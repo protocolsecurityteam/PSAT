@@ -1,17 +1,8 @@
 """Tier-1 harness core (EFFECTS_RESOLUTION_SPEC §4 / §8).
 
-The shared substrate every recipe (``services.effects.recipes`` Tier 1,
-``services.effects.anvil`` Tier 2) builds on: the returned verdict/discrepancy
-shapes, the identity-selection + raw-revert authorization discipline inherited
-from ``differential_probe`` (§8.2/§8.3), and transcript emission through an
-INJECTED store seam (§8.5 — ``transcript_ptr`` is an artifact key, never inline
-JSONB).
-
-Everything here is PURE given its injected seams (``call_batch`` /
-``Simulate`` / the transcript store), so it runs against stubbed wires with
-recorded transcripts in the offline suite (§8.6, inv. 8). No verdict is
-DB-persisted here — Phase 3 wires selection → harness → persistence; the harness
-only returns/emits :class:`ObservedEffect` objects.
+Shared by every recipe: verdict and discrepancy shapes, identity selection and raw-revert authorization from
+``differential_probe`` (§8.2/§8.3), and transcript emission through an injected store (§8.5; ``transcript_ptr`` is an
+artifact key). Pure given its seams; nothing is persisted here.
 """
 
 from __future__ import annotations
@@ -51,37 +42,30 @@ __all__ = [
     "unknown",
 ]
 
-# A transcript store persists a bounded transcript dict and returns its artifact
-# KEY (§8.5). Injected: the real impl wraps ``db.queue.store_artifact`` /
-# nested-artifacts; the offline stub records the dict and hands back a fake key.
+# Persists a bounded transcript and returns its artifact key (§8.5).
 TranscriptStore = Callable[[dict[str, Any]], str]
 
 
 @dataclass(frozen=True)
 class SimContext:
-    """Replay-minimum provenance stamped into every transcript (§8.5, inv. 14).
+    """Replay provenance stamped into every transcript (§8.5, inv.
 
-    ``hardfork`` is asserted/recorded for both Tier 1 and Tier 2; the anvil /
-    foundry versions are Tier-2-only (empty for Tier 1) so a fork witness is
-    reproducible across Dockerfile ``foundryup`` rebuilds (§8.7)."""
+    14). ``hardfork`` for both tiers; anvil/foundry versions only for Tier 2 (§8.7).
+    """
 
     chain_id: int
     block: int
     hardfork: str
     anvil_version: str | None = None
     foundry_version: str | None = None
-    # PROVENANCE of ``block`` — one of :data:`config.BLOCK_SOURCES`, or ``None``
-    # when the recorded height is not provably the height the probe ran at (an
-    # unpinnable head, a fork spawned without ``--fork-block-number``). Only a
-    # named source publishes the height as a witness; ``None`` publishes nothing.
+    # One of :data:`config.BLOCK_SOURCES`, or ``None`` when the height isn't provably the probe's (unpinnable head,
+    # unpinned fork); only a named source publishes the height.
     block_source: str | None = None
 
 
 @dataclass
 class Discrepancy:
-    """A §9 plane-disagreement object. Phase 2 RECORDS it on the verdict; it does
-    NOT route it anywhere (Phase 3 owns the warning-channel routing + the
-    closing-rule bookkeeping)."""
+    """A §9 plane-disagreement, recorded on the verdict but not routed here."""
 
     kind: str
     effect_class: str
@@ -91,13 +75,10 @@ class Discrepancy:
 
 @dataclass
 class ObservedEffect:
-    """A tiered, transcripted effect verdict returned by a recipe (§8.5, inv. 8).
+    """A tiered, transcripted verdict (§8.5, inv. 8).
 
-    ``details`` is the code-plane structural witness (cacheable on the behavioral
-    hash — supply-delta sign, destination *shape*, duration bound); ``concrete``
-    is the state-plane residue (exact destination, exact impl, current-check
-    result) that must never enter a cache key (inv. 3/12). Both are kept
-    separate so Phase 3 can route each to its correct table.
+    ``details`` is the code-plane witness (cacheable on the behavioural hash); ``concrete`` is state-plane residue that
+    must never enter a cache key (inv. 3/12).
     """
 
     effect_class: str
@@ -111,12 +92,8 @@ class ObservedEffect:
     transcript: dict[str, Any] | None = None
     transcript_ptr: str | None = None
     discrepancy: Discrepancy | None = None
-    # A verdict whose truth depends on per-probe STATE MANIPULATION this recipe
-    # performed on the fork — a scheduled operation landing, time advancing — is
-    # not a code-plane structural fact and must never transfer to a bytecode twin
-    # on the behavioural hash (the same reason ``TIER_HISTORICAL`` never caches,
-    # inv. 13 / §0.0.4). ``_is_cacheable`` refuses any verdict carrying this flag,
-    # whatever its tier, scope, verdict or reason.
+    # Verdicts depending on state the recipe manufactured (a scheduled op, a time warp) must never transfer to a twin
+    # (inv. 13); ``_is_cacheable`` refuses them.
     state_dependent: bool = False
 
     @property
@@ -125,24 +102,14 @@ class ObservedEffect:
 
     @property
     def witness_payload(self) -> dict[str, Any]:
-        """What gets PERSISTED as the witness — ``details`` plus the reason.
+        """What's persisted as the witness: ``details`` plus the reason.
 
-        ``details`` alone does not identify the verdict: every unknown supply
-        verdict carries ``{"observation": "executed"}``, so a sign WITHHELD
-        because the arithmetic and the zero-address ``Transfer`` logs contradicted
-        each other is byte-identical on the row to "supply did not move". The
-        reason is code-plane (it is what ``_is_cacheable`` already keys the
-        transfer decision on), so it travels with the verdict into the behavioral
-        cache too and a twin that free-hits can still say why.
+        The reason distinguishes otherwise identical unknowns (e.g. a withheld contradicted sign vs no supply movement)
+        and is code-plane, so it travels into the cache too.
         """
         if not self.reason:
             return dict(self.details)
         return {**self.details, "reason": self.reason}
-
-
-# ---------------------------------------------------------------------------
-# Identity selection + authorization discipline (§8.2 / §8.3)
-# ---------------------------------------------------------------------------
 
 
 def select_identities(
@@ -152,10 +119,9 @@ def select_identities(
     principal: str | None,
     random_count: int = 2,
 ) -> tuple[list[str], str | None]:
-    """The impersonation set: ``random_count`` (≥2) deterministic random controls
-    + the resolved principal (§8.2). Randoms are derived exactly as the
-    differential probe derives them, so replays reuse the same addresses and a
-    curated-allowlist collision is astronomically unlikely."""
+    """The impersonation set: two or more deterministic random controls plus the resolved principal (§8.2), derived
+    as in the differential probe.
+    """
     randoms = derive_random_identities(selector, contract_address, max(2, random_count))
     return randoms, principal
 
@@ -164,33 +130,22 @@ def authorization_opened(
     randoms_before: Sequence[EthCallResult],
     randoms_after: Sequence[EthCallResult],
 ) -> bool:
-    """Did a state change OPEN a gate to random callers? True only when ≥2
-    distinct random identities were consistently REJECTED before and ALL SUCCEED
-    after (§8.2). Uses the differential probe's :func:`attribute` on raw revert
-    data (§8.3) in both directions; an ambiguous/split outcome is never "opened"
-    (indeterminate ≠ public, fail-closed).
-
-    This is the direction the authority-change kernel (§4.4) and any
-    freeze-reversal check reads: a single-identity flip never opens anything.
+    """Did a state change open a gate to random callers? Only when at least two randoms were consistently rejected
+    before and all succeed after (§8.2), via :func:`attribute` on raw reverts (§8.3). A single-identity flip never
+    opens anything.
     """
     if len(randoms_before) < 2 or len(randoms_after) < 2:
         return False
     before = attribute(randoms_before, None)
     after = attribute(randoms_after, None)
-    # Before: consistently gated (all randoms rejected at the same gate).
-    # After: open (every random succeeds). Anything else withholds.
     return before == "caller_rejected_consistent" and after == "not_caller_discriminating"
 
 
-# ---------------------------------------------------------------------------
-# Transcript emission (§8.5)
-# ---------------------------------------------------------------------------
-
-
 def new_transcript(ctx: SimContext, *, feature: str, tier: str, effect_class: str) -> dict[str, Any]:
-    """A transcript bounded to the replay minimum (§8.5): tier, forked block,
-    hardfork, anvil/foundry version. ``calls``/``results`` are appended by
-    :func:`record_calls` as the recipe issues them."""
+    """A transcript with the replay minimum (§8.5): tier, block, hardfork, anvil/foundry versions.
+
+    Calls are appended by :func:`record_calls`.
+    """
     tr = {
         "feature": feature,
         "version": 1,
@@ -204,11 +159,8 @@ def new_transcript(ctx: SimContext, *, feature: str, tier: str, effect_class: st
         "calls": [],
         "results": [],
     }
-    # Tier 0 is excluded on purpose: it decides from an INDEXED event history plus
-    # a current-state check (``observation: not_run``), so no single height is the
-    # height it observed and ``ctx.block`` would be a bystander. Tier 1 simulates
-    # at ``hex(block_number)`` and Tier 2 forks at it, so for those the recorded
-    # height IS the observation — where the source says it was pinned.
+    # Tier 0 decides from indexed history, so no single height is its observation. Tiers 1 and 2 run at ``block``, so
+    # it's recorded when the source says it was pinned.
     if ctx.block_source in BLOCK_SOURCES and tier != TIER_HISTORICAL and ctx.block > 0:
         tr["block_source"] = ctx.block_source
     return tr
@@ -221,9 +173,7 @@ def record_calls(
     *,
     label: str = "",
 ) -> None:
-    """Append issued calls + their raw results to the transcript. Revert data is
-    kept raw; a decoded label is added for human replay only (never a verdict
-    input — §8.3)."""
+    """Append issued calls and raw results. Decoded labels are for humans only (§8.3)."""
     for call in calls:
         transcript["calls"].append({"label": label, **{k: _jsonable(v) for k, v in call.items()}})
     for res in results:
@@ -238,7 +188,7 @@ def _result_dict(label: str, res: Any) -> dict[str, Any]:
             "return_or_revert": res.return_data if res.success else res.revert_data,
             "decoded": None if res.success else decode_error(res.revert_data),
         }
-    # Simulate call result (duck-typed to avoid a hard import cycle).
+    # Duck-typed to avoid an import cycle.
     success = getattr(res, "success", None)
     revert = getattr(res, "revert_data", None)
     return {
@@ -254,11 +204,10 @@ def _jsonable(v: Any) -> Any:
 
 
 def emit(store: TranscriptStore, effect: ObservedEffect) -> ObservedEffect:
-    """Persist the verdict's transcript through the injected store seam and stamp
-    the artifact key (§8.5). No verdict ships without a replayable transcript
-    (inv. 8) — a verdict whose transcript can't be stored keeps the in-memory
-    ``transcript`` for the caller but a ``None`` ``transcript_ptr`` is a bug the
-    §8-rule-5 test guards against."""
+    """Persist the transcript through the store and stamp the key (§8.5).
+
+    A missing ``transcript_ptr`` is a bug (inv. 8; the §8-rule-5 test).
+    """
     if effect.transcript is not None:
         effect.transcript_ptr = store(effect.transcript)
         if effect.discrepancy is not None and effect.discrepancy.transcript_ptr is None:
@@ -268,19 +217,10 @@ def emit(store: TranscriptStore, effect: ObservedEffect) -> ObservedEffect:
 
 
 def _stamp_observation_height(effect: ObservedEffect) -> None:
-    """Copy the transcript's PROVEN observation height onto the verdict's witness.
+    """Copy the transcript's proven height onto the witness.
 
-    Every verdict already travels with a transcript, so this is the one place the
-    height reaches ``effect_verdicts.witness`` — no recipe restates it and none can
-    forget to. It publishes only what :func:`new_transcript` certified: a positive
-    height AND a named pin scope. A failed head pin (``block`` is ``0``, the
-    sentinel that reads as genesis), an unpinned fork, and a Tier-0 index read all
-    arrive here with no ``block_source`` and leave BOTH keys absent — the
-    not_determined state, never a fabricated or zero height.
-
-    The pair is state-plane (:data:`db.effect_cache.DEPLOYMENT_PLANE_KEYS`): one
-    deployment's observation height is not a property of the bytecode, so it must
-    not ride the behavioral cache onto a twin.
+    Only a positive height with a named pin scope from :func:`new_transcript`; failed pins, unpinned forks and Tier 0
+    leave both keys absent. The pair is state-plane (:data:`db.effect_cache.DEPLOYMENT_PLANE_KEYS`), so never cached.
     """
     tr = effect.transcript or {}
     block = tr.get("block_number")
@@ -291,11 +231,6 @@ def _stamp_observation_height(effect: ObservedEffect) -> None:
         return
     effect.details["block_number"] = block
     effect.details["block_source"] = source
-
-
-# ---------------------------------------------------------------------------
-# Verdict constructors
-# ---------------------------------------------------------------------------
 
 
 def proven(
@@ -334,8 +269,7 @@ def unknown(
     transcript: dict[str, Any] | None = None,
     discrepancy: Discrepancy | None = None,
 ) -> ObservedEffect:
-    """The §8 fail-closed verdict for every non-observation. Never carries a
-    proven positive; may carry a §9 discrepancy object (recorded, not routed)."""
+    """The §8 fail-closed verdict for every non-observation; may carry a recorded discrepancy."""
     return ObservedEffect(
         effect_class=effect_class,
         verdict=VERDICT_UNKNOWN,

@@ -1,22 +1,8 @@
-"""Contract-ownership claims: ``ownership.transfer`` / ``ownership.renounce`` /
-``ownership.accept``.
+"""``ownership.transfer`` / ``renounce`` / ``accept``.
 
-Standard-exact and ghost-immune: each claim keys on a canonical ownership
-selector plus a sibling/standard corroboration, never on which var a function
-"writes". On OZ v5 namespaced storage Slither mis-attributes the
-``OwnableStorageLocation`` slot constant as written by every touching function
-(including the ``owner()`` view), so a write-identity design would tag
-``setPeer`` / ``sweep`` / ``owner()`` as ownership changes. Keying on
-``transferOwnership`` (``0xf2fde38b``) + an ``owner()`` sibling keeps
-``transferOwnership`` and drops the ghosts.
-
-Corroboration paths, any one of which proves the standard:
-  * an ``owner()`` getter sibling (OZ Ownable / Ownable2Step / Solady);
-  * owner-var write identity — the function writes a hygiene-clean caller-
-    authority scalar — for a Solmate-style Auth whose ``owner`` is a public var
-    with no ``owner()`` in the ABI set;
-  * a two-step standard gate (Solady handover, DefaultAdminRules) for the
-    handover / staged-transfer selectors.
+Keyed on canonical ownership selectors plus corroboration, never on writes: on OZ v5 namespaced storage Slither
+attributes the owner slot as written by every touching function. Corroboration: an ``owner()`` sibling, a write to a
+caller-authority scalar (Solmate Auth, with ``owner`` as a public var), or a two-step standard gate.
 """
 
 from __future__ import annotations
@@ -28,7 +14,6 @@ from . import _authcommon as ac
 
 
 def _ownership_present(ctx: ClaimContext) -> bool:
-    """Coarse gate: some recognized ownership standard is on the contract."""
     return (
         ac.is_ownable(ctx)
         or ac.solady_handover_gate(ctx)

@@ -1,29 +1,9 @@
-"""Role-membership claims: ``roles.grant`` / ``roles.revoke`` /
-``roles.configure``.
+"""``roles.grant`` / ``revoke`` / ``configure``: matched on standard selectors plus a contract-level gate, never on
+writes to a caller-keyed map (a data queue like LayerZero ``composeQueue`` looks identical to an ACL).
 
-Standard-exact, selector-canonical — the only 100%-correct tier in the current
-system. Role *membership* is matched on the selector plus a contract-level
-standard gate, never on "writes a caller-authority membership var": a
-caller-keyed *data* map (LayerZero ``composeQueue`` on ``sendCompose`` /
-``lzCompose``) is structurally indistinguishable from a caller-keyed ACL, so the
-gate is what keeps those out.
-
-Standards covered:
-  * OZ AccessControl ``grantRole`` / ``revokeRole`` (gate: ``hasRole`` +
-    ``getRoleAdmin`` siblings);
-  * Solady ``EnumerableRoles`` behind OZ-named ``grantRole`` / ``revokeRole``
-    wrappers (gate: ``setRole`` + ``hasRole(address,uint256)`` + ``roleHolders``)
-    — a flat ``uint256`` role set publishes no per-role admin, so the OZ gate
-    alone leaves these registries unlabelled;
-  * Maker ``wards`` ``rely`` / ``deny`` (gate: ``rely`` + ``deny`` + a ``wards``
-    write) — today mislabeled ``hook_update``;
-  * Solmate RolesAuthority ``setUserRole`` / ``setRoleCapability`` /
-    ``setPublicCapability`` (gate: those setters + ``canCall``).
-
-Maker wards is the one arm that mints at ``idiom_structural`` rather than
-``standard_exact``: there is no published wards standard, and the ACL half of its
-gate can only be recognized by the variable's name (see ``maker_wards_gate``), so
-the claim is honest as an idiom and overclaimed as a standard proof.
+Covers OZ AccessControl, Solady EnumerableRoles behind OZ-named wrappers, Solmate RolesAuthority, and Maker ``wards``
+``rely``/``deny``. Wards mints idiom_structural: there is no published standard and its gate recognizes the variable by
+name.
 """
 
 from __future__ import annotations

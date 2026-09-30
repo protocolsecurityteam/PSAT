@@ -1,20 +1,8 @@
-"""Fleet / process-status aggregation.
+"""Fleet status for the monitor page:
 
-Builds the monitor page's view of *every* background process the system
-runs, so an operator can see what's alive and what each thing is doing
-without querying the DB or scraping logs:
-
-  - ``jobs``     — the jobs-queue pipeline, summarised from the jobs table.
-  - ``daemons``  — row-draining daemons that report liveness via the
-                   ``worker_heartbeats`` table (coverage-verify, audit
-                   text/scope extraction, event-log indexer, enrollment
-                   reconciler). Heartbeats are what distinguish 'idle' from
-                   'dead'; the work-state breakdown is queried straight from
-                   each daemon's own table so it's always fresh.
-  - ``watchers`` — runtime monitors (proxy/event scan, state poll, TVL)
-                   whose liveness is *derived* from the freshness of the
-                   rows they write, since they always have work and so never
-                   look falsely idle.
+- ``jobs``     — the jobs queue.
+- ``daemons``  — heartbeat-backed row drainers (heartbeats distinguish idle from dead).
+- ``watchers`` — runtime monitors whose liveness is derived from row freshness (they always have work).
 """
 
 from __future__ import annotations
@@ -56,22 +44,16 @@ from .audits_pipeline import build_audits_pipeline
 
 logger = logging.getLogger(__name__)
 
-# Daemon-lease name prefixes for the two chain-scoped monitoring loops. The
-# lease name embeds the chain (``protocol_scanner:ethereum``), so parsing it is
-# the source of per-chain monitoring visibility — no extra schema needed.
+# The lease name embeds the chain, giving per-chain visibility without schema changes.
 _SCANNER_LEASE_PREFIX = "protocol_scanner:"
 _POLLER_LEASE_PREFIX = "protocol_poller:"
 
-# A cursor more than this many blocks behind the leading cursor is "lagging" —
-# the signature of one still backfilling from its contract's creation block
-# while the rest track head. ~2 weeks of mainnet blocks; far below any genuine
-# backfill gap.
+# ~2 weeks of mainnet; flags a cursor still backfilling from creation.
 _CURSOR_LAG_BLOCKS = 100_000
 
 
 def _age_seconds(ts: datetime | None, now: datetime) -> float | None:
-    """Seconds between *ts* and *now*, or None. Guards naive timestamps so a
-    column read without tzinfo can't raise on the subtraction."""
+    """Tolerates naive timestamps."""
     if ts is None:
         return None
     if ts.tzinfo is None:
@@ -80,33 +62,21 @@ def _age_seconds(ts: datetime | None, now: datetime) -> float | None:
 
 
 def _bucket_counts(bucket: Any) -> dict[str, Any]:
-    """Collapse an audit-pipeline bucket ({status: [rows]}) to {status: count}."""
     if not isinstance(bucket, dict):
         return {}
     return {k: (len(v) if isinstance(v, list) else v) for k, v in bucket.items()}
 
 
-# This function runs once per ``/api/fleet`` read — every ~7s while the monitor
-# page is open — and both conditions below persist for as long as the fault
-# does, so an unconditional WARNING logs one incident thousands of times (739x
-# for a single 9.6h outage, measured). State-transition logging instead: the
-# entry into a condition and the recovery out of it each log once, with a
-# re-warn cadence so a standing fault does not fall out of a log window
-# entirely. Process-local, so a restart re-announces once.
+# Called every ~7s while the page is open; unconditional warnings logged one 9.6h outage 739 times. Log transitions
+# only, re-warning on this cadence.
 _CONDITION_RESTATE_S = 900.0
 _condition_state: dict[str, float] = {}
 
 
 def _condition_should_log(key: str, active: bool) -> bool:
-    """Whether this observation of *key* is a transition worth a line.
+    """True on entering, leaving, and once per ``_CONDITION_RESTATE_S`` while held.
 
-    True on entering the condition, on leaving it, and once per
-    ``_CONDITION_RESTATE_S`` while it holds. False for every repeat in between.
-
-    ``build_fleet_status`` is a sync endpoint, so anyio runs concurrent reads in
-    a threadpool: the recovery arm pops rather than checking-then-deleting,
-    because two racing recoveries would both pass the check and the second
-    ``del`` would raise into a 500.
+    Recovery pops rather than check-then-delete: concurrent threadpool reads would race into a 500.
     """
     now = time.monotonic()
     last = _condition_state.get(key)
@@ -119,18 +89,14 @@ def _condition_should_log(key: str, active: bool) -> bool:
 
 
 def reset_fleet_log_dedupe() -> None:
-    """Drop the transition state, so the next observation announces again."""
     _condition_state.clear()
 
 
 def _warn_stale_daemon(process: str, beat_age_s: float | None) -> None:
-    """WARNING that a heartbeat-backed daemon has gone stale (likely crashed or
-    wedged), so the death is captured server-side even when nobody is watching
-    ``/api/fleet``. Facts in ``extra`` so an alert can key on ``process``."""
+    """Captured server-side even when nobody is watching ``/api/fleet``."""
     if not _condition_should_log(f"stale:{process}", True):
         return
-    # Keyed ``daemon`` not ``process``: ``process`` is a reserved LogRecord
-    # attribute (the PID) and stdlib logging raises on the extra-key collision.
+    # ``process`` is a reserved LogRecord attribute; logging raises on the collision.
     logger.warning(
         "fleet: daemon %s is stale",
         process,
@@ -139,15 +105,12 @@ def _warn_stale_daemon(process: str, beat_age_s: float | None) -> None:
 
 
 def _note_daemon_fresh(process: str) -> None:
-    """The other half of the transition: one INFO when a stale daemon returns."""
     if not _condition_should_log(f"stale:{process}", False):
         return
     logger.info("fleet: daemon %s is beating again", process, extra={"daemon": process})
 
 
 def _warn_lagging_cursors(lagging_cursors: int, block_spread: int | None) -> None:
-    """WARNING that one or more event-indexer cursors lag the leader by more
-    than ``_CURSOR_LAG_BLOCKS`` — the backfill-stall signature."""
     if not _condition_should_log("cursor_lag", bool(lagging_cursors)):
         return
     if not lagging_cursors:
@@ -161,9 +124,7 @@ def _warn_lagging_cursors(lagging_cursors: int, block_spread: int | None) -> Non
 
 
 def _chain_name_for_id(chain_id: int) -> str:
-    """Registry canonical name for *chain_id*, or the decimal id as a string for
-    a legacy/unregistered id — an observability read must never raise on a chain
-    the registry doesn't know."""
+    """Never raises on an unregistered chain."""
     try:
         return chain_by_id(chain_id).name
     except UnknownChainError:
@@ -171,9 +132,6 @@ def _chain_name_for_id(chain_id: int) -> str:
 
 
 def _indexer_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
-    """Per-chain event-indexer cursor rollup. The cursor row already carries
-    ``chain_id`` (invariant 4) — a stalled Base indexer shows as its own row
-    with an old ``stalest_run_age_s`` while mainnet stays fresh."""
     rows = session.execute(
         select(
             IndexedEventCursor.chain_id,
@@ -183,8 +141,7 @@ def _indexer_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
             func.min(IndexedEventCursor.last_indexed_block),
         ).group_by(IndexedEventCursor.chain_id)
     ).all()
-    # Laggards are measured against each chain's *own* leader, so a chain still
-    # backfilling can't hide behind another chain's head.
+    # Per-chain leader so a backfilling chain can't hide behind another's head.
     max_sub = (
         select(
             IndexedEventCursor.chain_id,
@@ -221,10 +178,6 @@ def _indexer_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
 
 
 def _held_lease_chains(session: Session, now: datetime) -> tuple[set[str], set[str]]:
-    """Chain-cache tokens of chains currently holding a live scanner / poller
-    daemon lease. The ``protocol_scanner:{chain}`` naming is the reuse of the
-    existing per-chain lease dimension (invariant 4) — no heartbeat schema
-    change needed to see which chains a monitoring pass is serving."""
     scanner: set[str] = set()
     poller: set[str] = set()
     for name, expires_at in session.execute(select(DaemonLease.name, DaemonLease.expires_at)).all():
@@ -242,9 +195,6 @@ def _held_lease_chains(session: Session, now: datetime) -> tuple[set[str], set[s
 
 
 def _monitoring_by_chain(session: Session, now: datetime) -> list[dict[str, Any]]:
-    """Per-chain monitored-contract rollup + live-lease flags. Combines the
-    ``monitored_contracts.chain`` dimension with the per-chain daemon leases so
-    a chain whose scanner has stalled is visible against the ones still fresh."""
     rows = session.execute(
         select(
             MonitoredContract.chain,
@@ -277,8 +227,7 @@ def _monitoring_by_chain(session: Session, now: datetime) -> list[dict[str, Any]
                 "poller_lease_held": token in poller_held,
             }
         )
-    # A chain can hold a lease before its first contract is enrolled — surface it
-    # so an early-enablement pass isn't invisible.
+    # A chain can hold a lease before its first enrollment.
     for token in (scanner_held | poller_held) - seen_tokens:
         out.append(
             {
@@ -299,11 +248,9 @@ def _monitoring_by_chain(session: Session, now: datetime) -> list[dict[str, Any]
 
 
 def build_fleet_status(session: Session, *, now: datetime | None = None) -> FleetStatusResponse:
-    """Liveness + work breakdown for every background process, for the
-    monitor page's "all processes" view. ``now`` is injectable for tests."""
+    """``now`` is injectable for tests."""
     now = now or datetime.now(timezone.utc)
 
-    # --- Jobs queue pipeline -----------------------------------------------
     jobs: dict[str, Any] = {s.value: 0 for s in JobStatus}
     for status, count in session.execute(select(Job.status, func.count()).group_by(Job.status)).all():
         jobs[status.value] = count
@@ -316,7 +263,6 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
         by_stage.setdefault(stage.value, {})[status.value] = count
     jobs["by_stage"] = by_stage
 
-    # --- Heartbeat-backed daemons ------------------------------------------
     beats = {hb.process: hb for hb in session.execute(select(WorkerHeartbeat)).scalars().all()}
 
     cov_work: dict[str, int] = {}
@@ -329,13 +275,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
 
     audit_pipeline = build_audits_pipeline(session)
 
-    # Backlog + oldest-pending age for the two audit row workers. Cheap
-    # index-backed aggregates (the partial ``ix_audit_reports_*_status``
-    # indexes cover the predicates). Computed here rather than reused from the
-    # build_audits_pipeline buckets because those cap each bucket at 50, which
-    # understates a real backlog; ``min(...)`` over the pending slice dates the
-    # oldest waiting row so the frontend can flag a stuck worker (old age with
-    # zero throughput).
+    # Not reused from build_audits_pipeline: its buckets cap at 50.
     text_backlog, text_oldest = session.execute(
         select(func.count(), func.min(AuditReport.discovered_at)).where(AuditReport.text_extraction_status.is_(None))
     ).one()
@@ -354,17 +294,11 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
             func.min(IndexedEventCursor.last_indexed_block),
         )
     ).one()
-    # Cursors far behind the leader. A cursor still backfilling from its
-    # contract's creation block is invisible in max_indexed_block alone once a
-    # healthy cursor reaches head; this surfaces it. Lag and spread are
-    # within-chain figures rolled up from the per-chain breakdown — a faster
-    # chain's naturally higher block numbers are not a backfill signal for
-    # another chain's cursors.
+    # Within-chain figures: other chains' higher block numbers aren't a backfill signal.
     idx_by_chain = _indexer_by_chain(session, now)
     idx_lagging = sum(d["lagging_cursors"] for d in idx_by_chain)
     idx_spread = max((d["block_spread"] or 0 for d in idx_by_chain), default=None)
-    # Called on every read, lagging or not: the recovery is the other half of
-    # the transition and it is what closes the incident in the log.
+    # Called every read: recovery closes the incident in the log.
     _warn_lagging_cursors(idx_lagging, idx_spread)
 
     def _work_for(process: str) -> dict[str, Any] | None:
@@ -372,11 +306,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
             return {
                 "by_equivalence_status": cov_work,
                 "total": sum(cov_work.values()),
-                # Drainable queue depth. Derived from the breakdown above (no
-                # extra query). No clean enqueue timestamp exists —
-                # equivalence_checked_at is stamped at *claim*, not enqueue —
-                # so we lead with backlog and omit oldest-age rather than date
-                # it from the wrong column.
+                # No enqueue timestamp exists (``equivalence_checked_at`` is stamped at claim), so no oldest-age.
                 "backlog": cov_work.get("pending", 0),
             }
         if process == HEARTBEAT_AUDIT_TEXT:
@@ -402,10 +332,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
                 "by_chain": idx_by_chain,
             }
         if process == HEARTBEAT_PROTOCOL_SCANNER:
-            # The scanner writes its head-lag into its own heartbeat detail
-            # (design §2.1). Surface it here so "behind" is a first-class number
-            # in the fleet view; tolerate absence (stage-1 scanner deploys
-            # separately and older beats predate the field).
+            # Tolerate absence: older beats predate the field.
             hb = beats.get(process)
             detail = hb.detail if hb and isinstance(hb.detail, dict) else {}
             return {"max_lag_blocks": detail.get("max_lag_blocks")}
@@ -443,7 +370,6 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
             }
         )
 
-    # --- Runtime watchers (derived liveness, no heartbeat) -----------------
     mon_total = session.execute(select(func.count()).select_from(MonitoredContract)).scalar() or 0
     mon_active = (
         session.execute(
@@ -457,8 +383,7 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
     ).one()
     tvl_latest = session.execute(select(func.max(TvlSnapshot.timestamp))).scalar()
     mon_by_chain = _monitoring_by_chain(session, now)
-    # Scan spread is a within-chain figure (rolled up as the worst per-chain
-    # gap) — chains run at different heights, so a cross-chain max−min is noise.
+    # Chains run at different heights, so a cross-chain spread is noise.
     mon_spreads = [d["scan_block_spread"] for d in mon_by_chain if d["scan_block_spread"] is not None]
     watchers = {
         "monitored_contracts": mon_total,
@@ -471,23 +396,12 @@ def build_fleet_status(session: Session, *, now: datetime | None = None) -> Flee
         "tvl_last_snapshot_at": tvl_latest.isoformat() if tvl_latest else None,
         "tvl_last_snapshot_age_s": _age_seconds(tvl_latest, now),
         "by_chain": mon_by_chain,
-        # Liveness says the scanner is running; this says what it is running
-        # WITH. A contract watching on the baseline registry alone is quiet for
-        # the same reason a healthy one is, and without this census the two are
-        # indistinguishable on the page.
+        # Liveness says the scanner runs; this says with what. A baseline-only watcher is as quiet as a healthy one.
         "plan_coverage": plan_coverage_counts(session),
-        # The other half of "what is it running with": a plan can be current and
-        # its hint controllers still unverified, because the read failed, was
-        # skipped over budget, or is bound to nothing. Point-in-time by
-        # construction (``basis``) — the per-pass counts that do not depend on a
-        # marker surviving ride the scanner's own heartbeat, published above as
-        # ``daemons[protocol_scanner].detail.verification_reads_*``.
+        # Plans can be current with hint controllers still unverified. Point-in-time; per-pass counts ride the scanner
+        # heartbeat.
         "verification_gaps": count_verification_read_gaps(session),
-        # And the supply side of the same question: ``plan_coverage`` counts
-        # contracts watching without a current plan, this counts the rebuild
-        # work that would fix them and how much of it the budget allows today.
-        # A schema bump moves the whole fleet into here at once, which is the
-        # moment this needs to be visible rather than inferred.
+        # Rebuild work needed and how much the budget allows today; a schema bump moves the whole fleet here at once.
         "materialization_backlog": materialization_backlog(session, now=now),
     }
 

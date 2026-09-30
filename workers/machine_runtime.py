@@ -101,8 +101,6 @@ def run(group: str, stop: threading.Event) -> int:
                 logger.info("process group draining", extra={"group": group, "boot_id": str(boot)})
             if group == "monitor" and not draining:
                 # Controller/indexer failure must not interrupt monitoring.
-                # This launcher supervises processes; the existing monitoring
-                # Supervisor still isolates the loops within its interpreter.
                 for index, child in enumerate(children):
                     if child.poll() is None:
                         continue

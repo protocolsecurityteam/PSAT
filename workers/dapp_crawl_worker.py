@@ -1,12 +1,7 @@
-"""DApp Crawl worker — discovers contract addresses by crawling DApp frontends.
+"""Discovers contract addresses by crawling DApp frontends with a spoofed wallet.
 
-Calls the integrated dapp crawler directly (no subprocess) to visit DApp
-URLs with a spoofed wallet, captures contract interactions, and writes
-every discovered address into the ``contracts`` table tagged
-``discovery_source='dapp_crawl'``. Analysis child jobs are created
-later by the ``SelectionWorker`` so this crawl's discoveries can
-compete with inventory and DefiLlama hits for the shared
-``analyze_limit`` budget on equal footing.
+Writes every address to ``contracts`` (``discovery_source='dapp_crawl'``); ``SelectionWorker`` creates analysis jobs so
+all sources compete for ``analyze_limit`` equally.
 """
 
 from __future__ import annotations
@@ -45,17 +40,13 @@ class DAppCrawlWorker(BaseWorker):
         chain_id = request.get("chain_id") or 1
         wait = request.get("wait") or 10
 
-        # Derive / create Protocol row from URL hostname if no company context exists
         first_host = (urlparse(urls[0]).hostname or "").lstrip(".")
         if first_host.startswith("www."):
             first_host = first_host[4:]
         protocol_name = job.company or first_host or f"dapp_{str(job.id)[:8]}"
         official_domain = first_host or None
-        # Route through the resolver so dapp-crawl jobs that started from a
-        # hostname spelling ("ether.fi") collapse onto the same canonical
-        # row as discovery jobs that started from the github-org spelling
-        # ("etherfi"). Returns None for unknown hostnames; the fallback
-        # name-keyed lookup handles those.
+        # Resolver collapses hostname spellings ("ether.fi") onto the same row as github-org spellings ("etherfi"). None
+        # for unknown hosts; the name lookup handles those.
         resolved = resolve_protocol(protocol_name)
         canonical_slug = pick_family_slug(resolved)
         protocol_row = get_or_create_protocol(
@@ -76,7 +67,6 @@ class DAppCrawlWorker(BaseWorker):
         def report(detail: str) -> None:
             self.update_detail(session, job, detail)
 
-        # Call crawler directly — no subprocess
         with log_timed_phase(logger, "dapp_crawl") as ph:
             result = crawl_dapp(
                 urls,
@@ -89,7 +79,6 @@ class DAppCrawlWorker(BaseWorker):
         addresses = result["addresses"]
         logger.info("DApp crawl found %d addresses for job %s", len(addresses), job.id)
 
-        # Store raw results
         store_artifact(
             session,
             job.id,
@@ -102,7 +91,6 @@ class DAppCrawlWorker(BaseWorker):
             },
         )
 
-        # Persist full interaction log for later audit / analytics
         for entry in result.get("interactions", []):
             to_raw = entry.get("to") or ""
             session.add(
@@ -123,23 +111,20 @@ class DAppCrawlWorker(BaseWorker):
             )
         session.commit()
 
-        # Write ALL discovered addresses to contracts table
         protocol_id = protocol_row.id
         try:
             chain_name = chain_by_id(chain_id).name
         except UnknownChainError:
             chain_name = None
         default_chain = request.get("chain") or chain_name
-        # Build per-address context from address_details
         detail_by_addr: dict[str, dict] = {}
         for detail in result.get("address_details", []):
             addr = detail.get("address", "").lower()
             if addr:
                 detail_by_addr[addr] = detail
 
-        # Addresses the crawl couldn't chain-attribute inherit the job's chain
-        # (default_chain) via the shared helper rather than persisting chain=NULL
-        # and duplicating against a sibling writer's 'ethereum' stub (inv. 1/6/12).
+        # Unattributed addresses inherit the job chain rather than chain=NULL, which would duplicate a sibling's
+        # 'ethereum' stub (inv. 1/6/12).
         bulk_entries: list[dict] = []
         for addr in addresses:
             normalized = addr.lower()

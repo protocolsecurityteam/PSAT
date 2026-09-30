@@ -29,16 +29,9 @@ from .artifacts import get_artifact, store_artifact
 
 logger = logging.getLogger("db.queue")
 
-# ---------------------------------------------------------------------------
-# Static data caching
-# ---------------------------------------------------------------------------
 
-# Artifact names that constitute cached static data (immutable, never change).
-# slither_results / analysis_report were removed when vulnerability-detector
-# triage was split out of PSAT's pipeline; downstream stages don't depend on
-# them, and the only writer (StaticWorker._run_slither_phase) is gone.
-# predicate_trees / effects are emitted by semantic static analysis and are
-# required by resolution and policy, so cache hits must carry them forward.
+# Immutable static artifacts carried by a cache hit; ``predicate_trees``/``effects`` are required by resolution and
+# policy.
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
         "contract_analysis",
@@ -50,7 +43,7 @@ _STATIC_ARTIFACT_NAMES = frozenset(
     }
 )
 
-# Artifacts copied as a starting baseline but appended to on subsequent runs.
+# Copied as a baseline and appended to on later runs.
 _SEED_ARTIFACT_NAMES = frozenset(
     {
         "dynamic_dependencies",
@@ -59,23 +52,13 @@ _SEED_ARTIFACT_NAMES = frozenset(
     }
 )
 
-# Contract columns that are mutable (resolved live by _resolve_proxy) and
-# must NOT be carried over from a cached job.
+# Resolved live by _resolve_proxy; never carried over from a cached job.
 _MUTABLE_CONTRACT_FIELDS = frozenset({"is_proxy", "proxy_type", "implementation", "beacon", "admin"})
 
 
 def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozenset(), **overrides: Any) -> Base:
-    """Copy a SQLAlchemy row, returning a new detached instance.
-
-    - Primary keys are always skipped (auto-generated).
-    - Columns with a ``server_default`` (e.g. ``created_at``) are skipped
-      so the DB assigns fresh values, unless explicitly passed in *overrides*.
-    - *exclude* names additional columns to drop.
-    - *overrides* supply values that differ from the source (e.g. remapped
-      foreign keys, zeroed-out mutable fields).
-
-    Lists are shallow-copied so the new row doesn't share references with
-    the source.
+    """Copy a row as a new detached instance: primary keys and ``server_default`` columns are skipped (unless in
+    *overrides*), *exclude* drops more, lists are shallow-copied.
     """
     from sqlalchemy import inspect as sa_inspect
 
@@ -106,25 +89,10 @@ def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozen
 def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
     """The analyzer era *job*'s static artifacts were produced under, or None.
 
-    ``jobs.analysis_schema_version`` is stamped only on the fetch path
-    (``workers/discovery``): a same-address cache hit copies the donor's
-    artifacts and returns before the stamp, so the column reads NULL on 32 of
-    the working DB's 86 completed cache-hit jobs. NULL is not "current" — it is
-    the absence of the fact — and a consumer that treats it as current stamps an
-    era nothing witnessed onto the bundle.
-
-    The fact is still recoverable: ``copy_static_cache`` copies the donor's
-    artifacts verbatim, so the donor's era IS this job's artifacts' era. The
-    chain is followed until a stamped job is found.
-
-    **Walked to termination, not to a hop budget.** Every cache-hit re-run of an
-    address appends one hop, so the chain grows without bound on exactly the
-    addresses that get re-analyzed most; measured on the working DB, all 32
-    unstamped jobs terminate at a stamped v5 donor between 1 and 14 hops away —
-    a fixed budget silently converts the far end of that distribution into
-    "no witnessed era" and refuses supply for the busiest contracts. Termination
-    rests on the visited set instead: each hop moves to a distinct job id, so a
-    finite table is exhausted in finite steps whatever the links look like.
+    ``jobs.analysis_schema_version`` is stamped only on the fetch path, so cache-hit jobs are NULL, which isn't
+    "current". Since ``copy_static_cache`` copies the donor's artifacts verbatim, the donor chain is followed to a
+    stamped job. Walked to termination (with a visited set), not a hop budget: chains grow with every re-run of busy
+    addresses.
     """
     version = getattr(job, "analysis_schema_version", None)
     if isinstance(version, int):
@@ -141,14 +109,8 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
         try:
             current = session.get(Job, donor_id)
         except Exception as exc:
-            # A DB error reads exactly like "no donor", which publishes "no
-            # witnessed era" for a job that has one. Nothing here can recover it
-            # — the caller's contract is a value or None — so the honest move is
-            # to say the None came from a failed read. The sole caller is the
-            # static worker, inside a job, so the WARNING is paired with
-            # ``record_degraded``: this module sits outside the level-contract
-            # checker's perimeter, which is why the pairing is stated here
-            # rather than enforced.
+            # A DB error would read as "no witnessed era"; record it. Paired with ``record_degraded`` by hand since this
+            # module is outside the level-contract checker.
             record_degraded(
                 phase="donor_era_walk",
                 exc=exc,
@@ -172,26 +134,12 @@ def find_completed_static_cache(
     chain: str | None = None,
     source_content_hash: str | None = None,
 ) -> Job | None:
-    """Find a previously completed job for *address* (and *chain*) that has all required static data.
+    """A completed job for *address*/*chain* with all static data (source files, ``contract_analysis``, a summaried
+    contract row), or ``None``.
 
-    Returns the cached :class:`Job` if one exists with:
-    - status = completed, stage = done
-    - at least one ``source_files`` row
-    - the ``contract_analysis`` artifact (key indicator that the static stage finished)
-    - a ``contracts`` row for this address/chain with a ``contract_summaries`` row
-
-    The contract lookup uses (address, chain) rather than ``job_id`` so that
-    the cache remains valid even after ``copy_static_cache`` reassigned the
-    Contract row to a later target job.
-
-    **Cross-chain fallback (invariant 1):** when the exact ``(address, chain)``
-    lookup misses and *source_content_hash* is supplied, a second lookup finds a
-    completed job that analyzed the *same verified source* under the current
-    analyzer schema version — regardless of its chain or address. That donor's
-    code plane is reusable for this deployment (its state is re-resolved per
-    chain by the copy path). The primary ``(address, chain)`` behaviour is
-    unchanged, so mainnet re-runs are byte-identical; the fallback only fires on
-    a primary miss. Returns ``None`` when no suitable cache exists.
+    Looks up the contract by (address, chain), since ``copy_static_cache`` may have reassigned it. If that misses and
+    *source_content_hash* is given, falls back to any completed job with the same verified source under the current
+    analyzer (invariant 1); the primary path is unchanged.
     """
     stmt = (
         select(Job)
@@ -202,11 +150,7 @@ def find_completed_static_cache(
         )
         .order_by(Job.updated_at.desc())
     )
-    # SQL-side chain filtering on the first-class ``jobs.chain_id`` column
-    # (invariant 1). The M0.2 backfill populated chain_id for every
-    # address-scoped row, so ``chain_id = :id`` is a total, collision-free
-    # filter; ``derive_job_chain_id`` maps the caller's chain string to the same
-    # id the dual-write stored (unknown/missing → 1) so mainnet is unchanged.
+    # Filter on ``jobs.chain_id`` (invariant 1).
     if chain is not None:
         stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
     candidates = session.execute(stmt).scalars().all()
@@ -218,16 +162,14 @@ def find_completed_static_cache(
         if not src_count:
             continue
 
-        # Look up by (address, chain), not job_id — copy_static_cache may have reassigned.
-        # Join ContractSummary so .limit(1) skips stub rows that lack the cached summary.
+        # By (address, chain), not job_id; the summary join skips stub rows.
         contract_stmt = (
             select(Contract)
             .join(ContractSummary, ContractSummary.contract_id == Contract.id)
             .where(func.lower(Contract.address) == address.lower())
         )
         if chain is not None:
-            # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain
-            # rows; a non-mainnet lookup stays isolated.
+            # Mainnet-coalesced.
             contract_stmt = contract_stmt.where(
                 func.lower(func.coalesce(Contract.chain, "ethereum"))
                 == _mainnet_coalesced_chain(canonical_chain(chain))
@@ -236,13 +178,8 @@ def find_completed_static_cache(
         if not contract_row:
             continue
 
-        # Static-stage-finished check. For non-proxy contracts the canonical
-        # indicator is ``contract_analysis`` (slither output + summary).
-        # Proxies never produce ``contract_analysis`` on their own job —
-        # it lives on the impl child — so require ``contract_flags`` instead,
-        # which proxies do write (is_proxy + proxy_type). Without this
-        # branch, re-discovered proxies would miss the cache and do a full
-        # fresh Etherscan fetch + slither run every time.
+        # Proxies never write ``contract_analysis`` (it's on the impl child), so require ``contract_flags`` for them;
+        # otherwise re-discovered proxies always miss.
         required_artifact = "contract_flags" if contract_row.is_proxy else "contract_analysis"
         has_required = session.execute(
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == required_artifact).limit(1)
@@ -258,9 +195,7 @@ def find_completed_static_cache(
 
         return candidate
 
-    # Cross-chain fallback: the exact (address, chain) lookup missed; if we know
-    # this deployment's source hash, reuse a completed job that analyzed the same
-    # source on any chain (invariant 1).
+    # Cross-chain fallback (invariant 1).
     if source_content_hash:
         return _find_static_cache_by_source_hash(session, source_content_hash)
 
@@ -268,14 +203,9 @@ def find_completed_static_cache(
 
 
 def _find_static_cache_by_source_hash(session: Session, source_content_hash: str) -> Job | None:
-    """Most-recent completed job whose verified source hashes to *source_content_hash*
-    under the current analyzer schema version, with a real analyzed root (a
-    ``contract_analysis`` artifact + a summaried contract).
+    """The newest completed job with this source hash under the current analyzer and a real analysed root.
 
-    Version-gated so a bumped analyzer misses stale donors (``jobs`` rows carry
-    the schema version they were analyzed under). Proxies are never donors — they
-    carry ``contract_flags`` rather than ``contract_analysis`` and are analyzed
-    per chain.
+    Proxies are never donors.
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
@@ -301,11 +231,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         ).scalar_one_or_none()
         if not has_src:
             continue
-        # A summaried contract at the donor's own (address, chain) proves the
-        # static tables landed; contract_analysis proves the analysis (not a
-        # proxy stub). Chain-qualified: a CREATE2 same-address deployment on
-        # another chain can carry different source, so the donor job must pair
-        # with its own chain's row.
+        # Chain-qualified: a same-address deployment on another chain may have different source.
         donor_contract = session.execute(
             select(Contract)
             .join(ContractSummary, ContractSummary.contract_id == Contract.id)
@@ -333,11 +259,7 @@ def find_previous_company_inventory(
     exclude_job_id: Any = None,
     chain: str | None = None,
 ) -> Job | None:
-    """Find the most recent completed company job with a contract_inventory artifact.
-
-    When *chain* is given, only jobs whose ``request["chain"]`` matches are
-    considered, preventing cross-chain inventory contamination.
-    """
+    """The newest completed company job with a contract_inventory artifact, filtered by *chain* when given."""
     stmt = (
         select(Job)
         .where(
@@ -347,12 +269,8 @@ def find_previous_company_inventory(
         )
         .order_by(Job.updated_at.desc())
     )
-    # Company/root jobs are address-less, so ``jobs.chain_id`` is NULL for them
-    # (M0.2's CHECK requires chain_id only for address-scoped rows). Their chain
-    # identity lives solely in ``request->>'chain'``, so the SQL-side chain
-    # predicate keys on the JSONB value — an exact-string match that preserves
-    # the prior Python-side ``req.get("chain") != chain`` semantics, including
-    # excluding candidates whose request omits ``chain`` (NULL != value).
+    # Company jobs have NULL ``chain_id``, so match ``request->>'chain'`` exactly (requests without a chain are
+    # excluded).
     if chain is not None:
         stmt = stmt.where(Job.request["chain"].as_string() == chain)
     candidates = session.execute(stmt).scalars().all()
@@ -368,34 +286,24 @@ def find_previous_company_inventory(
 
 
 def find_existing_job_for_address(session: Session, address: str, chain: str | None = None) -> Job | None:
-    """Find a non-failed job for *address* (and *chain*), case-insensitive.
-
-    When *chain* is given, only jobs whose ``request["chain"]`` matches are
-    returned, so an Ethereum job won't suppress a Base job at the same address.
-    """
+    """A non-failed job for *address* (case-insensitive), filtered by *chain* when given."""
     stmt = select(Job).where(
         func.lower(Job.address) == address.lower(),
         Job.status != JobStatus.failed,
         Job.request["effects_resume_work_id"].astext.is_(None),
     )
-    # SQL-side chain filtering on ``jobs.chain_id`` (invariant 1). The M0.2
-    # backfill populated every address-scoped row, so this is total;
-    # ``derive_job_chain_id`` resolves the caller's chain string to the stored
-    # id (unknown/missing → 1), matching the dual-write.
     if chain is not None:
         stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
     return session.execute(stmt.limit(1)).scalar_one_or_none()
 
 
 def is_known_proxy(session: Session, address: str, chain: str | None = None) -> bool:
-    """Return True if *address* (on *chain*) has been classified as a proxy in any prior analysis."""
     stmt = select(Contract).where(
         func.lower(Contract.address) == address.lower(),
         Contract.is_proxy.is_(True),
     )
     if chain is not None:
-        # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
-        # a non-mainnet lookup stays isolated.
+        # Mainnet-coalesced.
         stmt = stmt.where(
             func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(canonical_chain(chain))
         )
@@ -403,32 +311,15 @@ def is_known_proxy(session: Session, address: str, chain: str | None = None) -> 
 
 
 def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) -> int | None:
-    """Copy all cached static data from *source_job_id* to *target_job_id*.
-
-    Copies:
-    - ``contracts`` row (immutable fields only; proxy fields left as defaults)
-    - ``source_files`` rows
-    - ``contract_summaries`` and ``role_definitions``
-      rows (linked to the new contract row)
-    - Static artifacts (``contract_analysis``, ``control_tracking_plan``,
-      ``predicate_trees``, ``effects``, ``static_dependencies``,
-      ``enrichment_cache``)
-
-    The source contract is looked up by (address, chain) rather than by
-    ``job_id`` so that subsequent cache copies still work after a prior copy
-    reassigned the Contract row.
-
-    Returns the new ``Contract.id`` on success, or ``None`` on failure.
+    """Copy cached static data from *source_job_id* to *target_job_id*: the contract row (immutable fields), source
+    files, summaries and role definitions, and static artifacts. The source contract is found by (address, chain)
+    since earlier copies reassign it. Returns the new ``Contract.id``, or ``None``.
     """
-    # Guard: if the target already has a contract row, return early.
     existing = session.execute(select(Contract).where(Contract.job_id == target_job_id).limit(1)).scalar_one_or_none()
     if existing:
         return existing.id
 
-    # Resolve the source job's address and chain so we can find the Contract
-    # by its natural key (address, chain) rather than by job_id.  A prior
-    # copy_static_cache may have reassigned the Contract row's job_id to a
-    # different target, so job_id lookup is unreliable after the first copy.
+    # Find the contract by (address, chain); job_id is unreliable after a prior copy.
     src_job = session.get(Job, source_job_id)
     if not src_job or not src_job.address:
         return None
@@ -436,15 +327,13 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     src_req = src_job.request if isinstance(src_job.request, dict) else {}
     src_chain = src_req.get("chain")
 
-    # Join ContractSummary so we copy a summaried row, not a stub (mirrors find_completed_static_cache).
     src_contract_stmt = (
         select(Contract)
         .join(ContractSummary, ContractSummary.contract_id == Contract.id)
         .where(func.lower(Contract.address) == src_job.address.lower())
     )
     if src_chain is not None:
-        # Mainnet-coalesced so a mainnet lookup matches legacy NULL-chain rows;
-        # a non-mainnet lookup stays isolated.
+        # Mainnet-coalesced.
         src_contract_stmt = src_contract_stmt.where(
             func.lower(func.coalesce(Contract.chain, "ethereum"))
             == _mainnet_coalesced_chain(canonical_chain(src_chain))
@@ -453,15 +342,11 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     if not src_contract:
         return None
 
-    # The unique constraint on (address, chain) means src_contract IS the
-    # only Contract for this address/chain.  Reassign it to the target job.
+    # The only contract for this (address, chain) (unique key); reassign it.
     src_contract.job_id = target_job_id
 
-    # Save the current proxy state so _check_proxy_cache can compare it
-    # against the live on-chain implementation to decide whether
-    # re-classification is needed.  The Contract row keeps its proxy
-    # fields intact — zeroing them would corrupt data for the old
-    # completed job that also references this row via address lookup.
+    # Save proxy state for ``_check_proxy_cache``; the row's fields stay intact for the older job that also references
+    # it.
     _cached_proxy_state = {
         "is_proxy": src_contract.is_proxy,
         "proxy_type": src_contract.proxy_type,
@@ -476,7 +361,6 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 
     storage = get_storage_client()
 
-    # --- source files ---
     src_files = session.execute(select(SourceFile).where(SourceFile.job_id == source_job_id)).scalars().all()
     for sf in src_files:
         if sf.storage_key and storage is not None:
@@ -486,7 +370,6 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
         else:
             copy_row(session, sf, job_id=target_job_id)
 
-    # --- artifacts (static + seed) ---
     src_artifacts = (
         session.execute(
             select(Artifact).where(
@@ -528,14 +411,9 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
     return new_contract.id
 
 
-# Code-plane artifacts safe to reuse across a same-source deployment. Unlike the
-# same-chain ``copy_static_cache`` set, this EXCLUDES ``static_dependencies`` and
-# ``enrichment_cache`` (dependency addresses / Etherscan enrichment differ per
-# chain and are re-derived by the static/discovery stage) and every
-# ``_SEED_ARTIFACT_NAMES`` member (dynamic_dependencies / classifications /
-# upgrade_history are on-chain-derived and MERGED on re-run — cross-chain merge
-# would be wrong). ``contract_analysis`` / ``control_tracking_plan`` carry the one
-# deployment-specific field (the contract address), which is re-stamped on copy.
+# Code-plane artifacts safe to reuse across chains. Excludes ``static_dependencies``, ``enrichment_cache`` and the seed
+# artifacts (chain-specific or merged). ``contract_analysis``/``control_tracking_plan`` have their address re-stamped on
+# copy.
 _CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
 
 
@@ -546,21 +424,11 @@ def copy_static_cache_cross_chain(
     *,
     target_address: str,
 ) -> int | None:
-    """Reuse a donor job's CODE plane for a same-source deployment on another chain.
+    """Reuse a donor's code plane for a same-source deployment on another chain.
 
-    Unlike :func:`copy_static_cache` (which reassigns the donor's Contract row —
-    correct only same-chain), this leaves the donor untouched and copies onto the
-    target's OWN Contract row (already created per-chain by discovery, with the
-    right address/chain/deployer/proxy state). It copies only source-derived
-    artifacts, re-stamping the contract address in ``contract_analysis`` /
-    ``control_tracking_plan`` so resolution reads the target deployment's state,
-    and it copies the summary + role definitions (the static worker skips
-    ``_write_analysis_tables`` on a cache hit). The STATE plane (proxy impl,
-    controllers, balances, events, monitoring) is untouched and resolved per
-    ``(chain, address)`` downstream.
-
-    Returns the target ``Contract.id`` on success, or ``None`` if the target has
-    no contract row or the donor lacks the expected artifacts.
+    Unlike :func:`copy_static_cache` it leaves the donor alone and copies onto the target's own contract row:
+    source-derived artifacts (address re-stamped), plus summary and role definitions. State is resolved per ``(chain,
+    address)`` downstream. Returns the target ``Contract.id``, or ``None``.
     """
     from db.models import RoleDefinition
 
@@ -574,9 +442,7 @@ def copy_static_cache_cross_chain(
     if src_job is None or not src_job.address:
         return None
 
-    # Chain-qualified on the donor job's own chain: a CREATE2 same-address
-    # deployment on another chain can carry different source, and its
-    # summary/roles must never be the ones copied.
+    # Chain-qualified to the donor's own chain.
     donor_contract = session.execute(
         select(Contract)
         .join(ContractSummary, ContractSummary.contract_id == Contract.id)
@@ -591,7 +457,6 @@ def copy_static_cache_cross_chain(
 
     target_addr_norm = target_address.lower()
 
-    # --- summary + role definitions (source-level; re-linked to target) ---
     donor_summary = session.execute(
         select(ContractSummary).where(ContractSummary.contract_id == donor_contract.id).limit(1)
     ).scalar_one_or_none()
@@ -615,7 +480,6 @@ def copy_static_cache_cross_chain(
         for rd in donor_roles:
             copy_row(session, rd, contract_id=target_contract.id)
 
-    # --- code-plane artifacts (re-stamp the deployment address) ---
     for name in _CROSS_CHAIN_STATIC_ARTIFACTS:
         payload = get_artifact(session, source_job_id, name)
         if payload is None:

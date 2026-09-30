@@ -141,7 +141,6 @@ def run(stop: threading.Event) -> None:
     while not stop.is_set():
         started = time.monotonic()
         try:
-            # Lightweight durable scheduling belongs on the always-on side.
             # Import lazily; never call the governance builder here.
             if time.monotonic() >= sweep_at:
                 from services.monitoring.enrollment_schedule import DEFAULT_RECONCILE_INTERVAL_S, sweep_enqueue_stale
@@ -159,8 +158,7 @@ def run(stop: threading.Event) -> None:
                 assert fly is not None and machine is not None
                 fly.start(machine["id"])
         except Exception as exc:
-            # Do not log HTTP bodies/config or credentials. Any uncertainty
-            # inhibits shutdown. Durable queue plus next pass repairs wakeups.
+            # Never log HTTP bodies, config or credentials. Any uncertainty inhibits shutdown.
             logger.error("worker lifecycle pass failed", extra={"exc_type": type(exc).__name__})
             record_heartbeat("worker_lifecycle", status="error", detail={"exc_type": type(exc).__name__})
         stop.wait(max(0, interval - (time.monotonic() - started)))

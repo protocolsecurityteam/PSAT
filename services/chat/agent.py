@@ -1,12 +1,5 @@
-"""Streaming agent loop for the company-page Agent sidebar.
-
-Drives ``LLMClient.tool_chat`` (utils/llm.py): pipes assistant tokens
-through, runs tools server-side when the model requests them, and emits
-a final highlights event listing in-scope addresses to focus on the
-canvas.
-
-Public surface: ``run_agent_stream(message, history, ctx)`` yields plain
-dicts that the FastAPI route translates to SSE frames.
+"""Streaming agent loop for the company-page sidebar: tokens through, tools run server-side, final highlights of
+in-scope addresses.
 """
 
 from __future__ import annotations
@@ -37,13 +30,7 @@ class AgentContext:
 
 
 def _system_prompt(session, ctx: AgentContext) -> str:
-    """Compose the agent's system prompt with auto-injected context.
-
-    The selected contract's metadata is fetched once up front so the agent
-    can answer "what does this control?" without a tool round-trip when
-    the user is staring right at it. If nothing's selected, the prompt
-    just frames the protocol.
-    """
+    """Selected-contract metadata is injected up front so common questions need no tool round-trip."""
     parts = [
         f"You are an on-chain protocol auditor's assistant inside the PSAT app, looking at '{ctx.company}'.",
         (
@@ -91,22 +78,18 @@ def _system_prompt(session, ctx: AgentContext) -> str:
 
 
 def run_agent_stream(message: str, history: list[dict], ctx: AgentContext) -> Iterator[dict]:
-    """Yield streaming events for one user turn.
+    """Yield events for one user turn:
 
-    Events:
-      {"event": "token", "data": {"text": str}}
-      {"event": "tool_call_start", "data": {"id", "name", "arguments"}}
-      {"event": "tool_call_result", "data": {"id", "name", "result"}}
-      {"event": "highlights", "data": {"addresses": [str]}}
-      {"event": "done", "data": {}}
-      {"event": "error", "data": {"message": str}}
-
-    The caller (FastAPI route) frames these as SSE.
+    {"event": "token", "data": {"text": str}}
+    {"event": "tool_call_start", "data": {"id", "name", "arguments"}}
+    {"event": "tool_call_result", "data": {"id", "name", "result"}}
+    {"event": "highlights", "data": {"addresses": [str]}}
+    {"event": "done", "data": {}}
+    {"event": "error", "data": {"message": str}}
     """
     session = SessionLocal()
     try:
         messages: list[dict] = [{"role": "system", "content": _system_prompt(session, ctx)}]
-        # Replay prior conversation. Trust client to send sane history.
         for h in history or []:
             role = h.get("role")
             content = h.get("content") or ""
@@ -134,10 +117,7 @@ def run_agent_stream(message: str, history: list[dict], ctx: AgentContext) -> It
                         final_text_parts.append(text)
                         yield {"event": "token", "data": {"text": text}}
                     elif kind == "reasoning":
-                        # Pass reasoning through as its own SSE event so the
-                        # frontend can render it in a lighter style. We don't
-                        # accumulate into final_text_parts — reasoning is
-                        # display-only and shouldn't drive highlights.
+                        # Display-only; doesn't drive highlights.
                         yield {"event": "reasoning", "data": {"text": chunk.get("text", "")}}
                     elif kind == "tool_calls":
                         tool_calls = chunk.get("calls", [])
@@ -149,10 +129,8 @@ def run_agent_stream(message: str, history: list[dict], ctx: AgentContext) -> It
                 return
 
             if not tool_calls:
-                # Plain answer — we're done.
                 break
 
-            # Append the assistant turn (with tool_calls) and execute each.
             messages.append(
                 {
                     "role": "assistant",
@@ -189,10 +167,7 @@ def run_agent_stream(message: str, history: list[dict], ctx: AgentContext) -> It
                     }
                 )
         else:
-            # We exhausted MAX_ITERATIONS without the model giving a
-            # tool-call-free turn. Force a final synthesis call WITHOUT
-            # tools so the model has to write an answer using whatever
-            # context it has — a friendlier outcome than a hard error.
+            # Out of iterations: force a tool-less synthesis rather than a hard error.
             try:
                 final_stream = openrouter.tool_chat(
                     messages
@@ -223,9 +198,7 @@ def run_agent_stream(message: str, history: list[dict], ctx: AgentContext) -> It
                     "data": {"message": f"agent exhausted tools and synthesis failed: {exc}"},
                 }
 
-        # Highlights: extract any addresses the assistant mentioned and
-        # intersect with the in-scope contract set so the canvas only
-        # lights up nodes it actually has.
+        # Only highlight addresses the canvas actually has.
         final_text = "".join(final_text_parts)
         addrs_in_text = {m.lower() for m in ADDR_RE.findall(final_text)}
         if addrs_in_text:

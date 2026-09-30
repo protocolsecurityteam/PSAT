@@ -1,37 +1,14 @@
-"""Per-class calldata + entry-point synthesis, one synthesizer per effect class.
+"""Per-class calldata and entry-point synthesis, one synthesizer per effect class.
 
-Turns the STATIC facts a candidate already carries — ABI param types, sinks,
-state writes, value-flow taint, predicate trees, resolved principals — into the
-concrete probe inputs each recipe needs. Pure over the DB/artifact reads it does:
-no RPC, no fork, no wire of its own, so the whole surface is testable against
-recorded fixtures.
+Turns a candidate's static facts (ABI types, sinks, state writes, taint, predicate trees, principals) into concrete
+probe inputs, with DB/artifact reads only.
 
-Every synthesizer returns ``None`` when the facts are too thin to build an
-honest probe. That is the load-bearing property: a recipe fed guessed calldata
-would mint a witness for a call the contract never actually performs, and the
-fail-closed discipline only holds if the inputs are real. Thin facts ⇒ no plan
-⇒ the class stays ``unknown``.
+Every synthesizer returns ``None`` when the facts are too thin: a recipe fed guessed calldata would mint a witness for a
+call the contract never makes, so thin facts mean no plan and ``unknown``. A class with no plans across a protocol is
+normal (e.g. every value-moving function already carries ``flow.out``).
 
-A class emitting NO plans across a whole protocol is a normal outcome, not a
-symptom. Measured on etherfi (2026-07-21): value-out and supply produced zero
-plans over all 265 candidates, because every value-moving function there already
-carries a ``flow.out`` claim and the selection cascade selects BLANK-claim
-functions only. The fact plumbing is fine — those functions do carry
-``direction: "out"`` in the effects artifact; they are simply already explained.
-That is the cascade working as designed: as the claims matchers grow, the
-simulation workload shrinks.
-
-Decision points are deliberately concentrated and named so the live-validation
-loop can adjust them without re-deriving the module:
-
-* :data:`ARG_AMOUNT` — the numeric filler for value-carrying params (1 wei, the
-  amount that slips under real rate limiters; measured 2026-07-21).
-* :data:`SENTINEL_ADDRESS` — the attacker identity substituted at a taint index.
-* :func:`_arg_values` — the address/uint/other substitution policy.
-* :data:`NEUTRAL_CALLER` — the identity a blast-radius probe uses when the entry
-  point has no resolved principal.
-* :func:`read_max_pause_duration` — the bound is READ off the latch's own guard
-  leaf, never hardcoded and never scraped from source text.
+Tunable decision points: :data:`ARG_AMOUNT`, :data:`SENTINEL_ADDRESS`, :func:`_arg_values`, :data:`NEUTRAL_CALLER`, and
+:func:`read_max_pause_duration` (read from the latch's own guard, never hardcoded).
 """
 
 from __future__ import annotations

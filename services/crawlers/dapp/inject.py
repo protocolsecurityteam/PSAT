@@ -1,7 +1,4 @@
-"""
-Prepares the JavaScript provider script with wallet-specific config
-injected, and handles signing requests from the page context.
-"""
+"""Builds the injected JS provider and handles signing requests from the page."""
 
 from pathlib import Path
 

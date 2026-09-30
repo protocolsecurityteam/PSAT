@@ -1,48 +1,20 @@
 """The analysis perimeter: which discovered contracts become analysis jobs.
 
-One walker, two call sites, deliberately the SAME code path:
+One walker for both the resolution stage (the first graph) and the policy stage (the refreshed graph with
+``role_principal`` nodes); before the second call site, nodes first found by the refresh were never analysed.
 
-* the **resolution stage** spawns from the walk's first graph, and
-* the **policy stage** spawns from the refreshed graph it rebuilds once
-  ``effective_permissions`` exists — the refresh that projects
-  ``role_principal`` nodes into the graph.
+Every non-job candidate lands in a disposition:
 
-Until the second call site existed, every node FIRST discovered by the policy
-refresh was permanently outside the perimeter even though it satisfied every
-gate here. Measured on the PR-161 corpus: 32 addresses carry
-``details->>'source' = 'semantic_capability:role_grant'`` with
-``node_type='contract'``, of which **19 had no job** — all 19 ``analyzed=true``,
-so all 19 pass the gates below unmodified.
+* ``queued``: a job was created;
+* ``omitted``: could have been analysed but wasn't (budget, depth, chain, bad address), persisted with its reason;
+* ``out_of_population``: never a candidate (the root, unanalysed walk nodes, non-contracts, existing jobs). Not
+omissions.
 
-**Every candidate that does not become a job is accounted for**, in one of three
-declared dispositions. The three PARTITION the node list **only when the ledger
-carries ``walked: true``** — see ``walked`` below; on a ``false`` they are a
-PREFIX of it and nothing may be concluded from their emptiness:
+They partition the node list only when ``walked`` is true. The caller builds the ledger and persists it from a
+``finally``, so it can be written after a full walk, a partial walk, or none; ``walked`` is set only at loop exit, and
+when false the lists are a prefix.
 
-* ``queued`` — a job was created;
-* ``omitted`` — a candidate this stage COULD have analysed and chose not to
-  (budget, depth, chain, unusable address). This is the ledger: a silently
-  dropped candidate is precisely the C2 defect, so each one is persisted with
-  its reason, not merely counted;
-* ``out_of_population`` — never a candidate for this stage at all: the root
-  itself, a node the walk did not analyse, a non-contract node, or an address
-  that already has a job. These are the fail-closed gates and the dedup arm;
-  they are NOT omissions and must not redden a population invariant.
-
-``walked`` is the discriminator that makes those dispositions readable. The
-ledger is constructed by the CALLER and persisted from a ``finally``, so it is
-written on three different histories: the walk ran to the end, the walk raised
-part-way through, and the walk never started at all (the policy stage skips it
-when the refresh produced no graph). All three used to serialize identically
-when nothing was queued, so an all-empty ledger asserted "walked, omitted
-nothing" for two histories that had walked nothing. ``walked`` is set at LOOP
-EXIT and nowhere else: ``true`` licenses the partition claim, ``false`` says
-the ledger is a prefix — its contents are still true individually, but their
-emptiness proves nothing.
-
-A budget is spent at ``create_job`` and nowhere else, so a candidate rejected by
-any earlier gate provably consumes none of it — the ordering of the gates in the
-loop below cannot silently become load-bearing.
+Budget is spent only at ``create_job``, so gate order never matters for it.
 """
 
 from __future__ import annotations
@@ -75,42 +47,22 @@ logger = logging.getLogger(__name__)
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-#: How many contracts ONE policy-stage refresh may spawn. The policy refresh is
-#: recursive in a way the resolution walk is not: a newly-analysed manager runs
-#: its own policy stage, projects its own role principals, and spawns again — so
-#: without a cut it fans out until the graph is exhausted.
-#:
-#: This is a NAMED MODEL CHOICE, not a measured reliability: the 19-row jobless
-#: population is far below the ~5-row floor at which calibrating a threshold on
-#: observed data is admissible at all, so no number here is claimed to be
-#: derived from it. Chosen so one refresh makes progress while a cut stays
-#: visible; raise it in config, never by inferring a "right" value from a run.
+# Spawns per policy-stage refresh. The refresh recurses (new managers spawn their own), so without a cut it exhausts the
+# graph. A chosen value, not calibrated from data; adjust in config.
 PERIMETER_SPAWN_LIMIT = int(os.getenv("PSAT_PERIMETER_SPAWN_LIMIT", "8"))
 
-#: How many spawn generations may chain off one root. Counts PERIMETER SPAWNS
-#: ONLY and is carried in the child's request — it is NOT
-#: ``control_graph_nodes.depth`` (the walk's BFS distance, which is 1 on all 19
-#: jobless role-grant nodes) and the two must never be read for each other.
+# Spawn generations per root. Counts perimeter spawns only (carried in the request), never
+# ``control_graph_nodes.depth``.
 PERIMETER_SPAWN_DEPTH_CAP = int(os.getenv("PSAT_PERIMETER_SPAWN_DEPTH_CAP", "2"))
 
-#: Request key carrying the spawn generation. Absent ⇒ generation 0.
+# Absent means generation 0.
 PERIMETER_DEPTH_KEY = "perimeter_spawn_depth"
 
-#: ``control_graph_nodes.details`` key recording what PRODUCED a node, persisted
-#: by the FP materialization pass. Provenance on the stored row — read by
-#: consumers of the graph plane, and NOT by the admission arm below.
-#:
-#: It cannot gate admission, and the earlier draft that used it was wrong to say
-#: nothing else may write it. ``details`` is free-form JSONB copied verbatim from
-#: upstream principal payloads by the walk (``recursive.py``: no key allowlist),
-#: so any producer that can put a key in a principal's details can forge this
-#: one — demonstrated: a hand-crafted walk node carrying the key passed the arm
-#: and spawned a job. Admission is therefore decided by an explicit set the
-#: CALLER passes (see ``fp_materialized_addresses``), which is a construction the
-#: data plane cannot reach rather than a now-fact about writers.
+# ``details`` key recording what produced a node (the FP materialization pass). Provenance only, never admission:
+# ``details`` is copied verbatim from upstream payloads (``recursive.py``), so it can be forged. Admission uses the
+# caller's ``fp_materialized_addresses``.
 CONTROL_GRAPH_BASIS_KEY = "control_graph_basis"
 
-#: The value :data:`CONTROL_GRAPH_BASIS_KEY` carries on a minted node.
 FP_MATERIALIZATION_BASIS = "fp_materialization"
 
 
@@ -127,15 +79,12 @@ class PerimeterSpawnResult(TypedDict):
     queued: list[dict[str, Any]]
     omitted: list[OmissionRecord]
     out_of_population: list[OmissionRecord]
-    # True only after the node loop ran to completion. See the module docstring:
-    # this is what separates "walked, omitted nothing" from "never walked" and
-    # from "raised on node 3 of 5", which are otherwise the same three lists.
+    # True only after the loop completes (see module docstring).
     walked: bool
 
 
 def spawn_depth_of(job: Job) -> int:
-    """The perimeter generation *job* belongs to. A malformed or absent value is
-    generation 0 — never a guess that skips the cap."""
+    """The perimeter generation of *job*; malformed or absent is 0."""
     request = job.request if isinstance(job.request, dict) else {}
     raw = request.get(PERIMETER_DEPTH_KEY)
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
@@ -144,7 +93,6 @@ def spawn_depth_of(job: Job) -> int:
 
 
 def _parent_company(session: Session, job: Job) -> str | None:
-    """Walk up the parent chain for a company when this job has none."""
     if job.company:
         return job.company
     request = job.request if isinstance(job.request, dict) else {}
@@ -164,34 +112,17 @@ def _parent_company(session: Session, job: Job) -> str | None:
 
 
 def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, str], Contract | None]:
-    """``(parent_is_member, {dep_address: relationship}, parent_contract)`` for
-    structural same-protocol components of the parent — the W2 producer's edge
-    walk (spec §3.2).
+    """``(parent_is_member, {dep_address: relationship}, parent_contract)`` for structural same-protocol components
+    of the parent (the W2 producer, spec §3.2).
 
-    ``cd.relationship_type`` alone isn't sufficient — it's the classifier's
-    verdict on what kind of contract the dep IS, not the edge semantics. A
-    member ether.fi contract calling Lido stETH has
-    ``relationship_type='proxy'`` because stETH is a proxy — that doesn't make
-    stETH ether.fi's structural proxy. We require the proxy/impl/beacon fields
-    on the Contract row to actually link the two.
+    ``relationship_type`` alone isn't enough: it's what the dep is, not the edge (a member calling Lido stETH sees
+    ``proxy`` because stETH is a proxy). The Contract row's proxy/impl/beacon fields must link the two.
 
-    ``library`` is intentionally excluded because the bucket is
-    *heterogeneous*: the classifier's DELEGATECALL-only heuristic correctly
-    identifies real libraries (verified — it does NOT mis-tag the primary
-    proxy→impl edge), but the *targets* mix protocol-internal helpers with
-    shared infrastructure. In a single sample dataset ``BucketLimiter``
-    (etherfi-internal rate limiter) and ``SignatureChecker`` (Circle's USDC
-    helper, shared across protocols) both land in the ``library`` bucket.
-    Admitting either way would be wrong for the other. Until there's a
-    downstream signal that splits "internal helper" from "shared lib,"
-    structural admission skips this relationship type and those rows stay
-    candidates. Same-name address pairs (e.g. two different contracts both
-    called ``EtherFiOracle``) are common — never assume the
-    ``dependency_name`` string equals the parent's identity without checking
-    addresses.
+    ``library`` is excluded: it mixes internal helpers with shared infrastructure (e.g. etherfi's BucketLimiter vs
+    Circle's SignatureChecker), and nothing yet distinguishes them. Never trust a dependency name to match the parent
+    without comparing addresses.
 
-    Best-effort: a failure falls back to "no propagation" (the safe default)
-    rather than blocking discovery.
+    Best-effort: failure means no propagation.
     """
     structural_rel_by_addr: dict[str, str] = {}
     try:
@@ -204,8 +135,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
     if parent_contract is None:
         return False, {}, None
 
-    # Membership, never a source tag: only a member parent's stored resolution
-    # can admit (spec §3.2 W2; supersedes the HIGH-source shortcut).
+    # Membership, never a source tag (spec §3.2 W2).
     parent_is_member = getattr(parent_contract, "protocol_id", None) is not None
     parent_id = getattr(parent_contract, "id", None)
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
@@ -223,14 +153,10 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
         logger.debug("Job %s: structural-propagation dep-rows lookup failed: %s", job.id, exc)
         return parent_is_member, {}, parent_contract
 
-    # For proxy-direction edges we need to verify the dep's Contract.implementation
-    # back-links to the parent. Batch so the loop stays O(deps) not O(deps×SELECTs).
+    # Batch the back-link check for proxy edges.
     proxy_edge_addrs = [row.dependency_address.lower() for row in dep_rows if row.relationship_type == "proxy"]
     dep_impl_by_addr: dict[str, str | None] = {}
-    # Chain-scoped like ``is_known_proxy``: a back-link is only evidence on the
-    # parent's own chain — a CREATE2 twin elsewhere satisfies the bare address
-    # match. Mainnet-coalesced so legacy NULL-chain rows still match a mainnet
-    # parent while a non-mainnet lookup stays isolated.
+    # Chain-scoped (a CREATE2 twin elsewhere matches the bare address), mainnet-coalesced.
     if proxy_edge_addrs:
         try:
             dep_contract_rows = session.execute(
@@ -274,14 +200,9 @@ def produce_structural_witness(
     protocol_id: int | None,
     relationship: str,
 ) -> str | None:
-    """W2 producer (spec §3.2, invariant 6): write the witness only when the
-    stored resolution on the rows themselves carries the edge — the parent's
-    ``implementation``/``beacon`` pointer, or the candidate proxy's back-link
-    — never a bare ``relationship_type`` or a request flag.
-
-    Returns the verified edge kind, or None (no witness written). The witness
-    protocol is the PARENT's membership; a parent that is not a member (or is
-    a member of a different protocol than *protocol_id* claims) admits nothing.
+    """W2 producer (spec §3.2, invariant 6): write the witness only when the rows' stored resolution carries the edge
+    (the parent's ``implementation``/``beacon``, or the candidate proxy's back-link). The witness protocol is the
+    parent's membership. Returns the edge kind, or None.
     """
     from db.models import WITNESS_RULE_W2_STRUCTURAL
     from services.discovery import membership_gate as gate
@@ -290,8 +211,7 @@ def produce_structural_witness(
         return None
     if protocol_id is not None and parent.protocol_id != protocol_id:
         return None
-    # Chain-scoped: a CREATE2 twin on another chain satisfies the bare
-    # address match, so the edge only holds within one chain.
+    # Chain-scoped against CREATE2 twins.
     parent_chain = _mainnet_coalesced_chain(canonical_chain(parent.chain))
     candidate_chain = _mainnet_coalesced_chain(canonical_chain(candidate.chain))
     if parent_chain != candidate_chain:
@@ -329,11 +249,9 @@ def produce_structural_witness(
 
 
 def needs_probe(session: Session, contract: Contract) -> bool:
-    """§3.4 event 1 trigger: no probe attempt persisted for the row's OWN
-    chain, an attempt that never completed (``status != probed`` — an error or
-    unroutable outcome is an attempt, never a verdict), or a pruned row seen
-    again — re-nomination re-runs W1 (pruned is evidence-at-a-block, not
-    terminal)."""
+    """§3.4 event 1 trigger: no probe for the row's own chain, an incomplete attempt (errors aren't verdicts), or a
+    pruned row seen again (pruning is evidence at a block, not terminal).
+    """
     from services.discovery.probes import STATUS_PROBED, UNRESOLVABLE_CHAIN_ID
 
     chain_id = chain_id_for_chain_name(contract.chain)
@@ -352,12 +270,9 @@ def needs_probe(session: Session, contract: Contract) -> bool:
 
 
 def probe_predates_revocation(session: Session, contract: Contract) -> bool:
-    """A demoted member keeps its completed ``probed`` attempt, so
-    ``needs_probe`` skips it. A witness revocation NEWER than that attempt
-    makes the stored probe stale evidence for re-admission (invariant 8), so
-    the probe pass re-targets the row through the normal event flow — the
-    pickup path for demotions from request/queue contexts (e.g. the
-    protocol-merge deployer cascade) where no inline probe may run."""
+    """A demoted member keeps its old probe, so ``needs_probe`` skips it; a witness revocation newer than that probe
+    makes it stale (invariant 8), so re-target it. The pickup path for demotions where no inline probe may run.
+    """
     from services.discovery.probes import UNRESOLVABLE_CHAIN_ID
 
     chain_id = chain_id_for_chain_name(contract.chain)
@@ -375,8 +290,7 @@ def probe_predates_revocation(session: Session, contract: Contract) -> bool:
 
 
 def record_code_witness(session: Session, *, contract: Contract, protocol_id: int, probe_result: "ProbeResult") -> bool:
-    """W1 from a fresh probe — only a code-present verdict block-stamped on the
-    contract's OWN chain mints the witness (invariant 3)."""
+    """W1 from a fresh probe: only code-present on the contract's own chain mints it (invariant 3)."""
     from db.models import WITNESS_RULE_W1_CODE
     from services.discovery import membership_gate as gate
 
@@ -400,13 +314,10 @@ def _produce_structural_witnesses(
     parent: Contract,
     rel_by_addr: Mapping[str, str],
 ) -> None:
-    """W2 production for structurally-linked deps that already have Contract
-    rows on the parent's chain; a dep with no row yet earns its witness at
-    fetch time from the child request's edge hint (re-verified there).
+    """W2 for structurally linked deps that already have rows on the parent's chain; new deps earn it at fetch time.
 
-    A witnessed candidate lacking a probe attempt gets the event-1 probe
-    near-line, so a dep that never re-enters the fetch path (existing row +
-    existing job) can still complete W2+W1 and promote."""
+    Witnessed candidates without a probe get one near-line so they can still promote.
+    """
     from services.discovery import membership_gate as gate
 
     protocol_id = parent.protocol_id
@@ -441,23 +352,14 @@ def _produce_structural_witnesses(
             promoted.append(row.id)
     session.commit()
     if promoted:
-        # A promotion is itself new evidence (spec §3.4 event 2d).
+        # A promotion is new evidence (spec §3.4 event 2d).
         gate.evaluate(session, gate.FactsDelta(new_member_contract_ids=tuple(promoted)))
         session.commit()
 
 
 def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> PerimeterSpawnResult:
-    """An empty ledger, constructed by the CALLER so it survives a raise.
-
-    The walker fills this in place. If ``create_job`` raises on the third of
-    five nodes, the caller's ``finally`` still holds — and can still persist —
-    the two children that were already committed. Building the ledger inside
-    the walker and returning it made a partial spawn indistinguishable from no
-    spawn: the children were committed, the artifact was never written.
-
-    ``walked`` starts ``False`` and only the walker's loop exit sets it, so a
-    ledger that reaches ``_persist_spawn_summary`` without the walk having run
-    to the end says so rather than reading as a completed empty walk.
+    """An empty ledger built by the caller so it survives a raise: if ``create_job`` fails partway, the caller's
+    ``finally`` can still persist the committed children. ``walked`` starts ``False``.
     """
     return {
         "site": site,
@@ -471,50 +373,28 @@ def new_spawn_result(*, site: str, budget: int | None, spawn_depth: int = 0) -> 
     }
 
 
-#: Ledger site of the FP→control-graph materialization pass.
 FP_MATERIALIZATION_SITE = "fp_materialization"
 
 
 class FpMaterializationResult(PerimeterSpawnResult):
-    """The FP materialization pass's ledger. Same machinery, TWO planes.
+    """The FP materialization pass's ledger, on two planes.
 
-    The inherited three dispositions keep their meaning verbatim — they
-    partition every FP principal considered, on the one question the perimeter
-    also asks: **will this address be offered to the walker as an analysis
-    candidate?**
+    The three dispositions answer "will this address be offered to the walker?": ``queued`` (minted analysable
+    contract), ``omitted`` (``budget_exhausted``, ``chain_not_enabled``), ``out_of_population`` (``not_analyzable_type``
+    for safes/EOAs, plus existing node, zero/invalid address, anchor problems, undetermined or conflicting type).
 
-    * ``queued`` — offered. Minted, analyzable type, so ``node_type='contract'``.
-    * ``omitted`` — could have been offered and was not: ``budget_exhausted``,
-      ``chain_not_enabled``.
-    * ``out_of_population`` — never offerable: ``not_analyzable_type`` (a safe /
-      EOA: the node IS minted, the job never happens), ``existing_node``,
-      ``zero_address``, ``invalid_address``, ``no_contract_anchor``,
-      ``anchor_contract``, ``resolved_type_not_determined``,
-      ``resolved_type_conflict``.
+    ``minted`` is separate because minting a node and offering a job are different acts (a Safe gets the first only); it
+    equals ``queued`` plus ``not_analyzable_type``.
 
-    ``minted`` is the ORTHOGONAL plane and is why it is a separate list rather
-    than a fourth disposition: minting a node and offering a job are different
-    acts, and the whole point of this pass is that a safe gets the first without
-    the second. Folding them into one axis would force one of the two to lie.
-    Its members are exactly ``queued`` ∪ the ``not_analyzable_type`` entries.
-
-    ``budget_used`` counts MINTS, because the budget is spent at the COMMITTED
-    INSERT and nowhere else — the same discipline ``queue_discovered_contracts``
-    applies at ``create_job``, so no earlier gate's ordering can silently become
-    load-bearing, and no entry here can name a row a rollback removed.
-
-    ``budget_exhausted`` in ``omitted`` is a PERMANENT loss on this anchor, not a
-    queue: the scope is rewritten before every mint, so the next pass re-mints
-    the same sorted prefix and drops the same tail. See ``FP_MATERIALIZE_LIMIT``.
+    ``budget_used`` counts committed mints only. ``budget_exhausted`` is a permanent loss on this anchor: the next pass
+    re-mints the same sorted prefix (see ``FP_MATERIALIZE_LIMIT``).
     """
 
     minted: list[dict[str, Any]]
 
 
 def new_fp_materialization_result(*, budget: int | None) -> FpMaterializationResult:
-    """An empty FP-materialization ledger, constructed by the CALLER for the
-    same reason :func:`new_spawn_result` is: it has to survive a raise in the
-    middle of the mint loop and still say which nodes were already committed."""
+    """An empty FP-materialization ledger built by the caller, like :func:`new_spawn_result`."""
     return {
         "site": FP_MATERIALIZATION_SITE,
         "budget": budget,
@@ -543,20 +423,11 @@ def queue_discovered_contracts(
 ) -> PerimeterSpawnResult:
     """Queue analysis jobs for contracts in *resolved_graph* that have none.
 
-    ``budget=None`` (the resolution stage) means no cut: the walk's own
-    ``max_depth`` already bounds it. An int (the policy stage) caps this
-    stage's spawns and records every candidate it drops.
+    ``budget=None`` (resolution stage) means no cut beyond ``max_depth``; an int (policy stage) caps spawns and records
+    every drop. Pass *result* (:func:`new_spawn_result`) so the ledger survives a raise.
 
-    Pass *result* (from :func:`new_spawn_result`) to keep the ledger reachable
-    if this raises part-way through.
-
-    *fp_materialized_addresses* — lowercase addresses this caller MINTED in this
-    same job (``materialize_fp_principal_nodes``). Only these are exempt from the
-    ``analyzed`` gate. It is an explicit set, not a field on the node, because a
-    field can be forged: ``details`` is free-form JSONB the walk copies verbatim
-    from upstream principal payloads, so a provenance MARKER inside it is a
-    now-fact about writers, whereas the caller's own set is a construction the
-    graph data cannot reach.
+    *fp_materialized_addresses* are the addresses this caller minted in this job (``materialize_fp_principal_nodes``),
+    the only ones exempt from the ``analyzed`` gate. An explicit set because a field in ``details`` could be forged.
     """
     spawn_depth = spawn_depth_of(job)
     if result is None:
@@ -568,8 +439,7 @@ def queue_discovered_contracts(
     parent_is_member, structural_rel_by_addr, parent_contract = _structural_ownership(session, job)
     if getattr(parent_contract, "protocol_id", None) is not None:
         assert parent_contract is not None
-        # Witness production is evidence recording, not spawn control — a
-        # failure degrades the gate's recall, never the walk.
+        # Witness production is recording; failures reduce recall but never stop the walk.
         try:
             _produce_structural_witnesses(session, parent_contract, structural_rel_by_addr)
         except Exception as exc:
@@ -609,52 +479,27 @@ def queue_discovered_contracts(
             _omit(addr or "", "invalid_address")
             continue
         if addr == ZERO_ADDRESS:
-            # An unset controller/dependency resolves to the zero address;
-            # queuing it spawns a discovery job that can only fail with
-            # "No verified source code for 0x000…000".
+            # An unset pointer resolves to the zero address, whose job can only fail.
             _omit(addr, "zero_address")
             continue
         if addr == root_address:
             _out(addr, "root_node")
             continue
-        # Only queue contracts that were analyzed during the walk — with one
-        # declared exception. ``analyzed`` is the walk's own gate and it is
-        # correct for walk-produced nodes: an unanalysed one was reached, and
-        # not analysing it was a decision this stage already recorded.
-        #
-        # An FP-materialized node was never OFFERED to the walk. It exists
-        # because a ``function_principals`` row proves the address is a resolved
-        # principal of a gated function on this contract, while the walk's only
-        # principal ingresses (``authority_roles[].principals`` and
-        # ``controllers[].principals``) never saw it — 73 addresses / 411 of
-        # 1,200 FP rows on the PR-161 corpus, 72 of them with no ``contracts``
-        # row at all. Reading its ``analyzed=false`` as "this stage chose not to
-        # analyse it" would restate the very defect: unanalysed is its
-        # DEFINITION, not a verdict, and it is exactly the population that needs
-        # analysis. Admitting it changes no other gate — ``node_type``,
-        # ``existing_job``, ``chain_enabled``, depth and budget all still apply
-        # below, which is what keeps safes and EOAs out (they mint
-        # ``node_type='principal'``).
-        #
-        # Membership of the CALLER's minted set, never a field on the node: a
-        # graph node's ``details`` is attacker-reachable through the walk's
-        # verbatim copy of upstream principal payloads.
+        # Only analysed walk nodes are queued, except FP-materialized ones: they were never offered to the walk (the FP
+        # rows prove them principals the walk's ingresses missed), so ``analyzed=false`` is their definition, not a
+        # decision. Other gates still apply, keeping safes and EOAs out. Checked against the caller's set, since node
+        # ``details`` are attacker-reachable.
         if not node.get("analyzed") and addr not in fp_minted:
             _out(addr, "not_analyzed")
             continue
         if node.get("node_type") != "contract":
             _out(addr, "not_contract_node")
             continue
-        # Skip if a job already exists for this address on THIS chain —
-        # case-insensitive (a checksummed admin submission is the same
-        # contract) and chain-scoped so a same-address twin on another chain
-        # doesn't suppress this chain's child.
+        # Case-insensitive and chain-scoped.
         if find_existing_job_for_address(session, addr, chain=chain_name) is not None:
             _out(addr, "existing_job")
             continue
-        # Defense in depth: discovered contracts share the parent's chain
-        # (chain-as-island), so a gated parent already implies a gated child —
-        # but a disabled chain must never spawn analysis work.
+        # Defence in depth: children share the parent's chain, but a disabled chain must never spawn.
         if not chain_enabled(chain_name):
             _omit(addr, "chain_not_enabled")
             continue
@@ -665,11 +510,8 @@ def queue_discovered_contracts(
             _omit(addr, "budget_exhausted")
             continue
 
-        # ``label`` is deliberately NOT a fallback. It is display copy on the
-        # graph plane ("role principal", "capability principal") and this value
-        # becomes ``Job.name`` and ``request["name"]`` — an IDENTITY — for every
-        # child, so the leg published a noun describing the EDGE as the name of
-        # the CONTRACT. The address is a worse-looking but true fallback.
+        # Not ``label``: that's edge display text ("role principal"), and this becomes the job's name. The address is a
+        # true fallback.
         contract_name = node.get("contract_name") or addr
         child_request: dict[str, Any] = {
             "address": addr,
@@ -693,8 +535,7 @@ def queue_discovered_contracts(
             child_job.protocol_id = job.protocol_id
         session.commit()
 
-        # Budget is spent HERE and only here, so every earlier gate provably
-        # consumes none of it.
+        # Spent here only.
         result["budget_used"] += 1
         result["queued"].append({"address": addr, "name": contract_name, "job_id": str(child_job.id)})
         logger.info(
@@ -705,9 +546,7 @@ def queue_discovered_contracts(
             child_job.id,
         )
 
-    # Loop exit, and only loop exit: every node has now been placed in exactly
-    # one disposition. A raise above skips this line and leaves the prefix
-    # marked incomplete.
+    # Only at loop exit; a raise leaves the prefix marked incomplete.
     result["walked"] = True
 
     if result["queued"] or result["omitted"]:

@@ -11,66 +11,38 @@ from services.scoring.fold.types import _WalkedHop
 from services.scoring.reach import HOP_REFUSED_CONDITION, HOP_REFUSED_CONFERRAL, HOP_REFUSED_SCOPE
 from services.scoring.reach import hop_bound as _hop_bound
 
-# A licensed hop the composition walk never offered, because it never reached
-# the hop's CALLER: every path from the seized node to it broke at an earlier
-# hop that carried no act-as witness. Not an act-as refusal at this hop — the
-# question was never asked here — and named separately for exactly that reason.
+# Never asked at this hop (an earlier hop broke the path), so distinct from an act-as refusal.
 ACT_AS_CALLER_UNREACHED = "caller_not_reachable_from_the_seized_node"
 
 
-# Every gate-control capability, each asking the conferral question with its own
-# witness. The census has no signal instance to ask, so it asks the class-wide
-# union — an upper bound on what any one instance's walk can confer, and labelled
-# as one wherever it is published.
+# The census has no instance, so it asks the class-wide union: an upper bound, labelled as one.
 _CENSUS_GATE_CAPABILITIES = tuple(sorted(K.GATE_CONTROL_CAPABILITIES))
 
 
-# Duplicate edge rows are real — 2,937 rows over 565 distinct pairs — and a pair
-# is walked when ANY of its edges licenses it, so the census counts pairs and has
-# to pick which of a pair's answers to report. Each ranking reports the answer
-# that got FURTHEST, so a pair is never filed under a shortfall one of its own
-# edges did not have. Ordering is by rank, ties impossible (the keys are total).
+# Edge rows duplicate pairs (2,937 over 565), and a pair walks if any edge does, so report each pair's furthest-reaching
+# answer.
 _CONFERRAL_RANK = {
     P.CONFERRAL_CONFERRED: 0,
-    # The gate was asked and the label was readable; these two are the real
-    # negative answers and rank alike.
     P.CONFERRAL_ROLE_NOT_LICENSED: 1,
     P.CONFERRAL_VARIABLE_NOT_REWRITTEN: 2,
-    # Coverage shortfalls: nothing about this gate or this label was read.
     P.CONFERRAL_WRITES_NOT_EXTRACTED: 3,
     P.CONFERRAL_SCOPE_NOT_DETERMINED: 4,
 }
 
 
-# A pair every edge of which was bound reports the SHARPEST bound it hit: being
-# disproved at the destination is a fact about the destination's own code, and
-# outranks "this gate does not confer it", which outranks "the label said
-# nothing".
+# A fully bound pair reports its sharpest bound: condition, then conferral, then scope.
 _REFUSAL_RANK = {HOP_REFUSED_CONDITION: 0, HOP_REFUSED_CONFERRAL: 1, HOP_REFUSED_SCOPE: 2}
 
 
-# Among the edges that DID walk a pair, the most specific scope reported it.
 _SCOPE_KIND_RANK = {P.SCOPE_ROLES: 0, P.SCOPE_STATE_VAR: 1, P.SCOPE_NOT_DETERMINED: 2}
 
 
 def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferral: P.ConferralPlane) -> dict[str, Any]:
     """Every hop in the graph, by what each class of capability can prove of it.
 
-    Counted over DISTINCT ``(principal, anchor)`` pairs. ``control_graph_edges``
-    holds one row per witnessed read — several times the pair count — so an
-    edge-keyed census would report the same hop as many findings as the resolver
-    happened to look.
-
-    Published whether or not a bound ever bit: a rule with no fired count and a
-    rule that was never wired read identically from the outside.
-
-    Gate control is now capability-dependent — ownership.transfer and
-    authority.replace confer different hops — so the class-level block is the
-    UNION over the five gate capabilities (a hop is counted walked there if ANY
-    of them confers it) and ``by_capability`` carries each one's own answer. The
-    union is an upper bound twice over: over the capabilities, and over the
-    instances, because each capability is asked with the union of what its
-    witnesses rewrite anywhere rather than with one function's own set.
+    Counted over distinct ``(principal, anchor)`` pairs, since edges repeat per read. Published even when no bound
+    fired, so "never fired" differs from "never wired". Gate control is the union over the five gate capabilities, with
+    ``by_capability`` per capability; the union over-counts across both capabilities and instances.
     """
     pairs: dict[tuple[str, str], list[P.ControlEdge]] = defaultdict(list)
     for edge in closure.edges:
@@ -119,12 +91,7 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferr
         "conferred_by_at_least_one_gate_capability": len(conferred_by_any),
         "conferred_by_none": len(pairs) - len(conferred_by_any),
         "reading": (
-            # "and no finding walks it" was here: a universal over the findings
-            # population, authored in a census that runs over the control
-            # closure BEFORE any finding exists and therefore never asked it.
-            # What is stated instead is the property this function does
-            # establish — why the union over-counts — which holds at every value
-            # of the counters.
+            # Only states what this function establishes; it runs before any finding exists.
             "the union over the five gate capabilities, each asked with the class-wide union of "
             "what its witnesses rewrite. It is an upper bound on every real walk twice over — "
             "over capabilities, because a pair walked by any one of the five is counted here, "
@@ -135,12 +102,8 @@ def _hop_census(closure: P.ControlClosure, conditions: P.ConditionPlane, conferr
         ),
     }
     census["gate_control_by_capability"] = by_capability
-    # The label-names-nothing population, counted three ways because a pair is
-    # not an edge and a pair carrying one unlabelled edge is not a pair a gate
-    # can be withheld on: the walk reaches a destination if ANY of the pair's
-    # edges confers it, so only pairs with no labelled edge at all can lose their
-    # hop to this rule. Publishing only the deduped number would report the 55
-    # unlabelled role edges as 9.
+    # Counted three ways: only pairs with no labelled edge can lose a hop to this rule, and deduping alone would show 55
+    # role edges as 9.
     unlabelled_edges = [edge for edge in closure.edges if not edge.scope.is_determined]
     unlabelled_pairs = {(edge.principal, edge.anchor) for edge in unlabelled_edges}
     by_relation: dict[str, int] = defaultdict(int)
@@ -184,20 +147,10 @@ def _behind_the_frontier(
     value_plane: P.ValuePlane,
     reached: set[str],
 ) -> dict[str, Any]:
-    """The entities a row's withheld hops hide, counted rather than left implicit.
+    """The entities a row's withheld hops hide.
 
-    A hop published as ``not_determined`` names one destination. The closure
-    places a whole subtree behind that destination, and none of it appears on the
-    row: two published hops can withhold twenty-two entities, twenty of which are
-    named nowhere in the document. The withheld population is therefore SIZED
-    here, by walking the closure from the withheld destinations with no scope
-    bound at all — the widest walk this fold performs, which is code control's —
-    and subtracting what the row reached anyway.
-
-    This is the size of what was withheld and NOT a claim of reach: the row does
-    not reach these entities, that is the whole point. The number is an upper
-    bound on the subtree for the same reason the code-control walk is an upper
-    bound on any gate's, and it is published as one.
+    Walks the closure from withheld destinations with no scope bound (code control's walk) and subtracts what the row
+    reached. An upper bound on what's hidden, not a claim of reach.
     """
     if not gaps:
         return {"hops": 0, "entities": 0, "entity_keys": [], "reading": "no hop was withheld"}
@@ -221,41 +174,17 @@ def _behind_the_frontier(
 def _closure(
     seeds: set[str], closure: P.ControlClosure, conditions: P.ConditionPlane, *, grant: P.GateGrant | None
 ) -> tuple[set[str], list[dict[str, Any]], dict[str, set[P.LicensedFunction]], list[_WalkedHop]]:
-    """The reach the walk proves, every hop it could not establish, and what the
-    hops it did walk LICENSE at each destination.
+    """The reach the walk proves, the hops it couldn't establish, and what walked hops license at each destination.
 
-    ``grant`` is the gate doing the walking; ``None`` is code control, which asks
-    no conferral question. The third return value is the role -> selector join's
-    output, keyed by the RAW anchor: the named functions a walked ``roles`` hop
-    licenses there. Callers that publish it re-key onto the canonical entity,
-    which is what the reach set is keyed on and what a consumer joins against.
-    It is the reach's own answer to "to do *what*", and it is
-    what a compositional magnitude is later attributed to — a destination reached
-    only through state-variable hops has no entry, because nothing named which of
-    its functions the gate reaches.
+    ``grant`` is the walking gate; ``None`` is code control. Returns:
 
-    The burn sentinel is refused at every hop. ``load_control_closure`` already
-    refuses ``0x0`` at both ends of an edge, so on the production path that guard
-    never fires. It is here because the fold's guarantee must not be a property
-    of how the closure was BUILT: the sentinel is the single largest fan-out in
-    the graph, and one edge into it — from a repoint witness, a hand-built
-    closure, or a future loader — would otherwise hand a row everything behind
-    ``msg.sender != 0x0``. Refusing reach is always monotone, so the second line
-    of defence costs nothing.
+    1. the reach set;
+    2. un-walked hops, deduped on ``(caller, destination)``;
+    3. licensed functions per raw anchor (callers re-key to canonical), absent for state-variable-only destinations;
+    4. walked hops as (caller, destination, licensed), since composition needs the caller.
 
-    The second return value is the hops this walk did not walk AS PROVEN, keyed
-    on the distinct ``(caller, destination)`` pair. The edge table carries one
-    row per witnessed read — 2,937 rows over 565 pairs on the reference corpus —
-    so counting refusals per EDGE would report the same withheld hop five times
-    and read as five findings.
-
-    The fourth return value is the walked hops themselves — (caller, destination,
-    what that hop licensed there). The licensed map above collapses every caller
-    that reached a destination into one entry, which is the right shape for "what
-    does this row reach it to do" and the wrong one for composing a magnitude:
-    the question a composition asks is whether THAT caller can be made to act,
-    and a map keyed on the destination alone cannot say which caller a licence
-    came from.
+    The zero address is refused at every hop even though ``load_control_closure`` already drops it, so the guarantee
+    doesn't depend on how the closure was built.
     """
     seen: set[str] = set()
     withheld: dict[tuple[str, str], dict[str, Any]] = {}
@@ -281,9 +210,7 @@ def _closure(
                     stack.append(edge.anchor)
                 continue
             withheld.setdefault((edge.principal, edge.anchor), bound)
-    # A hop another path reached anyway withheld nothing: the destination is in
-    # reach either way, and reporting it as a gap would publish a shortfall the
-    # walk does not have.
+    # Reached by another path, so nothing was withheld.
     gaps = [bound for pair, bound in sorted(withheld.items()) if pair[1] not in seen]
     hops = [
         _WalkedHop(caller=pair[0], destination=pair[1], licensed=frozenset(rows))

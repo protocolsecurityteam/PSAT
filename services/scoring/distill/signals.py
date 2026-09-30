@@ -87,8 +87,6 @@ from .self_service import (
 
 logger = logging.getLogger("services.scoring.distill")
 
-# ---------------------------------------------------------------- the signals
-
 
 def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> list[FunctionSignal]:
     claims = _claims(func)
@@ -100,10 +98,7 @@ def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> l
         if claim_id:
             grouped[str(claim_id)].append(claim)
 
-    # The register's own entity rule: the runtime address is
-    # ``effective_functions.deployment_address`` falling back to
-    # ``contracts.address``. The fallback is licensed there because a row with no
-    # deployment address IS analysed at the contract's own address.
+    # The register's entity rule: a row with no deployment address is analysed at the contract's own address.
     deployment_address = _lower(func.deployment_address) if func.deployment_address else facts.address
     acting_key = entity_key(facts.chain, deployment_address)
     openness = _openness(func)
@@ -137,17 +132,14 @@ def _openness(func: Any) -> str:
     value = func.authority_openness
     if value in (OPENNESS_OPEN, OPENNESS_RESTRICTED, OPENNESS_NOT_DETERMINED):
         return str(value)
-    # NULL predates the column and cannot be read as any of the three; the
-    # boolean sibling merges "restricted" with "unread" and is not consulted.
+    # NULL predates the column; the boolean sibling conflates restricted with unread.
     return OPENNESS_NOT_DETERMINED
 
 
 def _exact_empty_gate(func: Any, principals: list[Any]) -> tuple[Tri[dict[str, Any]], set[str]]:
-    """The SERVED earned-negative gate. Never re-derived here (B16.3).
+    """The served earned-negative gate, never re-derived (B16.3).
 
-    The withheld arm is disclosed rather than dropped: a function whose caller
-    set is an empty ``finite_set`` that did not earn the credit is neither
-    unreachable nor reachable, and its shortfall names which witness is missing.
+    The withheld arm is disclosed with the missing witness.
     """
     from services.policy.capability_surface import exact_empty_credit
 
@@ -164,11 +156,10 @@ def _exact_empty_gate(func: Any, principals: list[Any]) -> tuple[Tri[dict[str, A
 
 
 def _latch_gate(func: Any) -> Tri[dict[str, Any]]:
-    """A ``one_shot`` latch witness, if the resolver published one.
+    """A ``one_shot`` latch witness.
 
-    ``consumed`` is a mutable now-fact — re-openable by the upgrade authority of
-    the proxy it was read at — so it is carried as an annotation whose strength
-    is tied to that authority, never as a permanent credit.
+    ``consumed`` is re-openable by the proxy's upgrade authority, so it's an annotation tied to that authority, not a
+    permanent credit.
     """
     conditions = func.conditions
     if not isinstance(conditions, list):
@@ -178,7 +169,6 @@ def _latch_gate(func: Any) -> Tri[dict[str, Any]]:
             continue
         witness = condition.get("latch_witness")
         if not isinstance(witness, dict) or not witness.get("probe_block"):
-            # Absent, or read at no reproducible height: the weakest branch.
             continue
         return Tri.proven(
             "witnessed",
@@ -222,7 +212,6 @@ def _build_signal(
     notes.update(exact_empty_notes)
     fields["witness_tier"] = _best_tier({_tier(entry) for entry in entries})
 
-    # --- destination -------------------------------------------------------
     destination = _UNDETERMINED_DESTINATION
     if claim_id in ("delegatecall.execute", "exec.arbitrary"):
         fork_param = _fork_caller_arbitrary_param(facts.verdicts.get(func.id, []))
@@ -240,10 +229,7 @@ def _build_signal(
             basis="not_applicable",
         )
     else:
-        # Not in the bearing tuple is not the same as destination-free. A claim
-        # this scorer has no destination model for publishes not_determined:
-        # stamping "there is no destination here" from the absence of a rule is
-        # the same absence-as-a-witness move in a quieter place.
+        # A claim with no destination model is not_determined, not destination-free.
         destination = _Destination(
             tri=Tri[str].not_determined(),
             severity=None,
@@ -256,9 +242,7 @@ def _build_signal(
         for verdict in facts.verdicts.get(func.id, []):
             if verdict.verdict != "proven" or not verdict.concrete_destination:
                 continue
-            # Gated on ``shape_proved_by``: with no proven shape this is one
-            # destination from one probe — an existential, which cannot prove a
-            # fixed destination and does not enter the grade.
+            # Without ``shape_proved_by`` this is a single-probe existential and doesn't enter the grade.
             citations.append(
                 {
                     "field": "effect_verdicts.concrete_destination",
@@ -269,7 +253,6 @@ def _build_signal(
             )
             notes.add("concrete_destination_existential_not_a_fixed_destination")
 
-    # --- severity ----------------------------------------------------------
     severity, severity_basis, severity_notes = _severity(
         facts,
         func,
@@ -279,8 +262,7 @@ def _build_signal(
         openness=openness,
         deployment_address=deployment_address,
         self_gated=_function_is_self_gated(facts, func),
-        # Asked only where the flow set is what the claim is ABOUT; every other
-        # claim carries the state where the question was never put.
+        # Asked only where the flow set is the claim's subject.
         msg_value=_msg_value_return(all_claims) if claim_id == "flow.out" else _MSG_VALUE_NOT_ASKED,
         self_service=_self_service_bound(all_claims) if claim_id == "flow.out" else _SELF_SERVICE_NOT_ASKED,
     )
@@ -288,7 +270,6 @@ def _build_signal(
     fields["severity_basis"] = severity_basis
     notes.update(severity_notes)
 
-    # --- authority / principals -------------------------------------------
     fields["authority_openness"] = openness
     if openness == OPENNESS_OPEN:
         fields["principal_state"] = PRINCIPAL_STATE_NONE_REQUIRED
@@ -304,13 +285,11 @@ def _build_signal(
         if severity.state == SEVERITY_STATE_PROVEN:
             notes.add("restricted_privileged_no_principal")
 
-    # --- reach gate --------------------------------------------------------
     licensed = facts.licensed_reach_entities
     fields["reach_gate_state"] = REACH_GATE_LICENSED if licensed else REACH_GATE_NOT_DETERMINED
     if licensed:
         citations.append({"field": "gated_contract_backlink", "value": licensed})
 
-    # --- value -------------------------------------------------------------
     reach = _reach_for_claim(
         facts,
         claim_id=claim_id,
@@ -323,12 +302,8 @@ def _build_signal(
     if reach.state == VALUE_STATE_PROVEN_REACH and licensed:
         extra_keys = [entry["entity_key"] for entry in licensed]
     if licensed:
-        # ``licensed`` is a fact about the GATE — this contract is the gating
-        # contract of those vaults — and it is stamped whatever this signal's own
-        # reach turned out to be. The licence is consumed as a reach key only
-        # where the signal ALSO proved reach; on every other signal the state
-        # names a witness that was cited and not spent, and reading it as a
-        # consumed reach key is the laundering this field was corrected to stop.
+        # ``licensed`` is a gate fact stamped regardless; it's consumed as reach only where the signal also proved
+        # reach.
         citations.append(
             {
                 "field": "reach_gate_state",
@@ -347,24 +322,17 @@ def _build_signal(
     fields["value_entity_keys"] = keys if reach.state == VALUE_STATE_PROVEN_REACH else ()
     fields["value_basis"] = reach.basis
     gates["reach_magnitude_usd"] = reach.magnitude.to_json()
-    # F6: the execution that PROVED the figure above, carried BESIDE it. The two
-    # travel together or the fold publishes a number with no account of the call
-    # it came from — which is what every consumer of this magnitude has had until
-    # now, because the caller exists only inside the transcript blob.
+    # F6: the execution that proved the figure travels with it.
     gates[PROVING_EXECUTION_KEY] = _proving_execution_gate(facts, func, entries).to_json()
     notes.update(reach.notes)
 
-    # --- claim-scoped gates -------------------------------------------------
     if claim_id == "flow.out":
         gates.update(_flow_gates(facts, entries, all_claims, notes))
     if claim_id == "pause.set":
         gates.update(_pause_gates(facts, func, entries))
 
-    # ONE rule, read once, so the signal's own citation and the execution record
-    # in ``gate_inputs`` name the same verdict by construction. Every
-    # verdict-bearing entry still travels as a citation below — the ambiguity is
-    # disclosed, not collapsed — and a claim naming more than one says so in its
-    # notes rather than letting stored order settle it in silence.
+    # Read once so the citation and execution record name the same verdict. Extra verdicts are still cited and disclosed
+    # in notes.
     cited = _cited_verdict_entry(entries)
     if cited is not None:
         fields["effect_verdict_id"] = int((cited.get("witness") or {})["effect_verdict_id"])
@@ -375,8 +343,7 @@ def _build_signal(
         verdict_id = witness.get("effect_verdict_id")
         if verdict_id is not None:
             verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == int(verdict_id)), None)
-            # inv.9: a published verdict carries its transcript pointer, or is
-            # published WITHOUT a traceability claim — never as "no transcript".
+            # inv.9: a verdict carries its transcript pointer or no traceability claim, never "no transcript".
             citations.append(
                 {
                     "field": "claims[].witness.effect_verdict_id",
@@ -447,10 +414,8 @@ def _reach_for_claim(
                     bound=reach.bound,
                     entity_keys=tuple(sorted(set(reach.entity_keys) | set(keys))),
                     basis=reach.basis + "+" + ",".join(bases),
-                    # The magnitude the flow witness proved, unchanged. A repoint
-                    # widens WHERE that one call's value may sit; it does not
-                    # multiply the call, and the per-call cap holds the sum of
-                    # the widened key set to the figure the witness proved.
+                    # A repoint widens where the one call's value may sit; the per-call cap still holds the sum to the
+                    # proven figure.
                     magnitude=reach.magnitude,
                     notes=reach.notes + ("reach_repointed_by_witness",),
                 )
@@ -458,9 +423,7 @@ def _reach_for_claim(
         return reach
 
     if claim_id == "pause.set":
-        # FIELDS §5: the value membership is GATED on the fork proof that the
-        # latch takes effect. Charging an entity whose latch is unproven is the
-        # balance-sheet error, so an unproven latch reaches nothing.
+        # FIELDS §5: value membership requires the fork proof that the latch takes effect.
         effective = any(
             _is_true(((e.get("witness") or {}).get("observed") or {}).get("pause_effective")) for e in entries
         )
@@ -483,10 +446,7 @@ def _reach_for_claim(
         repointed.extend(keys)
         bases.extend(entry_bases)
     if claim_id not in K.BASE_SEVERITY:
-        # A named callee is not a capability. Reading the repoint as one is what
-        # promoted six ``flow.in`` rows from capability_not_scored to
-        # proven_reach purely because a witness named an address — an upgrade of
-        # the reach STATE out of a fact about call structure.
+        # A named callee is not a capability; this previously promoted six ``flow.in`` rows to proven_reach.
         return _no_reach("capability_not_scored(not_determined)")
     keys = tuple(sorted({acting_key, *repointed}))
     basis = "acting_entity" + ("+" + ",".join(sorted(set(bases))) if bases else "")
@@ -500,13 +460,7 @@ def _reach_for_claim(
 
 
 def _cite_refused_repoints(refused: list[dict[str, Any]], citations: list[dict[str, Any]]) -> None:
-    """A declined repoint is published, never absent.
-
-    An admitted repoint travels as a citation; a refused one that travelled as
-    nothing would be indistinguishable from a witness that named no entity at
-    all, and the two are opposite facts about how much reach this row is not
-    claiming.
-    """
+    """A declined repoint is published as a citation so it's distinguishable from a witness that named nothing."""
     for entry in refused:
         citations.append(
             {"field": entry["basis"], "value": entry["entity_key"], "admitted": False, "why": entry["why"]}
@@ -528,18 +482,14 @@ def _flow_gates(
     identity, refusal = _token_identity(facts, entries)
     identity_json = identity.to_json()
     if refusal is not None:
-        # The arm travels twice on purpose: in the envelope, where the persisted
-        # signal carries it, and in the notes, which are the only path onto the
-        # document. The three-state itself is untouched — a named refusal is
-        # still a refusal.
+        # Carried in the envelope (persisted) and in notes (the only path onto the document).
         identity_json["not_determined_reason"] = refusal
         notes.add(refusal)
         if refusal == W2_PLANE_ABSENT:
             identity_json["asset_identity_plane_state"] = facts.asset_identity_state
             notes.add(f"asset_identity_plane_{facts.asset_identity_state}")
     return {
-        # ``token_identity`` proves exactly one NON-FUNGIBLE token moves, which
-        # forbids pricing the row off a fungible balance sheet.
+        # Exactly one non-fungible token moves, so a fungible balance sheet can't price it.
         "token_identity": (
             Tri.proven("proven", True) if "token_identity" in amount_kinds else Tri[bool].not_determined()
         ).to_json(),
@@ -564,17 +514,8 @@ def _flow_gates(
 def _token_identity(facts: _ContractFacts, entries: list[dict[str, Any]]) -> tuple[Tri[dict[str, Any]], str | None]:
     """The W2 pricing precondition: is the moved asset's identity decidable?
 
-    Satisfied only by a state-variable receiver whose address RESOLVED with a
-    non-``not_determined`` invariant. A caller-named receiver fails it — a
-    demotion, in the honest direction — and an absent plane is ``not_determined``
-    because the plane did not run, never "no asset".
-
-    Returns the answer AND, where it is ``not_determined``, the arm that refused
-    it: five distinct conjuncts reach the same third state, and a refusal that
-    does not name itself is one a reader cannot act on. The token is the arm the
-    walk got FURTHEST on across all entries — the entry that reached the
-    invariant check says so, rather than being reported as the coarser miss some
-    other entry took.
+    Only a state-variable receiver resolved with a determined invariant satisfies it; a caller-named receiver fails; an
+    absent plane is ``not_determined``. Also returns the refusing arm, the furthest any entry got.
     """
     if not facts.asset_identity:
         return Tri[dict[str, Any]].not_determined(), W2_PLANE_ABSENT
@@ -626,8 +567,7 @@ def _pause_gates(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]
         "freeze_recovery_principals": (
             Tri.proven("enumerated", recovery) if recovery else Tri[list].not_determined()
         ).to_json(),
-        # A count ratio over function names is a COVERAGE fraction, never a
-        # fraction of dollars; it is cited and never multiplied into value.
+        # A coverage fraction over function names, never multiplied into dollars.
         "freeze_coverage_fraction": (
             Tri.proven("observed_blast_radius", sorted(set(blast))) if blast else Tri[list].not_determined()
         ).to_json(),
@@ -647,17 +587,14 @@ def _severity(
     msg_value: _MsgValueReturn = _MSG_VALUE_NOT_ASKED,
     self_service: _SelfServiceBound = _SELF_SERVICE_NOT_ASKED,
 ) -> tuple[Tri[float], tuple[str, ...], set[str]]:
-    # The ``msg_value`` default is the state where the question was never put —
-    # it publishes nothing and moves nothing, so a caller that omits it loses the
-    # witness rather than gaining a verdict.
+    # Default ``msg_value`` is not-asked: omitting it loses the witness, never gains a verdict.
     notes: set[str] = set()
 
     if claim_id in K.UNMODELLED_CLAIMS:
         notes.add("claim_type_not_scored")
         return Tri[float].not_determined(), (), notes
     if claim_id in K.PRODUCT_CLAIMS:
-        # ``claim_id`` does not prove permissionlessness, so a not_determined
-        # openness is not product and is surfaced rather than dropped.
+        # ``claim_id`` doesn't prove permissionlessness, so this is surfaced, not treated as product.
         if openness == OPENNESS_NOT_DETERMINED:
             notes.add("product_claim_reachability_unproven")
         else:
@@ -668,50 +605,27 @@ def _severity(
         return Tri[float].not_determined(), (), notes
 
     if claim_id in K.DESTINATION_BEARING_SEVERITY:
-        # Published whatever the destination turns out to be: what the flow set
-        # proved about the amount is a fact about the amount, and a withheld
-        # destination is not a reason to un-say it.
+        # What was proven about the amount stands even if the destination is withheld.
         notes.update(msg_value.notes)
         if msg_value.arm == MSG_VALUE_ARM_SELF_RETURN and destination.tri.is_determined:
-            # AHEAD of the withhold, and conditional on it: the open-caller arm
-            # withholds the price *pending an amount witness*, and this IS that
-            # witness. Reading the withhold first would leave the row carrying
-            # both "no witness bounds this payout" and the witness that bounds
-            # it. The gate is the destination being PROVEN, not priced — an
-            # unread destination still reaches nothing here, so the arm cannot
-            # fire on a payee nobody read. The wave-4 self-service consumer arm
-            # sits beside this one the same way, for the same reason.
-            #
-            # What the zero rests on: the caller is paid its own attached value,
-            # to itself, on the function's ONE out-flow entry, so the payout
-            # moves no position the caller did not just fund. How many times one
-            # call makes that payment is a question this witness did not ask,
-            # and the residual note says so.
+            # Before the withhold, since this is the amount witness the open-caller arm waits on; gated on a proven (not
+            # priced) destination. The zero rests on the caller being paid its own attached value on one out-flow;
+            # repetition is disclosed.
             return (
                 Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_MSG_VALUE_SELF_RETURN),
                 (MSG_VALUE_ARM_SELF_RETURN,),
                 notes | {MSG_VALUE_REPETITION_RESIDUAL},
             )
-        # The PASS-THROUGH arm, ruled in by the owner (W3b): the caller's own
-        # msg.value reaching a fixed payee it cannot name. Beside the self-return
-        # arm and for the same reason — AHEAD of the withhold, gated on a PROVEN
-        # destination — the amount moved is bounded by what the caller just
-        # attached, so it is uncharged product surface and scores 0.0. Its basis
-        # names the arm, which is how ``fold._uncharged_product`` excludes it.
+        # W3b pass-through: the caller's own msg.value to a fixed payee, bounded by what was attached, so 0.0. Same
+        # placement and gate as above; the basis names the arm for ``fold._uncharged_product``.
         if msg_value.arm == MSG_VALUE_ARM_PASSTHROUGH and destination.tri.is_determined:
             return (
                 Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH),
                 (MSG_VALUE_ARM_PASSTHROUGH,),
                 notes,
             )
-        # The self-service consumer arm, sitting beside the msg_value arms for the
-        # same reason and with the same gate: an open-caller payout has its
-        # destination PROVEN and its severity withheld pending an amount witness,
-        # and W1 ∧ W2 IS that witness. Evaluated BEFORE the ``severity is None``
-        # withhold so a proven row is reachable (SPEC §4 compose-ordering); gated
-        # on the destination being determined, never priced, so it cannot fire on
-        # a payee nobody read; and a REFUSED conjunction falls through to the
-        # withhold below, never to a cheaper number.
+        # W1 and W2 is the amount witness the open-caller withhold waits on, so it's evaluated first (SPEC §4) and gated
+        # on a determined destination. A refused conjunction falls through to the withhold.
         if claim_id == "flow.out" and self_service.proven and destination.tri.is_determined:
             return (
                 Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_SELF_SERVICE_BOUNDED),
@@ -719,17 +633,13 @@ def _severity(
                 notes | set(self_service.notes),
             )
         if destination.severity is None:
-            # A withheld price has two different reasons and one token cannot
-            # carry both: an unread destination, or a proven destination whose
-            # price waits on a witness of its own.
+            # Separate tokens: unread destination vs. proven destination awaiting its own witness.
             notes.add(
                 "destination_not_determined_row_withheld"
                 if not destination.tri.is_determined
                 else "flow_severity_withheld_pending_amount_witness"
             )
-            # A self-service witness that was ASKED and refused names why on the
-            # row it leaves withheld, so the refusal is not lost to silence. A
-            # not-asked / proven-but-unread-destination witness adds nothing here.
+            # An asked-and-refused self-service witness names why.
             refusal = self_service.refusal_note
             if refusal is not None:
                 notes.add(refusal)
@@ -749,19 +659,14 @@ def _severity(
     elif claim_id == "authority.replace":
         owner = facts.registry_owner
         if owner and facts.solmate_mutators:
-            # Escalation gated on POSITIVE proof: an owner resolves AND the role
-            # mutators it would need are present on this contract.
+            # Escalates only with positive proof: a resolved owner and the needed role mutators.
             base = K.DEST_SEVERITY_UNCONSTRAINED
             basis.append("registry_owner_self_grant_escalation")
             notes.add("owner_may_grant_itself_any_role_on_this_registry")
         elif owner:
             notes.add("registry_escalation_mutators_unverified")
     elif claim_id == "timelock.set_delay":
-        # No credit either way. "Every resolved principal is the contract itself"
-        # is "no other caller RESOLVED", and the principal enumeration is a proven
-        # LOWER BOUND on the caller set — the one thing it can never witness is
-        # that the set is closed. The observation is published; the severity does
-        # not move on it.
+        # No credit either way: the principal enumeration is a lower bound and can't prove the caller set is closed.
         notes.add("delay_gate_self_gated_lower_bound" if self_gated else "delay_change_gate_not_self_gated")
 
     return Tri.proven(SEVERITY_STATE_PROVEN, base), tuple(basis), notes
@@ -770,12 +675,8 @@ def _severity(
 def _pause_severity(entries: list[dict[str, Any]], notes: set[str]) -> tuple[Tri[float], tuple[str, ...], set[str]]:
     """Built up from zero, from proven components only.
 
-    The proven existence of a freeze capability is the first and unconditional
-    component; a proven auto-expiry refines it downward. The sustainable-freeze
-    component is added by the fold, and only where key-set dependence is PROVEN.
-    Every undetermined recovery question — no recovery claim, an unresolved
-    recovery principal, an unread freezing key set — leaves this rung exactly
-    where it is, in either direction.
+    A proven freeze capability is the base; proven auto-expiry refines downward; sustainable freeze is added by the fold
+    where key-set dependence is proven. Undetermined recovery questions leave the rung unchanged.
     """
     severity = K.BASE_SEVERITY["pause.set"] + K.FREEZE_CAPABILITY_PROVEN
     basis = ["freeze_capability_proven"]
@@ -786,7 +687,6 @@ def _pause_severity(entries: list[dict[str, Any]], notes: set[str]) -> tuple[Tri
             severity = min(severity, K.FREEZE_AUTO_EXPIRY)
             basis.append("auto_expiry_witnessed")
         elif observed.get("auto_expiry") is False:
-            # The fork CONTRADICTED the static constant. Recorded; no witness
-            # sets the size of a raise, so none is taken.
+            # Contradiction recorded; no witness sizes a raise, so none is applied.
             notes.add("fork_contradicted_static_duration_bound")
     return Tri.proven(SEVERITY_STATE_PROVEN, severity), tuple(basis), notes

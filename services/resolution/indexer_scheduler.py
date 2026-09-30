@@ -75,8 +75,7 @@ def drain_enrollment(
                     commit=False,
                     caches=caches,
                 )
-            # Successful cursor inserts commit separately before the next RPC;
-            # crashes retry the source and cheaply skip those durable cursors.
+            # Cursor inserts commit before the next RPC; a crash retries the source and skips existing cursors.
             renew_claim(session, claim)
             finish(session, claim, success=not pending, remove=gone)
             enrolled += count
@@ -139,13 +138,11 @@ def drain_reconciliation(
                 with fenced_commits(session, partial(renew_claim, claim=claim)):
                     a = reconcile_deferred_resolutions(session, chain_id=chain_id, limit=job_limit)
                     b = reconcile_role_set_drift(session, chain_id=chain_id, limit=job_limit)
-                # Also fence any writes left pending by a reconciler that did
-                # not commit (including the final acknowledgement).
+                # Also fences writes a reconciler left uncommitted.
                 renew_claim(session, claim)
                 deferred += a
                 drift += b
-                # Existing reconcilers commit their progress; a cap must retain
-                # the remainder even if nothing else changes on the chain.
+                # Keep the remainder when a cap was hit.
                 finish(session, claim, success=a < job_limit and b < job_limit)
                 pending += a >= job_limit or b >= job_limit
         except Exception as exc:

@@ -1,5 +1,3 @@
-"""Header + content-pattern matching that finds scope sections in PDF text."""
-
 from __future__ import annotations
 
 import re
@@ -8,9 +6,7 @@ from typing import Final
 
 from ._utils import _normalize_ligatures, _page_of_offset, _page_offsets
 
-# Ordered so longer phrases win when multiple match on the same line
-# (e.g. "Files in scope" beats "Scope"). Covers Spearbit / Cantina /
-# Certora / Halborn / Nethermind / Trail-of-Bits formats.
+# Longer phrases first so "Files in scope" beats "Scope".
 _SCOPE_HEADERS: Final[tuple[str, ...]] = (
     "smart contracts in scope",
     "contracts in scope",
@@ -28,10 +24,7 @@ _SCOPE_HEADERS: Final[tuple[str, ...]] = (
     "scope",
 )
 
-# Body-prose scope-introduction phrases. Second pass — catches
-# multi-sub-audit reports (Certora) that list scope inline without a
-# structural heading. Each pattern is a phrase that *introduces* a
-# scope listing, not a passing mention of "scope".
+# Second pass for reports that introduce scope inline without a heading (Certora).
 _SCOPE_CONTENT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(
         r"the\s+following\s+(?:contract\s+list|file\s+list|list\s+of\s+\w+)\s+"
@@ -54,15 +47,12 @@ _SCOPE_CONTENT_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     ),
 )
 
-# Optional numbered-section prefix real audits use ("5. Scope", "5.1 Files
-# in scope"). Anchored to line start so body prose doesn't match.
+# Line-anchored so body prose doesn't match.
 _NUMBERED_PREFIX = r"(?:\d+(?:\.\d+)*\.?[ \t]+)?"
 
 
 @dataclass(frozen=True)
 class ScopeSection:
-    """One scope-section slice located by a header or content-pattern match."""
-
     start_page: int
     end_page: int
     header: str
@@ -70,32 +60,25 @@ class ScopeSection:
 
 
 def locate_scope_section(text: str) -> list[ScopeSection]:
-    """Find the scope section(s) in an audit's PDF text.
+    """Find scope sections: line-start headers (~3 pages of context), then content patterns; overlaps merge.
 
-    Matches any of ``_SCOPE_HEADERS`` case-insensitively at line start, then
-    captures ~3 pages of context. A second pass runs the body-prose content
-    patterns. Overlapping slices merge. Returns [] when nothing is found,
-    which the worker translates into ``status='skipped'``.
+    [] becomes ``status='skipped'``.
     """
     text = _normalize_ligatures(text)
     pages = _page_offsets(text)
     lower = text.lower()
 
-    # (start_offset, end_offset, start_page, end_page, header)
     candidates: list[tuple[int, int, int, int, str]] = []
     seen_offsets: set[int] = set()
 
     for header in _SCOPE_HEADERS:
-        # Tolerate pypdf double-spacing within the header phrase; keep
-        # whitespace classes non-newline so the match can't slurp a
-        # preceding page-marker line and land on the wrong page.
+        # Tolerate pypdf double-spacing, but never across newlines or the match can land on the wrong page.
         header_words = r"[ \t]+".join(re.escape(w) for w in header.split())
         pattern = re.compile(
             rf"^[ \t]*{_NUMBERED_PREFIX}{header_words}\b[ \t:]*$",
             re.MULTILINE,
         )
-        # Capture ALL matches per header — a TOC entry and the actual
-        # section often both match; we want the LLM to see the real one.
+        # A TOC entry and the real section both match.
         for m in pattern.finditer(lower):
             start = m.start()
             if start in seen_offsets:
@@ -116,7 +99,6 @@ def locate_scope_section(text: str) -> list[ScopeSection]:
                 continue
             seen_offsets.add(start)
             start_page = _page_of_offset(pages, start)
-            # Content matches land right before the listing; 2 pages suffice.
             end_page = min(start_page + 1, pages[-2][0])
             end_offset = next(
                 (off for (p, off) in pages if p > end_page),
@@ -124,9 +106,7 @@ def locate_scope_section(text: str) -> list[ScopeSection]:
             )
             candidates.append((start, end_offset, start_page, end_page, f"content:{m.group(0)[:40].strip()}"))
 
-    # Merge by offset range. text_slice spans the FULL merged range —
-    # an earlier version kept only the first candidate's slice and
-    # silently dropped sub-scope listings from later matches.
+    # The slice spans the full merged range; keeping only the first slice once dropped later sub-scopes.
     candidates.sort(key=lambda c: c[0])
     merged: list[tuple[int, int, int, int, str]] = []
     for c in candidates:

@@ -1,20 +1,9 @@
-"""Multi-chain resolution for discovered contracts.
+"""Multi-chain resolution for discovered contracts with ``chains=["unknown"]``.
 
-After the inventory pipeline builds contracts, some entries have
-``chains=["unknown"]``.  This module probes ``eth_getCode`` via JSON-RPC
-batch requests through the eRPC proxy (one per-chain route) to determine
-where each contract is actually deployed.
+Probes ``eth_getCode`` via JSON-RPC batches through eRPC (one route per chain), so all chains run in parallel.
 
-Routes through eRPC (``ERPC_BASE_URL``) like every other read, so all chains
-can be probed **in parallel** (~1-2 seconds for hundreds of addresses across
-10+ chains) with no direct-provider dependency.
-
-Strategy
---------
-1. **Phase 1** -- probe every unknown address on every known chain in
-   parallel using JSON-RPC batch requests.
-2. **Phase 2** -- for addresses that matched nothing in phase 1, probe
-   the remaining supported chains (also in parallel).
+1. Probe unknown addresses on the known chains.
+2. Probe the remaining supported chains for addresses with no match.
 """
 
 from __future__ import annotations
@@ -42,10 +31,8 @@ from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code
 
 logger = logging.getLogger(__name__)
 
-# Max addresses per JSON-RPC batch request.
 _BATCH_RPC_SIZE = 100
 
-# Fallback: rate-limited individual calls if batch is rejected.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 _RPC_RATE_LIMIT = int(os.getenv("RPC_RATE_LIMIT", "15"))
 _FALLBACK_WORKERS = 4
@@ -53,20 +40,15 @@ _FALLBACK_WORKERS = 4
 
 @dataclass
 class _ErrorFills:
-    """Error-fills for one chain probe: a ``"0x"`` written because a read failed
-    or went unanswered, not because the address has no code there.
+    """``"0x"`` results written because a read failed, not because there's no code.
 
-    Only a count and the last exception are kept — a live exception per address
-    would pin its traceback frames (and the response bodies in them) for the
-    whole pass.
+    Only a count and the last exception are kept, to avoid pinning tracebacks.
     """
 
     count: int = 0
     last_exc: BaseException | None = None
     exc_types: set[str] = field(default_factory=set)
-    # The individual-read fallback fans out over ``_FALLBACK_WORKERS`` threads
-    # that all share this object; ``count += 1`` is a read-modify-write, so an
-    # unlocked census undercounts exactly when the outage is widest.
+    # The fallback fans out across threads; ``count += 1`` needs the lock or it undercounts during outages.
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record(self, exc: BaseException | None) -> None:
@@ -77,10 +59,7 @@ class _ErrorFills:
                 self.exc_types.add(type(exc).__name__)
 
 
-# Sink for the probe currently in flight. A ContextVar rather than a parameter
-# so the read helpers keep their existing signatures (the fallback fan-out
-# copies the context, and the object is shared through the copy). ``None``
-# outside a probe makes recording a no-op.
+# The in-flight probe's sink, as a ContextVar so read helpers keep their signatures; ``None`` outside a probe.
 _probe_error_fills: contextvars.ContextVar[_ErrorFills | None] = contextvars.ContextVar(
     "psat_chain_probe_error_fills", default=None
 )
@@ -93,11 +72,8 @@ def _record_error_fill(exc: BaseException | None) -> None:
 
 
 def _erpc_url_for_chain(chain_name: str) -> str | None:
-    """eRPC route for a chain name, or None when the chain isn't mapped, is off
-    the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist, or ``ERPC_BASE_URL`` is unset.
-
-    eRPC only serves allowlisted chains; probing any other returns 404, which
-    the batch path treats as a rejected batch and retries per address.
+    """eRPC route for a chain name, or None when unmapped, not in ``PSAT_SUPPORTED_CHAIN_IDS``, or ``ERPC_BASE_URL``
+    is unset (other chains 404).
     """
     chain_id = CHAIN_IDS.get(chain_name)
     if not chain_id or not chain_enabled(chain_id):
@@ -106,7 +82,6 @@ def _erpc_url_for_chain(chain_name: str) -> str | None:
 
 
 def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple[str, str]:
-    """Fetch code for a single address with rate limiting -- returns (addr, bytecode_hex)."""
     from .static_dependencies import get_code
 
     limiter.wait()
@@ -118,12 +93,9 @@ def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple
 
 
 def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
-    """Batch-fetch eth_getCode for many addresses in a single HTTP request.
+    """Batch ``eth_getCode`` for many addresses, returning ``{address: bytecode_hex}``.
 
-    Returns ``{address: bytecode_hex}`` for each address.  Splits into
-    sub-batches of ``_BATCH_RPC_SIZE`` to stay within RPC limits.
-    Falls back to rate-limited concurrent individual calls if the RPC
-    rejects batching.
+    Sub-batches of ``_BATCH_RPC_SIZE``; falls back to rate-limited individual calls if batching is rejected.
     """
     if not addresses:
         return {}
@@ -153,14 +125,11 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
             body = None
 
-        # A successful batch returns a JSON list.  If we got a dict instead
-        # (e.g. RPC error like "too many calls in batch") or an HTTP error,
-        # fall back to rate-limited concurrent individual calls.
+        # Non-list responses (batch errors, HTTP errors) fall back to individual calls.
         if not isinstance(body, list):
             limiter = RateLimiter(_RPC_RATE_LIMIT)
             with ThreadPoolExecutor(max_workers=_FALLBACK_WORKERS) as executor:
-                # Per-submission context copy so trace_id/job_id contextvars
-                # bound by the calling worker survive into the fallback fan-out.
+                # Copy context per submission so trace ids survive.
                 futures = []
                 for addr in batch:
                     ctx = contextvars.copy_context()
@@ -173,14 +142,12 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
         for item in body:
             idx = item.get("id")
             if idx is not None and 0 <= idx < len(batch):
-                # A per-item JSON-RPC error still lands as "0x" below, and the
-                # address IS in ``results`` so the fill loop never sees it.
+                # Per-item errors also become ``"0x"``; count them here since the fill loop won't see them.
                 if item.get("error") is not None or "result" not in item:
                     _record_error_fill(None)
                 code = item.get("result") or "0x"
                 results[batch[idx]] = code if isinstance(code, str) and code.startswith("0x") else "0x"
-        # Fill in any missing addresses (e.g. from errors in individual items).
-        # No exception to attach — the RPC answered, just not about this address.
+        # Fill missing addresses; the RPC answered, just not about this one.
         for addr in batch:
             if addr not in results:
                 _record_error_fill(None)
@@ -194,7 +161,6 @@ def _probe_chain_batch(
     chain_name: str,
     debug: bool = False,
 ) -> set[str]:
-    """Probe all *addresses* on a single chain via the eRPC JSON-RPC batch route."""
     rpc_url = _erpc_url_for_chain(chain_name)
     if not rpc_url:
         _debug_log(debug, f"  {chain_name}: no eRPC route configured, skipping")
@@ -206,12 +172,8 @@ def _probe_chain_batch(
         code_map = _batch_get_code(rpc_url, addresses)
         hits = {addr for addr, code in code_map.items() if has_deployed_code(code)}
     except Exception as exc:
-        # The empty set is indistinguishable from "no address has code here", so
-        # the log line is the only place the difference survives: without it a
-        # chain-wide probe outage silently shrinks multichain membership.
-        # ``probe_chain``, not ``chain``: the probed chain differs from the job's
-        # chain by construction, and the formatter drops an ``extra`` that
-        # collides with a bound context field.
+        # An empty result looks like "no code anywhere", so log it. ``probe_chain`` because ``chain`` would collide with
+        # a bound context field.
         record_degraded(
             phase="chain_probe",
             exc=exc,
@@ -229,10 +191,8 @@ def _probe_chain_batch(
         _probe_error_fills.reset(token)
 
     if error_fills.count:
-        # ``_batch_get_code`` swallows transport errors internally and answers
-        # "0x", so a chain-wide outage returns *successfully* with every address
-        # reading as no-code. This count is the only signal that the empty
-        # membership was a read failure rather than an answer.
+        # ``_batch_get_code`` turns transport errors into ``"0x"``, so this count is the only sign a chain-wide empty
+        # result was a failure.
         last_exc = error_fills.last_exc
         if last_exc is not None:
             record_degraded(
@@ -263,10 +223,7 @@ def _probe_chains(
     matched: dict[str, list[str]],
     debug: bool = False,
 ) -> None:
-    """Probe multiple chains in parallel using eRPC batch routes."""
     with ThreadPoolExecutor(max_workers=min(len(chains), 10)) as executor:
-        # Per-chain context copy preserves the caller's trace context inside
-        # each per-chain batch RPC call.
         future_to_chain = {}
         for chain_name in chains:
             ctx = contextvars.copy_context()
@@ -293,17 +250,12 @@ def _probe_chains(
 
 
 def _primary_chain(contract: dict[str, Any]) -> str:
-    """Return the first chain from a contract's chains list, or 'unknown'."""
     chains = contract.get("chains", [])
     return (canonical_chain(chains[0]) if chains else None) or "unknown"
 
 
 def _within_run_evidence_chains(contracts: list[dict[str, Any]]) -> list[str]:
-    """Registry chains any evidence-bearing entry in this inventory declares.
-
-    These are chain-scoped crawler / deployer-expansion results (invariant 3
-    evidence): a chain another contract in the same run is already placed on.
-    """
+    """Registry chains that evidence-bearing entries in this inventory declare (invariant 3 evidence)."""
     chains: list[str] = []
     seen: set[str] = set()
     for c in contracts:
@@ -319,24 +271,14 @@ def resolve_unknown_chains(
     declared_chains: list[str] | None = None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Resolve ``chains=["unknown"]`` entries by probing ``eth_getCode`` across chains.
+    """Resolve ``chains=["unknown"]`` entries by probing ``eth_getCode``; mutates and returns the list.
 
-    Mutates the contract dicts in-place and returns the same list.
+    ``declared_chains`` enforces invariant 3 (probing may confirm membership, never originate it):
 
-    ``declared_chains`` gates the two behaviours (invariant 3 — "probing may
-    CONFIRM membership, never ORIGINATE it"):
-
-    * ``None`` (default, standalone callers): the legacy all-chain probe —
-      within-run evidence first, then every remaining registry chain — writing
-      every hit onto ``chains``. Kept for backward compatibility.
-    * a list (the discovery pipeline always passes one, possibly empty): the
-      **narrowed** probe. The declared set is the caller's declared chains
-      (``Protocol.chains`` + the requested chain) unioned with within-run
-      evidence. A hit on a declared chain is corroborated → written to
-      ``chains``. When there is no declared evidence at all, no hit can
-      originate membership: chains stay ``["unknown"]`` and hits are recorded
-      as ``chain_candidates`` — surfaced in the discovery artifact, never
-      written to ``chains`` and so never a ``contracts`` row or job.
+    * ``None`` (standalone callers): the legacy all-chain probe, writing every hit to ``chains``.
+    * a list (the pipeline): probe only declared chains (``Protocol.chains``, the requested chain, and within-run
+    evidence); hits there go to ``chains``. With no declared evidence, chains stay ``["unknown"]`` and hits are only
+    recorded as ``chain_candidates``.
     """
     if not contracts:
         return contracts
@@ -348,12 +290,10 @@ def resolve_unknown_chains(
 
     within_run = _within_run_evidence_chains(contracts)
 
-    # address -> list of chains where it has code
     matched: dict[str, list[str]] = {c["address"]: [] for c in unknowns}
     all_addrs = list(matched.keys())
 
     if declared_chains is None:
-        # Legacy all-chain probe (backward compatibility for standalone callers).
         known_chains = within_run or list(CHAIN_IDS.keys())
         seen = set(known_chains)
         remaining_chains = [ch for ch in CHAIN_IDS if ch not in seen]
@@ -382,8 +322,6 @@ def resolve_unknown_chains(
         _debug_log(debug, f"Chain resolution: resolved {resolved_count}/{len(unknowns)} contract(s)")
         return contracts
 
-    # Narrowed probe (invariant 3). Declared set = caller-declared chains ∪
-    # within-run evidence, restricted to the registry.
     declared_set: list[str] = list(within_run)
     declared_seen: set[str] = set(within_run)
     for ch in canonical_chain_list(declared_chains) or []:
@@ -408,7 +346,7 @@ def resolve_unknown_chains(
         _debug_log(debug, f"Chain resolution (narrowed): resolved {resolved_count}/{len(unknowns)} contract(s)")
         return contracts
 
-    # No declared evidence: presence alone can never originate membership.
+    # No declared evidence: presence alone never originates membership.
     _debug_log(
         debug,
         f"Chain resolution (candidates): {len(unknowns)} unknown contract(s) with no declared "
@@ -432,10 +370,8 @@ def validate_claimed_chains(
     source_names: tuple[str, ...] = ("exa_deep_research",),
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Verify high-risk AI-supplied chain claims with ``eth_getCode``.
-
-    If a claimed chain has no code, probe the remaining supported chains and
-    either correct to the detected chain(s) or mark it unknown.
+    """Verify high-risk AI-claimed chains with ``eth_getCode``; if absent, probe other chains and correct or mark
+    unknown.
     """
     targets: list[tuple[dict[str, Any], str, list[str]]] = []
     for contract in contracts:

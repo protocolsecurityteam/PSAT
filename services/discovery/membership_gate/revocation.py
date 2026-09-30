@@ -1,5 +1,4 @@
-"""Invariant-8 revocation: the deployer demotion cascade and revocation
-quiescence."""
+"""Invariant-8 revocation: the deployer demotion cascade and revocation quiescence."""
 
 from __future__ import annotations
 
@@ -43,7 +42,6 @@ logger = logging.getLogger(__name__)
 class DemotionResult:
     revoked_witness_ids: tuple[int, ...] = ()
     demoted_contract_ids: tuple[int, ...] = ()
-    #: Contracts whose corroboration probes must re-run after the demotion.
     reprobe_contract_ids: tuple[int, ...] = ()
 
 
@@ -55,9 +53,9 @@ def _demote_if_no_verified_witness(
     reason: str,
     evidence: dict[str, Any] | None = None,
 ) -> tuple[list[int], bool]:
-    """Invariant 8: demote exactly the members left with no admitting witness
-    whose via-fact still verifies; a remaining witness that fails verification
-    is revoked in the same pass. Returns (extra revoked ids, demoted?)."""
+    """Invariant 8: demote members left with no admitting witness whose via-fact verifies; failing witnesses are
+    revoked in the same pass. Returns (extra revoked ids, demoted?).
+    """
     contract = session.get(Contract, contract_id)
     if contract is None or contract.protocol_id != protocol_id:
         return [], False
@@ -86,8 +84,7 @@ def _demote_if_no_verified_witness(
 def _revoke_deployer_registry_row(
     session: Session, deployer_row: ProtocolDeployer, reason: str
 ) -> tuple[list[int], list[int]]:
-    """Single-level deployer revocation: revoke the registry row, revoke its
-    dependent W4 witnesses, demote members left with no verifying witness."""
+    """Revoke one registry row and its W4 witnesses, demoting members left without a verifying witness."""
     if deployer_row.revoked_at is None:
         deployer_row.revoked_at = _utcnow()
         deployer_row.revocation_reason = reason
@@ -134,10 +131,10 @@ def _revoke_deployer_registry_row(
 
 
 def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> DemotionResult:
-    """Deployer revocation (invariant 8), cascaded to quiescence: dependent
-    W4 witnesses are revoked, members left without a verifying witness are
-    demoted, and each demotion recursively invalidates the W2/W3 witnesses
-    resting on it. All demoted contracts are re-probe candidates."""
+    """Deployer revocation cascaded to quiescence (invariant 8): W4 witnesses revoked, unsupported members demoted,
+    and each demotion recursively invalidates W2/W3 witnesses resting on it. Demoted contracts are re-probe
+    candidates.
+    """
     revoked, demoted = _revoke_deployer_registry_row(session, deployer_row, reason)
     result = DemotionResult(
         revoked_witness_ids=tuple(revoked),
@@ -148,18 +145,17 @@ def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> 
 
 
 def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> DemotionResult:
-    """§3.2 witness invalidation: each demoted member is itself a via-fact —
-    recurse the invalidation to quiescence. Terminates because revocations
-    only shrink the active witness set."""
+    """§3.2 invalidation: each demoted member is a via-fact, so recurse.
+
+    Terminates because revocations only shrink the active set.
+    """
     seed: set[str] = set()
     for contract_id in result.demoted_contract_ids:
         contract = session.get(Contract, contract_id)
         addr = (contract.address or "").lower() if contract is not None else ""
         if addr:
             seed.add(addr)
-    # A member that kept membership but lost the witness that made it ANCHOR
-    # is a changed via-fact too, so every revocation seeds — not only the
-    # demotions (same reason as ``_revocation_quiescence``'s frontier).
+    # A member that kept membership but lost its anchoring witness is also a changed via-fact.
     if result.revoked_witness_ids:
         seed |= {
             address.lower()
@@ -186,13 +182,11 @@ def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> Dem
 
 
 def _controllers_of(session: Session, contract_ids: Sequence[int] | set[int]) -> set[str]:
-    """The addresses observed controlling these rows — caller-gating resolved
-    controller values plus proxy-admin pointers.
+    """Addresses observed controlling these rows (caller-gating controller values and proxy-admin pointers).
 
-    A controller's exclusivity is a claim about the rows it controls, so when
-    one of those rows changes hands the claim must be re-verified. The
-    ``d2_exclusive`` arm records no anchor chain and keys its dependent
-    witnesses on the controller, so this is the only edge that reaches them."""
+    ``d2_exclusive`` witnesses are keyed on the controller, so this is the only edge that reaches them when a controlled
+    row changes hands.
+    """
     ids = sorted(set(contract_ids))
     if not ids:
         return set()
@@ -219,19 +213,12 @@ def _controllers_of(session: Session, contract_ids: Sequence[int] | set[int]) ->
 
 
 def _vias_citing_evidence_address(session: Session, addresses: Sequence[str] | set[str]) -> set[str]:
-    """The vias of standing W3 witnesses whose recorded PROOF names one of
-    *addresses* — an anchor-chain link or terminal anchor, or the member
-    hosting a perimeter-principal fact.
+    """Vias of standing W3 witnesses whose recorded proof names one of *addresses* (anchor-chain link, terminal
+    anchor, or perimeter-principal host). Such witnesses' via is the controller, so otherwise they'd never reach
+    the revocation frontier (invariant 8).
 
-    Invariant 8's trigger for both proof arms: such a witness's via is the
-    CONTROLLER, not the address whose facts changed, so a broken proof would
-    otherwise never reach the revocation frontier.
-
-    Every arm is written as containment against the ``evidence`` COLUMN, not
-    against a ``->`` path expression: only the column form is served by the
-    GIN index (``ix_contract_membership_witnesses_evidence``). JSONB
-    containment recurses through objects and matches an array when some element
-    contains the probe, so the nested shapes below are exact."""
+    Written as containment against the ``evidence`` column (not a ``->`` path) so the GIN index applies.
+    """
     addrs = sorted({a.lower() for a in addresses if a})
     if not addrs:
         return set()
@@ -263,11 +250,10 @@ def _vias_citing_evidence_address(session: Session, addresses: Sequence[str] | s
 
 
 def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]) -> tuple[list[int], list[int]]:
-    """Stratum (i): revoke every active W2/W3/W4 witness whose via-fact no
-    longer holds, demote members left with no verifying admitting witness,
-    and follow each demotion's own dependents until nothing changes.
-    Deterministic (sorted vias, then contract id); terminates because each
-    frontier addition consumes a fresh demotion and revocations only shrink."""
+    """Stratum (i): revoke witnesses whose via-fact no longer holds, demote unsupported members, follow each
+    demotion's dependents to quiescence. Deterministic; terminates because each frontier addition consumes a
+    demotion.
+    """
     revoked: list[int] = []
     demoted: list[int] = []
     frontier = {a.lower() for a in seed_vias if a}
@@ -313,11 +299,8 @@ def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]
             revoked.extend(extra)
             if was_demoted:
                 demoted.append(contract_id)
-            # The frontier follows every revocation, not only the demotions.
-            # A member that KEEPS membership can still lose the witness that
-            # made it anchor (``_member_anchors_ladder``), and the F2 facts
-            # resting on that anchoring — factory lineage, principal-keyed W3 —
-            # are keyed on this address alone (invariant 8).
+            # Follow every revocation, not only demotions: a member can keep membership but lose its anchoring, and the
+            # F2 facts keyed on it must be re-checked (invariant 8).
             contract = session.get(Contract, contract_id)
             addr = (contract.address or "").lower() if contract is not None else ""
             if addr:

@@ -1,5 +1,3 @@
-"""Policy package."""
-
 from .effective_permissions import build_effective_permissions
 from .principal_enrichment import build_principal_labels
 

@@ -1,22 +1,8 @@
-"""``rate_limit.consume`` — a throughput limiter the function passes through.
+"""``rate_limit.consume``: a throughput limiter the function passes through.
 
-**A FACT AT ZERO SEVERITY WEIGHT, and deliberately not part of the ``amount_kind``
-lattice.** Every member of that lattice describes the MAGNITUDE that can leave
-(``whole_balance``, ``capped_by_balance``, ``fixed_constant``), and a refilling
-bucket is not a magnitude: it bounds throughput per window, not total loss. Over
-N windows the extractable total under a refilling limiter is unbounded, so
-crediting it as a ceiling would invent a discount out of nothing: a loss bound
-must stay a conservative upper bound, never an imputed one. Publish the fact and
-let it contribute nothing to severity — which is what ``consumer_family="fact"``
-means structurally, not merely by convention.
-
-**But the argument inverts on configuration, and that is why the configuration is
-part of the fact rather than a footnote.** ``setRefillRate(id, 0)`` is one
-governance call away, and a bucket created with a zero refill rate is a ONE-SHOT
-total cap, not a throughput cap; the limiter source further documents
-``capacity == 0`` on an existing bucket as *reverting*, which makes a zero
-capacity a **pause in disguise**. So the same call site means three different
-things depending on two numbers:
+Published at zero severity weight and kept out of the ``amount_kind`` lattice: a refilling
+bucket bounds throughput per window, not total loss, so crediting it as a ceiling would invent
+a discount. But the meaning depends on two chain-state numbers:
 
 ===================  ==========================  ===========================
 observed             what the limiter is         severity meaning
@@ -26,16 +12,8 @@ observed             what the limiter is         severity meaning
 ``capacity == 0``    a freeze                    a pause in disguise
 ===================  ==========================  ===========================
 
-Both numbers are CHAIN state — no static pass can read them — so the witness
-carries them as explicit three-state fields that read ``not_determined`` here,
-alongside the selectors a later resolution stage would read them WITH. A future
-scorer can then tell the three cases apart; it can never mistake "we did not read
-it" for "zero", which under the table above is the difference between a rate
-limit and a freeze.
-
-Detection is by the limiter's PUBLISHED selectors on the call sink, never by an
-identifier: ``consume(bytes32,uint64)`` / ``consumeToken(bytes32,uint64)``. A
-contract that merely names a variable ``rateLimiter`` earns nothing.
+No static pass can read them, so the witness carries them as ``not_determined`` along with the
+getter that would. Detected by the limiter's published selectors, never an identifier.
 """
 
 from __future__ import annotations
@@ -47,15 +25,12 @@ from ..decorator import claim_matcher
 from ..types import ClaimEvidence
 from . import _facts
 
-# The bucket-limiter ABI, by published signature. ``consume`` reverts on
-# exhaustion; ``consumeToken`` is the token-side entry with the same shape.
+# ``consume`` reverts on exhaustion; ``consumeToken`` has the same shape.
 CONSUME = abi_selector("consume(bytes32,uint64)")
 CONSUME_TOKEN = abi_selector("consumeToken(bytes32,uint64)")
 CONSUME_SELECTORS = {CONSUME: "consume", CONSUME_TOKEN: "consume_token"}
 
-# How a resolution stage reads the two discriminators off-chain. Published so the
-# witness names its own follow-up read rather than leaving a consumer to guess
-# which getter holds the numbers.
+# The getter a resolution stage would read the discriminators with.
 GET_LIMIT = abi_selector("getLimit(bytes32)")
 SET_CAPACITY = abi_selector("setCapacity(bytes32,uint64)")
 SET_REFILL_RATE = abi_selector("setRefillRate(bytes32,uint64)")
@@ -64,11 +39,9 @@ _UNREAD = {"state": "not_determined", "source": "chain_state"}
 
 
 def _mandatory_callee_names(ctx: ClaimContext, function: str) -> set[str]:
-    """Bare callee names named by a MANDATORY revert-gate leaf of ``function``.
-
-    A limiter call the path can route around bounds nothing, so "is this consume
-    on every path to the sink" is a real question — and one whose negative answer
-    is not provable from a tree that simply does not mention the callee."""
+    """Callee names named by a mandatory revert-gate leaf; a tree that doesn't mention the callee doesn't prove it
+    skippable.
+    """
     tree = ctx.predicate_tree(function)
     if tree is None:
         return set()
@@ -101,29 +74,21 @@ def rate_limit_consume(ctx: ClaimContext, function: str) -> ClaimEvidence | None
         "sink_ids": sorted(str(sink["id"]) for sink in sinks if sink.get("id")),
         "callee_selectors": sorted({str(sink["selector"]) for sink in sinks}),
         "consume_kinds": kinds,
-        # Three states, not a bool: a tree that does not name the callee is not
-        # proof that the call is skippable.
         "mandatory": (
             {"state": "proven"}
             if any(str(sink.get("target") or "").rsplit(".", 1)[-1] in mandatory_names for sink in sinks)
             else {"state": "not_determined"}
         ),
-        # THE DISCRIMINATORS. Present-and-unread, never absent: a consumer that
-        # read an absent field as 0 would read a throughput cap as a freeze.
+        # Present-and-unread, never absent: an absent field read as 0 would turn a throughput cap into a freeze.
         "capacity": dict(_UNREAD),
         "refill_rate": dict(_UNREAD),
-        # Derivable from the two above, so it inherits their state. It is NOT
-        # flatly ``false``: a zero-refill bucket really does bound total
-        # extraction, and asserting otherwise would be the mirror of the
-        # over-claim this whole family exists to remove.
+        # Inherits their state; a zero-refill bucket really does bound total extraction.
         "bounds_total_extraction": dict(_UNREAD),
         "config_reader": {
             "get_limit_selector": GET_LIMIT,
             "set_capacity_selector": SET_CAPACITY,
             "set_refill_rate_selector": SET_REFILL_RATE,
         },
-        # Stated in the payload so a consumer cannot reach the wrong conclusion
-        # from the numbers once they are read.
         "severity_weight": 0,
         "interpretation": (
             "refill_rate > 0: throughput cap only (does NOT bound total extraction). "

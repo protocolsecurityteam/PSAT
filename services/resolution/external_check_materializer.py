@@ -1,9 +1,5 @@
-"""Materialize enumerable external authorization checks.
-
-This is intentionally generic: given a resolved external bool call with
-one symbolic caller argument and concrete non-caller arguments, enumerate
-candidate addresses from the checker contract's observed events and probe
-the checker for each candidate.
+"""Materialize enumerable external authorization checks: for an external bool call with one symbolic caller argument,
+enumerate candidates from the checker's events and probe each.
 """
 
 from __future__ import annotations
@@ -34,10 +30,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES", "512"))
 
-# Per-checker candidate cache keyed on (chain_id, checker_address). _MAX_CANDIDATES
-# bounds each entry's list length; _CANDIDATE_CACHE_MAX bounds the NUMBER of entries so
-# a long-lived worker probing many distinct checkers stays memory-bounded (oldest 25%
-# evicted by insertion order at the cap).
+# Keyed (chain_id, checker_address); _MAX_CANDIDATES bounds each list, _CANDIDATE_CACHE_MAX the entry count (oldest 25%
+# evicted).
 _CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
 _CANDIDATE_CACHE_LOCK = threading.Lock()
 _CANDIDATE_CACHE_MAX = 1024
@@ -45,8 +39,7 @@ _CANDIDATE_PRESSURE_NAME = "external_check_candidates"
 
 
 def _evict_candidates_if_needed() -> None:
-    """Drop the oldest 25% of _CANDIDATE_CACHE entries by insertion order when the bound
-    is reached (caller holds _CANDIDATE_CACHE_LOCK)."""
+    """Drop the oldest 25% at the bound (caller holds _CANDIDATE_CACHE_LOCK)."""
     if len(_CANDIDATE_CACHE) < _CANDIDATE_CACHE_MAX:
         return
     for k in list(_CANDIDATE_CACHE.keys())[: _CANDIDATE_CACHE_MAX // 4]:
@@ -54,7 +47,6 @@ def _evict_candidates_if_needed() -> None:
 
 
 def _log_candidate_pressure() -> None:
-    """Log when _CANDIDATE_CACHE crosses 50/75/95% of the bound (caller holds the lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message(_CANDIDATE_PRESSURE_NAME, len(_CANDIDATE_CACHE), _CANDIDATE_CACHE_MAX)
@@ -63,7 +55,6 @@ def _log_candidate_pressure() -> None:
 
 
 def clear_candidate_cache() -> None:
-    """Clear the per-checker candidate cache. For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
 
     with _CANDIDATE_CACHE_LOCK:
@@ -71,12 +62,9 @@ def clear_candidate_cache() -> None:
     reset_cache_pressure_state(_CANDIDATE_PRESSURE_NAME)
 
 
-# Collapse the per-candidate checker probes (canCall/isAllowed/…) into one billable eth_call via Multicall3.
-# The checker takes the candidate as an explicit argument — the enumerable caller dimension — so it is
-# caller-independent and safe to route through Multicall3 (which becomes msg.sender). Falls back to the
-# JSON-RPC array batch (identical decode) on any failure. Default ON in every real run (no env needed); set
-# PSAT_EXTERNAL_CHECK_MULTICALL=0 as a kill switch. The offline suite forces this OFF via tests/conftest.py
-# (it stubs the per-call wire, not Multicall3's eth_call) for hermeticity.
+# Batch the per-candidate checker probes into one Multicall3 call. The candidate is an argument, so sender rewriting is
+# harmless. Falls back to the JSON-RPC batch on failure. PSAT_EXTERNAL_CHECK_MULTICALL=0 disables; tests/conftest.py
+# forces it off.
 _EXTERNAL_CHECK_MULTICALL_ENABLED = os.getenv("PSAT_EXTERNAL_CHECK_MULTICALL", "1").lower() in ("1", "true", "yes")
 
 
@@ -86,9 +74,10 @@ def _eval_candidate_calls(
     batch_calls: list[tuple[str, list[Any]]],
     block_tag: str,
 ) -> list[tuple[Any, bool]]:
-    """Probe every candidate's checker call. One Multicall3 aggregate3 (per chunk) when enabled, else/on any
-    failure the JSON-RPC array batch. Both return ``[(raw, had_error)]`` with identical decode semantics: a
-    reverting probe → ``had_error=True`` (skipped); a successful probe → its raw bytes for ``decode_bool_word``."""
+    """Probe every candidate's checker call via Multicall3, else the JSON-RPC batch.
+
+    Both return ``[(raw, had_error)]``; reverts are skipped.
+    """
     if _EXTERNAL_CHECK_MULTICALL_ENABLED:
         try:
             mc = multicall3_aggregate3(rpc_url, mc_calls, block_tag)
@@ -98,13 +87,8 @@ def _eval_candidate_calls(
     return rpc_batch_request_with_status(rpc_url, batch_calls)
 
 
-# Event words are 32 bytes; ``_word_to_address`` takes the low 20. A non-address
-# field carrying a small integer (a uint8 role, a bool, an array length, a small
-# uint) coerces to a phantom address like 0x00..01–0x00..ff. A real account/contract
-# address — being a 20-byte value — is astronomically unlikely to fit in the low 32
-# bits, so reject candidates below this floor. This stops phantom principals being
-# probed/minted: on a *public* capability ``canCall(0x..01)`` returns true, so the
-# phantom would otherwise survive as a controller.
+# Small integers in event words (roles, bools, lengths) decode to phantom addresses like 0x..01, and a public capability
+# would pass them. Real addresses essentially never fit in 32 bits.
 _ADDRESS_PLAUSIBILITY_FLOOR = 2**32
 
 
@@ -125,12 +109,8 @@ def materialize_external_check_from_events(
     call_args: list[dict[str, Any]],
     block: int | None = None,
 ) -> CapabilityExpr | None:
-    """Return a caller set for ``checker(args...)`` when enumerable.
-
-    The shape is generic and ABI-level:
-      * exactly one argument is the symbolic caller dimension;
-      * all other arguments are concrete ABI words;
-      * candidates are addresses observed in events from the checker.
+    """A caller set for ``checker(args...)`` when enumerable: exactly one symbolic caller argument, concrete other
+    arguments, candidates from the checker's events.
     """
     if not rpc_url or not checker_selector:
         return None
@@ -145,8 +125,7 @@ def materialize_external_check_from_events(
     with _CANDIDATE_CACHE_LOCK:
         candidates = _CANDIDATE_CACHE.get(cache_key)
     if candidates is None:
-        # Candidate discovery (PG read + optional hypersync scan) runs outside the
-        # lock so concurrent misses for different checkers don't serialize.
+        # Outside the lock so misses for different checkers don't serialize.
         candidates = _candidate_addresses_from_events(
             session=session,
             chain_id=chain_id,
@@ -299,13 +278,8 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
 
     from services.resolution.hypersync_bound import hypersync_url_for_chain
 
-    # Per-chain HyperSync endpoint (inv. 5), env override kept for backward compat.
-    # A chain with no registry coverage (or no env override) has no scan surface —
-    # return no candidates rather than silently scanning mainnet.
-    # NOTE (F7): PSAT_HYPERSYNC_URL is a single-URL global that outranks the
-    # per-chain registry URL — a SINGLE-CHAIN DEV OVERRIDE only. Do not set it in
-    # a multichain deployment (it would pin every chain to one endpoint);
-    # per-chain routing must come from the registry.
+    # Per-chain endpoint (inv. 5); no coverage means no candidates. ``PSAT_HYPERSYNC_URL`` is a single-chain dev
+    # override only.
     url = os.getenv("PSAT_HYPERSYNC_URL") or hypersync_url_for_chain(chain_id)
     if not url:
         return []
@@ -317,7 +291,7 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
     client = build_hypersync_client(hypersync, url=url, bearer_token=envio_token)
     from services.resolution.creation_block_floor import resolve_scan_floor
 
-    # No floor → DEFER: return no candidates rather than scan from genesis.
+    # No floor: defer rather than scan from genesis.
     floor = resolve_scan_floor(checker_address, chain_id)
     if floor is None:
         return []

@@ -1,10 +1,8 @@
-"""Orchestrator for protocol contract inventory discovery.
-
-Given a company/protocol name or domain, this module:
-  1. Identifies the official domain via Tavily search + LLM  (inventory_domain.py)
-  2. Selects pages likely to contain contract inventories     (inventory_domain.py)
-  3. Extracts contract entries from those pages               (inventory_extract.py)
-  4. Scores, deduplicates, and ranks the results
+"""Orchestrator for protocol contract inventory discovery:
+1. find the official domain via Tavily + LLM (inventory_domain.py);
+2. select pages likely to list contracts (inventory_domain.py);
+3. extract contract entries (inventory_extract.py);
+4. score, dedup and rank.
 """
 
 from __future__ import annotations
@@ -34,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 def _collect_source_urls(evidence: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
-    """Extract deduplicated page URLs and explorer URLs from evidence."""
     page_urls: list[str] = []
     explorer_urls: list[str] = []
     seen_pages: set[str] = set()
@@ -59,7 +56,6 @@ def _register_sources(
     page_urls: list[str],
     explorer_urls: list[str],
 ) -> list[str]:
-    """Register URLs in the top-level sources map and return their IDs."""
     source_ids: list[str] = []
     for url in page_urls + explorer_urls:
         if url not in sources_map:
@@ -70,7 +66,7 @@ def _register_sources(
 
 
 def _collapse_unknown_chain_entries(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Merge unknown-chain evidence per address while preserving multi-chain evidence."""
+    """Merge unknown-chain evidence per address, keeping multi-chain evidence."""
     by_address: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in entries:
         chain = canonical_chain(entry.get("chain")) or "unknown"
@@ -117,7 +113,6 @@ def _select_name(evidence: list[dict[str, Any]]) -> tuple[str | None, list[str]]
 
 
 def _determine_sources(evidence: list[dict[str, Any]]) -> list[str]:
-    """Derive the source list from evidence kinds present for an address."""
     _KIND_TO_SOURCE = {
         "official_inventory_table": "ai_inventory",
         "official_inventory_link": "ai_inventory",
@@ -136,11 +131,7 @@ def _determine_sources(evidence: list[dict[str, Any]]) -> list[str]:
 
 
 def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Build the contract list and a top-level sources map.
-
-    Returns (contracts, sources_map) where sources_map is ``{url: id}``
-    and each contract references source IDs instead of full URLs.
-    """
+    """Build the contract list and a ``{url: id}`` sources map; contracts reference source ids."""
     grouped = _collapse_unknown_chain_entries(entries)
     sources_map: dict[str, str] = {}  # url → id
     contracts: list[dict[str, Any]] = []
@@ -152,8 +143,7 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
         if not page_urls and not explorer_urls:
             continue
         source_types = _determine_sources(evidence)
-        # Drop unnamed deployer-only contracts — without a name they can't be
-        # catalogued or fed into the analysis pipeline (which needs verified source).
+        # Unnamed deployer-only contracts can't be catalogued or analysed.
         if not name and source_types == ["deployer_expansion"]:
             continue
         source_ids = _register_sources(sources_map, page_urls, explorer_urls)
@@ -184,12 +174,7 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
 
 
 def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group contracts that share the same name and appear on multiple chains.
-
-    Contracts with the same name but different addresses across chains are
-    collapsed into a single entry with a ``deployments`` array.
-    """
-    # Index by lowercase name — only group named contracts.
+    """Collapse same-named contracts at different addresses across chains into one entry with ``deployments``."""
     by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
     ungroupable: list[dict[str, Any]] = []
     for contract in contracts:
@@ -205,15 +190,12 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
             result.append(group[0])
             continue
 
-        # Check if these are actually different addresses (multi-chain deploys).
         unique_addresses = {c["address"] for c in group}
         if len(unique_addresses) == 1:
-            # Same address listed multiple times — just keep the best one.
             result.append(group[0])
             continue
 
-        # Group into a single entry with deployments array.
-        # Use the highest-confidence entry as the base.
+        # Base on the highest-confidence entry.
         group.sort(key=lambda c: -c.get("confidence", 0))
         base = group[0].copy()
         all_chains: list[str] = []
@@ -246,12 +228,10 @@ def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, 
         base["confidence"] = max_confidence
         base["source_ids"] = all_source_ids
         base["deployments"] = deployments
-        # Remove single-address field — use deployments instead.
         base.pop("address", None)
         result.append(base)
 
     result.extend(ungroupable)
-    # Re-sort after grouping.
     result.sort(
         key=lambda item: (
             -float(item.get("rank_score", item.get("confidence", 0))),
@@ -294,11 +274,8 @@ def search_protocol_inventory(
         ),
     )
 
-    # Always run broad Tavily + LLM domain selection. A domain-shaped input
-    # (e.g. ``"ether.fi"``) is kept as a fallback hint, but we prefer the
-    # LLM's choice so companion docs/github hosts (``etherfi.gitbook.io``,
-    # ``github.com/etherfi-protocol``) can become the primary when they're
-    # the real contract-inventory source.
+    # Always run the broad search and LLM domain choice; a domain-shaped input is only a fallback hint, since companion
+    # hosts (gitbook, GitHub) are often the real inventory source.
     hint_domain = _maybe_domain(clean_company)
     broad_results = _tavily_search(
         f'"{clean_company}" protocol smart contract addresses deployments docs',
@@ -323,8 +300,7 @@ def search_protocol_inventory(
             official_domain = domain_candidates[0]
             extra_domains = []
             notes.append(f"Falling back to sole domain candidate: {official_domain}")
-    # Ensure the hint is at least a companion so site-scoped search still
-    # covers the provided domain, even if the LLM preferred a gitbook/github host.
+    # Keep the hint as a companion so its site-scoped search still runs.
     if official_domain and hint_domain and hint_domain != official_domain:
         extras = list(extra_domains or [])
         if hint_domain not in extras:
@@ -374,10 +350,7 @@ def search_protocol_inventory(
     if run_deployer and tavily_entries:
         seed_addresses = sorted({e["address"] for e in tavily_entries})
         _debug_log(debug, f"Running deployer expansion with {len(seed_addresses)} seed(s)")
-        # Trace deployer wallets on the requested chain, not a mainnet default:
-        # the deployer getcontractcreation/txlist calls hit Etherscan and would
-        # otherwise search mainnet for L2 seeds (F3). Genuinely chainless
-        # discovery (chain="any"/unknown) keeps the documented mainnet fallback.
+        # Trace deployers on the requested chain, not mainnet (F3); chainless discovery keeps the mainnet fallback.
         deployer_chain_id = 1
         if requested_chain:
             try:
@@ -398,7 +371,7 @@ def search_protocol_inventory(
     entries = tavily_entries + deployer_entries
     contracts, sources_map = _build_contracts(entries, limit=limit)
 
-    # Resolve unknown chains before activity ranking (activity needs correct chain_id).
+    # Resolve unknown chains before ranking (activity needs a chain id).
     def _primary_chain(c: dict[str, Any]) -> str:
         chains = c.get("chains", [])
         return (canonical_chain(chains[0]) if chains else None) or "unknown"
@@ -406,9 +379,7 @@ def search_protocol_inventory(
     unknown_count = sum(1 for c in contracts if _primary_chain(c) == "unknown")
     if unknown_count:
         _debug_log(debug, f"Resolving chain for {unknown_count} unknown-chain contract(s)")
-        # Fold the requested chain into the declared set (invariant 3): a caller
-        # asking for a specific chain is declaring it. ``None`` stays ``None`` so
-        # standalone callers keep the legacy all-chain probe.
+        # A requested chain counts as declared (invariant 3); ``None`` keeps the legacy all-chain probe.
         resolve_declared = declared_chains
         if resolve_declared is not None:
             resolve_declared = [*resolve_declared, requested_chain] if requested_chain else list(resolve_declared)
@@ -436,14 +407,9 @@ def search_protocol_inventory(
             record_degraded(phase="claimed_chain_validation", exc=exc, context={"company": company})
             notes.append(f"Claimed-chain sanity check failed: {exc}")
 
-    # Activity ranking intentionally does NOT run here. The worker
-    # pipeline runs the single authoritative ranking in the selection
-    # stage (see ``services/discovery/ranking.rank_contract_rows``),
-    # which sees contracts from every source — inventory, DApp crawl,
-    # DefiLlama — on equal footing. Doing it here would re-rank
-    # inventory contracts the selection stage is about to rank again.
+    # No ranking here: the selection stage ranks all sources together
+    # (``services/discovery/ranking.rank_contract_rows``).
 
-    # Group multi-chain deployments of the same contract.
     contracts = _group_multi_deployments(contracts)
 
     if not contracts:
@@ -458,7 +424,6 @@ def search_protocol_inventory(
         ),
     )
 
-    # Invert sources map for output: {id: url}.
     sources_by_id = {sid: url for url, sid in sources_map.items()}
 
     return {
@@ -480,43 +445,34 @@ def search_protocol_inventory(
     }
 
 
-# ---------------------------------------------------------------------------
-# Inventory merge (append-only with confidence decay)
-# ---------------------------------------------------------------------------
-
-# Confidence decay factor applied to contracts not rediscovered on re-run.
+# Applied to contracts not rediscovered on a re-run.
 CONFIDENCE_DECAY = 0.8
 
-# Confidence floor — entries below this are dropped entirely.
+# Entries below this are dropped.
 CONFIDENCE_FLOOR = 0.1
 
 
 def merge_inventory(prev: dict, new: dict) -> dict:
-    """Merge a previous inventory with a new one (append-only with confidence decay).
+    """Merge a previous inventory with a new one.
 
-    Contracts present in both use the new entry but keep the higher confidence.
-    Contracts only in the previous inventory are retained with decayed confidence
-    (multiplied by :data:`CONFIDENCE_DECAY` each time they are not rediscovered).
-    Contracts that decay below :data:`CONFIDENCE_FLOOR` are dropped.
+    Shared contracts take the new entry with the higher confidence; previous-only contracts decay by
+    :data:`CONFIDENCE_DECAY` and drop below :data:`CONFIDENCE_FLOOR`.
     """
     prev_contracts = {c["address"].lower(): c for c in prev.get("contracts", []) if c.get("address")}
     new_contracts = {c["address"].lower(): c for c in new.get("contracts", []) if c.get("address")}
 
     merged: dict[str, dict] = {}
 
-    # Addresses in new (possibly also in prev)
     for addr, entry in new_contracts.items():
         if addr not in prev_contracts:
             merged[addr] = entry
         else:
-            # In both — use new entry, keep higher confidence
             prev_conf = prev_contracts[addr].get("confidence", 0) or 0
             new_conf = entry.get("confidence", 0) or 0
             merged_entry = dict(entry)
             merged_entry["confidence"] = max(prev_conf, new_conf)
             merged[addr] = merged_entry
 
-    # Addresses only in prev — decay confidence
     for addr, entry in prev_contracts.items():
         if addr not in new_contracts:
             decayed_entry = dict(entry)
@@ -538,7 +494,6 @@ def merge_inventory(prev: dict, new: dict) -> dict:
         "notes": new.get("notes"),
     }
 
-    # Union pages by URL
     for key in ("pages_considered", "pages_selected"):
         prev_pages = prev.get(key, []) or []
         new_pages = new.get(key, []) or []
@@ -551,7 +506,6 @@ def merge_inventory(prev: dict, new: dict) -> dict:
                 deduped.append(page)
         result[key] = deduped
 
-    # Merge sources dicts
     prev_sources = prev.get("sources") or {}
     new_sources = new.get("sources") or {}
     if isinstance(prev_sources, dict) and isinstance(new_sources, dict):

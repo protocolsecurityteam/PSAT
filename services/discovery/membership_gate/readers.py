@@ -47,15 +47,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Membership state (spec §3.1) — derived, never a parallel status column
-# ---------------------------------------------------------------------------
+# Spec §3.1: derived, never a separate status column.
 
 
 def membership_state(contract: Contract, *, code_absent_at_probe: bool | None = None) -> MembershipState:
-    """Derive the §3.1 state. ``code_absent_at_probe`` is the persisted probe
-    verdict for the row's (address, chain); ``None`` = not probed, which can
-    never prove absence — the row stays a candidate."""
+    """The §3.1 state. ``code_absent_at_probe=None`` (not probed) never proves absence."""
     if contract.protocol_id is not None:
         return "member"
     if contract.nominated_protocol_id is None:
@@ -66,8 +62,7 @@ def membership_state(contract: Contract, *, code_absent_at_probe: bool | None = 
 
 
 def resolve_membership_state(session: Session, contract: Contract) -> MembershipState:
-    """``membership_state`` with the code-probe fact fetched from
-    ``contract_creation_witnesses`` for the row's own (address, chain)."""
+    """``membership_state`` with the probe verdict from ``contract_creation_witnesses``."""
     code_absent: bool | None = None
     chain_id = chain_id_for_chain_name(contract.chain)
     if chain_id is not None and contract.address:
@@ -78,9 +73,9 @@ def resolve_membership_state(session: Session, contract: Contract) -> Membership
 
 
 def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """Does the row hold ≥1 unrevoked non-lineage witness for *protocol_id*?
-    The F1 membership-evidence test for candidate rows: nomination alone (or
-    W4 alone) proves nothing about belonging."""
+    """Whether the row has an unrevoked non-lineage witness for *protocol_id* (F1); nomination or W4 alone proves
+    nothing.
+    """
     return (
         session.execute(
             select(ContractMembershipWitness.id)
@@ -97,16 +92,11 @@ def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: 
 
 
 def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """DEPLOYER_HEURISTIC_SPEC.md §6: may this member stand as the via-fact of
-    another evidence rule? False EXACTLY when its admission is heuristic —
-    every active admitting witness it holds is a heuristic one. Heuristic
-    members stay full members operationally (``protocol_id`` is unchanged for
-    selection, monitoring, scoring, overview); the boundary is evidentiary, so
-    a heuristic admission has zero transitive amplification.
-
-    The predicate judges the witness set, not membership: a row with no
-    admitting witness at all is not a HEURISTIC admission, and whether it may
-    be a member is ``promote``'s question, asked with its own evidence."""
+    """Whether this member may serve as another rule's via-fact (DEPLOYER_HEURISTIC_SPEC.md §6): False exactly when
+    all its active admitting witnesses are heuristic. Heuristic members are full members operationally; the
+    boundary is evidentiary, so they have no transitive amplification. A row with no admitting witness isn't a
+    heuristic admission.
+    """
     admitting = [
         row
         for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id)
@@ -116,11 +106,9 @@ def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int)
 
 
 def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """§3.2 D2 non-transitivity mirrored into the ladder (F2, same discipline
-    as ``_via_transitivity``): a member whose ONLY admitting witness is W3-D2
-    must not anchor perimeter or corroboration facts — its principals would
-    license what the D2 entry itself may not. Heuristic witnesses never anchor
-    either (DEPLOYER_HEURISTIC_SPEC.md §6)."""
+    """F2: a member whose only admitting witness is W3-D2 (non-transitive, §3.2), or only heuristic ones, can't
+    anchor perimeter or corroboration facts.
+    """
     for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id):
         if row.rule not in ADMITTING_WITNESS_RULES or witness_is_heuristic(row):
             continue
@@ -132,9 +120,10 @@ def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: i
 
 
 def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory: str) -> int | None:
-    """The id of this protocol's MEMBER row at *factory* holding a non-D2
-    admitting witness (F2), or None. Lowest member id wins, so the published
-    via is a function of the evidence set, not of row order (invariant 9)."""
+    """The id of this protocol's member at *factory* with a non-D2 admitting witness (F2), or None.
+
+    Lowest id wins (invariant 9).
+    """
     for member in session.execute(
         select(Contract)
         .where(Contract.protocol_id == protocol_id, func.lower(Contract.address) == factory)
@@ -146,19 +135,16 @@ def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory:
 
 
 def _anchoring_member_factory(session: Session, *, protocol_id: int, factory: str) -> bool:
-    """Whether *factory* is this protocol's own MEMBER holding a non-D2
-    admitting witness (F2). The member-factory mapping rule (deliberate §3.3
-    deviation, owner ruling): a creation minted by the protocol's own member
-    factory is a protocol-family creation — it counts as MAPPED in the Class-B
-    exclusivity test and is tolerated by the shared-operator kill. Mapping
-    only: it admits nothing and mints no witness."""
+    """Whether *factory* is this protocol's member with a non-D2 admitting witness.
+
+    Its creations count as mapped for Class B exclusivity and the shared-operator check (a deliberate §3.3 deviation);
+    it admits nothing.
+    """
     return _anchoring_member_factory_id(session, protocol_id=protocol_id, factory=factory) is not None
 
 
 @dataclass(frozen=True)
 class MemberFactoryLineage:
-    """The stored creation attribution behind a W4-factory witness."""
-
     factory: str
     member_contract_id: int
     chain_id: int
@@ -168,11 +154,10 @@ class MemberFactoryLineage:
 def _member_factory_lineage(
     session: Session, *, protocol_id: int, contract: Contract, factory: str | None = None
 ) -> MemberFactoryLineage | None:
-    """The stored-attribution arm of the member-factory rule: the row's own
-    creation witness names a factory that is an anchoring member of this
-    protocol. NULL attribution is not-determined and licenses nothing.
-    ``factory``, when given, additionally pins WHICH factory must be named —
-    the re-verification path for an already-published witness."""
+    """Whether the row's own creation witness names an anchoring member factory of this protocol.
+
+    NULL attribution licenses nothing. ``factory`` pins which one (re-verification).
+    """
     chain_id = chain_id_for_chain_name(contract.chain)
     addr = (contract.address or "").lower()
     if chain_id is None or not addr:
@@ -198,23 +183,17 @@ def _member_factory_created(session: Session, *, protocol_id: int, contract: Con
     return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract) is not None
 
 
-# ---------------------------------------------------------------------------
-# Witness-fact verification (spec §3.2 witness invalidation; invariant 6).
-# Admission and cascade both re-check the EDGE, never mere witness presence —
-# a caller-written witness row is a claim the gate re-verifies, not a license.
-# ---------------------------------------------------------------------------
+# Witness-fact verification (spec §3.2, invariant 6): admission and cascade re-check the edge, never mere witness
+# presence.
 
 
 def _chain_key(chain: str | None) -> str:
-    """Mainnet-coalesced, canonicalized chain key — the same NULL≡'ethereum'
-    dedup convention as ``db.queue._mainnet_coalesced_chain``."""
+    """Mainnet-coalesced chain key, like ``db.queue._mainnet_coalesced_chain``."""
     return ((canonical_chain(chain) or chain) or "ethereum").lower()
 
 
 def _member_rows_at(session: Session, *, protocol_id: int, address: str, chain_key: str) -> list[Contract]:
-    """This protocol's EVIDENCE members at (address, chain): heuristic-only
-    members are excluded (DEPLOYER_HEURISTIC_SPEC.md §6) — every caller here
-    reads a member as the via-fact of another rule."""
+    """This protocol's evidence members at (address, chain), excluding heuristic-only members (§6)."""
     rows = session.execute(
         select(Contract)
         .where(
@@ -231,9 +210,7 @@ _PROBE_CONTROLLER_READS = ("owner", "authority", "admin")
 
 
 def _probe_controller_values(session: Session, contract: Contract) -> set[str]:
-    """Controller addresses the latest §3.5 probe of *contract* resolved
-    (owner/authority/admin reads only — impl/beacon reads are W2-shaped facts,
-    not control edges)."""
+    """Controllers the latest §3.5 probe resolved (owner/authority/admin only; impl/beacon are W2 facts)."""
     chain_id = chain_id_for_chain_name(contract.chain)
     row = session.get(ContractProbeAttempt, (contract.id, chain_id if chain_id is not None else 0))
     if row is None or not isinstance(row.results, dict) or row.results.get("status") != "probed":
@@ -293,11 +270,9 @@ def _w2_edge_holds(session: Session, *, contract: Contract, member: Contract, ed
 
 
 def _authority_derived_principal():
-    """SQL predicate: the principal row's recorded ``resolver_path`` is a
-    non-empty list of AUTHORITY resolutions, end to end. ``<@`` is JSONB array
-    containment — every step must be an authority resolver, so a path that
-    mixes in a mapping enumeration does not qualify. A missing path, a JSON
-    ``null`` path, and an empty list are all not_determined and never qualify."""
+    """SQL predicate: the principal's ``resolver_path`` is a non-empty list of authority resolutions only (``<@``
+    containment). Missing, null or empty never qualifies.
+    """
     path = FunctionPrincipal.details.op("->")("resolver_path")
     return (
         (func.jsonb_typeof(path) == "array")
@@ -315,17 +290,11 @@ def _member_principal_rows(
     exclude_contract_id: int | None,
     safe_owners: bool,
 ):
-    """Resolved-principal observations of *address* on this protocol's members,
-    in deterministic order (principal row id), as
+    """Resolved-principal observations of *address* on this protocol's members, by principal row id, as
     ``(function_principal_id, function_id, resolved_type, safe_address, member)``.
 
-    ``safe_owners=False`` reads the principal row whose ADDRESS is *address*;
-    ``safe_owners=True`` reads Safe principals whose stored signer set CONTAINS
-    it. Only same-chain members are read: a principal fact is an observation on
-    a deployment, and a deployment is (address, chain). Only AUTHORITY-derived
-    principals are read (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`) — a row the
-    resolver produced by enumerating a caller mapping, or with no recorded
-    derivation, proves membership of a caller set and not control.
+    ``safe_owners=True`` reads Safe principals whose signer set contains it. Same-chain members only; authority-derived
+    principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since caller-set enumerations aren't control.
     """
     member_scope = [
         Contract.protocol_id == protocol_id,
@@ -344,8 +313,7 @@ def _member_principal_rows(
         ):
             yield fp_id, function_id, resolved_type, None, member
         return
-    # Owner matching happens in Python so stored casing can never hide a
-    # signer; the SQL ``ilike`` is a case-insensitive SUPERSET prefilter only.
+    # Match owners in Python so casing can't hide a signer; SQL ``ilike`` is a superset prefilter.
     for fp_id, function_id, safe_address, details, member in session.execute(
         select(
             FunctionPrincipal.id,
@@ -395,14 +363,9 @@ def _principal_perimeter_fact(
     chain_key: str,
     exclude_contract_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """§3.3 Class-A perimeter reading for the D1-principal arm: *address* is a
-    resolved EOA principal (:data:`W3_PERIMETER_PRINCIPAL_TYPE`) of a member's
-    effective function. The hosting member must itself hold a non-D2 admitting
-    witness (F2) — a principal observed only on a D2-only entry licenses
-    nothing, since the D2 entry itself is non-transitive.
-
-    Smallest principal row wins, so the published fact is a function of the
-    evidence set rather than of row arrival order (invariant 9)."""
+    """§3.3 Class-A reading for the D1-principal arm: *address* is a resolved EOA principal of a member hosting a
+    non-D2 admitting witness (F2). Smallest principal row wins (invariant 9).
+    """
     for fp_id, function_id, resolved_type, _safe_address, member in _member_principal_rows(
         session,
         protocol_id=protocol_id,
@@ -422,10 +385,9 @@ def _principal_perimeter_fact(
 def _d2_principal_facts(
     session: Session, *, protocol_id: int, address: str, chain_key: str, exclude_contract_id: int | None
 ) -> list[tuple[Contract, dict[str, Any]]]:
-    """One D2-principal fact per anchoring member on which *address* is a
-    resolved controller-typed principal (:data:`W3_PRINCIPAL_CONTROLLER_TYPES`).
-    The smallest principal row per member wins; members are returned in id
-    order."""
+    """One D2-principal fact per anchoring member where *address* is a controller-typed principal; smallest row per
+    member, members by id.
+    """
     facts: dict[int, tuple[Contract, dict[str, Any]]] = {}
     for fp_id, function_id, resolved_type, _safe, member in _member_principal_rows(
         session,
@@ -444,10 +406,11 @@ def _d2_principal_facts(
 
 
 def _address_proven_foreign(session: Session, *, protocol_id: int, address: str) -> bool:
-    """Positive counterevidence that *address* belongs elsewhere: it is a
-    member of another protocol, or another protocol's unrevoked deployer
-    registry row. A bare nomination is deliberately NOT counted — it proves
-    nothing in either direction (F1)."""
+    """Positive counterevidence that *address* belongs elsewhere: another protocol's member or unrevoked deployer
+    row.
+
+    A nomination doesn't count (F1).
+    """
     foreign_member = session.execute(
         select(Contract.id)
         .where(
@@ -474,11 +437,9 @@ def _address_proven_foreign(session: Session, *, protocol_id: int, address: str)
 
 
 def _controls_a_foreign_row(session: Session, *, protocol_id: int, controller_address: str) -> bool:
-    """Ward-side counterevidence for the anchor-chain arm: is this controller
-    observed controlling a row that PROVABLY belongs elsewhere — another
-    protocol's member, or a row another protocol nominated? The observation set
-    is the same three W3 sources ``_controller_is_exclusive`` reads:
-    caller-gating controller values, proxy-admin pointers, §3.5 probe reads."""
+    """Whether this controller is observed controlling a row provably belonging elsewhere (another protocol's member
+    or nomination), using the same three sources as ``_controller_is_exclusive``.
+    """
     foreign = or_(
         Contract.protocol_id.is_not(None) & (Contract.protocol_id != protocol_id),
         Contract.protocol_id.is_(None)
@@ -528,11 +489,9 @@ def _member_ids_subquery(protocol_id: int):
 
 
 def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict[str, Any] | None:
-    """A resolved principal fact placing *address* inside the protocol's proven
-    control graph: a resolved controller value on a member, a function
-    principal of a member, or a resolved Safe signer-set entry. The anchoring
-    member must itself hold a non-D2 admitting witness (F2) — a principal
-    observed on a D2-only entry never mints a ladder anchor."""
+    """A resolved principal fact placing *address* in the protocol's control graph (controller value, function
+    principal, or Safe signer), on a member with a non-D2 admitting witness (F2).
+    """
     for fact, member_id in _perimeter_fact_candidates(session, protocol_id=protocol_id, address=address):
         if _member_anchors_ladder(session, contract_id=member_id, protocol_id=protocol_id):
             return fact
@@ -540,9 +499,9 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
 
 
 def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: str):
-    """Every §3.3 perimeter observation of *address*, in deterministic order,
-    as ``(fact, anchoring_member_id)``. Whether the anchoring member may
-    actually anchor is the caller's check."""
+    """Every §3.3 perimeter observation of *address*, as ``(fact, anchoring_member_id)``; the caller checks
+    anchoring.
+    """
     members = _member_ids_subquery(protocol_id)
     for member_id, controller_id in session.execute(
         select(ControllerValue.contract_id, ControllerValue.controller_id)
@@ -554,9 +513,7 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         .order_by(ControllerValue.contract_id, ControllerValue.id)
     ):
         yield {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}, member_id
-    # A principal produced by enumerating a caller mapping proves membership
-    # of a caller set, not control — only an authority-derived principal is a
-    # perimeter observation (invariant 6, :data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`).
+    # Only authority-derived principals are perimeter observations (invariant 6).
     for fp_id, function_id, member_id in session.execute(
         select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -568,11 +525,7 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         .order_by(FunctionPrincipal.id)
     ):
         yield {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}, member_id
-    # Owner matching happens in Python so stored casing can never hide a
-    # signer: the persisted owner strings are lowercased on read. The SQL
-    # ``ilike`` is a case-insensitive SUPERSET prefilter only — it keeps a
-    # multi-tenant Safe registry (thousands of delegate rows) off the wire
-    # without narrowing what the exact check below accepts.
+    # Match owners in Python; the SQL ``ilike`` prefilter keeps large Safe registries off the wire.
     safe_rows = session.execute(
         select(
             FunctionPrincipal.id, FunctionPrincipal.address, FunctionPrincipal.details, EffectiveFunction.contract_id
@@ -598,19 +551,19 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
 
 
 def _secondary_pointer_named(addresses: Sequence[str]):
-    """Array-membership predicate over ``secondary_implementations``,
-    case-folded. A full 0x-address can only match at an element boundary
-    ('x' is not a hex digit), so the joined-LIKE form is element-exact."""
+    """Case-folded membership test over ``secondary_implementations``; full addresses only match at element
+    boundaries.
+    """
     joined = func.lower(func.array_to_string(Contract.secondary_implementations, ","))
     conditions = [joined.like(f"%{address.lower()}%") for address in addresses]
     return or_(*conditions) if conditions else false()
 
 
 def principal_addresses(session: Session, contract_ids: Sequence[int] | set[int]) -> set[str]:
-    """Addresses the stored ``FunctionPrincipal`` rows of these contracts name
-    — the principals themselves plus the signer sets of resolved Safe
-    principals. The fuel and the revocation trigger for both principal-keyed
-    W3 arms; a withheld (NULL) signer set is not_determined and names nothing."""
+    """Addresses named by these contracts' ``FunctionPrincipal`` rows, including resolved Safe signer sets.
+
+    A NULL signer set names nothing.
+    """
     ids = sorted(set(contract_ids))
     if not ids:
         return set()

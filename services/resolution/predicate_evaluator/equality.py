@@ -45,26 +45,19 @@ def _resolve_equality_principal(
     leaf: LeafPredicate,
     ctx: EvaluationContext | None = None,
 ) -> CapabilityExpr:
-    """``msg.sender == X`` — resolve X to a CapabilityExpr.
+    """``msg.sender == X``: resolve X to a CapabilityExpr.
 
-    Per v6 round-5 #2: when X is a function parameter, the result is
-    conditional_universal(self_service) — anyone may call but only
-    for their own data. State-var operands consult
-    ``ctx.state_var_values`` (populated from ``controller_values``);
-    when the value isn't there we emit the lower_bound placeholder so
-    the FE can still render 'guarded by X' even without enumeration."""
+    A parameter X is self-service (conditional_universal). State vars read ``ctx.state_var_values``, else a lower_bound
+    placeholder so the UI can still show "guarded by X".
+    """
     operands = leaf.get("operands") or []
     other = [op for op in operands if op["source"] not in _CALLER_SOURCES]
     if len(other) != 1:
         return CapabilityExpr.unsupported("equality_operand_ambiguous")
     op = other[0]
 
-    # ``msg.sender == <mapping>[<param>]`` — the authorized caller is any VALUE in a
-    # parameter-keyed address mapping (claim #3 group C, L1BaseSyncPool
-    # ``receivers[originEid]``). Route to event enumeration before the per-source
-    # getter dispatch: the operand's ``source`` is the bare storage accessor, and the
-    # mapping identity rides on ``mapping_name`` / ``mapping_writer_specs`` (stamped
-    # by the static stage). There is no getter to read here.
+    # ``msg.sender == <mapping>[<param>]`` (claim #3 group C): enumerate the mapping's values from events; there's no
+    # getter.
     if op.get("mapping_name") is not None:
         return _resolve_param_keyed_authority_mapping(cast(dict[str, Any], op), ctx)
 
@@ -89,28 +82,12 @@ def _resolve_equality_principal(
                     quality="exact",
                     confidence="enumerable",
                 )
-        # state_var_values miss. For a bare (non-struct-member) variable the
-        # equality ``msg.sender == X`` names X as the sole authorized caller, so
-        # reading X's getter live recovers the principal the persisted
-        # ControllerValue feed didn't carry (or carried under a different key,
-        # e.g. an owner()/governor() gate). Three getter candidates are tried in
-        # order until one reads a concrete value:
-        #   1. ``<name>()`` — the auto-getter of a ``public`` state var, named
-        #      after the var itself (``owner``→``owner()``).
-        #   2. the de-underscored canonical getter — an OZ-v4 ``onlyOwner`` lowers
-        #      to ``msg.sender == _owner`` (the private backing var, since the
-        #      trivial ``owner(){return _owner;}`` getter is inlined), and
-        #      ``_owner()`` has no selector of its own, but ``owner()`` reads the
-        #      same storage (``_governor``→``governor()`` likewise). Mirrors the
-        #      view_call branch's internal-accessor fallback and is fail-closed to
-        #      {owner,governor,authority}(+pending), so an arbitrary ``_x`` is left
-        #      alone rather than bound to whatever public ``x()`` returns.
-        #   3. the canonical getter behind a storage-slot *locator* (Solady
-        #      ``_OWNER_SLOT``, OZ-v5 ``OwnableStorageLocation``, ``_GOVERNOR_SLOT``)
-        #      whose own ``<slot>()`` getter reverts.
-        # Struct members are read only for the OZ-v5 namespaced ``_owner``; others
-        # (``accountantState.payoutAddress``) have no nullary getter and describe
-        # fund destinations, not callers.
+        # Read the variable live, trying in order:
+        #   1. ``<name>()``, the public auto-getter;
+        #   2. the de-underscored canonical getter (OZ-v4 ``_owner`` → ``owner()``), limited to
+        # owner/governor/authority(+pending);
+        #   3. the canonical getter behind a slot locator (``_OWNER_SLOT``, ``OwnableStorageLocation``).
+        # Struct members are read only for OZ-v5 namespaced ``_owner``; others describe fund destinations, not callers.
         name = op.get("state_variable_name")
         result: CapabilityExpr | None = None
         if not op.get("member_path"):
@@ -127,35 +104,21 @@ def _resolve_equality_principal(
             result = _resolve_authority_via_getters(ctx, [_OWNER_SELECTOR])
         if result is not None and result.membership_quality == "exact":
             return result
-        # Getter-less internal address var (ether.fi ``MembershipNFT.membershipManager``
-        # is declared without ``public``, so its ``membershipManager()`` getter
-        # reverts on every deployment): the *sequential* storage slot the static
-        # stage carried is AUTHORITATIVE — the value lives in the contract's own
-        # storage, read it directly. A non-zero slot IS the principal; a
-        # confirmed-zero slot is a renounced/unset authority (resolved_empty, like a
-        # clean-zero getter), published as the read that produced it
-        # (``slot_read_zero``, with the slot, contract and pinned block);
-        # an unreadable slot stays an honest ``lower_bound``. Only bare address
-        # scalars carry a slot (the static pass excludes mappings/structs/packed
-        # vars), so a non-address word is never misread as a principal.
+        # Non-public address var (e.g. ``MembershipNFT.membershipManager``): read its sequential slot directly. Only
+        # bare address scalars carry a slot.
         slot = op.get("storage_slot")
         if isinstance(slot, str) and not op.get("member_path"):
             slot_result = _live_resolve_authority_slot(ctx, slot)
             if slot_result is not None:
                 return slot_result
-            # Slot present but no read attempted (no reachable RPC) — honest
-            # unknown, not a guess.
+            # Slot present but no RPC.
             return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="not_read")
-        # An accept-side 2-step transfer gate (pending governor / default admin)
-        # that read empty — or, like ``_pendingDefaultAdmin.newAdmin``, has no
-        # getter to read — is uncallable until a transfer is queued. That is
-        # empty-by-design, not an unresolved gap.
+        # An empty accept-side 2-step gate is empty-by-design until a transfer is queued.
         if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
             return _pending_ceiling_capability(cast(dict[str, Any], op), result)
         if result is not None:
             return result  # carries unreadable_revert / unreadable_empty
-        # Fallback: a guarding state-var with no getter attempted (struct member /
-        # non-address value). UI surfaces this as 'guarded but unresolved'.
+        # Guarding var with no getter (struct member, non-address): "guarded but unresolved".
         return CapabilityExpr.finite_set(
             [],
             quality="lower_bound",
@@ -170,16 +133,8 @@ def _resolve_equality_principal(
         return CapabilityExpr.unsupported("self_address_without_contract")
 
     if src == "view_call":
-        # ``msg.sender == owner()`` / ``== governor()``: the static stage
-        # recorded the getter but couldn't read it. Resolve it live against the
-        # contract under analysis. This branch previously returned an empty
-        # lower_bound placeholder unconditionally, which dropped every
-        # owner()/governor()-gated function's principal (the etherfi SyncPool /
-        # LRTSquaredCore recall gap). Falls back to the placeholder when no RPC
-        # is reachable.
-        # Only nullary getters (owner()/governor()) are read live — a view
-        # taking args (e.g. roleAdmin(role)) can't be called with empty
-        # calldata, so leave it to the placeholder.
+        # Read nullary getters like ``owner()``/``governor()`` live; this used to be an unconditional placeholder that
+        # dropped their principals. Arg-taking views can't be called with empty calldata.
         signature = op.get("callee_signature")
         if (
             earned_public_enabled()
@@ -188,17 +143,9 @@ def _resolve_equality_principal(
             and not signature.endswith("()")
             and _view_call_caller_selects_key(op)
         ):
-            # An ARG-taking view lookup whose key the CALLER selects —
-            # ``msg.sender == ownerOf(tokenId)`` / ``== getApproved(id)`` /
-            # ``== withdrawal.owner``: every caller passes for their own key
-            # (self-service-or-appointed, the uniform policy). A FIXED
-            # authority keeps the gated path below — nullary getters, and
-            # arg-taking lookups keyed by constants/state
-            # (``msg.sender == roleAdmin(ROLE)``), which are authority
-            # values, not caller-chosen rows. Without this arm the
-            # placeholder empty-lower set would trip the earned-public
-            # projection blocker and gate every ERC721 transfer/claim
-            # family function.
+            # An arg-taking lookup keyed by the caller (``ownerOf(tokenId)``, ``getApproved(id)``) is self-service:
+            # every caller passes for their own key. Fixed authority lookups stay gated. Without this, ERC721
+            # transfer/claim functions would be gated.
             cond = Condition(
                 kind="self_service",
                 description=f"caller matches {signature} for their own key",
@@ -216,31 +163,17 @@ def _resolve_equality_principal(
                     if isinstance(signature, str) and signature.endswith("()")
                     else None
                 )
-            # Internal authority accessors (``_governor()``/``_owner()``) have no
-            # external selector, so reading them reverts (the etherfi LRTSquared
-            # ``onlyGovernor`` gap: the gate is ``msg.sender == _governor()``). The
-            # authority is the value the public getter returns, so prefer the
-            # de-underscored canonical getter (``governor()``/``owner()``).
+            # Internal accessors have no selector; read the de-underscored public getter instead.
             canonical_selector = _public_getter_selector_for_internal_accessor(signature)
             canonical_basis = "deunderscore_convention"
-            # OZ-v5 keeps ownership in an ERC-7201 namespace, so an ``owner()``
-            # gate inlines to a ``view_call`` of the namespaced storage accessor
-            # (``_getAccessControlDefaultAdminRulesStorage()``) rather than a
-            # ``_owner()`` helper — recognized by exact accessor name and read
-            # through ``owner()``.
+            # OZ-v5 namespaced ownership accessor, read through ``owner()``.
             if canonical_selector is None:
                 canonical_selector = _oz_v5_namespaced_authority_selector(signature)
                 canonical_basis = "standard_namespaced_accessor"
-        # Canonical public getter first (when the operand is an internal authority
-        # accessor its own selector is dead); otherwise the literal selector.
+        # Canonical getter first, since an internal accessor's own selector is dead.
         candidates = dict.fromkeys((canonical_selector, selector))
-        # Which HELPER produced the canonical selector is a control-flow fact at
-        # this write point, so the two accessor arms are published as themselves
-        # rather than under one label a consumer cannot split: an ERC-7201
-        # accessor matched against the standard's table
-        # (``standard_namespaced_accessor``) and the leading-underscore naming
-        # convention (``deunderscore_convention``). Both are accessor-NAME
-        # matches and neither is ranked above the other.
+        # Publish which name-match produced the selector (``standard_namespaced_accessor`` vs
+        # ``deunderscore_convention``); neither outranks the other.
         candidate_basis = {selector: "callee_selector", canonical_selector: canonical_basis}
         result = _resolve_authority_via_getters(
             ctx,
@@ -249,28 +182,17 @@ def _resolve_equality_principal(
         )
         if result is not None and result.membership_quality == "exact":
             return result
-        # Getter-less slot-backed accessor (Governable ``_pendingGovernor`` reads a
-        # keccak slot via assembly, no public getter): the slot the static stage
-        # carried is AUTHORITATIVE. A non-zero slot IS the principal — on
-        # Governable ``_changeGovernor`` never clears the pending slot, so after a
-        # completed transfer it stays == governor and the accept gate is
-        # satisfiable by the sitting governor; a confirmed-zero slot publishes the
-        # read (``slot_read_zero``) and leaves the accept-side-ceiling
-        # CLASSIFICATION to ``_pending_ceiling_capability``, which discloses that it
-        # rests on the accessor's name; an unreadable slot stays an honest
-        # ``lower_bound``. We never downgrade an unreadable slot to a name guess,
-        # so resolved_empty here is always an evidenced (read-confirmed) verdict.
+        # Slot-backed accessor with no getter (Governable ``_pendingGovernor``): the slot is authoritative. Zero
+        # publishes ``slot_read_zero`` and classification is left to ``_pending_ceiling_capability``; unreadable stays
+        # lower_bound.
         slot = op.get("storage_slot")
         if isinstance(slot, str):
             slot_result = _live_resolve_authority_slot(ctx, slot)
             if slot_result is not None:
                 return slot_result
-            # Slot present but no read attempted (no reachable RPC) — honest
-            # unknown, not a guess.
+            # Slot present but no RPC.
             return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="not_read")
-        # No slot to read. A getter-less ``pending``-prefixed accept gate (the OZ
-        # ``_pendingDefaultAdmin.newAdmin`` struct member, which has no nullary
-        # getter) is uncallable until a transfer is queued — empty-by-design.
+        # Getter-less pending accept gate (OZ ``_pendingDefaultAdmin.newAdmin``): empty-by-design.
         if _is_pending_authority_accessor_operand(cast(dict[str, Any], op)):
             return _pending_ceiling_capability(cast(dict[str, Any], op), result)
         if result is not None:
@@ -283,7 +205,6 @@ def _resolve_equality_principal(
         )
 
     if src == "parameter":
-        # Self-service: anyone, on their own data.
         cond = Condition(
             kind="self_service",
             description=f"caller acting on their own {op.get('parameter_name') or 'arg'}",
@@ -293,19 +214,12 @@ def _resolve_equality_principal(
         return CapabilityExpr.conditional_universal(cond)
 
     if src == "signature_recovery":
-        # Already handled via signature_auth leaf kind, but defensive.
+        # Normally handled as a signature_auth leaf; defensive.
         return CapabilityExpr.signature_witness(CapabilityExpr.unsupported("signer_unresolved"))
 
     if src == "external_call":
-        # ``msg.sender == otherContract.someGetter()`` — the authority lives in
-        # another contract (PauserRegistry.unpauser(), avsNodeRunner(), …). The
-        # operand carries the callee selector but not the target address (the
-        # callee's host is a state var of the contract under analysis), so we
-        # can't enumerate it offline. Surface a query-only external check: the
-        # caller must equal the getter's return. This is GATED (external_check_only
-        # → residual, zero principal rows), never public — the whole point of
-        # recognizing it as caller_authority rather than letting it fall to a
-        # business side-condition that opens the function.
+        # Authority lives in another contract (``PauserRegistry.unpauser()``) whose address we don't have offline. Gated
+        # query-only check, never public.
         selector = op.get("callee_selector")
         return CapabilityExpr.external_check_only(
             ExternalCheck(
@@ -334,14 +248,10 @@ def _resolve_contextual_equality(
     ctx: EvaluationContext | None,
     operator: str,
 ) -> CapabilityExpr:
-    """Evaluate equality leaves whose caller operand was already bound.
+    """Equality leaves whose caller operand was already bound by inlining (``msg.sender`` is the calling contract).
 
-    Recursive external-call evaluation intentionally rewrites a callee's
-    ``msg.sender`` to the calling contract address. A guard like
-    ``msg.sender == liquidityPool`` then becomes a concrete call-edge
-    condition, not a root-caller principal. Exact true is no caller
-    restriction; exact false means the external call can never authorize
-    this edge. Dynamic non-caller checks remain business side-conditions.
+    Exact true means no restriction; exact false means this edge can never authorize; dynamic non-caller checks stay
+    business side conditions.
     """
     operands = leaf.get("operands") or []
     if len(operands) != 2:

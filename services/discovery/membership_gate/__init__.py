@@ -1,23 +1,12 @@
-"""Contract-membership gate — sole writer of ``Contract.protocol_id``
-(DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3–§5).
+"""Contract-membership gate, the sole writer of ``Contract.protocol_id`` (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3–§5).
 
-Membership is an earned fact with a recorded witness: no discovery source's
-identity confers it, and no witness field may contain or be derived from LLM
-output (invariant 2). Every function here mutates the session without
-committing — the caller commits so the gate write lands atomically with the
-triggering fact.
+Membership is earned with a recorded witness; no source's identity confers it, and no witness may derive from LLM output
+(invariant 2). Functions mutate the session without committing so the gate write lands with the triggering fact.
 
-Package layout: ``rules`` (witness vocabulary, evidence constructors,
-witness-row primitives), ``readers`` (evidence predicates and stored-fact
-readers), ``deployers`` (the §3.3 trust ladder and its registry rows),
-``transitivity`` (W3 anchor chains, exclusivity, via-fact re-verification),
-``admission`` (nomination, promotion/demotion primitives, stratum-(iii)
-derivation), ``revocation`` (the invariant-8 demotion cascade),
-``heuristics`` (W4-H affinity and its trailing stratum), ``fixpoint``
-(fact deltas, targeting, the stratified fixpoint). This ``__init__``
-re-exports the full pre-split module surface — including the private names
-tests and scripts import — so ``services.discovery.membership_gate.X`` keeps
-resolving unchanged.
+Modules: ``rules`` (witness vocabulary and constructors), ``readers`` (evidence predicates), ``deployers`` (§3.3 trust
+ladder), ``transitivity`` (W3 anchor chains, exclusivity, re-verification), ``admission`` (nomination,
+promotion/demotion, stratum iii), ``revocation`` (invariant-8 cascade), ``heuristics`` (W4-H), ``fixpoint`` (deltas,
+targeting, the stratified fixpoint). This module re-exports the pre-split surface, private names included.
 """
 
 from .admission import (

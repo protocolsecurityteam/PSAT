@@ -1,19 +1,7 @@
-"""Prompt building and LLM call for scope extraction.
+"""Prompt building and LLM call for scope extraction. Tests patch ``_call_llm``.
 
-``_call_llm`` is the single swap point — tests patch
-``services.audits.scope_extraction._llm._call_llm`` to intercept calls.
-
-Two output shapes are accepted on the response side:
-
-- **Legacy**: flat JSON array of contract name strings. Used by audits
-  whose scope section is prose or flat name lists.
-- **Structured**: JSON object ``{contracts: [...], scope_entries: [...]}``.
-  Used by audits whose scope section contains a name/address/commit
-  table. Unlocks address-anchored matching
-  (``match_type='reviewed_address'``) in the coverage matcher.
-
-Both shapes return ``(names, scope_entries, raw_response, model)``.
-``scope_entries`` is empty for legacy responses.
+Accepts a legacy flat name array or a structured object ``{contracts, scope_entries, classified_commits}``; the latter
+enables address-anchored coverage.
 """
 
 from __future__ import annotations
@@ -29,8 +17,7 @@ from ._locate import ScopeSection
 
 PROMPT_VERSION: Final[str] = "scope-v3"
 
-# Cap on prompt payload. Scope sections are ~10 KB normally; 40 KB
-# protects against a degenerate slice.
+# Scope sections are ~10 KB; guards against a degenerate slice.
 _MAX_SCOPE_TEXT_CHARS: Final[int] = 40_000
 
 
@@ -178,12 +165,7 @@ def _build_prompt(sections: list[ScopeSection], title: str, auditor: str) -> str
 
 
 def _call_llm(prompt: str) -> tuple[str, str]:
-    """Call the LLM, returning ``(response_text, model_identifier)``.
-
-    When ``PSAT_LLM_STUB_DIR`` is set, routes to fixture files keyed by the
-    SHA-256 of the prompt, falling back to ``_default.json``. Lets
-    integration tests run deterministically without OpenRouter.
-    """
+    """With ``PSAT_LLM_STUB_DIR``, reads fixtures keyed by prompt SHA-256 (fallback ``_default.json``)."""
     stub_dir = os.environ.get("PSAT_LLM_STUB_DIR")
     if stub_dir:
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -215,7 +197,6 @@ def _call_llm(prompt: str) -> tuple[str, str]:
 
 
 def _clean_name(candidate: Any) -> str:
-    """Normalize one raw LLM-output name: strip, drop .sol/.vy, leave casing."""
     if isinstance(candidate, str):
         text = candidate.strip()
     elif isinstance(candidate, dict):
@@ -229,13 +210,7 @@ def _clean_name(candidate: Any) -> str:
 
 
 def _parse_scope_entry(raw: Any) -> dict[str, Any] | None:
-    """Validate + normalize one scope_entries element from LLM output.
-
-    Returns the cleaned entry or ``None`` when the entry doesn't pass
-    address-format / name-required checks. The full PDF-text hallucination
-    filter is applied separately in ``_validate.py`` — this function only
-    handles shape + format.
-    """
+    """Shape and format validation only; the hallucination filter is in ``_validate.py``."""
     if not isinstance(raw, dict):
         return None
     name = _clean_name(raw.get("name") or raw.get("contract_name") or raw.get("file"))
@@ -247,9 +222,7 @@ def _parse_scope_entry(raw: Any) -> dict[str, Any] | None:
         addr_clean = address_raw.strip().lower()
         if _ADDRESS_RE.match(addr_clean):
             address = addr_clean
-    # Require an address — the whole point of scope_entries is address-anchored
-    # matching. Drop entries without one; the caller's ``contracts`` list
-    # will still capture the name.
+    # Address-anchoring needs an address; the name still reaches ``contracts``.
     if address is None:
         return None
     commit_raw = raw.get("commit")
@@ -268,7 +241,6 @@ def _parse_scope_entry(raw: Any) -> dict[str, Any] | None:
 
 
 def _dedupe_names(raw_list: Any) -> list[str]:
-    """Dedupe + normalize a list of LLM-output names."""
     names: list[str] = []
     seen: set[str] = set()
     if not isinstance(raw_list, list):
@@ -286,7 +258,6 @@ def _dedupe_names(raw_list: Any) -> list[str]:
 
 
 def _parse_classified_commit(raw: Any) -> dict[str, Any] | None:
-    """Validate one ``classified_commits`` entry — shape + SHA + label."""
     if not isinstance(raw, dict):
         return None
     sha_raw = raw.get("sha")
@@ -295,7 +266,7 @@ def _parse_classified_commit(raw: Any) -> dict[str, Any] | None:
     sha = sha_raw.strip().lower()
     if not _COMMIT_RE.match(sha):
         return None
-    # All-same-char tokens (0000000, ffffffff) = padding, not a real SHA.
+    # Padding, not a real SHA.
     if len(set(sha)) < 3:
         return None
     label_raw = raw.get("label")
@@ -304,19 +275,14 @@ def _parse_classified_commit(raw: Any) -> dict[str, Any] | None:
         label = "unclear"
     context_raw = raw.get("context")
     context = str(context_raw).strip() if context_raw else ""
-    # Cap context to keep the JSONB payload bounded.
+    # Keeps the JSONB payload bounded.
     if len(context) > 400:
         context = context[:400]
     return {"sha": sha, "label": label, "context": context}
 
 
 def _dedupe_classified_commits(raw_commits: Any) -> list[dict[str, Any]]:
-    """Dedupe classified commits by SHA, preferring stronger labels.
-
-    When the same SHA appears multiple times with different labels,
-    rank ``reviewed > fix > cited > unclear`` so a strong label isn't
-    silently overwritten by a weaker one.
-    """
+    """Rank ``reviewed > fix > cited > unclear`` so a weaker duplicate doesn't overwrite."""
     rank = {"reviewed": 3, "fix": 2, "cited": 1, "unclear": 0}
     by_sha: dict[str, dict[str, Any]] = {}
     if not isinstance(raw_commits, list):
@@ -332,7 +298,6 @@ def _dedupe_classified_commits(raw_commits: Any) -> list[dict[str, Any]]:
 
 
 def _dedupe_entries(raw_entries: Any) -> list[dict[str, Any]]:
-    """Dedupe scope_entries by (name_lower, address_lower)."""
     entries: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     if not isinstance(raw_entries, list):
@@ -352,31 +317,16 @@ def _dedupe_entries(raw_entries: Any) -> list[dict[str, Any]]:
 def extract_scope_with_llm(
     sections: list[ScopeSection], title: str, auditor: str
 ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]], str, str]:
-    """Call the LLM for the scope list + structured entries + commit labels.
+    """Returns ``(names, scope_entries, classified_commits, raw_response, model)``.
 
-    Returns ``(names, scope_entries, classified_commits, raw_response, model)``.
-
-    - ``scope_entries`` — list of ``{name, address, commit, chain}`` dicts
-      for audits whose scope section had an explicit address column;
-      empty list for legacy prose-style scope sections (Phase F).
-    - ``classified_commits`` — list of ``{sha, label, context}`` where
-      ``label ∈ {reviewed, fix, cited, unclear}``. Empty when no SHAs
-      appear in the text (Phase C).
-
-    Accepts the legacy array form (list of name strings) and the object
-    forms from scope-v2 (``{contracts, scope_entries}``) and scope-v3
-    (``{contracts, scope_entries, classified_commits}``). Missing keys
-    default to empty lists so the function never raises on shape drift.
-
-    Raises ``LLMUnavailableError`` on call failure or unparseable output.
-    Hallucination filtering happens later in ``validate_contracts``.
+    Missing keys default to empty so shape drift never raises. Raises ``LLMUnavailableError`` on call failure or
+    unparseable output.
     """
     from services.discovery.audit_reports_llm import _parse_json_array, _parse_json_object
 
     prompt = _build_prompt(sections, title, auditor)
     response, model = _call_llm(prompt)
 
-    # Try the new object form first — it carries more information.
     parsed_obj = _parse_json_object(response)
     if parsed_obj is not None and (
         "contracts" in parsed_obj or "scope_entries" in parsed_obj or "classified_commits" in parsed_obj
@@ -384,8 +334,7 @@ def extract_scope_with_llm(
         names = _dedupe_names(parsed_obj.get("contracts"))
         scope_entries = _dedupe_entries(parsed_obj.get("scope_entries"))
         classified_commits = _dedupe_classified_commits(parsed_obj.get("classified_commits"))
-        # Ensure every scope_entry's name is also in contracts — the prompt
-        # requires this but LLMs drift. Silently add missing ones.
+        # The prompt requires it but LLMs drift.
         known = {n.lower() for n in names}
         for e in scope_entries:
             if e["name"].lower() not in known:
@@ -393,7 +342,6 @@ def extract_scope_with_llm(
                 known.add(e["name"].lower())
         return names, scope_entries, classified_commits, response, model
 
-    # Fall back to legacy array form.
     parsed = _parse_json_array(response)
     if parsed is None:
         raise LLMUnavailableError(f"LLM returned unparseable output: {response[:200]!r}", failure_kind="parse")

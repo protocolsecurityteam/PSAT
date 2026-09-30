@@ -1,10 +1,4 @@
-"""In-process sliding-window rate limiter.
-
-Single-web-machine deployment: state is per-process and memory-only by
-design (no Redis / shared store). A multi-worker deployment therefore
-permits up to workers×limit requests in aggregate — an accepted first cut,
-not a defect.
-"""
+"""In-process sliding-window rate limiter. Per-process by design, so N workers allow N×limit in aggregate."""
 
 from __future__ import annotations
 
@@ -19,10 +13,9 @@ if TYPE_CHECKING:
 
 
 def client_ip(request: Request) -> str:
-    """Use only the boundary's verified visitor identity, otherwise the socket peer.
+    """Only the boundary's verified visitor identity, else the socket peer.
 
-    Uvicorn proxy-header rewriting must remain disabled. Local/private previews
-    intentionally ignore all forwarded headers; network access grants no identity.
+    Keep uvicorn proxy-header rewriting disabled.
     """
     state = getattr(request, "state", None)
     trusted = getattr(state, "edge_visitor_ip", None)
@@ -35,21 +28,11 @@ def client_ip(request: Request) -> str:
 class SlidingWindowRateLimiter:
     """Per-key sliding-window limiter.
 
-    ``hit(key)`` records one request and returns ``None`` when within
-    budget, or the integer seconds to wait before retrying (>=1) when the
-    key has already reached ``limit`` requests inside the trailing
-    ``window_s`` seconds. An over-limit call is NOT recorded, so a client
-    that keeps hammering does not push its own window forward indefinitely.
+    ``hit(key)`` returns ``None`` within budget, else seconds to wait (>=1). Over-limit hits aren't recorded, so
+    hammering doesn't extend the window. ``limit <= 0`` disables it.
 
-    ``limit <= 0`` disables the limiter (every request is allowed) — the
-    env-override escape hatch used to turn a route's limit off.
-
-    Cost invariant: this runs on every request, so a hit must be O(1) in the
-    number of active keys. The hot path prunes only the hit key's own window;
-    stale buckets are reclaimed by an amortized full sweep every
-    ``sweep_every`` hits, and ``max_keys`` caps memory so one distributed (or
-    IPv6-/64-spraying) source cannot inflate the bucket count and turn the
-    limiter into a self-DoS amplifier.
+    Hits are O(1) in active keys: only the hit key is pruned, a full sweep runs every ``sweep_every`` hits, and
+    ``max_keys`` caps memory against key-spraying.
     """
 
     def __init__(
@@ -65,18 +48,13 @@ class SlidingWindowRateLimiter:
         self._max_keys = max_keys
         self._sweep_every = max(1, sweep_every)
         self._buckets: dict[Hashable, deque[float]] = {}
-        # Sync route handlers run in the threadpool, so concurrent hits on
-        # one key can race the read-modify-write below; the lock keeps the
-        # count exact.
+        # Sync handlers run in the threadpool.
         self._lock = threading.Lock()
         self._hits_since_sweep = 0
-        # Full-sweep counter — observability and a test spy: it must grow far
-        # slower than the hit count (amortized), never once per hit.
+        # Must grow far slower than hits (amortized); a test spy.
         self._full_sweeps = 0
 
     def _sweep(self, now: float) -> None:
-        """Full O(active keys) reclaim. Amortized: called once per
-        ``sweep_every`` hits, never on the per-hit hot path."""
         self._full_sweeps += 1
         self._hits_since_sweep = 0
         for key in list(self._buckets.keys()):
@@ -98,19 +76,12 @@ class SlidingWindowRateLimiter:
             bucket = self._buckets.get(key)
             if bucket is None:
                 if len(self._buckets) >= self._max_keys:
-                    # At cap. Expired/empty buckets are already reclaimed by
-                    # the amortized sweep above; anything left is an in-window
-                    # bucket. Invariant: an in-window bucket is NEVER evicted
-                    # to admit a new key — a new key that cannot get a slot is
-                    # limited, not let through. Evicting an active bucket would
-                    # reset a legitimate client's window, so a flood of fresh
-                    # keys could bypass the limit; rejecting cannot.
+                    # At cap: never evict an in-window bucket for a new key, or a flood of fresh keys resets legitimate
+                    # windows and bypasses the limit.
                     return max(1, int(self.window_s))
                 bucket = deque()
                 self._buckets[key] = bucket
 
-            # Hot path: prune only THIS key's window — O(bucket), independent
-            # of the number of active keys.
             while bucket and bucket[0] + self.window_s < now:
                 bucket.popleft()
             if len(bucket) >= self.limit:

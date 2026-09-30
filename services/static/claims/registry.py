@@ -1,17 +1,8 @@
-"""The claim registry — the structural anti-creep mechanism.
+"""The claim registry: claims are only constructible through :func:`emit_claim`, and an unregistered ``claim_id`` is
+a hard error, so an unevidenced label is unrepresentable.
 
-Claims are constructible only through :func:`emit_claim`, and a ``claim_id`` not
-present here is a hard error, so an unevidenced label is *unrepresentable*
-rather than reviewable-away. Each :class:`RegistryEntry` pairs a written claim
-sentence with the machine-checkable evidence predicates a witness-replay test
-re-verifies — a contract-level ``gate`` and a per-function ``trigger`` over the
-Plane-0 facts — the legacy label string it projects to (or ``None``), and the
-consumer family that keys off it.
-
-Matcher modules do not populate this dict directly; they use the
-``@claim_matcher`` decorator (``decorator.py``), which registers the entry and
-its trigger together. Auto-discovery (``matchers/__init__.py``) imports every
-matcher module so those decorators run.
+Each entry pairs a claim sentence with its ``gate`` and ``trigger`` evidence predicates, its legacy label, and its
+consumer family. Matchers register through ``@claim_matcher``.
 """
 
 from __future__ import annotations
@@ -32,10 +23,7 @@ from .types import (
     Witness,
 )
 
-# Contract-level corroboration (sibling selectors / views / sink shapes a
-# standard mandates). ``True`` means "this claim may apply to this contract".
 Gate = Callable[[ClaimContext], bool]
-# Per-function evidence check. Returns the tier + witness on a hit, else ``None``.
 Trigger = Callable[[ClaimContext, str], ClaimEvidence | None]
 
 
@@ -53,8 +41,7 @@ _REGISTRY: dict[str, RegistryEntry] = {}
 
 
 def register(entry: RegistryEntry) -> RegistryEntry:
-    """Add ``entry`` to the registry, enforcing the entry contract. Raises on a
-    malformed or duplicate registration (loud at import time)."""
+    """Add ``entry``; raises on a malformed or duplicate registration."""
     if not entry.claim_id:
         raise ValueError("claim_id must be non-empty")
     if entry.claim_id in _REGISTRY:
@@ -73,7 +60,6 @@ def register(entry: RegistryEntry) -> RegistryEntry:
 
 
 def registry() -> Mapping[str, RegistryEntry]:
-    """Read-only view of the registered claims."""
     return MappingProxyType(_REGISTRY)
 
 
@@ -86,14 +72,11 @@ def entry_for(claim_id: str) -> RegistryEntry:
 
 
 def legacy_projections() -> dict[str, str | None]:
-    """``claim_id -> legacy effect_labels string`` so consumers migrate on their
-    own schedule."""
     return {claim_id: entry.legacy_projection for claim_id, entry in _REGISTRY.items()}
 
 
 def emit_claim(claim_id: str, tier: Tier, witness: Witness) -> Claim:
-    """Mint a claim, or fail closed. An unregistered ``claim_id`` or a ``tier``
-    outside the Literal is a hard error — the whole point of the registry."""
+    """Mint a claim; an unregistered ``claim_id`` or unknown tier is a hard error."""
     if claim_id not in _REGISTRY:
         raise ValueError(f"unregistered claim_id {claim_id!r}; register it in a claims matcher module before emitting")
     if tier not in TIERS:
@@ -106,16 +89,10 @@ def _tier_rank(tier: str) -> int:
 
 
 def resolve_claim_precedence(claims: Iterable[Claim]) -> list[Claim]:
-    """The per-function precedence/dedup rule: collapse witnesses that assert the
-    SAME ``claim_id`` and keep only the strongest tier (``standard_exact`` beats
-    ``idiom_structural`` beats ``policy_derived``), so a consumer never sees one
-    claim sentence at two provenance levels.
+    """Keep only the strongest tier per ``claim_id`` on a function, sorted deterministically.
 
-    Precedence is keyed on the atomic ``claim_id``, never a coarser namespace:
-    sibling claims in a family are distinct operations — ``pause.set`` and
-    ``pause.unset``, ``supply.mint`` and ``supply.burn``, ``timelock.execute``
-    and ``exec.arbitrary`` — and are all preserved. Returns a deterministically
-    sorted list."""
+    Keyed on the exact id: sibling claims (``pause.set`` vs ``pause.unset``) are distinct operations.
+    """
     best: dict[str, Claim] = {}
     for claim in claims:
         claim_id = claim["claim_id"]

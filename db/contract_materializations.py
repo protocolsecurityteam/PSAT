@@ -1,50 +1,14 @@
 """Cross-job, cross-process materialization cache.
 
-A row per ``(chain, bytecode_keccak)`` holding the static analysis +
-tracking-plan bundle so two impl jobs requesting the same contract pay
-the expensive forge+Slither cost exactly once. Concurrent requests are
-serialized via ``pg_advisory_xact_lock(hashtext(chain || ':' || keccak))``:
-the lock winner runs the builder; the loser blocks on the lock, finds
-``status='ready'`` on its second read, and returns the cached bundle
-without rebuilding.
+One row per ``(chain, bytecode_keccak)`` holding the static analysis and tracking-plan bundle, so identical bytecode
+pays forge+Slither once. Concurrent requests coalesce on ``pg_advisory_xact_lock(hashtext(chain || ':' || keccak))``.
+Each entry point opens its own short session so callers don't share a connection with blocking locks.
 
-The module is deliberately small and stateless — every entry point opens
-its own short-lived session so the caller doesn't have to share its DB
-connection with potentially blocking advisory locks.
+``chain`` is always the canonical decimal id (:func:`utils.chains.chain_cache_token`); ``None`` means mainnet ``"1"``.
 
-The ``chain`` key is always the canonical decimal-string chain id (``"1"``,
-``"8453"``): callers may pass a chain name, alias, id,
-or ``None``, and :func:`utils.chains.chain_cache_token` collapses them all
-onto the id token so a name-keyed writer and an id-keyed reader hit the
-same row. ``None``/empty resolves to the mainnet token ``"1"``, matching
-how ``Job.request['chain']`` defaults.
-
-Bundle storage: the ``analysis`` and ``tracking_plan`` payloads can be
-multi-megabyte JSON blobs (a Compound-v3-class contract analysis is
-~5-20 MB). Postgres JSONB stores fine but detoasts on every read,
-inflates page-cache pressure on this hot table, and slows backup /
-dump / restore. The schema therefore carries paired columns:
-
-  - ``analysis`` (JSONB) and ``analysis_blob_key`` (Text)
-  - ``tracking_plan`` (JSONB) and ``tracking_plan_blob_key`` (Text)
-
-When object storage is configured (``ARTIFACT_STORAGE_*`` env vars set,
-``db.storage.get_storage_client()`` returns non-None) new writes go to
-blob storage and the JSONB columns are persisted as NULL. The blob_key
-columns are then the source of truth. When storage is unconfigured
-(local dev, offline tests without minio) writes fall back to inline
-JSONB and blob_key is NULL.
-
-Reads are always handled by ``hydrate_analysis`` / ``hydrate_tracking_plan``
-which try the blob first and transparently fall back to inline JSONB.
-That fallback is what lets pre-migration rows keep working while the
-backfill (``scripts/backfill_contract_materializations_to_blob.py``)
-catches up — and what insulates the pipeline from a transient Tigris
-outage when the inline copy still exists. When it does not, the read
-raises ``StorageContentIncomplete``: "the bucket could not answer" and
-"this row stored nothing" are different facts, and the caller
-(``services/resolution/recursive``) turns the second into an empty
-analysis that the effects probe is then seeded from.
+Payloads can be many MB, so with object storage configured they go to blobs (``*_blob_key``) and the JSONB columns stay
+NULL; otherwise they're inline. ``hydrate_*`` reads the blob and falls back to inline; with neither available it raises
+``StorageContentIncomplete``, since "the bucket couldn't answer" differs from "nothing was stored".
 """
 
 from __future__ import annotations
@@ -73,100 +37,18 @@ from utils.chains import chain_cache_token
 
 logger = logging.getLogger(__name__)
 
-# Analyzer/pipeline schema version stamped on every materialized row. The read
-# paths (``find_by_keccak``/``find_by_address``/``materialize_or_wait``) only
-# serve a row whose ``analysis_schema_version`` equals this constant, so a row
-# written by an older analyzer reads as a miss and is rebuilt. Bump by hand only
-# when the static-analysis / tracking-plan / predicate-tree *output shape*
-# changes — deliberately NOT tied to a git SHA, which would cold-rebuild every
-# multi-MB forge+Slither bundle on unrelated deploys (frontend, docs, workers).
-# v2: the effects sink emitter resolves a library-wrapped/cast token receiver to
-# the state var it aliases (was a Slither temporary) and records a canonical
-# selector for a UDT-param direct call — both change the persisted sink shape, so
-# an existing deployment must rebuild rather than serve materializations written
-# against the old heads.
-# v3: ``computed`` operands carry ``derived_from`` (the origins that reached the
-# value through the arguments of the computation that produced it), so the
-# predicate-tree output shape changed. Without this bump a materialized row keeps
-# serving trees in which a hash-commitment gate is unbound from the parameters it
-# commits, and the fix never reaches any deployment already in the cache.
-# v4: ``view_call`` / ``external_call`` operands now carry ``derived_from`` too,
-# and an un-lowerable single-address-param SELF gate is emitted as an
-# ``external_set`` descriptor instead of a bare-bool leaf. A v3 tree records
-# neither, so its caller-tainted role gate still reads PUBLIC — the fix would
-# never reach a deployment already in the cache. v4 also pins provenance frame
-# purity: a parameter's origin set never unions other call sites' arguments
-# (the entry-parameter Phi is excluded), so ``derived_from`` is frame-local.
-# Both landed within the unreleased v4 window — no v4 row was ever
-# materialized under the pre-purity shape (verified: local DB carries only
-# v2/v3 rows; production runs pre-v4 code).
-# Also in the same unreleased v4 window: operand
-# tie-breaking is now cross-process stable — ``provenance._digest`` derives
-# ``callee_args_digest`` from content instead of ``hash()``, so the operand
-# slots that previously flickered with PYTHONHASHSEED settle to one canonical
-# byte form. The tree SCHEMA gains and loses no key, but WHICH computed source
-# wins a slot changes, and ``derived_from`` on the winner is a witness input:
-# ``claims/matchers/_facts.param_constraints`` reads it to mint the
-# destination-constraint fragment. The verdict movement is retreat-from-proof
-# by construction (its magnitude is base-sample-dependent — the pre-fix
-# tie-break varies even at a fixed seed); that and the cache non-bump
-# decision are recorded at ``EFFECT_CACHE_SCHEMA_VERSION``
-# (db/effect_cache.py), where the probe-input consumers live. Noted per the
-# same-unreleased-version precedent rather than minting a version no row was
-# ever written under.
-# v5: an ``external_bool`` leaf carries ``authority_role='delegated_authority'``
-# (and its ``external_set``/``authority_contract`` descriptor) only when the
-# callee is GATE-SHAPED (view/pure/nonview_library, or the void-call
-# ``bytes32[]`` merkle-witness carve-out) — a v4 tree still stamps delegated
-# authority on value-movement calls (``permit(msg.sender,…)``,
-# ``transferFrom(msg.sender,…)``, ``burnShares(msg.sender,…)``,
-# ``vault.enter(msg.sender,…)``), and a materialized v4 row would keep minting
-# the fabricated ``caller_gate`` controllers those leaves produced (PR-161:
-# 21 controller rows, incl. wstETH published as a controller of
-# WithdrawalQueueERC721). Result-checked const-compare external_bool leaves
-# now also carry ``callee_state_mutability``/``callee_signature``/``gate_kind``.
-# Same v5 window: pause-var classification requires a LATCH shape (bool flag;
-# constant-toggle uint; a uint read by a revert-carrying modifier — directly
-# or through a helper call; or a uint a non-writer's revert read compares for
-# EQUALITY against a CONSTANT, tested on the predicate-leaf plane so
-# polarity-folded if/revert custom-error gates, getter hops, and mask
-# arithmetic all count, with a same-node IR fallback for degraded trees), so
-# a governed duration like OZ TimelockController's ``_minDelay`` — whose
-# revert read is RELATIONAL against a parameter — is no longer classified as
-# a pause var, and its comparison leaves lose the ``authority_role='pause'``
-# stamp v4 trees carried.
-# Same v5 window: ``subject.source_verified`` carries the FETCH's verification fact
-# out of ``contract_meta.json`` and has three states, where a v4 row holds a two-state
-# boolean computed as ``bool(project_dir.rglob("src/**/*.sol"))`` — a Foundry-layout
-# glob that published FALSE for 9 of 90 Etherscan-verified contracts on the 2026-07-28
-# run (Lido, WithdrawalQueueERC721, two TimelockControllers, …), all of them analysed
-# from that verified source in the same job. Serving a cached v4 subject would keep
-# republishing that FALSE into ``contract_summaries.source_verified`` and the
-# frontend's data-confidence axis; the version was already minted on this unreleased
-# branch and this rides it.
-# v6: predicate-tree operands carry the element-record fields — which base
-# variable an element read is rooted in, the member path reached on it, and
-# which parameter keys it. A v5 tree records none of them, and the self-service
-# payout witness reads a missing base variable as "not determined", never as
-# "not an element read" — so a served v5 tree would silently withhold the
-# witness on every cached deployment while a rebuilt one proves it, which is a
-# verdict that depends on cache age rather than on the code. Minted with the
-# safety prep (index-based operand exclusion, element-aware operand ordering)
-# so the shape change and its invalidation land together rather than thrashing
-# through ``_bundle_differs``, which compares the whole serialized tree.
+# Stamped on every row; reads serve only matching rows, so older rows rebuild. Bump by hand when the analysis,
+# tracking-plan or predicate-tree output shape changes; not tied to a git SHA, which would rebuild every multi-MB bundle
+# on unrelated deploys. If the change also moves an effects probe input, consider ``EFFECT_CACHE_SCHEMA_VERSION``
+# (db/effect_cache.py). Bump reasons are in the commit history.
 ANALYSIS_SCHEMA_VERSION = 6
 
 
-# ── Provenance ─────────────────────────────────────────────────────────────
-# Who established a row, and from what. Recorded because a materialization is
-# the versioned store monitoring enrolls from: invariant 7 forbids a per-job
-# artifact entering it without the source job written down, and once three
-# producers exist "which one wrote this" stops being reconstructable.
+# Who produced a row and from which job; invariant 7 requires the source job for anything monitoring enrolls from.
 PRODUCED_BY_RESOLUTION = "resolution"
 PRODUCED_BY_PIPELINE = "pipeline"
 PRODUCED_BY_PROMOTION_SWEEP = "promotion_sweep"
 
-# What :func:`publish_materialization` did, as a token the caller reports.
 PUBLISH_WRITTEN = "written"
 PUBLISH_REFRESHED = "refreshed"
 PUBLISH_ALREADY_CURRENT = "already_current"
@@ -181,11 +63,10 @@ def build_provenance(
     source_job_id: Any = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """The provenance stamp for one row write.
+    """The provenance stamp for one write.
 
-    ``source_job_id`` is written even when it is None: the producer is known
-    and the job is not, and those are two different facts. A NULL
-    ``provenance`` column means no producer was recorded at all.
+    ``source_job_id`` is written even when None (producer known, job unknown); a NULL ``provenance`` means nothing was
+    recorded.
     """
     return {
         "produced_by": produced_by,
@@ -195,14 +76,9 @@ def build_provenance(
 
 
 def _builder_staleness_s() -> float:
-    """How long a ``status='building'`` row stays trusted as in-flight.
+    """How long a ``building`` row is trusted as in flight before a crashed builder is presumed and taken over.
 
-    A worker that started a build longer ago than this is presumed dead
-    (process crash, SIGKILL on OOM, machine restart). The next caller
-    takes over the build. Default 15 minutes covers the worst observed
-    forge+Slither+predicate-pipeline run (~6.5 min on EtherFi contracts
-    in PR-79) with comfortable headroom; tunable via env for incident
-    response.
+    Default 15 min covers the slowest observed build (~6.5 min); env-tunable.
     """
     try:
         return max(60.0, float(os.getenv("PSAT_MATERIALIZE_BUILDER_STALENESS_S", "900")))
@@ -211,11 +87,8 @@ def _builder_staleness_s() -> float:
 
 
 def _wait_poll_interval_s() -> float:
-    """How long the loser sleeps between polls while waiting on a winner.
-
-    Short enough that a fast cache hit (~10s build) doesn't cost extra
-    latency; long enough that 100 waiting callers don't hammer the DB
-    advisory-lock space.
+    """Poll interval while waiting on another builder: short for fast builds, long enough not to hammer the lock
+    space.
     """
     try:
         return max(0.05, float(os.getenv("PSAT_MATERIALIZE_WAIT_POLL_INTERVAL_S", "1.0")))
@@ -224,11 +97,9 @@ def _wait_poll_interval_s() -> float:
 
 
 def is_enabled() -> bool:
-    """Env-gated kill switch (mirrors ``PSAT_BYTECODE_PG_CACHE``).
+    """Env kill switch (like ``PSAT_BYTECODE_PG_CACHE``), default on.
 
-    Default ON in production. Tests that don't intend to exercise this
-    layer turn it off via the autouse ``_scrub_contract_materializations_env``
-    fixture; tests that do exercise it re-enable via ``cm_session_local``.
+    Tests disable it via ``_scrub_contract_materializations_env`` and re-enable via ``cm_session_local``.
     """
     return os.getenv("PSAT_CONTRACT_MATERIALIZATIONS", "1").lower() in ("1", "true", "yes")
 
@@ -242,13 +113,8 @@ def _normalize(chain: str | int | None, address: str, bytecode_keccak: str) -> t
 
 
 def _blob_key(chain_norm: str, keccak_norm: str, kind: str) -> str:
-    """Deterministic blob key for an analysis/tracking_plan payload.
-
-    ``kind`` is the payload name without extension (``"analysis"`` or
-    ``"tracking_plan"``). Includes the PR-preview prefix from
-    ``ARTIFACT_STORAGE_PREFIX`` so previews scope cleanly under one
-    bucket. Path separators around chain and keccak make S3-console
-    browsing usable.
+    """Deterministic blob key for a payload (``kind`` is ``"analysis"`` or ``"tracking_plan"``), with the
+    ``ARTIFACT_STORAGE_PREFIX`` preview prefix.
     """
     return f"{_key_prefix()}contract_materializations/{chain_norm}/{keccak_norm}/{kind}.json"
 
@@ -259,13 +125,9 @@ def find_by_keccak(
     chain: str | int | None,
     bytecode_keccak: str,
 ) -> ContractMaterialization | None:
-    """Return the row for ``(chain, bytecode_keccak)`` if status='ready'.
+    """The ready, current-version row for ``(chain, bytecode_keccak)``.
 
-    ``status='pending'`` rows are NOT returned — a pending row means a
-    builder is still in flight; the caller should take the advisory
-    lock and re-read inside it. Rows stamped with a different
-    ``analysis_schema_version`` are likewise skipped (read as a miss) so
-    a bumped analyzer rebuilds rather than serving a stale bundle.
+    Pending rows aren't returned (take the lock and re-read).
     """
     chain_norm = chain_cache_token(chain)
     keccak_norm = bytecode_keccak.lower() if bytecode_keccak.startswith("0x") else "0x" + bytecode_keccak.lower()
@@ -286,14 +148,7 @@ def find_by_address(
     chain: str | int | None,
     address: str,
 ) -> ContractMaterialization | None:
-    """Return the row for ``(chain, address)`` if status='ready'.
-
-    Address-keyed lookup is the legacy entry path — same-bytecode-different-address
-    contracts share one row keyed by keccak, but a known address still
-    resolves to that row via the unique index. A row stamped with a
-    different ``analysis_schema_version`` reads as a miss so a bumped
-    analyzer rebuilds rather than serving a stale bundle.
-    """
+    """The ready, current-version row for ``(chain, address)``, via the address unique index (the legacy entry path)."""
     chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()
     row = session.execute(
@@ -308,33 +163,16 @@ def find_by_address(
 
 
 def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: str) -> dict | None:
-    """Generic blob-or-inline read for analysis / tracking_plan columns.
+    """Blob-or-inline read for a payload column. Three outcomes:
 
-    Three outcomes, and a caller can tell them apart — which is the whole point,
-    because this function's output *is* the analysis state the resolution stage
-    reasons over and the effects probe is seeded from:
+      * ``dict``: present (blob, or inline when the blob is unreadable; stale beats crashing).
+      * ``None``: proven absent, no blob key and no inline (``status='failed'`` rows).
+      * ``StorageContentIncomplete``: a blob key whose content couldn't be obtained, with no inline copy. Returning
+    ``None`` there made a bucket outage read as "no analysis" and got cached as a witness. ``StorageContentAbsent`` when
+    the bucket answered with no object, else ``StorageContentNotDetermined``; ``workers.retry_policy`` classifies by
+    type.
 
-      * a ``dict`` — **proven present**: read from the blob, or from the inline
-        JSONB when the blob is unreadable but inline holds a (possibly stale)
-        copy. Serving stale beats crashing the pipeline, and it is still a real
-        payload rather than a claim about the subject.
-      * ``None`` — **proven absent**: the row records no blob key *and* no
-        inline payload, so nothing was ever stored for this column. On the
-        working DB this is exactly the 6 ``status='failed'`` rows, where no
-        analysis was ever produced.
-      * ``StorageContentIncomplete`` — the row records a blob key and we could
-        not obtain its content, with no inline fallback. Returning ``None`` here
-        is what let a bucket outage read as "this contract has no analysis, no
-        plan, no predicate trees" at ``services/resolution/recursive`` — and that
-        verdict then gets cached as a witness. Which subclass says why, and the
-        type is the only thing ``workers.retry_policy`` sees:
-        ``StorageContentAbsent`` when the bucket answered and holds no such
-        object (determined — a retry re-asks an answered question), else
-        ``StorageContentNotDetermined`` (unreachable, unconfigured, corrupt).
-
-    Callers that need to mutate the returned dict should ``copy.deepcopy``
-    it themselves — the inline JSONB read returns the ORM-cached dict
-    and mutations would leak across rows.
+    Deep-copy before mutating: the inline path returns the ORM-cached dict.
     """
     blob_key: str | None = getattr(row, blob_key_attr, None)
     inline: dict | None = getattr(row, inline_attr, None)
@@ -354,8 +192,7 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
     object_proven_absent = False
     client = get_storage_client()
     if client is None:
-        # blob_key set but storage unconfigured (e.g. an env that turned
-        # ARTIFACT_STORAGE_* off after the row was written). We cannot ask.
+        # A blob key but storage now unconfigured; we can't ask.
         reason = "storage is not configured"
     else:
         try:
@@ -363,11 +200,9 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
             parsed = json.loads(body.decode("utf-8"))
             if isinstance(parsed, dict):
                 return parsed
-            # The serializer always emits JSON objects for these
-            # payloads; a non-dict is corruption, not a normal case.
+            # Payloads are always JSON objects; anything else is corruption.
             reason = f"blob decoded to {type(parsed).__name__}, expected dict"
         except StorageKeyMissing as exc:
-            # The bucket was asked about every candidate and holds none of them.
             object_proven_absent = True
             reason = str(exc)
         except (StorageError, ValueError) as exc:
@@ -399,43 +234,29 @@ def _hydrate(row: ContractMaterialization, *, blob_key_attr: str, inline_attr: s
 
 
 def hydrate_analysis(row: ContractMaterialization) -> dict | None:
-    """Load the row's ``analysis`` payload, transparently picking the
-    blob path when ``analysis_blob_key`` is set and falling back to the
-    inline JSONB column otherwise. ``None`` means the row genuinely
-    has no analysis (nothing was ever stored — the ``status='failed'``
-    corner case). Raises ``StorageContentIncomplete`` when a blob key is
-    recorded but its content cannot be obtained: that is not the same fact and
-    must not reach a consumer as an empty analysis."""
+    """The row's ``analysis`` (blob, else inline).
+
+    ``None`` means nothing was stored; raises ``StorageContentIncomplete`` when a blob key's content can't be obtained.
+    """
     return _hydrate(row, blob_key_attr="analysis_blob_key", inline_attr="analysis")
 
 
 def hydrate_tracking_plan(row: ContractMaterialization) -> dict | None:
-    """Symmetric to ``hydrate_analysis`` for ``tracking_plan``, including the
-    ``StorageContentIncomplete`` third state."""
+    """Like ``hydrate_analysis``, for ``tracking_plan``."""
     return _hydrate(row, blob_key_attr="tracking_plan_blob_key", inline_attr="tracking_plan")
 
 
 def hydrate_predicate_trees(row: ContractMaterialization) -> dict | None:
-    """Load the row's predicate-tree artifact (semantic source of truth
-    for revert/auth guards). Returns None if the cache row predates the
-    predicate-pipeline migration (pre-c1d2e3f4a5b6) so callers can fall
-    back to rebuilding the artifact from the analysis dict if they need
-    mapping-writer enumeration. Raises ``StorageContentIncomplete`` when the
-    row records a blob key whose content cannot be obtained — "written before
-    the migration" and "the bucket is down" are different facts and the
-    fallback is only correct for the first."""
+    """The row's predicate trees.
+
+    ``None`` for rows predating c1d2e3f4a5b6 (callers may rebuild from the analysis). Raises
+    ``StorageContentIncomplete`` for an unreadable blob, which the rebuild fallback must not mask.
+    """
     return _hydrate(row, blob_key_attr="predicate_trees_blob_key", inline_attr="predicate_trees")
 
 
 def _advisory_lock(session: Session, chain_norm: str, keccak_norm: str) -> None:
-    """Take ``pg_advisory_xact_lock`` for the dedup key.
-
-    ``hashtext`` is built into Postgres and returns a 32-bit signed int —
-    fine for the advisory-lock space which is a 64-bit int. Using the
-    composite ``chain || ':' || keccak`` rather than just keccak keeps
-    chains independent so an Ethereum and a Base contract sharing keccak
-    don't serialize on the same lock unnecessarily.
-    """
+    """Take ``pg_advisory_xact_lock`` on ``chain || ':' || keccak``, so chains sharing a keccak don't serialize."""
     session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
         {"key": f"{chain_norm}:{keccak_norm}"},
@@ -443,9 +264,7 @@ def _advisory_lock(session: Session, chain_norm: str, keccak_norm: str) -> None:
 
 
 def _put_blob(client, blob_key: str, payload: dict) -> None:
-    """Serialize and upload one payload. Errors propagate so the
-    enclosing transaction rolls back — avoids persisting a row that
-    points at a key the bucket doesn't have."""
+    """Upload one payload. Errors propagate so the transaction rolls back rather than point at a missing key."""
     body = json.dumps(payload, default=str).encode("utf-8")
     client.put(blob_key, body, JSON_CONTENT_TYPE)
 
@@ -455,14 +274,8 @@ def find_reusable_by_source_hash(
     *,
     source_content_hash: str,
 ) -> ContractMaterialization | None:
-    """Return any ``status='ready'`` current-version row with this source hash.
-
-    The cross-chain code-plane lookup (invariant 1): the bundle is a pure
-    function of the source, so a ready row for the same ``source_content_hash``
-    on *any* chain/address/keccak carries a bundle the new deployment can reuse.
-    Version-gated like the keccak/address reads so a bumped analyzer rebuilds
-    rather than serving a stale bundle. Returns the first match (all matches are
-    byte-identical bundles by construction).
+    """Any ready, current-version row with this source hash, on any chain (invariant 1): the bundle is a pure
+    function of the source, so all matches are identical.
     """
     if not source_content_hash:
         return None
@@ -488,13 +301,8 @@ def _copy_bundle_row(
 ) -> ContractMaterialization:
     """Write a ready row for ``(chain_norm, keccak_norm)`` reusing *donor*'s bundle.
 
-    Blob keys are SHARED, not copied: materialization blobs are content-addressed
-    (``contract_materializations/{chain}/{keccak}/{kind}.json``), written once,
-    and never deleted (no delete path touches them — only ``SourceFile`` /
-    ``Artifact`` orphans are cleaned up). Reads always dereference the row's
-    stored ``*_blob_key`` column, never re-derive it from ``(chain, keccak)``, so
-    the new row pointing at the donor's blob is safe and avoids re-uploading a
-    multi-MB payload. Inline JSONB (storage-unconfigured rows) is copied by value.
+    Blob keys are shared, not copied: blobs are content-addressed, never deleted, and reads use the stored key column.
+    Inline payloads are copied by value.
     """
     values = dict(
         chain=chain_norm,
@@ -511,9 +319,7 @@ def _copy_bundle_row(
         status="ready",
         error=None,
         builder_started_at=None,
-        # The donor's bundle, recorded as this row's own provenance: the copy is
-        # the recursion's write, and which row it came from is the fact that
-        # would otherwise be unreconstructable.
+        # Record the donor as provenance.
         provenance={
             **build_provenance(PRODUCED_BY_RESOLUTION),
             "reused_from": {"chain": donor.chain, "bytecode_keccak": donor.bytecode_keccak},
@@ -561,65 +367,27 @@ def materialize_or_wait(
     builder: Callable[[], Mapping[str, Any]],
     source_hash_fn: Callable[[], str | None] | None = None,
 ) -> ContractMaterialization:
-    """Look up or build the materialization row for the given content key.
+    """Look up or build the materialization row for a content key.
 
-    ``source_hash_fn`` enables cross-chain code-plane reuse (invariant 1). It is
-    called at most once, and only on the path where we would otherwise build (a
-    ``(chain, bytecode_keccak)`` miss) — so a cheap keccak hit never pays for
-    it. It returns the deployment's source content hash (see
-    ``services.discovery.fetch.source_content_hash``); if a ready row for that
-    hash already exists on any chain, its bundle is copied into this row and the
-    expensive ``builder()`` is skipped. When ``None`` (or it returns ``None``),
-    behaviour is exactly the pre-reuse keccak cache.
+    ``source_hash_fn`` enables cross-chain reuse (invariant 1); called at most once, only on a keccak miss. A ready row
+    with the same source hash is copied instead of building.
 
-    Three phases, each in its own short-lived transaction so no PG
-    connection sits idle during ``builder()``:
+    Three phases, each its own short transaction so no connection idles during ``builder()`` (Neon's pooler drops idle
+    SSL):
 
-      1. **Ready check + claim** — open a session, take the advisory lock,
-         re-read the row. Branch on status:
-           * ``ready`` → return it.
-           * ``building`` + ``builder_started_at`` recent → release lock,
-             sleep, retry phase 1. This is the wait path: the loser blocks
-             on the winner instead of running a duplicate builder.
-           * ``building`` + stale (older than ``_builder_staleness_s``) →
-             upsert ``status='building'`` with our timestamp and proceed
-             to phase 2. Stale rows mean the prior worker crashed or was
-             SIGKILLed; we take over.
-           * no row, ``failed``, or legacy ``pending`` → upsert
-             ``status='building'``, set ``builder_started_at = NOW()``,
-             release lock, proceed to phase 2.
-      2. **Build** — call ``builder()`` with no DB session held. The
-         bundle has ``contract_name``, ``analysis``, ``tracking_plan``,
-         and optionally ``predicate_trees``. Blob uploads (if storage
-         is configured) happen here too.
-      3. **Write** — open a fresh session, take the advisory lock, recheck
-         (a concurrent fresh-takeover may have written ``status='ready'``
-         while our builder was running — serve theirs, drop ours), else
-         upsert to ``status='ready'``, commit.
+      1. Under the lock, re-read: ``ready`` returns; a recent ``building`` releases and polls; a stale ``building``
+    (crashed worker), missing, ``failed`` or legacy ``pending`` row is claimed as ``building`` with our timestamp.
+      2. Build with no session held; upload blobs if configured.
+      3. Under the lock, recheck (a takeover may have finished first; serve theirs), else write ``ready``.
 
-    Why this shape: the original design released the lock between phase 1
-    and phase 2 to avoid keeping a PG connection idle for the multi-minute
-    builder (which trips Neon's pooler-side SSL idle timeout). But it
-    persisted *nothing* about in-flight builds, so two callers racing
-    through phase 1 within the build window both ran the builder — wasted
-    60-150 s of CPU per collision. The ``status='building'`` claim row +
-    ``builder_started_at`` lets the second caller wait on the first, while
-    the staleness check keeps a crashed worker from wedging the cache.
-
-    On builder failure, a fresh session writes a ``status='failed'`` row
-    with the exception text so an operator can triage, then re-raises.
-
-    On a blob upload failure the exception propagates without writing a
-    row — better to leave nothing committed than a row pointing at a
-    blob key the bucket doesn't have.
+    The ``building`` claim lets a second caller wait instead of duplicating a 60-150 s build. Builder failure writes
+    ``failed`` with the error, then re-raises. Blob upload failure writes nothing.
     """
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
     staleness_s = _builder_staleness_s()
     poll_interval_s = _wait_poll_interval_s()
 
-    # Computed lazily and at most once, only when we are about to build (a keccak
-    # miss). Kept off the cheap keccak-hit path so a same-chain re-run pays
-    # nothing extra.
+    # Lazy, only on a keccak miss.
     _src = {"done": False, "hash": None}  # type: dict[str, Any]
 
     def _get_source_hash() -> str | None:
@@ -629,16 +397,12 @@ def materialize_or_wait(
                 try:
                     _src["hash"] = source_hash_fn()
                 except Exception as exc:
-                    # A hash-computation failure must never fail-stop the build —
-                    # it only disables cross-chain reuse for this call.
+                    # Only disables cross-chain reuse for this call.
                     logger.debug("contract_materializations: source_hash_fn failed: %s", exc)
                     _src["hash"] = None
         return _src["hash"]
 
-    # ── Phase 1: ready check / claim under a short-lived lock ──────
-    # Loop: a ``status='building'`` row from another caller sends us to
-    # sleep+retry until that caller transitions us to ``ready`` (cache
-    # hit return) or the row goes stale (we take over).
+    # Phase 1: poll while another caller is building, until it's ready or stale.
     wait_deadline = time.monotonic() + staleness_s
     while True:
         with SessionLocal() as session:
@@ -652,9 +416,7 @@ def materialize_or_wait(
             if row is not None and row.status == "ready" and row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION:
                 session.commit()
                 return row
-            # An old-version 'ready' row falls through to the claim below and
-            # is rebuilt; its status is overwritten to 'building' then 'ready'
-            # with the current version in phase 3.
+            # An old-version ready row falls through to be rebuilt.
 
             if row is not None and row.status == "building":
                 started = row.builder_started_at
@@ -662,11 +424,10 @@ def materialize_or_wait(
                     (datetime.now(timezone.utc) - started).total_seconds() if started is not None else staleness_s + 1
                 )
                 if age_s < staleness_s and time.monotonic() < wait_deadline:
-                    # Active builder elsewhere — release the lock and poll.
                     session.commit()
                     time.sleep(poll_interval_s)
                     continue
-                # Fall through: take over (insert/update our claim).
+                # Stale: take over.
                 logger.info(
                     "contract_materializations: taking over stale building row for %s:%s (age=%.1fs)",
                     chain_norm,
@@ -674,13 +435,8 @@ def materialize_or_wait(
                     age_s,
                 )
 
-            # Cross-chain code-plane reuse: before claiming a build, see whether
-            # an identical verified-source set was already analyzed under any
-            # ``(chain, keccak)``. Per-chain immutables make this deployment's
-            # keccak miss, but the source-derived bundle is reusable, so we copy
-            # it into this ``(chain, keccak)`` row and skip the forge/Slither
-            # build entirely. Runs under our advisory lock (we hold the
-            # ``(chain, keccak)`` lock), so the write races cleanly with siblings.
+            # Cross-chain reuse: an identical source set analysed under another ``(chain, keccak)`` is copied here
+            # instead of building (per-chain immutables make the keccak miss). Under our lock.
             src_hash = _get_source_hash()
             if src_hash:
                 donor = find_reusable_by_source_hash(session, source_content_hash=src_hash)
@@ -702,7 +458,6 @@ def materialize_or_wait(
                         source_content_hash=src_hash,
                     )
 
-            # Claim: upsert ``status='building'`` and record our start time.
             now_dt = datetime.now(timezone.utc)
             claim_stmt = pg_insert(ContractMaterialization).values(
                 chain=chain_norm,
@@ -729,7 +484,7 @@ def materialize_or_wait(
             session.commit()
             break
 
-    # ── Phase 2: builder + blob uploads, no DB connection held ─────
+    # Phase 2: build and upload, no DB connection held.
     try:
         bundle = builder()
     except Exception as exc:
@@ -773,10 +528,7 @@ def materialize_or_wait(
 
     client = get_storage_client()
     if client is not None:
-        # Blob uploads happen before reacquiring the PG lock so a slow
-        # Tigris PUT doesn't push us back into idle-connection territory.
-        # On failure, propagate without writing a row — the next caller
-        # retries the build cleanly.
+        # Uploads before re-locking so a slow PUT doesn't idle the connection; failures write no row.
         if analysis_inline is not None:
             analysis_blob_key = _blob_key(chain_norm, keccak_norm, "analysis")
             _put_blob(client, analysis_blob_key, analysis_inline)
@@ -790,14 +542,11 @@ def materialize_or_wait(
             _put_blob(client, predicate_trees_blob_key, predicate_trees_inline)
             predicate_trees_inline = None
 
-    # ── Phase 3: write under a short-lived lock ────────────────────
+    # Phase 3.
     with SessionLocal() as session:
         _advisory_lock(session, chain_norm, keccak_norm)
 
-        # Recheck: a stale-takeover caller may have raced past phase 1
-        # with us and committed first. Their bundle is keccak-equivalent
-        # (same bytecode → same static analysis), so we serve it and
-        # discard ours.
+        # A takeover may have committed first; its bundle is equivalent, so serve it.
         existing = session.execute(
             select(ContractMaterialization).where(
                 ContractMaterialization.chain == chain_norm,
@@ -826,10 +575,7 @@ def materialize_or_wait(
             source_content_hash=_src["hash"],
             status="ready",
             builder_started_at=None,
-            # No source job: the recursion materializes whatever dependency it
-            # walks onto, so the job that happens to be walking is not the job
-            # this bundle is *of*. The producer is known, the job is not, and
-            # the stamp says exactly that.
+            # No source job: the walking job isn't the job this bundle is of.
             provenance=build_provenance(PRODUCED_BY_RESOLUTION),
             analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         )
@@ -856,10 +602,7 @@ def materialize_or_wait(
         )
         session.execute(stmt)
         session.commit()
-        # Phase 1's claim already loaded the row into the identity map
-        # with ``status='building'``; ``expire_all`` forces the next read
-        # to refetch the row's columns from Postgres so callers see the
-        # post-upsert state (``status='ready'``, predicate_trees, …).
+        # Phase 1 cached the ``building`` row; refetch so callers see ``ready``.
         session.expire_all()
 
         ready = session.execute(
@@ -878,13 +621,9 @@ def _publish_blobs(
     tracking_plan: dict,
     predicate_trees: dict | None,
 ) -> tuple[dict | None, dict | None, dict | None, str | None, str | None, str | None]:
-    """Upload the bundle when storage is configured; else keep it inline.
+    """Upload the bundle if storage is configured, else keep it inline.
 
-    Returns ``(analysis_inline, tracking_plan_inline, predicate_trees_inline,
-    analysis_key, tracking_plan_key, predicate_trees_key)`` — the same
-    inline-or-blob split ``materialize_or_wait`` phase 2 produces. Upload
-    failures propagate: a row pointing at a key the bucket does not have reads
-    as "this contract's payload could not be produced" forever after.
+    Returns the inline/blob split ``materialize_or_wait`` uses. Upload failures propagate.
     """
     client = get_storage_client()
     if client is None:
@@ -913,60 +652,30 @@ def publish_materialization(
     provenance: dict[str, Any],
     refresh_on_differ: bool = False,
 ) -> str:
-    """Write a ready row for an ALREADY-BUILT bundle. Returns an outcome token.
+    """Write a ready row for an already-built bundle; returns an outcome token.
 
-    The producer-side counterpart to :func:`materialize_or_wait`: that function
-    exists to *build* a bundle under request coalescing, this one exists to
-    *record* one the caller already holds — the main pipeline's own analysis
-    artifacts (F4a), or a completed job's artifacts promoted into the versioned
-    store (F4b). Coverage then follows from analysis having run, instead of from
-    which dependencies the authority recursion happened to visit.
+    The record-side counterpart to :func:`materialize_or_wait`, used for the pipeline's own analysis (F4a) and for
+    promoting completed jobs' artifacts (F4b).
 
-    **Fill-or-refresh, never a downgrade.** Any row that is not ready at the
-    current schema version is written outright — absent, ``failed``, ``pending``,
-    superseded, or ``building``. Overwriting a live ``building`` claim is safe
-    and deliberate: that builder's phase-3 recheck finds our ready row and
-    discards its own duplicate build, which is the same coalescing
-    ``materialize_or_wait`` performs between two builders.
+    Any row not ready at the current version is overwritten (a live ``building`` claim then discards its duplicate in
+    phase 3). A ready current row is compared:
 
-    A ready row at the current schema version is compared, not assumed:
+    * ``refresh_on_differ=True``: the caller produced this bundle under the current analyzer, so a difference means it's
+    newer; refresh. Analyzer improvements don't always bump the version.
+    * ``refresh_on_differ=False``: the caller is passing on someone else's older bundle; the stored row stands (or two
+    such callers would flip-flop forever).
 
-    * ``refresh_on_differ=True`` — the caller's bundle was PRODUCED BY THE CALLER
-      under the current analyzer, so where it DIFFERS from the stored bundle it
-      is the later record and the row is refreshed (``refreshed``). Identical
-      bytecode does not imply an identical bundle: the analyzer improves without
-      every improvement earning an ``ANALYSIS_SCHEMA_VERSION`` bump (a bump
-      invalidates the whole fleet at once and bills a re-analysis of it), so
-      without this a ready row is frozen forever and later analyzer work never
-      reaches the store it was written to.
-    * ``refresh_on_differ=False`` — the caller is passing on a bundle SOMEONE
-      ELSE produced earlier: the promotion sweep's older job artifact, or a
-      static-cache job's copy of an ancestor's. Same era is not the same as
-      later, and two such callers that disagree would take turns overwriting
-      each other forever, so the stored row stands.
+    Identical bundles return ``already_current`` and touch nothing (compared under the lock, before upload). A ready
+    row's ``address`` is never changed.
 
-    Either way an identical bundle returns ``already_current`` and touches
-    nothing — including the blobs, which is why the comparison happens under the
-    lock, before any upload. And a ready row's ``address`` is never flipped to
-    ours: that would move the row out from under the address already resolving
-    to it.
-
-    Refusals, each a fact the caller reports rather than a silent no-op:
+    Refusals:
 
     ``incomplete_bundle``
-        No analysis or no tracking plan. A ready row whose ``analysis`` is
-        absent reads to the resolution stage as *this contract has no analysis*
-        — a claim about the contract that a missing artifact never made.
+        Missing analysis or tracking plan; publishing it would claim "no analysis".
     ``keccak_bound_to_other_address``
-        A ready current row for this bytecode already names a different
-        address. One row per ``(chain, keccak)`` is the table's key, so this
-        address cannot be served by address lookup; saying so is honest, and
-        stealing the row is not.
+        A ready row for this bytecode already names another address.
     ``address_bound_to_other_keccak``
-        Another row already holds ``(chain, address)`` under a different
-        keccak (``uq_contract_materializations_chain_address``). Which bytecode
-        is current at that address is not something this writer witnessed, so
-        it does not overwrite the other row's claim.
+        Another row holds ``(chain, address)`` under a different keccak; we didn't witness which is current.
     """
     if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
         return PUBLISH_INCOMPLETE_BUNDLE
@@ -974,13 +683,8 @@ def publish_materialization(
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
     written = PUBLISH_WRITTEN
 
-    # One lock spans decide → upload → write. Holding it across the upload is
-    # what makes ``already_current`` mean what it says: deciding first and
-    # uploading second is the only order in which a row we decline to touch also
-    # keeps the payload it had. Unlike ``materialize_or_wait``, no builder runs
-    # inside this lock — the payload is already in memory and the uploads are a
-    # few PUTs, not the multi-minute forge+Slither pass the lock-release dance in
-    # that function exists to keep a connection out of.
+    # One lock spans decide, upload and write, so ``already_current`` also means the payload was untouched. No builder
+    # runs inside it.
     with SessionLocal() as session:
         _advisory_lock(session, chain_norm, keccak_norm)
         existing = session.execute(
@@ -999,9 +703,7 @@ def publish_materialization(
             session.commit()
             return outcome
 
-        # Re-checked here rather than only before the lock: the row that owns
-        # ``(chain, address)`` can appear between the two, and the unique index
-        # would then fail the insert instead of reporting the collision.
+        # Re-checked under the lock; the conflicting row can appear in between.
         conflict = session.execute(
             select(ContractMaterialization.bytecode_keccak).where(
                 ContractMaterialization.chain == chain_norm,
@@ -1079,12 +781,9 @@ def _bundle_differs(
     tracking_plan: dict,
     predicate_trees: dict | None,
 ) -> bool:
-    """Does the stored bundle say something other than the caller's?
+    """Whether the stored bundle differs from the caller's, on serialized payloads.
 
-    Compared on the serialized payloads, which is what a consumer reads. An
-    unreadable stored payload counts as DIFFERING: "the same" is a positive
-    claim, and a bucket that cannot answer has not made it. Refreshing on that
-    answer is safe — the caller's bundle is complete by the time we are here.
+    An unreadable stored payload counts as differing ("same" is a positive claim).
     """
     if existing is None:
         return True
@@ -1112,12 +811,8 @@ def _canonical(payload: dict | None) -> str | None:
 
 
 def builder_claim_is_stale(status: str | None, builder_started_at: datetime | None) -> bool:
-    """Is a ``building`` claim old enough that no builder is presumed behind it?
-
-    Same rule ``materialize_or_wait`` phase 1 takes over on
-    (:func:`_builder_staleness_s`), exported so the reconciler's census counts a
-    crashed worker's leftover claim as a row to rebuild rather than reporting
-    "a builder is running" about a process that died.
+    """Whether a ``building`` claim is stale (:func:`_builder_staleness_s`), exported so the reconciler counts
+    crashed claims as rows to rebuild.
     """
     if status != "building":
         return False
@@ -1130,10 +825,7 @@ def builder_claim_is_stale(status: str | None, builder_started_at: datetime | No
 
 
 def _publish_precheck(existing: ContractMaterialization | None, addr_norm: str) -> str | None:
-    """The outcome when *existing* forbids a write, else None.
-
-    One implementation for every read of "already current" so they cannot drift.
-    """
+    """The outcome when *existing* forbids a write, else None; one implementation so reads can't drift."""
     if existing is None:
         return None
     if existing.status != "ready" or existing.analysis_schema_version != ANALYSIS_SCHEMA_VERSION:

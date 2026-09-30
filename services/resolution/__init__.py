@@ -1,5 +1,3 @@
-"""Resolution package."""
-
 from .recursive import resolve_control_graph
 from .tracking import (
     build_control_snapshot,

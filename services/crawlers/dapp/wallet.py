@@ -1,9 +1,5 @@
-"""
-Honeypot wallet management.
-
-Generates a throwaway private key used to legitimately sign auth messages
-during DApp crawls. The wallet never holds real funds - balances are spoofed
-at the RPC level. A fresh key is generated per crawl session (in-memory only).
+"""Throwaway honeypot wallet: a real per-session key for signing auth messages, never real funds (balances are
+spoofed at the RPC level).
 """
 
 import json
@@ -13,8 +9,6 @@ from eth_account.messages import encode_defunct
 
 
 class HoneypotWallet:
-    """A real wallet with a real private key, but no real funds."""
-
     def __init__(self, private_key: str | None = None):
         if private_key:
             self.account = Account.from_key(private_key)

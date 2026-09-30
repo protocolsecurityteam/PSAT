@@ -212,8 +212,7 @@ def _normalize_text(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
-# Vocabulary shared by nearly every audit filename; a title made only of these
-# words identifies no particular document.
+# Words nearly every audit filename shares; a title of only these identifies nothing.
 _GENERIC_TITLE_TOKENS = frozenset(
     {
         "audit",
@@ -241,20 +240,14 @@ _UNKNOWN_AUDITORS = frozenset({"", "unknown", "n a", "na", "none", "anonymous", 
 
 
 def _auditor_key(value: Any) -> str:
-    """Normalized auditor name, or ``""`` when the value is a not-determined
-    sentinel rather than a firm."""
+    """Normalized auditor name, or ``""`` for a not-determined sentinel."""
     text = _normalize_text(value)
     return "" if text in _UNKNOWN_AUDITORS else text
 
 
 def _shared_name_tokens(protocol: Any, auditor: Any) -> frozenset[str]:
-    """Tokens a whole folder of candidates can be expected to share: the
-    protocol's own name (every file in the protocol's repo carries it) and the
-    report's own auditor (a firm publishes many reports into one folder).
-
-    Both the tokenized and the run-together spellings are included, so
-    ``"ether.fi"`` covers a title token ``"etherfi"`` as well as ``"ether"``
-    and ``"fi"``.
+    """Tokens a whole folder is expected to share: the protocol's name and the report's auditor, in tokenized and
+    run-together spellings (``"ether.fi"`` covers ``"etherfi"``, ``"ether"`` and ``"fi"``).
     """
     tokens: set[str] = set()
     for value in (protocol, auditor):
@@ -267,15 +260,10 @@ def _shared_name_tokens(protocol: Any, auditor: Any) -> frozenset[str]:
 
 
 def _distinctive_title(value: Any, shared_tokens: frozenset[str] = frozenset()) -> str:
-    """Normalized title, minus generic audit vocabulary, kept only when what
-    survives can tell one document from another.
+    """Normalized title minus generic vocabulary, kept only if it distinguishes documents.
 
-    ``"Hats Finance Audit"`` -> ``"hats finance"``; ``"Audit Report"`` -> ``""``.
-    A title is also discarded when every surviving token is one ``shared_tokens``
-    names, because such a title distinguishes nothing within the folder it would
-    be matched against: with ``shared_tokens={"etherfi", "nethermind"}``,
-    ``"EtherFi Draft Audit"`` -> ``""`` and ``"Nethermind Audit"`` -> ``""``.
-    An empty result carries no document identity and must never corroborate.
+    Discarded when every remaining token is in ``shared_tokens`` (e.g. ``"EtherFi Draft Audit"``). Empty never
+    corroborates.
     """
     tokens = [t for t in _normalize_text(value).split() if t not in _GENERIC_TITLE_TOKENS]
     if not any(token not in shared_tokens for token in tokens):
@@ -291,8 +279,7 @@ def _candidate_haystack(candidate: dict[str, Any]) -> str:
 
 
 def _contradicts_auditor(report_auditor: str, candidate: dict[str, Any], haystack: str) -> bool:
-    """True when the candidate PDF is attributable to a *different* firm than
-    the report names for itself."""
+    """True when the candidate PDF belongs to a different firm than the report names."""
     if not report_auditor:
         return False
     candidate_auditor = _auditor_key(candidate.get("auditor"))
@@ -304,16 +291,11 @@ def _contradicts_auditor(report_auditor: str, candidate: dict[str, Any], haystac
 def _corroborated_pdf_candidate(
     report: dict[str, Any], candidates: list[dict[str, Any]], protocol: Any = ""
 ) -> dict[str, Any] | None:
-    """Pick the one candidate PDF that is evidently *this* report's document.
+    """The one candidate PDF evidently this report's document, matched on its distinctive title or dependency
+    component.
 
-    Adoption must be earned by the report's own identity: its distinctive
-    title, or the dependency component it was discovered for. Position in the
-    folder listing, the protocol's name (which every file in the protocol's own
-    repo carries), and the auditor's name alone (a firm can publish many
-    reports in one folder) are not evidence of document identity — hence
-    ``_shared_name_tokens``, which strikes exactly those two names out of what
-    a title or component is allowed to be made of. Ambiguity — two candidates
-    corroborating equally — is not evidence either, so it adopts nothing.
+    Folder position, the protocol's name and the auditor's name alone aren't evidence (``_shared_name_tokens`` strikes
+    them). Ties adopt nothing.
     """
     report_auditor = _auditor_key(report.get("auditor"))
     shared = _shared_name_tokens(protocol, report.get("auditor"))
@@ -339,12 +321,9 @@ def _corroborated_pdf_candidate(
 
 
 def _prefer_repo_audit_pdf(report: dict[str, Any], repos: list[str], protocol: str, debug: bool = False) -> None:
-    """Attach a repo-hosted PDF to a PDF-less report — only when the PDF is
-    corroborated as this report's own document (see
-    :func:`_corroborated_pdf_candidate`). An uncorroborated report keeps no
-    ``pdf_url``: PDF-less is the honest state, and it also keeps the report's
-    ``url`` unique, which the ``(protocol_id, url)`` audit-report upsert needs
-    to persist it as its own row.
+    """Attach a repo PDF to a PDF-less report only when corroborated (:func:`_corroborated_pdf_candidate`).
+
+    Otherwise stay PDF-less, which also keeps the ``url`` unique for the ``(protocol_id, url)`` upsert.
     """
     if report.get("pdf_url") and _is_pdf_url(str(report.get("pdf_url"))):
         return
@@ -388,7 +367,6 @@ def _prefer_repo_audit_pdf(report: dict[str, Any], repos: list[str], protocol: s
 
 
 def enrich_audit_reports(audit_result: dict[str, Any], protocol: str, debug: bool = False) -> dict[str, Any]:
-    """Mutate and return ``audit_result`` with PDF, repo, and commit metadata."""
     reports = audit_result.get("reports")
     if not isinstance(reports, list):
         return audit_result

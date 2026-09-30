@@ -133,8 +133,7 @@ def _resolve_static_external_call_operand(
     if not rpc_url:
         return None
     block_tag = hex(block) if isinstance(block, int) else "latest"
-    # Pass-scoped dedup of this nullary callee getter (deterministic at a fixed block). Successful reads only:
-    # a revert/transient error is never cached, so behavior is byte-identical to the un-memoized path.
+    # Pass-scoped dedup; only successful reads are memoized.
     memo_key = ("ext_operand", rpc_url, callee_contract_address.lower(), selector, block_tag)
     if memo is not None and memo_key in memo:
         return {"source": "constant", "constant_value": memo[memo_key]}
@@ -232,16 +231,9 @@ def _promote_bound_caller_leaf(leaf: dict[str, Any]) -> None:
         leaf.get("gate_kind"),
         leaf.get("callee_signature"),
     ):
-        # An external_bool leaf may only be promoted to proven delegated
-        # authority when the static plane's discriminator says the callee is
-        # gate-shaped (view/pure ACL read, own-storage library consume, or the
-        # void merkle-witness carve-out). A nonview value-movement callee
-        # (``require(token.transferFrom(user, …))`` with ``user``
-        # caller-bound) stays ``business``: the caller-bound argument is the
-        # funds subject, not an authorization subject. A ``None``
-        # (not-determined) mutability likewise stays ``business`` — same as
-        # the discriminator's own (None, nonview) handling: a not-determined
-        # input must not mint the proven delegated-authority state.
+        # Promote to delegated authority only when the static discriminator says the callee is gate-shaped.
+        # Value-movement callees (``require(token.transferFrom(user, …))``) and undetermined mutability stay
+        # ``business``.
         return
     operands = leaf.get("operands") or []
     key_sources = (leaf.get("set_descriptor") or {}).get("key_sources") or []
@@ -261,7 +253,6 @@ def _tree_for_signature_or_selector(
     callee_signature: str | None,
     callee_selector: str | None,
 ) -> PredicateTree | None:
-    """Find a predicate tree by exact ABI signature or selector."""
     if callee_signature and callee_signature in trees:
         tree = trees[callee_signature]
         return cast(PredicateTree, tree) if isinstance(tree, dict) else None

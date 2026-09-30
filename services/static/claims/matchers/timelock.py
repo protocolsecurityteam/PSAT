@@ -1,10 +1,6 @@
-"""OZ TimelockController per-selector claims (resurrects ``timelock_operation``).
+"""OZ TimelockController per-selector claims, on the timelock gate.
 
-The dead legacy label had 0 producers while 4 consumer branches waited on it.
-Each entry rides the oz_timelock gate (getMinDelay + schedule + execute +
-hashOperation) and matches the published TimelockController selector for its
-operation. ``execute``/``executeBatch`` additionally carry ``exec.arbitrary``
-(forwarded target + calldata) from that matcher.
+``execute``/``executeBatch`` also carry ``exec.arbitrary``.
 """
 
 from __future__ import annotations

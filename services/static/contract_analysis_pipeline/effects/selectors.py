@@ -14,11 +14,6 @@ def _is_fallback_or_receive(fn: Any) -> bool:
     return (getattr(fn, "name", "") or "") in ("fallback", "receive")
 
 
-# ---------------------------------------------------------------------------
-# Sink discovery (transitive across internal calls).
-# ---------------------------------------------------------------------------
-
-
 def _node_irs(node: Any) -> list[Any]:
     return list(getattr(node, "irs", []) or [])
 
@@ -29,26 +24,20 @@ def _function_full_name(fn: Any) -> str:
 
 
 def _selector_for(signature: str | None) -> str | None:
-    """Compute keccak256[:4] of a canonical ``name(types)`` signature.
-    Returns ``None`` if the signature isn't in canonical form.
+    """keccak256[:4] of a canonical ``name(types)`` signature, or ``None``.
 
-    Note this is a *string* test: Slither renders a fallback's ``full_name`` as
-    ``"fallback()"``, which is canonical-looking and hashes happily. Callers
-    passing a function's own name must go through :func:`_own_selector`."""
+    A string test: ``"fallback()"`` passes, so a function's own selector must go through :func:`_own_selector`.
+    """
     if not signature or "(" not in signature or ")" not in signature:
         return None
     return "0x" + keccak(text=signature).hex()[:8]
 
 
 def _own_selector(fn: Any) -> str | None:
-    """The 4-byte selector a caller would put in ``msg.sig`` to reach ``fn`` —
-    ``None`` for ``fallback`` / ``receive``, which have none by construction.
+    """The selector that reaches ``fn``, or ``None`` for fallback/receive (their name hashes are not dispatches).
 
-    ``keccak("fallback()")[:4] = 0x552079dc`` and ``keccak("receive()")[:4] =
-    0xa3e76c0f`` are not dispatches: no caller can send them, and a contract
-    that did define ``function fallback()`` would own that selector instead.
-    ``db/effect_cache.py`` already fixes the empty string as the sentinel for
-    this case; this is that convention, not a second one."""
+    Matches ``db/effect_cache.py``'s empty-string sentinel.
+    """
     if _is_fallback_or_receive(fn):
         return None
     return _selector_for(_function_full_name(fn))
@@ -56,15 +45,8 @@ def _own_selector(fn: Any) -> str | None:
 
 def _callee_signature(ir: Any) -> str | None:
     fn = getattr(ir, "function", None)
-    # A direct high-level call to a resolved sibling joins on selector against
-    # that sibling's OWN canonical selector (``cross_contract`` derivation 1), so
-    # lower user-defined parameter types here too — contract/interface → address,
-    # enum → uint<N>, struct → tuple. The string ``full_name`` keeps names like
-    # ``addAsset(ERC20)`` or ``send(MessagingParams,address)`` whose keccak is not
-    # the real EVM selector, and once the callee side is canonical the join would
-    # silently drop such a call. A LibraryCall's callee is a library internal with
-    # no external selector and nothing joins against it, so it keeps the string
-    # form (its selector is notional and ubiquitous — not worth churning).
+    # A resolved sibling call joins on the sibling's canonical selector (``cross_contract``), so lower user-defined
+    # types here too; ``addAsset(ERC20)`` would hash wrong. Library calls keep the string form: nothing joins on them.
     if type(ir).__name__ == "HighLevelCall" and fn is not None:
         from ..predicate_artifacts import _canonical_signature
 
@@ -82,28 +64,12 @@ def _callee_signature(ir: Any) -> str | None:
 
 
 def _auto_getter_selector(variable: Any) -> str | None:
-    """The selector of the getter solc mints for a ``public`` state variable,
-    or ``None`` when no NULLARY getter exists.
+    """Selector of solc's auto-getter for a ``public`` state variable, or ``None`` when it takes arguments.
 
-    Why this is a compiler fact and not a name guess: for every ``public``
-    state variable solc emits an accessor at a selector it derives itself, and
-    it REJECTS a hand-written function that would collide with one — so the
-    binding from declaration to selector is 1:1 and enforced by the compiler,
-    which ``name + "()"`` is not.
-
-    The signature comes from the DECLARED TYPE (``solidity_signature``, i.e.
-    solc's own ``export_nested_types_from_variable`` rule), never from the
-    identifier, because the two disagree the moment the getter takes
-    arguments: ``uint256[] public amounts`` is read by ``amounts(uint256)``
-    (0x45f0a44f) while ``amounts()`` hashes to 0x6beaeeae, and
-    ``mapping(address => uint256) public balances`` is ``balances(address)``
-    (0x27e235e3) against ``balances()``'s 0x7bb98a68. Both are reachable here:
-    a library call's receiver is its FIRST ARGUMENT, which may be any type at
-    all. Emitting the minted-from-name value would publish four bytes that
-    address no function — a fabricated positive, and four bytes collide.
-
-    A parameterised getter cannot be read without choosing a key, and choosing
-    one is not something this plane can witness, so it yields ``None``."""
+    A compiler fact, not a name guess: solc mints it and rejects colliding functions. The signature comes from the
+    declared type because they diverge once the getter takes arguments (``uint256[] public amounts`` is
+    ``amounts(uint256)``, not ``amounts()``). Parameterised getters need a key, which this plane can't witness.
+    """
     from slither.core.variables.state_variable import StateVariable
 
     if not isinstance(variable, StateVariable) or getattr(variable, "visibility", None) != "public":
@@ -118,50 +84,28 @@ def _auto_getter_selector(variable: Any) -> str | None:
     return _selector_for(signature)
 
 
-# The token-first safe-transfer library idiom (Solmate / Solady ``SafeTransferLib``,
-# OZ ``SafeERC20``): the token is the FIRST argument, so the ``(to, amount)`` /
-# ``(from, to, amount)`` slots are shifted one right of the bare ERC-20 selectors.
-# Their own canonical signatures — ``safeTransfer(ERC20,address,uint256)`` /
-# ``safeTransferFrom(ERC20,address,address,uint256)`` — hash to selectors NOT in
-# the bare ERC-20 sets, and Slither lowers them to ``LibraryCall`` (or, when the
-# helper is a plain internal, ``InternalCall``), so the value move is invisible to
-# the selector scan. What identifies the shape is the ERC-20 selector the callee
-# BODY provably issues (below), never the callee's identifier — and only where
-# that body issues it in a form the value-flow walk cannot resolve for itself, so
-# the recognizer covers the walk's blind spot instead of competing with it.
+# Token-first safe-transfer libraries (Solmate/Solady ``SafeTransferLib``, OZ ``SafeERC20``) take the token first, so
+# ``(to, amount)`` shift right, their own selectors aren't ERC-20's, and Slither lowers them to library/internal calls
+# the selector scan can't see. Identified by the ERC-20 selector the callee body provably issues, only where the
+# value-flow walk can't resolve it itself.
 _ERC20_TRANSFER_SELECTOR = _selector_for("transfer(address,uint256)")
 _ERC20_TRANSFER_FROM_SELECTOR = _selector_for("transferFrom(address,address,uint256)")
 
-# How far into the callee to look for the issued selector. Solmate/Solady build
-# it in the helper's own assembly and OZ SafeERC20 builds it in the helper's own
-# ``abi.encodeCall``, so one extra hop only covers a thin wrapper; going deeper
-# would start attributing a nested helper's transfer to an unrelated caller.
+# Solmate/Solady and OZ build the selector in the helper itself; deeper would credit a nested helper's transfer to an
+# unrelated caller.
 _TOKEN_FIRST_BODY_DEPTH = 1
 
 
-# Fixed-size byte types (``bytes1`` … ``bytes32``). A constant of one of these is
-# a numeric word: the compiler folded a ``.selector`` member or an assembly
-# literal into it. ``string`` and ``bytes`` (dynamic) are excluded — a revert
-# message is also handed back as a Python ``str``, and only the DECLARED type
-# separates the two.
+# Fixed-size byte types: a folded ``.selector`` or assembly literal. Dynamic ``bytes`` and ``string`` are excluded
+# (revert messages are also ``str``).
 _FIXED_BYTES_TYPE = re.compile(r"bytes([1-9]|[12][0-9]|3[0-2])$")
 
 
 def _selector_of_constant(operand: Any) -> str | None:
-    """The 4-byte selector a constant operand denotes, or ``None``.
-
-    Two encodings, both pure value facts:
-    ``abi.encodeWithSelector(token.transfer.selector, …)`` folds to a ``bytes4``
-    constant equal to the selector; the assembly form
-    ``mstore(ptr, 0xa9059cbb00…00)`` folds to a 32-byte word carrying the
-    selector left-aligned in its top four bytes and zeros below.
-
-    A ``bytesN`` constant's value arrives as a DECIMAL STRING rather than an
-    ``int``, so the numeric word has to be read back through the declared type —
-    which is also what keeps a revert-message ``string`` (identically a Python
-    ``str``) from being read as a selector. Rejecting the string form outright is
-    what made the OZ ``SafeERC20`` idiom, whose selector comes from exactly this
-    fold, invisible to the recognizer."""
+    """The selector a constant operand denotes, or ``None``: a folded ``bytes4``
+    (``abi.encodeWithSelector(token.transfer.selector, ...)``) or an assembly word with the selector left-aligned.
+    ``bytesN`` values arrive as decimal strings, so the declared type is what separates them from revert strings.
+    """
     value = getattr(operand, "value", None)
     if isinstance(value, str) and _FIXED_BYTES_TYPE.fullmatch(str(getattr(operand, "type", "") or "")):
         try:
@@ -178,12 +122,9 @@ def _selector_of_constant(operand: Any) -> str | None:
 
 
 def _selector_of_member_access(ir: Any) -> str | None:
-    """The selector behind ``<var>.<fn>`` on a contract/interface-typed variable
-    (``abi.encodeCall(token.transfer, …)``), or ``None``.
-
-    The member name is resolved against the DECLARED type's own function list —
-    the compiler's binding — and the selector comes from that declaration's
-    canonical signature. An overloaded or unresolvable member yields ``None``."""
+    """The selector behind ``<var>.<fn>`` on a contract-typed variable (``abi.encodeCall``), resolved against the
+    declared type's functions; ``None`` if overloaded or unresolvable.
+    """
     if type(ir).__name__ != "Member":
         return None
     member = getattr(getattr(ir, "variable_right", None), "value", None)
@@ -198,8 +139,7 @@ def _selector_of_member_access(ir: Any) -> str | None:
 
 
 def _ir_operands(ir: Any) -> list[Any]:
-    """Every value operand of one IR, flattening the argument tuples
-    ``abi.encodeCall`` nests."""
+    """Every value operand of an IR, flattening ``abi.encodeCall``'s nested tuples."""
     operands: list[Any] = []
     for attr in ("rvalue", "variable", "variable_left", "variable_right"):
         value = getattr(ir, attr, None)
@@ -210,26 +150,17 @@ def _ir_operands(ir: Any) -> list[Any]:
     return operands
 
 
-# The EVM call opcodes, as Slither names them on a ``SolidityCall``. These are
-# language builtins, not user identifiers, so keying on them is a published-spec
-# fact of the same kind as a selector. Solmate/Solady build their calldata in
-# assembly and dispatch it with a raw ``call``, which reaches the IR as one of
-# these rather than as a Low/HighLevelCall.
+# EVM call opcodes as Slither names them on a ``SolidityCall`` (language builtins, so a spec fact). Solmate/Solady
+# dispatch assembly-built calldata this way.
 _EVM_CALL_OPCODES = ("call", "staticcall", "delegatecall", "callcode")
 
 
-# How deep to look for the DISPATCH, as opposed to the selector. Deliberately
-# deeper than ``_TOKEN_FIRST_BODY_DEPTH``: that cap bounds selector ATTRIBUTION,
-# where reaching further would start crediting a nested helper's transfer to an
-# unrelated caller. "Does this call tree ever dispatch a call at all" carries no
-# such risk — it only ever REFUSES evidence — and OZ's SafeERC20 puts three hops
-# between the two (``safeTransfer`` builds the calldata, ``_callOptionalReturn``
-# forwards it, ``Address.functionCall`` makes the call).
+# Deeper than ``_TOKEN_FIRST_BODY_DEPTH``: this only refuses evidence, and OZ SafeERC20 puts three hops between building
+# and making the call.
 _DISPATCH_SEARCH_DEPTH = 5
 
 
 def _dispatches_a_call(unit: Any, seen: frozenset[int], depth: int) -> bool:
-    """Whether ``unit`` or a helper it calls ever dispatches an actual call."""
     if unit is None or depth > _DISPATCH_SEARCH_DEPTH:
         return False
     for node in getattr(unit, "nodes", []) or []:
@@ -254,41 +185,23 @@ def _is_evm_call_opcode(ir: Any) -> bool:
 
 
 def _erc20_selectors_issued(unit: Any, seen: frozenset[int], depth: int) -> tuple[set[str], set[str]]:
-    """``(issued, walk_visible)`` — the bare ERC-20 move selectors ``unit``'s body
-    provably issues, and the subset it issues in a form the value-flow walk can
-    resolve on its own."""
+    """``(issued, walk_visible)``: ERC-20 move selectors ``unit``'s body provably issues, and the subset the
+    value-flow walk can resolve itself.
+    """
     found, visible, _ = _erc20_selector_evidence(unit, seen, depth)
     return found, visible
 
 
 def _erc20_selector_evidence(unit: Any, seen: frozenset[int], depth: int) -> tuple[set[str], set[str], bool]:
-    """``(issued, walk_visible, dispatches)`` for one unit and the helpers it calls.
+    """``(issued, walk_visible, dispatches)`` for a unit and its helpers.
 
-    Evidence is a resolved external call whose canonical signature IS an ERC-20
-    move, a selector VALUE the body materializes (assembly literal or
-    ``abi.encodeWithSelector`` constant), or a member access the compiler bound
-    to an ERC-20 declaration (``abi.encodeCall``). None of it reads an identifier
-    of the unit itself.
+    Evidence: a resolved call whose canonical signature is an ERC-20 move (walk-visible), a materialized selector value,
+    or a compiler-bound member access (the two the walk can't see). Keeping them apart avoids double-counting.
 
-    Only the FIRST form is walk-visible: a resolved ``HighLevelCall`` to
-    ``transfer``/``transferFrom`` is a site the ordinary recursion already
-    classifies when it descends into this unit. The other two are the whole
-    reason the recognizer exists — a selector built in assembly or handed to a
-    low-level ``.call`` moves tokens with no IR the walk can see. Keeping them
-    apart is what lets the recognizer fire on a same-contract helper without ever
-    displacing, or double-counting, a move the walk already resolves.
-
-    A MATERIALIZED selector counts only if the body actually DISPATCHES a call —
-    mentioning a selector is not issuing one. A deny-list
-    (``require(sel != IERC20.transfer.selector)``) and a timelock that builds
-    calldata to store for later both materialize the constant while moving
-    nothing, and both would otherwise publish a fabricated ``flow.out``.
-
-    ``dispatches`` is TRANSITIVE, and it has to be: OZ's ``SafeERC20.safeTransfer``
-    materializes the selector in its own frame (``abi.encodeCall``) and hands it
-    to ``_callOptionalReturn``, which is where the ``.call`` actually happens.
-    Judging each frame alone therefore threw the evidence away exactly on the
-    most common safe-transfer library in existence."""
+    A materialized selector only counts if a call is actually dispatched (a deny-list or a timelock storing calldata
+    mentions it without moving anything). ``dispatches`` is transitive because OZ ``safeTransfer`` builds calldata in
+    one frame and calls in ``_callOptionalReturn``.
+    """
     found: set[str] = set()
     visible: set[str] = set()
     if unit is None or depth > _TOKEN_FIRST_BODY_DEPTH:
@@ -328,49 +241,18 @@ def _erc20_selector_evidence(unit: Any, seen: frozenset[int], depth: int) -> tup
 
 
 def _token_first_transfer(ir: Any) -> tuple[str, ...] | None:
-    """Classify a token-first library/internal transfer call, or ``None``.
+    """Classify a token-first library transfer call: ``("send", to, amount)`` or ``("pull", from, to, amount)`` from
+    the shifted call-site arguments, or ``None``.
 
-    Returns ``("send", to, amount)`` for ``<helper>(<Token>, to, amount)`` and
-    ``("pull", from, to, amount)`` for ``<helper>(<Token>, from, to, amount)`` —
-    the operands being the call-site arguments in the SHIFTED positions.
+    The callee body must issue exactly one ERC-20 move selector (picks send vs pull), and the trailing argument types
+    must match its ABI tail (excluding bare 2/3-arg forms and ERC-721's ``bytes`` tail). Callees issuing it through a
+    resolved call are left to the walk, which would otherwise double-count.
 
-    Two independent facts must agree, and neither is the helper's name. The
-    callee's body must provably issue exactly ONE bare ERC-20 move selector,
-    which is what picks send vs pull; a body issuing both (or neither) is
-    ``None``. The trailing argument types must then match that selector's ABI
-    tail, which discriminates the token-first form from the bare
-    ``transfer(address,uint256)`` / ``transferFrom(address,address,uint256)``
-    (2 / 3 args) the selector scan already handles, and from ERC-721
-    ``safeTransferFrom(...,bytes)`` (a ``bytes`` tail). With the token occupying
-    the leading slot, the remaining formals are the only type-consistent
-    carriers of the ABI tail the callee forwards.
-
-    A callee that issues the selector through a RESOLVED call is not recognized
-    here at all: the ordinary recursion descends into it and classifies that site
-    itself, so firing would double-count the move — two sites on one flow key,
-    folding a resolvable destination to ``indeterminate``. The recognizer is for
-    the moves the walk is BLIND to, and nothing else.
-
-    NOT applied to an ``InternalCall``, and the reason is the argument this whole
-    function does NOT make: it reads ``to``/``amount`` off the CALL SITE without
-    proving the callee forwards them into the selector's slots. For a library
-    that assumption is close to definitional — a library holds no mutable storage
-    to redirect through, and the token-first wrappers exist precisely to forward.
-    An arbitrary same-contract helper matching ``f(T, address, uint256)`` is a
-    different animal:
-
-        function _settle(IERC20 token, address to, uint256 amount) internal {
-            address dest = payoutOverride[to];      // anyone may set this
-            if (dest == address(0)) dest = to;
-            SafeTransferLib.safeTransfer(token, dest, amount);
-        }
-
-    Reading ``_settle(token, treasury, amount)`` at the call site published
-    ``target_kind: immutable`` at ``dispositive_ast`` — and §4.2 promoted it to
-    ``immutable_fixed``, a PROVABLY-UNREDIRECTABLE destination — for a payout any
-    caller can repoint. The walk reaches the library call inside ``_settle``
-    anyway and classifies ``dest`` honestly, so nothing is lost by declining
-    here."""
+    Not applied to ``InternalCall``: this reads ``to``/``amount`` at the call site without proving the callee forwards
+    them. Libraries have no storage to redirect through, but a same-contract helper can (``_settle`` looking up
+    ``payoutOverride[to]``), and reading it at the call site once published an anyone-redirectable payout as provably
+    fixed. The walk reaches the library call inside anyway.
+    """
     callee = getattr(ir, "function", None)
     if callee is None or not getattr(callee, "nodes", None):
         return None

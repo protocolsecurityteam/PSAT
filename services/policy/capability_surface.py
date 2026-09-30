@@ -1,9 +1,5 @@
-"""Projection helpers for semantic capability trees.
-
-The resolver preserves the full capability algebra. Policy rows and API
-payloads need a narrower view: materializable caller rows, public paths,
-and residual unresolved checks. Keep that interpretation in one place so
-DB and artifact paths do not drift.
+"""Narrow projections of the resolver's capability algebra (caller rows, public paths, residual checks), in one place
+so DB and artifact paths don't drift.
 """
 
 from __future__ import annotations
@@ -37,30 +33,20 @@ class CapabilitySurface:
         return _unique_conditions(out)
 
 
-#: Three-state authority verdict persisted alongside ``authority_public``
-#: (``effective_functions.authority_openness``). See
-#: ``capability_surface_openness``.
+# Persisted beside ``authority_public``; see ``capability_surface_openness``.
 AUTHORITY_OPENNESS_VALUES = OPENNESS_STATES
 
 
 def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str:
-    """The three-state authority verdict for one capability.
+    """Three-state authority verdict for one capability.
 
-    * ``open`` — a public path was EARNED (a ``conditional_universal`` /
-      cofinite child survived the earned-public projection). Exactly
-      ``authority_public``.
-    * ``restricted`` — a caller restriction was WITNESSED: the surface carries
-      principal rows (the callers), or the capability is a witnessed-empty set
-      (``resolved_empty`` — a complete enumeration that admits nobody).
-    * ``not_determined`` — neither. ``unsupported`` (extraction fail-closed,
-      guard seen but not lowered), ``external_check_only`` (a probe interface,
-      no enumeration), an irreducible AND/OR residual — everything the bool
-      column reported with the same ``False`` a fully resolved gated function
-      gets.
+    * ``open`` — a public path was earned; exactly ``authority_public``.
+    * ``restricted`` — a restriction was witnessed: caller rows, or a complete enumeration admitting nobody.
+    * ``not_determined`` — neither (unsupported, external_check_only, irreducible residual), all of which the bool
+    reported as ``False``.
 
-    Total over every capability shape; never raises. A caller must not read
-    ``restricted`` as "these are all the callers" — that is what
-    ``membership_quality`` says — only as "a restriction exists and we saw it".
+    Never raises. ``restricted`` means a restriction exists, not that these are all the callers (that's
+    ``membership_quality``).
     """
     if surface.authority_public:
         return "open"
@@ -71,36 +57,21 @@ def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySur
     return "not_determined"
 
 
-#: A capability whose event fold covered a height this many blocks or more behind
-#: the durable index's own frontier is reported ``stale``. Floor chosen from the
-#: measured within-one-job spread of ``last_indexed_block`` (25619032 → 25619235 =
-#: 203 blocks, ~40 min of mainnet, presented as equally current): the threshold
-#: must be ABOVE that so ordinary per-address cursor skew is not called stale,
-#: and far below the ~2-week backfill-stall signature ``fleet`` alarms on.
+# Above the measured 203-block per-address cursor skew within one job, far below the ~2-week backfill-stall signature
+# ``fleet`` alarms on.
 CAPABILITY_INDEX_STALE_BLOCKS = 1_000
 
 
 def capability_currency(cap_dict: Any, *, index_head: int | None) -> dict[str, Any]:
-    """Is this capability statement CURRENT?
+    """Three-state currency of a capability against the index frontier (``index_head``, a local read).
 
-    ``last_indexed_block`` is written on 240+ rows and read by nothing: a bare
-    height is not a currency statement, and two capabilities in ONE job carried
-    heights 203 blocks apart while being presented as equally current. This turns
-    the height into a three-state verdict against the durable index's own
-    frontier (``index_head``, a local read — no wire):
+    A bare ``last_indexed_block`` isn't a currency claim: two capabilities in one job sat 203 blocks apart.
 
-    * ``current``        — the fold covered a height within
-      ``CAPABILITY_INDEX_STALE_BLOCKS`` of the frontier.
-    * ``stale``          — it covered a height further behind than that: members
-      granted or revoked since are not in the set.
-    * ``not_determined`` — the capability records no ``last_indexed_block`` (it
-      was not resolved from an event fold at all, or was resolved before the
-      field existed), or no index frontier is available to compare against.
-      **This is what a consumer sees when the fact is absent**, and it must not
-      be rendered as ``current``.
+    * ``current`` — within ``CAPABILITY_INDEX_STALE_BLOCKS`` of the frontier.
+    * ``stale`` — further behind; later grants/revokes are missing.
+    * ``not_determined`` — no fold height or no frontier. Must never render as ``current``.
 
-    ``lag_blocks`` is ``None`` in the not-determined case, never 0 — a zero lag
-    is the strongest currency claim available and must be earned.
+    ``lag_blocks`` is ``None`` when not determined, never 0 (a zero lag must be earned).
     """
     heights = _last_indexed_blocks(cap_dict)
     lowest = min(heights) if heights else None
@@ -115,47 +86,30 @@ def capability_currency(cap_dict: Any, *, index_head: int | None) -> dict[str, A
     }
 
 
-#: Trace steps whose PRODUCER proves it covered the recording surface it read.
-#: Presence of *a* step is not a witness — any future producer could append one —
-#: so the admissible steps are enumerated and justified:
-#: ``solmate_roles_authority`` defers unless a ``backfill_complete`` cursor exists
-#: (``adapters/solmate_roles.py`` — no cursor ⇒ ``no_index_cursor``, never an
-#: empty set); ``enumerable_role_store`` folds at the MIN over complete cursors;
-#: the two live reads are single pinned calls that ARE their own surface.
+# Admissible steps are enumerated, since any producer could append a step: ``solmate_roles_authority`` defers without a
+# ``backfill_complete`` cursor; ``enumerable_role_store`` folds at the MIN over complete cursors; the two live reads are
+# single pinned calls.
 _COVERAGE_PROVING_TRACE_STEPS = frozenset(
     {"solmate_roles_authority", "enumerable_role_store", "live_getter_resolution", "live_slot_resolution"}
 )
 
-#: Empty-reasons that report a COMPLETED READ. Everything else is excluded with
-#: cause: ``empty_by_design`` is a classification whose surviving producer records
-#: ``basis: "accessor_name"`` (an identifier, inv.2); ``unreadable_revert`` /
-#: ``unreadable_empty`` / ``not_read`` / ``bad_input`` are failure states, which
-#: must never license a credit; ``owner_read_burn_address`` rests on the
-#: convention that ``0x…dEaD`` is unspendable, which no read establishes.
+# Only reasons reporting a completed read. ``empty_by_design`` rests on an accessor name (inv.2); failure states never
+# license credit; ``owner_read_burn_address`` rests on a convention, not a read.
 _READ_CONFIRMED_EMPTY_REASONS = frozenset({"owner_read_zero", "slot_read_zero"})
 
 
 def exact_empty_credit(cap_dict: Any) -> dict[str, Any]:
-    """Has this capability EARNED the "nobody can call this" credit?
+    """Has this capability earned the "nobody can call this" credit?
 
-    An empty caller set is the strongest earned negative the resolver publishes,
-    and the shipped consumers award it on ``membership_quality == "exact" and
-    members == []`` alone — a shape a provenance-less empty satisfies exactly as
-    well as a read-confirmed one (four such rows exist that nothing can explain,
-    one of them labelled from a default argument). Three things must hold
-    together, and the verdict travels with them:
+    Consumers awarded it on ``exact`` + ``members == []`` alone, which provenance-less empties also satisfy. All three
+    are required:
 
-    * a trace step from a producer that proves coverage of what it read;
-    * an OBSERVATION BLOCK — a pinned read's ``observed_at_block``, or the
-      equal-heights ``exact_as_of``. **Never ``last_indexed_block``**: that is a
-      MIN across operands, a staleness floor, and admitting it here would
-      re-introduce through the consumer the "empty as of MIN" claim that is
-      false whenever the operands sat at different heights;
+    * a trace step from a coverage-proving producer;
+    * an observation block (``observed_at_block`` or equal-heights ``exact_as_of``), never ``last_indexed_block``, a MIN
+    across operands;
     * an ``empty_reason`` naming a completed read.
 
-    Anything short of all three is ``not_determined`` — with ``missing`` naming
-    which, so the shortfall is legible rather than silent. Never proven-absent:
-    this function withholds a credit, it never asserts that callers exist.
+    Otherwise ``not_determined`` with ``missing`` naming the gap. Withholds credit; never asserts callers exist.
     """
     missing: list[str] = []
     if not isinstance(cap_dict, dict):
@@ -186,13 +140,7 @@ def exact_empty_credit(cap_dict: Any) -> dict[str, Any]:
 
 
 def _observation_block(cap_dict: dict[str, Any]) -> tuple[int | None, str | None]:
-    """The height at which this set was OBSERVED empty, and where it came from.
-
-    Two admissible sources, both describing one instant: a pinned read's
-    ``observed_at_block``, and an ``exact_as_of`` int (emitted only when every
-    operand carried a height and all were equal). ``last_indexed_block`` is
-    deliberately not one — see :func:`exact_empty_credit`.
-    """
+    """The height the set was observed empty at. Not ``last_indexed_block`` (see :func:`exact_empty_credit`)."""
     trace = cap_dict.get("trace")
     if isinstance(trace, list):
         for step in trace:
@@ -208,9 +156,7 @@ def _observation_block(cap_dict: dict[str, Any]) -> tuple[int | None, str | None
 
 
 def _last_indexed_blocks(cap_dict: Any) -> list[int]:
-    """Every ``last_indexed_block`` in a capability tree. The LOWEST governs the
-    whole statement: an AND/OR over folds is only as current as its least-current
-    conjunct."""
+    """The lowest governs: an AND/OR is only as current as its least-current conjunct."""
     out: list[int] = []
     if not isinstance(cap_dict, dict):
         return out
@@ -225,56 +171,23 @@ def _last_indexed_blocks(cap_dict: Any) -> list[int]:
     return out
 
 
-#: Adapter trace steps that resolve a ROLE-keyed authority. ``solmate_roles_authority``
-#: names the role ids that carry the capability, so a single-role read is a witnessed
-#: role requirement; ``enumerable_role_store`` deliberately DISSOLVES role identity
-#: (it probes the gate, never a role name), so a row
-#: resolved by it is role-gated with the role NOT determined.
+# ``enumerable_role_store`` dissolves role identity (probes the gate, not a role), so its rows are role-gated with role
+# not determined.
 _ROLE_DISSOLVING_TRACE_STEPS = frozenset({TRACE_STEP_ENUMERABLE_ROLE_STORE})
 
 
 def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Witnessed ``(role, principals)`` grants for one capability — the role half
-    of the ``(capability, principal)`` scoring unit, which did not exist in
-    the persisted plane (``effective_functions.authority_roles`` was the literal
-    ``[]`` on 1773/1773 rows).
+    """Witnessed ``(role, principals)`` grants for one capability (``authority_roles`` was literally ``[]`` on every
+    row).
 
-    Three states, and a consumer must tell them apart:
+    * non-empty — proven: a trace names exactly one role for the enumerated set.
+    * ``None`` — not determined: role identity dissolved, multiple roles (per-member attribution unrecoverable), or an
+    ``unsupported`` node.
+    * ``[]`` — proven absent: the gate was lowered with no role-keyed authority.
 
-    * **non-empty list** — proven present. Emitted only where an adapter trace
-      names exactly ONE role id for the enumerated set: every member of that set
-      then holds that role, because it is the only role carrying the capability.
-    * ``None`` — **not determined**. A role-keyed authority whose role identity
-      the adapter dissolves by design (``enumerable_role_store``); a multi-role
-      capability (``roles: [1, 2]``) where WHICH role each member holds is not
-      recoverable — attributing every member to every role would be the
-      over-claim; or an ``unsupported`` node anywhere in the tree — extraction
-      failed, so nothing about the gate (including whether it is role-keyed)
-      was read, and "proven absent" is not available from a gate that was
-      never lowered.
-    * ``[]`` — proven absent: the gate WAS lowered and no role-keyed authority
-      appeared in it (a plain owner equality, a public path).
-
-    ``[]`` requires a lowered gate, and the function that already decides
-    whether one was lowered is :func:`capability_surface_openness`. Its
-    ``not_determined`` is precisely "no public path was earned and no caller set
-    was witnessed" — an ``external_check_only`` probe interface, a
-    ``finite_set`` whose ``empty_reason`` is ``not_read``, an irreducible
-    AND/OR residual. Nothing about such a gate was read, INCLUDING whether it is
-    role-keyed, so the proven-absent ``[]`` is not available there and the answer
-    is ``None``. Walking the tree for role traces alone missed this: only
-    ``unsupported`` nodes and role-dissolving trace steps set the flag, so
-    ``external_check_only`` fell through to ``[]`` — 12 of the 1,159 ether.fi
-    rows on the PR-161 preview asserted "proven not role-gated" for a function
-    whose authority was not determined at all (8 of the 12 ``external_check_only``,
-    3 AND, 1 ``finite_set``), among them two ``grantRole`` entry points whose
-    whole gate is an external view probe that was never lowered.
-
-    A NON-empty grant is kept whatever the openness verdict says: it names a
-    role and its members, which is direct evidence, and ``authority_openness``
-    reports the gate verdict separately.
-
-    Reads only the persisted capability shape — no wire, no DB.
+    ``[]`` requires a lowered gate; openness ``not_determined`` means it wasn't, so the answer is ``None``. Missing this
+    let 12 ether.fi rows claim "proven not role-gated", including two ``grantRole`` entry points. A non-empty grant is
+    kept regardless of openness. Reads only the persisted shape.
     """
     grants: dict[int, list[str]] = {}
     not_determined = False
@@ -296,8 +209,7 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
                 continue
             roles = [r for r in (step.get("roles") or []) if isinstance(r, int)]
             if not roles:
-                # A public Solmate capability (no role carries it) is not a role
-                # gate — nothing witnessed, nothing undetermined.
+                # No role carries a public Solmate capability.
                 continue
             members = node.get("members")
             if node.get("kind") != "finite_set" or not isinstance(members, list) or not members:
@@ -334,12 +246,8 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
     ]
     if witnessed:
         return witnessed
-    # Nothing witnessed — and that alone does not earn the proven-absent ``[]``.
     if grants:
-        # A role WAS named and not one member address of it survived the
-        # 0x-prefixed-20-byte filter: role-keyed, holders not determined. 0
-        # realised (every role-witnessing trace on the corpus carries at least
-        # one well-formed member), structural on the first malformed one.
+        # A role was named but no well-formed member survived: role-keyed, holders undetermined.
         return None
     if capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined":
         return None
@@ -349,12 +257,8 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:
     if surface.authority_public:
         return "public"
-    # ``resolved_empty`` means "provably nobody". Only when the surface yields NO
-    # caller rows: an AND that carries a real caller set alongside an exact-empty
-    # *bound* side-condition (a downstream call whose own auth resolved empty) still
-    # has those callers — flagging it resolved_empty would drop them via the status,
-    # re-opening the Veda caller-drop one layer up. A genuine no-role own gate has no
-    # rows, so this still resolves_empty correctly.
+    # Only with no caller rows: an AND with real callers beside an exact-empty bound side-condition keeps them (the Veda
+    # caller-drop).
     if not surface.principal_rows and _is_resolved_empty_capability(cap_dict):
         return "resolved_empty"
     if cap_dict.get("kind") == "unsupported" and not surface.principal_rows:
@@ -413,8 +317,7 @@ def _project_node(
             surface = _or_surface(surface, child_surface)
         return _with_node_conditions(surface, node_conditions)
     if kind == "AND":
-        # Fold from an empty identity, never a seeded public path: an `anyone` surface must
-        # be earned by a conditional_universal child, not minted by AND-ing pure checks.
+        # Start empty: ``anyone`` must be earned by a conditional_universal child, not minted by AND-ing checks.
         surface = CapabilitySurface()
         blocked = False
         for child in _child_dicts(cap_dict):
@@ -428,14 +331,8 @@ def _project_node(
             surface = _and_surface(surface, child_surface)
         surface = _with_node_conditions(surface, node_conditions)
         if blocked and surface.public_paths:
-            # Earned-public: an unresolved ROOT-caller authorization is AND-ed
-            # in (an external_check / unsupported gate / a caller-equality
-            # whose authority value couldn't be read). The sibling public
-            # paths are not earned — the function is gated, principals
-            # unknown. Principal rows (already-gated callers) keep folding the
-            # blocker as a side-condition exactly as before; bound-subject
-            # checks (inlined downstream auth) never block — see
-            # ``_is_root_authority_blocker``.
+            # An unresolved root-caller authorization AND-ed in means the function is gated with principals unknown;
+            # sibling public paths aren't earned. See ``_is_root_authority_blocker``.
             surface = CapabilitySurface(
                 principal_rows=list(surface.principal_rows),
                 public_paths=[],
@@ -443,18 +340,9 @@ def _project_node(
             )
         return surface
     if kind == "cofinite_blacklist":
-        # "Anyone except a finite exclusion" is a PUBLIC path with the denylist as a
-        # side-condition, not an unresolved residual. Surface the exclusion so a reviewer
-        # still sees the filter; the cofinite's own conditions (whenNotPaused, a share
-        # time-lock) ride along in ``node_conditions``. Quality (exact vs lower_bound) is
-        # informational only — every cofinite is "open modulo a finite/condition filter",
-        # so the openness verdict never branches on it.
-        #
-        # It does change the CONDITION TEXT: a ``lower_bound``
-        # denylist is not enumerated, so "N known excluded" alone reads as the
-        # complete exclusion set. The quality is now always present on a cofinite
-        # (never inferred from absence), so absence here means a pre-fix persisted
-        # row and is rendered as the unknown it is.
+        # A cofinite is a public path with the denylist as a side-condition. Quality doesn't change openness but does
+        # change condition text: a ``lower_bound`` denylist isn't the complete exclusion set. Absent quality means a
+        # pre-fix row, rendered as unknown.
         quality = cap_dict.get("blacklist_quality")
         excluded = len(cap_dict.get("blacklist") or [])
         if quality == "exact":
@@ -469,36 +357,18 @@ def _project_node(
 
 
 def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
-    """Does this capability represent an UNRESOLVED authorization on the
-    root (end-user) caller? Under the earned-public default such a check
-    AND-ed with public side-conditions gates the function — "public" must be
-    earned, and an authority whose principal set couldn't be read/enumerated
-    is still an authority.
+    """Is this an unresolved authorization on the root caller? Public must be earned, so such a check AND-ed with
+    public side-conditions gates the function.
 
-    Shapes that block:
-      - ``external_check_only`` carrying a caller-gate basis tag
-        (``CALLER_GATE_BASIS_TAGS`` — the earned-public default's fail-closed
-        verdicts and the subsumed E3/E4 allowlists). A check WITHOUT the tag
-        is a targeted downstream-call probe (the un-inlined Veda teller→vault
-        ``requiresAuth``, a descriptor probe awaiting an adapter) — an
-        intermediate-contract condition that must keep folding as a side
-        condition next to an adapter-earned public capability
-        (PublicCapabilityUpdated) exactly as the legacy path did.
-      - ``unsupported`` — an un-modeled gate (extraction fail-closed, E2).
-      - an EMPTY non-exact ``finite_set`` — a caller equality whose authority
-        value wasn't read (``msg.sender == owner`` with no controller value);
-        a generic exact-empty / empty-by-design set is NOT a blocker — that is
-        resolved, not unresolved.
-      - an EMPTY ``finite_set`` enumerated from a Solmate ``RolesAuthority``
-        (``requiresAuth`` with the capability not public and no role holders):
-        a provably-nobody read. AND-ed with a sibling public side-condition,
-        the gate still authorizes literally no caller — the function is gated.
-      - AND: any blocking child; OR: only if EVERY disjunct blocks (a single
-        genuinely-open disjunct keeps the OR open).
+    Blocks:
+      - ``external_check_only`` with a ``CALLER_GATE_BASIS_TAGS`` tag (untagged checks are downstream probes that fold
+    as side-conditions, e.g. Veda teller->vault ``requiresAuth``).
+      - ``unsupported``.
+      - an empty non-exact ``finite_set`` (authority value unread); exact-empty / by-design sets are resolved.
+      - an empty set enumerated from a Solmate ``RolesAuthority``: provably nobody.
+      - AND if any child blocks; OR only if every disjunct blocks.
 
-    Bound-subject capabilities never block: an inlined downstream call's
-    authorization is a runtime side-condition on the intermediate contract,
-    not a restriction of the end-user caller (the Veda Teller contract).
+    Bound-subject capabilities never block: they condition the intermediate contract, not the end user.
     """
     if cap_dict.get("subject", "root") != "root":
         return False
@@ -506,14 +376,9 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     if kind == "finite_set":
         if cap_dict.get("members"):
             return False
-        # An empty confirmed role-store enumeration is a provably-nobody gate: the
-        # capability is not public and no confirmed member passes the gate, so no
-        # caller is authorized. AND-ed with a sibling public path it still blocks.
         if _is_role_store_provably_empty(cap_dict):
             return True
-        # A generic exact-empty / empty-by-design set is RESOLVED (an accept-side
-        # ceiling, e.g. a 2-step transfer with none pending) and folds as a side
-        # condition next to a public path — mirrors ``_is_resolved_empty_capability``.
+        # Resolved, not unresolved; mirrors ``_is_resolved_empty_capability``.
         if cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design":
             return False
         return True
@@ -531,22 +396,15 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     return False
 
 
-# Adapter trace steps whose EXACT-empty enumeration is a confirmed "nobody passes
-# this gate": the Solmate RolesAuthority fold and the enumerable role-store adapter
-# (fold + pinned-block gate probe). Both settle a cold / unconfirmed read to a
-# deferral or external check rather than an empty exact set, so an exact-empty here
-# is a real provably-nobody, not an under-resolution artifact.
+# Both settle cold reads to deferral, so an exact-empty here is real, not under-resolution.
 _PROVABLY_EMPTY_TRACE_STEPS = {"solmate_roles_authority", "enumerable_role_store"}
 
 
 def _is_role_store_provably_empty(cap_dict: dict[str, Any]) -> bool:
-    """An EXACT-quality empty ``finite_set`` enumerated by a confirmed role-store
-    adapter (Solmate RolesAuthority, or the enumerable role-store fold+probe): the
-    capability is not public and no confirmed member passes the gate at the
-    resolution block, so the on-chain authority authorizes literally no caller.
-    Keyed on the adapter's trace step so only a confirmed-warm read counts — an
-    empty LOWER_BOUND set (under-resolved / cold index) and a generic empty-exact
-    ceiling (no such trace) are excluded."""
+    """Exact-empty set from a confirmed role-store adapter: literally no caller.
+
+    Keyed on the trace step so lower-bound and generic ceilings are excluded.
+    """
     if cap_dict.get("kind") != "finite_set":
         return False
     if cap_dict.get("members"):
@@ -560,10 +418,7 @@ def _is_role_store_provably_empty(cap_dict: dict[str, Any]) -> bool:
 
 
 def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:
-    """Qualify the caller rows / public paths an AND or OR resolved to with the node's own
-    side conditions. A public path exists only where a child contributed one (a
-    ``conditional_universal``, which always carries its condition); node-level conditions
-    narrow a real authorization, they never constitute one."""
+    """Node conditions narrow a real authorization; they never constitute one."""
     if not conditions:
         return surface
     return CapabilitySurface(
@@ -578,9 +433,7 @@ def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:
     if kind == "finite_set":
         if cap_dict.get("members") != []:
             return False
-        # An exact-empty set is provably nobody; an empty-by-design ceiling (the
-        # accept side of a 2-step transfer with none pending) is too, even when
-        # the read that confirmed it could only structurally infer a lower_bound.
+        # An empty-by-design ceiling is provably nobody even when only inferred lower_bound.
         return cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design"
     if kind == "AND":
         return any(_is_resolved_empty_capability(child) for child in _child_dicts(cap_dict))
@@ -602,17 +455,11 @@ def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> Capabilit
     left_valid = _has_valid_path(left)
     right_valid = _has_valid_path(right)
 
-    # Neither side carries a caller path — both are pure checks; keep them residual.
     if not left_valid and not right_valid:
         return CapabilitySurface(residual=left.residual + right.residual)
 
-    # Exactly one side carries the caller path (principal rows / public paths); the
-    # other is a pure check with no path — a downstream/bound-subject authorization or
-    # an unenumerable external check. That check is a runtime SIDE-CONDITION on the
-    # call, NOT grounds to drop the real callers. Preserve the valid side and attach
-    # the check as a condition, per this module's contract ("AND with caller path +
-    # side conditions → caller rows with conditions"). Collapsing to residual-only
-    # here is what silently dropped the Veda Teller withdraw/deposit caller sets.
+    # The pure-check side is a side-condition, not grounds to drop the callers; collapsing to residual silently dropped
+    # the Veda Teller caller sets.
     if not right_valid:
         return _surface_with_side_checks(left, right.residual)
     if not left_valid:
@@ -639,9 +486,9 @@ def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> Capabilit
 
 
 def _surface_with_side_checks(valid: CapabilitySurface, side_residual: list[dict[str, Any]]) -> CapabilitySurface:
-    """Keep ``valid``'s caller rows / public paths, folding the pure-check residual on
-    the other AND branch in as side-condition(s) (and retaining it in ``residual`` so
-    the API can still surface the probe)."""
+    """Keep ``valid``'s callers/public paths, folding the other branch in as side-conditions (and in ``residual`` for
+    the API).
+    """
     conditions = [cond for residual in side_residual for cond in _residual_as_conditions(residual)]
     if not conditions:
         return CapabilitySurface(
@@ -659,9 +506,6 @@ def _surface_with_side_checks(valid: CapabilitySurface, side_residual: list[dict
 
 
 def _residual_as_conditions(residual: dict[str, Any]) -> list[dict[str, Any]]:
-    """Render a residual check (an ``external_check_only`` / ``unsupported`` cap dict)
-    as side-condition dict(s): any conditions it already carries, plus one summarizing
-    the check itself."""
     if not isinstance(residual, dict):
         return []
     out = _condition_dicts(residual.get("conditions"))
@@ -682,10 +526,8 @@ def _has_valid_path(surface: CapabilitySurface) -> bool:
     return bool(surface.principal_rows or surface.public_paths)
 
 
-#: The accessor bases a principal may be published under. An unrecognised label —
-#: including the pre-split ``internal_accessor_convention`` epoch, which 33
-#: persisted rows carry — is NOT passed through: one field must not carry two
-#: vocabularies, and a consumer that cannot map a label cannot rank it.
+# Unrecognized labels (including 33 rows of the pre-split ``internal_accessor_convention``) aren't passed through: one
+# field, one vocabulary.
 _SHIPPED_AUTHORITY_BASES = frozenset(
     {
         "abi_auto_getter",
@@ -696,30 +538,20 @@ _SHIPPED_AUTHORITY_BASES = frozenset(
     }
 )
 
-#: Bases that are an accessor-NAME match. They share one strength tier and are
-#: mutually unordered; the residual each leaves open — does the accessor read the
-#: same storage the canonical getter reads — is published, unresolved, beside them.
+# Accessor-name matches: one tier, mutually unordered; the storage-agreement residual is published beside them.
 _NAME_MATCHED_AUTHORITY_BASES = frozenset(
     {"standard_namespaced_accessor", "deunderscore_convention", "slot_name_keyword"}
 )
 
-#: Trace steps that do not, on their own, attribute the members of a set: the
-#: basis step itself, and the live read it names (which corroborates the same
-#: single principal). Any OTHER step means a second producer contributed members.
+# Any other step means a second producer contributed members.
 _BASIS_COMPATIBLE_TRACE_STEPS = frozenset({"authority_getter_basis", "live_getter_resolution"})
 
 
 def _authority_basis(cap_dict: dict[str, Any]) -> str | None:
-    """The accessor basis every member of this set rests on, or ``None``.
+    """The accessor basis every member rests on, or ``None``.
 
-    Fail-closed on anything that could attribute one operand's basis to members
-    it did not resolve. ``_intersect_finite`` / ``_union_finite`` concatenate
-    their operands' traces, so a merged set can carry ONE basis step beside
-    members an event fold contributed — and these details are stamped onto EVERY
-    member row. So the basis is hoisted only for a set that is a single member,
-    named by exactly one basis step, with no other member-attributing step in the
-    trace. (0 rows on the corpus are merged today; the guard is for the first one
-    that is.)
+    Merged sets concatenate traces and the basis is stamped on every member row, so it's hoisted only for a single
+    member named by exactly one basis step.
     """
     trace = cap_dict.get("trace")
     if not isinstance(trace, list):
@@ -746,10 +578,7 @@ def _authority_basis(cap_dict: dict[str, Any]) -> str | None:
 def _rows_for_finite_set(cap_dict: dict[str, Any], conditions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     members = cap_dict.get("members") or []
-    # Published BESIDE membership_quality / confidence, not only inside the trace:
-    # a consumer reading "exact + enumerable" off this row was reading the
-    # strength of a set whose principal may rest on an accessor NAME, with the
-    # only disclosure of that buried in a trace nobody reads.
+    # Beside quality/confidence: otherwise "exact + enumerable" hid that the principal rests on an accessor name.
     basis = _authority_basis(cap_dict)
     for member in members:
         if not isinstance(member, str) or not member.startswith("0x") or len(member) != 42:
@@ -764,12 +593,8 @@ def _rows_for_finite_set(cap_dict: dict[str, Any], conditions: list[dict[str, An
         if basis is not None:
             details["authority_basis"] = basis
             if basis in _NAME_MATCHED_AUTHORITY_BASES:
-                # The open residual, stated rather than left to look settled:
-                # whether the matched accessor reads the same storage the
-                # canonical getter reads is NOT established. A slot differential
-                # would answer it; on this corpus it is unrunnable on 2 of 3
-                # runtime addresses and non-identifying on the third, so the
-                # honest value is the third state.
+                # Whether the accessor reads the canonical getter's storage is unestablished; the slot differential is
+                # unrunnable on this corpus.
                 details["accessor_slot_agreement"] = "not_determined"
         rows.append(
             {
@@ -845,7 +670,6 @@ def _rows_for_signature_witness(cap_dict: dict[str, Any], conditions: list[dict[
                     {
                         "signer_kind": "finite_set",
                         "source": "semantic_predicate_capability_resolver",
-                        # The signer set's own path, not the wrapper's.
                         "resolver_path": resolver_path(signer),
                     },
                     conditions + signer_conditions,
@@ -863,22 +687,13 @@ def _row_with_conditions(row: dict[str, Any], conditions: list[dict[str, Any]]) 
 
 
 def resolver_path(cap_dict: dict[str, Any]) -> list[str] | None:
-    """Which resolver path produced this capability's members.
+    """Which resolver path produced the members.
 
-    ``function_principals.origin`` and ``principal_type`` are single constants —
-    ``semantic_capability:finite_set`` / ``controller`` on 1132/1132 rows — so the
-    columns that assert "here is the provenance of this principal attribution"
-    prove only "this row exists": a Safe threshold read, a Solmate ``canCall``
-    enumeration and an event fold are the same six words. Neither column can be
-    repurposed (``origin`` is read as a role name by ``services/chat/data.py`` and
-    as a controller label by the governance payload), so the path is recorded
-    beside them.
+    ``origin``/``principal_type`` are constant on every row and can't be repurposed (read elsewhere as role name /
+    label).
 
-    Three states: a non-empty list of adapter trace steps in order (proven), and
-    ``None`` when the capability carries no trace at all — resolved, path NOT
-    recorded, which is a third of the local rows and must not be read as any
-    particular resolver. Absence of the key entirely means the row predates this
-    field.
+    A list of trace steps (proven), ``None`` when no trace was recorded (not any particular resolver), key absent on
+    pre-field rows.
     """
     trace = cap_dict.get("trace")
     if not isinstance(trace, list):

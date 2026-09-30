@@ -1,14 +1,4 @@
-"""Audit-report post-processing services.
-
-This package holds the pieces that run *after* discovery:
-  - ``text_extraction`` — download audit PDFs, extract text, store the text in
-    object storage, and update the ``AuditReport`` row's extraction state.
-  - ``scope_extraction`` — locate the scope section in the extracted text,
-    LLM-extract the list of in-scope contracts, and write a JSON artifact.
-  - ``coverage`` — match scope contracts to ``Contract`` rows (proxy-aware
-    via ``UpgradeEvent`` history) and persist the link in
-    ``audit_contract_coverage``.
-"""
+"""Audit-report post-processing: text extraction, scope extraction, and coverage matching."""
 
 from .coverage import (
     GRACE_DAYS,
@@ -67,7 +57,6 @@ __all__ = [
     "extract_text_from_pdf",
     "process_audit_report",
     "store_audit_text",
-    # scope-extraction exports
     "LLMUnavailableError",
     "PROMPT_VERSION",
     "SCOPE_ARTIFACT_CONTENT_TYPE",
@@ -82,7 +71,6 @@ __all__ = [
     "process_audit_scope",
     "scope_artifact_key",
     "validate_contracts",
-    # coverage exports
     "CoverageMatch",
     "GRACE_DAYS",
     "ImplWindow",
@@ -91,7 +79,6 @@ __all__ = [
     "upsert_coverage_for_audit",
     "upsert_coverage_for_contract",
     "upsert_coverage_for_protocol",
-    # source-equivalence exports
     "EquivalenceMatch",
     "VerifiedSource",
     "extract_reviewed_commits",

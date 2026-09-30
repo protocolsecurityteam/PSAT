@@ -1,5 +1,3 @@
-"""Typed schemas for frontend-friendly principal labeling."""
-
 from __future__ import annotations
 
 from typing import Literal, TypedDict

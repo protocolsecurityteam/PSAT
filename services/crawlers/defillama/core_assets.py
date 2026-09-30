@@ -1,21 +1,9 @@
-"""
-Parse DefiLlama's coreAssets.json — a master mapping of well-known
-token addresses organized by chain.
-"""
-
 import json
 from pathlib import Path
 
 
 def load_core_assets(repo_path: Path) -> dict[str, dict[str, str]]:
-    """
-    Load coreAssets.json and return a normalized structure:
-    {
-        "ethereum": {"WETH": "0x...", "USDC": "0x...", ...},
-        "arbitrum": {...},
-        ...
-    }
-    """
+    """``{chain: {symbol: address}}`` from coreAssets.json."""
     path = repo_path / "projects" / "helper" / "coreAssets.json"
     if not path.exists():
         return {}
@@ -37,9 +25,6 @@ def load_core_assets(repo_path: Path) -> dict[str, dict[str, str]]:
 
 
 def build_address_to_chain_map(core_assets: dict) -> dict[str, str]:
-    """
-    Build a reverse map: address -> chain, for quick lookups.
-    """
     addr_map = {}
     for chain, assets in core_assets.items():
         for name, addr in assets.items():

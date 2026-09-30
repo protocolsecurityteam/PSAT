@@ -1,14 +1,9 @@
-"""Tier-1 effect recipes — value-out, code-upgrade, authority-change, supply.
+"""Tier-1 effect recipes: value-out, code-upgrade, authority-change, supply.
 
-Each recipe is a PURE decision over injected seams (``Simulate`` / ``CallBatch``
-+ the transcript store) that returns a tiered, transcripted
-:class:`~services.effects.harness.ObservedEffect`. Names never enter a
-definition; every positive verdict is an OBSERVED transition, every
-non-observation is fail-closed ``unknown``. The Tier-2 pause recipe lives in
-``services.effects.anvil`` because it needs the fork transport.
-
-Boundary: recipes RETURN verdicts and RECORD discrepancies on them; they do
-not persist to the DB and do not route discrepancies anywhere.
+Each recipe is a pure decision over injected seams (``Simulate`` / ``CallBatch`` and the transcript store) returning a
+transcripted :class:`~services.effects.harness.ObservedEffect`. Positive verdicts are observed transitions; everything
+else is ``unknown``. Recipes record discrepancies but don't persist or route them. The Tier-2 pause recipe is in
+``services.effects.anvil`` (needs the fork).
 """
 
 from __future__ import annotations
@@ -78,39 +73,26 @@ from utils.execution_record import PROVING_EXECUTION_KEY, residue_payload
 
 logger = logging.getLogger(__name__)
 
-# ERC-20 totalSupply().
 TOTAL_SUPPLY_SELECTOR = "0x18160ddd"
 
-# Re-exported: the discriminator is the whole stage's contract, not this module's
-# (``services.effects.anvil`` emits pause rows under it too), so it lives in the
-# shared vocabulary. See :mod:`services.effects.config` for what each value means.
+# Re-exported from :mod:`services.effects.config`, since anvil's pause rows use it too.
 
 
 def _sim_to_ethcall(r: SimCallResult) -> EthCallResult:
-    """Adapt a simulate call result to the ``EthCallResult`` the raw-revert
-    authorization discipline consumes."""
+    """Adapt a simulate result to ``EthCallResult`` for the raw-revert discipline."""
     return EthCallResult(r.success, r.return_data, r.revert_data, None)
 
 
-# ---------------------------------------------------------------------------
-# Input-asset seeding (shared by value-out and supply)
-# ---------------------------------------------------------------------------
-
-
-# Attempt labels. ``contract_balance`` is the most synthetic and always runs last.
+# ``contract_balance`` is the most synthetic and always runs last.
 _ATTEMPT_SEEDED = "seeded_probe"
 _ATTEMPT_PAYABLE = "seeded_probe_payable"
 _ATTEMPT_CONTRACT_BALANCE = "seeded_probe_contract_balance"
 _ATTEMPT_CONTRACT_TOKEN = "seeded_probe_contract_token"
-# ERC-20 analogue of the native contract-balance seed runs on at most this many of
-# the deployment's measured holdings; the seeder's own layout budget caps distinct
-# tokens further.
+# Contract-token seeding runs on at most this many measured holdings; the seeder's layout budget caps it further.
 _MAX_CONTRACT_HOLDINGS = 2
 
-# Why a seeded attempt (or the whole retry path) produced no observation. Recorded
-# per attempt on the transcript AND counted on the seed budget's metrics, so a live
-# run reporting ``executed=0`` names the failing precondition instead of going
-# silent.
+# Why a seeded attempt produced no observation, recorded on the transcript and counted on the seed budget so
+# ``executed=0`` names the failing precondition.
 _OUTCOME_EXECUTED = "executed"
 _OUTCOME_TARGET_REVERTED = "target_reverted"
 _OUTCOME_READBACK_FAILED = "readback_failed"
@@ -120,16 +102,13 @@ _SKIP_NO_CALLDATA = "skipped_no_seeded_calldata"
 _SKIP_BUDGET = "skipped_budget_exhausted"
 _SKIP_NO_TOKEN = "skipped_no_token_resolved"
 _SKIP_NO_ATTEMPT_PATH = "skipped_no_viable_attempt"
-# A token PARAMETER was left at the encoder's default because nothing honest
-# could be named for it. The call reverts on its own argument — a non-observation
-# with a recorded reason, never a guessed address.
+# Nothing honest to put in a token parameter; the call reverts on it (a recorded non-observation, never a guessed
+# address).
 _SKIP_NO_TOKEN_ARG = "skipped_no_token_for_param"
 
 
 @dataclass(frozen=True)
 class _SeedAttempt:
-    """One seeded retry of a probe call."""
-
     label: str
     overrides: StateOverride | None
     value: int
@@ -137,9 +116,8 @@ class _SeedAttempt:
     sentinel_calldata: str | None
     seeding: Seeding | None
     contract_balance_seeded: bool = False
-    # ``param index -> token address`` written into this attempt's calldata. Only
-    # a read-back-proved token appears here, so it is what the backing witness is
-    # gated on (see :func:`_backing_admissible`).
+    # ``param index -> token address`` placed in the calldata; only read-back-proved tokens, which gate the backing
+    # witness (see :func:`_backing_admissible`).
     token_args: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -159,9 +137,7 @@ def _record_seed_outcome(
     *,
     detail: str | None = None,
 ) -> None:
-    """Append one attempt/skip outcome to the transcript and count it on the
-    budget. The transcript already carries the raw calls; this says which
-    PRECONDITION each attempt died on, which the call list alone cannot."""
+    """Record which precondition an attempt died on (transcript plus budget metric)."""
     entry: dict[str, Any] = {"label": label, "outcome": outcome}
     if detail:
         entry["detail"] = detail
@@ -190,32 +166,20 @@ def _seed_attempts(
     token_param_indexes: Sequence[int] = (),
     contract_holdings: Sequence[str] = (),
 ) -> list[_SeedAttempt]:
-    """The ordered retries for a probe whose UNSEEDED call already reverted.
+    """The ordered retries for a probe whose unseeded call already reverted.
 
-    Ordering is the soundness argument, not an optimization:
+    The order is the soundness argument:
 
-    * the ERC-20 attempt runs first, at ``value == 0``, so an asset the call then
-      consumes is one it genuinely pulls;
-    * ``msg.value`` is attached only on the SECOND attempt — i.e. only after a
-      zero-value call provably failed. Attaching ETH up front would let a payable
-      admin mint bank our own ``msg.value`` as an "inflow" when a real caller
-      could mint with nothing attached. This ordering makes an ETH deposit's
-      inflow a witnessed REQUIREMENT;
-    * the TARGET CONTRACT's own balance is seeded LAST and only for a function
-      static says pays native ETH out. It is the most synthetic override the
-      stage makes — a verdict it produces means "would move value if the contract
-      were funded", not "moves value in current state" — so it may only ever run
-      after every attempt that carries the stronger meaning has failed.
+    * ERC-20 seeding first at ``value == 0``, so any asset consumed is genuinely pulled;
+    * ``msg.value`` only second, after a zero-value call failed, so a payable admin mint can't bank our own ETH as an
+    "inflow";
+    * the target contract's own balance last, only for functions static says pay native ETH out; its verdicts mean
+    "would move value if funded".
 
-    Attempts a target cannot execute are not issued at all: a NON-payable function
-    rejects an attached ``msg.value`` with an empty revert before its body runs,
-    which witnesses nothing and cost 9 of the 13 seeded calls on the 2026-07-22
-    run. With no token seeding, no payable path and no native payout there is
-    nothing left to try, and the probe keeps exactly today's unseeded verdict.
-
-    The whole path is charged to the job's :class:`~services.effects.seeding.SeedBudget`
-    FIRST — an exhausted budget returns no attempt at all, which is the exact
-    pre-seeding probe, never a less careful one."""
+    Non-payable functions never get ``msg.value`` (rejected before the body; it wasted 9 of 13 seeded calls on one run).
+    The path is charged to the job's :class:`~services.effects.seeding.SeedBudget` first; an exhausted budget returns no
+    attempts.
+    """
     if seeder is None or not principal:
         _record_seed_outcome(transcript, seeder, "seed_path", _SKIP_NO_SEEDER)
         return []
@@ -291,15 +255,9 @@ def _seed_attempts(
                 token_args=placed,
             )
         )
-    # ERC-20 analogue of the native contract-balance seed: a payout the
-    # contract's LIVE balance cannot cover reaches its send once the contract's own
-    # token balance is overridden. Seeding with ``principal == spender == contract``
-    # makes the seeder write the CONTRACT's balance slot (``slot(principal, spender)``)
-    # and read it back via ``balanceOf(contract)`` — the same discipline as every
-    # other seed. Runs LAST (most synthetic) and carries ``contract_balance_seeded``:
-    # a verdict it produces is "would move value IF THE CONTRACT WERE FUNDED", a
-    # capability of the code, not a live outflow. The token is whatever the
-    # deployment provably holds, never a hardcoded asset.
+    # Seed the contract's own token balance (``principal == spender == contract``), read back via
+    # ``balanceOf(contract)``. Runs last and carries ``contract_balance_seeded``: a code capability, not a live outflow.
+    # Tokens are what the deployment provably holds.
     for token in list(contract_holdings)[:_MAX_CONTRACT_HOLDINGS]:
         if not isinstance(token, str) or token.lower() == contract_address.lower():
             continue
@@ -342,18 +300,14 @@ def _place_token_args(
     seeding: Seeding | None,
     contract_address: str,
 ) -> tuple[str, str | None, dict[str, str]]:
-    """Write a SEEDED token address into each proved token parameter.
+    """Write a seeded token into each proved token parameter.
 
-    Only a token the seeder actually seeded may be written: the principal now
-    holds it, so the pull the function performs can succeed and emit the Transfer
-    the backing witness is read from. The probe target itself is excluded even
-    when it was the only token seeded — feeding a vault its own share token as
-    the deposit asset produces a mint whose inflow is the minted asset, which the
-    backing rule discards, and the resulting ``inflow_observed: false`` would
-    describe the prober's argument rather than the function.
+    Only tokens the seeder actually seeded, so the pull can succeed and emit the Transfer the backing witness needs. The
+    probe target itself is excluded: a vault given its own share token as the asset produces an ``inflow_observed:
+    false`` about our argument, not the function.
 
-    Returns the (possibly unchanged) calldata pair and a map of what was placed;
-    an empty map means the slots kept the encoder's default."""
+    Returns the calldata pair and a map of what was placed (empty means defaults kept).
+    """
     tokens = [t for t in (seeding.tokens if seeding else ()) if t != contract_address.lower()]
     if not tokens:
         return calldata, sentinel, {}
@@ -371,33 +325,21 @@ def _place_token_args(
 
 
 def _token_slots_unresolved(token_param_indexes: Sequence[int], used: _SeedAttempt | None) -> bool:
-    """Did a slot the static plane PROVED carries a token keep the encoder's
-    filler instead of a read-back-verified one?
-
-    The cheap half of the mint-backing admissibility gate: a call made with a non-token in
-    a known token slot cannot witness anything about backing. It is only half
-    because ``token_param_indexes`` is derived from parameter NAMES plus body-sink
-    heads (``calldata.address_param_roles``), so an asset argument named outside
-    that vocabulary leaves it EMPTY — the reason the negative additionally needs
-    :func:`_prober_address_inert`."""
+    """Did a slot static proved is a token keep the encoder's filler? Only half the mint-backing gate:
+    ``token_param_indexes`` comes from parameter names and sink heads, so unconventionally named asset params
+    leave it empty (hence :func:`_prober_address_inert`).
+    """
     if not token_param_indexes:
         return False
     return used is None or not set(used.token_args) >= {str(i) for i in token_param_indexes}
 
 
 def _stamp_seed_qualifiers(details: dict[str, Any], used: _SeedAttempt | None) -> None:
-    """Mirror ``value_out``'s top-level qualifiers (:func:`value_out`, the
-    ``input_seeded`` / ``contract_balance_seeded`` block) onto a supply verdict's
-    ``details``.
+    """Copy ``value_out``'s top-level seeding qualifiers onto a supply verdict's ``details``.
 
-    ``claims_bridge._observed_summary`` propagates these by TOP-LEVEL key, so a
-    qualifier written only into the nested ``backing`` map (or only onto the
-    transcript) never reaches the witness and the claim then reads stronger than
-    the seeded observation it came from. ``contract_balance_seeded`` is the
-    capability-not-current-state weakener and MUST travel wherever the verdict
-    does; a plain ``input_seeded`` records that the caller was funded first. A
-    no-op when nothing was seeded, so absence still means "no override was
-    needed", never "seeded but undisclosed"."""
+    ``claims_bridge._observed_summary`` only propagates top-level keys, and ``contract_balance_seeded`` must travel with
+    the verdict. No-op when nothing was seeded.
+    """
     if used is None:
         return
     details["input_seeded"] = True
@@ -405,27 +347,17 @@ def _stamp_seed_qualifiers(details: dict[str, Any], used: _SeedAttempt | None) -
         details["contract_balance_seeded"] = True
 
 
-# Runtime that reverts on ANY call, on every fork: ``PUSH1 0 PUSH1 0 REVERT``.
-# Deliberately not ``PUSH0``-based (that would pin the probe to post-Shanghai) and
-# deliberately non-empty, so ``extcodesize`` is nonzero and an ``isContract``
-# guard takes the same branch a real token would.
+# ``PUSH1 0 PUSH1 0 REVERT``: reverts on any fork (no ``PUSH0``) and is non-empty, so ``isContract`` checks behave as
+# with a real token.
 _REVERT_STUB_CODE = "0x60006000fd"
 
 
 def _prober_supplied_address_args(calldata: str, principal: str | None) -> list[str]:
-    """Addresses THIS prober invented and wrote into ``calldata``'s head words.
+    """Addresses this prober invented and wrote into ``calldata``'s head words.
 
-    The encoder's address policy (``calldata._arg_values``) writes the acting
-    identity into EVERY address parameter, and the seeded retry overwrites the
-    proved token slots with a read-back-verified token
-    (``calldata.substitute_address_arg``). So a head word still equal to the
-    principal is an address argument the prober chose, and a slot holding a seeded
-    token is excluded by construction — it no longer holds the principal.
-
-    Read off the BYTES that were executed rather than off a parameter-type list,
-    so it stays true whatever the encoder did with the signature. A ``uint`` head
-    word can only collide with this by carrying the principal's exact 160-bit
-    value, which the encoder never writes into an integer slot."""
+    The encoder writes the acting identity into every address param, and seeded token slots are overwritten, so a head
+    word still equal to the principal is a prober-chosen address. Read from the executed bytes, not a type list.
+    """
     if not principal or not isinstance(calldata, str):
         return []
     raw = principal[2:] if principal.startswith("0x") else principal
@@ -449,31 +381,17 @@ def _prober_address_inert(
     delta: int,
     suspects: Sequence[str],
 ) -> bool:
-    """Is the mint we just observed PROVABLY independent of the addresses the
-    prober itself supplied as arguments?
+    """Is the observed mint provably independent of addresses the prober supplied?
 
-    This is the proof the mint-backing NEGATIVE rests on, and it exists because absence of
-    evidence is not evidence of absence here. A call to a CODELESS address is a
-    silent no-op success inside ``SafeTransferLib`` and its imitators, so a
-    deposit-backed conversion handed a codeless address for its asset still mints
-    while pulling nothing — and ``inflow_observed: false`` would then describe the
-    prober's argument, not the function. Parameter names cannot rule that out
-    (that is exactly what let it through), and a codesize read cannot either: the
-    acting principal is routinely an EOA, and withholding on that alone would
-    delete the unbacked-admin-mint witness this stage exists to produce.
+    The mint-backing negative depends on this. A call to a codeless address is a silent success in ``SafeTransferLib``,
+    so a deposit given a codeless asset still mints while pulling nothing. Names can't rule that out, and codesize can't
+    either (principals are often EOAs).
 
-    The differential decides it by OBSERVATION instead. Re-run the same read →
-    mint → read block, under the same seed, with plain reverting code placed at
-    each prober-supplied address. If the mint still executes and moves supply by
-    the SAME delta, then no call to those addresses was on the executed path: no
-    pull was silently skipped, and ``inflow_observed: false`` is a statement about
-    F. If it now reverts, diverges, or cannot be run at all, the execution DID
-    depend on an address this prober invented and the witness is withheld.
+    So re-run read, mint, read under the same seed with reverting code at each prober-supplied address. The same delta
+    means those addresses weren't on the path; a revert, divergence or failure withholds the witness.
 
-    Known limit, stated rather than papered over: a pull made through an
-    UNCHECKED low-level call would survive the stub and still be counted inert.
-    Every safe-transfer wrapper in circulation checks, so this is the residual
-    the differential does not close."""
+    Known limit: a pull via an unchecked low-level call would survive the stub.
+    """
     overrides: StateOverride = {}
     if attempt is not None and attempt.overrides:
         overrides = {addr: dict(fields) for addr, fields in attempt.overrides.items()}
@@ -505,13 +423,9 @@ def _prober_address_inert(
 
 
 def _readback_ok(attempt: _SeedAttempt, results: Sequence[SimCallResult]) -> bool:
-    """Did every seeded slot echo its written word inside THIS probe's block?
-
-    The strict gate on every seeded verdict. The discovery block proved the
-    getter reads the slot; this proves the seed landed in the block the witness
-    comes from. Any revert or any mismatch ⇒ the whole attempt is discarded and
-    the probe falls back to its unseeded verdict — an unseeded ``unknown`` is
-    honest, a wrongly-seeded positive is not."""
+    """Did every seeded slot echo its written word in this probe's block? Any revert or mismatch discards the
+    attempt; an honest unseeded ``unknown`` beats a wrongly-seeded positive.
+    """
     expected = attempt.expected
     if len(results) < len(expected):
         return False
@@ -522,11 +436,6 @@ def _readback_ok(attempt: _SeedAttempt, results: Sequence[SimCallResult]) -> boo
         if value is None or value != _to_int(want):
             return False
     return True
-
-
-# ---------------------------------------------------------------------------
-# value-out (+ three-valued destination shape)
-# ---------------------------------------------------------------------------
 
 
 def value_out(
@@ -560,36 +469,20 @@ def value_out(
 ) -> ObservedEffect:
     """Does calling F move value out, and to what kind of destination?
 
-    Tier 1 needs ``eth_simulateV1`` (balance + ``Transfer``-event diffs); where
-    unsupported the class declares its Tier-2 fallback explicitly, never a
-    silent degrade. The value-MOVED fact is the sim's; the fixed shapes
-    are static UNIVERSALS; only ``caller_arbitrary`` is proven by simulation via
-    a sentinel that lands — a sentinel that moves nothing proves nothing and,
-    when taint said the param reaches the sink, is a discrepancy (recorded, not
-    routed).
+    Tier 1 needs ``eth_simulateV1``; without it the class declares its Tier-2 fallback. Value moved comes from the sim;
+    fixed shapes are static universals; only ``caller_arbitrary`` is proven by a landing sentinel. A sentinel that moves
+    nothing when taint says it reaches the sink is a recorded discrepancy.
 
-    VERDICT SEMANTICS under seeding. A proven verdict normally reads "calling F
-    moves value out, in the state at this block". Two flags on ``details`` weaken
-    that, and both travel with the verdict through the cache and the claims
-    bridge because a consumer that misses them over-reads the witness:
+    Two ``details`` flags weaken the verdict and travel with it:
 
-    * ``input_seeded`` — the caller was given the asset F pulls. The effect is
-      still fully observed; what is not claimed is that this principal holds the
-      asset today.
-    * ``contract_balance_seeded`` — the TARGET CONTRACT's own ETH balance was
-      overridden before the payout executed. The verdict then means "would move
-      value IF THE CONTRACT WERE FUNDED" — a capability of the code — not "moves
-      value in current state". Its absence means no override was needed, never
-      that the treasury is funded.
+    * ``input_seeded``: the caller was given the asset F pulls.
+    * ``contract_balance_seeded``: the target's own ETH balance was overridden, so this means "would move value if
+    funded".
 
-    ``sentinel_param`` names the PARAMETER the sentinel address was substituted
-    into (:func:`calldata._value_probe_inputs`). A ``caller_arbitrary`` verdict is
-    a proof about that one parameter and about no other — an executor-shaped
-    function takes the sentinel in its payload slot while its call target keeps
-    the base probe's value — so a consumer joining the proof onto a destination
-    (``distill._fork_caller_arbitrary_param``) has to be told the subject. It is
-    published only where a sentinel probe was actually issued; absent means no
-    subject was named, which such a consumer must refuse rather than assume."""
+    ``sentinel_param`` names the one parameter the sentinel went into (:func:`calldata._value_probe_inputs`);
+    ``caller_arbitrary`` proves nothing about other parameters. Present only when a sentinel probe ran; consumers
+    (``distill._fork_caller_arbitrary_param``) must refuse when absent.
+    """
     tr = new_transcript(ctx, feature="value_out", tier=TIER_CALL, effect_class=EFFECT_CLASS_VALUE_OUT)
     if not simulate_supported:
         tr["fallback"] = "tier2"
@@ -611,8 +504,7 @@ def value_out(
     observed = base_res.calls[0]
     used: _SeedAttempt | None = None
     if not observed.success:
-        # A precondition revert, not an absence of value movement: a payable or
-        # asset-pulling withdrawal never reaches its send with an empty caller.
+        # A precondition revert, not absence of value movement.
         used, seeded_result = _seeded_call(
             simulate,
             tr,
@@ -663,10 +555,7 @@ def value_out(
         static_shape=static_shape,
         static_destination=static_destination,
     )
-    # Did the execution the transfers were read off actually RUN? ``observed.logs``
-    # is empty for a reverted call, so ``transfers_out`` returns ``[]`` for "F moved
-    # nothing" and for "F never got past its own precondition" alike. Without this
-    # flag both land the identical ``value_moved: false`` payload on the row.
+    # A reverted call has no logs, so without this "moved nothing" and "never got past its precondition" look identical.
     executed = observed.success
     details: dict[str, Any] = {
         "value_moved": value_moved,
@@ -674,39 +563,20 @@ def value_out(
         "destination_shape": shape,
         "shape_proved_by": proved_by,
     }
-    # Code-plane, and keyed on whether a sentinel probe RAN rather than on
-    # whether it landed: a sentinel that moved nothing is still a probe of that
-    # parameter, and its subject is the same fact about the synthesized calldata
-    # either way. Absent = no sentinel was issued = no subject to name.
+    # Keyed on whether a sentinel probe ran, not whether it landed.
     if sentinel_param and sentinel_transfers is not None:
         details["sentinel_param"] = sentinel_param
     if used is not None:
-        # Code-plane: the function could only be exercised once the caller held
-        # the input asset it pulls. Which token / how much is state-plane residue
-        # and stays in the transcript.
+        # Which token and how much stays in the transcript (state plane).
         details["input_seeded"] = True
         if used.contract_balance_seeded:
-            # WEAKER CLAIM, and it has to travel with the verdict everywhere the
-            # verdict does (cache included): the payout was only reachable after
-            # the TARGET CONTRACT's own ETH balance was overridden, so this proves
-            # "would move value if the contract were funded" — a capability of the
-            # code — not "moves value in current state". A consumer that ignores
-            # this key reads a treasury-empty contract as a live outflow.
+            # The payout needed the contract's own balance overridden: a capability, not a live outflow. Must travel
+            # with the verdict, cache included.
             details["contract_balance_seeded"] = True
     concrete: dict[str, Any] = {
-        # F6: the caller that proved this outflow exists nowhere but inside the
-        # transcript blob, so every consumer of the figure sees a number with no
-        # account of the call behind it. Recorded here, from the call that was
-        # ACTUALLY ISSUED — the seeded retry where one landed, the unseeded probe
-        # where none did — because on a seeded retry the unseeded call reverted
-        # and naming it would publish an execution that proved nothing.
-        #
-        # ``concrete``, never ``details``: a caller address and a block height are
-        # one deployment's observation and must not ride the behavioral cache onto
-        # a bytecode twin (the reach-leak class, ``db/effect_cache.py``). The
-        # residue column is additive and key-merged, and an ABSENT key is the
-        # third state — every verdict written before this existed reads as
-        # not_determined, never as an unseeded probe with no caller.
+        # F6: record the call actually issued (the seeded retry if one landed). In ``concrete``, since caller and height
+        # are per-deployment and mustn't reach bytecode twins via the cache (``db/effect_cache.py``). Absent on older
+        # verdicts means not_determined.
         PROVING_EXECUTION_KEY: residue_payload(
             caller=principal,
             target=contract_address,
@@ -717,9 +587,7 @@ def value_out(
             block_source=tr.get("block_source"),
             chain_id=ctx.chain_id,
             tier=TIER_CALL,
-            # Earned negatives, not defaults: no attempt landed means the proving
-            # call ran with no seeded input and no balance override, which the
-            # unseeded probe's own success proves.
+            # Earned negatives: no attempt landed, so the unseeded probe itself succeeded.
             input_seeded=used is not None,
             contract_balance_seeded=used is not None and used.contract_balance_seeded,
         )
@@ -727,20 +595,10 @@ def value_out(
     if concrete_dest is not None:
         concrete["destination"] = concrete_dest
     if not value_moved and shape != SHAPE_CALLER_ARBITRARY:
-        # Two different facts, and they must not share a reason string: a call that
-        # RAN and moved nothing is a code-plane structural non-observation a
-        # bytecode twin inherits, while a call that reverted — on a precondition,
-        # or on an argument this prober guessed — is state-/input-dependent and
-        # must re-probe. ``value_probe_reverted`` is deliberately absent from
-        # ``effects_worker._CACHEABLE_UNKNOWN_REASONS`` for exactly that reason;
-        # ``no_supply_delta``/``mint_call_reverted`` already split this way.
-        #
-        # A THIRD split: a call that RAN but did so with an effect-relevant
-        # argument left at the encoder default (an empty dynamic array, an integer
-        # role that never resolved) observed nothing about F — it observed a fact
-        # about the vacuous argument. That is input-dependent by the same criterion
-        # a revert is, so its reason must ALSO stay out of the behaviour cache; a
-        # twin must not inherit "moves no value" from an empty-array probe.
+        # Separate reasons: a call that ran and moved nothing is code-plane and cacheable; a reverted call is
+        # input-dependent and must re-probe (``value_probe_reverted`` is excluded from
+        # ``effects_worker._CACHEABLE_UNKNOWN_REASONS``). A call that ran with an effect-relevant argument left at the
+        # default also observed nothing about F and stays uncached.
         if executed and inputs_vacuous:
             reason = "no_value_observed_vacuous_input"
             details["vacuous_input"] = True
@@ -759,11 +617,8 @@ def value_out(
                 discrepancy=disc,
             ),
         )
-    # Downstream value-reach rides the proven flow.out verdict only, and is
-    # STATE-plane (holder addresses + this protocol's USD) — hence ``concrete``.
-    # Measured on ``observed``, the execution the VERDICT came from: on a seeded
-    # retry the unseeded call reverted and carries no logs at all, so reading
-    # reach off it made every seeded verdict indeterminate by construction.
+    # Reach rides the proven flow.out verdict and is state-plane (hence ``concrete``). Measured on ``observed``, the
+    # execution the verdict came from; the reverted unseeded call has no logs.
     _add_reach(concrete, observed, value_holders, acting_balance_usd, protocol_tvl_usd)
     if budget is not None and used is not None:
         budget.record_proven()
@@ -777,11 +632,6 @@ def value_out(
     )
     eff.discrepancy = disc
     return emit(store, eff)
-
-
-# ---------------------------------------------------------------------------
-# code-upgrade
-# ---------------------------------------------------------------------------
 
 
 def code_upgrade(
@@ -802,14 +652,11 @@ def code_upgrade(
 ) -> ObservedEffect:
     """Can calling F change the executing code?
 
-    Tier 0 FIRST — an indexed upgrade proves PAST capability only *in
-    conjunction* with a current-state check: indexed + current-impl
-    non-zero ⇒ proven now; indexed + current fails ⇒ ``unknown`` (historically
-    upgradeable, current capability unknown), fail-closed. Else Tier 1: read the
-    impl slot, call F as principal with a sentinel whose override survives the
-    proxy's validation (plain nonzero code for transparent, an ERC-1822 stub for
-    UUPS), re-read the slot. A bare-address sentinel (no code override) reverts
-    and proves nothing."""
+    Tier 0 first: an indexed upgrade plus a non-zero current impl is proven now; if the current check fails,
+    ``unknown``. Else Tier 1: read the impl slot, call F as the principal with a sentinel that survives proxy validation
+    (plain code for transparent, an ERC-1822 stub for UUPS), re-read. A bare-address sentinel reverts and proves
+    nothing.
+    """
     if indexed_upgrade and current_impl_nonzero is not None:
         tr0 = new_transcript(ctx, feature="code_upgrade", tier=TIER_HISTORICAL, effect_class=EFFECT_CLASS_CODE_UPGRADE)
         tr0["indexed_upgrade"] = True
@@ -844,8 +691,7 @@ def code_upgrade(
     tr["impl_slot"] = impl_slot
     tr["impl_before"] = impl_before
     if not sentinel_override:
-        # Bare-address sentinel: no code at the target, so the proxy's validation
-        # (UUPS proxiableUUID / a code check) reverts the upgrade — proves nothing.
+        # No code at the target, so proxy validation reverts; proves nothing.
         return emit(
             store,
             unknown(
@@ -866,13 +712,8 @@ def code_upgrade(
     ).get(impl_slot)
     tr["impl_after"] = impl_after
     if not probe.success:
-        # Same split as ``value_out``: an upgrade call that REVERTED leaves the
-        # impl slot untouched for a reason that has nothing to do with the code's
-        # upgradeability — the principal was rejected, or an argument this prober
-        # chose was. Reading it as ``impl_slot_unchanged`` put a state-dependent
-        # non-observation into the code-plane cache, where it transferred to every
-        # bytecode twin. Checked BEFORE the positive branch: a reverted call cannot
-        # have moved the slot, so a match here would be a node artifact.
+        # A reverted upgrade says nothing about upgradeability (principal or argument rejected), so it isn't cached as
+        # ``impl_slot_unchanged``. Checked before the positive branch.
         return emit(
             store,
             unknown(
@@ -907,11 +748,6 @@ def code_upgrade(
     )
 
 
-# ---------------------------------------------------------------------------
-# authority-change kernel (function-local gate mutation)
-# ---------------------------------------------------------------------------
-
-
 def authority_change(
     *,
     simulate: Simulate,
@@ -924,15 +760,12 @@ def authority_change(
     randoms: Sequence[str],
     gate_ref: str = "",
 ) -> ObservedEffect:
-    """Does calling F change WHO can call some gate G? (kernel only)
+    """Does calling F change who can call some gate G? (kernel only)
 
-    One simulated block carries state across calls: probe G as ≥2 random
-    identities → call F as principal (e.g. grantRole) → re-probe G as the same
-    randoms. Opened iff the randoms were consistently rejected before and ALL
-    succeed after (raw reverts compared undecoded); a single-identity flip or
-    an ambiguous outcome never opens (fail-closed). The whole-contract
-    authorization DELTA is a projection on whole-contract identity — this
-    returns the function-local gate-mutation kernel only."""
+    In one simulated block: probe G as two or more random identities, call F as the principal, re-probe with the same
+    randoms. Opened iff all were rejected before and all succeed after (raw reverts compared); anything else fails
+    closed. The whole-contract delta is a separate projection.
+    """
     tr = new_transcript(ctx, feature="authority_change", tier=TIER_CALL, effect_class=EFFECT_CLASS_AUTHORITY_CHANGE)
     n = max(2, len(randoms))
     rlist = list(randoms)[:n] if len(randoms) >= 2 else list(randoms)
@@ -957,12 +790,8 @@ def authority_change(
     mutate = res.calls[len(rlist)]
     after = [_sim_to_ethcall(c) for c in res.calls[len(rlist) + 1 :]]
     if not mutate.success:
-        # The principal could not even execute F — a precondition revert, not a
-        # proven absence of effect. This class takes NO seeder: its
-        # reverts are on the gate, not a missing asset, so there is nothing to
-        # seed away. But the decoded revert IS worth keeping — without it the next
-        # census cannot name why the mutation reverted. Record it the way
-        # ``value_out`` records a seeded attempt's revert, via ``_revert_detail``.
+        # The principal couldn't execute F: a precondition revert, not absence of effect. No seeding for this class, but
+        # keep the decoded revert for the census.
         revert_reason = _revert_detail(mutate)
         tr["mutate_revert"] = revert_reason
         return emit(
@@ -999,11 +828,6 @@ def authority_change(
     )
 
 
-# ---------------------------------------------------------------------------
-# supply (mint / burn)
-# ---------------------------------------------------------------------------
-
-
 def supply(
     *,
     simulate: Simulate,
@@ -1031,10 +855,9 @@ def supply(
 ) -> ObservedEffect:
     """Does calling F change ``totalSupply``?
 
-    Tier 1 via ``eth_simulateV1`` (read → call → read in one context): a signed
-    delta is the label (up = mint, down = burn); a zero delta is a
-    non-observation (``unknown``). Destination shape follows value-out — sentinel
-    proves ``caller_arbitrary``; sentinel-negative is ``unknown``, never fixed."""
+    Tier 1 via ``eth_simulateV1`` (read, call, read). A signed delta labels mint or burn; zero is ``unknown``.
+    Destination shape follows value-out.
+    """
     tr = new_transcript(ctx, feature="supply", tier=TIER_CALL, effect_class=EFFECT_CLASS_SUPPLY)
     if not simulate_supported:
         tr["fallback"] = "tier2"
@@ -1056,10 +879,8 @@ def supply(
     before_c, mint_c, after_c = res.calls
     used: _SeedAttempt | None = None
     if not mint_c.success:
-        # A deposit-backed conversion (wrap / enter / deposit) reverts here on the
-        # asset it pulls, never reaching the mint — so it drops out of the mint
-        # population and takes its backing witness with it. Retry with the input
-        # asset seeded.
+        # Deposit-backed conversions revert on the asset they pull before minting; retry with the input seeded so they
+        # (and their backing witness) aren't lost.
         used, seeded = _seeded_supply_call(
             simulate,
             tr,
@@ -1131,31 +952,20 @@ def supply(
             ),
         )
     delta = _signed_delta(after_ts, before_ts)
-    # mint = Transfer from the zero address, EMITTED BY the token whose
-    # ``totalSupply`` moved. Any other token minting inside the same call is a
-    # different asset's supply event and must not stand in for this one's.
+    # Mints are Transfers from 0x0 emitted by the token whose supply moved; other tokens don't count.
     minted = transfers_out(mint_c, "0x" + "00" * 20, only_asset=token_address)
-    # The mirror: units destroyed are a Transfer TO the zero address.
     burned = transfers_in(mint_c, "0x" + "00" * 20, only_asset=token_address)
     if delta == 0:
-        # ``totalSupply`` is NOT the unit count for a share-accounted or
-        # rebasing token — EETH's reads ``liquidityPool.getTotalPooledEther()``,
-        # stETH's reads pooled ether — so a zero delta there does not mean no units
-        # were minted or burned. An UNAMBIGUOUS zero-address ``Transfer`` (exactly
-        # one direction present) IS that witness; take the sign from it. Only when
-        # the transfer evidence is ambiguous (both directions, or neither) is this
-        # the honest non-observation. Erring toward under-claiming: missing this
-        # capped the entire share-accounted population, not two functions.
+        # ``totalSupply`` isn't the unit count for share-accounted or rebasing tokens (EETH, stETH read pooled ether),
+        # so a zero delta doesn't mean nothing was minted. One-directional zero-address Transfers are the witness;
+        # ambiguous evidence stays a non-observation.
         if bool(minted) != bool(burned):
             sign = "mint" if minted else "burn"
         else:
             no_delta_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
             _stamp_seed_qualifiers(no_delta_details, used)
             if inputs_vacuous:
-                # The mint call ran but an effect-relevant argument was
-                # left at the encoder default, so "no supply delta" is a fact about
-                # the vacuous input, not about F — its reason must stay OUT of the
-                # behaviour cache (a twin must not inherit it).
+                # An effect-relevant argument was left at the default, so keep this out of the behaviour cache.
                 no_delta_details["vacuous_input"] = True
                 reason = "no_supply_delta_vacuous_input"
             else:
@@ -1173,11 +983,7 @@ def supply(
     else:
         sign = "mint" if delta > 0 else "burn"
     if _sign_contradicted_by_events(sign, minted, burned):
-        # Two independent witnesses of the same event disagree, so we hold none of
-        # it. Publishing the arithmetic anyway is how a burn was once published as
-        # proven dilution — the strongest claim this stage can make, on a call that
-        # destroyed units. An unknown here is not a gap in coverage; it is the only
-        # honest reading of contradictory evidence.
+        # The two witnesses disagree, so hold neither; a burn was once published as proven dilution this way.
         contradicted_details: dict[str, Any] = {"observation": OBSERVATION_EXECUTED}
         _stamp_seed_qualifiers(contradicted_details, used)
         return emit(
@@ -1210,50 +1016,20 @@ def supply(
         static_destination=static_destination,
     )
     details: dict[str, Any] = {"supply_delta_sign": sign, "observation": OBSERVATION_EXECUTED}
-    # The synthesis qualifiers must live at ``details`` TOP LEVEL — the only
-    # place ``claims_bridge._observed_summary`` carries them from — for EVERY
-    # supply verdict, mint or burn. The nested ``backing`` copy below (mint-only,
-    # withheld-gated) never reaches a burn witness, so a seeded burn read stronger
-    # than its observation until this stamp.
+    # At the top level, the only place ``claims_bridge._observed_summary`` reads, for mints and burns alike.
     _stamp_seed_qualifiers(details, used)
     concrete: dict[str, Any] = {}
     withheld: str | None = None
     if sign == "mint":
-        # Mint backing: an asset Transfer INTO the vault during the SAME simulated
-        # mint call is the co-occurring inflow that separates a deposit-backed
-        # conversion (WeETH.wrap / BoringVault.enter) from an unbacked, dilutive
-        # admin mint. The mint ran as the resolved principal for an attacker-chosen
-        # amount, and ``mint_c.logs`` is the COMPLETE set of Transfers it emitted —
-        # so ``inflow_observed is False`` is a WITNESSED negative (supply rose with
-        # zero matching asset inflow in the same observed call = dilution), not an
-        # absence-of-evidence guess. Fork-observed, Tier 1. Proportionality (the
-        # backed-vs-partial distinction) is left to the scorer from these counts —
-        # the assets differ in token/decimals, so the recipe does NOT collapse them
-        # to a ratio here. NEVER inferred from static flow.in + supply.mint
-        # co-occurrence (that proves neither causation nor proportionality).
-        #
-        # The inflow must be an asset OTHER than the one just minted: a mint that
-        # credits the vault itself (``_mint(address(this), fee)``) emits a
-        # ``Transfer(0x0 -> vault)`` from the minted token, which is the dilution
-        # being measured, not backing for it. Counting it produced a
-        # ``backing.inflow_observed: true`` byte-identical to a real deposit-backed
-        # conversion on the purest case of unbacked issuance.
+        # Mint backing: an inflow of a different asset into the vault in the same call separates a deposit-backed
+        # conversion (WeETH.wrap, BoringVault.enter) from an unbacked admin mint. The logs are complete for the call, so
+        # ``inflow_observed is False`` is a witnessed negative. Proportionality is left to the scorer. The minted token
+        # itself is excluded: a fee mint to the vault is the dilution, not backing.
         inflow = transfers_in(mint_c, token_address, exclude_asset=token_address)
-        # ASYMMETRIC BURDEN, and the asymmetry is the whole point. ``inflow_observed:
-        # true`` is a positive observation — a Transfer log exists — and needs no
-        # further proof. The NEGATIVE has to be EARNED: it is published as witnessed
-        # dilution, so it may not rest on a pull that failed to happen because of an
-        # argument this prober invented. Two independent ways that can happen, each
-        # with its own gate:
-        #
-        #   * a slot static NAMED as a token never received a proven one
-        #     (:func:`_token_slots_unresolved`);
-        #   * a slot static never named at all — an asset parameter called ``want``
-        #     or ``market`` yields an EMPTY ``token_param_indexes``, so the first
-        #     gate passes vacuously — still holds the acting identity, and a call to
-        #     a codeless address is a silent no-op inside ``SafeTransferLib``. That
-        #     one is settled by OBSERVATION (:func:`_prober_address_inert`), never by
-        #     vocabulary.
+        # Asymmetric burden: ``inflow_observed: true`` needs only the log, but the negative is published as dilution and
+        # must be earned. It's withheld if a named token slot didn't get a proven token
+        # (:func:`_token_slots_unresolved`), or if an unnamed asset param still held our identity and the stub
+        # differential fails (:func:`_prober_address_inert`).
         withheld = "token_param_unresolved" if _token_slots_unresolved(token_param_indexes, used) else None
         if withheld is None and not inflow:
             suspects = _prober_supplied_address_args(used.calldata if used is not None else mint_calldata, principal)
@@ -1269,38 +1045,24 @@ def supply(
             ):
                 withheld = "prober_address_not_proven_inert"
             elif not suspects and not principal:
-                # No identity to fill address arguments with means the encoder's
-                # ``address(0)`` occupies them — the codeless case in its purest
-                # form — and nothing here can tell which slots those were.
+                # No identity means address(0) fills address args: the codeless case, with no way to tell which slots.
                 withheld = "prober_address_unidentifiable"
         if withheld is not None:
-            # WITHHOLDING IS NOT A NEGATIVE. The ``backing`` key is simply absent,
-            # which ``claims_bridge._observed_summary`` and the scorer read as
-            # unmeasured; the reason lives on the transcript so a live run can name
-            # what it could not prove instead of going quiet.
+            # Withholding isn't a negative: ``backing`` is absent (read as unmeasured) and the reason is on the
+            # transcript.
             tr["backing_withheld"] = withheld
         else:
-            # HOW MANY transfers this execution emitted is an observation of THIS
-            # deployment at this block, not a property of the bytecode: the same code
-            # on a vault with two fee recipients emits a different count. The
-            # code-plane witness is the BOOLEAN pair (an inflow co-occurred / units
-            # were minted), which is what a twin deployment may inherit; the counts go
-            # to the per-deployment residue.
+            # Counts vary by deployment, so they go to per-deployment residue; the code-plane witness is the boolean
+            # pair.
             concrete["backing_inflow_transfers"] = len(inflow)
             concrete["backing_mint_transfers"] = len(minted)
             details["backing"] = {
                 "inflow_observed": bool(inflow),
                 "minted": bool(minted),
-                # Whether the acting principal had to be given the input asset before
-                # the mint would execute at all. It records HOW the call was reached,
-                # never what the call did: ``inflow_observed`` above still comes
-                # solely from Transfers this execution emitted, and storage seeding
-                # emits none. A seeded mint that pulls nothing is still an honest
-                # ``inflow_observed: false`` (witnessed dilution); an unseeded mint is
-                # unaffected by any of this.
+                # How the call was reached, not what it did: seeding emits no Transfers, so ``inflow_observed`` is
+                # unaffected.
                 "input_seeded": used is not None,
-                # See ``value_out``: a mint only reachable once the CONTRACT's own ETH
-                # balance was overridden is a capability claim, not a live one.
+                # See ``value_out``: a capability claim, not a live one.
                 "contract_balance_seeded": used is not None and used.contract_balance_seeded,
             }
     if used is not None:
@@ -1319,11 +1081,6 @@ def supply(
     return emit(store, eff)
 
 
-# ---------------------------------------------------------------------------
-# shared helpers
-# ---------------------------------------------------------------------------
-
-
 def _run(
     simulate: Simulate,
     transcript: dict[str, Any],
@@ -1332,8 +1089,7 @@ def _run(
     overrides: dict[str, Any] | None = None,
     label: str,
 ):
-    """Issue one simulated block and record it. Returns ``None`` on a malformed
-    response (fewer results than calls) so the caller fails closed."""
+    """Issue and record one simulated block; ``None`` on a malformed response (fewer results than calls)."""
     call_dicts = [{"to": c.to, "data": c.data, "from": c.from_addr, "value": c.value} for c in calls]
     result = simulate(calls, hex(transcript["block_number"]), overrides)
     if result is None or len(result.calls) < len(calls):
@@ -1352,11 +1108,9 @@ def _seeded_call(
     principal: str | None,
     seeder: Seeder | None = None,
 ) -> tuple[_SeedAttempt | None, SimCallResult | None]:
-    """Run the seeded retries of a single-call probe until one EXECUTES.
-
-    Returns the attempt and its result only when the read-back held AND the call
-    succeeded; otherwise ``(None, None)`` and the caller keeps its unseeded
-    verdict verbatim. Every discarded attempt records WHY."""
+    """Run seeded retries until one executes with its read-back intact; else ``(None, None)`` and the unseeded
+    verdict stands. Every discarded attempt records why.
+    """
     for attempt in attempts:
         calls = [
             *attempt.readback,
@@ -1378,8 +1132,7 @@ def _seeded_call(
 
 
 def _revert_detail(result: SimCallResult) -> str:
-    """A short, replayable reason for one reverted attempt: the decoded error when
-    the revert data decodes, else the raw selector, else ``empty_revert``."""
+    """A replayable reason for a revert: decoded error, else raw selector, else ``empty_revert``."""
     from services.resolution.differential_probe import decode_error
 
     raw = result.revert_data
@@ -1398,9 +1151,7 @@ def _seeded_supply_call(
     principal: str | None,
     seeder: Seeder | None = None,
 ) -> tuple[_SeedAttempt | None, tuple[SimCallResult, SimCallResult, SimCallResult] | None]:
-    """Seeded-retry form of the read → mint → read block. The two ``totalSupply``
-    reads must bracket the seeded call in the SAME block, so the whole triple is
-    re-run rather than splicing a seeded mint into the unseeded reads."""
+    """Seeded read, mint, read. Both reads must bracket the seeded call in one block, so the triple is re-run."""
     read = SimCall(to=token_address, data=TOTAL_SUPPLY_SELECTOR)
     for attempt in attempts:
         mint = SimCall(to=token_address, data=attempt.calldata, from_addr=principal, value=attempt.value)
@@ -1433,15 +1184,12 @@ def _run_sentinel(
     only_asset: str | None = None,
     attempt: _SeedAttempt | None = None,
 ) -> list[tuple[str, str, str]] | None:
-    """Run the attacker-sentinel probe if one was supplied, returning its
-    transfers of interest (or ``None`` when no sentinel probe ran). A sentinel
-    that moves nothing returns ``[]`` — a non-observation the shape resolver
-    treats as rule-8.1 ``unknown``, never "fixed".
+    """Run the sentinel probe if supplied; ``None`` when none ran, ``[]`` when it moved nothing (rule-8.1
+    ``unknown``).
 
-    When the base probe only executed under a seed, the sentinel runs under the
-    SAME seed: an unseeded sentinel would revert on the same precondition and its
-    empty result would read as "the caller cannot redirect this", which is a
-    conclusion the probe never actually tested."""
+    When the base probe needed a seed, the sentinel uses the same seed; an unseeded sentinel would revert on the
+    precondition and falsely read as "the caller can't redirect this".
+    """
     if not sentinel_calldata or not sentinel_address:
         return None
     overrides = attempt.overrides if attempt is not None else None
@@ -1467,62 +1215,21 @@ def _resolve_destination_shape(
     static_shape: str | None,
     static_destination: str | None,
 ) -> tuple[str, str, str | None, Discrepancy | None]:
-    """Three-valued destination shape. Returns
-    ``(shape, proved_by, concrete_destination, discrepancy)``.
+    """Three-valued destination shape: ``(shape, proved_by, concrete_destination, discrepancy)``.
 
-    Priority: a sentinel that LANDS proves ``caller_arbitrary`` (existential,
-    simulation) → static's positive proof of a fixed shape (universal) → a
-    discrepancy when taint said the param reaches the sink but the
-    sentinel moved nothing → otherwise ``unknown`` (an observation of one
-    destination can't prove "fixed").
+    A landing sentinel proves ``caller_arbitrary``; else static's fixed-shape proof; a discrepancy when taint said the
+    param reaches the sink but the sentinel moved nothing; otherwise ``unknown``.
 
-    ``concrete_destination`` means one thing everywhere it is returned: an address
-    value that was OBSERVED to receive the outflow (or, on the static branch, the
-    fixed address static positively proved). It is deliberately computed from the
-    BASE probe's transfers and never from the sentinel: the sentinel is an address
-    this prober invented, so publishing it in the column that otherwise means
-    "where the money went" would present a fabricated address as an observation.
-    The caller_arbitrary PROOF loses nothing by that — it lives in
-    ``destination_shape``/``shape_proved_by``, which is where a consumer reads
-    "the caller chooses this destination"; the sentinel's own address adds no
-    information (it is recomputable, and it is in the transcript).
+    ``concrete_destination`` is an address observed receiving the outflow (or static's proven fixed address), computed
+    from the base probe, never the sentinel. Invented identities (the sentinel and :data:`calldata.NEUTRAL_CALLER`,
+    which fills every address argument and comes back in the Transfer log) are excluded, and ``caller_arbitrary``
+    publishes no address: it would just be our own input, misleadingly reassuring.
 
-    TWO INVENTED ADDRESSES, NOT ONE. The sentinel is not the only
-    identity this prober invents: :data:`calldata.NEUTRAL_CALLER` is the caller a
-    public/unresolved-principal probe runs as, it is substituted into every address
-    ARGUMENT of the synthesized call, and it comes straight back out in the
-    ``Transfer`` log. Measured: on 35 of 35 ``caller_arbitrary`` rows in the local DB
-    the stored ``concrete_destination`` is a ``function_principals`` address of the
-    same function echoed back; a stored ``NEUTRAL_CALLER`` has zero realised rows
-    here (lower bound — it arises whenever a probe runs with no resolved principal,
-    which the exclusion below is test-pinned against). Both invented identities are
-    excluded here, and a ``caller_arbitrary`` shape publishes NO address at all: the shape
-    IS the adverse finding, the address is by construction whatever WE passed, and
-    a stored one can only mislead in the reassuring direction ("the money goes to
-    the timelock, so this is fine").
-
-    The exclusion is applied to the CONVERGENCE ANSWER, never to the destination set
-    it is computed from: removing an invented recipient before counting destinations
-    manufactures agreement out of a genuinely ambiguous outflow. See the comment on
-    the capture itself.
+    The exclusion applies after the convergence test, not before; see the capture comment.
     """
-    # State-plane residue: the address value actually left to THIS run. Capture it
-    # whenever every observed outflow converged on a single destination — a
-    # withdrawal that emits several Transfer logs (burn + send, or send + fee to
-    # the same address) still has one concrete destination. Divergent destinations
-    # are genuinely ambiguous → withheld. This never proves the SHAPE (a single
-    # observation can't prove "always this address").
-    #
-    # ORDER IS LOAD-BEARING: the convergence test runs over EVERY destination, and
-    # only then is an invented identity refused. Filtering first turned an ambiguous
-    # two-destination outflow into a "convergent" one and published the survivor:
-    # `from=holder, to=NEUTRAL_CALLER` is the ordinary "paid msg.sender" leg of a
-    # withdrawal, so dropping it and asserting the residual fee/treasury address as
-    # "the address value actually left to" is exactly the reassuring-direction
-    # mislead this filter exists to remove ("the money goes to the timelock, so this
-    # is fine") — measured: 90% to the impersonated caller and a 10% fee to the
-    # treasury published the treasury as THE destination. An invented recipient among
-    # several destinations means the destination is NOT determined.
+    # Capture the destination only when every outflow converged on one address (several logs to one address is fine).
+    # Order matters: test convergence over every destination first, then refuse invented identities. Filtering first
+    # turned "90% to the caller, 10% fee to treasury" into "the money goes to treasury".
     out_destinations = {to for _f, to, _v in base_transfers}
     observed_dest = next(iter(out_destinations)) if len(out_destinations) == 1 else None
     if _is_invented_identity(observed_dest):
@@ -1530,17 +1237,10 @@ def _resolve_destination_shape(
     if sentinel_transfers is not None and sentinel_address is not None:
         landed = any(_addr_eq(to, sentinel_address) for _f, to, _v in sentinel_transfers)
         if landed:
-            # PROVEN caller-arbitrary: the destination is whatever the caller says,
-            # so this run's recipient is our own calldata read back, never an
-            # observation about the contract. Withheld (the column has no
-            # "probe_supplied" state, and NULL is the honest one of the two it has).
+            # Proven caller-arbitrary: the recipient is our own calldata, so publish no address.
             return SHAPE_CALLER_ARBITRARY, "simulation", None, None
-    # Evaluated BEFORE the static branch returns. Taint saying the param
-    # reaches the sink while the sentinel moved nothing is a matcher/probe
-    # soundness problem whatever static believes — and it is most interesting
-    # precisely when static claims a fixed shape, because then the two planes
-    # contradict each other. Returning early on the static branch filed no
-    # discrepancy in exactly that case.
+    # Checked before the static branch returns: taint vs a silent sentinel is a soundness problem, most interesting when
+    # static claims a fixed shape.
     disc = (
         Discrepancy(
             kind="taint_param_sentinel_negative",
@@ -1551,20 +1251,11 @@ def _resolve_destination_shape(
         else None
     )
     if static_shape in (SHAPE_IMMUTABLE_FIXED, SHAPE_STORAGE_DETERMINED):
-        # The SHAPE is static's to prove and it is a universal — "this destination
-        # cannot be redirected" holds whether or not this particular probe moved
-        # anything. The ADDRESS is the observation's to supply, and it is fine for
-        # it to be absent: a probe that reverted still leaves the shape true and
-        # ``concrete_destination`` simply unfilled.
-        #
-        # Requiring a static ADDRESS here is what made this branch dead code for
-        # the stage's whole life: the static plane classifies destinations by KIND
-        # and never resolves the value behind an immutable, so no caller could
-        # ever satisfy the condition and ``destination_shape`` stayed ~95%
-        # ``unknown`` — the single most security-relevant bit, unproven.
+        # The shape is static's universal; the address is the observation's and may be absent. Requiring a static
+        # address made this branch dead (static never resolves the value behind an immutable), leaving
+        # ``destination_shape`` ~95% unknown.
         return static_shape, "static", static_destination or observed_dest, disc
-    # Taint says the param reaches the sink, yet the sentinel moved nothing: a
-    # discrepancy (matcher/probe-soundness), NOT a "fixed" verdict.
+    # Taint says the param reaches the sink but the sentinel moved nothing: a discrepancy, not "fixed".
     return SHAPE_UNKNOWN, "none", observed_dest, disc
 
 
@@ -1575,137 +1266,55 @@ def _add_reach(
     acting_balance_usd: float | None,
     protocol_tvl_usd: float | None = None,
 ) -> None:
-    """Downstream value-reach. From the SAME fork execution of F, a value-holder
-    from which value provably LEFT (a ``Transfer`` out in this call's logs) is a
-    fork-OBSERVED reach; its full on-chain USD is attributed as reached (a
-    conservative upper bound). Downstream value is NEVER imputed via the
-    control-graph reference heuristic (``control_graph_edges`` carries no fund-flow
-    edge). Skipped entirely when no value-holder set was supplied (nothing to
-    measure), leaving the verdict shape unchanged.
+    """Downstream value reach from the same fork execution of F.
 
-    THREE STATES, and ``reach_determined`` is the one key that tells them apart:
+    A holder whose balance provably left (a Transfer out in this call's logs) is an observed reach, attributed at its
+    full USD (an upper bound). Never imputed from control-graph edges. Skipped when no holder set is supplied.
 
-    * ``reach_determined: True`` + ``observed_reach_value_usd`` +
-      ``observed_reach_holders`` + ``observed_reach_assets`` — measured, and every
-      asset that moved had a priced holding. The USD is an upper bound.
-    * ``reach_determined: False`` + ``reach_indeterminate: True`` +
-      ``observed_reach_floor_usd`` — NOTHING was witnessed leaving a holder, which is
-      not the same as "reach is nothing": this branch fires for any zap / router /
-      adapter that moves value it does not itself hold (18 armed ``flow.out``
-      functions on 6 zero-balance contracts locally). It used to publish the acting
-      deployment's own balance as ``observed_reach_value_usd``, so a consumer reading
-      the number and ignoring the flag got **"$0 reach" for a function that may move
-      millions** — a proven-absence sentence minted out of a non-observation. The
-      floor is still recorded, under a name that says what it is, and the key that
-      means "measured reach" is ABSENT.
-    * ``reach_determined: False`` + ``reach_indeterminate: True`` and NO
-      ``observed_reach_floor_usd`` — the same non-observation, and no balance row was
-      witnessed for the acting deployment either (``acting_balance_usd is None``), so
-      there is no floor to state. The floor key's ABSENCE is the witness; it is never
-      published as ``null`` and never as ``0.0``. A floor of ``0.0`` on this branch
-      means a balance row WAS read and summed to zero — a different, weaker-but-real
-      fact — which is why the two cannot share a payload.
-    * ``reach_determined: False`` WITHOUT ``reach_indeterminate`` +
-      ``observed_reach_holders`` / ``observed_reach_assets`` /
-      ``observed_reach_unvalued_pairs`` — value WAS witnessed leaving a holder and
-      its USD is not determined, because at least one (holder, asset) pair that moved
-      has no priced holding on record. ``observed_reach_priced_usd`` carries the part
-      that IS priced (a partial floor), with ``observed_reach_priced_holders`` naming
-      whose holdings it came from; both are omitted when that part is nothing, and the
-      figure is withheld when the TVL ceiling refuses it
-      (``reach_tvl_check: exceeds_protocol_tvl`` + ``observed_reach_rejected_usd`` +
-      ``protocol_tvl_usd`` then record the contradiction, exactly as on the measured
-      branch). This is the unpriced-asset case: 1001 of 1376 local
-      ``contract_balances`` rows are unpriced, and the recoverETH row moved native ETH
-      out of a deployment with no native balance row at all — "holds nothing", "not
-      fetched" and "fetch failed" are one shape there, so the only honest USD is
-      *unknown*.
-    * every key absent — no holder set was supplied, so nothing was even attempted.
+    * ``reach_determined: True`` with ``observed_reach_value_usd``, ``observed_reach_holders``,
+    ``observed_reach_assets``: every moved asset had a priced holding.
+    * ``reach_determined: False``, ``reach_indeterminate: True``, ``observed_reach_floor_usd``: nothing left a holder,
+    which isn't "no reach" (routers and zaps move value they don't hold). The acting deployment's balance is published
+    as a floor, never as measured reach.
+    * The same without ``observed_reach_floor_usd``: no balance row for the acting deployment either. A ``0.0`` floor
+    would mean a row was read and summed to zero.
+    * ``reach_determined: False`` without ``reach_indeterminate``: value left but some (holder, asset) pair has no
+    priced holding. ``observed_reach_priced_usd`` is the priced part (a floor) with ``observed_reach_priced_holders``;
+    withheld if it exceeds TVL.
+    * Everything absent: no holder set supplied.
 
-    THE UNVALUED DISCLOSURE IS KEYED THE WAY THE ARITHMETIC IS — per (holder, asset).
-    It used to be a set of ASSETS while the pricing loop ran per pair, so an asset
-    priced for holder A and unrecorded for holder B was published as unvaluable
-    *tout court* beside a concrete USD figure computed from A. On three PR-161 rows
-    that produced a payload asserting both halves of a contradiction: verdict 198
-    (``PriorityWithdrawalQueue.requestWithdrawWithWeETH``) named weETH as the ONLY
-    asset that moved, named weETH as the ONLY asset that could not be valued, and
-    published ``observed_reach_priced_usd: 8471736.29`` — every dollar of it the
-    BoringVault holder's weETH row, a holder the disclosure never connected to the
-    figure. Three keys keep the two facts apart now:
+    The unvalued disclosure is per (holder, asset), matching the arithmetic: ``observed_reach_unvalued_pairs`` (one
+    entry per unvalued pair), ``observed_reach_unvalued_assets`` (assets no holder priced; ``[]`` is an earned
+    negative), ``observed_reach_priced_holders``. Keying it per asset once published an asset as both the only mover and
+    unvaluable beside a figure made from another holder's balance.
 
-    * ``observed_reach_unvalued_pairs`` — the disclosure proper: one
-      ``{holder, asset, reason}`` per pair whose USD is not known.
-    * ``observed_reach_unvalued_assets`` — the assets NO holder priced (an asset that
-      moved and contributed nothing to the figure). Published on this branch even when
-      EMPTY, because on this branch it is computed: ``[]`` is the earned negative
-      "every asset that moved was priced for at least one holder", and absence of the
-      key means the branch never ran.
-    * ``observed_reach_priced_holders`` — whose holdings the figure is made of,
-      published beside every figure this branch publishes. It is deliberately absent
-      on the measured branch, where ``reach_determined: True`` already says every
-      holder in ``observed_reach_holders`` was priced.
+    Written to ``concrete``, not ``details``: holders and USD are per-deployment and mustn't reach bytecode twins via
+    the cache.
 
-    Writes to ``concrete``, NOT ``details``. Every value here is
-    per-deployment — the holders are addresses and the USD is this protocol's
-    balance sheet at this block — while ``details`` is the code-plane witness the
-    behavioral cache stores and re-publishes to every OTHER deployment sharing the
-    bytecode. Reach in ``details`` meant a second deployment's verdict named the
-    first one's holders and USD as its own.
+    Matching is per (holder, asset), where asset is the Transfer emitter (``NATIVE_ASSET_LOG_EMITTER`` for native).
+    Asset-blind matching published $3.489B of reach for ``WeETH.recoverETH`` from one synthetic native Transfer.
 
-    ASSET-SCOPED MATCHING. ``transfers_out`` is asked per (holder, asset), where
-    the asset is the ``Transfer`` log's EMITTER — the token contract, or
-    ``NATIVE_ASSET_LOG_EMITTER`` for a native move (measured against the live node,
-    see that constant). Asset-blind matching is what published $3.489B of reach for
-    ``WeETH.recoverETH``: the contract-balance seed gave the proxy synthetic native
-    ETH, ``traceTransfers`` emitted one synthetic ``Transfer`` out of it, and the
-    holder's ENTIRE balance — 99.99% of it eETH — was attributed as reached. Two rows
-    of that shape carried 64.96% of all published reach USD in the DB and both are
-    truly $0.
-
-    Note what is NOT done: this does not pass ``only_asset`` to a single whole-holder
-    match — a synthetic native log has no token emitter, so that would have matched
-    nothing and under-claimed 100%. The
-    INPUT changed: holdings arrive per asset, native included, keyed on the emitter
-    the node actually uses.
-
-    ONE ADD PER (HOLDER, ASSET), never per LOG. The attributed figure is a whole
-    recorded balance, so a second Transfer log of the same asset out of the same
-    holder must contribute nothing: summing per log published a MULTIPLE of the
-    balance in the field that documents itself as an upper bound."""
+    One add per (holder, asset), never per log, since the figure is the whole balance.
+    """
     if not value_holders:
         return
     priced_usd = 0.0
     priced_any = False
-    # Both sides of the disclosure are accumulated per (holder, asset) — the key the
-    # arithmetic uses. Publishing the unvalued side per ASSET is what let one asset be
-    # named as the only thing that moved AND the only thing that could not be valued,
-    # next to a figure made of a different holder's balance.
+    # Accumulated per (holder, asset), the arithmetic's key.
     unvalued_pairs: list[dict[str, str]] = []
     priced_holders: set[str] = set()
     priced_assets: set[str] = set()
     reach_holders: set[str] = set()
     reach_assets: set[str] = set()
-    # (holder, asset) -> the priced holding, or None when we hold it unpriced. A
-    # (holder, asset) pair MISSING from this map is the third case: value left that
-    # holder in an asset we have no balance row for at all.
+    # (holder, asset) -> priced holding, or None if unpriced. A missing pair means no balance row at all.
     known: dict[tuple[str, str], float | None] = {
         (h.holder.lower(), h.asset.lower()): h.usd_value for h in value_holders
     }
-    # Uniform per holder (see ``AssetHolding.completeness``): what is KNOWN about an
-    # asset absent from ``known`` for that holder. Two states, and neither is "the
-    # list is whole" — nothing recorded can prove that (``selection
-    # ._completeness_from_fetch`` registers no ``complete`` member),
-    # so the reason an absent asset gets is "not in the holdings we recorded, which
-    # are not provably all of them", never "this holder does not hold it".
+    # What's known about assets absent from ``known`` per holder. Never "the list is whole": nothing can prove that
+    # (``selection._completeness_from_fetch`` has no ``complete`` member).
     completeness: dict[str, str] = {h.holder.lower(): h.completeness for h in value_holders}
-    # The (holder, asset) PAIRS value provably left, deduped BEFORE any USD is added.
-    # Deduping is not tidiness: the figure attributed for a pair is the holder's WHOLE
-    # recorded balance for that asset (the documented conservative upper bound), and a
-    # single call legitimately emits several Transfer logs of the same asset out of the
-    # same holder — the shape ``_resolve_destination_shape`` names one screen up, "a
-    # withdrawal that emits several Transfer logs (burn + send, or send + fee to the
-    # same address)". Adding once per LOG published a MULTIPLE of the entire balance
-    # and called it an upper bound; two logs made a $100 holding read as $200 reach.
+    # Pairs value provably left, deduped before any USD is added; several logs of one asset from one holder must count
+    # once.
     moved: set[tuple[str, str]] = set()
     for holder in sorted({h.holder.lower() for h in value_holders}):
         for _frm, _to, _value, asset in transfers_out_with_asset(base_call, holder):
@@ -1714,21 +1323,14 @@ def _add_reach(
         reach_holders.add(holder)
         reach_assets.add(asset)
         if (holder, asset) not in known:
-            # No balance row at all for this (holder, asset): value left in an asset
-            # we never recorded. Absence there conflates "holds nothing", "not
-            # fetched" and "fetch failed", so it is not a zero. The reason names which
-            # of the two things we know, and neither is "the holder does not hold it":
-            # ``holdings_at_page_cap`` when the holder's stored rows reach the
-            # fetcher's one-page cap (assets are probably missing), otherwise
-            # ``asset_not_in_recorded_holdings`` — recorded, not proven-complete.
+            # No balance row: "holds nothing", "not fetched" and "fetch failed" look the same, so it's not a zero.
+            # ``holdings_at_page_cap`` when stored rows hit the fetch cap, else ``asset_not_in_recorded_holdings``.
             reason = _UNVALUED_REASON_BY_COMPLETENESS[completeness.get(holder, HOLDINGS_NOT_DETERMINED)]
             unvalued_pairs.append({"holder": holder, "asset": asset, "reason": reason})
             continue
         usd = known[(holder, asset)]
         if usd is None:
-            # Held, but unpriced. Per PAIR: this says nothing about another holder's
-            # holding of the same asset, and it never did — the old asset-keyed set
-            # said it anyway.
+            # Held but unpriced, per pair.
             unvalued_pairs.append({"holder": holder, "asset": asset, "reason": "unpriced_holding"})
         else:
             priced_usd += usd
@@ -1744,28 +1346,18 @@ def _add_reach(
     concrete["observed_reach_holders"] = sorted(reach_holders)
     concrete["observed_reach_assets"] = sorted(reach_assets)
     if unvalued_pairs:
-        # Witnessed, and NOT valued. The priced part is a floor, never the answer.
+        # Witnessed but not valued; the priced part is a floor.
         concrete["reach_determined"] = False
-        # Sorted by (holder, asset) already: the loop above walks ``sorted(moved)``.
+        # Already sorted: the loop walks ``sorted(moved)``.
         concrete["observed_reach_unvalued_pairs"] = unvalued_pairs
-        # The assets NO holder priced. An asset that IS priced for some holder is not
-        # one of them, however many other holders moved it unvalued — that is the whole
-        # correction, and ``[]`` here is the earned negative, not a missing answer.
+        # Assets no holder priced; ``[]`` is an earned negative.
         concrete["observed_reach_unvalued_assets"] = sorted({p["asset"] for p in unvalued_pairs} - priced_assets)
         concrete["observed_reach_unvalued_reasons"] = sorted({p["reason"] for p in unvalued_pairs})
         if priced_any:
-            # WHOSE holdings the figure is. Published beside the figure on both arms
-            # below — a refused figure is still a figure, and the contradiction the
-            # ceiling records is only inspectable if its subjects are named.
+            # Whose holdings the figure is, published on both arms so a refused figure's subjects are named.
             concrete["observed_reach_priced_holders"] = sorted(priced_holders)
-            # The CEILING applies to the partial floor too. It used to guard only
-            # the branch below, so a floor ABOVE the protocol's own measured TVL was
-            # publishable with no ``reach_tvl_check`` at all — the same contradiction on
-            # the sibling key, and worse on this branch than on a measured total: the
-            # floor is a LOWER bound over a subset of the assets that moved, so a floor
-            # above the ceiling cannot be explained by the upper bound being loose.
-            # Refused the same way (recorded, never clamped) and the unvalued-asset
-            # disclosure stands either way — the two facts are independent.
+            # The TVL ceiling applies to the partial floor too; a floor above TVL is even more contradictory than a
+            # loose upper bound. Refused, never clamped.
             tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
             concrete["reach_tvl_check"] = tvl_state
             if tvl_state == REACH_TVL_EXCEEDED:
@@ -1783,16 +1375,10 @@ def _add_reach(
                 if tvl_note is not None:
                     logger.warning("reach TVL ceiling not applied: %s", tvl_note)
                 concrete["observed_reach_priced_usd"] = priced_usd
-        # ``priced_any`` False publishes NO ``reach_tvl_check``: there is no figure for a
-        # ceiling to bear on, and ``within_protocol_tvl`` over an absent number would
-        # read as a check that passed. Absence of the key here means "no figure", which
-        # is exactly what the absent ``observed_reach_priced_usd`` beside it says.
+        # No figure, so no ``reach_tvl_check``; ``within_protocol_tvl`` over nothing would read as a pass.
         return
-    # CORROBORATING CEILING: no exercise of one function can reach more value than the
-    # protocol holds. The worst published row asserted $3.489B against a protocol TVL
-    # of $3.297B, and nothing checked. A sum above the ceiling is not clamped (a clamp
-    # would invent a number nothing measured) — it is refused, with both figures
-    # recorded so the contradiction is inspectable.
+    # One function can't reach more than the protocol holds ($3.489B was once published against $3.297B TVL). Refused
+    # with both figures, never clamped.
     tvl_state, tvl_note = _reach_tvl_state(priced_usd, protocol_tvl_usd)
     concrete["reach_tvl_check"] = tvl_state
     if tvl_state == REACH_TVL_EXCEEDED:
@@ -1813,16 +1399,9 @@ def _add_reach(
     concrete["observed_reach_value_usd"] = priced_usd
 
 
-# The three answers of the reach-vs-TVL ceiling. ``skipped_no_tvl`` is published, not
-# implied: an absent ceiling must be visible as "not checked" rather than looking like
-# a check that passed — a gate that silently never fires is not a mitigation.
-# Why an asset that moved could not be valued, keyed on what is KNOWN about the
-# holder's holdings list. Neither reason asserts the holder does not hold the asset:
-# ``asset_not_in_recorded_holdings`` says only that our recorded set does not contain
-# it and that set is not provably complete: the fetch's recorded ``asset_set_status``
-# can witness the at-cap case and nothing witnesses its negation, so
-# ``selection._completeness_from_fetch`` registers no ``complete`` member at all. The
-# previous name, ``unrecorded_asset``, read as a proven absence.
+# The ceiling's answers include ``skipped_no_tvl`` so an unchecked ceiling isn't mistaken for a pass. Unvalued reasons
+# are keyed on what's known about the holder's list; neither asserts the holder lacks the asset (the old
+# ``unrecorded_asset`` name read as proven absence).
 _UNVALUED_REASON_BY_COMPLETENESS = {
     HOLDINGS_COMPLETENESS_AT_PAGE_CAP: "holdings_at_page_cap",
     HOLDINGS_NOT_DETERMINED: "asset_not_in_recorded_holdings",
@@ -1836,10 +1415,8 @@ REACH_TVL_SKIPPED = "skipped_no_tvl"
 def _reach_tvl_state(reached_usd: float, protocol_tvl_usd: float | None) -> tuple[str, str | None]:
     """``(state, log_note)`` for the reach-vs-TVL ceiling.
 
-    Reads ONLY a caller-supplied ``defillama_tvl`` figure (see
-    ``selection._protocol_tvl_usd``): ``tvl_snapshots.total_usd`` and
-    ``contract_breakdown`` are NULL on every local row, so a ceiling written against
-    them could never fire.
+    Reads only a caller-supplied ``defillama_tvl`` (see ``selection._protocol_tvl_usd``); the tvl_snapshots columns are
+    NULL locally.
     """
     if protocol_tvl_usd is None or protocol_tvl_usd <= 0:
         return REACH_TVL_SKIPPED, "no defillama_tvl snapshot for this protocol"
@@ -1862,19 +1439,12 @@ _UINT256_MOD = 1 << 256
 
 
 def _signed_delta(after: int, before: int) -> int:
-    """``after - before`` read as the uint256 word it actually is.
+    """``after - before`` as a uint256 delta.
 
-    ``totalSupply`` is a uint256 and the ubiquitous ``_burn`` idiom decrements it
-    inside ``unchecked``. Python subtracts arbitrary-precision integers, so a burn
-    that wrapped past zero on-chain comes back here as a delta of nearly ``2^256``
-    — a positive number, i.e. a MINT, on a call that destroyed units. Reading the
-    difference modulo ``2^256`` and taking the short way round restores the sign
-    the EVM computed.
-
-    The halfway split is sound because both readings cannot be plausible at once:
-    a supply that genuinely moved by more than ``2^255`` units has overflowed any
-    real token's economics, and the burn reading is the only one that corresponds
-    to code that can execute."""
+    ``_burn`` often decrements in ``unchecked``, and a wrap past zero comes back from Python subtraction as ~``2^256``,
+    a mint. Reading modulo ``2^256`` and taking the short way round restores the EVM's sign; more than ``2^255`` real
+    movement isn't plausible.
+    """
     raw = (after - before) % _UINT256_MOD
     return raw - _UINT256_MOD if raw > _UINT256_MOD // 2 else raw
 
@@ -1882,19 +1452,10 @@ def _signed_delta(after: int, before: int) -> int:
 def _sign_contradicted_by_events(
     sign: str, minted: list[tuple[str, str, str]], burned: list[tuple[str, str, str]]
 ) -> bool:
-    """True when the zero-address ``Transfer`` logs say the OPPOSITE of what the
-    ``totalSupply`` arithmetic said.
+    """Whether zero-address Transfers say the opposite of the ``totalSupply`` arithmetic.
 
-    A mint is ``Transfer(0x0 -> holder)`` and a burn is ``Transfer(holder -> 0x0)``,
-    both emitted by the token whose supply moved. When the events present are
-    exclusively the other direction's, one of the two witnesses is wrong and this
-    stage must publish neither — least of all the "witnessed dilution" output,
-    which asserts that units were printed against no inflow.
-
-    Deliberately requires POSITIVE contradicting evidence rather than mere absence:
-    a token that mints without emitting anything is unhelpful but not lying, and
-    treating its silence as a contradiction would withhold every honest verdict on
-    it. Absence of evidence is not evidence of absence — here as everywhere."""
+    Requires positive contradicting events, not silence (a token that mints without events isn't lying).
+    """
     if sign == "mint":
         return bool(burned) and not minted
     return bool(minted) and not burned
@@ -1909,13 +1470,8 @@ def _to_int(hexval: str | None) -> int | None:
         return None
 
 
-# The identities this prober INVENTS and substitutes into the calls it synthesizes.
-# Neither is ever a fact about the contract, so neither may be published as an
-# observed destination: ``SENTINEL_ADDRESS`` is the attacker stand-in planted at a
-# taint-identified address parameter, and ``NEUTRAL_CALLER`` is both the caller a
-# public / unresolved-principal probe runs as AND the filler for every address
-# argument of the synthesized call — so it arrives back in the ``Transfer`` log as
-# the "destination" of our own making.
+# Identities this prober invents (the attacker sentinel and the neutral caller, which also fills every address arg), so
+# never publishable as observed destinations.
 _INVENTED_IDENTITIES = (SENTINEL_ADDRESS, NEUTRAL_CALLER)
 
 
@@ -1924,7 +1480,6 @@ def _is_invented_identity(address: str | None) -> bool:
 
 
 def _addr_eq(a: str | None, b: str | None) -> bool:
-    """Compare a 32-byte-padded slot value or a raw address against an address."""
     if a is None or b is None:
         return False
     aa = a[2:] if a.startswith("0x") else a

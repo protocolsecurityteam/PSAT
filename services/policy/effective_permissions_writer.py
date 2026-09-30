@@ -1,15 +1,10 @@
-"""Row writer for semantic per-function capabilities.
-
-This module drives ``EffectiveFunction`` and ``FunctionPrincipal`` rows
-directly from per-function ``CapabilityExpr`` shapes.
-
-Per-kind row representation:
+"""Writes ``EffectiveFunction`` / ``FunctionPrincipal`` rows from per-function ``CapabilityExpr`` shapes.
 
   finite_set                    -> N rows, principal_type=controller
   threshold_group (Safe)        -> 1 row,  resolved_type=safe, details.owners[]
   signature_witness(finite)     -> N rows, principal_type=signature_witness
   signature_witness(non-finite) -> 0 rows
-  finite_set(empty exact)        -> 0 rows + status='resolved_empty'
+  finite_set(empty exact)       -> 0 rows + status='resolved_empty'
   cofinite_blacklist            -> 0 rows
   external_check_only           -> 0 rows
   conditional_universal         -> 0 rows + status='public', authority_public=True
@@ -18,14 +13,8 @@ Per-kind row representation:
   AND with caller path + side conditions -> caller rows with conditions
   AND/OR irreducible residuals -> 0 rows + capability_expr=full tree
 
-Caller-shaped kinds (``finite_set``, ``threshold_group``,
-``signature_witness(finite)``) are the only leaf kinds that produce
-``FunctionPrincipal`` rows, either directly or through a composite path.
-``FunctionPrincipal.address`` semantically means "this address can call
-as itself"; putting blacklists, registry contracts, or external-check
-targets there is a category error that produces false-authority claims
-downstream
-(``ProtocolSurface.jsx:303``, ``protocolScore.js:124``).
+``FunctionPrincipal.address`` means "can call as itself"; putting blacklists, registries or external-check targets there
+produces false authority claims downstream.
 """
 
 from __future__ import annotations
@@ -55,11 +44,6 @@ logger = logging.getLogger(__name__)
 
 
 def _to_dict(cap: CapabilityExpr | dict[str, Any] | None) -> dict[str, Any] | None:
-    """Normalize ``cap`` to its serialized dict form.
-
-    Accepts either a real ``CapabilityExpr`` (e.g. from the resolver) or
-    an already-serialized dict (e.g. handed back through a fixture or
-    persisted artifact). ``None`` propagates."""
     if cap is None:
         return None
     if is_dataclass(cap):
@@ -75,11 +59,8 @@ def _principal_rows_for_capability(
     safe_address_lookup: dict[str, str] | None = None,
     function_signature: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Translate a serialized CapabilityExpr to the principal-row tuples
-    that should be written for the function.
-
-    Returns a list of dicts with keys ``address``, ``resolved_type``,
-    ``origin``, ``principal_type``, ``details``. Caller persists them.
+    """Principal-row dicts (``address``, ``resolved_type``, ``origin``, ``principal_type``, ``details``) for one
+    capability.
     """
     return project_capability_surface(
         cap_dict,
@@ -94,12 +75,10 @@ def _classify_principal(
     memo: dict[str, tuple[str | None, dict[str, Any] | None]],
     failures: list[BaseException] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Resolve one principal address to ``(resolved_type, details)`` via
-    *resolver*, memoized per writer call so an address shared across functions
-    is classified once. A resolver failure leaves the row untyped rather than
-    aborting the whole contract's FunctionPrincipal write; it is appended to
-    *failures* so the caller can report the batch once per contract instead of
-    once per principal."""
+    """Memoized per call.
+
+    A resolver failure leaves the row untyped and is collected so the caller reports once per contract.
+    """
     key = (address or "").lower()
     if key not in memo:
         try:
@@ -114,10 +93,6 @@ def _classify_principal(
 def _column_values_for_capability(
     cap_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compute ``EffectiveFunction`` column overrides from the resolved
-    capability. Always populates ``capability_expr``; ``conditions`` /
-    ``status`` / ``authority_public`` only set for the kinds that
-    require them."""
     surface = project_capability_surface(cap_dict)
     conditions = surface.conditions
     out: dict[str, Any] = {
@@ -131,30 +106,16 @@ def _column_values_for_capability(
 
 
 def _authority_roles_for(cap_dict: dict[str, Any] | None) -> list[dict[str, Any]] | None:
-    """``capability_role_grants`` with the no-capability case spelled out: with
-    no resolved capability nothing was read, so the answer is not-determined
-    (``None``), never the proven-absent ``[]``."""
+    """No capability means nothing was read: ``None``, never ``[]``."""
     if cap_dict is None:
         return None
     return capability_role_grants(cap_dict)
 
 
 def _selector_key(selector: str | None, function_name: str | None = None) -> tuple[str, str]:
-    """Identity for carrying observed-effect state across the row replace.
-
-    Keyed on ``(selector, function_name)``, not selector alone: a
-    selector-less entry point carries the documented ``""`` sentinel, and BOTH
-    ``fallback`` and ``receive`` are selector-less — so a contract declaring both
-    produced two rows under one key and the carry cross-assigned one's observed
-    claims and proven verdicts to the other. A ``None`` selector (the "could not
-    be derived" state) collapses onto the same ``""``, which is a second way in.
-    The function name discriminates without affecting any selector-bearing row,
-    where the pair is as unique as the selector was.
-
-    Armed population: 0 realised on the local corpus (no analysed contract
-    declares both, and every persisted selector-less row predates the ``""``
-    sentinel and still carries a fabricated selector) — structural on the first
-    contract that declares both once the sentinel is in use."""
+    """Carry key ``(selector, function_name)``: fallback and receive both have the ``""`` selector (and ``None``
+    collapses there too), so selector alone cross-assigned their observed state.
+    """
     return ((selector or "").lower(), (function_name or "").lower())
 
 
@@ -163,26 +124,13 @@ def _capture_observed_before(
     contract_id: int,
     deployment_address: str | None,
 ) -> dict[tuple[str, str], tuple[list[Any], list[Any]]]:
-    """Observed-effect carry, capture phase. Read this deployment's *outgoing*
-    observed-effect state BEFORE the wholesale row replace deletes it, keyed by
-    selector, so the re-created rows can carry it forward.
-
-    Two sources:
-
-    - ``behavioral_observed``-tier claims already on the outgoing rows (minted by
-      the effects stage). These are the durable carrier: without carrying the
-      claims themselves, any policy-only re-run (one that does not re-run
-      effects) would blank the observed labels, which is exactly the regression
-      this carry exists to kill.
-    - Proven ``effect_verdicts`` for those rows, re-merged as the authoritative
-      source. The verdict rows survive the replace (FK is ``ON DELETE SET
-      NULL``) but come out unlinked; the carry phase relinks them to the
-      re-created rows so claim witnesses keep resolving.
+    """Capture this deployment's observed-effect state before the row replace deletes it: ``behavioral_observed``
+    claims (or a policy-only re-run would blank them) and proven ``effect_verdicts`` (they survive via SET NULL
+    and are relinked).
 
     Returns ``{(selector, function_name): (carried_observed_claims, proven_verdicts)}``.
     """
-    # Older/stripped test metadata swaps in an EffectiveFunction model without the
-    # claims plane; nothing observed can exist there, so there is nothing to carry.
+    # Stripped test metadata without the claims plane.
     if not hasattr(EffectiveFunction, "claims"):
         return {}
     rows = (
@@ -241,44 +189,17 @@ def write_effective_function_rows(
     resolve_principal_type: Callable[[str], tuple[str | None, dict[str, Any] | None]] | None = None,
     deployment_address: str | None = None,
 ) -> int:
-    """Replace this contract's ``EffectiveFunction`` rows with semantic
-    rows and their associated ``FunctionPrincipal`` rows.
+    """Replace this contract's ``EffectiveFunction`` / ``FunctionPrincipal`` rows. Returns the principal row count.
 
-    ``resolve_principal_type`` — optional ``address -> (resolved_type,
-    details)`` classifier. The capability surface only knows caller
-    *addresses* (finite_set members carry ``resolved_type=None``); when this
-    is supplied, each untyped caller row is classified so
-    ``function_principals.resolved_type`` carries Safe / Timelock / EOA /
-    proxy_admin. That is the signal ``_fp_governance`` and the
-    primary-controller assignment key on — without it those rows are NULL and
-    a governance Safe reachable only through per-function authority never
-    surfaces. Callers pass the same resolver used for principal labels (the
-    resolution-stage classify cache + a live ``classify_resolved_address``
-    fallback). ``None`` preserves the prior write-time-untyped behavior.
-
-    ``function_records`` is the list of per-function dicts emitted by
-    ``build_effective_permissions``. Each must carry at minimum
-    ``function`` / ``abi_signature`` and the column overrides
-    (``capability_expr``, ``conditions``, ``status``,
-    ``authority_public``); optional compatibility fields (``effect_labels``,
-    ``effect_targets``, ``action_summary``, ``authority_roles``) ride
-    through unchanged.
-
-    ``capability_by_function`` maps function full-name to the resolved
-    capability (dict or dataclass). When None / missing for a
-    particular function, no principal rows are written for that function.
-
-    Returns the number of FunctionPrincipal rows added.
+    ``resolve_principal_type`` classifies untyped callers so ``resolved_type`` carries Safe/Timelock/EOA/proxy_admin;
+    without it, a governance Safe reachable only via per-function authority never surfaces. ``function_records`` come
+    from ``build_effective_permissions``. Functions missing from ``capability_by_function`` get no principal rows.
     """
     capability_by_function = capability_by_function or {}
 
-    # Snapshot the outgoing rows' observed-effect state before
-    # the replace destroys it, so the re-created rows carry it forward.
     observed_before = _capture_observed_before(session, contract_id, deployment_address)
 
-    # Replace this deployment's effective_functions wholesale, sweeping any
-    # legacy untagged (NULL) rows. FunctionPrincipal rows are removed by the
-    # DB-level ON DELETE CASCADE on function_principals.function_id.
+    # Principals go via ON DELETE CASCADE.
     session.query(EffectiveFunction).filter(
         EffectiveFunction.contract_id == contract_id,
         deployment_scope(EffectiveFunction.deployment_address, deployment_address),
@@ -286,8 +207,6 @@ def write_effective_function_rows(
     session.flush()
 
     added_principals = 0
-    # Per-call address→(type, details) memo so a caller shared across many
-    # functions is classified once.
     type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
     classify_failures: list[BaseException] = []
     for fn in function_records:
@@ -296,19 +215,12 @@ def write_effective_function_rows(
 
         cap = capability_by_function.get(fn_signature)
         cap_dict = _to_dict(cap)
-        # The capability the RECORD itself publishes (policy-minted
-        # ``_public_capability`` / ``_unsupported_capability`` shapes travel
-        # here, not in ``capability_by_function`` — that mapping is the
-        # RESOLVER's output). Column answers that are pure projections of the
-        # capability shape are derived from it when no resolver capability
-        # exists, so a row is never published with NULL ("this producer could
-        # not say") next to a capability_expr that says the answer.
+        # Policy-minted capabilities travel on the record, not in ``capability_by_function``; derive projections from
+        # them so a row never has NULL beside a capability that answers it.
         record_cap = fn.get("capability_expr")
         if not isinstance(record_cap, dict):
             record_cap = None
 
-        # Column values: prefer resolved capability columns; otherwise use
-        # explicit per-function compatibility fields.
         if cap_dict is not None:
             cap_columns = _column_values_for_capability(cap_dict)
         else:
@@ -320,25 +232,16 @@ def write_effective_function_rows(
                 "conditions": fn.get("conditions"),
                 "status": fn.get("status"),
                 "authority_public": bool(fn.get("authority_public", False)),
-                # NULL only when there is nothing to project from: a record
-                # with neither the key nor a capability_expr ("this writer
-                # could not say"), which is a different fact from
-                # ``not_determined`` ("the resolver looked and could not
-                # decide").
+                # NULL only with nothing to project from, which differs from ``not_determined`` (looked and couldn't
+                # decide).
                 "authority_openness": openness,
             }
-        # Per-function explicit override applies when the capability
-        # itself didn't pin the column. ``conditional_universal``
-        # should keep ``authority_public=True`` even if the per-function dict
-        # carries the default ``False``.
+        # ``conditional_universal`` keeps True over a default False.
         if cap_dict is None and "authority_public" in fn and fn.get("authority_public") is not None:
             cap_columns["authority_public"] = bool(fn["authority_public"])
         elif cap_dict is not None and bool(fn.get("authority_public", False)) and not cap_columns["authority_public"]:
-            # Per-function explicit True (e.g. policy_check public capability)
-            # ORs in even when the cap shape doesn't say public.
             cap_columns["authority_public"] = True
-            # Keep the three-state column in lockstep with the bool it splits:
-            # an OR-ed-in public path is still an earned public path.
+            # Keep openness in lockstep with the bool.
             cap_columns["authority_openness"] = "open"
         if cap_dict is None:
             if fn.get("status") is not None:
@@ -353,28 +256,14 @@ def write_effective_function_rows(
             "deployment_address": deployment_address,
             "function_name": function_name,
             "selector": fn.get("selector"),
-            # The canonical signature, not the Slither full_name it was derived
-            # from: ``selector`` on the line above already comes from the same
-            # dict, and taking the two from different sources put a signature in
-            # the row whose keccak is not that row's own selector. For a struct
-            # param the full_name has lost the tuple layout entirely, so nothing
-            # downstream can encode a call or recompute the selector from it.
+            # The canonical signature, from the same dict as the selector: a struct full_name has lost its tuple layout.
             "abi_signature": fn.get("abi_signature") or fn_signature,
             "effect_labels": fn.get("effect_labels", []),
             "effect_targets": fn.get("effect_targets", []),
             "action_summary": fn.get("action_summary"),
             "authority_public": cap_columns["authority_public"],
-            # The role half of the (capability, principal) unit. Three
-            # states: a non-empty list is witnessed, ``None`` is role-gated with
-            # the role not determined, ``[]`` is proven not role-gated. A record
-            # that already carries a NON-EMPTY list wins (an upstream caller
-            # resolved it); the historical literal ``[]`` every record ships is
-            # NOT treated as an answer — it is the uninformative constant this
-            # column carried everywhere, so the capability's own verdict wins:
-            # the resolver capability when there is one, otherwise the
-            # capability the record itself publishes (the policy-minted
-            # shapes), so the proven-absent ``[]`` is reachable on the
-            # production path and NULL keeps meaning "no capability at all".
+            # A non-empty upstream list wins; the historical constant ``[]`` isn't an answer, so the capability's own
+            # verdict applies and NULL keeps meaning no capability.
             "authority_roles": (
                 fn.get("authority_roles")
                 if fn.get("authority_roles")
@@ -385,41 +274,27 @@ def write_effective_function_rows(
         for col_name in ("capability_expr", "conditions", "status", "authority_openness"):
             if hasattr(EffectiveFunction, col_name):
                 ef_kwargs[col_name] = cap_columns.get(col_name)
-        # State-mutability witness. ``fn.get`` with no default on purpose: a
-        # record that never carried the key is not-determined, which is the same
-        # answer ``_mutability_fields`` gives for an uncovered signature — and it
-        # is NOT ``[]``/``False``, which would assert that the effects stage
-        # looked. Every caller that does carry the keys already passed them
-        # through ``_mutability_fields``.
+        # No default on purpose: a missing key is not determined, not ``[]``/``False``.
         for col_name in MUTABILITY_FIELDS:
             if hasattr(EffectiveFunction, col_name):
                 ef_kwargs[col_name] = fn.get(col_name)
-        # Plane-1 claims ride through unchanged alongside the legacy effect_labels.
         if hasattr(EffectiveFunction, "claims"):
             ef_kwargs["claims"] = fn.get("claims", [])
         ef = EffectiveFunction(**ef_kwargs)
         session.add(ef)
         session.flush()
 
-        # Observed-effect carry phase: fold the outgoing row's observed claims
-        # (and any surviving proven verdicts) back onto this re-created row so a
-        # policy-only rewrite never blanks observed labels. Only touches rows that
-        # had observed state — claim-free functions stay byte-identical.
+        # Only rows that had observed state are touched.
         carried = observed_before.get(_selector_key(ef.selector, ef.function_name))
         if carried:
             carried_claims, proven_verdicts = carried
             merged_claims = claims_bridge.merge_observed_claims([*(ef.claims or []), *carried_claims], proven_verdicts)
             ef.claims = merged_claims
             ef.effect_labels = claims_bridge.reproject_effect_labels(ef.effect_labels or [], merged_claims)
-            # The replace SET-NULLed the surviving verdicts' function_id; point
-            # them at the re-created row so the convenience join stays live.
             for verdict in proven_verdicts:
                 verdict.function_id = ef.id
 
-        # Semantic caller-shaped principals. ``ON CONFLICT DO NOTHING`` is
-        # implemented at the (function_id, address, origin, principal_type)
-        # level via an in-memory dedup set — the row schema has no UNIQUE
-        # constraint so we can't lean on Postgres for it.
+        # No UNIQUE constraint, so dedup in memory.
         seen: set[tuple[int, str, str, str]] = set()
 
         if cap_dict is not None:
@@ -440,11 +315,7 @@ def write_effective_function_rows(
                 seen.add(key)
                 resolved_type = row.get("resolved_type")
                 details = row.get("details")
-                # finite_set rows arrive untyped (the surface only knows the
-                # address). Classify callers so resolved_type is populated.
-                # signature_witness rows are signers, not callers, and are
-                # excluded from the governance/primary-controller consumers —
-                # skip the probe for them.
+                # Signature witnesses are signers, not callers; skip classification.
                 if (
                     resolve_principal_type is not None
                     and row.get("principal_type") != "signature_witness"
@@ -473,9 +344,7 @@ def write_effective_function_rows(
                 added_principals += 1
 
     if classify_failures:
-        # One line per contract, not per principal: a resolver outage fails
-        # every address, and the untyped rows it leaves behind are read
-        # downstream as "not a Safe/Timelock" rather than "never classified".
+        # Once per contract: untyped rows read downstream as "not a Safe" rather than "never classified".
         record_degraded(
             phase="principal_classification",
             exc=classify_failures[0],

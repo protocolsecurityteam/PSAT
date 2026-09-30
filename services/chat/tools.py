@@ -1,14 +1,6 @@
-"""Agent-callable tools for the company-page chatbot.
+"""Agent tools: ``fn(session, ctx, **kwargs) -> dict``, defined for OpenRouter in ``TOOL_DEFINITIONS``.
 
-Each tool is a Python callable ``fn(session, ctx, **kwargs) -> dict`` that
-returns JSON-serializable data the LLM can read back. Tool *definitions*
-(name, description, JSON-schema params) are surfaced to OpenRouter via
-``TOOL_DEFINITIONS``.
-
-Truncation: tool results are cheap to ship to the model in this v1, but
-text bodies that are routinely large (contract source code) cap at
-``MAX_SOURCE_CHARS`` so a single tool call doesn't blow the context
-budget for follow-up turns.
+Source bodies cap at ``MAX_SOURCE_CHARS`` to protect the context budget.
 """
 
 from __future__ import annotations
@@ -33,9 +25,6 @@ logger = logging.getLogger("services.chat.tools")
 MAX_SOURCE_CHARS = 30_000
 
 
-# ── Tool implementations ────────────────────────────────────────────────
-
-
 def _get_protocol_info(session, ctx, **_kwargs) -> dict[str, Any]:
     return protocol_brief(session, ctx.company)
 
@@ -49,12 +38,9 @@ def _get_contract_info(session, ctx, address: str | None = None, chain: str | No
 
 
 def _source_row_content(row) -> str | None:
-    """Resolve a SourceFile row to its raw content body.
+    """Body, or ``None`` when unreadable.
 
-    Returns the body, or ``None`` when it could not be read — a genuinely
-    empty file is ``""`` and must stay distinguishable from an unreadable
-    one. Collapsing both into ``""`` is what let ``search_source`` report
-    ``total_matches: 0`` across 167 contracts while 2,261/2,261 bodies were
+    Empty is ``""``; conflating them let ``search_source`` report 0 matches over 167 contracts whose bodies were all
     unreachable.
     """
     from db.storage import get_storage_client
@@ -86,17 +72,13 @@ def _source_row_content(row) -> str | None:
 
 
 def _etherscan_sources(address: str, chain: str | None) -> dict[str, str]:
-    """Live-fetch verified source from Etherscan as a fallback when DB
-    rows have no inline content (typical when source bodies live in
-    object storage and the storage backend is unreachable).
-    Returns ``{path: content}`` (empty on failure)."""
+    """Etherscan fallback when DB bodies are unreachable. ``{}`` on failure."""
     try:
         from services.clients.etherscan import get_source
         from services.discovery.fetch import parse_sources
         from utils.chains import UnknownChainError, chain_by_name
 
-        # Chat is a user-facing edge: no/unknown selected chain falls
-        # back to mainnet explicitly rather than failing the whole tool call.
+        # User-facing edge: fall back to mainnet explicitly rather than fail.
         try:
             chain_id = chain_by_name(chain).chain_id if chain else 1
         except UnknownChainError:
@@ -111,17 +93,7 @@ def _etherscan_sources(address: str, chain: str | None) -> dict[str, str]:
 def _get_contract_source(
     session, ctx, address: str | None = None, chain: str | None = None, file: str | None = None, **_kw
 ) -> dict[str, Any]:
-    """Return verified source code for a contract.
-
-    Strategy:
-      1. Read indexed ``SourceFile`` rows for the contract's job. If a
-         row has inline ``content`` we use it directly; otherwise we
-         fetch the body from object storage via ``storage_key``.
-      2. If every row resolves to empty (typical when MinIO/S3 is down
-         or no rows are indexed), live-fetch from Etherscan as a
-         fallback. This keeps the tool useful in environments where the
-         DB only stores hashes/keys.
-    """
+    """Verified source from ``SourceFile`` rows (inline or object storage), else Etherscan."""
     from db.models import SourceFile
 
     addr = address or ctx.selected_address
@@ -140,8 +112,6 @@ def _get_contract_source(
     if contract is not None and contract.job_id is not None:
         rows = session.execute(select(SourceFile).where(SourceFile.job_id == contract.job_id)).scalars().all()
 
-    # Materialize (path, content) pairs from DB. If every body resolves
-    # empty, fall through to Etherscan.
     resolved = [(r.path, _source_row_content(r)) for r in rows]
     unreadable = sum(1 for _, body in resolved if body is None)
     db_files: list[tuple[str, str]] = [(p, b) for p, b in resolved if b is not None]
@@ -154,9 +124,7 @@ def _get_contract_source(
 
     if not files:
         if unreadable:
-            # The rows exist; their bodies could not be fetched. Saying "no
-            # verified source available" would report an infrastructure failure
-            # as a fact about the contract.
+            # Unreadable bodies are an infrastructure failure, not a fact about the contract.
             return {
                 "error": (
                     f"{unreadable}/{len(rows)} indexed source files for {addr} could not be read from "
@@ -170,12 +138,7 @@ def _get_contract_source(
 
     file_list = [{"name": p, "size": len(b) if b else None} for p, b in files]
 
-    # A partial read publishes a subset of the contract as if it were the whole
-    # contract, and the model has no way to notice. Carried on every successful
-    # return, not only the nothing-loaded dead end: ``files`` is what the model
-    # will reason over, so the shortfall has to travel with it. When the bodies
-    # came from Etherscan the set is complete from that source, but the count is
-    # still reported — the DB rows remain unreadable and a later call may see it.
+    # Carried on every return so a partial read can't pass as the whole contract.
     provenance: dict[str, Any] = {"source_origin": "indexed" if from_db else "etherscan"}
     if unreadable:
         provenance["unreadable_source_files"] = unreadable
@@ -192,7 +155,7 @@ def _get_contract_source(
             return {"files": file_list, "error": f"file {file!r} not found", **provenance}
         return {"files": file_list, "requested": target[0], "source": _truncate(target[1]), **provenance}
 
-    # Default: largest file (typically the top-level contract).
+    # Largest file is usually the top-level contract.
     files_sorted = sorted(files, key=lambda kv: -len(kv[1] or ""))
     main_path, main_body = files_sorted[0]
     return {"files": file_list, "requested": main_path, "source": _truncate(main_body), **provenance}
@@ -215,13 +178,9 @@ def _search_source(
     case_sensitive: bool = False,
     **_kw,
 ) -> dict[str, Any]:
-    """Substring search across indexed source files.
+    """Substring search, scoped to ``address``, else the selected contract, else the protocol.
 
-    Scope (in priority): explicit ``address`` arg → currently-selected
-    contract → all of the protocol's contracts. Returns ``matches``
-    (file/line/snippet for the first ``max_results`` hits) plus
-    ``summary`` (per-file total counts) so the model can budget how much
-    detail to fetch next.
+    Returns ``matches`` plus per-file ``summary`` counts.
     """
     from db.models import SourceFile
 
@@ -230,7 +189,6 @@ def _search_source(
 
     needle = pattern if case_sensitive else pattern.lower()
 
-    # Pick the contract scope.
     contracts: list[Contract] = []
     target_addr = address or ctx.selected_address
     if target_addr:
@@ -317,8 +275,7 @@ def _search_source(
         "truncated": len(matches) >= max_results and total_matches > max_results,
     }
     if unreadable_source_files and files_searched == 0:
-        # Nothing was actually searched. Reporting total_matches: 0 alone
-        # states "the pattern does not occur", which is not what was proven.
+        # Nothing was searched; 0 matches alone would claim the pattern is absent.
         out["error"] = (
             f"no source file body could be read ({unreadable_source_files} unreadable); "
             "total_matches reflects nothing searched, not an absent pattern"
@@ -327,9 +284,7 @@ def _search_source(
 
 
 def _get_contract_overview(session, ctx, address: str | None = None, chain: str | None = None, **_kw) -> dict[str, Any]:
-    """One-shot fetch combining identity, controls, upgrade summary, and
-    verified source. Saves a tool round-trip when the agent wants the
-    full picture of a single contract."""
+    """Identity, controls, upgrades and source listing in one call."""
     addr = address or ctx.selected_address
     chn = chain if chain is not None else ctx.selected_chain
     if not addr:
@@ -337,10 +292,7 @@ def _get_contract_overview(session, ctx, address: str | None = None, chain: str 
     info = contract_brief(session, addr, chn)
     upgrades = upgrade_summary(session, addr, chn) if not info.get("error") else None
     src = _get_contract_source(session, ctx, address=addr, chain=chn)
-    # Strip the source body from the bulk result — the agent gets file
-    # listing + main file path, then can request the full body via
-    # get_contract_source(file=...) if needed. Keeps the bulk response
-    # compact for the prompt.
+    # Listing only; the body is fetched via get_contract_source.
     src_summary = {"files": src.get("files", []), "main_file": src.get("requested")}
     if "error" in src:
         src_summary["error"] = src["error"]
@@ -401,9 +353,6 @@ def _search_audits(session, ctx, query: str = "", **_kw) -> dict[str, Any]:
             for r in rows
         ]
     }
-
-
-# ── Registry + OpenRouter-shaped definitions ─────────────────────────────
 
 
 TOOLS: dict[str, Callable] = {
@@ -607,16 +556,14 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 
 def run_tool(name: str, session, ctx, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Execute a tool by name. Filters arguments to those the tool actually
-    accepts, so the LLM can't smuggle unknown kwargs into the call."""
+    """Filters to accepted args so the LLM can't smuggle kwargs."""
     fn = TOOLS.get(name)
     if fn is None:
         return {"error": f"unknown tool: {name}"}
     try:
         return fn(session, ctx, **(arguments or {}))
     except TypeError as exc:
-        # Mismatched kwargs from the LLM: surface as an error result so the
-        # model can self-correct on the next turn instead of crashing.
+        # Returned as an error result so the model can self-correct.
         logger.warning("tool %s rejected args %r: %s", name, arguments, exc)
         return {"error": f"tool {name} called with invalid arguments: {exc}"}
     except Exception as exc:

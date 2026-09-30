@@ -1,9 +1,4 @@
-"""
-Core browser crawler using Playwright.
-
-Launches a Chromium instance with the spoofed wallet provider injected,
-visits target URLs, and captures all contract interactions.
-"""
+"""Playwright crawler with a spoofed wallet provider that captures contract interactions."""
 
 import asyncio
 import json
@@ -22,18 +17,11 @@ from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
 
-# Concurrency cap for the per-URL crawl fan-out. Each URL holds a Page
-# in the shared BrowserContext for the full wait window, so this caps
-# memory + CPU. Default 3 keeps the shared-cpu-2x fleet happy.
+# Each URL holds a Page for the full wait window; 3 suits the shared-cpu-2x fleet.
 _DAPP_PARALLEL = max(1, int(os.environ.get("PSAT_DAPP_PARALLEL", "3")))
 
 
 class DAppCrawler:
-    """
-    Playwright-based crawler that impersonates a high-balance wallet
-    and captures contract interactions from DApp frontends.
-    """
-
     def __init__(
         self,
         wallet: HoneypotWallet,
@@ -49,25 +37,14 @@ class DAppCrawler:
         self.headless = headless
         self.interaction_log = InteractionLog()
         self._provider_script = build_provider_script(wallet, chain_id, eth_balance, token_balance)
-        # Running tally of swallowed sniffer failures, surfaced as a crawl-level
-        # stage metric so a site that consistently breaks address sniffing is
-        # visible instead of every exception vanishing into ``except: pass``.
+        # So a site that consistently breaks sniffing is visible.
         self._sniff_errors = 0
 
-    # ------------------------------------------------------------------ #
-    #  Page setup & message handling                                       #
-    # ------------------------------------------------------------------ #
-
-    # Regex to match Ethereum addresses in text
     _ADDR_RE = __import__("re").compile(r"0x[a-fA-F0-9]{40}")
 
     def _record_sniff_error(self, exc: Exception, source: str) -> None:
-        """Surface a swallowed sniffer failure instead of dropping it silently.
-
-        A single sniff failure is degraded-but-continuing (one response failed
-        to yield addresses; the crawl proceeds), so it carries ``exc_type`` and
-        lands in the job's degraded-errors artifact while the running
-        ``sniff_errors`` count rides the stage metrics for the monitor UI.
+        """One failure degrades but doesn't stop the crawl; recorded with ``exc_type``, and the count rides stage
+        metrics.
         """
         self._sniff_errors += 1
         logger.warning(
@@ -78,10 +55,8 @@ class DAppCrawler:
         record_stage_metric("sniff_errors", self._sniff_errors)
 
     async def _setup_page(self, page: Page):
-        """Inject the spoofed provider and network interceptors."""
         await page.add_init_script(self._provider_script)
 
-        # Listen for captured interactions via postMessage
         await page.expose_function("_dappCrawlerCapture", self._handle_capture)
         await page.add_init_script("""
             window.addEventListener('message', (event) => {
@@ -91,7 +66,6 @@ class DAppCrawler:
             });
         """)
 
-        # Handle signing requests from the injected provider
         await page.expose_function("_dappCrawlerSign", self._handle_sign_request)
         await page.add_init_script("""
             window.addEventListener('message', (event) => {
@@ -108,13 +82,11 @@ class DAppCrawler:
             });
         """)
 
-        # Intercept API responses and JS bundles for contract addresses
         page.on("response", lambda resp: asyncio.ensure_future(self._sniff_response(resp, page.url)))
 
-        # Also sniff JS bundles for hardcoded addresses
         page.on("response", lambda resp: asyncio.ensure_future(self._sniff_js_bundle(resp, page.url)))
 
-    # URL patterns that return user/wallet data, not contract addresses
+    # User/wallet data endpoints, not contract addresses.
     _USER_DATA_PATTERNS = [
         "leaderboard",
         "ranking",
@@ -132,7 +104,6 @@ class DAppCrawler:
         "stats/user",
     ]
 
-    # URL patterns likely to contain contract/protocol config
     _CONTRACT_DATA_PATTERNS = [
         "config",
         "contract",
@@ -153,11 +124,7 @@ class DAppCrawler:
     ]
 
     async def _sniff_response(self, response, page_url: str):
-        """
-        Inspect JSON API responses for Ethereum addresses.
-        Skips user-data endpoints (leaderboards, profiles, trade history)
-        to avoid capturing EOA wallets instead of contracts.
-        """
+        """Addresses from JSON API responses, skipping user-data endpoints that would yield EOAs."""
         try:
             url = response.url
             content_type = response.headers.get("content-type", "")
@@ -167,7 +134,6 @@ class DAppCrawler:
 
             url_lower = url.lower()
 
-            # Skip endpoints that return user/wallet data
             if any(p in url_lower for p in self._USER_DATA_PATTERNS):
                 return
 
@@ -185,9 +151,7 @@ class DAppCrawler:
             if not addrs:
                 return
 
-            # If the endpoint looks like it has contract data, take all addresses.
-            # Otherwise, only take addresses that appear as JSON values next to
-            # contract-related keys (heuristic to filter out user wallets).
+            # Otherwise only addresses next to contract-related keys, to filter out user wallets.
             is_contract_endpoint = any(p in url_lower for p in self._CONTRACT_DATA_PATTERNS)
 
             if not is_contract_endpoint:
@@ -227,11 +191,7 @@ class DAppCrawler:
             self._record_sniff_error(exc, source="api_response")
 
     async def _sniff_js_bundle(self, response, page_url: str):
-        """
-        Scan loaded JavaScript bundles for hardcoded contract addresses.
-        Many DApps compile contract addresses directly into their JS bundles.
-        Only looks at JS files from the same origin.
-        """
+        """Hardcoded addresses in same-origin JS bundles."""
         try:
             url = response.url
             content_type = response.headers.get("content-type", "")
@@ -239,7 +199,6 @@ class DAppCrawler:
             if "javascript" not in content_type and not url.endswith(".js"):
                 return
 
-            # Only scan same-origin JS files
             from urllib.parse import urlparse
 
             page_origin = urlparse(page_url).netloc
@@ -298,7 +257,6 @@ class DAppCrawler:
             self._record_sniff_error(exc, source="js_bundle")
 
     async def _handle_capture(self, entry_json: str):
-        """Process a captured interaction from the browser."""
         try:
             entry = json.loads(entry_json)
             self.interaction_log.add(entry)
@@ -312,7 +270,6 @@ class DAppCrawler:
             logger.warning("Failed to parse captured interaction: %s", entry_json)
 
     async def _handle_sign_request(self, request_json: str) -> str:
-        """Sign auth messages with the honeypot wallet's real key."""
         try:
             request = json.loads(request_json)
             method = request.get("method", "")
@@ -331,15 +288,10 @@ class DAppCrawler:
                 return sig
 
         except Exception as e:
-            # Returns a dummy signature; no exception propagates. WARNING per the
-            # level contract for swallowed-and-fallback paths.
+            # Falls back to a dummy signature.
             logger.warning("Signing failed: %s", e, extra={"exc_type": type(e).__name__})
 
         return "0x" + "00" * 65
-
-    # ------------------------------------------------------------------ #
-    #  Selector banks                                                      #
-    # ------------------------------------------------------------------ #
 
     CONNECT_WALLET_SELECTORS = [
         'xpath=//a[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "connect a wallet")]',
@@ -413,12 +365,7 @@ class DAppCrawler:
         "redeem",
     ]
 
-    # ------------------------------------------------------------------ #
-    #  Overlay / connect helpers                                           #
-    # ------------------------------------------------------------------ #
-
     async def _dismiss_overlays(self, page: Page):
-        """Dismiss cookie banners and other overlays."""
         for selector in self.COOKIE_DISMISS_SELECTORS:
             try:
                 el = page.locator(selector).first
@@ -431,7 +378,6 @@ class DAppCrawler:
                 continue
 
     async def _try_connect_wallet(self, page: Page, max_rounds: int = 5):
-        """Multi-step wallet connection: dismiss -> sign-in -> connect -> pick wallet."""
         all_selectors = [
             ("browser-tab", self.BROWSER_TAB_SELECTORS),
             ("wallet-option", self.WALLET_OPTION_SELECTORS),
@@ -463,15 +409,8 @@ class DAppCrawler:
                 logger.info("Round %d: no more buttons to click", round_num + 1)
                 break
 
-    # ------------------------------------------------------------------ #
-    #  Action link discovery                                               #
-    # ------------------------------------------------------------------ #
-
     async def _discover_action_links(self, page: Page) -> list[dict]:
-        """
-        Find all same-origin action links on the current page that could lead
-        to pages with contract interactions (deposit, stake, swap, etc.).
-        """
+        """Same-origin links likely to lead to contract interactions (deposit, stake, swap)."""
         keywords_js = json.dumps(self.ACTION_KEYWORDS)
         results = await page.evaluate(f"""
             () => {{
@@ -526,12 +465,7 @@ class DAppCrawler:
             logger.info("  [%s] %s -> %s", r["keyword"], r["text"], r["href"])
         return results
 
-    # ------------------------------------------------------------------ #
-    #  Form interaction                                                    #
-    # ------------------------------------------------------------------ #
-
     async def _click_all_tabs(self, page: Page):
-        """Click through all visible tab-like buttons to reveal hidden content."""
         tab_keywords = [
             "stake",
             "deposit",
@@ -573,13 +507,7 @@ class DAppCrawler:
         return clicked_tabs
 
     async def _try_fill_and_submit(self, page: Page):
-        """
-        On a deposit/stake/swap page:
-        1. Dismiss overlays (switch network, risk modals)
-        2. Click through all tabs to reveal content and scrape addresses
-        3. Try filling amount inputs
-        4. Click submit buttons to trigger transactions
-        """
+        """Dismiss overlays, click through tabs, fill amounts, click submit to trigger transactions."""
         await self._dismiss_overlays(page)
         await page.wait_for_timeout(1000)
 
@@ -646,15 +574,8 @@ class DAppCrawler:
 
         logger.info("No enabled submit button found on %s", page.url)
 
-    # ------------------------------------------------------------------ #
-    #  Page address scraping                                               #
-    # ------------------------------------------------------------------ #
-
     async def _scrape_page_addresses(self, page: Page):
-        """
-        Scrape Ethereum contract addresses visible on the page -- from text
-        content, links to block explorers, and data attributes.
-        """
+        """Addresses from page text, explorer links and data attributes."""
         try:
             results = await page.evaluate("""
                 () => {
@@ -762,17 +683,9 @@ class DAppCrawler:
         except Exception as e:
             logger.warning("Page address scraping failed: %s", e)
 
-    # ------------------------------------------------------------------ #
-    #  Main crawl orchestration                                            #
-    # ------------------------------------------------------------------ #
-
     async def _explore_page(
         self, page: Page, context: BrowserContext, depth: int = 0, max_depth: int = 1, visited: set | None = None
     ):
-        """
-        Explore a page: scrape addresses, discover action links to follow,
-        then on leaf pages try to fill forms and trigger transactions.
-        """
         if visited is None:
             visited = set()
 
@@ -816,14 +729,10 @@ class DAppCrawler:
                 await child_page.close()
 
     async def crawl(self, urls: list[str], wait_seconds: int = 10, progress: Callable[[str], None] | None = None):
-        """
-        Visit URLs, connect wallet, then deeply explore each site for
-        contract interactions.
+        """Visit URLs, connect the wallet, and explore each site.
 
-        URLs run concurrently up to ``PSAT_DAPP_PARALLEL`` (default 3) — each
-        gets its own Page in the shared BrowserContext. The interaction_log
-        is mutated cooperatively from a single asyncio thread so per-URL
-        capture order is preserved within a URL but interleaves across URLs.
+        URLs run concurrently up to ``PSAT_DAPP_PARALLEL``; capture order is preserved within a URL but interleaves
+        across URLs.
         """
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=self.headless)

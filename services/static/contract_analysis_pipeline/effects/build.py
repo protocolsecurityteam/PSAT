@@ -23,18 +23,9 @@ from .types import (
 )
 from .value_flow import _value_flow_facts
 
-# ---------------------------------------------------------------------------
-# Effects + labels + writer selectors per function.
-# ---------------------------------------------------------------------------
-
 
 def _effect_targets_from_sinks(sinks: list[SinkRecord]) -> list[str]:
-    """Compatibility display targets sourced from the sink list.
-
-    State writes and external-call dotted targets both remain here because
-    API/UI consumers already render this field. Semantic consumers should
-    read ``sinks`` and selectors directly.
-    """
+    """Display targets from the sink list, kept for API/UI; semantic consumers read ``sinks`` and selectors."""
     seen: list[str] = []
     seen_set: set[str] = set()
     for sink in sinks:
@@ -42,18 +33,15 @@ def _effect_targets_from_sinks(sinks: list[SinkRecord]) -> list[str]:
             seen.append(sink["target"])
             seen_set.add(sink["target"])
         elif sink["kind"] == "external_call" and sink["target"] not in seen_set:
-            # Kept for API/UI compatibility; label inference reads the
-            # selector-bearing sink records instead.
             seen.append(sink["target"])
             seen_set.add(sink["target"])
     return seen
 
 
 def _writer_selectors_for(function: Any, sinks: list[SinkRecord]) -> list[str]:
-    """For a state-write function, its own selector is the relevant
-    writer selector (HyperSync replays this function to attribute the
-    write). Returns a list because some pipelines accumulate multiple
-    selectors per logical writer (overloads)."""
+    """A state-write function's own selector (HyperSync replays it to attribute the write); a list because overloads
+    accumulate.
+    """
     has_state_write = any(s["kind"] == "state_write" for s in sinks)
     if not has_state_write:
         return []
@@ -66,42 +54,26 @@ def _writer_selectors_for(function: Any, sinks: list[SinkRecord]) -> list[str]:
 def _reconcile_value_flow_labels(
     labels: list[str], value_flows: list[ValueFlow], zero_value_sinks: set[str] | None = None
 ) -> list[str]:
-    """Correct asset-direction labels from the value-flow facts. Native
-    transfer/send is an outbound value sink Slither's low-level scan misses;
-    a ``transferFrom`` whose ``from`` is ``address(this)`` was mis-read as a
-    pull. Only body-origin flows count. ``value_router`` flows are excluded: they
-    are a callee's move, not the entry's own asset direction, so they must not add
-    ``asset_send``/``asset_pull`` to the router."""
+    """Correct asset-direction labels from the value-flow facts: native ``transfer``/``send`` is an outbound sink
+    Slither's scan misses, and a ``transferFrom`` from ``address(this)`` is not a pull. Body-origin only;
+    ``value_router`` flows are a callee's move and never add direction labels.
+    """
     body = [vf for vf in value_flows if vf["origin"] != "guard"]
     body_flows = [vf for vf in body if vf["direction"] != "value_router"]
 
     def _is_erc20_pull(vf: ValueFlow) -> bool:
         return vf["kind"] == "callee_erc20_selector" and vf["selector"] in _ERC20_PULL_SELECTORS
 
-    # Plane 0 maps a pull SELECTOR straight to ``asset_pull``, which reads the
-    # call and not the destination. When every pull this function makes is one it
-    # merely caused between two other parties, nothing arrived here and the label
-    # has to come off — otherwise the row still says "fund-in" and the summary
-    # still reads "Pulls assets into the contract" about a contract the funds
-    # never touched. Removal only, and only on positive evidence: a routed flow
-    # never ADDS a direction label, and a function with no flow facts keeps
-    # whatever the selector scan said, because silence is not evidence.
+    # The selector scan labels any pull ``asset_pull``. When every pull is one this function merely caused between third
+    # parties, nothing arrived here, so remove it. Only on positive evidence: no flow facts leaves the label alone.
     if any(_is_erc20_pull(vf) and vf["direction"] == "value_router" for vf in body) and not any(
         _is_erc20_pull(vf) for vf in body_flows
     ):
         labels = [lbl for lbl in labels if lbl != "asset_pull"]
 
-    # Plane 0 mints ``asset_send`` from ANY ``.call{value: v}`` it can reach
-    # through an internal call, without looking at v. OZ's
-    # ``Address.functionCallWithValue(target, data, 0)`` sits at the bottom of
-    # every SafeERC20 call, so a function whose only "value move" is an approval
-    # published "sends assets out of the contract" — with no flow fact under it,
-    # because the walk had already proved the same site moves nothing. That proof
-    # is what retracts the label; it is available precisely because the walk
-    # resolves the callee's ``value`` parameter through the caller's binding,
-    # which the Plane-0 string scan cannot do. Only when no outbound flow
-    # survives: a function that both approves and pays keeps the label from the
-    # payment.
+    # Plane 0 mints ``asset_send`` from any reachable ``.call{value: v}`` without reading v, so OZ's
+    # ``functionCallWithValue(target, data, 0)`` under every SafeERC20 call made approvals read as sends. The walk
+    # proved the site moves nothing, which retracts it, unless an outbound flow survives.
     if "low_level_value_call" in (zero_value_sinks or ()) and not any(vf["direction"] == "out" for vf in body_flows):
         labels = [lbl for lbl in labels if lbl != "asset_send"]
 
@@ -135,21 +107,13 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     attach_record_ordering(value_flows, function, assembly_state_access=assembly_state_access)
     effects: list[str] = []
 
-    # Guard-origin sinks (a modifier's own auth call, a reentrancy latch) are
-    # facts, not effects: they never drive a label, a display target, or a
-    # summary. They stay in ``sinks`` with ``origin=guard``.
+    # Guard-origin sinks are facts, not effects: they stay in ``sinks`` but drive no label, target or summary.
     body_sinks = [s for s in sinks if s["origin"] != "guard"]
 
-    # ``effect_targets`` remains a compatibility display field. Semantic
-    # consumers should read ``sinks`` and selectors instead.
     effect_targets = _effect_targets_from_sinks(body_sinks)
 
-    # _effect_labels takes a synthetic graph-entry analog. Capability
-    # reachability (delegatecall_execution, selfdestruct_capability,
-    # contract_deployment) keys on ``sink_kinds`` over *all* sinks — a
-    # delegatecall reachable only through a proxy's ``ifAdmin`` modifier is
-    # still reachable. The external-call/asset layer reads the body-only sink
-    # list, so a modifier's own auth call can't drive an effect label.
+    # Capability reachability (delegatecall, selfdestruct, deployment) uses all sinks (a delegatecall behind a proxy's
+    # ``ifAdmin`` modifier is still reachable); the external-call/asset layer uses body sinks only.
     sink_kinds = sorted({s["kind"] for s in sinks})
     effect_context = {
         "effects": list(effects),
@@ -159,18 +123,14 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     }
     labels = _effect_labels(function, effect_context)
     labels = _reconcile_value_flow_labels(labels, value_flows, zero_value_sinks)
-    # Functions with body external_call sinks but no specific (mint/burn/asset/etc)
-    # label get ``external_contract_call`` directly from the sink shape. AFTER the
-    # reconcile, so a function whose only specific label the flow facts just
-    # disproved falls back to the generic sink fact rather than to nothing.
+    # After the reconcile, so a function whose only specific label was disproved falls back to the generic fact.
     has_external_call = any(s["kind"] == "external_call" for s in body_sinks)
     if has_external_call and not any(lbl in _SPECIFIC_EFFECT_LABELS for lbl in labels):
         labels.append("external_contract_call")
     summary = _action_summary(labels, list(effect_targets))
 
     signature = _function_full_name(function)
-    # "" is the no-selector sentinel (fallback/receive), matching the
-    # ``effect_verdicts`` identity key in ``db/effect_cache.py``.
+    # "" is the no-selector sentinel (fallback/receive), matching ``db/effect_cache.py``.
     selector = _own_selector(function) or ""
     return {
         "function": signature,
@@ -181,9 +141,6 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "value_flows": value_flows,
         "effects": list(effects),
         "effect_labels": list(labels),
-        # Includes both state-write var names and external-call dotted
-        # targets for label/summary rendering. Tracking.py reads ``sinks``
-        # directly to enumerate state_write writers.
         "effect_targets": list(effect_targets),
         "action_summary": summary,
         "writer_selectors": _writer_selectors_for(function, sinks),
@@ -194,19 +151,10 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     }
 
 
-# ---------------------------------------------------------------------------
-# Top-level entry.
-# ---------------------------------------------------------------------------
-
-
 def _record_prefers(new_info: EffectInfo, new_fn: Any, old_info: EffectInfo, old_fn: Any) -> bool:
-    """Should ``new_info`` replace ``old_info`` for the same signature?
-
-    Two functions can share a ``full_name`` — a concrete implementation and
-    an inherited interface/abstract re-declaration (0 nodes). Keying the dict
-    by ``full_name`` alone lets the 0-node record clobber the real one and
-    blank its sinks (EigenLayer StrategyManager ``pause``). Prefer the
-    implemented body, then the one carrying more sinks."""
+    """Whether ``new_info`` should replace ``old_info`` for the same signature: prefer an implemented body over a
+    0-node interface re-declaration (which blanked EigenLayer StrategyManager ``pause``), then more sinks.
+    """
     new_impl = bool(getattr(new_fn, "is_implemented", False)) and bool(getattr(new_fn, "nodes", None))
     old_impl = bool(getattr(old_fn, "is_implemented", False)) and bool(getattr(old_fn, "nodes", None))
     if new_impl != old_impl:
@@ -215,9 +163,9 @@ def _record_prefers(new_info: EffectInfo, new_fn: Any, old_info: EffectInfo, old
 
 
 def build_effects(contract: Any) -> EffectsArtifact:
-    """Return the ``effects`` artifact for ``contract``: one
-    ``EffectInfo`` per externally-observable function (external,
-    public, fallback, receive)."""
+    """The ``effects`` artifact for ``contract``: one ``EffectInfo`` per external, public, fallback and receive
+    function.
+    """
     cache_token = _ENGINE_BUNDLE_SCOPE.set({})
     try:
         functions: dict[str, EffectInfo] = {}

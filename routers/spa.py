@@ -1,8 +1,4 @@
-"""SPA static-asset mount and HTML catch-all.
-
-Must be the LAST router registered on the app — its ``/{full_path:path}``
-catch-all will swallow any route registered after it, including ``/api/*``.
-"""
+"""SPA static assets and HTML catch-all. Must be registered LAST."""
 
 from __future__ import annotations
 
@@ -20,11 +16,7 @@ SITE_ASSETS_DIR = SITE_DIST_DIR / "assets"
 
 
 class _ImmutableStaticFiles(StaticFiles):
-    """StaticFiles that stamps a 1-year immutable Cache-Control on every
-    response. Vite emits hashed filenames (``index-<hash>.js``) so the URL
-    changes whenever content changes — caching forever is correct, and lets
-    repeat visitors skip the ~2MB bundle download entirely.
-    """
+    """Vite filenames are content-hashed, so cache forever."""
 
     async def get_response(self, path: str, scope: Scope):
         response = await super().get_response(path, scope)
@@ -34,9 +26,7 @@ class _ImmutableStaticFiles(StaticFiles):
 
 
 def _site_index_response():
-    # The HTML embeds hash-stamped asset URLs (`/assets/index-<hash>.js`)
-    # that change on every build, so it must NOT be cached — otherwise a
-    # post-deploy reload would keep pointing at old, evicted bundles.
+    # The HTML references hashed bundles; caching it would point at evicted builds after deploy.
     headers = {"Cache-Control": "no-cache, must-revalidate"}
     dist_index = SITE_DIST_DIR / "index.html"
     if dist_index.exists():
@@ -49,7 +39,6 @@ def _site_index_response():
 
 
 def mount_static_assets(app: FastAPI) -> None:
-    """Mount /assets/* before any router is included."""
     if SITE_ASSETS_DIR.exists():
         app.mount("/assets", _ImmutableStaticFiles(directory=SITE_ASSETS_DIR), name="assets")
 

@@ -1,5 +1,3 @@
-"""Hallucination guard, regex fallback, and date extraction."""
-
 from __future__ import annotations
 
 import logging
@@ -9,16 +7,14 @@ from typing import Final
 
 logger = logging.getLogger(__name__)
 
-# Capital-start to skip lowercase identifiers ("foo.sol") that rarely
-# represent real contracts. Used only by the regex fallback.
+# Capital-start skips lowercase identifiers.
 _SOL_FILE_RE: Final[re.Pattern[str]] = re.compile(r"\b([A-Z][A-Za-z0-9_]+)\.(?:sol|vy)\b")
 
 _MONTH_NAMES = (
     "january|february|march|april|may|june|july|august|september|october|november|december"
     "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
 )
-# Title-region scan size. Some auditors (Nethermind, Zellic) push the
-# delivery date past the first ~2k chars of title-page boilerplate.
+# Some auditors put the date past ~2k chars of boilerplate.
 _DATE_SEARCH_CHARS: Final[int] = 6_000
 
 _ORDINAL = r"(?:st|nd|rd|th)"
@@ -64,12 +60,9 @@ _MONTH_TO_NUM: Final[dict[str, int]] = {
 
 
 def validate_contracts(names: list[str], raw_text: str) -> list[str]:
-    """Drop names that don't appear verbatim in ``raw_text``.
+    """Drop names not appearing verbatim in ``raw_text``.
 
-    An earlier iteration also collapsed ``IFoo``→``Foo`` duplicates to match
-    Nethermind's LoC-table convention, but that produced 23 wrong drops vs
-    11 right drops — Certora lists ``src/interfaces/IFoo.sol`` as
-    first-class scope. The LLM's per-audit judgment handles this better.
+    ``IFoo``→``Foo`` collapsing was tried and dropped more right names than wrong (Certora scopes interfaces).
     """
     if not names:
         return []
@@ -86,10 +79,7 @@ def validate_contracts(names: list[str], raw_text: str) -> list[str]:
 
 
 def extract_contracts_regex_fallback(sections_text: str) -> list[str]:
-    """Scrape ``Word.sol`` / ``Word.vy`` names when the LLM is unavailable.
-
-    Tolerates noise — the caller still runs ``validate_contracts``.
-    """
+    """Scrape ``Word.sol`` / ``Word.vy`` when the LLM is unavailable; still validated by the caller."""
     seen: set[str] = set()
     names: list[str] = []
     for m in _SOL_FILE_RE.finditer(sections_text):
@@ -103,12 +93,7 @@ def extract_contracts_regex_fallback(sections_text: str) -> list[str]:
 
 
 def extract_date_from_pdf_text(text: str) -> str | None:
-    """Best-effort ISO date from the title region (first 6000 chars).
-
-    Returns ``YYYY-MM-DD`` for full dates, ``YYYY-MM-00`` for month-only
-    matches, ``None`` on no hit or ambiguous slash formats. The worker
-    only uses this to backfill a null ``AuditReport.date``.
-    """
+    """``YYYY-MM-DD``, ``YYYY-MM-00`` for month-only, or ``None`` (including ambiguous slash dates)."""
     head = text[:_DATE_SEARCH_CHARS]
     for pat in _DATE_PATTERNS:
         m = pat.search(head)
@@ -117,15 +102,11 @@ def extract_date_from_pdf_text(text: str) -> str | None:
         try:
             groups = m.groups()
             if len(groups) == 3 and groups[0].isdigit() and len(groups[0]) == 4:
-                # YYYY-MM-DD
                 year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
                 datetime(year, month, day)
                 return f"{year:04d}-{month:02d}-{day:02d}"
             if len(groups) == 3 and groups[0].isdigit() and groups[1].isdigit():
-                # Slash date — disambiguate by values:
-                #   first > 12  → DD/MM/YYYY
-                #   second > 12 → MM/DD/YYYY
-                #   both ≤ 12   → ambiguous, defer to next pattern
+                # first > 12 → DD/MM, second > 12 → MM/DD, both ≤ 12 → ambiguous.
                 a, b, year = int(groups[0]), int(groups[1]), int(groups[2])
                 if a > 12 and b <= 12:
                     month, day = b, a
@@ -136,7 +117,6 @@ def extract_date_from_pdf_text(text: str) -> str | None:
                 datetime(year, month, day)
                 return f"{year:04d}-{month:02d}-{day:02d}"
             if len(groups) == 3 and groups[0].isdigit():
-                # DD Month YYYY
                 day = int(groups[0])
                 month = _MONTH_TO_NUM.get(groups[1].lower())
                 year = int(groups[2])
@@ -145,7 +125,6 @@ def extract_date_from_pdf_text(text: str) -> str | None:
                 datetime(year, month, day)
                 return f"{year:04d}-{month:02d}-{day:02d}"
             if len(groups) == 3:
-                # Month DD, YYYY
                 month = _MONTH_TO_NUM.get(groups[0].lower())
                 if month is None:
                     continue
@@ -153,7 +132,6 @@ def extract_date_from_pdf_text(text: str) -> str | None:
                 datetime(year, month, day)
                 return f"{year:04d}-{month:02d}-{day:02d}"
             if len(groups) == 2:
-                # Month YYYY
                 month = _MONTH_TO_NUM.get(groups[0].lower())
                 if month is None:
                     continue

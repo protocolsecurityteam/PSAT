@@ -1,20 +1,11 @@
-"""Layer 1 — one job's planes to per-function signal rows. Pure and read-only.
+"""Layer 1: one job's planes to per-function signal rows. Pure and read-only.
 
-The distiller answers one question per (function, capability): **what did the
-pipeline PROVE about this function's behaviour?** It resolves nothing across
-contracts — principals travel as ``function_principals`` references and value as
-``<chain>::<address>`` entity keys — because MAX-per-entity, principal units and
-subsumption are only decidable with the whole protocol in hand, and a signal
-that had already resolved its own value would make them undecidable.
+Resolves nothing across contracts (principals stay ``function_principals`` references, value stays entity keys), since
+max-per-entity, principal units and subsumption need the whole protocol.
 
-Three-state is preserved verbatim. Every undetermined witness reaches its signal
-through :func:`not_determined_signal_defaults` or an explicit
-:meth:`Tri.not_determined`, never through a default value or a missing key. The
-severity axis in particular is either built up from proven components starting
-at zero (``pause.set``) or a capability-class constant refined only downward by
-mitigating witnesses (everything else) — it is never escalated by the ABSENCE of
-a constraint witness, which is why an unread delegatecall/exec destination
-yields ``severity = not_determined`` and the row never enters the grade.
+Undetermined witnesses reach signals only via :func:`not_determined_signal_defaults` or :meth:`Tri.not_determined`.
+Severity is either built up from proven components (``pause.set``) or a class constant refined downward; it is never
+escalated by a missing constraint witness, so an unread delegatecall destination yields ``severity = not_determined``.
 """
 
 from __future__ import annotations

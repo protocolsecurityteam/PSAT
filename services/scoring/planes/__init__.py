@@ -1,10 +1,6 @@
-"""The resolution planes the Layer-2 fold reads to resolve a signal's references.
-
-Signals carry references — ``function_principals`` ids and ``<chain>::<address>``
-entity keys — so the fold is the first place that can turn them into units,
-dollars and breadth. Every read here is ordered, read-only, and publishes its
-own three-state: an unreadable or absent witness lands on ``not_determined`` and
-is counted in the provenance block rather than defaulted to a number.
+"""Resolution planes the Layer-2 fold reads to turn signal references (``function_principals`` ids, entity keys) into
+units, dollars and breadth. Reads are ordered and read-only; unreadable witnesses are ``not_determined`` and
+counted, never defaulted.
 """
 
 from __future__ import annotations

@@ -1,15 +1,8 @@
 """Production discovery orchestrator (Premium + Deps tier).
 
-Single entry point that runs the best audit- and address-discovery
-pipelines and conditionally triggers dependency-audit two-pass.
-
-Target recall: ~75% audit URLs, ~82% address URLs, plus dependency
-audits for protocols with third-party components. Target cost:
-~$1.40 per protocol cold, ~$0.05 cached re-run.
-
-Output shape mirrors the legacy `search_audit_reports()` and
-`search_protocol_inventory()` return dicts so the existing workers
-(`workers/discovery.py`) can persist without schema changes.
+Runs the best audit and address discovery pipelines and, when warranted, a dependency-audit second pass. Targets ~75%
+audit recall and ~82% address recall at ~$1.40 per protocol cold (~$0.05 cached). Output matches
+``search_audit_reports()`` / ``search_protocol_inventory()`` so ``workers/discovery.py`` persists it unchanged.
 """
 
 from __future__ import annotations
@@ -39,12 +32,12 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 KNOWN_DOCS_PATH = ROOT / "config" / "known_docs.yaml"
 
-# Budget guardrails (per-protocol); abort + alert if exceeded.
+# Per-protocol budget; abort and alert if exceeded.
 MAX_SEARCH_CALLS_PER_PROTOCOL = 10
 MAX_RESEARCH_CALLS_PER_PROTOCOL = 5
 BUDGET_CIRCUIT_BREAKER_USD = 2.00
 
-# Deep Research output is stable for 24-48h; cache aggressively.
+# Deep Research output is stable for a day or two.
 RESEARCH_CACHE_TTL_SECONDS = 24 * 3600
 
 _DEPENDENCY_CLASSIFIER_PROMPT = """\
@@ -80,16 +73,13 @@ def _load_known_docs() -> dict[str, dict[str, list[str]]]:
     return data.get("protocols", {}) or {}
 
 
-# Process-wide cache keyed on (instructions, schema_hash). Values are
-# ``(monotonic_ts, result)``: the 24h TTL serves re-run savings, the size
-# cap bounds the entry count across protocols in a long-lived worker.
+# Keyed (instructions, schema_hash) → ``(monotonic_ts, result)``; 24h TTL and a size cap for long-lived workers.
 _research_cache: dict[tuple, tuple[float, dict]] = {}
 _research_cache_lock = threading.Lock()
 _RESEARCH_CACHE_MAX = 256
 
 
 def _evict_research_if_needed() -> None:
-    """Drop the oldest 25% of _research_cache entries when the bound is reached (caller holds the lock)."""
     if len(_research_cache) < _RESEARCH_CACHE_MAX:
         return
     cutoff = sorted(_research_cache.values(), key=lambda v: v[0])[len(_research_cache) // 4][0]
@@ -98,7 +88,6 @@ def _evict_research_if_needed() -> None:
 
 
 def _log_research_pressure() -> None:
-    """Log when _research_cache crosses 50/75/95% of its bound (caller holds the lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("research", len(_research_cache), _RESEARCH_CACHE_MAX)
@@ -107,7 +96,6 @@ def _log_research_pressure() -> None:
 
 
 def _cached_deep_research(instructions: str, schema: dict | None = None) -> dict:
-    """TTL-cached wrapper around exa.deep_research for re-run savings."""
     import hashlib
     import json as _json
 
@@ -122,8 +110,7 @@ def _cached_deep_research(instructions: str, schema: dict | None = None) -> dict
                 logger.info("deep_research cache hit for %r", instructions[:60])
                 return result
             del _research_cache[key]
-    # exa.deep_research runs outside the lock (it can block up to 900s); concurrent
-    # misses for the same key may both fetch, matching the _GETCODE_CACHE pattern.
+    # Outside the lock (can block 900s); concurrent misses may both fetch, like _GETCODE_CACHE.
     result = exa.deep_research(instructions, schema=schema, timeout_seconds=900)
     with _research_cache_lock:
         _evict_research_if_needed()
@@ -133,8 +120,6 @@ def _cached_deep_research(instructions: str, schema: dict | None = None) -> dict
 
 
 class _Budget:
-    """Per-protocol call + spend tracker."""
-
     def __init__(self) -> None:
         self.search_calls = 0
         self.research_calls = 0
@@ -158,7 +143,6 @@ class _Budget:
 
 
 def _make_search_fn(mode: str, budget: _Budget, research_seeds: list[dict] | None = None):
-    """Backend-agnostic _tavily_search replacement routed to Exa."""
     call_count = [0]
 
     def fn(
@@ -199,7 +183,6 @@ def _restore_search(original):
 
 
 def _patch_classify_with_seeds(research_seeds: list[dict]):
-    """Bypass stage 1b classifier for Deep Research seeds."""
     original = audit_reports_mod.classify_search_results
 
     def wrapped(results, company, debug=False):
@@ -416,7 +399,6 @@ def _needs_dependency_pass(protocol: str, contracts: list[dict], audits: list[di
 
 
 def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
-    """Two-pass: identify deps, then audit-search each."""
     pass1 = (
         f"For the {protocol} protocol, list the main third-party smart contract systems, "
         f"vaults, libraries, or infrastructure components {protocol} integrates with or uses "
@@ -475,17 +457,15 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
 
 
 def _apply_spa_overrides(protocol: str, inventory_result: dict, audit_result: dict) -> None:
-    """Fold hardcoded known-docs URLs into results for SPA-bait protocols."""
+    """Fold hardcoded known-docs URLs into results for protocols whose docs are SPAs."""
     known = _load_known_docs().get(protocol.lower()) or {}
     if not known:
         return
-    # For addresses: add known contract_docs_urls as notes so a downstream
-    # worker can fetch them directly (pipeline can't index the SPA).
+    # Recorded as notes for a worker to fetch directly (the pipeline can't index SPAs).
     for url in known.get("contract_docs_urls", []):
         inventory_result.setdefault("notes", []).append(f"SPA override: fetch {url} manually")
     for url in known.get("contract_docs_raw_urls", []):
         inventory_result.setdefault("notes", []).append(f"SPA override (raw): {url}")
-    # For audits: inject the known audit_urls as pre-approved audit reports.
     for url in known.get("audit_urls", []):
         audit_result.setdefault("reports", []).append(
             {
@@ -505,20 +485,14 @@ def run_discovery(
     chain: str | None = None,
     declared_chains: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Premium+Deps discovery for one protocol.
-
-    Returns ``{audits: <search_audit_reports shape>, addresses: <search_protocol_inventory shape>,
-    meta: {...}}`` so existing workers can slot it in with minimal plumbing changes.
-    """
+    """Premium+Deps discovery for one protocol. Returns ``{audits, addresses, meta}`` in the existing worker shapes."""
     budget = _Budget()
     started_at = time.monotonic()
 
-    # ---- Audits ----
     original_search = inventory_domain_mod._tavily_search
     original_classify = audit_reports_mod.classify_search_results
 
     with log_timed_phase(logger, "discovery_audits") as ph_audit:
-        # 1a. Deep Research for audit seeds
         audit_seeds: list[dict] = []
         audit_seed_metadata: dict[str, dict[str, Any]] = {}
         try:
@@ -545,7 +519,6 @@ def run_discovery(
             record_degraded(phase="deep_research_audit_seeds", exc=exc, context={"protocol": protocol})
             logger.warning("deep research (audit seeds) failed for %s: %s", protocol, exc)
 
-        # 1b. Full pipeline: exa/deep-lite search + research_plus classifier bypass
         _patch_search(_make_search_fn("deep-lite", budget, research_seeds=audit_seeds))
         _patch_classify_with_seeds(audit_seeds)
         try:
@@ -562,7 +535,6 @@ def run_discovery(
         ph_audit["audit_seeds"] = len(audit_seeds)
         ph_audit["reports"] = len(audit_result.get("reports", []))
 
-    # ---- Addresses ----
     with log_timed_phase(logger, "discovery_addresses") as ph_addr:
         _patch_search(_make_search_fn("auto", budget))  # exa/regular
         try:
@@ -578,7 +550,6 @@ def run_discovery(
         finally:
             _restore_search(original_search)
 
-        # Attach address-side Deep Research output as additional evidence.
         try:
             budget.charge_research()
             r_addr = _cached_deep_research(_address_research_instructions(protocol), schema=_ADDRESS_SCHEMA)
@@ -611,7 +582,6 @@ def run_discovery(
         record_degraded(phase="claimed_chain_check", exc=exc, context={"protocol": protocol})
         logger.warning("claimed-chain sanity check failed for %s: %s", protocol, exc)
 
-    # ---- Dependency two-pass (conditional) ----
     dependency_pass_triggered = _needs_dependency_pass(
         protocol,
         inventory_result.get("contracts", []),
@@ -627,15 +597,12 @@ def run_discovery(
     else:
         logger.info("dependency classifier skipped two-pass for %s", protocol)
 
-    # ---- SPA override (gmx, etc.) ----
     _apply_spa_overrides(protocol, inventory_result, audit_result)
     enrich_audit_reports(audit_result, protocol, debug=False)
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
 
-    # Fold the per-protocol budget counters into the stage_timing artifact so
-    # the monitor UI can attribute discovery cost/call-volume per job (a no-op
-    # outside a worker job context, e.g. standalone runs / tests).
+    # Per-job discovery cost in stage_timing for the monitor UI (no-op outside a worker job).
     record_stage_metric("search_calls", budget.search_calls)
     record_stage_metric("research_calls", budget.research_calls)
     record_stage_metric("estimated_cost_usd", round(budget.estimated_cost_usd, 3))
@@ -656,7 +623,6 @@ def run_discovery(
 
 
 def reset_cache() -> None:
-    """Clear the deep_research cache + its pressure state (for tests)."""
     from utils.memory import reset_cache_pressure_state
 
     with _research_cache_lock:

@@ -1,4 +1,4 @@
-"""The three orchestrators — compute_protocol_score, _aggregate, _row_value — plus unit resolution."""
+"""The fold's orchestrators (``compute_protocol_score``, ``_aggregate``, ``_row_value``) and unit resolution."""
 
 from __future__ import annotations
 
@@ -93,20 +93,14 @@ def compute_protocol_score(
     trigger_job_id: Any | None = None,
     computed_at: datetime | None = None,
 ) -> ScoreDocument:
-    """The protocol's score document, folded over its current signal rows.
+    """The protocol's score document over its current signal rows.
 
-    ``signals`` is the §7.5 in-memory feeding mode and nothing else: the offline
-    CLI distils every contract without persisting, and passes the result in the
-    population order :func:`order_signals` pins. Left unset — every persisted
-    path — the population comes from the one pinned query and from nowhere else,
-    so no caller can hand the fold a filtered or re-ordered population.
+    ``signals`` is only for the offline CLI's in-memory mode (in :func:`order_signals` order); otherwise the population
+    comes from the one pinned query, so no caller can filter or reorder it.
     """
     row_faults: list[dict[str, Any]] = []
     if signals is None:
-        # A row whose persisted JSONB does not hold its declared shape withholds
-        # ITSELF: the schema's canonical-key checks are the right checks, but
-        # raising them through the population read costs the whole protocol its
-        # score over one bad column.
+        # A row with malformed persisted JSONB withholds only itself.
         signals, row_faults = current_signals_with_faults(session, protocol_id)
 
     value_plane = P.load_value_plane(session, protocol_id)
@@ -114,11 +108,8 @@ def compute_protocol_score(
     conditions = P.load_condition_plane(session, protocol_id)
     conferral = P.load_conferral_plane(session, protocol_id)
     act_as = P.load_act_as_plane(session, protocol_id)
-    # ``load_deletability_plane`` takes NO protocol_id, unlike every loader
-    # around it: it asks about specific (chain, address) contracts, which are
-    # global on-chain identities, and scoping it would drop setter rows on
-    # contracts this protocol does not own — turning our own scoping into an
-    # earned negative about somebody's control.
+    # Not protocol-scoped: it asks about global (chain, address) identities, and scoping would drop setter rows and mint
+    # false negatives.
     admission = _AdmissionPlanes(P.load_deletability_plane(session), P.load_router_flow_plane(session, protocol_id))
     role_floors = P.load_role_holder_floors(session, protocol_id)
     refs = [ref for signal in signals for ref in signal.principal_refs]
@@ -147,9 +138,7 @@ def compute_protocol_score(
     for signal in signals:
         malformed = _malformed_gates(signal)
         if malformed:
-            # One unreadable envelope withholds its own row. Raising here would
-            # take the whole protocol's grade down with one bad payload, and
-            # scoring around it would read a payload nobody validated.
+            # One unreadable envelope withholds its own row, not the whole grade.
             warnings.append(_warning("gate_input_malformed", signal, f"unreadable gate envelopes: {malformed}"))
             continue
 
@@ -158,12 +147,8 @@ def compute_protocol_score(
             continue
 
         if _uncharged_product(signal, warnings):
-            # A proven benign payout of the caller's own value: it kept its
-            # confidence credit above (it entered the grade), and here it creates
-            # NO row — so no finding, no value_at_stake, no exposure key. Its
-            # disclosures already left on the earned-negative record above; this
-            # is the finding-half of the decoupling the ruling needs (inv. 3 — a
-            # permissionless self-service payout is not a finding worth zero).
+            # A proven benign payout of the caller's own value: counted in confidence, but no row or exposure (not a
+            # finding worth zero).
             uncharged_product_rows += 1
             continue
 
@@ -238,10 +223,7 @@ def compute_protocol_score(
     warnings.extend(value_warnings)
     composition_census = _composition_totals(findings, subsumed)
 
-    # A transport fault takes the composition rule's withheld arm and moves the
-    # grade, so it must not be discoverable only by reading every execution
-    # block: an artifact store that stops answering would otherwise look exactly
-    # like a code regression.
+    # Transport faults move the grade, so they're announced at the top rather than left in execution blocks.
     execution_faults = _execution_fault_census(findings, subsumed)
     if execution_faults is not None:
         warnings.append(_execution_fault_warning(execution_faults))
@@ -265,24 +247,16 @@ def compute_protocol_score(
             "signals_entering_grade": sum(1 for s in signals if s.enters_grade),
             "findings": len(findings),
             "subsumed_rows": len(subsumed),
-            # The distinction the read surface cannot make on its own: an
-            # un-analysed protocol and a fully-undetermined one both reach a
-            # consumer as grade_state=not_determined.
+            # Distinguishes un-analysed from fully undetermined, which both read as grade_state=not_determined.
             "disposition": _population_disposition(signals, findings),
             "rows_withheld_malformed": len(row_faults),
-            # Signals that entered the grade (their confidence credit stands) but
-            # created no row: proven benign product surface, excluded from the
-            # ledger. Without this counter a reader can only find them by
-            # subtraction — a zero here is a zero, not an absence.
+            # Signals that entered the grade but created no row, so they aren't found only by subtraction.
             "rows_uncharged_product": uncharged_product_rows,
         },
         "value": value_plane.provenance,
         "value_annotations": value_plane.annotations,
-        # Each closure admission rule, counted where it fired AND where it did
-        # not. A refusal and an earned negative are different facts about the
-        # same row: the first says what this scorer declined to walk, the second
-        # says the protocol has proven an authority slot empty, and only the
-        # second is evidence about the protocol.
+        # Each closure admission rule counted whether or not it fired; a refusal and an earned negative are different
+        # facts.
         "closure_admission": {
             "refusals": closure.refusal_counts(),
             "renounced": closure.renounced_counts(),
@@ -299,10 +273,7 @@ def compute_protocol_score(
                 "resolver looked and never by how much authority was renounced"
             ),
         },
-        # What bounds a reach hop, and where the bound could not be established.
-        # A closure that walks every edge publishes reach it never proved; one
-        # that silently drops the edges it cannot establish publishes a smaller
-        # number with the same defect. Both classes' populations are counted.
+        # What bounds reach hops, and where the bound couldn't be established.
         "reach_bounds": {
             "code_control_capabilities": sorted(K.CODE_CONTROL_CAPABILITIES),
             "gate_control_capabilities": sorted(K.GATE_CONTROL_CAPABILITIES),
@@ -348,18 +319,10 @@ def compute_protocol_score(
         },
         "unpriced_positions": value_plane.unpriced_positions,
         "exposure_gaps": exposure_gaps,
-        # How much of the perimeter grade_exposure was measured over. Without
-        # it the ratio's numerator (a few findings) and its denominator (the
-        # whole priced perimeter) are not comparable quantities, and the figure
-        # reads as a measurement of safety rather than of coverage.
+        # How much of the perimeter ``grade_exposure`` covers, so the ratio isn't read as a safety measurement.
         "exposure_coverage": exposure_coverage,
-        # The sheet-ceiling population at the document level. Every entry it
-        # counts is published per row too, and it is still worth assembling
-        # once: these dollars are the one class of published magnitude that is
-        # deliberately absent from exposure_usd, so a consumer that reads only
-        # the grade figures would have no way to see how much money the model
-        # bounded from above and then declined to charge. Its credited-signal
-        # count is the confidence pass's own, not a second derivation of it.
+        # The sheet-ceiling dollars held out of exposure, rolled up so grade readers can see what was bounded and not
+        # charged. The credited-signal count is the confidence pass's own.
         "sheet_ceilings": _sheet_ceiling_totals(
             findings,
             subsumed,
@@ -390,12 +353,8 @@ def compute_protocol_score(
         ),
     }
 
-    # The three grade figures stand or fall together, and so does everything
-    # derived from them. An exposure ratio with no priced denominator is not a
-    # 100 — it is a quantity that was never measured — so a protocol with
-    # findings but no priced value publishes the findings and parks every
-    # derived number under provenance instead of serving it beside a withheld
-    # grade.
+    # The grade figures stand or fall together: with findings but no priced denominator, derived numbers go to
+    # provenance instead of beside a withheld grade.
     scored = bool(findings) and grade_exposure is not None
     if not scored:
         withheld_rows = [
@@ -439,19 +398,10 @@ def compute_protocol_score(
     )
 
 
-# ---------------------------------------------------------------- principals
-
-
 class _UnitResolver:
-    """Principal units: per (chain, address), with the two licensed collapses.
-
-    Safes that can ACT AS each other are one unit — independence is a property of
-    owner KEY SETS, and two Safes sharing enough owners are one power. A timelock
-    whose proposer-executor is a Safe collapses into that Safe: upgrade-by-
-    timelock is a subset of exec-by-proposer, so two rows would charge the same
-    value twice. The collapse needs BOTH halves proven — proposing without
-    executing is not acting as the timelock — and neither collapse ever crosses a
-    chain, because same-address is not proof of same owner set.
+    """Principal units per (chain, address), with two collapses: Safes that can act as each other (enough shared
+    owners) are one unit, and a timelock whose proposer-executor is a Safe folds into that Safe
+    (upgrade-by-timelock is a subset of exec-by-proposer). Both halves must be proven, and neither crosses chains.
     """
 
     def __init__(
@@ -466,10 +416,7 @@ class _UnitResolver:
         for facts in sorted(principal_facts.values(), key=lambda f: f.key):
             if facts.resolved_type == "safe" and facts.owners:
                 by_key[facts.key].append(facts)
-        # Last row wins, exactly as before: which contradictory owner set to adopt
-        # is an open ruling (R17), and this fold does not arbitrate it. What it
-        # will not do is arbitrate SILENTLY — a Safe whose witnesses disagree
-        # publishes the disagreement beside the set the merge decision used.
+        # Last row wins (which contradictory owner set to use is an open ruling), but disagreement is published.
         self._safe_by_key = {key: rows[-1] for key, rows in by_key.items()}
         self.owner_set_contradictions = [
             {
@@ -518,9 +465,7 @@ class _UnitResolver:
                 shared = left.owners & right.owners
                 if not shared:
                     continue
-                # An unread threshold cannot license a merge: "these two Safes are
-                # one power" needs both thresholds proven, and a sentinel standing
-                # in for one would publish a coalition size nobody measured.
+                # An unread threshold can't license a merge.
                 if left.threshold is None or right.threshold is None:
                     self.overlaps.append(
                         {
@@ -557,13 +502,8 @@ class _UnitResolver:
         self.overlaps.sort(key=lambda o: (o["a"], o["b"]))
 
     def _timelock_proposer_executors(self, signals: list[FunctionSignal]) -> dict[str, dict[str, Any]]:
-        """The weakest Safe proven able to BOTH propose and execute on a timelock.
-
-        Both halves are required because the collapse asserts the Safe can act as
-        the timelock. A propose-only witness proves the right to start a delayed
-        action, not the right to complete one, and treating it as the collapse
-        would re-price every timelock-gated dollar at the proposer's undelayed
-        weakness on the strength of a witness that never mentioned execution.
+        """The weakest Safe proven able to both propose and execute on a timelock; propose-only doesn't let it act as
+        the timelock.
         """
         by_role: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"schedule": set(), "execute": set()})
         facts_by_key: dict[str, P.PrincipalFacts] = {}
@@ -585,9 +525,7 @@ class _UnitResolver:
             best: dict[str, Any] | None = None
             for safe_key in both:
                 facts = facts_by_key[safe_key]
-                # inv.5 is the WEAKEST path. An unread threshold cannot lose that
-                # comparison: it sorts first, and is then priced at the uncredited
-                # rung rather than at a ratio nobody measured.
+                # Weakest path: an unread threshold sorts first and is priced at the uncredited rung.
                 rank = (0, 0.0) if facts.threshold is None else (1, facts.threshold / len(facts.owners))
                 candidate = {
                     "key": safe_key,
@@ -608,10 +546,7 @@ class _UnitResolver:
             if proposer:
                 key = str(proposer["key"])
         if key in self._parent:
-            # The unit is named by its LOWEST member key, not by whichever root
-            # the union order happened to leave: a union-find root is an
-            # implementation artefact, and naming a unit with one would make the
-            # same set of Safes carry different identities across runs.
+            # Named by the lowest member key, not the union-find root, for stable identities.
             root = self._find(key)
             members = {member for member in self._parent if self._find(member) == root}
             unit = min(members)
@@ -621,12 +556,7 @@ class _UnitResolver:
         return key
 
     def published_units(self) -> dict[str, Any]:
-        """The unit memberships this fold folded, as the document's own evidence.
-
-        A unit id is only meaningful beside the members it collapsed: without
-        them a consumer cannot tell a re-labelled unit from a re-keyed one, and
-        cannot check the inv.13 collapse that removed a double charge.
-        """
+        """The unit memberships folded, so consumers can check the collapse."""
         return {
             "members": {unit: sorted(members) for unit, members in sorted(self._members.items())},
             "timelock_collapses": {
@@ -644,7 +574,6 @@ class _UnitResolver:
         return self._proposers.get(facts.key)
 
     def path_for(self, facts: P.PrincipalFacts) -> str:
-        """How this principal reaches the unit's capability: directly, or via a delay."""
         if facts.resolved_type == "timelock" and facts.key in self._proposers:
             return f"via_timelock:{facts.key}"
         return "direct"
@@ -667,9 +596,7 @@ class _UnitResolver:
             weakness, label, notes = self._timelock_weakness(facts, notes)
             kind = "timelock"
         elif facts.resolved_type == "contract":
-            # "An EOA controls the gating CONTRACT" is not "an EOA can call this
-            # function": the gating contract may impose its own conditions. The
-            # hop is a confidence fact, never this row's weakness.
+            # An EOA controlling the gating contract isn't an EOA calling the function; a confidence fact only.
             return None, "contract", "contract", notes
         else:
             return None, facts.resolved_type or "unresolved", "unknown", notes
@@ -686,12 +613,10 @@ class _UnitResolver:
         if discount is None:
             notes.append("timelock_delay_not_determined")
             return K.WEAKNESS_TIMELOCK_UNDETERMINED, "timelock(delay not_determined)", notes
-        # Reached only where the discount resolved, which requires a read delay.
         delay_seconds = float(facts.delay_seconds) if facts.delay_seconds is not None else 0.0
         days = int(delay_seconds // 86400)
         if delay_seconds == 0:
-            # A proven ZERO delay is proven-absent protection, not an unread one.
-            # It earns no discount and does not land on the undetermined rung.
+            # A proven zero delay is proven-absent protection.
             notes.append("timelock_delay_proven_zero:no_protection")
             if proposer is None:
                 return K.WEAKNESS_SAFE_UNCREDITED, "timelock(0d, proposer not_determined)", notes
@@ -699,8 +624,7 @@ class _UnitResolver:
             notes.append(f"proposer={_kn(proposer)}")
             return base, f"timelock 0d via {_kn(proposer)}", notes
         if proposer is None:
-            # A proven delay whose proposer-executor set is undetermined is not
-            # proven protection, so the delay earns no discount.
+            # Undetermined proposer-executors earn no delay credit.
             notes.append("timelock_proposer_not_determined:no_delay_credit")
             return K.WEAKNESS_TIMELOCK_UNDETERMINED, f"timelock {days}d(proposer not_determined)", notes
         base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
@@ -708,7 +632,7 @@ class _UnitResolver:
         return round(base * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
 
     def _role_breadth(self, facts: P.PrincipalFacts) -> float | None:
-        """A proven holder floor above one is proven BREADTH. It may only raise."""
+        """A proven holder floor above one is breadth; it only raises."""
         for registry, role_hash in facts.role_bindings:
             entry = self._role_floors.get((facts.chain, registry, role_hash))
             if entry and entry["holders_floor"] > 1:
@@ -717,18 +641,15 @@ class _UnitResolver:
 
 
 def _kn(proposer: dict[str, Any]) -> str:
-    """A proposer's k/n, or the honest refusal. Never a fabricated ratio."""
+    """A proposer's k/n, or a refusal; never a fabricated ratio."""
     return f"{proposer['k']}/{proposer['n']}" if proposer["k"] is not None else "k not_determined"
 
 
 def _safe_weakness(
     facts: P.PrincipalFacts, notes: list[str], recovery_proven_independent: bool
 ) -> tuple[float, str, list[str]]:
-    """A Safe's weakness from its PROVEN k and n, or the uncredited rung.
-
-    An unread owner set is not an n. Backfilling n from k publishes a k-of-k Safe
-    — the strongest rung on the ladder — out of a witness that never existed, and
-    prints the fabricated ratio as the finding's own principal.
+    """A Safe's weakness from proven k and n, else the uncredited rung (backfilling n from k would fabricate a k-of-k
+    Safe).
     """
     if not facts.owners:
         notes.append("safe_owner_set_not_determined:kn_uncomputable")
@@ -748,7 +669,6 @@ def _safe_weakness(
 
 
 def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
-    """Principal references named by pause recovery gates, so the fold can read them."""
 
     @dataclass(frozen=True)
     class _Ref:
@@ -758,8 +678,7 @@ def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
 
     out: list[Any] = []
     for signal in signals:
-        # Runs before the per-signal gate check in the main loop, so it repeats
-        # it: a malformed payload must not be walked HERE either.
+        # Repeats the malformed check, since this runs first.
         if signal.claim_id != "pause.set" or _malformed_gates(signal):
             continue
         gate = _gate(signal, "freeze_recovery_principals")
@@ -770,18 +689,12 @@ def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
                 out.append(
                     _Ref(
                         function_principal_id=int(entry["function_principal_id"]),
-                        # The gate's entries are minted beside the pause signal on
-                        # the same contract, so the chain is the same fact, not a
-                        # substitute for an unread one. A JSONB null falls back to
-                        # that same fact rather than stringifying to "None".
+                        # Same contract as the pause signal, so the same chain.
                         chain=str(entry.get("chain") or signal.chain),
                         address=str(entry.get("address") or ""),
                     )
                 )
     return out
-
-
-# ---------------------------------------------------------------- severity
 
 
 def _fold_severity(
@@ -790,12 +703,8 @@ def _fold_severity(
     principal_facts: dict[int, P.PrincipalFacts],
     warnings: list[dict[str, Any]],
 ) -> tuple[float, tuple[str, ...], set[str]]:
-    """The distilled severity, plus the components only the fold can prove.
-
-    Per PRINCIPAL, not per function: whether a freeze is recoverable is a
-    property of the freezing key set against the recovery key set, so evaluating
-    it once over the union of a function's principals would charge a key set for
-    an overlap another principal contributed.
+    """Distilled severity plus fold-only components, per principal: recoverability compares the freezing key set with
+    the recovery key set.
     """
     severity = signal.severity.require(SEVERITY_STATE_PROVEN)
     basis = tuple(signal.severity_basis)
@@ -805,7 +714,7 @@ def _fold_severity(
 
     verdict, coalition, note = _keyset_independence(signal, principal, principal_facts)
     if verdict is False:
-        # PROVEN: this key set can freeze and also deny the recovery quorum.
+        # Proven: this key set can freeze and deny the recovery quorum.
         severity = max(severity, K.FREEZE_SUSTAINABLE)
         basis = basis + ("freeze_keyset_not_independent",)
         warnings.append(
@@ -817,17 +726,12 @@ def _fold_severity(
             )
         )
     elif verdict is None:
-        # Every undetermined arm — no recovery claim, an unresolved recovery
-        # principal, an unread freezing key set — leaves the rung where the
-        # capability's proven existence put it. Raising here would move severity
-        # on an absent witness; lowering would credit one. The question itself is
-        # published instead.
+        # Undetermined arms leave the rung where it was and publish the question.
         notes.add(note)
         basis = basis + ("freeze_recovery_independence_not_determined",)
         warnings.append(_warning("freeze_recovery_independence_not_determined", signal, note))
     else:
-        # PROVEN independence: the credited rung, which equals the existence rung
-        # today, so what changes is the basis rather than the number.
+        # Proven independence: credited rung (currently equal to existence), changing the basis only.
         severity = min(severity, K.FREEZE_KEYSET_RECOVERABLE)
         notes.add(note)
         basis = basis + ("freeze_keyset_independent",)
@@ -837,14 +741,10 @@ def _fold_severity(
 def _keyset_independence(
     signal: FunctionSignal, principal: P.PrincipalFacts, principal_facts: dict[int, P.PrincipalFacts]
 ) -> tuple[bool | None, int | None, str]:
-    """Is the recovery quorum independent of the freezing one, in KEYS?
+    """Whether the recovery quorum is key-independent of the freezing one: ``|owners(U) \\ owners(P)| >=
+    threshold(U)``.
 
-    Independence is a property of owner key sets: P and U are independent iff
-    ``|owners(U) \\ owners(P)| >= threshold(U)``. Comparing principal ADDRESSES
-    publishes a protective credit for a configuration where a handful of keys
-    freeze the protocol and hold it — and an address stands in for a key set only
-    where the principal IS a single key, i.e. an EOA. For every other type an
-    unread owner set makes the test uncomputable, not favourable.
+    Addresses only stand in for key sets for EOAs; unread owner sets make it uncomputable, not favourable.
     """
     if principal.owners:
         pauser_owners = principal.owners
@@ -873,9 +773,6 @@ def _keyset_independence(
     return None, None, "recovery_principal_unresolved"
 
 
-# ---------------------------------------------------------------- value fold
-
-
 def _instance(
     signal: FunctionSignal, severity: float, basis: tuple[str, ...], principal_address: str = ""
 ) -> _Instance:
@@ -885,14 +782,11 @@ def _instance(
     asset_identity_undecidable = False
     if signal.claim_id == "flow.out":
         if _gate(signal, "token_identity").is_determined:
-            # Exactly one NON-FUNGIBLE token moves: pricing the row off a
-            # fungible balance sheet is forbidden, not merely imprecise.
+            # One non-fungible token moves; pricing it from a fungible sheet is forbidden.
             pricing_blocked = "token_identity(non-fungible; pricing forbidden)"
         asset_class = _gate(signal, "asset_class")
         native_only = asset_class.is_determined and asset_class.value == "native_only"
-        # The W2 pricing precondition: single-asset pricing is licensed only by a
-        # decidable token identity. Undecidable ⇒ the unpriced branch, never the
-        # entity's whole fungible sheet read as this call's magnitude.
+        # Single-asset pricing needs a decidable token identity; otherwise unpriced.
         asset_identity_undecidable = (
             asset_class.is_determined
             and asset_class.value in SINGLE_ASSET_CLASSES
@@ -913,18 +807,13 @@ def _instance(
 
 
 def _attach(row: _Row, signal: FunctionSignal, instance: _Instance, notes: set[str]) -> None:
-    # The burn sentinel is refused as a REACH key here, one admission short of the
-    # walk: ``msg.sender != 0x0``, so nothing routes value through it and a
-    # repoint witness that names it has proved no reach. The confidence perimeter
-    # refuses it on the same rule; this is the value side of that discipline.
+    # The burn address is refused as a reach key.
     kept = tuple(key for key in instance.entity_keys if not P.is_zero_key(key))
     if len(kept) != len(instance.entity_keys):
         row.zero_reach_keys_refused += len(instance.entity_keys) - len(kept)
         row.notes.add("zero_address_reach_key_refused")
         if not kept:
-            # Every reach key this instance carried was the sentinel, so it now
-            # witnesses nothing. Dropping it silently would read as "this call
-            # reaches no priced entity" — an earned negative it never earned.
+            # Every reach key was the sentinel, so it witnesses nothing; recorded rather than read as proven no reach.
             row.zero_reach_stripped.append(
                 {
                     "function": signal.function_name,
@@ -952,25 +841,9 @@ def _member_weakness(
     magnitudes: dict[tuple[str, str], _DestinationMagnitude],
     admission: _AdmissionPlanes,
 ) -> tuple[dict[str, float], float, tuple[str, str, str]]:
-    """A merged unit's weakness, per REACHED ENTITY (inv. 5).
-
-    ``_row_for`` keeps the max weakness over a merged Safe unit's members while
-    the row folds the UNION of their reach, with no tie between a member's rung
-    and the entities that member reaches — so value only the 4/8 member can move
-    is published at the 3/7 member's rung, a coalition nobody proved.
-
-    inv. 5's weakest path is the weakest path TO THAT ENTITY: entity ``e`` is
-    priced at the max over ONLY the members proven to reach ``e``. The row still
-    publishes a single weakness against a union no single member reaches, so that
-    union is priced at **the hardest rung among the contributing members** — the
-    ``min`` over the per-entity rungs. That is NOT the overlap record's
-    ``min_coalition_to_act_as_both``: that field is ``max(k)``, and weakness is
-    keyed on ``k/n``, so a 3/4 member (0.20) and a 5/20 member (0.55) put the
-    coalition size on the 5/20 Safe while this rung is the 3/4's 0.20. The
-    hardest rung is the deliberate under-claim — inv. 5 forbids pricing a union
-    at a rung no contributing member has to clear. Naming a member's reach needs
-    the member's own witness, so a row whose instances cannot be attributed to a
-    member keeps the unit-level rung rather than inventing an attribution.
+    """A merged unit's weakness per reached entity: each entity priced at the max over only members proven to reach
+    it, and the row's union at the hardest (min) of those rungs. Not the overlap record's coalition size (keyed on
+    k, not k/n). Unattributable instances keep the unit-level rung.
     """
     unchanged = ({}, row.weakness, (row.weakest_label, row.principal_kind, row.weakest_address))
     if len(row.member_gate) < 2 or not per_entity:
@@ -985,10 +858,8 @@ def _member_weakness(
     for address, instances in by_member.items():
         probe = _Row(unit=row.unit, capability=row.capability, path=row.path)
         probe.instances = instances
-        # Reach is MEMBERSHIP, so it is read off ``.reach`` and never off the
-        # value map: W2b's per-call magnitude cap scales what a member is charged
-        # and can empty ``per_entity`` outright, but it moves no entity out of
-        # what the member provably reaches.
+        # Reach is read from ``.reach``, not the value map (magnitude caps can empty the value map without changing
+        # reach).
         reached = _row_value(probe, value_plane, closure, conditions, conferral, act_as, magnitudes, admission).reach
         reach_by_member[address] = reached
 
@@ -997,9 +868,7 @@ def _member_weakness(
     for key in sorted(per_entity):
         holders = sorted(a for a, reached in reach_by_member.items() if key in reached)
         if not holders:
-            # The union carries an entity no single member's fold reproduces.
-            # That is an attribution this function cannot witness, so the row
-            # keeps the unit rung rather than pricing it at a guess.
+            # An entity no single member reaches: keep the unit rung rather than guess.
             return unchanged
         holders_by_entity[key] = holders
         weakness_by_entity[key] = max(row.member_gate[a][0] for a in holders)
@@ -1016,21 +885,13 @@ def _member_weakness(
 CITATION_CAP = 8
 
 
-# A citation that points AT evidence: a transcript pointer, a verdict, the block
-# a reading was pinned to. Everything else is a field restatement, and a
-# ``reading`` key marks the ones that are prose about how to read a field rather
-# than a pointer to anything.
+# Citations that point at evidence; others are restatements or prose.
 _CITATION_EVIDENCE_KEYS = ("transcript_ptr", "verdict", "block_source")
 
 
 def _cited(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The row's citations, evidence first, capped for display.
-
-    The cap is a display bound and the eviction it causes is arbitrary, so the
-    order it evicts in must not be. A citation pointing at a transcript is the
-    one a reader can check; a prose ``reading`` restating how to read a field is
-    not, and it evicted two transcript pointers off a shipped row. Stable within
-    each tier, so the population order still decides among equals.
+    """Citations, evidence first, capped for display; stable within tiers (a prose reading once evicted transcript
+    pointers).
     """
 
     def rank(citation: dict[str, Any]) -> int:
@@ -1064,32 +925,22 @@ def _aggregate(
             continue
         valued = _row_value(row, value_plane, closure, conditions, conferral, act_as, magnitudes, admission)
         composed_signals.update(valued.composed_signals)
-        # Rolled up beside the composed set and never merged into it. Both name
-        # signals whose magnitude question the FOLD answered rather than the
-        # signal, and they answered it with different evidence — a destination's
-        # own flow.out witness against a balance observation — so a consumer
-        # crediting either has to be able to say which one it credited.
+        # Kept apart from the composed set: different evidence answered the magnitude question.
         ceiling_signals.update(valued.ceiling_signals)
         per_entity, value_usd, undetermined = valued.per_entity, valued.total_usd, valued.undetermined
         value_basis = valued.basis
         if row.zero_reach_stripped:
             undetermined = undetermined + row.zero_reach_stripped
             value_basis += f"; {len(row.zero_reach_stripped)} instance(s) reached only the refused zero address"
-        # A priced total over an entity that also holds assets the priced sheet
-        # never covered is a FLOOR over that entity, not its value: an instance
-        # that answered is not the same fact as an entity that was answered.
+        # An entity with unpriced assets makes the total a floor.
         partially_priced = _partially_priced_entities(value_plane, valued.reach)
-        # Coverage alone decides nothing about direction. A contribution that is
-        # itself an extraction ceiling cannot be summed into a floor because
-        # OTHER contributions are missing, so the two axes are read together.
+        # Direction reads coverage and attribution together.
         direction = _bound_direction(
             value_usd,
             frozenset(per_entity),
             valued.ceiling_entities,
             bool(undetermined or partially_priced),
-            # The withheld-reach block is ALWAYS a dict — it carries its own
-            # reading even when nothing was withheld — so its counts are what is
-            # read here and never its truthiness.
+            # Always a dict; read its counts.
             bool(
                 valued.hops_not_determined
                 or valued.withheld_behind_hops.get("hops")
@@ -1097,16 +948,7 @@ def _aggregate(
             ),
             valued.non_attributed_entities,
         )
-        # Only a row that HAS a total and something in it to grade has a
-        # direction to explain. A row whose value is not_determined publishes
-        # that word as its basis, and a proven_no_reach row publishes an earned
-        # negative consumers branch on by name — neither is a bound claim.
-        #
-        # Both writers live HERE and not in :func:`_row_value` for one reason:
-        # the string names a direction, and the direction is not known until the
-        # attribution axis has been read beside the coverage one. A basis built
-        # from coverage alone said ">= proven floor" beside a header refusing to
-        # publish a floor.
+        # Only rows with a total and a graded entity get a direction basis, written here where both axes are known.
         if valued.ceiling_entities:
             value_basis = _ceiling_bearing_basis(
                 direction,
@@ -1145,12 +987,8 @@ def _aggregate(
             value_plane,
             hops_not_determined=valued.hops_not_determined,
         )
-        # The at-most in the grade's own units: the raw points this row would
-        # earn if every open question resolved against the protocol at its
-        # ceiling. Proven severity x proven weakness x the ceiling's band —
-        # nothing here is minted, and it never enters lambda. A proven-$0
-        # ceiling bounds points at zero (the band floor is for unpriced, not
-        # for an earned nothing); an unbounded ceiling bounds nothing.
+        # Points at the unresolved ceiling (proven severity x weakness x the ceiling's band); never in lambda. A
+        # proven-$0 ceiling bounds at zero; an unbounded one bounds nothing.
         ceiling_usd = unresolved["ceiling_usd"]
         if ceiling_usd is None:
             unresolved["points_ceiling"] = None
@@ -1178,89 +1016,34 @@ def _aggregate(
             {
                 "principal_unit": row.unit,
                 "unit_members": sorted(units.published_units()["members"].get(row.unit, [row.unit])),
-                # The published principal IS the one that set the weakness, not
-                # whichever row was folded last.
+                # The principal that set the weakness.
                 "principal": f"{weakest[0]} {weakest[2]}",
                 "access_path": row.path,
                 "principal_addresses": sorted(row.principal_addresses),
                 "principal_kind": weakest[1],
                 "capability": row.capability,
                 "chain": row.unit.split("::", 1)[0],
-                # The row's total and its per-entity breakdown are the SAME
-                # floats the per-entity ceiling records publish — one derivation,
-                # three keys, one finding object — so they take one rounding
-                # (``_round_published``). Measured: five live upgrade.implementation
-                # rows carry a sub-cent entity, and at cents the header said
-                # "$0.00 at stake" and the breakdown said 0.0 while the record
-                # beside them published the bound that was proven. The total is
-                # included DELIBERATELY and not only the breakdown: on a row whose
-                # one entity is that sheet, the header IS the row's claim, and
-                # "$0.00 at stake" is the false-safety reading this whole change
-                # exists to remove. It is immaterial today only because those five
-                # sit inside a $4.2B row — a fact about this corpus, not a
-                # property of the rule.
-                #
-                # Nothing GRADED moves with either key: ``value_band``,
-                # ``value_at_stake_bound_direction`` and ``value_at_stake_is_floor``
-                # are derived above from the UNROUNDED ``value_usd``, and the
-                # weakness axis reads the unrounded ``per_entity``. But
-                # ``value_by_entity`` is NOT inert — do not read this rounding as
-                # a presentation-only key. ``_grade`` takes the exposure
-                # numerator from it (``held = finding["value_by_entity"][key]``,
-                # then ``mine += take * held`` into ``exposure_usd`` and so into
-                # ``grade_exposure``), and the subsumed-exclusive selection
-                # compares candidates on ``held * fraction`` and charges the
-                # winner through the same loop.
-                #
-                # What keeps THIS change out of the numerator is §6.4, not an
-                # absence of readers: a sheet ceiling is held out of exposure
-                # entirely (``held = None`` there), and every sub-cent entity on
-                # this corpus is a sheet ceiling. That is a rule with its own
-                # lifetime and it may be revisited. Where a sub-cent entity is
-                # NOT a sheet ceiling the charge can only GROW — the unrounded
-                # figure is larger than the 0.00 it replaced — so exposure rises
-                # and ``grade_exposure`` falls, and this rounding can never
-                # manufacture an improvement.
+                # The total and per-entity figures share the ceiling records' rounding (``_round_published``), so
+                # sub-cent entities aren't shown as "$0.00 at stake". Graded values use unrounded figures, but
+                # ``value_by_entity`` feeds exposure in ``_grade``; sheet ceilings are held out of exposure, and
+                # elsewhere the change can only raise exposure, never improve the grade.
                 "value_at_stake_usd": (_round_published(value_usd) if value_usd is not None else None),
                 "value_state": (VALUE_STATE_PROVEN_REACH if value_usd is not None else NOT_DETERMINED),
                 "value_by_entity": {k: _round_published(v) for k, v in sorted(per_entity.items())},
                 "value_at_stake_basis": value_basis,
-                # Which direction the total bounds the principal in, and the
-                # reason the flag below is no longer the whole answer: a sum of
-                # composed extraction ceilings is not an at-least. Three-valued,
-                # and ``not_determined`` is the fall-through — a direction is
-                # published only where one was proven.
+                # Which way the total bounds the principal (a sum of composed ceilings isn't an at-least);
+                # ``not_determined`` unless proven.
                 "value_at_stake_bound_direction": direction,
-                # Retained, and now derived: it is TRUE only where the direction
-                # is a floor, so a consumer reading the boolean alone can no
-                # longer read a ceiling as an at-least.
+                # Derived: true only where the direction is a floor.
                 "value_at_stake_is_floor": is_floor,
-                # The entities whose published figure is a composed extraction
-                # ceiling, named rather than left to be counted out of
-                # reach_composed_magnitudes — that list holds every candidate,
-                # including ones an entity's own witness beat. SPLIT from the
-                # sheet ceilings below rather than widened to hold both: the two
-                # are different claims about how the bound was earned, only one
-                # of them spends the exposure budget, and a consumer joining
-                # this list to reach_composed_magnitudes[] would find no entry
-                # for a sheet entity that had been folded into it.
+                # Entities priced from a composed ceiling, named; separate from sheet ceilings (different claims, only
+                # one spends exposure).
                 "entities_priced_from_a_composed_ceiling": sorted(
                     valued.ceiling_entities - valued.sheet_ceiling_entities
                 ),
-                # The other ceiling: entities whose published figure is their OWN
-                # priced sheet, admitted because this row's capability replaces
-                # their code. Disjoint from the list above by construction — a
-                # standing figure came from one branch — and the two together are
-                # the row's ceiling-bearing population.
+                # Entities priced from their own sheet (replaced code); disjoint from the composed list.
                 "entities_priced_from_a_sheet_ceiling": sorted(valued.sheet_ceiling_entities),
-                # Its refusal counterpart, and the reason it is published rather
-                # than left to be counted out of the list above: on a row whose
-                # every composed figure was withheld the ceiling list is EMPTY,
-                # and an empty list there is otherwise the same shape as an
-                # empty list on a row that never composed anything. One is a
-                # typed refusal, the other is a question nobody asked, and
-                # spelling them identically is the collapse three-valued logic
-                # exists to prevent.
+                # The composed refusals, so an empty ceiling list isn't confused with never composing.
                 "entities_withheld_from_a_composed_ceiling": [
                     {
                         "entity": record.entity,
@@ -1272,8 +1055,6 @@ def _aggregate(
                     }
                     for record in valued.withheld_composed_magnitudes
                 ],
-                # The entities behind the coverage gap, named rather than left to
-                # be inferred from the direction alone.
                 "entities_holding_unpriced_assets": partially_priced,
                 "value_band": (
                     (_BAND_PREFIX.get(direction, "") + K.band_label(value_usd))
@@ -1283,51 +1064,28 @@ def _aggregate(
                 "undetermined_instances": undetermined,
                 "proven_no_reach_instances": valued.proven_no_reach,
                 "witnessed_magnitude_caps": valued.magnitude_caps,
-                # A floor witness the entity's own sheet could not bound. The
-                # published dollars for these entities are the witness's figure
-                # standing alone, which is a different fact from a figure two
-                # witnesses agreed on.
+                # A floor witness the sheet couldn't bound; the figure stands alone.
                 "unbounded_floor_magnitudes": valued.unbounded_floor_magnitudes,
-                # Phase 6: every dollar this row carries that came from a
-                # DESTINATION function's own flow.out witness rather than from a
-                # witness on this row's own call, with the act-as chain that
-                # licensed it published beside it (inv. 9 exact decomposition).
+                # Dollars from a destination function's own flow.out witness, with the licensing act-as chain.
                 "reach_composed_magnitudes": [
                     entry.as_json() for _, entry in sorted(valued.composed_magnitudes.items())
                 ],
-                # The other half of the same population: every candidate that
-                # cleared all three composition witnesses and then lost its
-                # FIGURE to the three-arm rule. Each one publishes its gate
-                # claim, its execution record and its typed refusal, and no
-                # dollar figure of any kind.
+                # Candidates that cleared the witnesses but lost their figure to the three-arm rule: gate claim,
+                # execution record and refusal, no dollars.
                 "reach_composed_magnitudes_withheld": [
                     record.as_json() for record in valued.withheld_composed_magnitudes
                 ],
-                # The sheet ceilings this row publishes, one entry per entity,
-                # each carrying the observation-shaped answer to #170's question:
-                # a sheet ceiling is proven by a BALANCE OBSERVATION and not by a
-                # call, so its proving_execution is not_determined under a
-                # registered non-fault reason that says exactly that. Published
-                # rather than left implicit, because a magnitude with no
-                # execution block reads as one whose execution nobody asked about.
+                # Sheet ceilings per entity. Proven by a balance observation, not a call, so ``proving_execution`` is
+                # ``not_determined`` under a registered non-fault reason.
                 "reach_sheet_ceiling_magnitudes": _sheet_ceiling_records(
                     valued.sheet_ceiling_entities, per_entity, value_plane, row.capability
                 ),
-                # Its refusal counterpart, published for the reason every refusal
-                # on this row is: an entity silently absent from the list above
-                # is indistinguishable from one the branch never fired on. These
-                # are entities whose standing figure did not reconcile against
-                # the sheet it claimed to be, so the ceiling LABEL was withheld —
-                # the dollars stand, graded in no direction, and they charge the
-                # exposure budget like any other figure.
+                # Ceiling labels withheld because the figure didn't reconcile with the sheet; the dollars stand,
+                # ungraded, and charge exposure.
                 "reach_sheet_ceiling_magnitudes_withheld": valued.sheet_ceilings_withheld,
                 "reach_composition_census": valued.composition_census,
-                # ``witnessed_magnitude_caps`` lists only the calls a witness
-                # actually TRIMMED. Read alone it says nothing about the calls
-                # that carried no witness at all, which are the majority and
-                # which a reader would otherwise take for "checked and within
-                # bound". The census separates the three: capped, witnessed and
-                # within its bound, and never witnessed.
+                # Calls capped by a witness, witnessed within bound, and never witnessed, so unwitnessed calls aren't
+                # read as checked.
                 "magnitude_witness_census": {
                     **valued.magnitude_census,
                     "reading": (
@@ -1349,62 +1107,38 @@ def _aggregate(
                         "reached anyway — the rest bound nothing and are listed nowhere"
                     ),
                 },
-                # Hops the walk could establish neither way, deduped on the
-                # distinct (caller, destination) pair. Reach withheld is still
-                # reach this row does not claim — published so the bound is
-                # visible instead of the closure quietly getting smaller.
+                # Hops established neither way, deduped by (caller, destination).
                 "reach_hops_not_determined": valued.hops_not_determined,
                 "zero_address_reach_keys_refused": row.zero_reach_keys_refused,
-                # Filled in after the sort, which is where a tie can be seen.
-                # Present on every row: null is the proven "nothing tied".
+                # Filled after sorting; null is the proven "nothing tied".
                 "exposure_order_tie": None,
                 "severity_proven": round(severity, 4),
                 "severity_basis": sorted({b for instance in row.instances for b in instance.severity_basis}),
                 "weakness": round(weakness, 4),
                 "weakest_gate": weakest[0],
-                # inv.5 read as the weakest path TO AN ENTITY: present only where a
-                # merged unit's members reach different entities at different rungs,
-                # and then the union is priced at the hardest rung among the
-                # contributing members. Absent means one rung priced the whole union.
+                # Present only where a merged unit's members reach entities at different rungs.
                 "weakness_by_entity": {k: round(v, 4) for k, v in sorted(weakness_by_entity.items())},
                 "raw_points": round(K.SEV_SCALE * severity * weakness * band, 4),
                 "n_functions": len({(i.signal.deployment_address, i.signal.selector) for i in row.instances}),
                 "n_entities": len(row.seeds),
-                # The deployment entities the row's instances were witnessed ON
-                # — the direct targets — as distinct from reach_entities, the
-                # closure the capability reaches through control edges. That
-                # closure is MEMBERSHIP and is not filtered by pricing: the
-                # entities in it whose dollars are undetermined are named in
-                # the row's exposure gap, not dropped from the fact that this
-                # capability reaches them.
+                # Deployments the instances were witnessed on, distinct from the reach closure (membership, not filtered
+                # by pricing).
                 "host_entities": sorted(row.seeds),
                 "reach_entities": sorted(valued.reach),
-                # What the gate hops this row walked LICENSE at each destination
-                # — the role -> selector join's named functions, keyed on the
-                # canonical entity the reach set uses, as {selector, name}
-                # objects rather than a string a consumer would have to re-parse.
-                # A reached entity absent from this map was reached through a hop
-                # that named no function, which is a reach whose "to do what" is
-                # unanswered and not a reach to nothing.
+                # What the walked gate hops license per destination (canonical keys, ``{selector, name}``). A reached
+                # entity absent here was reached through a hop naming no function.
                 "reach_licensed_functions": valued.licensed_functions,
-                # The size of what the withheld hops hide. Two published hops can
-                # withhold twenty-two entities; without this the other twenty
-                # appear nowhere in the document.
+                # The size of what withheld hops hide.
                 "reach_withheld_behind_hops": valued.withheld_behind_hops,
-                # The at-most behind this row's unanswered questions, from the
-                # unresolved entities' own sheets. Out of lambda and exposure.
+                # The at-most behind unanswered questions; outside lambda and exposure.
                 "unresolved_stake": unresolved,
-                # Proven actor and act (ledger membership), unsized consequence.
-                # The row's lambda contribution is unchanged by this stamp.
+                # Proven actor and act, unsized consequence; lambda unchanged.
                 "partial_proof": bool(unresolved["entities_total"]),
                 "example_functions": sorted({i.signal.function_name for i in row.instances})[:6],
                 "witness_tiers": sorted(row.tiers),
                 "witness_notes": sorted(row.notes),
                 "citations": _cited(row.citations),
-                # The slice above is a display cap, and a cap that is not counted
-                # reads as the whole population. Two witness citations were
-                # evicted by a reading-string on one shipped row before the
-                # ordering below existed; the total says how many were not shown.
+                # The display cap's total, so the slice isn't read as everything.
                 "citations_total": len(row.citations),
                 "counterfactual": _counterfactual(weakest[1]),
             }
@@ -1433,29 +1167,12 @@ def _aggregate(
             for r in rest
         ]
         top["subsumed_raw_points"] = round(sum(r["raw_points"] for r in rest), 4)
-        # Subsumption removes a row's POINTS, never the unit's reach. Value that
-        # only a subsumed row names is still value this unit provably reaches, and
-        # dropping it from the exposure accounting would publish a smaller
-        # exposure for a unit that got no smaller.
-        #
-        # The contributing row's OWN fraction travels with the value. The top row
-        # is a different access path — often an undelayed one — and charging the
-        # delayed row's value at the undelayed fraction would re-merge in the
-        # exposure term exactly what keying rows by access path separated.
-        #
-        # A SHEET CEILING is not occupancy. The top row publishes a figure at
-        # such an entity and charges nothing for it, so treating the key as
-        # taken would discard a subsumed row's genuinely witnessed value there
-        # and take it out of the exposure accounting altogether — a leak in the
-        # direction the budget exists to prevent.
+        # Subsumption removes points, not reach: value only a subsumed row names still enters exposure, at that row's
+        # own fraction. A sheet ceiling isn't occupancy (the top row charges nothing there).
         occupied = set(top["value_by_entity"]) - set(top["entities_priced_from_a_sheet_ceiling"])
         exclusive: dict[str, dict[str, float]] = {}
-        # Which exclusive keys arrived as a SUBSUMED row's sheet ceiling. The
-        # skip in ``_grade`` reads the TOP row's ceilings, and value carried in
-        # from a subsumed row is not on that list — so without this the ceiling
-        # a subsumed row published would charge the budget the top row's own is
-        # kept out of. Tracked per key beside the winning figure, because the
-        # answer belongs to whichever row's figure actually won.
+        # Exclusive keys that arrived as a subsumed row's sheet ceiling, so they stay out of the budget like the top
+        # row's own.
         exclusive_ceilings: set[str] = set()
         for row in rest:
             per_entity_weakness = row["weakness_by_entity"]
@@ -1471,9 +1188,7 @@ def _aggregate(
                     if key in row_ceilings:
                         exclusive_ceilings.add(key)
         top["subsumed_exclusive_value_by_entity"] = dict(sorted(exclusive.items()))
-        # Published rather than left to be re-derived from the subsumed rows: the
-        # exposure loop needs it, and a reader checking why an exclusive entity
-        # was not charged has nowhere else to look.
+        # Published because the exposure loop needs it and readers look for it.
         top["subsumed_exclusive_sheet_ceiling_entities"] = sorted(exclusive_ceilings)
         if rest:
             top["counterfactual"] += (
@@ -1500,61 +1215,32 @@ def _row_value(
 ) -> _RowValue:
     """Value at stake for one row: MAX per entity, never SUM.
 
-    Two functions reaching the same vault charge it once, and the only dollar
-    figure this function will publish against an entity is one a magnitude
-    WITNESS proved — the entity's whole balance sheet answers "what is there",
-    never "what this reach can move". The magnitude is also one number for the
-    whole CALL, so it caps that call's sum across the keys it reached rather than
-    being re-charged at each of them.
+    A dollar figure needs a magnitude witness (the sheet says what is there, not what can move), and one call's
+    magnitude caps that call across all its keys.
 
-    The reach itself is bounded by the capability's class: code control expands
-    over the whole closure of the controlled node, gate control only through
-    edges whose scope the gate confers, and both only where the destination's
-    own conditions do not pin their caller to the destination itself.
-
-    Where a gate's own call carries no magnitude witness, the DESTINATION
-    function's may supply one (:func:`_compose`, Phase 6). That is a reuse of an
-    existing witness and never a second source of dollars: it applies only where
-    the instance proved no magnitude itself, and each composed figure is capped
-    at the destination's own witness and at the destination's own sheet.
-
-    The conferral question is asked with the WITNESSED FUNCTION's own grant, per
-    instance: two ownership.transfer functions that rewrite different variables
-    confer different hops, and asking the capability class would walk one row's
-    reach on another row's witness.
+    Reach is bounded by capability class (code control expands over the controlled node's closure; gate control only
+    through conferred edges) and by destinations not pinning their caller to themselves. Without its own magnitude
+    witness, a gate may reuse the destination function's (:func:`_compose`), capped at that witness and the
+    destination's sheet. Conferral uses each instance's own function grant.
     """
     per_entity: dict[str, float] = {}
-    # The entities whose standing figure in ``per_entity`` bounds this principal
-    # from above, each mapped to WHICH ceiling it is — a composed extraction
-    # ceiling or the controlled node's own sheet. Maintained beside the MAX
-    # rather than after it: which branch produced a figure is only knowable where
-    # the figure is chosen.
+    # Standing-figure entities that bound from above, and which kind of ceiling; only knowable where the figure is
+    # chosen.
     ceiling_kinds: dict[str, str] = {}
-    # Maintained beside the MAX for the same reason ``ceiling_entities`` is: the
-    # witness behind a figure is only knowable where that figure is chosen.
     non_attributed_entities: set[str] = set()
     reached: set[str] = set()
     undetermined: list[dict[str, Any]] = []
     proven_no_reach: list[dict[str, Any]] = []
     magnitude_caps: list[dict[str, Any]] = []
     unbounded_floors: list[dict[str, Any]] = []
-    # Every candidate every instance offered per entity, kept rather than
-    # collapsed on arrival: the merge below has to choose between candidates
-    # that tie on dollars, and a running MAX destroys the losers before the tie
-    # can be seen, let alone published.
+    # All candidates per entity, so ties can be seen and published.
     composition_candidates: dict[str, list[_ComposedMagnitude]] = {}
     composition_census: dict[str, int] = {}
     composition_refusals: dict[str, int] = defaultdict(int)
-    # Every composed candidate whose FIGURE the three-arm rule refused, keyed on
-    # the call it refused so two instances reaching it report one refusal.
+    # Composed candidates whose figure the three-arm rule refused, keyed by call.
     withheld_composed: dict[tuple[str, str], _WithheldComposition] = {}
     composed_signals: set[tuple[Any, ...]] = set()
-    # The signals whose sheet ceiling is the STANDING figure at each entity,
-    # kept per entity so a figure the MAX later replaces takes its credit with
-    # it. Built on ``composed_signals``' pattern and kept apart from it: a
-    # ceiling and a composed destination witness answer the same question with
-    # different evidence, and a consumer crediting either has to be able to say
-    # which.
+    # Signals whose sheet ceiling is the standing figure per entity, so a replaced figure loses its credit.
     ceiling_signals_by_entity: dict[str, set[tuple[Any, ...]]] = {}
     hops: dict[tuple[str, str], dict[str, Any]] = {}
     licensed: dict[str, set[P.LicensedFunction]] = defaultdict(set)
@@ -1590,17 +1276,13 @@ def _row_value(
             )
             continue
         if instance.signal.value_state == VALUE_STATE_PROVEN_NO_REACH:
-            # An EARNED negative, not a gap: reach was witnessed and reached
-            # nothing. Counting it among the undetermined instances would make a
-            # proven fact read as a missing one.
+            # Reach witnessed and reached nothing: an earned negative.
             proven_no_reach.append(
                 {"function": instance.signal.function_name, "entity": entity, "basis": instance.signal.value_basis}
             )
             continue
         if instance.signal.value_state != VALUE_STATE_PROVEN_REACH:
-            # The transitive closure is a REACH, not a licence: a signal whose own
-            # reach was never witnessed contributes no seed, however much value
-            # its deployment's neighbours hold.
+            # No witnessed reach contributes no seed.
             undetermined.append(
                 {"function": instance.signal.function_name, "entity": entity, "why": instance.signal.value_basis}
             )
@@ -1623,18 +1305,11 @@ def _row_value(
             keys, withheld, licensed_here, walked_hops = _closure(keys, closure, conditions, grant=grant)
             for hop in withheld:
                 hops.setdefault((hop["caller"], hop["destination"]), hop)
-            # Keyed on the CANONICAL entity, the same key ``reached`` uses. The
-            # walk speaks in raw edge anchors and an implementation folded onto
-            # its proxy is one entity under two of them, so a consumer joining
-            # the licensed functions to the reach set would silently miss every
-            # destination that folds.
+            # Canonical keys, matching ``reached``, so folded destinations join.
             for destination, functions in licensed_here.items():
                 licensed[value_plane.canonical(destination)].update(functions)
             if not code_control:
-                # Phase 6. Code control asks no conferral question, so it names
-                # no destination function and has no compositional source; its
-                # magnitude question is a different one and stays where Phase 4
-                # left it.
+                # Code control asks no conferral question, so it has no compositional source.
                 composed, counts, refused, refused_entries = _compose(
                     seeds,
                     walked_hops,
@@ -1646,9 +1321,7 @@ def _row_value(
                     row.principal_addresses,
                 )
                 for record in refused_entries:
-                    # Deduped on (entity, selector): two instances of one row
-                    # reaching the same call refused it once, and counting it
-                    # twice would double the refusal a reader is shown.
+                    # One refusal per (entity, selector).
                     withheld_composed.setdefault((record.entity, record.selector), record)
                 _pool_composed(composition_candidates, composed)
                 for name, count in counts.items():
@@ -1657,12 +1330,7 @@ def _row_value(
                     composition_refusals[reason] += hits
                 if composed:
                     composed_signals.add(_signal_identity(instance.signal))
-        # Reach is MEMBERSHIP, and it is witnessed here. It may not be read off
-        # the value map: an entity drops out of that map whenever its dollars
-        # are not_determined — an unpriced sheet today, a refused magnitude once
-        # the magnitude discipline lands — and deleting a proven fact because an
-        # unproven one is missing is the whole error this fold is being repaired
-        # for. Priced or not, the row reaches these entities.
+        # Reach is membership, witnessed here; it can't be read from the value map, which drops undetermined entities.
         reached.update(value_plane.canonical(key) for key in keys)
         contributions, gaps, cap, unbounded, from_ceilings, non_attributed = _instance_contributions(
             instance, keys, value_plane, transitive=transitive, composed=composed
@@ -1670,17 +1338,7 @@ def _row_value(
         unbounded_floors.extend(unbounded)
         census["instances"] += 1
         if _witnessed_magnitude(instance) is None:
-            # A composed magnitude is a witness — the DESTINATION's — so it is
-            # counted apart from both the calls that carried their own and the
-            # calls that carry none. Folding it into either reports a different
-            # fact than the one that was proved, and leaving it at zero on the
-            # rows that composed says no witness answered where one did.
-            #
-            # A sheet ceiling is a THIRD answer and gets a third counter for the
-            # same reason: it carries no call witness, so it was landing in
-            # magnitude_not_witnessed — the population this census says publishes
-            # not_determined at the unpriced band's floor, which is exactly what
-            # a priced ceiling does not do.
+            # Composed and sheet-ceiling figures get their own counters (neither is a call's own witness nor missing).
             if from_ceilings and CEILING_KIND_SHEET in from_ceilings.values():
                 census["magnitude_sheet_ceiling"] += 1
             else:
@@ -1696,49 +1354,31 @@ def _row_value(
             if previous is None or contribution > previous:
                 per_entity[canonical] = contribution
                 ceiling_kinds.pop(canonical, None)
-                # The credit goes with the figure it proved. A ceiling a larger
-                # contribution has just displaced proves nothing the row
-                # publishes, and leaving its signal credited would answer the
-                # magnitude question with a number no carrier in the document
-                # holds.
+                # The credit goes with the figure it proved.
                 ceiling_signals_by_entity.pop(canonical, None)
                 non_attributed_entities.discard(canonical)
-            # The bound travels with the figure that stands, and a tie is
-            # settled by the weaker of the two claims: an extraction ceiling
-            # equal to a witnessed figure is still only a ceiling.
+            # Ties go to the weaker claim: a ceiling equal to a witnessed figure is still a ceiling.
             if canonical in from_ceilings and contribution >= per_entity[canonical]:
                 ceiling_kinds[canonical] = from_ceilings[canonical]
                 if from_ceilings[canonical] == CEILING_KIND_SHEET:
-                    # Ties are the common case and not an edge: several calls on
-                    # one node read the same sheet and produce the identical
-                    # figure, so each of them proved the number the row
-                    # publishes. Only a ceiling STRICTLY beaten above loses its
-                    # credit.
+                    # Ties are common (several calls read the same sheet); only a ceiling strictly beaten loses credit.
                     ceiling_signals_by_entity.setdefault(canonical, set()).add(_signal_identity(instance.signal))
-            # Same rule, same direction: an attribution-derived figure tying the
-            # standing one revokes the grade, because either candidate may be
-            # the number published.
+            # An attribution-derived tie also revokes the grade.
             if contribution >= per_entity[canonical]:
                 if canonical in non_attributed:
                     non_attributed_entities.add(canonical)
                 else:
                     non_attributed_entities.discard(canonical)
 
-    # Every ceiling label the row is about to publish, checked against the sheet
-    # it claims to be — per KEY, which is the only level the cap holds at.
+    # Reconcile every ceiling label against its sheet, per key.
     sheet_ceilings_withheld = _reconcile_sheet_ceilings(ceiling_kinds, per_entity, value_plane)
     for record in sheet_ceilings_withheld:
         ceiling_signals_by_entity.pop(record["entity"], None)
 
-    # One selection over every instance's candidates, not a running MAX: the
-    # figure is the same either way, but the selector, destination function,
-    # witness state and chain published beside it are the CHOSEN candidate's own
-    # and must be taken from it together.
+    # One selection over every candidate, so the published details come from the chosen candidate.
     composition = {key: _select_composed(pool) for key, pool in sorted(composition_candidates.items())}
-    # The rule again, on the row's own selection. The pool holds only entries an
-    # instance-level pass already admitted, so this changes nothing today — it is
-    # here so that the PUBLISHED entry is the one the rule was applied to,
-    # whatever a later edit does to the two selection points.
+    # Reapply the rule to the published selection (a no-op today, kept so the published entry is always the one the rule
+    # saw).
     composition, refused_again = _admit_composed(
         composition, principal_addresses=row.principal_addresses, planes=admission
     )
@@ -1754,9 +1394,7 @@ def _row_value(
     licensed_out = {key: [fn.as_json() for fn in sorted(rows)] for key, rows in sorted(licensed.items())}
     refusals_out = dict(sorted(refused_composed.items()))
     withheld_out = tuple(withheld_composed[key] for key in sorted(withheld_composed))
-    # §7.2 arm 1's conjunct, counted over every entry this row publishes —
-    # republished and withheld alike, because the gate claim is published on
-    # both and the conjunct qualifies it on both.
+    # Counted over republished and withheld entries alike.
     gate_claims = _counted(
         _gate_claim(entry.chain, entry.execution)["state"] for entry in (*composition.values(), *withheld_out)
     )
@@ -1791,19 +1429,11 @@ def _row_value(
         if transitive
         else "per-instance witnessed value, MAX per entity over latest-observation sheets"
     )
-    # The coverage gap is NOT written into the basis here. A gap alone does not
-    # decide the direction — :func:`_bound_direction` reads the attribution axis
-    # beside it — and this function cannot see that axis's verdict, so the
-    # direction-bearing sentence is :func:`_coverage_bearing_basis`'s to write.
+    # The gap doesn't decide direction alone; :func:`_coverage_bearing_basis` writes that sentence.
     if proven_no_reach:
         basis += f"; {len(proven_no_reach)} instance(s) proven_no_reach"
-    # A sheet ceiling is capped by its node's own sheet BY CONSTRUCTION — it is
-    # that sheet, and the MAX below only ever replaces it with something larger
-    # that is no longer a ceiling. The cap therefore holds PER KEY and is checked
-    # per key (``tests/test_scoring_redteam.py``'s sheet-ceiling cases); it may
-    # NOT be checked on the total, because a row's value sums across every priced
-    # host it reaches and legitimately exceeds any single sheet — $4.217B over
-    # eight hosts on the reference corpus, more than the largest of them.
+    # A sheet ceiling is capped by its node's sheet per key (checked per key, never on the total, which sums hosts and
+    # can exceed any one sheet).
     total = round(sum(sorted(per_entity.values())), 6)
     return _RowValue(
         per_entity,
@@ -1834,32 +1464,16 @@ def _row_value(
 
 
 def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str, Any]]) -> dict[str, Any]:
-    """Every row's composition census, summed to the protocol.
+    """Every row's composition census summed to the protocol.
 
-    Findings and subsumed rows are rolled up SEPARATELY because a subsumed row is
-    usually the same walk seen through a weaker capability: adding the two counts
-    one composition twice and publishes twice the recovery. That is the whole
-    reason for the split, and it is NOT that a subsumed row's dollars stay out of
-    the grade — they do not. A subsumed row's entities that no surviving row
-    reaches are charged to the top row's exposure at its own fraction
-    (``subsumed_exclusive_value_by_entity``), and on the reference corpus a
-    subsumed ``authority.replace`` row's composed ``ethereum::0x657e8c86``
-    ($11,358,880.43) enters the top finding's published exposure that way.
-
-    Entities are counted DISTINCT within each population — two findings composing
-    the same vault composed one entity — while the dollars are summed per row,
-    because that is how they enter the grade: each row is charged what it reaches
-    and the exposure budget, not this figure, is what keeps one entity from being
-    paid for twice.
+    Findings and subsumed rows are rolled up separately (a subsumed row usually repeats the same walk), though
+    subsumed-only entities still enter the top row's exposure. Entities are distinct within each population; dollars sum
+    per row, as they enter the grade.
     """
 
-    # Per-row counts sum; a per-row MAXIMUM does not, and summing chain lengths
-    # across rows would publish an arithmetic artefact as the longest chain the
-    # corpus grows.
+    # Per-row maxima don't sum.
     maxima = ("longest_composed_chain",)
-    # Census keys whose value is itself a count-per-token map. They roll by
-    # merging the maps, never by summing them into one number: the whole point
-    # of keying a refusal on its reason is that the reasons stay apart.
+    # Per-reason maps merge rather than sum.
     breakdowns = (
         "composed_withheld_by_deletability",
         "composed_withheld_by_arm",
@@ -1911,10 +1525,7 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
             "composed_usd_summed_over_rows": round(usd, 2),
         }
 
-    # How many entities actually take the subsumed-exclusive route into a top
-    # row's exposure, counted rather than stated: the sentence below used to
-    # assert "one … does so here", a measurement of this corpus baked into a
-    # literal and false the moment a second row composes one.
+    # Counted rather than asserted in the sentence.
     exclusive: set[str] = set()
     for row in findings:
         exclusive.update(row.get("subsumed_exclusive_value_by_entity") or {})
@@ -1954,14 +1565,7 @@ def _composition_totals(findings: list[dict[str, Any]], subsumed: list[dict[str,
 
 
 def _execution_carriers(node: Any) -> Iterator[dict[str, Any]]:
-    """Every published dict carrying a ``proving_execution`` block, wherever it sits.
-
-    Walked structurally rather than read off the two list names the composition
-    rule uses today: a census that names its carriers cannot count a carrier
-    added after it was written, and an execution block this document publishes
-    but the census never looked at is exactly the silent miss the census exists
-    to stop.
-    """
+    """Every published dict with a ``proving_execution`` block, found structurally so new carriers are counted."""
     if isinstance(node, dict):
         if isinstance(node.get(PROVING_EXECUTION_KEY), dict):
             yield node
@@ -1973,24 +1577,11 @@ def _execution_carriers(node: Any) -> Iterator[dict[str, Any]]:
 
 
 def _execution_fault_census(findings: list[dict[str, Any]], subsumed: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The published magnitudes whose proving execution could not be read, or ``None``.
+    """Published magnitudes whose proving execution couldn't be read, or ``None`` (every block examined, none
+    faulted).
 
-    ``None`` where the walk covered every published execution block and none of
-    them carried a registered fault reason — a completed count of zero, which is
-    why the document omits the field rather than publishing an empty census.
-
-    The reasons counted here are :data:`EX.FAULT_REASONS`, the subset
-    :func:`_admit_composed` takes the ``withheld`` arm on. That arm fires BEFORE
-    the deletability join is consulted, so a faulted entry loses its dollars
-    however the join answered — which is why a fault is a fact about the GRADE
-    and not only about one entry, and why it is announced at the document's top
-    level instead of being left to be found by reading forty blocks.
-
-    Nothing here names a cause. A body that could not be read is not a store
-    that was unavailable, and the four reasons are not even one situation
-    between them: ``transcript_unstored`` is a record that was never written,
-    while ``fetch_failed`` is a read that did not come back. They are published
-    apart and counted apart.
+    These reasons (:data:`EX.FAULT_REASONS`) take ``_admit_composed``'s withheld arm before the deletability join, so a
+    fault moves the grade and is announced at top level. Reasons are counted apart; none names a cause.
     """
     populations = (("findings", findings), ("subsumed_rows", subsumed))
     examined = 0
@@ -2011,13 +1602,10 @@ def _execution_fault_census(findings: list[dict[str, Any]], subsumed: list[dict[
     if not reasons:
         return None
     return {
-        # The machine-checkable marker. Not a ``grade_state`` value — see
-        # ``utils.scoring_status.GRADE_FAULT_DEGRADED`` for why the two
-        # vocabularies are kept apart.
+        # Not a ``grade_state`` value; see ``utils.scoring_status.GRADE_FAULT_DEGRADED``.
         "grade_qualifier": GRADE_FAULT_DEGRADED,
         "records_faulted": len(reasons),
-        # The denominator, so a reader can tell one unreadable block in forty
-        # from forty in forty without counting them.
+        # The denominator.
         "execution_records_examined": examined,
         "faulted_by_reason": _counted(reasons),
         "faulted_by_population": by_population,
@@ -2045,7 +1633,6 @@ def _execution_fault_census(findings: list[dict[str, Any]], subsumed: list[dict[
 
 
 def _execution_fault_warning(census: dict[str, Any]) -> dict[str, Any]:
-    """The census's top-level warning, with its counts derived from the census."""
     breakdown = ", ".join(f"{reason} x{hits}" for reason, hits in census["faulted_by_reason"].items())
     return {
         "kind": "execution_evidence_unreadable",

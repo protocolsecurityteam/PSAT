@@ -1,14 +1,7 @@
 """Selection-pass enqueue for newly promoted members.
 
-A promotion changes the set of rows selection ranks, so a protocol that just
-gained members needs a selection pass. This lives outside the gate module and
-outside ``workers/`` so both can call it without an import cycle: the gate's
-event-2 wrapper fires it, and the discovery worker's direct-``evaluate`` sites
-fire it for their own promotions.
-
-Enqueue is guarded twice — a queued/processing pass for the protocol already
-covers the new members (the selection worker ranks the full unanalyzed set),
-and an empty promotion set fires nothing at all.
+Outside the gate and ``workers/`` to avoid an import cycle; used by the gate's event-2 wrapper and the discovery worker.
+A queued or processing pass already covers new members, and empty promotion sets enqueue nothing.
 """
 
 from __future__ import annotations
@@ -28,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 
 def enqueue_selection_pass(session: Session, protocol_id: int, *, reason: str) -> bool:
-    """One selection pass per protocol. Returns whether a job was created."""
     pending = session.execute(
         select(Job.id)
         .where(
@@ -52,10 +44,9 @@ def enqueue_selection_pass(session: Session, protocol_id: int, *, reason: str) -
 def enqueue_selection_for_promotions(
     session: Session, promoted_contract_ids: Sequence[int], *, reason: str
 ) -> list[int]:
-    """Enqueue one selection pass per protocol that gained members. Reads the
-    protocol off the promoted rows themselves — a row whose stamp is already
-    gone again by the time this runs contributes nothing. Returns the protocol
-    ids enqueued, sorted."""
+    """One selection pass per protocol that gained members, read off the promoted rows (rows already unstamped
+    contribute nothing). Returns the protocol ids, sorted.
+    """
     ids = sorted({cid for cid in promoted_contract_ids})
     if not ids:
         return []

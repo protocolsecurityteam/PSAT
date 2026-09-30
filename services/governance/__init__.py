@@ -1,16 +1,4 @@
-"""Governance-view helpers shared by aggregation services.
-
-Two slices live here:
-
-- ``principals`` — turn ``EffectiveFunction`` / ``FunctionPrincipal`` rows
-  into the dict shape the company-overview / analysis-detail aggregators
-  serialize. Includes the role-promotion logic that filters out the
-  generic ``authority_kind`` controller when a more specific principal
-  (Safe, EOA, ...) covers the same authority slot.
-
-- ``proxies`` — display-name resolution and proxy/impl entry merging for
-  the analyses listing.
-"""
+"""Governance-view helpers shared by aggregation services."""
 
 from .primary_controller import PRINCIPAL_PRIORITY, assign_primary_controllers
 from .principals import (

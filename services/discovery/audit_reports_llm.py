@@ -1,10 +1,5 @@
-"""LLM-based classification and extraction for audit report discovery.
-
-Stage 1 — classify_search_results: given Tavily search results, determine which
-are actual third-party audit reports and extract basic metadata.
-
-Stage 2 — extract_report_details: given a fetched page's text, extract structured
-audit metadata AND discover links to additional audit reports on the page.
+"""LLM classification and extraction for audit report discovery: ``classify_search_results`` (Stage 1) and
+``extract_report_details`` (Stage 2, including links to more reports).
 """
 
 from __future__ import annotations
@@ -27,8 +22,6 @@ _MARKDOWN_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
 
 
 def _parse_json_array(text: str) -> list[dict[str, Any]] | None:
-    """Best-effort extraction of a JSON array from LLM output."""
-    # Strip markdown fences first
     fence_match = _MARKDOWN_FENCE_RE.search(text)
     if fence_match:
         text = fence_match.group(1).strip()
@@ -40,7 +33,6 @@ def _parse_json_array(text: str) -> list[dict[str, Any]] | None:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Try to extract the first [...] block
     match = _JSON_ARRAY_RE.search(text)
     if match:
         try:
@@ -54,7 +46,6 @@ def _parse_json_array(text: str) -> list[dict[str, Any]] | None:
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
-    """Best-effort extraction of a JSON object from LLM output."""
     fence_match = _MARKDOWN_FENCE_RE.search(text)
     if fence_match:
         text = fence_match.group(1).strip()
@@ -198,10 +189,7 @@ def generate_followup_query(
     company: str,
     debug: bool = False,
 ) -> str | None:
-    """Use the LLM to generate a targeted follow-up search query.
-
-    Returns the query string, or ``None`` if the LLM call fails.
-    """
+    """A targeted follow-up search query, or ``None`` on failure."""
     if not initial_results:
         return f'"{company}" security audit report findings'
 
@@ -216,7 +204,7 @@ def generate_followup_query(
             temperature=0.0,
         )
         query = response.strip().strip('"').strip("'").strip()
-        # Fix mismatched quotes (LLM sometimes produces 'word" or "word')
+        # The LLM sometimes produces unbalanced quotes.
         if query.count('"') % 2 != 0:
             query = query.replace('"', "")
         if query and len(query) < 200:
@@ -244,10 +232,9 @@ def classify_search_results(
     company: str,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Stage 1: Classify Tavily results as audit/not-audit.
+    """Stage 1: classify Tavily results.
 
-    Returns list of ``{url, is_audit, auditor, type, confidence}`` dicts for
-    results classified as audits with confidence >= 0.5.
+    Returns ``{url, is_audit, auditor, type, confidence}`` for audits with confidence >= 0.5.
     """
     if not results:
         return []
@@ -268,17 +255,12 @@ def classify_search_results(
     try:
         response = llm.chat(
             [{"role": "user", "content": prompt}],
-            # 20 search results × 7 fields each can run ~3k output tokens once
-            # title and date are included; the previous 2k cap silently
-            # truncated and made the JSON unparseable.
+            # 20 results with titles and dates can need ~3k tokens; 2k truncated the JSON.
             max_tokens=4096,
             temperature=0.0,
         )
     except Exception as exc:
-        # An empty classification is indistinguishable from "none of these are
-        # audits" downstream; a provider-wide failure here is what both prior
-        # audit-discovery collapses looked like from the outside. The
-        # StageError carries the provider's own text (402 vs 401 vs timeout).
+        # An empty classification looks like "no audits" downstream; record provider failures with their text.
         record_degraded(
             phase="audit_classification",
             exc=exc,
@@ -325,19 +307,14 @@ def classify_search_results(
     return confirmed
 
 
-# Per-chunk window for chunked extraction. 15k chars ≈ 4k tokens of input —
-# leaves room for the prompt + a sizeable JSON response on the same call.
+# ~4k input tokens per chunk, leaving room for the prompt and response.
 _CHUNK_SIZE = 15000
-# Cap how many chunks we send for one page so a 300k-char gitbook doesn't
-# burn 20 LLM calls. 3 covers ~45k chars which is enough for nearly every
-# real audit listing we've seen.
+# Covers ~45k chars, enough for nearly every audit listing, without dozens of calls.
 _MAX_CHUNKS = 3
 
 
 def _chunked_text(text: str) -> list[str]:
-    """Split page text into ``_MAX_CHUNKS`` overlapping windows of
-    ``_CHUNK_SIZE`` chars each. Pages that fit in one window stay one chunk.
-    """
+    """Split text into up to ``_MAX_CHUNKS`` overlapping windows of ``_CHUNK_SIZE``."""
     if len(text) <= _CHUNK_SIZE:
         return [text]
     chunks: list[str] = []
@@ -355,8 +332,7 @@ def _extract_one_chunk(
     company: str,
     debug: bool = False,
 ) -> dict[str, Any] | None:
-    """Run the extraction prompt over a single text chunk and parse the
-    JSON response. Returns ``None`` on LLM failure or unparseable output."""
+    """Extract from one chunk; ``None`` on failure or unparseable output."""
     prompt = _EXTRACTION_PROMPT.format(company=company, url=url, page_text=chunk)
     try:
         response = llm.chat(
@@ -391,14 +367,10 @@ def extract_report_details(
     company: str,
     debug: bool = False,
 ) -> dict[str, Any] | None:
-    """Stage 2: Extract structured audit data and discover links from page content.
+    """Stage 2: extract audit data and links from page content.
 
-    Returns a dict with ``reports`` (list of extracted report dicts) and
-    ``linked_urls`` (list of URLs to follow), or ``None`` if extraction fails.
-
-    Long pages are split into multiple windows so audit listings on heavyweight
-    docs sites (gitbook, notion, SPAs) aren't truncated past the first ~15k
-    characters.
+    Returns ``{reports, linked_urls}`` or ``None``. Long pages are chunked so listings past the first ~15k chars aren't
+    lost.
     """
     chunks = _chunked_text(page_text)
     if len(chunks) > 1:
@@ -416,7 +388,7 @@ def extract_report_details(
         if isinstance(chunk_reports, list):
             raw_reports.extend(chunk_reports)
         elif parsed.get("auditor") and parsed.get("title"):
-            # Backwards compat: a flat-field response is one report
+            # Backwards compat: a flat response is one report.
             raw_reports.append(parsed)
         chunk_links = parsed.get("linked_urls")
         if isinstance(chunk_links, list):
@@ -434,7 +406,7 @@ def extract_report_details(
         if not auditor or not title:
             continue
 
-        # Resolve pdf_url — may be relative
+        # May be relative.
         pdf_url_raw = str(raw["pdf_url"]).strip() if raw.get("pdf_url") else None
         if pdf_url_raw and not pdf_url_raw.startswith(("http://", "https://")):
             from urllib.parse import urljoin
@@ -450,7 +422,6 @@ def extract_report_details(
             }
         )
 
-    # Normalize linked URLs — resolve relative paths against the source page URL
     from urllib.parse import urljoin
 
     linked_urls: list[str] = []
@@ -459,16 +430,13 @@ def extract_report_details(
         clean = str(link).strip() if link else ""
         if not clean:
             continue
-        # Resolve relative URLs (e.g. "/audits" → "https://example.com/audits")
         if not clean.startswith(("http://", "https://")):
             clean = urljoin(url, clean)
         if clean.startswith(("http://", "https://")) and clean not in seen:
             seen.add(clean)
             linked_urls.append(clean)
 
-    # When a page is split into multiple overlapping chunks the same audit can
-    # be extracted from each chunk it falls inside. Dedup here so the caller
-    # doesn't have to deal with within-page duplicates.
+    # Overlapping chunks can extract the same audit twice; dedup here.
     if len(chunks) > 1:
         seen_keys: set[tuple[str, str, str]] = set()
         deduped_reports: list[dict[str, Any]] = []

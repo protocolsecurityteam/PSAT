@@ -1,5 +1,3 @@
-"""Shared helpers for contract analysis."""
-
 from __future__ import annotations
 
 import json
@@ -154,35 +152,15 @@ def external_bool_leaf_is_gate_shape(
     gate_kind: str | None,
     callee_signature: str | None,
 ) -> bool:
-    """May an ``external_bool`` leaf assert a CALLER GATE — i.e. carry
-    ``authority_role='delegated_authority'`` and mint an ``authority_contract``
-    descriptor that downstream promotes into a ``caller_gate`` controller?
+    """Whether an ``external_bool`` leaf may assert a caller gate (``delegated_authority`` with an
+    ``authority_contract``). Mirrors ``permissionless_shapes``' external_bool arm so the two planes can't
+    disagree.
 
-    Mirrors the resolution-plane discriminator
-    (``services/resolution/permissionless_shapes.py``, ``external_bool`` arm),
-    which already separates these shapes correctly for the openness question.
-    Applied at classify/harvest time so the provenance plane cannot publish an
-    authority the openness plane simultaneously calls permissionless:
-
-    * ``view``/``pure`` callee — an external ACL read
-      (``authority.canCall(...)``, ``roleRegistry.onlyGuardian(msg.sender)``,
-      ``blacklister.nonBlacklisted(msg.sender)``): a gate.
-    * ``nonview_library`` — an effectful library manipulating the contract's
-      OWN storage (``pendingAdmins.remove(msg.sender)``): a
-      membership-consume gate.
-    * ``nonview`` external — the call moves the CALLER'S value or state
-      (``transferFrom(msg.sender, ...)``, ``permit(msg.sender, ...)``,
-      ``burnShares(msg.sender, ...)``, ``vault.enter(msg.sender, ...)``);
-      msg.sender is the funds/burn subject, not an authorization subject.
-      NOT a gate — with the same single carve-out the resolution plane
-      proves: a VOID statement call (``external_call_revert`` /
-      ``try_catch_revert``) consuming a caller-supplied ``bytes32[]``
-      hash-path witness is a merkle membership verification against a
-      contract-committed root.
-    * ``None`` — the callee's mutability was NOT determined. A
-      not-determined input must not publish the proven delegated-authority
-      state (it may still fold as the merkle shape above, matching the
-      resolution plane's ``(None, "nonview")`` handling).
+    ``view``/``pure`` callees are ACL reads (``authority.canCall``, ``roleRegistry.onlyGuardian(msg.sender)``): gates.
+    ``nonview_library`` manipulates own storage (``pendingAdmins.remove(msg.sender)``): a gate. ``nonview`` external
+    moves the caller's value (``transferFrom``, ``permit``, ``vault.enter`` with ``msg.sender``): not a gate, except a
+    void statement call consuming a caller-supplied ``bytes32[]`` proof (merkle verification). ``None`` (undetermined)
+    can't publish delegated authority, but may still fold as the merkle shape.
     """
     if callee_state_mutability in ("view", "pure", "nonview_library"):
         return True

@@ -18,38 +18,19 @@ from utils.scoring_status import (
 ANYONE = "anyone"
 
 
-# The closed vocabulary of every gate the fold reads: gate name → the proven
-# state tokens that license its positive branch. ``gate_inputs`` is free-form
-# JSONB with no CHECK behind it, so a reader that branches on "is not
-# not_determined" treats a WITHHELD envelope (say ``not_earned``) as the earned
-# one. Branching on the exact token is what makes the two different facts again.
+# Gate name to the proven tokens that license its positive branch. ``gate_inputs`` is unchecked JSONB, so match exact
+# tokens, not "not not_determined".
 GATE_PROVEN_TOKENS: dict[str, tuple[str, ...]] = {
     "exact_empty_credit": ("earned",),
     "latch_witness": ("witnessed",),
-    # F4: ``proven_upper_bound`` is the ATTRIBUTION path's own state and MUST be
-    # listed. ``_malformed_gates`` withholds any row whose gate state is neither
-    # ``not_determined`` nor a member here, and ``_gate`` degrades it — so
-    # omitting it would take every attribution-derived magnitude out at once,
-    # which is a number movement dressed as a vocabulary omission.
-    #
-    # ``proven_ceiling`` (``scoring_status.MAGNITUDE_STATES_UPPER_BOUNDING``) is
-    # ABSENT ON PURPOSE, and its absence takes no population out. This list
-    # allow-lists states a DISTILLED signal may carry on its own
-    # ``reach_magnitude_usd`` gate; a sheet ceiling is derived inside the fold
-    # from the ``ValuePlane`` at the moment a code-control capability is priced
-    # against the node it controls, so no signal ever presents it here and the
-    # F4 hazard cannot apply to it. Should a distiller ever stamp the state onto
-    # a gate, this is the line that must gain it — the omission is a scope
-    # ruling, not an oversight.
+    # F4: ``proven_upper_bound`` must be listed or every attribution-derived row is withheld. ``proven_ceiling`` is
+    # absent on purpose: it's derived inside the fold and never on a distilled gate.
     "reach_magnitude_usd": (
         MAGNITUDE_STATE_PROVEN_EXACT,
         MAGNITUDE_STATE_PROVEN_FLOOR,
         MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
     ),
-    # Both states are PROVEN: the distiller always performed the lookup, and the
-    # earned negative carries the typed reason there is no record. The
-    # execution's own three-state answer lives inside the payload — see
-    # ``utils.execution_record``.
+    # Both states are proven; the execution's own three-state answer is in the payload (``utils.execution_record``).
     PROVING_EXECUTION_KEY: EX.GATE_STATES,
     "token_identity": ("proven",),
     "asset_class": ("proven",),
@@ -64,16 +45,12 @@ GATE_PROVEN_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 
-# Gates whose payload enters arithmetic. Validated as a real, finite number at
-# READ as well as at construction: a string "1e12" compares and multiplies just
-# fine in Python and would charge $1T off an untyped payload.
+# Validated as finite numbers on read too: a string "1e12" still does arithmetic in Python.
 NUMERIC_GATES = frozenset({"reach_magnitude_usd"})
 
 
-# Every gate's payload SHAPE, checked before any consumer walks it. ``gate_inputs``
-# is free-form JSONB, so a list the fold iterates as dicts can arrive as a list of
-# ints; without this the walk raises out of ``compute_protocol_score`` and one bad
-# payload on one function silently costs the whole protocol its score.
+# Payload shapes are checked before walking so one bad payload withholds its row instead of raising out of the whole
+# score.
 GATE_PAYLOAD_SHAPES: dict[str, str] = {
     "exact_empty_credit": "object",
     "latch_witness": "object",
@@ -92,10 +69,7 @@ GATE_PAYLOAD_SHAPES: dict[str, str] = {
 }
 
 
-# The gates the fold WILL read for a given claim. A signal missing one of them is
-# a distiller bug, and it withholds its own row: reading a gate that was never
-# written would put a default where a witness belongs, and raising would let one
-# malformed row take the whole protocol's grade down with it.
+# A missing one is a distiller bug: withhold the row rather than default or raise.
 REQUIRED_GATES = ("exact_empty_credit", "latch_witness", "reach_magnitude_usd")
 
 
@@ -118,14 +92,10 @@ def _row_for(
     kind: str,
     address: str,
 ) -> _Row:
-    """The row for one (unit, capability, ACCESS PATH), at its weakest gate.
+    """The row for one (unit, capability, access path), at its weakest gate.
 
-    The path is part of the key because a unit can hold the same capability
-    through paths that cost different things: a Safe that also proposes-and-
-    executes on a timelock reaches the timelock's contracts only by paying the
-    delay, and one max-weakness row would charge that delayed value at the
-    Safe's undelayed rung. Within one path the weakest gate still wins (inv.5),
-    which is what keeps two merged Safes one power rather than two.
+    The path is in the key because the same capability via a timelock costs the delay; one max-weakness row would charge
+    it at the undelayed rung.
     """
     key = (unit, capability, path)
     row = rows.get(key)
@@ -138,24 +108,14 @@ def _row_for(
         row.principal_kind = kind
         row.weakest_address = address
     row.principal_addresses.add(address)
-    # The member's OWN rung, kept beside the unit's weakest: a merged Safe unit
-    # publishes one reach union, and pricing an entity only the 4/8 member
-    # reaches at the 3/7 member's rung charges a coalition nobody proved.
+    # Keep the member's own rung so an entity only one member reaches isn't priced at another's.
     previous = row.member_gate.get(address)
     if previous is None or weakness > previous[0]:
         row.member_gate[address] = (weakness, label, kind)
     return row
 
 
-# ---------------------------------------------------------------- gate reads
-
-
 def _malformed_gates(signal: FunctionSignal) -> list[str]:
-    """Gate envelopes this fold refuses to read, by name.
-
-    A state outside the gate's closed vocabulary, or a numeric payload that is
-    not a finite number, is a row this fold cannot score honestly.
-    """
     bad: list[str] = []
     for name in REQUIRED_GATES + REQUIRED_GATES_BY_CLAIM.get(signal.claim_id, ()):
         if name not in signal.gate_inputs:
@@ -180,7 +140,6 @@ def _malformed_gates(signal: FunctionSignal) -> list[str]:
 
 
 def _payload_has_shape(name: str, value: Any) -> bool:
-    """Whether a proven gate payload is the shape its consumers walk."""
     shape = GATE_PAYLOAD_SHAPES.get(name)
     if shape is None:
         return True
@@ -216,19 +175,11 @@ def _is_number(value: Any) -> bool:
 
 
 def _gate(signal: FunctionSignal, name: str) -> Tri[Any]:
-    """One gate, read on its EXACT proven token. Never "is not not_determined".
-
-    A state the gate's vocabulary does not name is returned as
-    ``not_determined``: an unrecognised token is a witness this fold cannot
-    vouch for, and reading it as the positive branch is how a withheld arm
-    publishes an earned one.
-    """
+    """One gate, read on its exact proven token. Unrecognised tokens read as ``not_determined``."""
     try:
         tri = signal.gate_input(name)
     except KeyError:
-        # ``_malformed_gates`` has already withheld any row whose required gates
-        # are missing; this arm keeps an incidental read from raising out of the
-        # fold rather than inventing a value.
+        # Missing required gates were already withheld; this keeps incidental reads from raising.
         return Tri.not_determined()
     expected = GATE_PROVEN_TOKENS.get(name, ())
     if tri.state == NOT_DETERMINED or tri.state in expected:
@@ -239,33 +190,23 @@ def _gate(signal: FunctionSignal, name: str) -> Tri[Any]:
 
 
 def _signal_identity(signal: FunctionSignal) -> tuple[Any, ...]:
-    """What names one signal row across the fold and the confidence pass.
+    """The signal's identity.
 
-    ``contract_id`` is part of it because split-proxy secondary implementations
-    share a ``deployment_address`` and are legitimately different contracts.
+    Includes ``contract_id`` because split-proxy implementations share a deployment address.
     """
     return (signal.contract_id, signal.chain, signal.deployment_address, signal.selector, signal.claim_id)
 
 
 def _signal_execution(signal: FunctionSignal) -> EX.ProvingExecution:
-    """The execution this signal's magnitude was proven by, or the typed reason
-    there is none.
+    """The execution that proved this signal's magnitude, or the typed reason there is none.
 
-    A gate this fold cannot read is not an execution it may assume. ``_gate``
-    already degrades an unrecognised token to ``not_determined``, and a
-    ``not_determined`` envelope carries no payload — so both of those land on
-    :data:`EX.REASON_NOT_PERSISTED`, the same state a row written before the
-    record existed lands on. Absence never becomes a match, an empty caller, or
-    an unseeded probe.
+    Unreadable or undetermined gates map to :data:`EX.REASON_NOT_PERSISTED`, never an assumed execution.
     """
     gate = _gate(signal, PROVING_EXECUTION_KEY)
     payload = gate.value if isinstance(gate.value, dict) else {}
     ptr = payload.get("transcript_ptr")
     verdict_id = payload.get("effect_verdict_id")
-    # The two POINTERS survive the negative branch. They are the row's own
-    # identity, not part of the record, and they are exactly what a reader needs
-    # in order to go and look at the transcript the record is missing from —
-    # dropping them would turn a traceable gap into an untraceable one.
+    # Keep the pointers so the gap stays traceable to its transcript.
     if gate.state != EX.GATE_STATE_RECORDED:
         reason = payload.get("reason")
         return EX.not_determined(

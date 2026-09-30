@@ -1,38 +1,19 @@
-"""Input-asset state seeding for Tier-1 probes (EFFECTS_RESOLUTION_SPEC §4.2/§4.5).
+"""Input-asset seeding for Tier-1 probes (EFFECTS_RESOLUTION_SPEC §4.2/§4.5).
 
-A deposit-backed conversion (``WeETH.wrap``, a vault ``deposit``) begins by
-PULLING an input asset from the caller. The simulated principal holds none of it,
-and ``eth_simulateV1`` with ``validation:false`` skips ETH balance/nonce checks
-but NOT ERC-20 balance state — so the probe reverts at the precondition, the
-verdict is ``unknown``, and the function drops out of the mint population
-entirely. That is why ``supply.mint`` backing came back empty on 100% of rows:
-the only mints that could prove were the input-less admin/reward mints.
+Deposit-backed conversions (``WeETH.wrap``, vault ``deposit``) pull an input asset the simulated principal doesn't hold.
+``eth_simulateV1`` with ``validation:false`` skips ETH checks but not ERC-20 state, so the probe reverts and the
+function drops out of the mint population (``supply.mint`` backing was empty on every row).
 
-This module gives the acting principal the input asset it needs, and nothing
-else. Three properties carry the witness bar:
+This gives the principal the input asset and nothing else:
 
-1. **Seeding is a RETRY, never the first attempt.** The unseeded probe runs
-   first; seeding is attempted only after it reverted. That ordering is not a
-   perf trick — it is the soundness argument. Because the value/asset-free call
-   provably failed, an asset the seeded call then consumes was genuinely
-   REQUIRED. Without it we could hand a payable admin mint some ETH and read the
-   resulting ``msg.value`` inflow as "backed" when a real caller could mint with
-   zero.
-2. **Read-back or nothing.** A slot is only seeded after the token's own direct
-   view getter echoed a written magic word (:func:`discover_token_layout`), and
-   the probe block itself re-reads that getter and requires the exact seeded
-   value. A rebasing / computed / proxy-backed / exotic-layout token never
-   echoes, so it is never seeded — the probe stays exactly as unseeded as it is
-   today. An unseeded ``unknown`` is honest; a wrongly-seeded "backed" is a lie
-   about solvency.
-3. **Seeding never manufactures a witness.** Writing storage emits no logs, so
-   every ``Transfer`` the recipe observes was emitted by the contract's own
-   execution. Seeding an asset the function does not pull produces no inflow at
-   all. ``inflow_observed`` keeps its exact meaning either way.
+1. Seeding is a retry, never the first attempt: the unseeded call must have failed, so any asset the seeded call
+consumes was genuinely required (otherwise a payable admin mint could bank our ETH as "backing").
+2. Read-back or nothing: a slot is seeded only after the token's own getter echoed a magic word
+(:func:`discover_token_layout`), and the probe block re-reads it. Rebasing, computed or exotic tokens never echo and
+stay unseeded.
+3. Seeding never manufactures a witness: storage writes emit no logs, so every observed Transfer came from the contract.
 
-The seeded state is deliberately narrow: the principal's balance/shares/allowance
-of a candidate input token, plus (only on the second attempt) an ETH balance for
-an attached ``msg.value``. No roles, no gate flags, no unrelated storage.
+Only the principal's balance/shares/allowance of a candidate token, plus (second attempt only) ETH for ``msg.value``.
 """
 
 from __future__ import annotations
@@ -56,34 +37,19 @@ _RESOLVED_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def input_seeding_enabled() -> bool:
-    """Kill-valve for the whole feature. Default ON; setting it off restores the
-    exact pre-seeding probe (one unseeded call, no discovery RPCs)."""
+    """Kill switch; default on. Off restores the exact pre-seeding probe."""
     return os.getenv("PSAT_EFFECTS_INPUT_SEEDING", "1").strip().lower() in _TRUTHY
 
 
-# --------------------------------------------------------------------------
-# Per-job cost ceiling
-# --------------------------------------------------------------------------
-# The seeded retry fires on the COMMON path, not the rare one: it runs whenever
-# an unseeded value_out/supply probe reverted, and reverting is what most probes
-# do (5 of 34 value_out probes proved on the last live run). Each retry costs a
-# token-identity block, a layout-discovery block (548 storage overrides, ~70KB of
-# JSON, plus a ``narrow`` retry when the wide write breaks the getter), up to two
-# seeded attempts and a seeded sentinel re-run. Memoization bounds identity and
-# layout per DISTINCT spender/token, which is the right shape but has no ceiling:
-# a protocol with many distinct vaults scales all of it linearly, on a branch
-# whose other half exists to cut effects wall time.
-#
-# These caps are that ceiling. Exceeding one degrades the probe to EXACTLY its
-# pre-seeding behavior (unseeded call, no discovery) — never to a guess — and
-# says so in the log and the stage metrics. Raise them per-deployment via env
-# when a protocol genuinely needs more.
+# Per-job cost ceiling. The seeded retry runs on the common path (most probes revert), and each costs an identity block,
+# a layout-discovery block (hundreds of overrides, plus a ``narrow`` retry), up to two seeded attempts and a seeded
+# sentinel. Memoization is per distinct spender/token with no ceiling, so many vaults scale linearly. Exceeding a cap
+# degrades to exactly the unseeded probe and is logged; raise via env when needed.
 _DEFAULT_MAX_IDENTITY_PROBES = 16
 _DEFAULT_MAX_LAYOUT_DISCOVERIES = 8
 _DEFAULT_MAX_PROBE_RETRIES = 24
 
-# How many distinct skipped identities to keep for the log line. The counters
-# carry the totals; this is only so the message names something concrete.
+# Sample size for the log line; counters carry totals.
 _SKIP_SAMPLE = 8
 
 
@@ -99,12 +65,10 @@ def _int_env(name: str, default: int) -> int:
 
 @dataclass
 class SeedBudget:
-    """Per-job ceiling + counters for the seeded-retry path.
+    """Per-job ceiling and counters for the seeded-retry path.
 
-    One instance per job (the seeder is memoized per ``ProbeContext``). Every
-    ``take_*`` is called immediately before the wire work it authorizes, so a
-    refusal is exactly one skipped RPC block. A cap of ``0`` disables that kind
-    of work outright.
+    Each ``take_*`` is called right before the work it authorizes, so a refusal skips exactly one RPC block. A cap of
+    ``0`` disables that work.
     """
 
     max_identity_probes: int = _DEFAULT_MAX_IDENTITY_PROBES
@@ -114,9 +78,7 @@ class SeedBudget:
     identity_probes: int = 0
     layout_discoveries: int = 0
     probe_retries: int = 0
-    # Retries whose seeded attempt actually EXECUTED the target call the unseeded
-    # attempt could not, and the subset of those that ended in a proven verdict.
-    # Without these the next live run can only re-measure the cost, not the yield.
+    # Yield counters, so the next run measures results and not just cost.
     probes_executed: int = 0
     verdicts_proven_seeded: int = 0
 
@@ -124,10 +86,7 @@ class SeedBudget:
     skipped_layout_discoveries: int = 0
     skipped_probe_retries: int = 0
     skipped_names: list[str] = field(default_factory=list)
-    # Why individual seeded attempts (and whole retry paths) came to nothing,
-    # counted by reason. Without this a run reporting ``executed=0`` says only
-    # that seeding failed, never which precondition failed — which is the whole
-    # difference between a bug and an honest non-observation.
+    # Failure reasons, so ``executed=0`` says which precondition failed.
     attempt_outcomes: dict[str, int] = field(default_factory=dict)
 
     @classmethod
@@ -141,11 +100,7 @@ class SeedBudget:
     def _deny(self, kind: str, name: str, used: int, cap: int, skipped: int) -> None:
         if len(self.skipped_names) < _SKIP_SAMPLE:
             self.skipped_names.append(f"{kind}:{name}")
-        # WARNING on the FIRST denial of this kind only. ``used`` cannot express
-        # that — it stops incrementing once the cap is reached, so it equals
-        # ``cap`` for every subsequent denial. The skip counter is what
-        # distinguishes them, and a large protocol would otherwise flood the very
-        # log this truncation notice exists to make readable.
+        # WARNING only on the first denial; ``used`` stops at the cap, so the skip counter tells them apart.
         level = logging.WARNING if skipped == 1 else logging.DEBUG
         logger.log(
             level,
@@ -191,7 +146,6 @@ class SeedBudget:
         self.verdicts_proven_seeded += 1
 
     def record_outcome(self, outcome: str) -> None:
-        """Count one attempt/skip outcome by reason (see ``recipes._OUTCOME_*``)."""
         self.attempt_outcomes[outcome] = self.attempt_outcomes.get(outcome, 0) + 1
 
     def metrics(self) -> dict[str, int]:
@@ -225,62 +179,38 @@ class SeedBudget:
 
 
 def budget_of(seeder: object) -> "SeedBudget | None":
-    """The :class:`SeedBudget` a seeder carries, if any.
-
-    ``Seeder`` is a plain callable seam (tests inject lambdas), so the budget is
-    read structurally rather than widening the alias into a Protocol every stub
-    would then have to satisfy."""
+    """The :class:`SeedBudget` a seeder carries, read structurally since ``Seeder`` is a plain callable seam."""
     budget = getattr(seeder, "budget", None)
     return budget if isinstance(budget, SeedBudget) else None
 
 
-# Balance / shares / allowance handed to the principal. Same constant the pause
-# recipe seeds with: far above any probe amount so a ``>=`` precondition always
-# clears, far below 2**256 so a ``balance + amount`` path cannot overflow.
+# Far above any probe amount, far below overflow.
 SEED_AMOUNT = 2**128
 
-# Attached ``msg.value`` on the payable retry, and the ETH balance the principal
-# is given to pay it. One whole ether clears the minimum-deposit checks real
-# pools use (0.1 ETH is the common floor) without being large enough to trip a
-# deposit cap.
+# One ether clears common minimum deposits (0.1 ETH) without tripping caps.
 SEED_ETH_VALUE = 10**18
 SEED_ETH_BALANCE = 10**19
 
-# ETH handed to the TARGET CONTRACT (never the caller) on the last, most
-# synthetic retry. A redemption/sweep pays out of the contract's own balance and
-# reverts before its send when that balance is short — the revert is about this
-# block's treasury, not about what the function can do. 100 ETH clears a realistic
-# single redemption while staying far below any overflow concern.
+# ETH given to the target contract (never the caller) on the last, most synthetic retry: a payout that reverts on a
+# short treasury says nothing about the function.
 SEED_CONTRACT_ETH_BALANCE = 10**20
 
-# Solidity base slots scanned for a mapping. 256 is not arbitrary: OZ-upgradeable
-# inheritance chains push the balance mapping deep behind ``__gap`` arrays —
-# measured on mainnet, weETH's ``_balances`` is at slot 101 and eETH's ``shares``
-# at slot 203. A shallower scan silently misses exactly the deposit-backed
-# conversions this exists for.
+# OZ-upgradeable ``__gap`` arrays push balances deep (weETH ``_balances`` at 101, eETH ``shares`` at 203).
 MAX_BASE_SLOT = 256
-# Vyper folds mapping keys the other way round. Vyper tokens declare their
-# balance mapping near the top of storage, so a short scan is enough.
+# Vyper hashes keys the other way and declares balances near the top.
 MAX_VYPER_BASE_SLOT = 16
 
-# Distinguishes a candidate's echo from any real token value. The low bits carry
-# the candidate index, so ONE read identifies WHICH candidate slot the getter
-# reads — the whole scan costs a single call. Placed at 2**128 rather than near
-# 2**255: high enough that no real supply can collide, low enough that a getter
-# which SCALES the stored word (the shape we want to detect and refuse) computes
-# a distinct value rather than silently wrapping back into the magic range.
+# Low bits carry the candidate index, so one read identifies which slot the getter reads. At 2**128: above any real
+# supply, low enough that a scaling getter produces a distinct value rather than wrapping into the magic range.
 _MAGIC_PREFIX = 0x5EED5EED << 128
 _MAGIC_MASK = 0xFFFF
 
-# ERC-7201 namespaced storage: OZ v5 keeps ``_balances`` at the ``ERC20Storage``
-# base and ``_allowances`` at base + 1. Derived, not hardcoded.
+# OZ v5 ERC-7201: ``_balances`` at the ``ERC20Storage`` base, ``_allowances`` at base + 1.
 _OZ_ERC20_NAMESPACE = (int.from_bytes(keccak(text="openzeppelin.storage.ERC20"), "big") - 1).to_bytes(32, "big")
 OZ_V5_ERC20_BASE = int.from_bytes(keccak(_OZ_ERC20_NAMESPACE), "big") & ~0xFF
 
-# Read-back anchors. Each MUST be a direct read of the mapping it anchors: the
-# read-back compares with strict equality, so a computed getter (a rebasing
-# ``balanceOf = shares * rate``) simply never matches and its token is left
-# unseeded. ``arity`` is the mapping's key count.
+# Each anchor must directly read its mapping; strict equality means computed getters never match. ``arity`` is the key
+# count.
 _ANCHORS: tuple[tuple[str, int], ...] = (
     ("balanceOf(address)", 1),
     ("shares(address)", 1),
@@ -291,15 +221,10 @@ _ANCHORS: tuple[tuple[str, int], ...] = (
 _DECIMALS_SIG = "decimals()"
 _TOTAL_SUPPLY_SIG = "totalSupply()"
 _DEFAULT_DECIMALS = 18
-# Probe amounts pre-encoded by the synthesizer, one whole unit per common token
-# scale. The recipe picks by the decimals the discovery block read back.
+# One whole unit per common scale; the recipe picks by discovered decimals.
 SEED_UNIT_DECIMALS: tuple[int, ...] = (18, 8, 6)
 
-# Floor for a capped holder-balance seed: one whole unit at the LARGEST scale any
-# probe encodes (:data:`SEED_UNIT_DECIMALS`). The probe amount follows the first
-# seeded token's decimals while the cap follows each token's own supply, so
-# without this a low-supply or low-decimal token is seeded below what the call
-# then spends. See :func:`balance_seed_amount`.
+# Floor for a capped holder seed: one unit at the largest probe scale. See :func:`balance_seed_amount`.
 MIN_BALANCE_SEED = 10 ** max(SEED_UNIT_DECIMALS)
 
 
@@ -318,7 +243,6 @@ def _pad(value: int | str) -> bytes:
 
 
 def _solidity_slot(base: int, keys: Sequence[int | str]) -> str:
-    """``m[k1][k2] = keccak(pad(k2) ++ keccak(pad(k1) ++ base))``."""
     slot = base.to_bytes(32, "big")
     for key in keys:
         slot = keccak(_pad(key) + slot)
@@ -326,7 +250,6 @@ def _solidity_slot(base: int, keys: Sequence[int | str]) -> str:
 
 
 def _vyper_slot(base: int, keys: Sequence[int | str]) -> str:
-    """Vyper's ``HashMap`` folds the other way: ``keccak(base ++ pad(k))``."""
     slot = base.to_bytes(32, "big")
     for key in keys:
         slot = keccak(slot + _pad(key))
@@ -341,9 +264,10 @@ _SLOT_FNS: dict[str, Callable[[int, Sequence[int | str]], str]] = {
 
 @dataclass(frozen=True)
 class AnchorSlot:
-    """One read-back-verified mapping the principal's precondition lives in.
-    ``base`` + ``ordering`` reconstruct the concrete slot for any holder, so the
-    layout is holder-independent and memoizable per (chain, token)."""
+    """One read-back-verified mapping.
+
+    ``base`` and ``ordering`` rebuild the slot for any holder, so it memoizes per (chain, token).
+    """
 
     signature: str
     arity: int
@@ -361,24 +285,22 @@ class AnchorSlot:
 
 @dataclass(frozen=True)
 class TokenLayout:
-    """What a token's storage proved to be, or nothing. ``anchors`` empty means
-    discovery failed — the caller must leave the token unseeded."""
+    """A token's proven storage layout; empty ``anchors`` means discovery failed and the token stays unseeded."""
 
     token: str
     decimals: int = _DEFAULT_DECIMALS
     anchors: tuple[AnchorSlot, ...] = ()
-    # The token's own ``totalSupply`` at the discovery block, when it answered.
-    # Used to keep a seeded holder balance inside the supply that backs it; see
-    # :func:`balance_seed_amount`.
+    # Keeps a seeded holder balance within supply; see :func:`balance_seed_amount`.
     total_supply: int | None = None
 
 
 @dataclass(frozen=True)
 class SeedRequest:
-    """What a probe needs seeded. ``token_hints`` are zero-arg getter signatures
-    on ``spender`` naming the input asset, or already-resolved token addresses
-    (``"__self__"`` means the probe target itself — a withdrawal burning the
-    caller's own share token)."""
+    """What a probe needs seeded.
+
+    ``token_hints`` are zero-arg getters on ``spender`` naming the input asset, or resolved addresses (``"__self__"`` is
+    the probe target itself, for withdrawals burning the caller's shares).
+    """
 
     spender: str
     principal: str
@@ -388,8 +310,10 @@ class SeedRequest:
 
 @dataclass(frozen=True)
 class Seeding:
-    """A confirmed seed. ``readback_calls`` are prepended to the probe block and
-    each MUST return ``readback_expected`` for the probe to count."""
+    """A confirmed seed.
+
+    ``readback_calls`` are prepended to the probe block and must each return ``readback_expected``.
+    """
 
     overrides: StateOverride
     readback_calls: tuple[SimCall, ...]
@@ -402,13 +326,7 @@ class Seeding:
 Seeder = Callable[[SeedRequest], "Seeding | None"]
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
-
-
 def _candidate_bases() -> list[tuple[str, int]]:
-    """``(ordering, base)`` candidates, deterministic."""
     seen: set[tuple[str, int]] = set()
     out: list[tuple[str, int]] = []
     for base in (OZ_V5_ERC20_BASE, OZ_V5_ERC20_BASE + 1):
@@ -438,19 +356,13 @@ def discover_token_layout(
     block_tag: str,
     narrow: bool = False,
 ) -> TokenLayout:
-    """Identify ``token``'s balance/shares/allowance base slots by READ-BACK.
+    """Find ``token``'s balance/shares/allowance base slots by read-back.
 
-    One simulated block writes a DISTINCT magic word to every candidate slot and
-    calls each anchor getter once. A getter that returns magic ``n`` is, by
-    construction, a direct read of candidate ``n`` — the identification and its
-    verification are the same observation. A getter that returns anything else
-    (a computed/rebasing balance, an unsupported layout) yields no anchor and the
-    token stays unseeded.
+    One simulated block writes a distinct magic word to every candidate slot and calls each anchor getter; returning
+    magic ``n`` both identifies and verifies candidate ``n``. Anything else yields no anchor.
 
-    The wide write is safe precisely because this block's ONLY calls are view
-    getters whose results are used for identification and then discarded; no
-    verdict is derived from a block in this state. ``narrow`` retries with a
-    handful of low slots for a token the wide perturbation made revert.
+    The wide write is safe because this block only makes view calls used for identification. ``narrow`` retries with a
+    few low slots when the wide write made the getters revert.
     """
     bases = _candidate_bases()
     if narrow:
@@ -471,9 +383,7 @@ def discover_token_layout(
 
     calls = [SimCall(to=token, data=selector_of(sig) + _anchor_args(arity, holder, spender)) for sig, arity in _ANCHORS]
     calls.append(SimCall(to=token, data=selector_of(_DECIMALS_SIG)))
-    # Rides the discovery block rather than costing a round trip of its own. The
-    # perturbation above writes only keccak-derived MAPPING slots, so a scalar
-    # ``totalSupply`` reads its true value here.
+    # Rides the discovery block; only mapping slots were perturbed, so a scalar supply reads true.
     calls.append(SimCall(to=token, data=selector_of(_TOTAL_SUPPLY_SIG)))
     try:
         result = simulate(calls, block_tag, {token.lower(): {"stateDiff": overrides}})
@@ -495,9 +405,7 @@ def discover_token_layout(
             continue
         ordering, base, hit_arity = hit
         if hit_arity != arity:
-            # The getter read a slot derived with a different key count than its
-            # own signature implies — the layout is not what it looks like, so
-            # this anchor is not trustworthy. Drop it rather than guess.
+            # Slot derived with a different key count than the signature implies: untrustworthy, drop it.
             continue
         anchors.append(AnchorSlot(signature=sig, arity=arity, ordering=ordering, base=base))
 
@@ -509,8 +417,7 @@ def discover_token_layout(
     total_supply = _to_int(supply_call.return_data) if supply_call.success else None
 
     if not anchors and reverted and not narrow:
-        # Every anchor reverted: the wide write probably clobbered a slot the
-        # getter itself depends on. Retry with a much smaller perturbation.
+        # The wide write probably clobbered something the getter needs.
         return discover_token_layout(
             simulate, token=token, holder=holder, spender=spender, block_tag=block_tag, narrow=True
         )
@@ -520,35 +427,15 @@ def discover_token_layout(
 def balance_seed_amount(anchor: AnchorSlot, layout: TokenLayout) -> int:
     """How much to write into one seeded slot.
 
-    A HOLDER BALANCE is capped at the token's own ``totalSupply``, because
-    ``totalSupply >= balanceOf(holder)`` is an invariant every real token
-    maintains and this seed writes storage directly, with nothing to enforce it.
-    Handing a caller more shares than exist makes a burn arithmetically
-    impossible: ``unchecked { totalSupply -= amount }`` wraps past zero, and the
-    supply recipe then reads a burn as an enormous INCREASE. The recipe now
-    survives that on its own, but a fork state no real chain can reach is not a
-    sound thing to derive a verdict from in the first place.
+    A holder balance is capped at ``totalSupply``: more shares than exist makes a burn wrap ``unchecked { totalSupply -=
+    amount }`` and read as a huge mint, a state no real chain reaches. Zero or unanswered supply leaves the full seed.
 
-    One whole token unit is the largest amount any probe attaches, so capping at
-    the live supply still clears every balance precondition on a token with a
-    non-trivial supply. A supply of zero, or a token that would not answer
-    ``totalSupply()``, leaves the seed at its full value — there is no invariant
-    to respect and the alternative is seeding nothing at all.
+    Allowances aren't capped (``type(uint256).max`` is ordinary).
 
-    An ALLOWANCE is not capped: approvals above the supply are ordinary (the
-    ``type(uint256).max`` idiom) and bound nothing that could wrap.
-
-    The cap never falls below :data:`MIN_BALANCE_SEED`, and that floor is load
-    bearing. The probe AMOUNT is one whole unit of the FIRST seeded token's
-    decimals, while the cap is each token's OWN supply — different tokens, so
-    they can disagree. A job that discovers an 18-decimal token first calls with
-    ``1e18``; capping USDC (6 decimals, supply ~2.5e16) at its supply then seeds
-    less than the call spends and ``transferFrom`` reverts on a probe that used
-    to clear. That is pure recall loss rather than a false claim, but it is loss
-    the cap was never meant to buy. Above the floor the invariant still holds for
-    every token whose supply exceeds one unit — which is every live token — and
-    below it the wrap is caught downstream by the signed-delta read and the
-    zero-address ``Transfer`` cross-check."""
+    The cap never goes below :data:`MIN_BALANCE_SEED`, because the probe amount follows the first seeded token's
+    decimals while the cap follows each token's own supply (an 18-decimal first token plus a USDC cap would underseed
+    and revert). Below the floor the wrap is still caught downstream.
+    """
     if anchor.arity != 1:
         return SEED_AMOUNT
     supply = layout.total_supply
@@ -571,13 +458,12 @@ def _to_int(hexval: str | None) -> int | None:
 
 
 def _to_address(hexval: str | None) -> str | None:
-    """Last 20 bytes of a 32-byte return word, when it is a plausible address."""
+    """Last 20 bytes of a 32-byte word, when it's a plausible address."""
     if not isinstance(hexval, str) or not hexval.startswith("0x"):
         return None
     body = hexval[2:]
     if len(body) < 40:
         return None
-    # A 32-byte word whose high 12 bytes are non-zero is not an address.
     if len(body) >= 64 and int(body[-64:-40], 16) != 0:
         return None
     addr = "0x" + body[-40:].lower()
@@ -586,19 +472,12 @@ def _to_address(hexval: str | None) -> str | None:
     return addr
 
 
-# ---------------------------------------------------------------------------
-# The Seeder seam
-# ---------------------------------------------------------------------------
-
-
 class SimulateSeeder:
-    """Default :data:`Seeder`, backed by the Tier-1 ``eth_simulateV1`` seam.
+    """Default :data:`Seeder`, backed by ``eth_simulateV1``.
 
-    Memoized twice over its lifetime (one per job): token identity per
-    ``spender`` and storage layout per token. A protocol's many candidates on one
-    vault therefore pay discovery once, and its handful of distinct input assets
-    pay layout discovery once each. :class:`SeedBudget` caps how many DISTINCT
-    ones a single job may pay for at all."""
+    Memoizes token identity per ``spender`` and layout per token for the job; :class:`SeedBudget` caps how many distinct
+    ones it pays for.
+    """
 
     def __init__(
         self,
@@ -625,23 +504,14 @@ class SimulateSeeder:
         readback_expected: list[str] = []
         seeded: list[str] = []
         decimals = _DEFAULT_DECIMALS
-        # A hint that is already an address is a HOLDING of the acting deployment,
-        # not an asset the code was seen to pull. It is therefore too weak to stand
-        # in for the self-seed below.
+        # An address hint is a holding of the deployment, not an asset the code pulls, so too weak to replace the
+        # self-seed below.
         literals = {h.lower() for h in request.token_hints if _RESOLVED_ADDRESS.match(h)}
         for token in tokens:
             if token == request.spender.lower() and any(t not in literals for t in seeded):
-                # ``__self__`` is the always-appended fallback candidate (the
-                # withdrawal-burns-your-own-shares shape) and it resolves without
-                # a wire call, so EVERY reverting probe would otherwise pay a
-                # layout discovery for the probe target itself. A GETTER-named hint
-                # that already yielded anchors is the asset static actually saw
-                # flow in, so the fallback adds a discovery block for a seed the
-                # call has no evidence of needing. Ordered last by
-                # ``_resolve_tokens``, so ``seeded`` here holds only non-self
-                # candidates. Cost: a function that pulls one asset AND burns the
-                # caller's own shares gets only the former seeded and may stay
-                # ``unknown`` — the fail-closed direction.
+                # ``__self__`` resolves for free, so every reverting probe would pay a layout discovery for the target.
+                # Skip it once a getter-named hint (the asset static saw flow in) has anchors. A function that also
+                # burns its caller's shares may stay ``unknown`` (fail-closed).
                 continue
             layout = self._layout(token, request)
             if not layout.anchors:
@@ -656,8 +526,7 @@ class SimulateSeeder:
                 readback_expected.append(_word(amount))
             overrides[token.lower()] = {"stateDiff": diff}
             if not seeded:
-                # The probe amount follows the FIRST seeded token's scale — the
-                # highest-priority hint, i.e. the asset static said flows in.
+                # Amount follows the first seeded token (the asset static said flows in).
                 decimals = layout.decimals
             seeded.append(token.lower())
         if not seeded:
@@ -683,8 +552,7 @@ class SimulateSeeder:
         cached = self._tokens.get(key)
         if cached is not None:
             return cached
-        # A hint that is already an address needs no getter call: it came from the
-        # acting deployment's own measured holdings, not from a name.
+        # Address hints come from measured holdings and need no getter call.
         literals = [h.lower() for h in request.token_hints if _RESOLVED_ADDRESS.match(h)]
         getters = [
             h for h in request.token_hints if h != "__self__" and h not in literals and not _RESOLVED_ADDRESS.match(h)
@@ -704,18 +572,12 @@ class SimulateSeeder:
                 address = _to_address(call_result.return_data)
                 if address and address not in resolved:
                     resolved.append(address)
-        # After the getters: a getter names the asset the CODE pulls, which is
-        # stronger evidence than "the deployment happens to hold it".
+        # After getters: a getter names what the code pulls, stronger than a holding.
         for literal in literals:
             if literal not in resolved:
                 resolved.append(literal)
-        # ``__self__`` LAST, not first: it costs no wire call to resolve, but it
-        # sets the seeded probe's decimals when it is seeded first — and the
-        # amount is meant to be one whole unit of the INPUT asset static named,
-        # not of the probe target. Ordering it last also lets ``__call__`` drop
-        # its discovery once a specific hint has produced anchors. It is appended
-        # AFTER the cap so a long candidate list cannot crowd out the one seed a
-        # share-burning withdrawal needs.
+        # ``__self__`` last so it doesn't set the probe's decimals and can be skipped once a real hint has anchors;
+        # appended after the cap so it isn't crowded out.
         resolved = resolved[: self._max_tokens]
         if "__self__" in request.token_hints:
             self_token = request.spender.lower()
@@ -730,10 +592,7 @@ class SimulateSeeder:
         if cached is not None:
             return cached
         if not self.budget.take_layout(token):
-            # Memoized as "no layout" so the refusal costs one check, not one per
-            # candidate. A capped job seeds nothing further for this token and
-            # its probes stay exactly as unseeded as they were before seeding
-            # existed.
+            # Memoized as no-layout; this token stays unseeded for the rest of the job.
             self._layouts[token] = TokenLayout(token=token)
             return self._layouts[token]
         self.request_count += 1
@@ -749,9 +608,7 @@ class SimulateSeeder:
 
 
 def eth_value_override(principal: str, overrides: StateOverride | None = None) -> StateOverride:
-    """Add the principal's ETH balance to ``overrides`` (never replacing an
-    existing token diff). Only the balance field is set, so a contract
-    principal's code and storage are untouched."""
+    """Add the principal's ETH balance to ``overrides`` (balance only; code and storage untouched)."""
     merged: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (overrides or {}).items()}
     account = merged.setdefault(principal.lower(), {})
     account["balance"] = _word(SEED_ETH_BALANCE)
@@ -759,18 +616,11 @@ def eth_value_override(principal: str, overrides: StateOverride | None = None) -
 
 
 def contract_balance_override(contract: str, overrides: StateOverride | None = None) -> StateOverride:
-    """Add the TARGET CONTRACT's own ETH balance to ``overrides``.
+    """Add the target contract's own ETH balance to ``overrides``.
 
-    Semantically distinct from every other seed here, and the distinction has to
-    travel with the verdict: seeding the caller answers "could a caller reach this
-    function", seeding the contract answers "could this function pay out IF the
-    contract held funds". A verdict proven under this override is a CAPABILITY
-    claim about the code, not a statement that the money is there today — which is
-    why the recipes stamp ``contract_balance_seeded`` on the witness and run this
-    attempt LAST, after every less synthetic one has failed.
-
-    Only the balance field is set, so the contract's code and storage are
-    untouched (and any token seeding on the same account survives)."""
+    Unlike caller seeds, this answers "could the function pay out if the contract held funds": a capability, not current
+    state. Hence ``contract_balance_seeded`` on the witness and running this attempt last. Balance only.
+    """
     merged: dict[str, dict[str, Any]] = {k: dict(v) for k, v in (overrides or {}).items()}
     account = merged.setdefault(contract.lower(), {})
     account["balance"] = _word(SEED_CONTRACT_ETH_BALANCE)

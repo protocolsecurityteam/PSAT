@@ -49,21 +49,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("services.effects.calldata")
 
-# ---------------------------------------------------------------------------
-# Token-precondition seeding (blast-radius honesty)
-# ---------------------------------------------------------------------------
-
 
 def _word_hex(value: int) -> str:
-    """A 32-byte big-endian EVM word as ``0x`` + 64 hex."""
     return "0x" + format(value & (2**256 - 1), "064x")
 
 
 def _mapping_entry_slot(base_slot: str, keys: Sequence[int]) -> str | None:
-    """Storage slot of a (possibly nested) mapping entry, folding keys OUTERMOST
-    first: ``m[k1][k2] = keccak(pad32(k2) ++ keccak(pad32(k1) ++ base))``. ``keys``
-    is ``[k1, k2, ...]`` in declaration order. ``None`` when ``base_slot`` is not a
-    parseable ≤32-byte word."""
+    """Storage slot of a nested mapping entry, outermost key first: ``m[k1][k2] = keccak(pad32(k2) ++
+    keccak(pad32(k1) ++ base))``. ``None`` if ``base_slot`` isn't a ≤32-byte word.
+    """
     try:
         raw = base_slot[2:] if base_slot.lower().startswith("0x") else base_slot
         slot = bytes.fromhex(raw)
@@ -78,10 +72,10 @@ def _mapping_entry_slot(base_slot: str, keys: Sequence[int]) -> str | None:
 
 
 def _seed_fixture_for_role(entry: Mapping[str, Any], caller: str, target: str) -> ForkFixture | None:
-    """One read-back-verified storage fixture seeding ``caller``'s precondition for
-    a single token_slots ``entry`` on ``target`` (the state-bearing deployment).
-    ``None`` on any malformed field or role/kind mismatch — a dropped seed only
-    shrinks the observed lower bound, never manufactures a witness."""
+    """One read-back-verified fixture seeding ``caller``'s precondition for one token_slots ``entry`` on ``target``.
+
+    ``None`` on malformed fields (a dropped seed only shrinks the lower bound).
+    """
     role = entry.get("role")
     key_kind = entry.get("key_kind")
     base_slot = entry.get("base_slot")
@@ -101,16 +95,13 @@ def _seed_fixture_for_role(entry: Mapping[str, Any], caller: str, target: str) -
         logger.debug("effects calldata: token_slots caller not an address: %r", caller)
         return None
 
-    # The synthesizer substitutes identity=caller for every address arg (see
-    # ``_arg_values``), so in a probe an allowance is m[owner=caller][spender=caller];
-    # an id-shaped uint arg carries ARG_IDENTIFIER, so a uint-keyed owner mapping is
-    # read at exactly that token id — the seeds MUST match those keys.
+    # Probes put the caller in every address arg and ARG_IDENTIFIER in id-shaped uints, so seeds must use those keys.
     if role in ("balance", "shares") and key_kind == "address":
         keys, subs, value = [caller_key], {0: caller}, _word_hex(SEED_AMOUNT)
     elif role == "allowance" and key_kind == "address_address":
         keys, subs, value = [caller_key, caller_key], {0: caller, 1: caller}, _word_hex(SEED_AMOUNT)
     elif role == "owner" and key_kind == "uint256":
-        # The stored word IS the caller: ownerOf(tokenId) must return the prober.
+        # ``ownerOf(tokenId)`` must return the prober.
         keys, subs, value = [ARG_IDENTIFIER], {0: ARG_IDENTIFIER}, _word_hex(caller_key)
     else:
         logger.debug("effects calldata: token_slots role/kind unsupported: role=%r kind=%r", role, key_kind)
@@ -135,16 +126,12 @@ def _seed_fixture_for_role(entry: Mapping[str, Any], caller: str, target: str) -
 def _token_seed_fixtures(
     token_slots: Sequence[Mapping[str, Any]], callers: Sequence[str], target: str
 ) -> tuple[ForkFixture, ...]:
-    """Seed each distinct prober's token preconditions on ``target``. Deterministic
-    over (entry order, sorted callers).
+    """Seed each prober's token preconditions on ``target``, deterministically.
 
-    An ``owner`` seed is emitted for the FIRST caller only: its slot is keyed by
-    the tokenId (``ARG_AMOUNT``), not the caller, so per-caller seeds would all
-    write the same slot last-writer-wins — leaving every earlier caller's probe
-    precondition silently unmet while its read-back transcript said ok. One
-    deterministic owner keeps the transcript truthful; other callers' NFT entry
-    points stay invisible to the diff, which only shrinks the observed lower
-    bound."""
+    ``owner`` is seeded for the first caller only: the slot is keyed by tokenId, so per-caller seeds would overwrite
+    each other while every read-back said ok. Other callers' NFT entry points just stay invisible (a smaller lower
+    bound).
+    """
     fixtures: list[ForkFixture] = []
     for entry in token_slots:
         entry_callers = callers[:1] if entry.get("role") == "owner" else callers
@@ -155,17 +142,10 @@ def _token_seed_fixtures(
     return tuple(fixtures)
 
 
-# ---------------------------------------------------------------------------
-# Input-asset seeding (value-out / supply preconditions) — Tier 1
-# ---------------------------------------------------------------------------
-
-# Directions whose asset the ACTING PRINCIPAL must already hold for the call to
-# get past its first line: a pull (``in``) and a burn of the caller's own
-# holding. An ``out`` flow is what the function produces, never its precondition.
+# Directions whose asset the principal must already hold: a pull or a burn of its own holding.
 _INPUT_DIRECTIONS = frozenset({"in", "burn"})
 
-# ERC-20/721 selectors that PULL from the caller. A body sink bearing one of
-# these names the input asset in its dotted target (``eETH.transferFrom``).
+# Selectors that pull from the caller; the sink's dotted target names the input asset.
 _PULL_SELECTORS = frozenset(
     {
         "0x23b872dd",  # transferFrom(address,address,uint256)
@@ -176,14 +156,8 @@ _PULL_SELECTORS = frozenset(
     }
 )
 
-# View selectors that only ever READ a per-holder token balance, so a body sink
-# bearing one names the input asset in its dotted head just as a PULL selector
-# does — a share-accounted wrap reads ``eETH.shares(caller)`` before it moves the
-# asset, and that read is the only NAMED head when the transfer itself is
-# library-wrapped behind a temporary. Selector-keyed, not name-keyed:
-# ``shares(address)`` shares its selector with ``PaymentSplitter.shares``, so this
-# is a hint source only, never a token-role assertion (see ``_TOKEN_METHOD_WORDS``
-# which deliberately excludes ``shares`` for that reason).
+# Balance-read selectors whose sink head also names the input asset (a share-accounted wrap reads
+# ``eETH.shares(caller)`` first). Hint source only: ``shares(address)`` collides with ``PaymentSplitter.shares``.
 _TOKEN_READ_SELECTORS = frozenset(
     {
         "0xce7c2ac2",  # shares(address)
@@ -193,51 +167,34 @@ _TOKEN_READ_SELECTORS = frozenset(
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# A token hint that is already an address needs no getter call to resolve.
 
-# Zero-arg getter every ERC-4626 vault must expose for its input asset. A
-# standard, not a name guess — and a wrong candidate can only fail to unblock the
-# call, never fabricate an inflow.
+# ERC-4626's required input-asset getter; a wrong candidate only fails to unblock.
 _ERC4626_ASSET_GETTER = "asset()"
 
-# The probe target itself, as a token-hint sentinel: a withdrawal/unwrap burns
-# the caller's holding of the very contract under probe.
+# The probe target itself (a withdrawal burning the caller's holding of it).
 SELF_TOKEN_HINT = "__self__"
 
 
 def input_token_hints(fn: FunctionFacts, *, token_addresses: Sequence[str] = ()) -> tuple[str, ...]:
-    """Candidate input assets for the seeded retry, most specific first, plus
-    :data:`SELF_TOKEN_HINT` last. An entry is either a zero-arg getter signature
-    to call on the probe target or an already-resolved token ADDRESS.
+    """Candidate input assets for the seeded retry, most specific first, :data:`SELF_TOKEN_HINT` last.
 
-    Getter sources, no name invention: the dotted target of a body sink carrying
-    an ERC-20 PULL selector (``eETH.transferFrom`` ⇒ ``eETH()``); the dotted
-    target of a body sink calling a token-only METHOD, which is how a
-    library-wrapped pull surfaces (``nativeWrapper.safeApprove`` ⇒
-    ``nativeWrapper()``, whose selector belongs to the library, not to ERC-20);
-    and the ``token_var`` of a ``contract_analysis`` value flow whose direction is
-    a pull or burn. A head that is a declared PARAMETER names no getter — there is
-    no state variable behind it — which is what ``token_addresses`` is for: the
-    caller supplies the assets the acting deployment provably holds, and
-    :func:`substitute_address_arg` writes one of them into that parameter.
+    Each is a zero-arg getter on the target or a resolved address.
 
-    These are CANDIDATES, not claims. Identity is settled on the wire (the getter
-    must return an address whose storage read-back confirms a balance mapping),
-    and the verdict is settled by an observed transfer — a wrong candidate simply
-    leaves the call reverting exactly as it does today."""
+    Getters come from sinks with a pull selector (``eETH.transferFrom`` ⇒ ``eETH()``), sinks calling a token-only method
+    (library-wrapped pulls), and ``token_var`` of pull/burn value flows. Parameter heads have no getter;
+    ``token_addresses`` covers those via :func:`substitute_address_arg`.
+
+    Candidates, not claims: identity is confirmed by storage read-back and the verdict by an observed transfer.
+    """
     names: list[str] = []
     params = set(_declared_param_names(fn, len(_parse_arg_types(fn.canonical_signature) or ())))
 
     def _add(raw: Any) -> None:
         name = str(raw or "").strip()
-        # A Slither synthetic (``TMP_1127``/``REF_5``/``TUPLE_2``) is not a getter:
-        # it is an unresolved cast/index temporary, and calling it as ``TMP_1127()``
-        # seeds nothing. Static resolution now recovers the state var behind most
-        # of these; whatever survives here (a mapping element, a computed value) has
-        # no getter to name and is dropped rather than emitted as junk.
+        # Slither temporaries aren't getters; drop them.
         if name.startswith(("TMP_", "REF_", "TUPLE_")):
             return
-        # A parameter is not a getter: the value lives in calldata, not storage.
+        # Parameters live in calldata, not storage.
         if name and name not in params and _IDENTIFIER.match(name) and name not in names:
             names.append(name)
 
@@ -269,19 +226,12 @@ def seeded_calldata(
     directions: frozenset[str] | None = None,
     executor: "ExecutorCall | None" = None,
 ) -> dict[int, str]:
-    """``token decimals -> calldata`` for the SEEDED retry of a value/supply probe.
+    """``token decimals -> calldata`` for the seeded retry.
 
-    The unseeded probe sends :data:`ARG_AMOUNT` (1 unit) — the amount that slips
-    under rate limiters when the caller already holds the asset. Once the input is
-    seeded that amount becomes the new failure mode: a conversion rounds 1 unit to
-    a zero-sized mint (measured: ``WeETH.wrap(1)`` reverts on
-    ``require(weEthAmount > 0)``), which is a non-observation, not a witness. So
-    the seeded retry sends ONE WHOLE UNIT of the input token, pre-encoded per
-    common token scale because the encoder runs offline and the decimals are only
-    known once the discovery block has read them back.
-
-    ``sentinel_index`` re-points the taint-identified address param at the
-    attacker sentinel, so a seeded sentinel probe keeps its meaning."""
+    Once seeded, 1 unit becomes the failure mode (``WeETH.wrap(1)`` rounds to a zero mint and reverts), so send one
+    whole unit, pre-encoded per common scale since decimals are only known after discovery. ``sentinel_index`` keeps the
+    sentinel variant meaningful.
+    """
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return {}
@@ -307,16 +257,12 @@ def seeded_calldata(
 def synthesize_pause(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> PausePlanInputs | None:
-    """Applicable when F writes a latch-shaped state variable.
+    """Applicable when F writes a latch-shaped variable.
 
-    ``predicted_guard_set`` is static's read-set for that latch and remains the
-    SCORED denominator even when empty. The entry points PROBED are a separate
-    thing: when static predicts nothing (no trees for the readers, an
-    unsupported guard leaf), we fall back to probing every state-changing entry
-    point rather than skipping the class. The observed radius is a lower bound
-    either way, and an observed member static did not predict is routed as the
-    ``observed_guard_not_predicted`` vocabulary-growth discrepancy — which is
-    exactly what that channel is for."""
+    ``predicted_guard_set`` is static's read set and the scored denominator, even when empty. When static predicts
+    nothing, every state-changing entry point is probed instead. The radius is a lower bound either way; unpredicted
+    observed members become ``observed_guard_not_predicted`` discrepancies.
+    """
     latch = _claim_latch_pairs(session, candidate.function_id) or _latch_pairs(fn)
     if not latch:
         return None
@@ -334,22 +280,11 @@ def synthesize_pause(
     entry_points = [ep for ep in (_entry_point_for(facts, name, principals) for name in probe_names) if ep is not None]
     if not entry_points:
         return None
-    # Unresolved-victim recovery: also probe each predicted victim that has no resolved
-    # principal from the pause principal, so a freeze a foreign caller can't reach
-    # pre-pause is still witnessed. Only over the PREDICTED set (not the fallback),
-    # union semantics keep the observed radius a sound lower bound.
+    # Also probe predicted victims without a principal from the pause principal (see :func:`_pauser_identity_probes`).
     entry_points = [*entry_points, *_pauser_identity_probes(facts, predicted, principals, principal)]
 
-    # The pause principal needs gas of its own; the per-entry-point fixtures cover
-    # the probers. Kept flat here so the recipe applies one list, while each
-    # EntryPoint still carries its own for inspection. Token-precondition seeds
-    # (balance/allowance/shares/owner) go here too, one per distinct prober, so a
-    # token check can never hide an entry point from the diff; each carries its own
-    # getter read-back and lands on the state-bearing deployment, never the impl.
-    # The seeds are visible to the pause tx itself (a pause gated on the
-    # principal's token stake succeeds on the fork regardless of live holdings) —
-    # same gate-relative semantics as the ETH balance seed above: the verdict binds
-    # the gate structure, not the principal's current funding.
+    # One flat fixture list: gas for the pause principal plus per-prober token seeds, on the state-bearing deployment.
+    # The seeds are visible to the pause tx too; the verdict binds gate structure, not current funding.
     callers = sorted({ep.from_addr for ep in entry_points if ep.from_addr})
     token_fixtures = _token_seed_fixtures(facts.token_slots, callers, candidate.probe_target)
     fixtures = (ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)), *token_fixtures)

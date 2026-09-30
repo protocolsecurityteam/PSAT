@@ -1,16 +1,4 @@
-"""Build the claims artifact and ride it through the facts carrier.
-
-:func:`build_claims` runs every registered matcher over the Plane-0 facts —
-contract-level gate, then per-function trigger — and mints each hit through
-``emit_claim``, so an unregistered id can't escape a matcher. The result is a
-standalone artifact keyed by function full-name (an empty list per function is
-valid and common).
-
-:func:`attach_claims_to_effects` merges that artifact back onto the ``effects``
-artifact's per-function records. The policy stage already carries ``effects``
-end to end, so claims reach ``build_effective_permissions`` with no new
-artifact plumbing. Both functions fail soft on a degraded (errored) artifact.
-"""
+"""Build the claims artifact and attach it to the effects artifact, which already travels to the policy stage."""
 
 from __future__ import annotations
 
@@ -26,11 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArtifact:
-    """Run all registered matchers over the facts, returning the claims artifact.
+    """Run every registered matcher over the facts and return the claims artifact.
 
-    A matcher that raises is isolated: it forfeits only its own claims (logged),
-    never the whole pass. Per function the registry precedence rule then keeps
-    the strongest tier of each claim; claim ordering is deterministic.
+    A raising matcher only forfeits its own claims. Each claim keeps its strongest tier; ordering is deterministic.
     """
     discover()
     ctx = ClaimContext(contract, effects, predicate_trees)
@@ -57,17 +43,9 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
 
-    # The canonical ABI selector per function — the value a caller puts in
-    # ``msg.sig``. The effects record's own ``selector`` is keccak of the
-    # DECLARED signature, which is NOT a real selector when a parameter is
-    # interface/enum/struct-typed (``sweepTo(IERC20,address,uint256)`` →
-    # 0x38541c00 vs the dispatched 0x0aeef8c8), and the cross-contract join
-    # missed every such callee. Computed here because this is the one
-    # pass that holds the canonical-signature map and the Slither fallback
-    # (``ctx.canonical_selector``). A signature that cannot be lowered is
-    # OMITTED — absence is not-determined, never a proof. ``fallback()`` /
-    # ``receive()`` are excluded: they have no selector, and hashing their
-    # rendered names manufactures a selector no caller can dispatch.
+    # The canonical ABI selector (the real ``msg.sig``). The effects record's ``selector`` hashes the declared
+    # signature, which is wrong for interface/enum/struct params. Unlowerable signatures are omitted (not determined);
+    # fallback/receive have no selector.
     abi_selectors = {
         signature: selector
         for signature in signatures
@@ -83,17 +61,10 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
 
 
 def attach_claims_to_effects(effects: Any, claims_artifact: Any) -> None:
-    """Write each function's claims onto its ``effects`` record (in place), so
-    the existing effects transport carries them downstream. No-op if either
-    artifact is degraded.
+    """Write each function's claims, and its canonical ``abi_selector``, onto its ``effects`` record in place.
 
-    Also stamps ``abi_selector`` — the canonical dispatch selector from the
-    claims artifact — beside the record's declared-signature ``selector``, so
-    a consumer that must join on the REAL ``msg.sig`` (the cross-contract
-    callee map) has it in the artifact it already reads. Absence of the key
-    means not-determined (unlowerable signature, fallback/receive, or an
-    artifact minted before the field existed) — consumers must fall back, not
-    infer."""
+    No-op on a degraded artifact. A missing ``abi_selector`` means not determined; consumers must fall back.
+    """
     if not isinstance(effects, dict):
         return
     functions = effects.get("functions")
@@ -114,25 +85,17 @@ def attach_claims_to_effects(effects: Any, claims_artifact: Any) -> None:
 
 
 def project_effect_labels(effects: Any) -> None:
-    """Rewrite each function's legacy ``effect_labels`` as the union of the
-    retained fact-tier labels already on the record (value-flow / selector
-    facts, sink-kind capabilities, body external calls) and the registry
-    ``legacy_projection`` of every claim on the function, then refresh the
-    action summary. Runs after :func:`attach_claims_to_effects`; a no-op on a
-    degraded artifact or a record without claims.
+    """Rebuild each function's legacy ``effect_labels`` from its fact-tier labels plus the ``legacy_projection`` of
+    its claims, then refresh the action summary.
 
-    An ``upgrade.implementation`` claim suppresses the standalone
-    ``delegatecall_execution`` emphasis on the delegatecall sink it explains
-    (the sink IS the upgrade mechanism, not a separate capability).
+    An ``upgrade.implementation`` claim suppresses the ``delegatecall_execution`` emphasis on the sink it explains.
     """
     if not isinstance(effects, dict):
         return
     functions = effects.get("functions")
     if not isinstance(functions, dict):
         return
-    # Deferred so importing the claims package never pulls in the static
-    # pipeline (the module that defines this summary imports the claims
-    # package at build time).
+    # Deferred: the summaries module imports the claims package.
     from ..contract_analysis_pipeline.summaries import _action_summary
 
     projections = legacy_projections()
@@ -156,10 +119,7 @@ def project_effect_labels(effects: Any) -> None:
                     upgrade_explains_delegatecall = True
         if upgrade_explains_delegatecall:
             labels.discard("delegatecall_execution")
-        # ``external_contract_call`` is the lowest-value fact (a body external
-        # call exists, incl. SafeMath library calls); it stays only when no more
-        # specific label explains the function, mirroring the build-time
-        # downgrade so a claim never co-renders with the bare-call fact.
+        # ``external_contract_call`` only survives when nothing more specific explains the function.
         if labels - {"external_contract_call"}:
             labels.discard("external_contract_call")
         ordered = sorted(labels)

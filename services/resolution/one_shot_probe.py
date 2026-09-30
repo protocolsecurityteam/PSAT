@@ -1,28 +1,15 @@
-"""On-chain one-shot latch resolution — consumed vs live.
+"""On-chain one-shot latch resolution: consumed vs live.
 
-The static stage can prove a function is an initializer-family one-shot and
-where its latch lives (``one_shot.apply_one_shot_pass``); whether the latch
-is CONSUMED is mutable on-chain state only a live read can answer. This
-module performs that read against the function's runtime deployment address
-and classifies:
+The static stage finds initializer-family one-shots and their latch (``one_shot.apply_one_shot_pass``); whether the
+latch is consumed needs a live read at the runtime address.
 
-  consumed      — the latch is set (or carries the ``_disableInitializers``
-                  sentinel): the one-shot is inert at this address.
-  live          — the latch is unset ON A CONFIRMED LIVE DEPLOYMENT (a
-                  recognized proxy, or a DB-linked proxy): anyone can call
-                  it once. A live verdict is never earned from a bare,
-                  unconfirmed address — an implementation/template with an
-                  empty latch reads exactly the same and labeling it live
-                  re-manufactures the false-open this branch removes.
-  indeterminate — unset latch on an unconfirmed address, unreadable slot,
-                  no latch location, or RPC failure.
+  consumed      the latch is set (or holds the ``_disableInitializers`` sentinel)
+  live          unset on a confirmed live deployment (recognized or DB-linked proxy)
+  indeterminate unset on an unconfirmed address, unreadable, no latch, or RPC failure
 
-The proxy confirmation is a multi-standard resolver, not one slot read:
-EIP-1967 (impl/beacon/admin), the legacy zeppelinos slot, the Aragon app
-kernel slot, an ``implementation()`` getter (EIP-897 / Aragon AppProxy),
-and an EIP-2535 diamond loupe answer. Storage for every one of these lives
-on the proxy/diamond itself, so the latch read always targets the runtime
-address — never ``contracts.address``.
+An unconfirmed address never earns live: an implementation template reads the same. Proxy confirmation covers EIP-1967
+(impl/beacon/admin), zeppelinos, the Aragon kernel slot, ``implementation()`` (EIP-897 / Aragon AppProxy) and the
+EIP-2535 loupe. The latch read always targets the runtime address.
 """
 
 from __future__ import annotations
@@ -51,9 +38,7 @@ RpcFn = Callable[..., Any]
 
 
 def one_shot_probe_enabled() -> bool:
-    """Default ON; ``PSAT_ONE_SHOT_PROBE=0`` is the kill switch. The read is
-    strictly additive — a disabled or failing probe leaves the static badge
-    exactly as it was."""
+    """Default on; ``PSAT_ONE_SHOT_PROBE=0`` disables. Strictly additive."""
     return os.getenv("PSAT_ONE_SHOT_PROBE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -61,30 +46,23 @@ def _slot_hex(value: int) -> str:
     return "0x" + format(value, "064x")
 
 
-# Proxy-standard storage slots; preimage derivations documented in utils.evm.
+# Preimages documented in utils.evm.
 ARAGON_KERNEL_SLOT = "0x" + keccak(text="aragonOS.appStorage.kernel").hex()
 
 _IMPLEMENTATION_SELECTOR = IMPLEMENTATION_SELECTOR
 _FACET_ADDRESSES_SELECTOR = "0x" + keccak(text="facetAddresses()").hex()[:8]
 
-# ``_disableInitializers()`` sentinels: type-max of the latch word — uint8
-# (OZ v4) and uint64 (OZ v5).
+# ``_disableInitializers()`` sentinels: type-max of uint8 (OZ v4) and uint64 (OZ v5).
 _DISABLED_SENTINELS = {1: 0xFF, 8: 0xFFFFFFFFFFFFFFFF}
 
-# The four oracles ``_classify_value`` can decide from. Unordered by
-# construction: sentinel and value_gt_zero have zero realized rows and guard
-# six, so no reliability ranking over them is measurable here — the value is a
-# discriminator a consumer gates and cites on, never a strength score.
+# Oracles ``_classify_value`` can decide from. Unordered: a discriminator to gate and cite on, not a strength score.
 LATCH_BASIS_SENTINEL = "sentinel"
 LATCH_BASIS_VERSION_GE = "version_ge"
 LATCH_BASIS_VALUE_GT_ZERO = "value_gt_zero"
 LATCH_BASIS_GUARD = "guard"
 LATCH_BASIS_NOT_DETERMINED = "not_determined"
 
-# Descriptor keys copied verbatim onto the published witness. Each is a fact the
-# static producer recorded; a key whose descriptor value is None is OMITTED, so
-# "the producer had nothing" is a missing key rather than a null a consumer can
-# mistake for a measured zero.
+# Copied onto the witness; None-valued keys are omitted so "producer had nothing" isn't a measured zero.
 _WITNESS_DESCRIPTOR_KEYS = (
     "standard",
     "role",
@@ -102,16 +80,9 @@ class LatchReadResult:
     value: int | None
     target_kind: str  # "proxy:<standard>" | "db_linked_proxy" | "diamond" | "unverified"
     transcript: dict[str, Any] = field(default_factory=dict)
-    # The replayable witness for ``state``: which latch decided, which oracle
-    # decided it, and the read (address/block/slot/raw word) it decided from.
-    # Empty when no latch was read at all — the consumer then has no witness and
-    # must treat the row as the weakest branch, never as a proven fact.
+    # Which latch and oracle decided, and the read it came from. Empty when nothing was read; treat as the weakest
+    # branch.
     witness: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Proxy confirmation
-# ---------------------------------------------------------------------------
 
 
 def _storage_at(rpc: RpcFn, rpc_url: str, address: str, slot: str, block_tag: str) -> int | None:
@@ -142,8 +113,7 @@ def detect_proxy_standard(
     block_tag: str,
     transcript: dict[str, Any] | None = None,
 ) -> str | None:
-    """The first proxy standard whose marker confirms ``address`` is a live
-    proxy/diamond deployment, or None. Each probe is one point read."""
+    """The first proxy standard confirming ``address`` is a live deployment, or None."""
     checks: list[tuple[str, str]] = [
         ("eip1967", EIP1967_IMPL_SLOT),
         ("eip1967_beacon", EIP1967_BEACON_SLOT),
@@ -160,9 +130,7 @@ def detect_proxy_standard(
             found = standard
             break
     if found is None:
-        # EIP-897 / Aragon AppProxy expose implementation() as a view; an
-        # EIP-2535 diamond answers facetAddresses(). Either confirms a live
-        # deployment (a bare template answers neither).
+        # A bare template answers neither ``implementation()`` nor ``facetAddresses()``.
         raw = _eth_call(rpc, rpc_url, address, _IMPLEMENTATION_SELECTOR, block_tag)
         reads.append({"standard": "implementation_getter", "result": raw and raw[:66]})
         if raw and len(raw) >= 66 and int(raw[2:66], 16) != 0:
@@ -178,11 +146,6 @@ def detect_proxy_standard(
     return found
 
 
-# ---------------------------------------------------------------------------
-# Latch read + decode
-# ---------------------------------------------------------------------------
-
-
 def _read_latch_value(
     rpc: RpcFn,
     rpc_url: str,
@@ -191,12 +154,10 @@ def _read_latch_value(
     block_tag: str,
     transcript: dict[str, Any],
 ) -> tuple[int | None, dict[str, Any] | None]:
-    """``(value, read)`` — the latch's current integer value at ``address`` and
-    the transcript record of the read it came from, or ``(None, None)`` when
-    unreadable. Prefers a public getter when the latch payload carries one
-    (layout-independent), falling back to the raw storage read; the returned
-    record is the read that actually produced the value, so a witness built from
-    it can never attribute a getter answer to the descriptor's slot."""
+    """``(value, read)``: the latch value and the read that produced it, or ``(None, None)``.
+
+    Prefers a public getter, falling back to the raw slot; the record is the read actually used.
+    """
     selector = latch.get("getter_selector")
     if isinstance(selector, str) and selector.startswith("0x") and len(selector) == 10:
         raw = _eth_call(rpc, rpc_url, address, selector, block_tag)
@@ -207,8 +168,7 @@ def _read_latch_value(
                 return int(raw[2:66], 16), read
             except ValueError:
                 pass
-        # fall through to the slot read when the getter reverts (e.g. called
-        # on an address that doesn't expose it)
+        # Fall through to the slot when the getter reverts.
 
     slot = latch.get("slot")
     if not isinstance(slot, str) or not slot.startswith("0x"):
@@ -226,8 +186,7 @@ def _read_latch_value(
 
 
 def _guard_allows(operator: Any, constant: int | None, value: int) -> bool | None:
-    """Evaluate the (polarity-folded) ALLOW predicate against the live latch
-    value. None when the guard can't be evaluated."""
+    """Evaluate the polarity-folded allow predicate against the latch value; None when unevaluable."""
     if operator == "falsy":
         return value == 0
     if operator == "truthy":
@@ -263,11 +222,10 @@ def _parse_guard_constant(raw: Any) -> int | None:
 
 
 def _is_transient_flag_latch(latch: dict[str, Any]) -> bool:
-    """A latch payload targeting the OZ standard's transient ``_initializing``
-    flag rather than the persistent version member — the shape artifacts
-    persisted before role-stamping can carry. On the v5 namespaced slot only
-    the version member's exact byte range (uint64 at offset 0) is trusted;
-    on a v4 storage layout the standard's own field name marks the flag."""
+    """A payload targeting OZ's transient ``_initializing`` flag rather than the version member (possible in
+    pre-role-stamping artifacts). On the v5 namespaced slot only the uint64 at offset 0 is trusted; on v4 the
+    field name marks the flag.
+    """
     standard = latch.get("standard")
     if standard == "oz_v5_namespaced":
         return (latch.get("byte_offset"), latch.get("size_bytes")) != (0, 8)
@@ -277,21 +235,12 @@ def _is_transient_flag_latch(latch: dict[str, Any]) -> bool:
 
 
 def _latch_may_decide(latch: dict[str, Any]) -> bool:
-    """The safety invariant, stated positively: a consumed/live verdict may
-    only be decided by a latch that is a consumption oracle —
+    """Whether a latch may decide consumed/live: ``role="version"``, or a structural candidate with its own guard.
 
-      * ``role="version"``: the static pass's claim that the location holds
-        the persistent version member; or
-      * a ``guard``-carrying structural candidate, decisive by evaluating
-        its own guard.
-
-    The transient in-flight flag reads zero at rest on consumed and live
-    deployments alike, so its payloads never qualify. Untagged payloads from
-    artifacts persisted before role-stamping keep deciding via version
-    semantics when they have a standard shape and are not transient-shaped;
-    anything else (e.g. a slot-only ``namespaced_slot_constant`` record) is
-    excluded up front rather than being read first and masking a decisive
-    latch behind an ``unknown`` classification."""
+    The transient flag reads zero at rest on both consumed and live deployments, so it never qualifies. Untagged legacy
+    payloads decide via version semantics when standard-shaped and not transient-shaped; anything else is excluded up
+    front so it can't mask a decisive latch.
+    """
     if latch.get("role") == "version":
         return True
     if isinstance(latch.get("guard"), dict):
@@ -302,17 +251,15 @@ def _latch_may_decide(latch: dict[str, Any]) -> bool:
 
 
 def _classify_value(latch: dict[str, Any], value: int) -> tuple[str, str | None]:
-    """``(classification, basis)`` — ``consumed`` / ``armed`` (latch would admit
-    a caller) / ``unknown`` from the latch's own semantics, paired with the
-    oracle that decided it. Proxy confirmation is applied later. ``basis`` is
-    None exactly when nothing decided (``unknown``), which the publication layer
-    renders as ``not_determined`` rather than picking a branch."""
+    """``(classification, basis)``: ``consumed`` / ``armed`` / ``unknown`` with the deciding oracle.
+
+    ``basis`` is None exactly for ``unknown``. Proxy confirmation comes later.
+    """
     standard = latch.get("standard")
     if standard in ("storage_layout", "oz_v5_namespaced"):
         size_bytes = latch.get("size_bytes")
         sentinel = _DISABLED_SENTINELS.get(size_bytes) if isinstance(size_bytes, int) else None
         if sentinel is not None and value == sentinel:
-            # _disableInitializers(): locked forever
             return "consumed", LATCH_BASIS_SENTINEL
         expected = latch.get("expected_version")
         if isinstance(expected, int) and expected > 0:
@@ -326,14 +273,9 @@ def _classify_value(latch: dict[str, Any], value: int) -> tuple[str, str | None]
 
 
 def latch_descriptor_digest(latches: list[dict[str, Any]]) -> str:
-    """Stable identity of the descriptor list a probe result was computed from.
+    """Stable identity of the descriptor list a result was computed from.
 
-    Two rows may share one cached read only when their descriptors are
-    byte-identical. Keying on the slot alone is not enough now that the result
-    carries a witness naming which descriptor decided: FiatTokenV2_2's
-    ``initializeV2``/``initializeV2_1``/``initializeV2_2`` read the same slot
-    behind guards ``eq 0`` / ``eq 1`` / ``eq 2``, so a slot-keyed cache would
-    stamp one function's guard onto the other two.
+    Slot alone isn't enough: FiatTokenV2_2's three initializers share a slot behind different guards.
     """
     canonical = json.dumps(latches, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -347,21 +289,16 @@ def _build_latch_witness(
     block: int | None,
     address: str,
 ) -> dict[str, Any]:
-    """The published witness for one decided latch read.
+    """The published witness for one latch read.
 
-    Every key is emit-when-known: a key the producer had no value for is absent,
-    never null and never defaulted. ``latch_basis`` is the one key always
-    present, and it carries ``not_determined`` when no oracle decided — the
-    state a failed classification lands on, never a branch label.
+    Keys are omitted when unknown; ``latch_basis`` is always present (``not_determined`` when nothing decided).
     """
     witness: dict[str, Any] = {
         "latch_basis": basis or LATCH_BASIS_NOT_DETERMINED,
         "probe_address": address,
     }
     if isinstance(block, int) and block > 0:
-        # Only a pinned height is published. A ``"latest"`` read has no
-        # reproducible height, so it publishes none rather than a height that
-        # cannot be replayed.
+        # Only pinned heights are published.
         witness["probe_block"] = block
 
     for key in _WITNESS_DESCRIPTOR_KEYS:
@@ -369,10 +306,7 @@ def _build_latch_witness(
         if value is not None:
             witness[key] = value
 
-    # ``expected_version`` is publishable only alongside the basis that says
-    # where the integer came from (it is derived from a modifier NAME match, so
-    # bare it reads as compiler-forced). A descriptor predating basis stamping
-    # therefore publishes neither.
+    # Published only with the basis for where the integer came from (a modifier name match).
     expected_version = latch.get("expected_version")
     expected_version_basis = latch.get("expected_version_basis")
     if isinstance(expected_version, int) and isinstance(expected_version_basis, str) and expected_version_basis:
@@ -400,14 +334,8 @@ def _build_latch_witness(
 
 
 def _copy_witness(witness: dict[str, Any]) -> dict[str, Any]:
-    """A per-condition copy — one cached ``LatchReadResult`` annotates many
-    conditions, and a shared nested ``guard`` dict would alias across rows."""
+    """A per-condition copy so a shared ``guard`` dict doesn't alias across rows."""
     return {key: (dict(value) if isinstance(value, dict) else value) for key, value in witness.items()}
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 def resolve_one_shot_state(
@@ -419,13 +347,11 @@ def resolve_one_shot_state(
     db_proxy_linked: bool = False,
     rpc: RpcFn = rpc_request,
 ) -> LatchReadResult:
-    """Read the one-shot latch state for ``address`` (the runtime deployment
-    address). ``latches`` are the static latch payloads collected from the
-    function's predicate tree; only consumption oracles are read at all
-    (``_latch_may_decide``), version-tagged payloads first, then legacy
-    untagged standard shapes, then guard-carrying structural candidates —
-    the first readable one wins. A tree carrying no decisive latch yields
-    indeterminate, never live."""
+    """Read the one-shot latch state at the runtime ``address``.
+
+    Only consumption oracles are read (``_latch_may_decide``): version-tagged first, then legacy standard shapes, then
+    guarded candidates; the first readable wins. No decisive latch means indeterminate.
+    """
     transcript: dict[str, Any] = {}
     if not rpc_url or not isinstance(address, str) or not address.startswith("0x") or len(address) != 42:
         return LatchReadResult("indeterminate", None, "unverified", {"reason": "no_target"})
@@ -448,8 +374,7 @@ def resolve_one_shot_state(
         return LatchReadResult("indeterminate", None, "unverified", {"reason": reason})
 
     if db_proxy_linked:
-        # The pipeline's own proxy resolution already linked this runtime
-        # address to an implementation job — it IS a live proxy.
+        # Already linked to an implementation job, so it's a live proxy.
         target_kind = "db_linked_proxy"
         transcript["proxy_standard"] = "db_linked"
     else:
@@ -476,12 +401,9 @@ def resolve_one_shot_state(
     if classified == "consumed":
         state = "consumed"
     elif classified == "armed" and target_kind != "unverified":
-        # The latch would admit a caller AND the address is a confirmed live
-        # deployment: a real live one-shot.
         state = "live"
     else:
-        # Armed-but-unconfirmed (a bare impl/template with an empty latch reads
-        # exactly like this) or an unevaluable guard: never claim live.
+        # An unconfirmed address or unevaluable guard never claims live.
         state = "indeterminate"
     logger.debug(
         "one_shot probe decision",
@@ -496,15 +418,10 @@ def resolve_one_shot_state(
     return LatchReadResult(state, value, target_kind, transcript, witness)
 
 
-# ---------------------------------------------------------------------------
-# Tree → latch collection and capability annotation (resolver-side glue)
-# ---------------------------------------------------------------------------
-
-
 def collect_one_shot_latches(tree: Any) -> dict[str, list[dict[str, Any]]]:
-    """``{"standard": [...], "candidate": [...]}`` latch payloads from a
-    predicate tree: standard = leaves the A-spine stamped (role one_shot),
-    candidate = structural-detector stamps (leaf or tree-root)."""
+    """``{"standard": [...], "candidate": [...]}`` latch payloads from a predicate tree: A-spine one_shot leaves vs
+    structural-detector stamps.
+    """
     out: dict[str, list[dict[str, Any]]] = {"standard": [], "candidate": []}
     if not isinstance(tree, dict):
         return out
@@ -547,18 +464,9 @@ def annotate_capability_one_shot(
 ) -> None:
     """Land the latch read on the serialized capability dict.
 
-    Standard one-shots: every ``kind=one_shot`` condition (anywhere in the
-    expression) gains ``latch_state``/``latch_value``/``latch_target`` and, when
-    a latch was actually read, ``latch_witness``. A confirmed structural
-    candidate (consumed or live — never indeterminate) additionally APPENDS a
-    one_shot condition at the root, since the static side deliberately left its
-    badge untouched.
-
-    ``latch_witness`` describes the ONE read that produced ``latch_state`` for
-    this row; a function carrying several one_shot conditions gets that same
-    witness on each, because one read is what decided them all. An absent
-    ``latch_witness`` means no latch was read — the state has no replayable
-    evidence behind it and must be consumed as the weakest branch.
+    Every ``kind=one_shot`` condition gets ``latch_state``/``latch_value``/``latch_target`` and, when read,
+    ``latch_witness`` (the same witness on each, since one read decided them). A confirmed structural candidate also
+    appends a root one_shot condition. No ``latch_witness`` means nothing was read.
     """
 
     def annotate(node: dict[str, Any]) -> None:

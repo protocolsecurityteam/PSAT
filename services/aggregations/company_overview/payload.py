@@ -1,5 +1,3 @@
-"""Protocol-wide views + final payload assembly (``build_company_overview``)."""
-
 from __future__ import annotations
 
 import logging
@@ -45,10 +43,10 @@ logger = logging.getLogger("services.aggregations.company_overview")
 
 
 def _protocol_inventory_filter(protocol_id: int):
-    """Members plus this protocol's candidates/pruned rows. A row whose
-    ``protocol_id`` belongs to another protocol is that protocol's member —
-    a foreign nomination never surfaces here; unclaimed rows (both ids NULL)
-    are outside the model entirely (spec §3.1)."""
+    """Members plus this protocol's candidates/pruned rows.
+
+    Another protocol's members never surface; unclaimed rows are outside the model (spec §3.1).
+    """
     return or_(
         Contract.protocol_id == protocol_id,
         and_(Contract.protocol_id.is_(None), Contract.nominated_protocol_id == protocol_id),
@@ -73,9 +71,7 @@ def _witness_display_entry(row: ContractMembershipWitness) -> dict[str, Any]:
 
 
 def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
-    """Invariant 5: the parked state named from the persisted probe row —
-    never a silent default. ``no_probe_attempt`` is itself a named fact:
-    no row exists, so no probe has ever run for this (contract, chain)."""
+    """Invariant 5: parked state named from the persisted probe row. ``no_probe_attempt`` means no row exists."""
     if attempt is None:
         return {"kind": "no_probe_attempt"}
     results = attempt.results if isinstance(attempt.results, dict) else {}
@@ -104,9 +100,7 @@ def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
 
 
 def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict[str, Any]]:
-    """Per-row membership display fields (spec §5.2): state from the gate
-    helper, reasons only from persisted witness/probe rows. Batched — one
-    query per evidence table, never per row."""
+    """Membership display fields (spec §5.2). One query per evidence table, never per row."""
     chain_ids = {cr.id: chain_id_for_chain_name(cr.chain) for cr in rows}
     code_pairs = sorted(
         {(cid, cr.address.lower()) for cr in rows if cr.address and (cid := chain_ids.get(cr.id)) is not None}
@@ -167,8 +161,6 @@ def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict
         elif state == "pruned":
             chain_id = chain_ids.get(cr.id)
             fact = code_facts.get((chain_id, cr.address.lower())) if chain_id is not None and cr.address else None
-            # ``pruned`` is only derivable FROM a code-absent probe row, so
-            # the fact is present by construction.
             reason = {"kind": "code_absent", "code_probe_block": fact.code_probe_block if fact else None}
         out[cr.id] = {
             "membership_state": state,
@@ -183,11 +175,7 @@ def all_addresses_for_protocol(session: Session, protocol_row: Protocol) -> list
         session.execute(select(Contract).where(_protocol_inventory_filter(protocol_row.id))).scalars().all()
     )
 
-    # Prefetch impl-name lookup so proxy rows can expose the implementation
-    # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
-    # template name. Keyed by the composite entity token (a proxy's impl is on
-    # the proxy's own chain) so a same-address twin on another chain doesn't
-    # display the other chain's name.
+    # Composite keys so another chain's twin's name isn't shown.
     impl_name_by_entity = {
         _entity_key(c.chain, c.address): c.contract_name for c in all_contract_rows if c.address and c.contract_name
     }
@@ -240,13 +228,10 @@ def _latest_tvl(session: Session, protocol_row: Protocol) -> TvlSummary | None:
 
 
 def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -> ReachBlock:
-    """The scorer-computed reach claims (services.scoring.reach) for the payload.
+    """Scorer reach claims.
 
-    Computed HERE and not in ``build_governance_view``: the governance view's
-    other caller is the monitoring reconciler (``governance_controllers_for_
-    protocol``), which reads only ``principals`` and must not pay for three
-    scorer planes and the signal population on a 512 MB process. The block is
-    always present, and an entity absent from it holds no reach claim at all.
+    Computed here, not in ``build_governance_view``, because the monitoring reconciler also calls that and can't afford
+    the scorer planes in 512 MB.
     """
     protocol_ids = {c.protocol_id for c in contracts_by_job_id.values() if c is not None and c.protocol_id is not None}
     return {
@@ -285,9 +270,7 @@ def assemble_company_payload(
         "ownership_hierarchy": governance.hierarchy,
         "fund_flows": governance.fund_flows,
         "reach": reach,
-        # Just the count here — the full inventory (~167 KB for ether.fi) is
-        # served by /api/company/{name}/addresses and fetched lazily by
-        # AddressesModal when the user opens it.
+        # The full inventory (~167 KB) is served lazily by /api/company/{name}/addresses.
         "all_addresses_count": _all_addresses_count(session, protocol_row),
     }
 
@@ -348,37 +331,12 @@ def build_company_overview(session: Session, name: str, *, include_summary: bool
 
 
 def controllers_for_protocol(session: Session, protocol_id: int) -> dict[tuple[str, str], MonitoredContractType]:
-    """Map ``(principal_address_lc, chain) -> MonitoredContract.contract_type``
-    for every principal that holds governing authority over at least one
-    contract in the protocol — its **primary controllers union its privileged
-    co-controllers**, keyed per chain.
+    """``(principal, chain) -> MonitoredContract.contract_type`` for primary controllers union privileged
+    co-controllers.
 
-    The chain half of the key is the chain of the CONTRACTS the principal
-    governs (``controls_chains``, from the per-chain primary contests), not a
-    caller default: chain-as-island means a controller's monitoring row
-    belongs on each chain where it actually controls something, and a Safe
-    deployed at the same address on two chains gets one row per chain it
-    governs on.
-
-    Both sets come from the single source of truth
-    (:mod:`services.governance.primary_controller`) via the same loaders +
-    :func:`build_governance_view` the ``/company`` endpoint uses:
-
-    * ``primary_for`` — the winner-take-all set the Surface canvas groups by.
-    * ``co_controls`` — principals that hold real authority on a contract they
-      *lost* the primary contest for, restricted to privileged or tightly-gated
-      functions (:func:`assign_co_controllers`). This is what keeps a
-      pause / fund-recovery guardian Safe, or a withdrawal-ops timelock, from
-      going unmonitored just because a bigger governance Safe won the same
-      contracts. Permissionless callers (whitelisted auction bidders sharing
-      ``createBid``) and fund-destination Safes hold neither, so they stay out.
-
-    The canvas renders only ``primary_for`` (groups) and shows ``co_controls`` as
-    secondary annotations; monitoring intentionally watches the **union**,
-    because each controller — primary or co — emits its own governance events.
-
-    EOAs are dropped (no contract events / state to monitor) and ``proxy_admin``
-    maps to the historical ``'proxy'`` contract_type. Read-only.
+    Chain is where the governed contracts live (``controls_chains``). The canvas groups by ``primary_for`` only, but
+    monitoring watches the union: a guardian Safe or withdrawal timelock emits its own governance events. EOAs are
+    dropped; ``proxy_admin`` maps to ``'proxy'``.
     """
     protocol = session.get(Protocol, protocol_id)
     if protocol is None:

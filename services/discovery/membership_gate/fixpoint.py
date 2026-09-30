@@ -1,5 +1,4 @@
-"""Event-driven evaluation (spec 3.4): fact deltas, candidate targeting, and
-the stratified fixpoint."""
+"""Event-driven evaluation (spec §3.4): fact deltas, candidate targeting, and the stratified fixpoint."""
 
 from __future__ import annotations
 
@@ -43,25 +42,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Event-driven evaluation (spec §3.4 events 2–3)
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class FactsDelta:
-    """What just changed: the gate re-checks only candidates these facts can
-    reach (spec §3.4 event 2), never the whole table."""
+    """What changed; only candidates these facts can reach are re-checked (spec §3.4 event 2)."""
 
     new_member_contract_ids: tuple[int, ...] = ()
-    #: Newly resolved pointer/controller ADDRESSES (proxy impl/beacon/admin
-    #: values, controller values) written by a fact-writer commit.
+    # Newly resolved pointer/controller addresses from a fact-writer commit.
     new_edge_addresses: tuple[str, ...] = ()
-    #: Deployer EOAs whose registry row was just written, reclassified, or revoked.
     changed_deployer_addresses: tuple[str, ...] = ()
-    #: Contracts whose OWN stored facts just changed (a proxy that gained
-    #: pointers, a subject whose controllers were rewritten) — re-checked
-    #: directly when they are candidates.
+    # Contracts whose own stored facts changed, re-checked directly if candidates.
     recheck_contract_ids: tuple[int, ...] = ()
 
 
@@ -70,29 +59,22 @@ class PromotionResult:
     targeted_contract_ids: tuple[int, ...] = ()
     promoted_contract_ids: tuple[int, ...] = ()
     demoted_contract_ids: tuple[int, ...] = ()
-    #: Candidates whose settled verdict is blocked on a probe fact (missing W1
-    #: code proof or creation witness) plus demoted members re-queued per
-    #: invariant 8. The caller schedules probes; the gate never touches the wire.
+    # Candidates blocked on a probe fact (W1 or creation witness) plus demoted members (invariant 8). The caller
+    # schedules probes; the gate never touches the wire.
     reprobe_contract_ids: tuple[int, ...] = ()
 
 
-#: Etherscan-style FULL-creation-history provider for §3.3 Class B:
-#: ``enumerator(eoa) -> (created_addresses, history_complete)``. Optional —
-#: without one the fixpoint can register Class A but never mint Class B
-#: (positive exclusivity evidence cannot be derived from the DB alone).
-#: An enumerator MAY expose attribute channels the fixpoint reads via getattr:
-#: ``coverage_gaps`` (deployer → gap, F3 counterevidence) and ``creations``
-#: (deployer → full ``DeployerCreation`` records — the factory attributions
-#: for the member-factory mapping rule).
+# Full-creation-history provider for §3.3 Class B: ``enumerator(eoa) -> (created_addresses, history_complete)``. Without
+# one, Class B can't be minted. May expose ``coverage_gaps`` (F3 counterevidence) and ``creations`` (factory
+# attributions) attributes.
 DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
 
 
 def _standing_vias_named_by_edges(session: Session, edge_addresses: Sequence[str]) -> set[str]:
-    """Fresh edge values that name a STANDING via-fact — an active W2/W3/W4
-    witness's via or an unrevoked deployer-registry EOA. A new observation of
-    such an address (a foreign controller value, a new admin pointer) can
-    invalidate the exclusivity/perimeter facts resting on it, so these vias
-    seed the revocation stratum (§3.2 witness invalidation)."""
+    """New edge values naming a standing via-fact (an active W2/W3/W4 via or unrevoked deployer EOA).
+
+    A new observation of one can invalidate facts resting on it, so they seed the revocation stratum (§3.2).
+    """
     addrs = sorted({a.lower() for a in edge_addresses if a})
     if not addrs:
         return set()
@@ -115,8 +97,7 @@ def _standing_vias_named_by_edges(session: Session, edge_addresses: Sequence[str
             .distinct()
         ).scalars()
     }
-    # An address that is not a via itself can still be a LINK in a standing
-    # D1 anchor chain; the witness resting on it is keyed by its controller.
+    # A non-via address can still be a link in a D1 anchor chain keyed by its controller.
     touched |= _vias_citing_evidence_address(session, addrs)
     return {t for t in touched if t}
 
@@ -138,14 +119,11 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
             for pointer in (row.implementation, row.beacon, row.admin, *(row.secondary_implementations or [])):
                 if pointer:
                     pointer_addrs.add(pointer.lower())
-    # A fresh member's own principals are fresh perimeter facts: they admit the
-    # principal itself (D2) and anything that principal controls (D1).
-    # Targeting both directions here is what makes the settled state
-    # independent of whether the promotion or the principal write arrived first.
+    # A fresh member's principals are fresh perimeter facts (D2 and D1); targeting both directions makes the result
+    # independent of write order.
     principal_addrs = principal_addresses(session, facts_delta.new_member_contract_ids)
 
-    # Children the fresh members are recorded as having minted: a factory that
-    # just became a member is new W4-factory lineage for everything it created.
+    # A factory that became a member is new W4-factory lineage for its children.
     factory_children: set[str] = set()
     if member_addrs:
         factory_children = {
@@ -174,20 +152,12 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
             ).scalars()
         )
 
-    # Candidates REACHING the delta through their OWN stored facts — a
-    # candidate proxy whose pointer resolves to it (W2 proxy shape), or a
-    # candidate whose stored resolved controller is it (W3 D1). Both
-    # directions must target, or the settled state would depend on which
-    # side's fact arrived last (invariant 9). Fresh EDGE addresses count as
-    # well as fresh members: an edge that names a STANDING member (a role
-    # holder written under a member registry) changes that member's
-    # transitivity, and only its wards' own controller rows point back at it.
+    # Candidates reaching the delta through their own facts (a pointer to it, or it as their controller); both
+    # directions must target (invariant 9). Fresh edges count too, since they change a standing member's transitivity.
     reach_addrs = edge_addrs | member_addrs | principal_addrs
     if reach_addrs:
         reach_list = sorted(reach_addrs)
-        # The candidate's OWN ``secondary_implementations`` is deliberately not
-        # probed here: no admitting rule reads it in that direction, so the
-        # per-address LIKE it would cost buys no targeting.
+        # The candidate's own ``secondary_implementations`` isn't checked: no rule reads it in that direction.
         pointer_named = (
             func.lower(Contract.implementation).in_(reach_list)
             | func.lower(Contract.beacon).in_(reach_list)
@@ -209,9 +179,7 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
             ).scalars()
         )
 
-    # Candidates whose PROBED reads resolved to an address that just became a
-    # member or a fresh edge value (the probe persisted the resolved set for
-    # exactly this lookup).
+    # Candidates whose persisted probe reads resolved to a new member or edge value.
     perimeter_delta = sorted(reach_addrs)
     if perimeter_delta:
         targeted.update(
@@ -220,8 +188,7 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
                 .join(ContractProbeAttempt, ContractProbeAttempt.contract_id == Contract.id)
                 .where(
                     *candidate,
-                    # ``?|`` (not jsonb_exists_any): only the operator form is
-                    # served by the GIN index on results->'resolved_addresses'.
+                    # ``?|`` because only the operator form uses the GIN index.
                     ContractProbeAttempt.results.op("->")("resolved_addresses").op("?|")(
                         cast(perimeter_delta, ARRAY(Text()))
                     ),
@@ -237,18 +204,13 @@ def evaluate(
     *,
     deployer_enumerator: DeployerEnumerator | None = None,
 ) -> PromotionResult:
-    """Targeted gate check for one fact delta (spec §3.4 events 2–3):
-    indexed candidate lookup, then the stratified fixpoint. Mutates the
-    session without committing — the caller commits.
+    """Targeted gate check for one fact delta (spec §3.4 events 2–3): indexed candidate lookup, then the stratified
+    fixpoint. Doesn't commit.
 
-    ``changed_deployer_addresses`` also forces the §3.3 ladder re-check of any
-    STANDING registry row for those EOAs — a registry row is re-examined when
-    its deployer is named, not only when a candidate happens to name it.
-
-    ``new_member_contract_ids`` seeds the revocation stratum as well as the
-    recall lookup: a member another protocol just claimed is counterevidence
-    against every standing proof resting on that address, and a caller may
-    name one without naming any edge (invariant 8)."""
+    ``changed_deployer_addresses`` forces a ladder re-check of standing registry rows for those EOAs.
+    ``new_member_contract_ids`` also seeds revocation: a member another protocol claimed is counterevidence (invariant
+    8).
+    """
     targeted = _target_candidates(session, facts_delta)
     dirty_vias = {a.lower() for a in facts_delta.changed_deployer_addresses if a}
     named_addresses = list(facts_delta.new_edge_addresses)
@@ -261,10 +223,8 @@ def evaluate(
                 select(Contract.address).where(Contract.id.in_(entry_ids), Contract.address.is_not(None))
             )
         )
-        # An entry-delta member is a fresh FOREIGN anchor against every
-        # standing H row keyed by its deployer under another protocol; the
-        # delta names no deployer, so the W4-H scope must — a should-be-revoked
-        # row is re-judged this run, not on some later touch.
+        # Entry-delta members are foreign anchors against other protocols' H rows for their deployer, so add those
+        # deployers to the W4-H scope.
         entry_member_deployers = {
             deployer.lower()
             for (deployer,) in session.execute(
@@ -297,15 +257,11 @@ def evaluate_committed(
     context: str,
     deployer_enumerator: DeployerEnumerator | None = None,
 ) -> PromotionResult | None:
-    """Event-2 hook wrapper: ``evaluate`` + commit, best-effort. A failure
-    rolls back and returns None — membership settles at a later event or via
-    reconcile; a pipeline stage never fails on the gate.
+    """``evaluate`` plus commit, best-effort: failures roll back and return None (settled later or by reconcile).
 
-    Net-new members also enqueue a selection pass for their protocol: this
-    wrapper is the WORKER entry point, so the CLI/migration paths (which call
-    ``evaluate`` and commit themselves) enqueue nothing. The enqueue runs
-    AFTER the gate's own commit — ``create_job`` commits, so running it inside
-    the try would land the cascade durably and void the rollback below."""
+    Net-new members also enqueue a selection pass, only from this worker entry point, and after the gate commit
+    (``create_job`` commits, which would defeat the rollback).
+    """
     try:
         result = evaluate(session, facts_delta, deployer_enumerator=deployer_enumerator)
         session.commit()
@@ -342,13 +298,11 @@ def evaluate_role_plane_change(
     rows: Sequence[Mapping[str, Any]],
     context: str,
 ) -> PromotionResult | None:
-    """§3.4 event 2 for a role-holder plane rewrite — the anchor-chain arm's
-    fuel (``_own_controller_links``) and therefore its revocation trigger.
+    """§3.4 event 2 for a role-holder plane rewrite.
 
-    The registry is a standing via for every W3-D1 witness it controls, and its
-    holders appear as anchor-chain links; naming both as edge addresses is what
-    makes ``_standing_vias_named_by_edges`` revisit those witnesses. A withheld
-    (NULL) holder set names nothing — not_determined contributes no address."""
+    The registry and its holders are named as edge addresses so ``_standing_vias_named_by_edges`` revisits dependent
+    W3-D1 witnesses. A NULL holder set names nothing.
+    """
     registry = (registry_address or "").lower()
     if not _ADDRESS_RE.match(registry):
         return None
@@ -377,15 +331,11 @@ def evaluate_principal_change(
     addresses: Sequence[str] | set[str],
     context: str,
 ) -> PromotionResult | None:
-    """§3.4 event 2 for a ``FunctionPrincipal`` rewrite — the fuel and the
-    revocation trigger for both principal-keyed W3 arms (invariant 8).
+    """§3.4 event 2 for a ``FunctionPrincipal`` rewrite (invariant 8).
 
-    *addresses* must be the UNION of the principal addresses before and after
-    the rewrite: a principal the re-analysis DROPPED names no fact afterwards,
-    so only the pre-image can reach the witnesses resting on it. The rewritten
-    contract's own address is named too — it is the via of every D2-principal
-    witness it hosts, and the ``principal_fact.member_address`` of every
-    D1-principal witness it proved."""
+    *addresses* must be the union of principals before and after, since dropped principals are only reachable via the
+    pre-image. The contract's own address is named too.
+    """
     contract = session.get(Contract, contract_id)
     own = (contract.address or "").lower() if contract is not None else ""
     named = {a.lower() for a in addresses if isinstance(a, str) and _ADDRESS_RE.match(a)}
@@ -400,8 +350,7 @@ def evaluate_principal_change(
     )
 
 
-#: Loud-failure guard only: the fixpoint's own argument bounds rounds by the
-#: finite witness/registry space, so hitting this cap is a bug, never load.
+# Loud-failure guard only; rounds are bounded by the finite witness space.
 _FIXPOINT_ROUND_CAP = 1000
 
 
@@ -414,54 +363,36 @@ def _stratified_fixpoint(
     w4h_extra_addresses: Sequence[str] = (),
     deployer_enumerator: DeployerEnumerator | None = None,
 ) -> PromotionResult:
-    """Stratified fixpoint (spec §3.4 event 3, invariants 8+9). Each round
-    runs fixed strata — (i) revocations/invalidations to quiescence,
-    (ii) deployer registry reclassification, (iii) admissions — iterating in
-    stable sorted order, so the settled state is a deterministic function of
-    stored evidence, independent of event arrival order (confluence).
+    """Stratified fixpoint (spec §3.4 event 3, invariants 8+9).
 
-    Termination does NOT rest on the witness set only shrinking — a
-    re-admission re-arms a revoked row through ``write_witness``. It rests on
-    two facts. Within one protocol every re-checked predicate is monotone in
-    that protocol's member set, and a round either promotes (member set grows)
-    or revokes (it shrinks), so a row cannot oscillate without some other
-    protocol's set changing. Across protocols a contested row's LOSING claims
-    are consumed, not regenerated — a refused claim's witnesses stay recorded
-    but non-admitting — so the cross-protocol frontier drains. A
-    collision-revoked registry row is never re-registered within a run.
-    ``_FIXPOINT_ROUND_CAP`` is the loud-failure guard, not the bound.
+    Each round: (i) revocations to quiescence, (ii) deployer reclassification, (iii) admissions, in stable sorted order,
+    so the result depends only on stored evidence (confluence).
 
-    Stratum (ii) examines (protocol, deployer) pairs from pending candidates
-    PLUS every standing registry row named by ``changed_deployer_addresses``
-    PLUS every standing registry row of a protocol whose member set just
-    shrank (a demotion can void a Class-A anchor or Class-B corroboration —
-    invariant 8's trigger, enforced same-run, never left for a later event)."""
+    Termination: within a protocol every predicate is monotone in its member set and a round either grows or shrinks it;
+    across protocols a losing claim's witnesses stay non-admitting, so the frontier drains. Collision-revoked registry
+    rows aren't re-registered in a run. ``_FIXPOINT_ROUND_CAP`` is only a guard.
+
+    Stratum (ii) checks candidate-named pairs, rows named by ``changed_deployer_addresses``, and rows of protocols whose
+    member set shrank (invariant 8, same run).
+    """
     targeted = set(candidate_ids)
     pending: set[int] = set(targeted)
     dirty_vias: set[str] = {a.lower() for a in dirty_via_addresses if a}
     named_registry_addresses: set[str] = {a.lower() for a in changed_deployer_addresses if a}
     loss_check_protocol_ids: set[int] = set()
-    #: Run-level accumulators scoping the trailing W4-H stratum: the EOAs the
-    #: triggering delta named (changed deployers plus the caller's extras —
-    #: entry-delta members' deployers), every round-promoted contract's
-    #: deployer (added below), and every protocol whose member set moved.
+    # The EOAs scoping the trailing W4-H stratum: the delta's, round promotions' deployers, and changed protocols.
     w4h_named_addresses: set[str] = set(named_registry_addresses) | {a.lower() for a in w4h_extra_addresses if a}
     member_change_protocol_ids: set[int] = set()
     promoted: set[int] = set()
     demoted: set[int] = set()
     reprobe: set[int] = set()
-    #: Rows this run found ALREADY stamped. The admission stratum skips a row
-    #: whose ``protocol_id`` is set, so an entry-member can only reach
-    #: ``promoted`` by being demoted first — every demotion the fixpoint did
-    #: not itself cause therefore names one. Subtracted from the published
-    #: promotions so a supersession transient is not reported as net-new.
+    # Rows already stamped at entry; subtracted from reported promotions so a demote-then-repromote isn't counted as
+    # new.
     members_at_entry: set[int] = set()
     enum_cache: dict[str, tuple[Sequence[str], bool]] = {}
 
     def fold_demotions(demoted_ids: Sequence[int] | set[int]) -> None:
-        """Every stratum's demotion bookkeeping. ``members_at_entry`` must be
-        read off ``promoted`` BEFORE it shrinks. A demotion shrinks a member
-        set too — its protocol's standing rows get the loss check next round."""
+        """Demotion bookkeeping. Read ``members_at_entry`` off ``promoted`` before shrinking it."""
         demoted.update(demoted_ids)
         members_at_entry.update(set(demoted_ids) - promoted)
         promoted.difference_update(demoted_ids)
@@ -505,9 +436,7 @@ def _stratified_fixpoint(
             if contract is None or contract.protocol_id is not None:
                 continue
             if contract.nominated_protocol_id is None:
-                # Unclaimed rows are outside the gate's event flow (§3.1) —
-                # nomination is still the entry ticket; only ADMISSION is
-                # evidence-keyed across protocols.
+                # Unclaimed rows are outside the gate's flow (§3.1); nomination is the entry ticket.
                 continue
             for protocol_id in _admission_protocols(session, contract):
                 outcome = _attempt_admission(session, contract, protocol_id)
@@ -534,21 +463,13 @@ def _stratified_fixpoint(
                 addr = (contract.address or "").lower()
                 if addr:
                     promoted_addrs.add(addr)
-            # A round promotion is a fresh FOREIGN anchor for any standing H
-            # row keyed by the same EOA under another protocol — its deployer
-            # joins the W4-H scope so that row is re-judged this run.
+            # A promotion is a foreign anchor for other protocols' H rows with the same deployer.
             w4h_named_addresses |= deployer_addrs
-            # A promotion is new counterevidence for STANDING witnesses too,
-            # not only fresh recall: an address this protocol just claimed is
-            # proven foreign to every other protocol resting a transitivity
-            # proof on it. Re-seed the revocation stratum with the promoted
-            # addresses and with the vias whose published anchor chain cites
-            # one, so the next round re-verifies them (invariant 8).
+            # A promotion is counterevidence for other protocols' standing witnesses, so re-seed revocation with it and
+            # the vias citing it (invariant 8).
             dirty_vias |= _standing_vias_named_by_edges(session, sorted(promoted_addrs))
-            # The d2_exclusive arm publishes no chain and keys its witnesses on
-            # the CONTROLLER, so a promoted row reaches those witnesses only
-            # through its own controllers — exactly the ones whose observed
-            # control set this promotion just widened past the protocol.
+            # ``d2_exclusive`` witnesses are keyed on the controller, reached only through the promoted row's
+            # controllers.
             dirty_vias |= _controllers_of(session, round_promoted)
             pending.update(
                 _target_candidates(
@@ -586,8 +507,7 @@ def _stratified_fixpoint(
 
 
 def _protocols_of_demoted(session: Session, contract_ids: Sequence[int] | set[int]) -> set[int]:
-    """Former protocols of just-demoted members — ``demote_member`` preserves
-    them in ``nominated_protocol_id`` (invariant 4)."""
+    """Former protocols of just-demoted members, kept in ``nominated_protocol_id`` (invariant 4)."""
     ids = sorted(set(contract_ids))
     if not ids:
         return set()
@@ -602,9 +522,7 @@ def _protocols_of_demoted(session: Session, contract_ids: Sequence[int] | set[in
 
 
 def _standing_registry_pairs(session: Session, *, addresses: set[str], protocol_ids: set[int]) -> set[tuple[int, str]]:
-    """Unrevoked registry rows named by EOA or owned by a protocol whose
-    member set changed — the extra stratum-(ii) checks beyond candidate-named
-    pairs."""
+    """Unrevoked registry rows named by EOA or owned by a protocol whose members changed."""
     conditions = []
     if addresses:
         conditions.append(ProtocolDeployer.address.in_(sorted(addresses)))
@@ -630,12 +548,11 @@ def _reclassify_deployers(
     *,
     extra_pairs: set[tuple[int, str]] | None = None,
 ) -> tuple[bool, set[int], DemotionResult]:
-    """Stratum (ii): re-run the §3.3 ladder for every (protocol, deployer)
-    pair the pending candidates name, plus ``extra_pairs`` (standing registry
-    rows pulled in by a named deployer or a shrunken member set). Registers
-    fresh A/B verdicts; revokes an existing row only on POSITIVE
-    counterevidence (collision, perimeter fact lost, corroboration lost) — an
-    absent enumeration never revokes."""
+    """Stratum (ii): re-run the ladder for candidate-named pairs plus ``extra_pairs``.
+
+    Registers fresh A/B verdicts; revokes only on positive counterevidence (collision, lost perimeter fact or
+    corroboration), never on a missing enumeration.
+    """
     extra = set(extra_pairs or ())
     if not pending and not extra:
         return False, set(), DemotionResult()
@@ -695,12 +612,9 @@ def _reclassify_deployers(
                     creation_factories={c.address: c.factory for c in records if getattr(c, "factory", None)},
                 )
         if verdict.trust_class is None and verdict.evidence.get("reason") == "cross_protocol_collision":
-            # Invariant 7: a collision is Class C for EVERY party, never a
-            # vote — every protocol's standing PROOF row for this EOA falls in
-            # the same pass, each with its full demote cascade. Trust class H
-            # is exempt by design (DEPLOYER_HEURISTIC_SPEC.md §4/§5, ruling 2):
-            # a foreign observation there is one challenge row, and the quorum
-            # freezes the EOA for every holder without de-stamping anyone.
+            # Invariant 7: a collision is Class C for every party, so every protocol's proof row for this EOA falls this
+            # pass. H is exempt (DEPLOYER_HEURISTIC_SPEC.md §4/§5): a foreign observation is a challenge, and the quorum
+            # freezes without de-stamping.
             standing = list(
                 session.execute(
                     select(ProtocolDeployer)
@@ -743,15 +657,10 @@ def _reclassify_deployers(
             elif existing.trust_class == DEPLOYER_TRUST_CLASS_B and verdict.evidence.get("reason") == (
                 "foreign_or_unknown_creations"
             ):
-                # A FRESH enumeration surfaced a creation outside the
-                # member/candidate set — the §3.3 later-foreign-observation
-                # revocation; the run can mint no new W4 on this EOA after it.
+                # A fresh enumeration found a creation outside the member/candidate set (§3.3 revocation).
                 reason = "foreign_or_unknown_creations"
             elif existing.trust_class == DEPLOYER_TRUST_CLASS_B and deployer in coverage_gaps:
-                # F3: coverage gap — the raw enumeration was complete yet a
-                # KNOWN creation is missing or off-scope. Positive
-                # counterevidence against the standing license, unlike
-                # budget/cap incompleteness (which never revokes).
+                # F3: a complete enumeration missing a known creation is counterevidence (unlike cap incompleteness).
                 reason = "enumeration_coverage_gap"
             elif (
                 existing.trust_class == DEPLOYER_TRUST_CLASS_B
@@ -776,22 +685,13 @@ def _reclassify_deployers(
 
 
 def _admission_protocols(session: Session, contract: Contract) -> list[int]:
-    """Protocols the fixpoint may evaluate *contract* against, in
-    deterministic order: the nominated slot's protocol first (the slot stays
-    first-nominator-wins recall provenance and keeps first-attempt priority),
-    then every OTHER protocol whose OWN-SIDE facts name the candidate — a
-    member row's stored pointer/controller/upgrade history, an unrevoked
-    registry row for the candidate's deployer, or a recorded witness row —
-    in ascending protocol id. The first valid admission wins — a contract
-    holds ONE ``protocol_id``; a losing protocol's already-recorded
-    witnesses stay recorded-but-non-admitting.
+    """Protocols to evaluate *contract* against, in order: the nominated protocol first, then others whose own facts
+    name it (pointers, controllers, upgrade history, deployer registry, recorded witnesses) by id. First valid
+    admission wins; losers' witnesses stay recorded but non-admitting.
 
-    Listing a protocol here licenses nothing: each attempt derives and
-    re-verifies from THAT protocol's own edges/registry only
-    (``_derive_admitting_facts``/``promote`` are protocol-scoped), so P's
-    facts can never admit to Q."""
-    # ``Contract.protocol_id`` is nullable at the type level even under a
-    # NOT NULL filter; the None screen happens at ``others`` below.
+    Being listed licenses nothing: each attempt uses only that protocol's own edges, so P's facts never admit to Q.
+    """
+    # Typed nullable; None is filtered below.
     protocols: set[int | None] = set()
     addr = (contract.address or "").lower()
     if addr:
@@ -801,8 +701,7 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
             Contract.id != contract.id,
             func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key,
         )
-        # Members whose stored facts name the candidate: pointer edges (W2),
-        # historical impls (W2), probe reads (W3-D2).
+        # Members whose facts name the candidate (W2 pointers, historical impls, W3-D2 probe reads).
         protocols.update(
             session.execute(
                 select(Contract.protocol_id)
@@ -835,16 +734,9 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
                 .distinct()
             ).scalars()
         )
-        # Deliberately NOT discovered here: protocols reached only through the
-        # candidate's OWN stored pointers/controllers (the W2 proxy shape and
-        # W3-D1). A candidate delegating to a foreign protocol's shared
-        # singleton impl, or sharing an operator with it, is code-reuse or
-        # shared-ops — not that protocol's claim on the row — and admitting on
-        # it would vacuum every Safe-style proxy into the singleton owner's
-        # protocol. Those shapes still admit for the NOMINATED protocol
-        # (attempted first, full derivation), where the nomination supplies
-        # the corroborating recall.
-    # W4 — unrevoked registry rows for the candidate's deployer.
+        # Not discovered through the candidate's own pointers/controllers (W2 proxy shape, W3-D1): sharing a foreign
+        # singleton impl or operator isn't that protocol's claim, and would pull every Safe-style proxy into it. Those
+        # still admit for the nominated protocol. Below: W4 registry rows for the deployer.
     deployer = (contract.deployer or "").lower()
     if deployer and _ADDRESS_RE.match(deployer):
         protocols.update(
@@ -854,8 +746,7 @@ def _admission_protocols(session: Session, contract: Contract) -> list[int]:
                 .distinct()
             ).scalars()
         )
-    # Recorded witness rows — a W5 assertion for a foreign protocol, or a
-    # prior attempt's rows; promote re-verifies every via-fact regardless.
+    # Recorded witnesses (a foreign W5, or earlier attempts); promote re-verifies them.
     protocols.update(
         session.execute(
             select(ContractMembershipWitness.protocol_id)

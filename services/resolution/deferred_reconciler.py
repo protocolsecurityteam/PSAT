@@ -1,62 +1,19 @@
 """Self-heal reconciler for index-cold capability deferrals.
 
-Background
-----------
-"Who may call this privileged function" for event-indexed authorities
-(Solmate ``RolesAuthority`` ``canCall``, OZ ``AccessControl`` /
-mapping-ACL membership) is resolved by folding the authority's on-chain
-events out of the durable Postgres index (``indexed_event_logs`` /
-``indexed_event_cursors``). That index is populated *after* a job
-completes (``enroll_from_completed_jobs`` is gated on
-``Job.status == completed``) and then backfilled asynchronously, but the
-resolution that needs those events runs *during* the job (the policy
-stage). So the first — and persisted — resolution of the first contract
-to reference a given authority is cold: the adapter fails closed to
-``external_check_only`` (basis ``no_index_cursor``).
+Event-indexed authorities (Solmate ``canCall``, OZ AccessControl, mapping ACLs) resolve from the durable event index,
+which is only enrolled after a job completes. So the first resolution of a new authority is cold and fails closed to
+``external_check_only`` (``no_index_cursor``), and that result is persisted and never recomputed.
 
-That is fail-safe (never a wrong/over-broad controller set — just
-"unknown"), but it is *sticky*: the cold result lands in
-``EffectiveFunction`` / ``FunctionPrincipal`` / the ``effective_permissions``
-artifact and onward into the control graph + Surface, and nothing
-recomputes it once the index catches up.
+Adapters tag cold deferrals with ``check.extra.deferred_pending_index``. Once every authority a completed job deferred
+on has a ``backfill_complete`` cursor, this re-enqueues the job's policy stage, which re-resolves and re-persists
+everything. Any adapter setting the marker gets this for free.
 
-This module is the convergence backstop. The cold paths now tag their
-deferral with ``check.extra.deferred_pending_index = True`` (see
-``adapters/solmate_roles.py`` + ``adapters/event_indexed.py``). Once
-every authority a completed job deferred on has a ``backfill_complete``
-cursor, this reconciler re-enqueues that job's *policy* stage. The
-production policy pipeline then re-resolves against the now-warm index
-and re-persists everything (function rows + artifact + control graph +
-principal labels) — no logic is duplicated here.
-
-Why this is the general fix (not a Solmate patch)
--------------------------------------------------
-It keys on the adapter-agnostic ``deferred_pending_index`` marker that
-*any* event-indexed adapter sets, extracts the backing authority from the
-``external_check_only`` leaf the adapter already wrote, and re-runs the
-*whole* adapter registry via the policy stage. A new event-indexed
-standard inherits the self-heal for free by setting the same marker.
-
-Safety properties
-------------------
-* **Fail-safe.** Re-resolution can only *upgrade* a deferral to a concrete
-  set when the events are present; it never emits a wrong or empty set.
-  If the index is somehow still cold the function simply re-defers.
-* **Thrash-free.** A job is re-enqueued only when *all* of its deferred
-  authorities are ``backfill_complete`` (a monotonic flag). After one
-  re-run the ``no_index_cursor`` marker is gone, so the job is not
-  selected again.
-* **No double work.** A job with a re-analysis already queued/processing
-  for its address is skipped.
-* **Reachable.** ``contracts.job_id`` is ``ON DELETE SET NULL`` and every stage
-  finds its contract through it, so deleting a job strands that contract's rows
-  outside the reconciler's reach permanently. Orphaned contracts are
-  selected on their own ``(address, chain)`` identity and their linkage is
-  REPAIRED before the re-enqueue, because the policy stage writes rows for
-  ``Contract.job_id == job.id`` and would otherwise re-run and write nothing.
-  Orphans with no job at their ``(address, chain)`` at all cannot be converged
-  from here — their artifacts and sources went with the deleted job — so they are
-  counted and logged instead of silently skipped.
+* Fail-safe: re-resolution only upgrades deferrals; still-cold ones re-defer.
+* Thrash-free: re-enqueued only when all its authorities are warm (monotonic); the re-run clears the marker.
+* No double work: skipped if a job for the address is already in flight.
+* Orphans: ``contracts.job_id`` is ``ON DELETE SET NULL``, so deleting a job strands its rows. Orphans are selected by
+``(address, chain)`` and relinked before re-enqueueing (the policy stage writes by ``Contract.job_id``). Orphans with no
+job at all can't be converged here and are counted.
 """
 
 from __future__ import annotations
@@ -84,21 +41,15 @@ from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 logger = logging.getLogger(__name__)
 
-# The marker the index-cold adapter paths stamp into
-# ``external_check_only.check.extra``. Shared with the adapters by value
-# (a bare string) to avoid a worker→adapter import dependency.
+# Shared with the adapters by value to avoid an import dependency.
 DEFERRED_MARKER = "deferred_pending_index"
 
 _ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
 
 
 def _iter_deferred_authorities(node: Any) -> Iterator[str]:
-    """Yield the ``target_address`` of every ``external_check_only`` leaf in a
-    serialized ``capability_expr`` tree that is flagged ``deferred_pending_index``.
-
-    Walks ``children`` (AND/OR composition) and ``signer`` (signature_witness)
-    so a deferral nested inside a composite is still found — the cold leaf is
-    often one branch of an ``AND`` with side conditions.
+    """Yield ``target_address`` for every ``external_check_only`` leaf flagged ``deferred_pending_index``, walking
+    ``children`` and ``signer``.
     """
     if not isinstance(node, dict):
         return
@@ -117,15 +68,10 @@ def _iter_deferred_authorities(node: Any) -> Iterator[str]:
 
 
 def _chain_name_for(chain_id: int) -> str | None:
-    """Mainnet-coalesced chain name for ``chain_id``, or ``None`` when the id is
-    not in the registry.
+    """Mainnet-coalesced chain name for ``chain_id``, or ``None`` if unregistered.
 
-    ``contracts`` has no ``chain_id`` — its only scoping key is the string
-    ``chain``, which persisted NULL for mainnet on legacy rows. Coalescing
-    NULL→``'ethereum'`` lets a chain-1 pass match those rows while a
-    non-mainnet pass (its own name ≠ ``'ethereum'``) stays isolated; mirrors
-    ``db.queue._mainnet_coalesced_chain``. ``None`` makes the caller skip the
-    contract-keyed route entirely rather than guess a chain.
+    ``contracts`` only has a ``chain`` string (NULL on legacy mainnet rows), so NULL is coalesced to ``'ethereum'`` like
+    ``db.queue._mainnet_coalesced_chain``. ``None`` makes the caller skip the contract-keyed route.
     """
     try:
         return chain_by_id(chain_id).name.lower()
@@ -134,25 +80,12 @@ def _chain_name_for(chain_id: int) -> str | None:
 
 
 def _orphaned_marker_rows(session: Session, chain_id: int) -> list[Any]:
-    """Marker-bearing ``effective_functions`` rows whose contract is ORPHANED —
-    ``contracts.job_id IS NULL`` — paired with the job that can rewrite them.
+    """Marker-bearing ``effective_functions`` rows on orphaned contracts (``job_id IS NULL``), paired with a job that
+    can rewrite them.
 
-    ``contracts.job_id`` is ``ON DELETE SET NULL``, so deleting a job (the admin
-    routes do) detaches its contract permanently. Every stage finds "its"
-    contract by ``Contract.job_id == job.id``, so an orphaned contract's rows are
-    unreachable to the main query below and its deferred authority NEVER
-    resolves: a permanent index-cold capability on the published surface.
-
-    The pair is keyed on the system's own contract identity — ``(address,
-    chain)``, the ``uq_contract_address_chain`` unique key — never on the bare
-    address: a twin deployment of the same address on another chain
-    is a different contract and must not be re-enqueued by this chain's pass.
-
-    ``NOT EXISTS`` on the job's own contract is what keeps this to exactly the
-    orphaned class and makes the adoption in the caller safe. A job that already
-    owns a contract row is never a candidate, so the ``copy_static_cache``
-    reassignment case (where the row legitimately belongs to a later target job)
-    cannot be stolen back, and no job can end up with two contracts.
+    Keyed on ``(address, chain)`` (``uq_contract_address_chain``), never bare address. ``NOT EXISTS`` on the job's own
+    contract limits this to orphans, so ``copy_static_cache`` reassignments aren't stolen back and no job gets two
+    contracts.
     """
     chain_name = _chain_name_for(chain_id)
     if chain_name is None:
@@ -184,15 +117,9 @@ def _orphaned_marker_rows(session: Session, chain_id: int) -> list[Any]:
 
 
 def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
-    """How many orphaned contracts carry the marker with NO job at their
-    ``(address, chain)`` that could rewrite them — the residue this reconciler
-    still cannot converge, counted so it stops being silent.
+    """Count of orphaned marker-carrying contracts with no job at their ``(address, chain)``.
 
-    Deleting a job deletes its artifacts and source files too, so these
-    contracts cannot be re-resolved from anything on disk: closing them takes a
-    fresh analysis job, which is a decision for an operator, not a background
-    pass. 2 contracts / 32 rows on the local corpus, and a lower bound (one
-    protocol, one chain).
+    Their artifacts went with the deleted job, so they need a fresh analysis.
     """
     chain_name = _chain_name_for(chain_id)
     if chain_name is None:
@@ -225,19 +152,10 @@ def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
 
 
 def _authority_backfilled(session: Session, chain_id: int, event_address: str) -> bool:
-    """True iff at least one EXACTNESS-ELIGIBLE cursor for ``event_address`` has
-    ``backfill_complete = True``.
+    """Whether any exactness-eligible cursor for ``event_address`` has ``backfill_complete``.
 
-    "Any topic backfilled" is the right gate: the re-resolution re-reads every
-    topic an adapter needs; this check only answers "did the index this function
-    was waiting on catch up to head". A cursor that exists but is still
-    mid-backfill (``backfill_complete = False``) does NOT count — re-resolving
-    then would just re-defer.
-
-    Neither does a cursor the resolution gate refuses. A warm tracking-plan
-    cursor would say "the index caught up" while ``_cursor_state`` still folds
-    the address as cold, so every reconcile pass would re-enqueue the same
-    resolution and it would defer again — a thrash loop, paid per pass.
+    Mid-backfill cursors don't count (re-resolving would re-defer), and neither do cursors ``_cursor_state`` refuses, or
+    every pass would re-enqueue a resolution that still defers.
     """
     row = session.execute(
         select(IndexedEventCursor.event_address)
@@ -251,11 +169,10 @@ def _authority_backfilled(session: Session, chain_id: int, event_address: str) -
 
 
 def _address_has_active_job(session: Session, address: str | None, *, chain_id: int, exclude_job_id: Any) -> bool:
-    """True iff a non-terminal job (queued/processing) already exists for
-    ``(address, chain_id)`` other than ``exclude_job_id`` — so the reconciler does
-    not pile a second re-analysis on top of one already in flight. Chain-scoped:
-    a twin deployment's in-flight job on another chain must not block this chain's
-    re-enqueue."""
+    """Whether a queued/processing job exists for ``(address, chain_id)`` other than ``exclude_job_id``.
+
+    Chain-scoped.
+    """
     if not address:
         return False
     row = session.execute(
@@ -273,23 +190,11 @@ def _address_has_active_job(session: Session, address: str | None, *, chain_id: 
 def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: int = 200) -> int:
     """One reconciliation pass.
 
-    Re-enqueue the policy stage of every completed job whose index-cold
-    capability deferrals can now be resolved (every deferred authority has a
-    ``backfill_complete`` cursor). Returns the number of jobs re-enqueued.
-
-    Exposed separately from the loop so tests and an at-startup boot pass can
-    drive a single pass. Commits only when it re-enqueued at least one job;
-    otherwise it rolls back so the read-only pass leaves no open transaction.
+    Re-enqueues the policy stage of every completed job whose deferred authorities are all backfilled; returns the
+    count. Commits only when something was re-enqueued.
     """
-    # Cheap pre-filter: only effective_functions whose serialized capability
-    # tree mentions the marker. The JSONB→text cast LIKE catches the marker even
-    # when the deferred leaf is nested inside an AND/OR; the precise per-leaf
-    # walk happens in Python below.
-    #
-    # ``jsonb_has_payload``, not a SQL null test: a column written from a Python
-    # ``None`` holds the jsonb scalar null, which passes a null test and casts to
-    # the four-character text ``null`` — a row with no capability tree at all,
-    # carried into the Python walk below as a ``None`` to re-check.
+    # Pre-filter on the marker via a text cast (catches nested leaves); the precise walk is below. ``jsonb_has_payload``
+    # because a Python ``None`` is stored as jsonb null, which passes a SQL null test.
     rows = session.execute(
         select(Job.id, Job.address, EffectiveFunction.capability_expr)
         .join(Contract, Contract.job_id == Job.id)
@@ -301,7 +206,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
     ).all()
 
-    # job_id -> (address, set(deferred authority addresses))
+    # job_id -> (address, deferred authority addresses)
     by_job: dict[Any, tuple[str | None, set[str]]] = {}
     for job_id, address, capability_expr in rows:
         authorities = set(_iter_deferred_authorities(capability_expr))
@@ -310,15 +215,8 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         _addr, existing = by_job.setdefault(job_id, (address, set()))
         existing.update(authorities)
 
-    # Second route: marker rows on ORPHANED contracts (``contracts.job_id IS
-    # NULL``), which the join above cannot reach at all. Their linkage is
-    # repaired below, before the re-enqueue — reaching them without repairing is
-    # worse than not reaching them, see ``adopt``.
-    #
-    # ``setdefault`` deliberately does NOT overwrite: a job already selected by
-    # the linked route owns a contract, so it can never be an orphan candidate
-    # (``_orphaned_marker_rows`` requires the job to own none), and the ordering
-    # inside the orphan query picks the newest candidate job per contract.
+    # Orphaned contracts, which the join above can't reach. Linkage is repaired below; see ``adopt``. ``setdefault``
+    # doesn't overwrite, since a linked-route job owns a contract and can't be an orphan candidate.
     adopt: dict[Any, int] = {}
     for job_id, address, capability_expr, contract_id in _orphaned_marker_rows(session, chain_id):
         authorities = set(_iter_deferred_authorities(capability_expr))
@@ -330,9 +228,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
 
     stranded = _unreachable_orphan_contracts(session, chain_id)
     if stranded:
-        # Not a sentinel that mitigates anything — a count that stops the
-        # condition being invisible. These contracts have no job at their
-        # (address, chain), so nothing here can converge them.
+        # Just a count so the condition isn't invisible.
         logger.warning(
             "deferred-resolution reconciler: %s orphaned contract(s) on chain %s carry index-cold "
             "deferrals with no completed job at their (address, chain) — a fresh analysis is required "
@@ -345,10 +241,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     for job_id, (address, authorities) in by_job.items():
         if reenqueued >= limit:
             break
-        # Wait until EVERY authority this job deferred on is backfilled. Partial
-        # re-resolution would leave some leaves cold and risk re-selecting the
-        # job every pass; gating on "all warm" bounds re-enqueues to one per
-        # all-warm transition (backfill_complete is monotonic).
+        # Wait until every authority is warm, bounding re-enqueues to one per transition.
         if not all(_authority_backfilled(session, chain_id, addr) for addr in authorities):
             continue
         job = session.get(Job, job_id)
@@ -359,21 +252,13 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         orphan_contract_id = adopt.get(job_id)
         if orphan_contract_id is not None:
             contract = session.get(Contract, orphan_contract_id)
-            # Re-check under the same transaction that produced the plan: the row
-            # must still be orphaned and the job must still own nothing.
+            # Re-check within the same transaction.
             if contract is None or contract.job_id is not None:
                 continue
             if session.execute(select(Contract.id).where(Contract.job_id == job.id).limit(1)).first() is not None:
                 continue
-            # Repair the linkage, do not merely reach past it. The policy stage
-            # writes ``effective_functions`` for ``Contract.job_id == job.id``;
-            # re-enqueueing an address-matched job WITHOUT this would make that
-            # stage log "no Contract row for job; wrote zero DB rows", leave the
-            # marker in place, and hand the same job back to the next pass
-            # forever — the thrash-free property depends on the re-run clearing
-            # the marker. So the choice is repair-and-re-enqueue or leave it
-            # alone; reach-without-repair is a re-enqueue storm plus a
-            # guaranteed no-op.
+            # Repair the linkage: the policy stage writes for ``Contract.job_id == job.id``, so re-enqueueing without it
+            # writes nothing, leaves the marker, and re-enqueues forever.
             contract.job_id = job.id
             logger.info(
                 "deferred-resolution reconciler re-linked orphaned contract %s (%s) to job %s before "
@@ -399,9 +284,9 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
 
 
 def _requeue_policy(job: Job, detail: str) -> None:
-    """Reset a completed job to a fresh queued policy stage so the production
-    pipeline re-resolves and re-persists everything. Clears the lease / backoff
-    columns so ``claim_job`` mints a fresh lease immediately."""
+    """Reset a completed job to a queued policy stage, clearing lease and backoff so ``claim_job`` picks it up
+    immediately.
+    """
     job.stage = JobStage.policy
     job.status = JobStatus.queued
     job.worker_id = None
@@ -412,10 +297,8 @@ def _requeue_policy(job: Job, detail: str) -> None:
 
 
 def _iter_role_store_frontiers(node: Any) -> Iterator[tuple[str, int]]:
-    """Yield ``(authority, fold_frontier)`` for every ``enumerable_role_store`` trace
-    step in a serialized ``capability_expr`` tree — the (address, height) the adapter
-    folded a controller set up to. Walks ``children`` / ``signer`` like
-    ``_iter_deferred_authorities`` so a step nested in an AND/OR composition is found.
+    """Yield ``(authority, fold_frontier)`` for every ``enumerable_role_store`` trace step, walking ``children`` /
+    ``signer``.
     """
     if not isinstance(node, dict):
         return
@@ -439,9 +322,7 @@ def _iter_role_store_frontiers(node: Any) -> Iterator[tuple[str, int]]:
 
 
 def _role_row_past_frontier(session: Session, chain_id: int, event_address: str, frontier: int) -> bool:
-    """True iff a role-store grant/revoke row for ``event_address`` is indexed at a
-    block PAST ``frontier`` — a membership change the persisted enumeration did not
-    fold (``> frontier`` because the fold covered ``<= frontier`` inclusive)."""
+    """Whether a grant/revoke for ``event_address`` is indexed past ``frontier`` (the fold covered ``<= frontier``)."""
     row = session.execute(
         select(IndexedEventLog.block_number)
         .where(IndexedEventLog.chain_id == chain_id)
@@ -454,18 +335,10 @@ def _role_row_past_frontier(session: Session, chain_id: int, event_address: str,
 
 
 def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 200) -> int:
-    """One role-drift pass — the warm counterpart to the cold self-heal above.
+    """One role-drift pass, the warm counterpart to the cold self-heal.
 
-    Re-enqueue the policy stage of every completed job whose persisted capability
-    enumerated a role store (an ``enumerable_role_store`` trace step) once a
-    grant/revoke has been indexed PAST that trace's fold frontier. Returns the
-    number of jobs re-enqueued.
-
-    Thrash-bounded: the re-run folds to the current head and stamps a higher
-    ``fold_frontier``, so the same row never re-selects the job (the frontier is
-    monotonic under the indexer). Gated on ``backfill_complete`` so a re-run lands
-    a warm fold rather than bouncing straight back to a cold deferral. Reuses the
-    reconciler's requeue machinery; does not touch the monitoring pipeline.
+    Re-enqueues the policy stage of jobs whose role-store enumeration has a grant/revoke indexed past its fold frontier;
+    returns the count. The re-run stamps a higher frontier, so it doesn't re-select. Gated on ``backfill_complete``.
     """
     rows = session.execute(
         select(Job.id, Job.address, EffectiveFunction.capability_expr)
@@ -478,13 +351,12 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{TRACE_STEP_ENUMERABLE_ROLE_STORE}%"))
     ).all()
 
-    # job_id -> (address, {authority: lowest folded frontier seen})
+    # job_id -> (address, {authority: lowest frontier})
     by_job: dict[Any, tuple[str | None, dict[str, int]]] = {}
     for job_id, address, capability_expr in rows:
         _addr, frontiers = by_job.setdefault(job_id, (address, {}))
         for authority, frontier in _iter_role_store_frontiers(capability_expr):
-            # The lowest frontier is the conservative one: a row past even the
-            # least-advanced fold means some persisted enumeration is stale.
+            # The lowest frontier is the conservative one.
             prior = frontiers.get(authority)
             frontiers[authority] = frontier if prior is None else min(prior, frontier)
 
@@ -551,7 +423,6 @@ def enqueue_reorg_refreshes(session: Session, *, chain_id: int, authority: str) 
 
 
 def refresh_invalidated_job(session: Session, job_id: Any) -> int:
-    """Requeue a reorg-invalidated fold once its inputs and execution slot allow."""
     from services.resolution.indexer_work import WorkPending
 
     job = session.execute(

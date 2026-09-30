@@ -1,9 +1,4 @@
-"""Chat / agent services for the company-page sidebar.
-
-Public surface:
-- run_agent_stream — streaming agent loop with tool use
-- TOOL_DEFINITIONS — OpenRouter-shaped tool schemas exposed to the model
-"""
+"""Chat/agent services for the company-page sidebar."""
 
 from services.chat.agent import run_agent_stream
 from services.chat.tools import TOOL_DEFINITIONS

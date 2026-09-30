@@ -10,13 +10,10 @@ if TYPE_CHECKING:  # typing-only: scoring reads static's persisted JSON, not its
 
 from utils.scoring_status import MODEL_VERSION
 
-# --- the two scale constants ------------------------------------------------
 SEV_SCALE = 60.0
 LAMBDA = 0.6
 
-# --- value bands ------------------------------------------------------------
-# (upper bound exclusive, weight). Above the last bound the weight is
-# VALUE_BAND_TOP.
+# (upper bound exclusive, weight). Above the last bound the weight is VALUE_BAND_TOP.
 VALUE_BANDS: tuple[tuple[float, float], ...] = (
     (100_000.0, 0.15),
     (1_000_000.0, 0.3),
@@ -26,14 +23,12 @@ VALUE_BANDS: tuple[tuple[float, float], ...] = (
 )
 VALUE_BAND_TOP = 1.0
 
-# The unpriced branch: an unpriceable capability keeps the lowest band's weight
-# (still scores, publishes ``value_band: not_determined``) — dropping it would
-# let an unpriceable asset buy a clean grade.
+# Unpriceable capabilities keep the lowest band's weight (``value_band: not_determined``) so unpriceable assets can't
+# buy a clean grade.
 UNPRICED_BAND = 0.15
 
-# --- per-capability severity ------------------------------------------------
-# What the claim's PROVEN EXISTENCE licenses; refined only downward by
-# mitigating witnesses, never raised by the absence of one.
+# What the claim's proven existence licenses; refined only downward by mitigating witnesses, never raised by their
+# absence.
 BASE_SEVERITY: dict[str, float] = {
     "upgrade.implementation": 1.0,
     "authority.replace": 0.75,
@@ -52,69 +47,53 @@ BASE_SEVERITY: dict[str, float] = {
     "flow.out": 0.9,
 }
 
-# --- destination-bearing severity -------------------------------------------
-# Apply ONLY on a proven destination state; an unread destination yields no
-# severity at all, so none of these can be reached by absence.
+# Only on a proven destination state; an unread destination yields no severity.
 DEST_SEVERITY_UNCONSTRAINED = 1.0
 DEST_SEVERITY_HASH_COMMITMENT_PINS = 0.20
 DEST_SEVERITY_EXTERNAL_CALL_REVERT = 0.60
 DEST_SEVERITY_CONSTRAINED_OTHER = 0.35
-# delegatecall to address(this) preserves msg.sender, so every sub-call re-runs
-# its own access control; a plain CALL to self makes msg.sender the contract,
-# which can satisfy an ``address(this)`` gate — fixed, but not benign.
+# delegatecall to address(this) preserves msg.sender, so sub-calls re-run their own access control; a plain CALL to self
+# makes msg.sender the contract, which can satisfy an ``address(this)`` gate.
 DEST_SEVERITY_DELEGATECALL_SELF = 0.0
 DEST_SEVERITY_EXEC_SELF = 0.35
 FLOW_SEVERITY_CALLER_ARBITRARY = 0.9
 FLOW_SEVERITY_FIXED_DESTINATION = 0.10
-# The three proven-benign payout shapes are 0.0 because the bound is PROVEN
-# (the payout moves no position the caller did not just fund), never because a
-# witness was unread — an unread witness yields no severity and the row is
-# withheld from the grade instead.
+# Proven-benign payout shapes: 0.0 because the bound is proven (the payout moves nothing the caller didn't just fund),
+# never because a witness was unread.
 FLOW_SEVERITY_MSG_VALUE_SELF_RETURN = 0.0
 FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH = 0.0
 FLOW_SEVERITY_SELF_SERVICE_BOUNDED = 0.0
 OWNERSHIP_DEFAULT_ADMIN_RULES = 0.35
 
-# --- freeze ladder ----------------------------------------------------------
-# Each rung is licensed by a proof, not an outcome: existence is unconditional
-# (and where every undetermined recovery question stays), RECOVERABLE needs
-# proven key-set independence, SUSTAINABLE is added only on proven dependence.
-# AUTO_EXPIRY is admitted only under a witnessed duration bound at or below
-# FREEZE_AUTO_EXPIRY_MAX_SECONDS.
+# Each rung needs a proof: existence is unconditional, RECOVERABLE needs proven key-set independence, SUSTAINABLE proven
+# dependence, AUTO_EXPIRY a witnessed duration bound at or below FREEZE_AUTO_EXPIRY_MAX_SECONDS.
 FREEZE_CAPABILITY_PROVEN = 0.05
 FREEZE_KEYSET_RECOVERABLE = 0.05
 FREEZE_SUSTAINABLE = 0.20
 FREEZE_AUTO_EXPIRY = 0.02
 FREEZE_AUTO_EXPIRY_MAX_SECONDS = 30 * 86400
 
-# --- weakness ladder --------------------------------------------------------
 WEAKNESS_EOA = 0.9
 WEAKNESS_ANYONE = 1.0
-# The uncredited rung is what an UNREAD witness lands on, deliberately BELOW
-# the proven single-signer worst case: a fabricated k/n would be worse than a
-# conservative rung.
+# Where an unread witness lands; deliberately below the proven single-signer worst case.
 WEAKNESS_SAFE_UNCREDITED = 0.55
 WEAKNESS_SAFE_SINGLE_SIGNER = 0.85
 WEAKNESS_SAFE_MINORITY = 0.55
 WEAKNESS_SAFE_MAJORITY = 0.35
 WEAKNESS_SAFE_SUPERMAJORITY = 0.2
 WEAKNESS_TIMELOCK_UNDETERMINED = 0.55
-# Exact rationals, compared exactly, both boundaries INCLUSIVE: 3/6 is a
-# majority and 4/6 is the 2/3 supermajority it literally is. A float threshold
-# (0.67) silently excluded every exact-two-thirds quorum.
+# Exact rationals, inclusive boundaries: a float 0.67 excluded exact two-thirds quorums.
 SAFE_MAJORITY_RATIO = Fraction(1, 2)
 SAFE_SUPERMAJORITY_RATIO = Fraction(2, 3)
 
-# A proven holder floor >1 on the gating role is proven BREADTH; may only raise.
+# A proven holder floor >1 on the gating role; may only raise.
 ROLE_BREADTH_MULTI_HOLDER_WEAKNESS = 0.55
 
-# --- delay discount ---------------------------------------------------------
 DELAY_DISCOUNT_FLOOR = 0.25
 DELAY_DISCOUNT_SATURATION_DAYS = 30.0
 
-# --- capability classes -----------------------------------------------------
-# CODE control replaces what the node DOES: expansion covers the controlled
-# node's whole closure (bounded by each destination's own caller conditions).
+# Code control replaces what the node does: expansion covers its whole closure (bounded by each destination's caller
+# conditions).
 CODE_CONTROL_CAPABILITIES = frozenset(
     {
         "upgrade.implementation",
@@ -123,9 +102,8 @@ CODE_CONTROL_CAPABILITIES = frozenset(
     }
 )
 
-# GATE control replaces who MAY CALL: expansion only through edges the gate is
-# witnessed to confer; an edge whose scope is not determined confers nothing
-# and the hop is published as not_determined rather than walked.
+# Gate control replaces who may call: expansion only through edges the gate is witnessed to confer; undetermined scope
+# confers nothing and the hop is published as not_determined.
 GATE_CONTROL_CAPABILITIES = frozenset(
     {
         "authority.replace",
@@ -140,10 +118,8 @@ TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES
 
 DESTINATION_BEARING_SEVERITY = frozenset({"flow.out", "delegatecall.execute", "exec.arbitrary"})
 
-# Proven-0.0 severity bases that are UNCHARGED PRODUCT SURFACE: kept in the
-# population (confidence credit stays), excluded from the finding ledger. The
-# fold gates the exclusion on BOTH token AND value 0.0 — never the float alone,
-# which would sweep in pause.set's proven build-up-from-zero.
+# Proven-0.0 bases that are uncharged product surface: kept for confidence, excluded from findings. The fold requires
+# both token and value 0.0, since ``pause.set`` also starts at zero.
 UNCHARGED_PRODUCT_BASES = frozenset(
     {
         "proven_self_service_bounded",
@@ -152,8 +128,7 @@ UNCHARGED_PRODUCT_BASES = frozenset(
     }
 )
 
-# Product surface: scored only where permissionlessness is PROVEN. A
-# not_determined openness is not product and is published as a warning.
+# Scored only where permissionlessness is proven; undetermined openness is warned.
 PRODUCT_CLAIMS = frozenset(
     {
         "flow.in",
@@ -173,17 +148,13 @@ PRODUCT_CLAIMS = frozenset(
     }
 )
 
-# No severity semantics exists for these; exclusion is not a judgement that the
-# capability is benign, so each publishes a warning.
+# No severity model yet; excluded with a warning, not judged benign.
 UNMODELLED_CLAIMS = frozenset({"value_router", "contract_deployment", "callee_pointer.rotate"})
 
-# --- static destination lattice --------------------------------------------
 FIXED_TARGET_KINDS: frozenset[StateVarTargetKind] = frozenset({"immutable", "constant", "storage_no_setter"})
-# Annotated against the static plane's Literal (type-only import) so a
-# vocabulary drift is a pyright error without a runtime coupling.
+# Type-only import of the static plane's Literal, so vocabulary drift is a pyright error.
 ADMIN_TARGET_KIND: "StateVarTargetKind" = "storage_setter"
-# Proven caller-relative destinations: priced from the authority witness,
-# never from the kind alone (``distill._caller_relative_destination``).
+# Priced from the authority witness, never from the kind (``distill._caller_relative_destination``).
 CALLER_RELATIVE_TARGET_KINDS = frozenset({"msg_sender", "token_owner"})
 TARGET_KIND_RANK: dict[str, int] = {
     "indeterminate": 0,
@@ -200,7 +171,7 @@ TARGET_KIND_RANK: dict[str, int] = {
 NATIVE_FLOW_KINDS = frozenset({"native_transfer_send", "low_level_value_call"})
 ERC20_FLOW_KINDS = frozenset({"callee_erc20_selector"})
 
-# Resolution-provenance tiers. An UNKNOWN basis maps to the weakest tier.
+# An unknown basis maps to the weakest tier.
 RESOLVER_BASIS_TIERS: dict[str, str] = {
     "abi_auto_getter": "abi_forced",
     "auto_getter": "abi_forced",
@@ -212,10 +183,7 @@ RESOLVER_BASIS_TIERS: dict[str, str] = {
 }
 WEAKEST_RESOLVER_BASIS_TIER = "accessor_name_matched"
 
-# --- uncalibrated arms ------------------------------------------------------
-# Arms whose positive branch never fired on any corpus the model was measured
-# on: exercised by constructed fixtures only, published so a consumer can see
-# the arm is untested. An entry whose positive branch fires is removed.
+# Arms whose positive branch never fired on a measured corpus (fixtures only). Remove an entry once it fires.
 UNCALIBRATED_ARMS: tuple[str, ...] = (
     "reach_indeterminate_floor",
     "target_variable",
@@ -253,7 +221,6 @@ UNCALIBRATED_ARMS: tuple[str, ...] = (
 
 
 def band(usd: float | None) -> float:
-    """The band weight. ``None`` is the UNPRICED branch, never a zero."""
     if usd is None:
         return UNPRICED_BAND
     for bound, weight in VALUE_BANDS:
@@ -281,9 +248,7 @@ def band_label(usd: float | None) -> str:
 def delay_discount(seconds: float | None) -> float | None:
     """f(delay): monotone decreasing, log in days, saturating, floored.
 
-    A PROVEN ZERO delay returns ``1.0`` — no discount — because zero is an
-    answer. ``None`` is reserved for a delay that could not be read; a negative
-    value is unreadable, not a negative wait.
+    A proven zero delay returns ``1.0``. ``None`` means unreadable; negatives are unreadable too.
     """
     import math
 
@@ -305,16 +270,11 @@ def delay_discount(seconds: float | None) -> float | None:
 def quorum_weakness(
     k: int | None, n: int | None, *, credit_withheld: bool, waive_single_signer_cliff: bool = False
 ) -> float:
-    """k/n as an UPPER BOUND on protection.
+    """k/n as an upper bound on protection.
 
-    ``credit_withheld`` is the ``safe_protection`` verdict: a proven module or
-    guard means the threshold can be bypassed, so the k/n demotion is denied and
-    the result cannot fall below the un-credited base. It never raises weakness
-    above what k/n alone would have said.
-
-    ``waive_single_signer_cliff`` is the emergency-response design credit for a
-    single-signer freeze, granted only where recoverability by an independent
-    key set has been PROVEN, never on the capability's name.
+    ``credit_withheld`` (a proven module or guard can bypass the threshold) denies the k/n demotion but never raises
+    weakness above k/n. ``waive_single_signer_cliff`` is granted for a single-signer freeze only where independent-key
+    recoverability is proven.
     """
     if k is None or not n:
         return WEAKNESS_SAFE_UNCREDITED
@@ -337,7 +297,7 @@ def resolver_basis_tier(basis: str | None) -> str:
 
 
 def model_parameters() -> dict[str, Any]:
-    """The block emitted in every document. Sorted, so two documents diff."""
+    """The block emitted in every document, sorted so documents diff."""
     return {
         "model_version": MODEL_VERSION,
         "severity_scale": SEV_SCALE,

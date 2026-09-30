@@ -1,16 +1,12 @@
-"""Page-offset + ligature helpers shared across scope extraction submodules."""
-
 from __future__ import annotations
 
 import re
 from typing import Final
 
-# Matches the ``\f\n--- page {n} ---\n\f`` markers emitted by
-# ``services.audits.text_extraction.extract_text_from_pdf``.
+# Emitted by ``text_extraction.extract_text_from_pdf``.
 _PAGE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"\f\n--- page (\d+) ---\n\f")
 
-# Unicode ligatures pypdf leaves in extracted text. Normalized so contract
-# names like "EthfiL2Token" match across both halves of the pipeline.
+# pypdf leaves ligatures that break name matches.
 _LIGATURE_MAP: Final[dict[str, str]] = {
     "\ufb00": "ff",
     "\ufb01": "fi",
@@ -23,7 +19,6 @@ _LIGATURE_MAP: Final[dict[str, str]] = {
 
 
 def _normalize_ligatures(text: str) -> str:
-    """Replace unicode ligatures (U+FB00..U+FB06) with their ASCII expansion."""
     for lig, ascii_pair in _LIGATURE_MAP.items():
         if lig in text:
             text = text.replace(lig, ascii_pair)
@@ -31,11 +26,9 @@ def _normalize_ligatures(text: str) -> str:
 
 
 def _page_offsets(text: str) -> list[tuple[int, int]]:
-    """Return ``[(page_number, start_offset), ...]`` plus a sentinel at ``len(text)``.
+    """``[(page, offset), ...]`` plus a sentinel at ``len(text)``.
 
-    ``extract_text_from_pdf`` strips its output, so the leading ``\\f`` of
-    the first page marker is missing — we synthesize ``(1, 0)`` when no
-    page-1 marker is captured so pre-first-marker offsets still resolve.
+    The first marker's ``\\f`` is stripped, so ``(1, 0)`` is synthesized.
     """
     pages: list[tuple[int, int]] = []
     for m in _PAGE_MARKER_RE.finditer(text):
@@ -47,7 +40,6 @@ def _page_offsets(text: str) -> list[tuple[int, int]]:
 
 
 def _page_of_offset(pages: list[tuple[int, int]], offset: int) -> int:
-    """Look up the page number containing ``offset``."""
     for i in range(len(pages) - 1):
         if pages[i][1] <= offset < pages[i + 1][1]:
             return pages[i][0]
@@ -55,5 +47,4 @@ def _page_of_offset(pages: list[tuple[int, int]], offset: int) -> int:
 
 
 def scope_artifact_key(audit_report_id: int) -> str:
-    """Deterministic object-storage key for an audit's scope JSON blob."""
     return f"audits/scope/{int(audit_report_id)}.json"

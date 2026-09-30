@@ -1,29 +1,17 @@
 """Solodit (Cyfrin) audit-report discovery client.
 
-Solodit aggregates ~50,000 findings across ~8,000 reports from every major
-audit firm. For our purposes, it's the highest-leverage upstream source:
-one query by protocol name returns a canonical list of audit reports for
-that protocol, complete with auditor name, date, and the original PDF URL.
+Solodit aggregates tens of thousands of findings across thousands of reports, so one query by protocol returns a
+canonical list of reports with auditor, date and PDF URL.
 
-Solodit doesn't expose a documented public API, but the web UI's tRPC
-backend at ``https://solodit.cyfrin.io/api/trpc/findings.get`` is reachable
-without auth. This module is a thin client around that endpoint:
+There's no documented API; this wraps the web UI's unauthenticated tRPC endpoint
+``https://solodit.cyfrin.io/api/trpc/findings.get``:
 
-  - Builds the devalue-encoded input the backend expects (a structurally-
-    shared array literal — see the MCP wrapper at
-    ``LyuboslavLyubenov/search-solodit-mcp`` for prior art).
-  - Decodes the response by piping the JS-eval'd payload through
-    ``node -e`` (the response is a self-executing IIFE returning an object
-    with ``BigInt`` ids and ``Date`` timestamps that no JSON parser handles).
-  - Paginates until either ``pages`` is exhausted or no new ``contest_link``
-    URLs have appeared for ``_STOP_AFTER_BARREN_PAGES`` consecutive pages.
-  - Deduplicates by ``contest_link`` and returns one normalized record per
-    audit report.
+  - builds the devalue-encoded input (see ``LyuboslavLyubenov/search-solodit-mcp``);
+  - decodes the response (a JS IIFE with ``BigInt`` and ``Date`` values) by piping it through ``node -e``;
+  - paginates until pages run out or ``_STOP_AFTER_BARREN_PAGES`` pages add no new ``contest_link``;
+  - dedups by ``contest_link``, one record per report.
 
-The output shape mirrors what ``audit_reports.search_audit_reports``
-expects, so callers can drop Solodit's results straight into the same
-report list that Tavily/GitHub-crawled entries land in. The downstream
-LLM validate-and-cluster pass handles cross-source mirror dedup.
+The output shape matches ``audit_reports.search_audit_reports``; the LLM cluster pass handles cross-source dedup.
 """
 
 from __future__ import annotations
@@ -45,35 +33,21 @@ logger = logging.getLogger(__name__)
 
 _SOLODIT_TRPC_URL = "https://solodit.cyfrin.io/api/trpc/findings.get"
 
-# Stop paginating once this many consecutive pages add zero new audit URLs.
-# Findings are sorted by recency; once we've seen the audits, the remaining
-# pages are just additional findings on the same already-collected audits.
+# Findings are by recency, so once audits are seen the rest are more findings on them.
 _STOP_AFTER_BARREN_PAGES = 3
 
-# Hard cap on pages even when new URLs keep appearing — protects against
-# pathological queries (a generic word like "DeFi" returns thousands).
+# Hard cap for generic queries that return thousands.
 _MAX_PAGES = 40
 
-# Per-request timeout for the Solodit HTTP call. The backend is slow on
-# heavyweight queries (~5–10s for popular protocols).
+# The backend is slow on popular queries (~5-10s).
 _REQUEST_TIMEOUT = 30
 
-# Per-request timeout for the node decoder. Even a 10K-finding response
-# evals to JSON in well under a second on commodity hardware.
 _NODE_TIMEOUT = 10
 
 
-# --- Input/output -----------------------------------------------------------
-
-
 def _build_input(keyword: str, page: int) -> str:
-    """Build the structurally-shared input string the tRPC backend expects.
-
-    The wire format inlines string literals into a positional array and
-    references them by index — see the MCP wrapper repo for the original
-    reverse-engineered template. Only ``keyword`` and ``page`` change per
-    request; every other filter is fixed at "all-permissive" so we never
-    accidentally drop a real audit.
+    """The tRPC input: string literals in a positional array referenced by index (reverse-engineered; see the MCP
+    wrapper). Only ``keyword`` and ``page`` vary; every filter is maximally permissive.
     """
     safe_keyword = keyword.replace('"', '\\"')
     return (
@@ -93,10 +67,7 @@ def _build_input(keyword: str, page: int) -> str:
     )
 
 
-# Node script that reads JS source on stdin, evals, and prints JSON. The
-# replacer normalizes BigInt to string and Date to ISO 8601 — both appear
-# in Solodit responses (id/auditfirm_id/protocol_id are BigInts, report_date
-# is a Date) and would otherwise crash JSON.stringify.
+# Eval the JS on stdin and print JSON, converting BigInt to string and Date to ISO 8601.
 _NODE_DECODE_SCRIPT = (
     "process.stdin.resume(); let s=''; "
     "process.stdin.on('data', d => s+=d); "
@@ -115,11 +86,7 @@ _NODE_DECODE_SCRIPT = (
 
 
 def _decode_response(js_payload: str) -> dict[str, Any] | None:
-    """Pipe the JS-eval'd payload through node and parse as JSON.
-
-    Returns ``None`` if node fails or the output isn't a dict — callers
-    treat the page as empty rather than blowing up the whole pagination.
-    """
+    """Decode the payload via node; ``None`` if node fails or the result isn't a dict (the page counts as empty)."""
     try:
         result = subprocess.run(
             ["node", "-e", _NODE_DECODE_SCRIPT],
@@ -144,23 +111,15 @@ def _decode_response(js_payload: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-# --- HTTP fetch -------------------------------------------------------------
-
-
-# Retry config for 5xx + transport failures. Solodit's tRPC backend
-# occasionally returns 500 under load (effectively a soft rate limit) and
-# the same call succeeds on retry after a short backoff.
+# The backend returns 500 under load (a soft rate limit) that succeeds on retry.
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.5  # seconds — first retry waits 1.5s, then 3s, then 6s
 
 
 def _fetch_page(keyword: str, page: int) -> dict[str, Any] | None:
-    """Fetch one Solodit search page. Returns ``{count, pages, findings}`` or
-    ``None`` on transport / decode failure.
+    """One search page as ``{count, pages, findings}``, or ``None``.
 
-    Retries up to ``_MAX_RETRIES`` times on 5xx and transient transport
-    errors. 4xx errors fail immediately — those are programming bugs in
-    the input we're sending, not infrastructure issues.
+    Retries 5xx and transport errors up to ``_MAX_RETRIES``; 4xx fails immediately (a bug in our input).
     """
     url = f"{_SOLODIT_TRPC_URL}?batch=1&input=" + urllib.parse.quote(_build_input(keyword, page))
 
@@ -219,7 +178,6 @@ def _fetch_page(keyword: str, page: int) -> dict[str, Any] | None:
             return _decode_response(payload)
 
         last_status = resp.status_code
-        # Retry on 5xx (server-side / soft rate limit) and 429. Bail on 4xx.
         if resp.status_code >= 500 or resp.status_code == 429:
             if attempt < _MAX_RETRIES:
                 wait = _BACKOFF_BASE * (2**attempt)
@@ -246,15 +204,11 @@ def _fetch_page(keyword: str, page: int) -> dict[str, Any] | None:
     return None
 
 
-# --- Filtering --------------------------------------------------------------
-
-
 _NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]")
 
 
 def _company_variants(company: str) -> list[str]:
-    """Same shape as ``audit_reports._company_name_variants`` — kept local
-    so this module has no dependency on the orchestrator."""
+    """Like ``audit_reports._company_name_variants``, kept local to avoid depending on the orchestrator."""
     base = company.strip().lower()
     if not base:
         return []
@@ -266,11 +220,9 @@ def _company_variants(company: str) -> list[str]:
 
 
 def _protocol_matches_company(protocol_name: str, company_variants: list[str]) -> bool:
-    """True when Solodit's resolved protocol_name matches the company we asked
-    about. Solodit's keyword search returns hits whose CONTENT mentions the
-    keyword, not whose protocol IS the keyword — so an "ether.fi" search
-    would return Aave findings that happen to mention ether.fi in passing.
-    Filter to entries where the resolved protocol matches what we asked for.
+    """Whether Solodit's resolved protocol matches the company.
+
+    Keyword search matches content, so an "ether.fi" search also returns other protocols' findings that mention it.
     """
     if not company_variants:
         return True
@@ -280,34 +232,26 @@ def _protocol_matches_company(protocol_name: str, company_variants: list[str]) -
     return any(v in haystack or haystack in v for v in company_variants)
 
 
-# --- Public API -------------------------------------------------------------
-
-
 def search(
     company: str,
     *,
     max_pages: int = _MAX_PAGES,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search Solodit for audit reports of ``company``.
-
-    Returns a list of normalized audit-report dicts ready to merge with
-    the rest of ``search_audit_reports``'s output:
+    """Search Solodit for audit reports of ``company``, as records ready to merge with ``search_audit_reports``:
 
         {
-          "url": str,             # canonical audit report URL
-          "pdf_url": str | None,  # PDF when known (Solodit ``pdf_link``)
+          "url": str,             # canonical report URL
+          "pdf_url": str | None,  # Solodit ``pdf_link``
           "auditor": str,
           "title": str,
-          "date": str | None,     # YYYY-MM-DD when available
+          "date": str | None,     # YYYY-MM-DD
           "source_url": "https://solodit.cyfrin.io/",
-          "confidence": float,    # high — Solodit is human-curated
+          "confidence": float,    # high; human-curated
         }
 
-    Iterates pages until either (a) Solodit's reported page count is
-    exhausted, (b) ``max_pages`` is hit, or (c) ``_STOP_AFTER_BARREN_PAGES``
-    consecutive pages add zero new ``contest_link`` URLs. Returns ``[]`` on
-    transport failure — Solodit being down should never break the pipeline.
+    Stops when pages run out, at ``max_pages``, or after ``_STOP_AFTER_BARREN_PAGES`` barren pages. Returns ``[]`` on
+    transport failure.
     """
     clean = (company or "").strip()
     if not clean:
@@ -328,8 +272,7 @@ def search(
 
         body = _fetch_page(clean, page)
         if body is None:
-            # Transport / decode failure — stop early, don't fail the
-            # whole pipeline. Whatever we have is still useful.
+            # Stop early and keep what we have.
             break
 
         if total_pages_known is None:
@@ -348,7 +291,6 @@ def search(
                 continue
             url = (finding.get("contest_link") or "").strip()
             if not url:
-                # Some findings only have ``source_link`` — fall back.
                 url = (finding.get("source_link") or "").strip()
             if not url:
                 continue
@@ -357,8 +299,7 @@ def search(
 
             protocol_name = (finding.get("protocol_name") or "").strip()
             if variants and not _protocol_matches_company(protocol_name, variants):
-                # Solodit keyword-matched on content; the actual audit
-                # is for a different protocol. Skip.
+                # Keyword matched content; the audit is for another protocol.
                 continue
 
             seen_urls.add(url)
@@ -396,9 +337,7 @@ def search(
         else:
             barren = 0
 
-        # Be polite — Solodit's tRPC backend gets cranky under sustained
-        # load and starts returning 500s. A short pause between successful
-        # page fetches keeps us under whatever soft limit it enforces.
+        # Pause between pages; sustained load triggers 500s.
         if total_pages_known and page < total_pages_known:
             time.sleep(0.75)
 
@@ -408,13 +347,9 @@ def search(
 
 
 def _derive_title(firm: str, protocol: str, finding: dict[str, Any]) -> str:
-    """Synthesize an audit-report title.
+    """Synthesize a report title: Solodit's ``title`` is the finding's, not the report's.
 
-    Solodit's ``title`` field is the FINDING title (about a specific bug),
-    not the audit report title. Most callers want a coarse "Foo audited
-    Bar" string for display + dedup matching, so we synthesize one. When
-    the finding came from a contest platform (``contest_id``), prefer
-    "Foo Contest" for clarity.
+    Contest findings get "Foo Contest".
     """
     contest_id = (finding.get("contest_id") or "").strip()
     base = f"{firm} {protocol} Audit".strip()

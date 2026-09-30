@@ -24,11 +24,9 @@ from services.scoring.schema import NOT_DETERMINED, coalesce_chain, entity_key
 
 @dataclass(frozen=True)
 class ControlEdge:
-    """One proven control edge: ``principal`` has authority over ``anchor``.
+    """One proven control edge: ``principal`` has authority over ``anchor`` (chain-scoped keys).
 
-    Both ends are chain-scoped entity keys. ``relation`` and ``edge_id`` are
-    ``None`` for the ``contracts.admin`` column, which is a witness that exists
-    in no edge table.
+    ``relation``/``edge_id`` are ``None`` for the ``contracts.admin`` column.
     """
 
     principal: str
@@ -41,21 +39,14 @@ class ControlEdge:
 
 REFUSAL_ZERO_PRINCIPAL = "zero_address_principal"
 REFUSAL_ZERO_ANCHOR = "zero_address_anchor"
-# A beacon or admin column that names the contract itself. The edge would say
-# the entity controls itself, which adds no reach and asserts no authority over
-# anyone — refused with a count rather than admitted as a self-loop the walk
-# silently absorbs.
+# A beacon or admin column naming the contract itself: refused and counted, not absorbed as a self-loop.
 REFUSAL_SELF_EDGE = "self_referential_column"
-# A stored edge whose endpoint node id carries no address. It is a row this
-# loader cannot key, and dropping it uncounted would make a graph writer that
-# started emitting unusable ids read as a protocol with less control in it.
+# An endpoint with no address: counted, so a writer emitting unusable ids isn't silent.
 REFUSAL_MALFORMED_NODE_ID = "malformed_node_id"
 
 
 @dataclass(frozen=True)
 class RefusedEdge:
-    """An edge the closure declined to admit, and the rule that declined it."""
-
     rule: str
     principal: str
     anchor: str
@@ -66,17 +57,8 @@ class RefusedEdge:
 
 @dataclass(frozen=True)
 class RenouncedAuthority:
-    """An authority slot proven EMPTY: the anchor's ``label`` holds ``0x0``.
-
-    An earned negative, not a missing edge and not a refused one. For an
-    ownership slot this is renunciation; for a configuration pointer it is a
-    reference nobody set. Either way the slot names no principal at the observed
-    height, which is a resolved constraint — the mirror of the whole defect class
-    where a proven fact is discarded because the loader had no shape for it.
-
-    Counted apart from the refusals it coincides with: "we refused to walk an
-    edge to the burn address" and "this authority is proven to be held by nobody"
-    are different facts and only the second is evidence about the protocol.
+    """An authority slot proven empty (the anchor's ``label`` holds ``0x0``): renunciation for ownership, an unset
+    pointer otherwise. An earned negative, counted apart from the refusals it coincides with.
     """
 
     anchor: str
@@ -88,17 +70,9 @@ class RenouncedAuthority:
 
 @dataclass
 class ControlClosure:
-    """The protocol's control edges, indexed by principal.
+    """The protocol's control edges indexed by principal, each with its relation and scope.
 
-    Every edge carries the relation and scope it was proven under, so a walk can
-    ask what an edge licenses rather than only whether it exists.
-    ``controlled_by`` is the adjacency view — the whole answer this plane used to
-    return, now derived from the edges rather than standing in for them.
-
-    ``refusals`` and ``renounced`` are what the loader declined to admit and what
-    it read as a proven-absent authority; both are published counts rather than
-    silent drops, on the ``5b5db0c4`` template where every admission rule states
-    where it fired.
+    ``controlled_by`` is derived adjacency. ``refusals`` and ``renounced`` are published counts, not silent drops.
     """
 
     edges: tuple[ControlEdge, ...] = ()
@@ -113,18 +87,15 @@ class ControlClosure:
         self._out = {principal: tuple(rows) for principal, rows in sorted(grouped.items())}
 
     def principals(self) -> tuple[str, ...]:
-        """Every entity with at least one outbound control edge, ordered."""
         return tuple(self._out)
 
     def edges_from(self, principal: str) -> tuple[ControlEdge, ...]:
         return self._out.get(principal, ())
 
     def controlled_by(self, principal: str) -> tuple[str, ...]:
-        """The distinct entities ``principal`` is a proven controller of."""
         return tuple(sorted({edge.anchor for edge in self.edges_from(principal)}))
 
     def refusal_counts(self) -> dict[str, int]:
-        """Edges refused, per admission rule. A rule that never fired reports 0."""
         counts = {
             REFUSAL_ZERO_PRINCIPAL: 0,
             REFUSAL_ZERO_ANCHOR: 0,
@@ -136,14 +107,8 @@ class ControlClosure:
         return dict(sorted(counts.items()))
 
     def renounced_counts(self) -> dict[str, Any]:
-        """The earned negative, counted three ways because they differ.
-
-        ``control_graph_edges`` carries one row per witnessed read, so the same
-        ``owner`` slot on the same anchor appears many times; publishing the row
-        count as a slot count multiplies the earned negative by however often the
-        resolver looked. The slot is ``(anchor, label)`` — the anchor's named
-        authority — and the edge count is kept beside it rather than replaced,
-        since it is the citable population.
+        """The earned negative counted by slot (``(anchor, label)``) as well as by edge rows (one per witnessed
+        read), which would otherwise multiply it.
         """
         slots = {(row.anchor, row.scope.label) for row in self.renounced}
         by_label: dict[str, int] = {}
@@ -153,36 +118,19 @@ class ControlClosure:
             "edges": len(self.renounced),
             "authority_slots": len(slots),
             "anchors": len({row.anchor for row in self.renounced}),
-            # An ``owner`` slot holding 0x0 is a renunciation; a ``_pendingOwner``
-            # or an ``accessController`` holding it is a pointer nobody ever set.
-            # Both are proven-absent authority, and the earned negative is the
-            # same shape — but they are different facts about the protocol, and
-            # the day one of them moves a number the distinction has to already
-            # be in the document rather than be reconstructed from it.
+            # An empty ``owner`` is renunciation, an empty ``_pendingOwner`` a pointer never set: same shape, different
+            # facts.
             "authority_slots_by_label": dict(sorted(by_label.items())),
         }
 
 
 def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
-    """The proven control edges: ``edges_from(X)`` is what X controls.
+    """The proven control edges; ``edges_from(X)`` is what X controls. Chain-scoped on both ends.
 
-    Chain-scoped on both ends — an edge is only ever within one chain's graph,
-    and keying it unscoped would let one chain's twin inherit the other's reach.
-
-    Two admission rules run here, each publishing its own count. The zero address
-    is refused at BOTH ends: it is a burn sentinel, not an assessable entity
-    (``msg.sender != 0x0``), and admitting it as a principal makes it the single
-    largest control hub in the graph — every anchor that ever renounced an
-    authority, folded into one closure that no witness seeds. And a
-    ``controller_value`` edge pointing AT it is read as a renounced authority,
-    an earned negative, rather than thrown away with the refusal.
-
-    Two column witnesses join the graph rows. ``contracts.admin`` is the proxy
-    admin; ``contracts.beacon`` is the beacon whose implementation slot every
-    proxy pointing at it follows — the broadest code-control link there is, and
-    one the closure carried no representation of at all. Both are populated by
-    the same slot read, exist in no edge table, and carry their own witness
-    string so a consumer can tell which produced a hop.
+    The zero address is refused at both ends (a burn sentinel would otherwise become the biggest control hub), and a
+    ``controller_value`` edge pointing at it is read as a renounced authority. ``contracts.admin`` and
+    ``contracts.beacon`` join as column witnesses (the beacon being the broadest code-control link), each tagged with
+    its own witness string.
     """
     from db.models import Contract, ControlGraphEdge
 
@@ -202,10 +150,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                     edge_id=candidate.edge_id,
                 )
             )
-        # The self-edge rule is scoped to the COLUMN witnesses: a
-        # ``contracts.beacon`` naming the proxy itself is a degenerate column
-        # read, while a witnessed graph row saying an entity holds authority
-        # over itself is a fact this loader has no licence to discard.
+        # Self-edges are only refused for column witnesses; a graph row saying an entity controls itself is kept.
         self_column = candidate.principal == candidate.anchor and candidate.relation is None
         if zero_principal or is_zero_key(candidate.anchor) or self_column:
             refusals.append(
@@ -241,8 +186,6 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
             refusals.append(
                 RefusedEdge(
                     rule=REFUSAL_MALFORMED_NODE_ID,
-                    # Chain-scoped like every sibling refusal; the endpoint that
-                    # carried no address has no key to be scoped.
                     principal=entity_key(chain, target) if target else NOT_DETERMINED,
                     anchor=entity_key(chain, source) if source else NOT_DETERMINED,
                     relation=edge.relation,
@@ -251,8 +194,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                 )
             )
             continue
-        # Stored from=anchor, to=principal; the authority direction is the
-        # reverse, so the principal is what controls the anchor.
+        # Stored anchor -> principal; authority runs the other way.
         admit(
             ControlEdge(
                 principal=entity_key(chain, target),

@@ -28,17 +28,10 @@ logger = logging.getLogger("services.aggregations.company_overview")
 
 
 def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[dict[str, Any]]]:
-    """Return ``{"<chain>::<address>": [function_entries]}`` for every contract
-    in the protocol, keyed by the composite entity token (:func:`_entity_key`,
-    mirroring the frontend's ``entityKey``).
+    """``{"<chain>::<address>": [function_entries]}`` for the protocol.
 
-    Split out of ``build_company_overview`` so the heavy
-    ``effective_functions`` query (1469 rows × per-function principal
-    expansion, 120-290ms + 2.13 MB of payload on ether.fi) doesn't block
-    the main /company TTFB and JSON parse. The frontend mounts the
-    Surface canvas off the lighter main payload and fetches this in
-    parallel; the function inspector renders a loading state until it
-    lands.
+    Split from ``build_company_overview`` because the ``effective_functions`` query (~2 MB on ether.fi) would block the
+    main /company TTFB; the frontend fetches it in parallel.
     """
     timings_ms: dict[str, int] = {}
     start = time.monotonic()
@@ -52,11 +45,8 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     with _time_phase(timings_ms, "resolve_implementation_contracts"):
         impl_job_by_entity, contracts_by_job_id = resolve_implementation_contracts(session, jobs, contracts_by_job_id)
 
-    # Entities that are a secondary impl of some proxy are absorbed into that
-    # proxy node (their functions surface there), so they get no standalone
-    # entry — mirrors the canvas dedup for split-proxy admin impls. Keyed by the
-    # composite entity token (the secondary is on its proxy's chain) so a
-    # same-address standalone on another chain isn't suppressed.
+    # Secondary impls are absorbed into their proxy node (mirrors canvas dedup); composite keys so a same-address
+    # standalone on another chain survives.
     secondary_impl_entities = {
         _entity_key(cr.chain, s)
         for cr in contracts_by_job_id.values()
@@ -64,11 +54,8 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
         for s in (cr.secondary_implementations or [])
     }
 
-    # Map each job's (chain, address) to the contract_ids whose EF rows it
-    # should show — for a proxy: its EIP-1967 impl plus any split-proxy secondary
-    # impls; for a plain contract: its own row. The key is the composite entity
-    # token so a CREATE2 twin at the same address on two chains keeps each
-    # chain's own analysis instead of collapsing last-wins.
+    # Proxy -> its impl plus secondary impls; plain contract -> itself. Composite keys keep CREATE2 twins' analyses
+    # separate.
     entity_key_to_ef_cids: dict[str, list[int]] = {}
     for job in jobs:
         request = job.request if isinstance(job.request, dict) else {}
@@ -106,8 +93,6 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
                 ef_rows_by_cid.setdefault(ef.contract_id, []).append(ef)
                 ef_row_count += 1
 
-    # Reuse the same principal_lookup the main path builds so labels and
-    # resolved_type carry through to per-function principal entries.
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
     controller_values_by_cid: dict[int, list[ControllerValue]] = {}
     cgn_by_cid: dict[int, list[ControlGraphNode]] = {}
@@ -123,10 +108,8 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
                 select(ControlGraphNode).where(ControlGraphNode.contract_id.in_(id_list))
             ).scalars():
                 cgn_by_cid.setdefault(n.contract_id, []).append(n)
-            # Same terminal-walk forwarding as the main path: the per-function
-            # principal payload built below is what ``InspectorCard`` renders
-            # ``terminalControllerNote`` from, so wiring only ``build_governance_view``
-            # would connect the plane on one endpoint and leave it dark on the other.
+            # ``InspectorCard`` renders ``terminalControllerNote`` from this payload, so wire it here as well as in
+            # ``build_governance_view``.
             for address, details in session.execute(
                 select(PrincipalLabel.address, PrincipalLabel.details).where(
                     PrincipalLabel.contract_id.in_(id_list),

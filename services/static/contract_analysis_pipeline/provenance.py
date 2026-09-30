@@ -1,24 +1,9 @@
-"""ProvenanceEngine — worklist-based forward dataflow over Slither IR.
+"""ProvenanceEngine: worklist forward dataflow over Slither IR, mapping each SSA value to the set of ``Source``
+records it came from.
 
-Tracks the source(s) of every SSA value reachable in a function context.
-Output: a ``ProvenanceMap`` from SSA value → set of ``Source`` records.
-The predicate builder consumes this to populate ``Operand`` records on
-each leaf.
-
-Design (per /tmp/psat-plans/generic-predicate-pipeline-v4.md):
-
-* Lattice element per value = a ``frozenset[Source]``. Bottom is the
-  empty set (unreached); top is ``{Source(kind="top")}`` (saturated by
-  cycle / depth cap / unknown opcode).
-* Worklist iterates IR opcodes in CFG order, applying transfer
-  functions until fixed point. Phi nodes union incoming sources.
-* Cycle handling: same SSA value re-encountered while we have an
-  in-flight tag for it yields ``top``. Loop-carried Phi joins
-  converge or saturate.
-
-This module is intentionally name-free — no helper-name seed lists like
-the deleted ``MsgSenderTaint``. Every classification comes from IR
-shape and operand type.
+Lattice values are ``frozenset[Source]`` (empty is unreached; ``{Source(kind="top")}`` is saturated by cycles, depth
+caps or unknown opcodes). Phis union; the worklist runs to a fixed point. Classification comes from IR shape and operand
+types, never helper names.
 """
 
 from __future__ import annotations
@@ -62,32 +47,20 @@ from .slither_compat import (
     Variable,
 )
 
-# ---------------------------------------------------------------------------
-# Source record — one origin tag for an SSA value.
-# ---------------------------------------------------------------------------
-
-
-# Derived from the published Literal so the mint and the payload type can
-# never drift; ``__post_init__`` still validates dynamic construction.
+# Derived from the published Literal so the two can't drift.
 SOURCE_KINDS: tuple[OperandSource, ...] = get_args(OperandSource)
 
 
 @dataclass(frozen=True)
 class Source:
-    """One origin record for an SSA value.
-
-    Equality is structural (frozen dataclass). Provenance sets are
-    ``frozenset[Source]`` so they hash cleanly for cycle detection and
-    fixed-point comparison.
-    """
+    """One origin record for an SSA value; frozen so sets of them hash for cycle detection and fixed-point checks."""
 
     kind: OperandSource
     parameter_index: int | None = None
     parameter_name: str | None = None
     state_variable_name: str | None = None
     callee: str | None = None
-    # Hash of constituent source frozensets — used to keep view_call /
-    # external_call recursive shape without making Source recursive.
+    # Hash of constituent source sets, keeping nested call shape without recursion.
     callee_args_digest: str | None = None
     callee_signature: str | None = None
     callee_selector: str | None = None
@@ -96,40 +69,20 @@ class Source:
     computed_kind: str | None = None
     block_context_kind: str | None = None
     member_path: tuple[str, ...] = ()
-    # Keccak/constant slot a getter-less internal *address* accessor reads via
-    # inline ``sload(<constant>)`` (Governable ``_pendingGovernor`` →
-    # keccak256("LRTSquare.pending.governor")). Carried so resolution can read
-    # the live value via ``eth_getStorageAt``; ``None`` for everything else.
+    # The constant slot a getter-less internal address accessor ``sload``s (Governable ``_pendingGovernor``), so
+    # resolution can ``eth_getStorageAt`` it.
     storage_slot: str | None = None
-    # Which origins reached a ``computed`` value through its *arguments*. A
-    # ``keccak256``/``abi.encode`` collapses its inputs into one opaque value;
-    # without this the parameter a hash-commitment guard commits is gone by the
-    # time a leaf is built. Three states, and consumers must tell them apart:
-    #   ``None``        — not determined; nothing populated it for this Source
-    #   ``frozenset()`` — determined: only constants reached the computation
-    #   non-empty       — determined: exactly these origins reached it
-    # Members are themselves ``Source`` records with ``derived_from=None``, which
-    # bounds the nesting at one level: ``arg_origins`` splices an argument's own
-    # (already flattened) origins in rather than nesting them, so the projection
-    # is transitively complete without making the dataclass recursive.
-    #
-    # Also populated on ``view_call`` / ``external_call`` Sources:
-    # the call collapses its arguments into ``callee_args_digest`` — an opaque
-    # hash — so without this the fact that a gate's un-lowerable role read
-    # CONSUMED THE CALLER was unrepresentable by the time a leaf was built,
-    # and ``leaf_is_caller_tainted`` could not fire (RoleRegistry.upgradeTo
-    # published public over a caller gate). Same three states as above.
+    # Origins that reached a ``computed``, ``view_call`` or ``external_call`` value through its arguments, which the
+    # hash or call digest otherwise makes opaque (so a hash-commitment guard loses its parameter, and a role read loses
+    # that it consumed the caller). ``None`` is not determined; ``frozenset()`` means only constants; non-empty lists
+    # the origins. Members have ``derived_from=None`` (``arg_origins`` splices them flat), so one level deep.
     derived_from: frozenset["Source"] | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in SOURCE_KINDS:
             raise ValueError(f"unknown source kind {self.kind!r}")
-        # The "top" lattice element is a bare sentinel — no metadata
-        # fields. ``is_top`` does an O(1) ``_TOP_SOURCE in set`` check,
-        # which only works if every kind="top" instance hashes/equals
-        # ``_TOP_SOURCE``. Enforce that here so a future caller can't
-        # silently break the optimization by tagging a "top with
-        # metadata".
+        # ``is_top`` is an O(1) membership test that requires every top Source to equal ``_TOP_SOURCE``, so no metadata
+        # on top.
         if self.kind == "top" and (
             self.parameter_index is not None
             or self.parameter_name is not None
@@ -164,33 +117,21 @@ def _solidity_type_name(value: Any) -> str | None:
 
 
 def is_top(s: SourceSet) -> bool:
-    # O(1) frozenset hash lookup. Equivalence with the prior
-    # ``any(src.kind == "top" for src in s)`` is held by the
-    # ``__post_init__`` invariant above: every kind="top" Source
-    # equals (and hashes as) ``_TOP_SOURCE``.
+    # Valid because of the ``__post_init__`` invariant above.
     return _TOP_SOURCE in s
 
 
 def union(a: SourceSet, b: SourceSet) -> SourceSet:
-    """Lattice join: union of source sets, with TOP absorbing."""
+    """Lattice join; TOP absorbs."""
     if is_top(a) or is_top(b):
         return TOP
     return a | b
 
 
 def arg_origins(args_union: SourceSet) -> frozenset[Source]:
-    """The ``Source.derived_from`` projection of an argument source set.
-
-    Flat by construction: an argument that is itself a ``computed`` value with
-    its own ``derived_from`` contributes both itself (stripped, so the
-    derivation shape survives) and its already-flattened origins, so
-    ``keccak256(abi.encode(receiver))`` still names ``receiver``. Constants are
-    dropped — they carry no origin — which is what makes the empty set mean
-    "determined: only constants reached this".
-
-    Every member is stored with ``derived_from=None``. That is a *stripped*
-    marker, not a claim of "not determined" about the member: the member's own
-    origins have already been spliced into this same set.
+    """The flat ``derived_from`` of an argument source set: a computed argument contributes itself (stripped) and its
+    own origins, so ``keccak256(abi.encode(receiver))`` still names ``receiver``. Constants are dropped, so empty
+    means only constants. Members' ``derived_from=None`` marks them stripped, not undetermined.
     """
     origins: set[Source] = set()
     for source in args_union:
@@ -203,15 +144,10 @@ def arg_origins(args_union: SourceSet) -> frozenset[Source]:
 
 
 def _constant_storage_slot_for_accessor(callee: Any) -> str | None:
-    """The keccak/constant slot a getter-less internal *address* accessor reads
-    via inline ``sload(<constant>)`` — e.g. ``Governable._pendingGovernor()``
-    reading ``keccak256("LRTSquare.pending.governor")``. Returns the 0x-padded
-    32-byte slot so resolution can ``eth_getStorageAt`` it (the accessor has no
-    public getter to call); ``None`` for anything that isn't an unambiguous
-    single-constant-slot *address* reader. Reuses the split-proxy sload-constant
-    detection — the only existing place this pattern is mined — and is tightened
-    to address returns + exactly one constant slot so a non-address ``sload``
-    (e.g. a bytes32 flag) can't be misread as a 20-byte principal."""
+    """The 32-byte slot a getter-less internal address accessor reads via a single constant ``sload``
+    (``Governable._pendingGovernor()``), or ``None``. Limited to address returns and one constant slot so a
+    bytes32 flag can't be misread as a principal.
+    """
     if callee is None:
         return None
     try:
@@ -241,16 +177,7 @@ def _constant_storage_slot_for_accessor(callee: Any) -> str | None:
     return "0x" + format(val, "064x")
 
 
-# ---------------------------------------------------------------------------
-# Per-function provenance map + engine.
-# ---------------------------------------------------------------------------
-
-
-# Configuration knobs (tunable at call site / via env).
-# PSAT_PROVENANCE_INTERNAL_CALL_DEPTH overrides the default recursion
-# depth for InternalCall/LibraryCall — useful for stress-testing on
-# complex inheritance chains, or for cutting off depth on benchmarks.
-# PSAT_PROVENANCE_WORKLIST_CAP overrides the worklist iteration cap.
+# ``PSAT_PROVENANCE_INTERNAL_CALL_DEPTH`` and ``PSAT_PROVENANCE_WORKLIST_CAP`` override the defaults.
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -264,28 +191,16 @@ def _env_int(name: str, default: int) -> int:
 
 DEFAULT_INTERNAL_CALL_DEPTH = _env_int("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", 4)
 DEFAULT_WORKLIST_ITER_CAP = _env_int("PSAT_PROVENANCE_WORKLIST_CAP", 200)
-# Per-variable widening threshold: a value rewritten more than this many times
-# within one engine run is churning, not converging (forward node order settles
-# straight-line code in 1-2 passes; a loop-carried union saturates in a few).
+# A value rewritten more often than this is churning, not converging.
 DEFAULT_WIDEN_AFTER = _env_int("PSAT_PROVENANCE_WIDEN_AFTER", 8)
 
 
 def widen(s: SourceSet) -> SourceSet:
-    """Widening operator: drop ``callee_args_digest`` from every member (and
-    from the members of each ``derived_from``), collapsing digest-only
-    variants into one record.
+    """Widening: drop ``callee_args_digest`` from members (and their ``derived_from``).
 
-    Invariant this restores: the provenance lattice must have finite height
-    for the worklist to reach a fixed point. Every Source field except the
-    digest draws from a finite per-function universe (kinds, parameter
-    indices, state-variable names, callee names, ...); the digest is a hash
-    of the member set itself, so a self-referential assignment
-    (``inv = f(inv)`` — OZ ``Math.mulDiv``'s inverse chain) mints a fresh
-    digest variant every iteration and the set never stabilizes. Dropping
-    the digest loses nothing a consumer can observe: it is never emitted
-    (``operands._published_source_key`` excludes it — digest-only variants
-    render identically), and ``derived_from`` origins — the caller-taint
-    witness — are preserved exactly.
+    The digest hashes the set itself, so self-referential assignments (``inv = f(inv)`` in OZ ``Math.mulDiv``) mint new
+    variants forever; every other field is finite per function. The digest is never published and ``derived_from``
+    origins survive, so nothing observable is lost.
     """
     if is_top(s):
         return s
@@ -308,33 +223,20 @@ def widen(s: SourceSet) -> SourceSet:
 
 @dataclass
 class ProvenanceMap:
-    """Per-SSA-value provenance for one function context.
-
-    Keyed by Slither variable name (string) since SSA values from
-    Slither expose a stable ``name`` attribute. Phi nodes share the
-    base name with versioning Slither already handles.
-    """
+    """Per-SSA-value provenance for one function, keyed by Slither variable name."""
 
     sources: dict[str, SourceSet]
-    # Per-variable rewrite counts for the widening trigger. Scoped to one map
-    # (= one engine run), like the convergence question it answers.
+    # Per-run rewrite counts for the widening trigger.
     update_counts: dict[str, int] = field(default_factory=dict)
 
     def get(self, var_name: str) -> SourceSet:
         return self.sources.get(var_name, EMPTY)
 
     def set(self, var_name: str, value: SourceSet) -> bool:
-        """Returns True if this set changed the value (used by worklist
-        to detect convergence).
+        """Set ``name``; True if it changed.
 
-        A variable rewritten more than ``DEFAULT_WIDEN_AFTER`` times in one
-        run is churning, and its store switches to ``widen(prev ∪ value)``:
-        the join makes the store monotone (a base name with several
-        assignment sites otherwise oscillates between the writers' values
-        forever under replace semantics), and ``widen`` strips the digest
-        variants so the joined set draws from a finite universe and reaches a
-        fixed point. Values that stabilize on their own are never widened —
-        the threshold sits above what converging propagation needs.
+        After ``DEFAULT_WIDEN_AFTER`` rewrites the store becomes ``widen(prev | value)``: monotone (several writers
+        otherwise oscillate) and finite. Converging values never widen.
         """
         prev = self.sources.get(var_name, EMPTY)
         if prev == value:
@@ -350,12 +252,8 @@ class ProvenanceMap:
 
 
 class ProvenanceEngine:
-    """Forward dataflow over a function's SSA IR.
-
-    Lifecycle:
-        engine = ProvenanceEngine(function)
-        engine.run()                  # populates internal map to fixed point
-        sources = engine.provenance.get("some_ssa_var")
+    """Forward dataflow over a function's SSA IR: ``ProvenanceEngine(function).run()``, then
+    ``engine.provenance.get(name)``.
     """
 
     def __init__(
@@ -372,43 +270,22 @@ class ProvenanceEngine:
         self.internal_call_depth = internal_call_depth
         self.worklist_cap = worklist_cap
         self.provenance = ProvenanceMap(sources={})
-        # Stack of ParameterBindingEnv frames pushed when recursing into
-        # internal callees / modifiers. Top of stack is the active env.
+        # Parameter-binding frames for internal callees and modifiers; top is active.
         self._binding_frames: list[dict[str, SourceSet]] = []
         if parameter_bindings:
             self._binding_frames.append(dict(parameter_bindings))
-        # Track in-flight callees to break cycles.
         self._call_stack: list[str] = []
-        # Per-engine memo: (callee_full_name, frozenset(bindings.items()))
-        # → return_sources. The worklist iterates to fixed point so a
-        # callee may be re-visited many times within ONE run() — caching
-        # keeps each unique (callee, bindings) sub-engine run to a single
-        # invocation rather than O(worklist_iterations) re-walks.
-        # Sub-engines created by _handle_internal_call inherit a fresh
-        # cache; the memo is intentionally not propagated downward
-        # because the call_stack at the deeper level differs and would
-        # invalidate the keys.
+        # ``(callee, bindings) -> return_sources``, so the worklist's repeated visits run each sub-engine once. Not
+        # passed to sub-engines: their call stack differs.
         self._sub_engine_memo: dict[tuple[str, frozenset], frozenset] = {}
-        # Per-engine cache for leaf-value source classification —
-        # SolidityVariable / Constant / StateVariable are PURE functions
-        # of the value object, not of engine state. The worklist iterates
-        # to fixed point so the same operand is re-resolved many times
-        # within ONE run() — caching by id collapses each unique value
-        # to a single classification call. Bounded lifetime (= engine
-        # instance), so no cross-Slither-instance id-reuse risk.
-        # Variable subtypes (Local/Temporary/Reference/Variable) are NOT
-        # cached because their provenance changes as dataflow converges.
+        # Solidity variables, constants and state variables classify purely from the object, so cache by id for this
+        # engine's lifetime. Locals, temporaries and references change as dataflow converges and aren't cached.
         self._leaf_value_source_cache: dict[int, SourceSet] = {}
-        # Worklist iterations of the last run() — convergence observability.
+        # Iterations of the last run, for convergence checks.
         self.iterations_run: int = 0
 
-    # ------------------------------------------------------------------
-    # Public entry
-    # ------------------------------------------------------------------
-
     def run(self) -> ProvenanceMap:
-        """Seed parameter and msg-related variables, then iterate the
-        worklist until fixed point or cap hit."""
+        """Seed parameters and msg values, then iterate to a fixed point or the cap."""
         self._seed_parameters()
         nodes = list(self._iter_nodes())
         iterations = 0
@@ -419,32 +296,21 @@ class ProvenanceEngine:
                 if self._step_node(node):
                     changed = True
             iterations += 1
-        # Exposed for convergence assertions/observability. Per-variable
-        # widening (``ProvenanceMap.set``) bounds this well under the cap on
-        # digest-churning shapes; the cap remains the backstop for growth the
-        # widening operator does not cover (e.g. unbounded member_path chains).
+        # Widening keeps this well under the cap; the cap backstops growth widening doesn't cover.
         self.iterations_run = iterations
         if iterations >= self.worklist_cap:
-            # Saturate any value we still don't know about by leaving
-            # it empty; consumers treat absent ⇒ unknown.
+            # Unknown values stay empty; consumers read absent as unknown.
             pass
         return self.provenance
 
-    # ------------------------------------------------------------------
-    # Seeding
-    # ------------------------------------------------------------------
-
     def _seed_parameters(self) -> None:
-        """Bind each formal parameter to a `parameter` source. Also
-        seeds modifier-scope parameters so the engine can resolve
-        operands inside modifier bodies."""
+        """Seed each formal (and each modifier's formals) as a ``parameter`` source."""
         bindings = self._active_bindings()
         for idx, param in enumerate(self.function.parameters):
             name = self._var_name(param)
             if not name:
                 continue
             if bindings is not None and name in bindings:
-                # Substituted from caller — use caller's provenance.
                 self.provenance.set(name, bindings[name])
                 continue
             self.provenance.set(
@@ -459,14 +325,7 @@ class ProvenanceEngine:
                     }
                 ),
             )
-        # Modifier parameters: each modifier's formal parameters get
-        # seeded as local `parameter` sources. ParameterBindingEnv (a
-        # later sub-task) will substitute these with the invocation
-        # arguments at the call site so the leaf reports the
-        # function-level parameter index correctly. For now, the
-        # modifier-scope parameter index is what's recorded — fine
-        # for operand classification but not for argument binding to
-        # the calling function.
+        # Modifier formals are seeded with their modifier-scope index; call-site binding substitution is separate.
         for modifier in getattr(self.function, "modifiers", []) or []:
             for idx, param in enumerate(getattr(modifier, "parameters", []) or []):
                 name = self._var_name(param)
@@ -488,38 +347,15 @@ class ProvenanceEngine:
     def _active_bindings(self) -> dict[str, SourceSet] | None:
         return self._binding_frames[-1] if self._binding_frames else None
 
-    # ------------------------------------------------------------------
-    # IR walk
-    # ------------------------------------------------------------------
-
     def _iter_nodes(self) -> Iterable[Any]:
-        # Function body only — modifier nodes are deliberately excluded.
-        #
-        # Slither shares the modifier's SSA-IR across every caller, so the
-        # entry Phi for a modifier parameter unions ALL call-site
-        # arguments (one per function that uses the modifier). When the
-        # modifier parameter shares a name with the function's parameter
-        # (e.g. ``modifier onlyRole(bytes32 role)`` and
-        # ``function revokeRole(bytes32 role, address account)``), that
-        # Phi pollutes the function's ``role`` provenance with every
-        # other caller's argument — state vars, TMPs of unrelated helpers,
-        # etc. The pollution grows the binding sets unboundedly, so the
-        # per-IR ``_sub_engine_memo`` keyed on ``(callee, bindings)``
-        # never hits across worklist iterations and the engine respawns
-        # the same sub-engines until the 200-iter cap. On CumulativeMerkleDrop
-        # this turned a 0.02 s build into an 18 s one (revokeRole).
-        #
-        # Cross-fn gates that live inside the modifier (the canonical case:
-        # ``onlyRole`` -> ``_checkRole`` -> ``if (!hasRole(...)) revert``)
-        # are still discovered by RevertDetector's recursive scan, and the
-        # predicate builder walks them through ``_build_chain_bindings``
-        # which spawns a fresh ProvenanceEngine for each link with the
-        # call-site bindings — that path is unaffected.
+        # Function body only. Slither shares a modifier's SSA across callers, so its entry Phi unions every call site's
+        # arguments; when a modifier parameter shares a name with the function's (``onlyRole(bytes32 role)``), that
+        # pollutes the function's provenance and defeats the sub-engine memo (CumulativeMerkleDrop went from 0.02 s to
+        # 18 s). Gates inside modifiers are still found by RevertDetector and built with fresh engines per link.
         yield from self.function.nodes
 
     def _step_node(self, node: Any) -> bool:
-        """Apply transfer functions to all IRs in this CFG node.
-        Returns True if any provenance value changed."""
+        """Apply transfer functions to a node's IRs; True if anything changed."""
         any_changed = False
         for ir in node.irs_ssa:
             if self._step_ir(ir):
@@ -527,8 +363,7 @@ class ProvenanceEngine:
         return any_changed
 
     def _step_ir(self, ir: Any) -> bool:
-        # Dispatch on Slither IR class. We import lazily so this file
-        # is importable without solc available in test envs.
+        # Imports are lazy so this module loads without solc.
         if isinstance(ir, Assignment):
             return self._handle_assignment(ir)
         if isinstance(ir, TypeConversion):
@@ -560,27 +395,21 @@ class ProvenanceEngine:
         if isinstance(ir, (Send, Transfer)):
             return self._handle_send_transfer(ir)
         if isinstance(ir, Return):
-            # Returns don't bind a new lvalue here — caller handles
-            # callee-return propagation via _handle_internal_call.
+            # Callee return propagation is handled in _handle_internal_call.
             return False
-        # Unknown opcode: assign top to its lvalue (if any) so the
-        # consumer surfaces it as opaque rather than guessing.
+        # Unknown opcode: top, so consumers see it as opaque.
         if isinstance(ir, OperationWithLValue):
             lv = ir.lvalue
             if lv is not None:
                 return self.provenance.set(self._var_name(lv), TOP)
         return False
 
-    # ------------------------------------------------------------------
-    # Transfer functions
-    # ------------------------------------------------------------------
-
     def _handle_assignment(self, ir: Any) -> bool:
         rvalue_sources = self._sources_for_value(ir.rvalue)
         return self.provenance.set(self._var_name(ir.lvalue), rvalue_sources)
 
     def _handle_type_conversion(self, ir: Any) -> bool:
-        # Type cast preserves origin — `address(payable(x))` keeps x's source.
+        # Casts preserve origin.
         rvalue = getattr(ir, "variable", None) or getattr(ir, "rvalue", None)
         if rvalue is None:
             return self.provenance.set(self._var_name(ir.lvalue), TOP)
@@ -588,23 +417,10 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), sources)
 
     def _handle_phi(self, ir: Any) -> bool:
-        # Phi joins all incoming SSA versions with set union. Also
-        # unions with the lvalue's existing source set so caller-
-        # bound parameters seeded before the IR walk aren't
-        # clobbered.
-        #
-        # The ENTRYPOINT Phi of a formal parameter is excluded outright.
-        # Slither's interprocedural SSA makes its rvalues the arguments of
-        # EVERY internal call site of this function in the contract, and its
-        # lvalue carries the parameter's BASE name — the exact key
-        # ``_seed_parameters`` wrote. Unioning it therefore imports other
-        # frames into this one: ``guarded() { onlyA(msg.sender); }`` made
-        # ``account`` msg_sender-tainted inside ``onlyA``'s OWN frame (where it
-        # is an arbitrary argument, not the caller), and a helper called with a
-        # different constant per call site accumulated every sibling's
-        # constants. The parameter's truth for THIS frame is what seeding
-        # already wrote: ``parameter`` in the function's own frame, the
-        # call-chain binding in a bound frame.
+        # Phis union their inputs and the lvalue's existing set (so bound parameters survive). A parameter's ENTRYPOINT
+        # Phi is excluded: Slither makes its inputs every internal call site's arguments, which imported other frames
+        # (``onlyA(msg.sender)`` made ``account`` caller-tainted inside ``onlyA``'s own frame). Seeding already wrote
+        # this frame's truth.
         if self._is_entry_parameter_phi(ir):
             return False
         result: SourceSet = self.provenance.get(self._var_name(ir.lvalue))
@@ -613,11 +429,10 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), result)
 
     def _is_entry_parameter_phi(self, ir: Any) -> bool:
-        """True for the function-entry Phi of one of THIS function's formal
-        parameters — the only Phi whose rvalues live in other functions'
-        frames (they are the call-site arguments). State-variable Phis at the
-        entry node keep normal handling: their rvalues classify
-        frame-independently as ``state_variable``, which is correct here."""
+        """True for the entry Phi of one of this function's formals, whose inputs live in other frames.
+
+        State-variable entry Phis classify frame-independently and are handled normally.
+        """
         node = getattr(ir, "node", None)
         node_type = getattr(getattr(node, "type", None), "name", "")
         if node_type != "ENTRYPOINT":
@@ -629,17 +444,13 @@ class ProvenanceEngine:
         return any(self._var_name(param) in (name, base) for param in getattr(self.function, "parameters", ()) or ())
 
     def _handle_binary(self, ir: Any) -> bool:
-        # The result of a binary op is ``computed`` with the union of
-        # its operand sources tagged for downstream consumers.
         operand_sources = union(
             self._sources_for_value(ir.variable_left),
             self._sources_for_value(ir.variable_right),
         )
         if is_top(operand_sources):
             return self.provenance.set(self._var_name(ir.lvalue), TOP)
-        # Wrap in a single ``computed`` source with a digest of the
-        # operand union — keeps the provenance flat but preserves
-        # taint-shape for downstream analysis.
+        # One ``computed`` source with a digest of the operand union: flat, but keeps taint shape.
         result = (
             frozenset(
                 {
@@ -665,11 +476,8 @@ class ProvenanceEngine:
                         kind="computed",
                         computed_kind=str(getattr(ir, "type", "unary")),
                         callee_args_digest=_digest(operand_sources),
-                        # The negated value's own origins: a
-                        # ``!hasRole(msg.sender, …)`` gate renders as this
-                        # computed tag (it sorts first in the operand pick),
-                        # and without the readable origins the caller-taint
-                        # default cannot see the caller through the negation.
+                        # Keep the negated value's origins readable so ``!hasRole(msg.sender, ...)`` still shows the
+                        # caller.
                         derived_from=arg_origins(operand_sources),
                     )
                 }
@@ -679,10 +487,7 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), result)
 
     def _handle_index(self, ir: Any) -> bool:
-        """``map[k]`` — the lvalue is a ReferenceVariable whose access
-        path includes the base mapping plus the key. Provenance is the
-        union of base + key sources, plus a ``computed`` tag carrying
-        the key origin so downstream consumers can route on it."""
+        """``map[k]``: union of base and key sources plus a ``computed`` tag carrying the key origin."""
         base = getattr(ir, "variable_left", None)
         key = getattr(ir, "variable_right", None)
         base_sources = self._sources_for_value(base) if base is not None else EMPTY
@@ -691,12 +496,8 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), result)
 
     def _handle_length(self, ir: Any) -> bool:
-        """``arr.length`` / ``str.length`` — propagates the array's
-        provenance to the length value, tagged with
-        ``computed_kind="length"``. Loop bounds reading
-        ``params.length`` thus inherit the parameter taint of the
-        array, which lets the worklist converge on loop-carried
-        values without saturating to TOP.
+        """``.length`` inherits the array's provenance (tagged ``length``), so loop bounds over ``params.length``
+        converge instead of saturating.
         """
         base = getattr(ir, "value", None)
         sources = self._sources_for_value(base) if base is not None else EMPTY
@@ -714,19 +515,11 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), union(sources, wrapper))
 
     def _handle_member(self, ir: Any) -> bool:
-        """``s.field`` — propagate base sources AND tag the result with
-        a ``computed`` source whose ``computed_kind`` is
-        ``member.<field_name>``. Predicate builder reads computed_kind
-        to surface the field path; e.g. for
-        ``records[key].adminRole`` the leaf will see both the base
-        provenance (state_variable _roles + parameter role) and the
-        field tag (``member.adminRole``).
-        """
+        """``s.field``: base sources plus a ``computed`` tag ``member.<field>`` the builder reads for field paths."""
         base = getattr(ir, "variable_left", None)
         field = getattr(ir, "variable_right", None)
         base_sources = self._sources_for_value(base) if base is not None else EMPTY
-        # Slither's Member.variable_right is a Constant whose value is
-        # the field name string. Fall back to repr for unusual shapes.
+        # The field name is a Constant; repr for odd shapes.
         field_name: str | None = None
         if field is not None:
             field_name = getattr(field, "value", None) or getattr(field, "name", None) or str(field)
@@ -749,9 +542,7 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), union(union(base_sources, projected_sources), wrapper))
 
     def _handle_solidity_call(self, ir: Any) -> bool:
-        """``ecrecover``, ``keccak256``, ``addmod``, etc. ecrecover
-        gets a dedicated ``signature_recovery`` source tag. Hash
-        functions get ``computed``."""
+        """``ecrecover`` gets ``signature_recovery``; hashes and other builtins are ``computed``."""
         callee_name = getattr(ir.function, "name", "") if hasattr(ir, "function") else ""
         if callee_name == "ecrecover()" or callee_name.startswith("ecrecover"):
             args_union = self._union_of_args(ir.arguments)
@@ -765,12 +556,8 @@ class ProvenanceEngine:
                 }
             )
             return self.provenance.set(self._var_name(ir.lvalue), result)
-        # Other Solidity built-ins: hash family → computed. The arguments'
-        # origins ride along on ``derived_from`` — a hash-commitment gate
-        # (``publicDepositHistory[nonce] != keccak256(abi.encode(receiver, …))``)
-        # otherwise reaches the leaf builder with every parameter it commits
-        # already collapsed into an opaque digest, so the leaf can be *captured*
-        # without ever being *bound* to what it constrains.
+        # Carry argument origins on ``derived_from`` so a hash-commitment gate (``history[nonce] !=
+        # keccak256(abi.encode(receiver, ...))``) stays bound to what it constrains.
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
         if is_top(args_union):
             return self.provenance.set(self._var_name(ir.lvalue), TOP)
@@ -787,13 +574,10 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), result)
 
     def _handle_external_call(self, ir: Any) -> bool:
-        """High-level call to a known interface — ``other.method(args)``.
-        Records the callee name (function symbol) so the predicate
-        builder can route on it."""
+        """A high-level call; records the callee name for routing."""
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        # Same Constant-not-str hazard as the low-level arm: when the callee
-        # symbol is unresolved the fallback ``function_name`` is a Constant.
+        # The fallback ``function_name`` is a Constant when unresolved.
         raw_callee_name = getattr(getattr(ir, "function", None), "name", None) or getattr(ir, "function_name", None)
         callee_name = str(raw_callee_name) if raw_callee_name is not None else None
         callee_signature = _callee_signature(ir)
@@ -806,9 +590,7 @@ class ProvenanceEngine:
                     callee_args_digest=_digest(args_union),
                     callee_signature=callee_signature,
                     callee_selector=_selector_for_signature(callee_signature),
-                    # The caller-visible argument provenance: the
-                    # digest above is an opaque hash, so this is the only
-                    # readable record that e.g. msg.sender was consumed.
+                    # The only readable record that, e.g., ``msg.sender`` was consumed.
                     derived_from=arg_origins(args_union),
                 )
             }
@@ -816,37 +598,17 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), result)
 
     def _handle_low_level_call(self, ir: Any) -> bool:
-        """``addr.call(data)`` / ``staticcall`` / ``delegatecall``.
-
-        LowLevelCall has no resolved function symbol (the target is an
-        arbitrary address). What matters for downstream analysis:
-          - the call kind (call/staticcall/delegatecall) — delegatecall
-            in particular executes target code in our context, so we
-            preserve the kind in ``computed_kind``;
-          - the destination's provenance (where the target address
-            came from) — propagated into the result so a later check
-            on the call result can see if the target was caller-
-            controlled / state-loaded / parameter-loaded.
-
-        Result is a tuple (bool, bytes) which Slither models as a
-        TupleVariable lvalue; subsequent ``Unpack`` IRs split it into
-        the individual return values. Each unpacked value inherits the
-        tuple's provenance.
+        """``addr.call``/``staticcall``/``delegatecall``: tag the call kind and carry the destination and argument
+        provenance into the result tuple, so later checks see where the target came from. Unpacked values inherit
+        it.
         """
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        # ``LowLevelCall.function_name`` is a Slither ``Constant``, not a str;
-        # it flows into ``Source.callee`` and from there into the published
-        # ``derived_from`` operands, where a raw Constant crashed the
-        # ``predicate_trees.json`` write on 4 real contracts.
+        # ``function_name`` is a Constant; a raw Constant once crashed the predicate-tree write.
         kind = str(getattr(ir, "function_name", None) or "low_level_call")
         dest_sources = self._sources_for_value(getattr(ir, "destination", None))
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
-        # delegatecall is special — we tag it as external_call (it's still
-        # external from a control-flow perspective; the predicate builder
-        # treats delegatecall result the same as call result), but the
-        # destination provenance travels through so a downstream check
-        # can flag delegatecall-to-untrusted-target if needed.
+        # delegatecall is tagged external_call but keeps destination provenance.
         result = frozenset(
             {
                 Source(
@@ -856,21 +618,15 @@ class ProvenanceEngine:
                 )
             }
         )
-        # Also propagate destination + args sources so unpacked tuple
-        # inherits caller/state/parameter taint.
         result = union(result, dest_sources)
         result = union(result, args_union)
         return self.provenance.set(self._var_name(ir.lvalue), result)
 
     def _handle_unpack(self, ir: Any) -> bool:
-        """``Unpack`` splits a tuple lvalue into its components. Each
-        component inherits the tuple's full provenance — Slither doesn't
-        track per-tuple-position taint, so we conservatively forward
-        the whole set."""
+        """Each unpacked component inherits the whole tuple's provenance (Slither doesn't track per position)."""
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
-        # The tuple operand is exposed as `ir.tuple` on Slither; fall
-        # back to ``ir.rvalue`` for older versions.
+        # ``ir.tuple``, or ``ir.rvalue`` on older Slither.
         tup = getattr(ir, "tuple", None) or getattr(ir, "rvalue", None)
         if tup is None:
             return self.provenance.set(self._var_name(ir.lvalue), TOP)
@@ -878,21 +634,16 @@ class ProvenanceEngine:
         return self.provenance.set(self._var_name(ir.lvalue), sources)
 
     def _handle_internal_call(self, ir: Any) -> bool:
-        """Recurse into the callee's body, with parameter bindings
-        substituted, up to ``internal_call_depth``. Returns the
-        callee's union of return-value provenance."""
+        """Recurse into the callee with bound parameters (up to ``internal_call_depth``) and return the union of its
+        return values' provenance.
+        """
         if not isinstance(ir, OperationWithLValue) or ir.lvalue is None:
             return False
         callee = getattr(ir, "function", None)
         callee_name = getattr(callee, "full_name", None) or getattr(callee, "name", None)
-        # Slot a getter-less address accessor sload()s, so resolution can read
-        # the live value even though the accessor has no public getter.
         accessor_slot = _constant_storage_slot_for_accessor(callee)
         args_union = self._union_of_args(getattr(ir, "arguments", ()))
-        # Cycle / depth guard. ``derived_from`` carries the readable argument
-        # provenance next to the opaque digest: the un-lowerable
-        # assembly-backed role read consumed the caller, and without this the
-        # fact was gone by the time a leaf was built.
+        # Cycle/depth guard. ``derived_from`` keeps argument provenance readable next to the digest.
         call_tag = Source(
             kind="view_call",
             callee=callee_name,
@@ -904,7 +655,6 @@ class ProvenanceEngine:
         )
         if callee is None or len(self._call_stack) >= self.internal_call_depth or callee_name in self._call_stack:
             return self.provenance.set(self._var_name(ir.lvalue), frozenset({call_tag}))
-        # Recurse into callee's IR with bindings.
         bindings: dict[str, SourceSet] = {}
         for param, arg in zip(callee.parameters, getattr(ir, "arguments", ())):
             name = self._var_name(param)
@@ -922,7 +672,6 @@ class ProvenanceEngine:
         )
         sub._call_stack = self._call_stack + [callee_name or "?"]
         sub.run()
-        # Callee return provenance: union of all returned values' sources.
         return_sources = self._collect_return_sources(callee, sub.provenance)
         if not return_sources:
             return_sources = frozenset({call_tag})
@@ -953,20 +702,12 @@ class ProvenanceEngine:
             self._var_name(ir.lvalue), frozenset({Source(kind="computed", computed_kind="send_transfer")})
         )
 
-    # ------------------------------------------------------------------
-    # Source resolution for an arbitrary IR operand
-    # ------------------------------------------------------------------
-
     def _sources_for_value(self, value: Any) -> SourceSet:
         if value is None:
             return EMPTY
-        # Per-engine leaf cache: bounded lifetime, no cross-instance
-        # id-reuse risk. Lookup by id is O(1) and short-circuits the
-        # isinstance chain below for the dominant repeated cases.
         cached = self._leaf_value_source_cache.get(id(value))
         if cached is not None:
             return cached
-        # SolidityVariable: msg.sender / tx.origin / block.* / now etc.
         if isinstance(value, SolidityVariable):
             result = self._classify_solidity_variable(value)
             self._leaf_value_source_cache[id(value)] = result
@@ -994,11 +735,8 @@ class ProvenanceEngine:
             )
             self._leaf_value_source_cache[id(value)] = result
             return result
-        # ReferenceVariable (e.g., result of Index/Member) — propagate
-        # whatever provenance has been computed for the reference.
-        # Slither's SSA suffixes parameter names with ``_N``; if the
-        # SSA name has no entry but the base name does (seeded via
-        # parameter_bindings), fall back to the base.
+        # References take whatever provenance is computed for them; SSA names fall back to the base name (seeded by
+        # bindings).
         if isinstance(value, (LocalVariable, TemporaryVariable, ReferenceVariable)):
             name = self._var_name(value)
             if name:
@@ -1009,7 +747,6 @@ class ProvenanceEngine:
                         sources = self.provenance.get(base)
                 return sources
             return EMPTY
-        # Bare Variable fallback.
         if isinstance(value, Variable):
             name = self._var_name(value)
             if not name:
@@ -1023,22 +760,14 @@ class ProvenanceEngine:
         return EMPTY
 
     def _classify_solidity_variable(self, var: Any) -> SourceSet:
-        """msg.sender → msg_sender; tx.origin → tx_origin; block.* →
-        block_context; rest → top.
-
-        Detection is by ``var.name``. This is NOT user-identifier name
-        matching (that's the bad pattern we deleted) — these are
-        Solidity language keywords with a fixed enum on Slither's side.
-        """
+        """``msg.sender``, ``tx.origin``, ``block.*`` by name: these are language keywords, not user identifiers."""
         name = getattr(var, "name", "")
         if name == "msg.sender":
             return frozenset({Source(kind="msg_sender")})
         if name == "tx.origin":
             return frozenset({Source(kind="tx_origin")})
         if name == "this":
-            # Self-address — the contract's own address, structurally
-            # an authority operand for self-call gates like
-            # ``require(msg.sender == address(this))``.
+            # ``require(msg.sender == address(this))`` self-call gates.
             return frozenset({Source(kind="self_address")})
         if name in (
             "block.timestamp",
@@ -1070,13 +799,8 @@ class ProvenanceEngine:
         return out
 
     def _collect_return_sources(self, callee: Any, prov: ProvenanceMap) -> SourceSet:
-        """Union the provenance of every value the callee returns.
-
-        Uses ``_sources_for_value`` so SolidityVariable returns
-        (``return msg.sender``) classify even when there's no
-        intermediate assignment writing them into ``prov``."""
-        # Snapshot self.provenance so _sources_for_value reads from
-        # the sub-engine's run instead of the caller's state.
+        """Union of the provenance of every returned value, including Solidity variables returned directly."""
+        # Read from the sub-engine's map.
         original = self.provenance
         self.provenance = prov
         try:
@@ -1095,16 +819,8 @@ class ProvenanceEngine:
         return getattr(var, "name", None) or ""
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _strip_ssa_suffix(name: str) -> str:
-    """Slither's SSA gives ``account_1`` for the first version of
-    the parameter ``account``. When parameter_bindings seeds
-    ``account``, downstream IR walks reference ``account_1`` — so
-    if the SSA-named lookup misses, fall back to the base name."""
+    """Strip the SSA suffix (``account_1`` -> ``account``) so seeded base names are found."""
     if not name:
         return name
     parts = name.rsplit("_", 1)
@@ -1132,14 +848,7 @@ def _selector_for_signature(signature: str | None) -> str | None:
 
 
 def _canonical_source_key(source: "Source") -> str:
-    """Deterministic, content-complete string for one ``Source`` record.
-
-    Every field participates — including ``callee_args_digest`` (already a
-    content-stable string by the time a Source carrying one is a member of
-    another Source's argument set: digests are computed bottom-up) and
-    ``derived_from``, folded by its members' content tokens (each member is
-    stored with ``derived_from=None``, bounding the recursion at one level).
-    """
+    """Deterministic content key over every field of a Source, including the digest and ``derived_from`` (one level)."""
     return "\x1f".join(
         str(part)
         for part in (
@@ -1165,47 +874,28 @@ def _canonical_source_key(source: "Source") -> str:
 
 
 def sorted_tokens(members: "frozenset[Source]") -> "list[Source]":
-    """Members ordered by their content tokens — a total order that never
-    consults the seed-dependent set iteration order."""
+    """Members ordered by content token, independent of set iteration order."""
     return sorted(members, key=_source_token)
 
 
 def _source_token(source: "Source") -> int:
-    """Content-stable 64-bit token for one Source: keccak of its canonical
-    key, cached ON THE INSTANCE. A structurally-keyed cache (``lru_cache``)
-    is the wrong tool here: every lookup deep-compares dataclass keys, and
-    the ``derived_from`` frozensets made that an ``__eq__`` storm (134M calls
-    on one 44-function unit). The lazy per-instance slot costs one key build
-    + one keccak per Source OBJECT and no structural comparisons; equal
-    instances independently compute the same seed-free value, so the digest
-    stays content-stable."""
+    """Content-stable 64-bit token for a Source, cached on the instance.
+
+    A structural cache deep-compared dataclasses on every lookup (134M ``__eq__`` calls on one unit).
+    """
     token = source.__dict__.get("_content_token")
     if token is None:
         token = int.from_bytes(keccak(text=_canonical_source_key(source))[:8], "big")
-        # Frozen dataclass: bypass the immutability guard for the cache slot.
-        # Not a declared field, so repr/eq/hash never see it; a concurrent
-        # race recomputes the identical value.
+        # Bypasses the frozen guard; not a field, so repr/eq/hash ignore it.
         object.__setattr__(source, "_content_token", token)
     return token
 
 
 def _digest(s: SourceSet) -> str:
-    """Stable digest of a SourceSet for nesting via ``callee_args_digest``.
+    """Order-independent, process-stable digest of a SourceSet (XOR of member tokens).
 
-    Content-derived — XOR of the members' canonical-key keccak tokens — so
-    the same argument sources produce the same digest in EVERY process, and
-    the fold is order-independent without sorting. The previous
-    ``hash()``-of-frozenset form was PYTHONHASHSEED-dependent, and
-    ``predicates._source_sort_key`` orders competing sources by this string
-    BEFORE ``computed_kind`` — so which of two otherwise-tied computed
-    sources became the published operand flickered run to run (e.g. a
-    Teller deposit operand flipping between
-    ``call(uint256,...)`` and ``UnaryType.BANG``). Same 8-hex width as
-    before; the value is never published, only compared and ordered.
-
-    Performance note: this runs per NEW union inside the fixed point, so the
-    per-set work must stay O(members) with cheap ops. A frozenset holds no
-    duplicates, so the XOR never cancels a member against itself.
+    The previous ``hash()`` depended on PYTHONHASHSEED and flipped which tied operand got published between runs.
+    O(members); a frozenset has no duplicates to cancel.
     """
     acc = 0
     for member in s:

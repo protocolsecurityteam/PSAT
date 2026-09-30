@@ -37,38 +37,25 @@ def _is_external_contract_read_spec(read_spec: object) -> bool:
 
 
 def is_primitive_scalar_read_spec(read_spec: object) -> bool:
-    """True when the slot holds a primitive scalar (uint/int/bool/bytes/string/
-    enum) — a number that is never an address.
+    """Whether the slot holds a primitive scalar (uint/int/bool/bytes/string/enum).
 
-    Used to keep such slots out of the *resolved-address value snapshot*
-    (``build_control_snapshot``), where coercing a scalar to a 20-byte address
-    mints phantom EOA principals (a uint ``_minDelay == 864000`` becomes
-    ``0x…0d2f00``, has no code, classifies "eoa"). Address/contract slots are
-    real principals; mapping/array/struct slots are enumerated elsewhere (a
-    bare getter reverts on them) — all of those return False so they pass
-    through untouched.
+    Such slots are kept out of the address snapshot, where a uint like ``_minDelay`` would mint a phantom EOA. Address,
+    mapping, array and struct slots return False.
     """
     if not isinstance(read_spec, dict):
         return False
     type_kind = str(read_spec.get("type_kind") or "").strip().lower()
     if type_kind:
         return type_kind == "primitive"
-    # Older specs may omit type_kind; fall back to the Solidity type string.
+    # Older specs may omit type_kind.
     type_name = str(read_spec.get("type") or "").strip().lower()
     return type_name.startswith(("uint", "int", "bool", "bytes", "string", "enum"))
 
 
 def _is_runtime_resolvable_controller(target: object) -> bool:
-    """A controller earns inclusion in the tracking plan if it's either
-    pollable (address-like state we can read via eth_call) OR
-    event-watchable (any state var whose writers emit logs we can
-    subscribe to).
+    """A controller is tracked if pollable (address-like state via eth_call) or event-watchable (writers emit logs).
 
-    The poller filters by type_kind itself (it only handles a fixed
-    set of slot shapes), so non-address vars surfaced here flow purely
-    through the event pathway. This lets us track Governor proposal
-    mappings, role-bitmap slots, threshold ints, etc. by listening to
-    their emitted events without needing per-shape polling support.
+    Non-address vars flow only through the event pathway.
     """
     if not isinstance(target, dict):
         return False
@@ -78,10 +65,7 @@ def _is_runtime_resolvable_controller(target: object) -> bool:
     if kind == "state_variable":
         if _is_address_like_read_spec(target.get("read_spec")):
             return True
-        # Non-address state vars (mappings, uints, bools, structs) earn
-        # inclusion via event coverage. Any writer that emits a log is a
-        # signal worth subscribing to — semantics get classified later
-        # from the emitter's effect_tags.
+        # Non-address vars earn inclusion via event coverage; semantics come later from effect_tags.
         return bool(target.get("associated_events"))
     if kind == "external_contract":
         return _is_external_contract_read_spec(target.get("read_spec"))
@@ -89,7 +73,6 @@ def _is_runtime_resolvable_controller(target: object) -> bool:
 
 
 def build_control_tracking_plan(analysis: ContractAnalysis) -> ControlTrackingPlan:
-    """Build an event-first, polling-backed watch plan from contract analysis output."""
     contract_address = analysis["subject"]["address"]
     contract_name = analysis["subject"]["name"]
 
@@ -133,8 +116,7 @@ def build_control_tracking_plan(analysis: ContractAnalysis) -> ControlTrackingPl
             "polling_fallback": polling_fallback,
             "notes": list(target.get("notes", [])),
         }
-        # Absent stays absent: a plan built from a pre-provenance analysis
-        # artifact must not claim either value.
+        # Absent stays absent for pre-provenance artifacts.
         provenance = target.get("authority_provenance")
         if provenance:
             tracked["authority_provenance"] = provenance

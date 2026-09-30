@@ -1,21 +1,13 @@
 """Solmate ``RolesAuthority`` adapter.
 
-Resolves ``authority.canCall(user, target, sig)`` — the Solmate ``Auth``
-``requiresAuth`` authorization path — by reconstructing the
-``RolesAuthority`` capability/user state from the authority's indexed
-events:
+Resolves ``authority.canCall(user, target, sig)`` from the authority's indexed events:
 
     RoleCapabilityUpdated(uint8 indexed role, address indexed target, bytes4 indexed sig, bool enabled)
     PublicCapabilityUpdated(address indexed target, bytes4 indexed sig, bool enabled)
     UserRoleUpdated(address indexed user, uint8 indexed role, bool enabled)
 
-``canCall(user, target, sig)`` is true iff the ``(target, sig)``
-capability is public, or some role enabled for ``(target, sig)`` is held
-by ``user``. The generic ``EventIndexedAdapter`` folds a single event into
-a present-set keyed by one member; it cannot express this two-event join
-(capability ⋈ user-role), so this is a *named* adapter. It reads the same
-``IndexedEventLog`` backend the indexer populates from the descriptor's
-``enumeration_hint`` — no separate fetch path.
+``canCall`` is true iff the capability is public or some enabled role for it is held by ``user``. That two-event join is
+beyond ``EventIndexedAdapter``, hence a named adapter over the same ``IndexedEventLog`` backend.
 """
 
 from __future__ import annotations
@@ -49,28 +41,21 @@ def _sel(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
-# ``canCall(address,address,bytes4)`` is NOT unique to Solmate — OZ AccessManager
-# exposes the same selector (0xb7009613). Disambiguate from the authority's
-# bytecode: a Solmate RolesAuthority declares these getters; an OZ AccessManager
-# declares ``getTargetFunctionRole``. ``matches()`` confirms RolesAuthority before
-# claiming the descriptor at full confidence, and declines a recognized different
-# canCall standard so its own adapter can win the tie.
+# OZ AccessManager shares canCall's selector (0xb7009613), so confirm from bytecode: RolesAuthority declares these
+# getters, AccessManager declares ``getTargetFunctionRole``.
 _ROLES_AUTHORITY_MARKER_SELECTORS = (
     _sel("getRolesWithCapability(address,bytes4)"),
     _sel("doesUserHaveRole(address,uint8)"),
 )
 _OTHER_CANCALL_STANDARD_SELECTORS = (_sel("getTargetFunctionRole(address,bytes4)"),)  # OZ AccessManager
 _CONFIRMED_SCORE = 90
-# Claimed when confirmation isn't possible (no bytecode repo / unresolved
-# authority): Solmate is still the only wired canCall standard, but a *confirmed*
-# adapter (score 90) outranks this, so a second canCall standard drops in cleanly
-# instead of being starved by a registration-order tie.
+# Used when confirmation isn't possible; a confirmed adapter (90) outranks it, so another canCall standard isn't starved
+# by registration order.
 _PROVISIONAL_SCORE = 40
 
 
 class SolmateRolesAuthorityAdapter:
-    """Resolves a Solmate ``canCall`` external-bool check into the concrete
-    caller set authorized for the function under analysis."""
+    """Resolves a Solmate ``canCall`` check into the concrete caller set for the function under analysis."""
 
     @classmethod
     def matches(cls, descriptor: dict, ctx: EvaluationContext) -> int:
@@ -81,11 +66,8 @@ class SolmateRolesAuthorityAdapter:
         )
         if not is_cancall:
             return 0
-        # canCall's selector is shared with OZ AccessManager, so the signature
-        # alone can't claim this is Solmate. Confirm from the authority's bytecode:
-        # full confidence only for a real RolesAuthority; decline a recognized
-        # different canCall standard (so its adapter wins); claim provisionally
-        # when we can't probe.
+        # Full confidence only for a confirmed RolesAuthority; decline other canCall standards; claim provisionally when
+        # we can't probe.
         authority = _resolve_authority_address(descriptor, ctx)
         repo = getattr(ctx, "bytecode", None)
         if authority is None or repo is None:
@@ -127,8 +109,7 @@ class SolmateRolesAuthorityAdapter:
         roles_for_target_sig: set[int] = set()
         public = False
         users_by_role: dict[int, set[str]] = {}
-        # Rows MUST be in log order (block, tx_index, log_index) so enable/disable
-        # toggles fold to the final state.
+        # Rows must be in log order so toggles fold to the final state.
         for row in rows:
             topics = list(getattr(row, "topics", None) or [])
             data_words = list(getattr(row, "data_words", None) or [])
@@ -150,7 +131,6 @@ class SolmateRolesAuthorityAdapter:
                     bucket.add(user) if enabled else bucket.discard(user)
 
         if public:
-            # Capability is open to everyone — anyone may call.
             logger.debug(
                 "solmate_roles decision",
                 extra={
@@ -179,23 +159,11 @@ class SolmateRolesAuthorityAdapter:
             }
         ]
         if last_block is None:
-            # The authority's role events aren't durably indexed to head yet (no
-            # backfill_complete cursor). Any fold now is at best a lower bound — more grants
-            # may sit in the un-indexed tail — and a bare finite_set here carries nothing the
-            # reconciler can converge on: a partial set would freeze a never-self-healing
-            # answer, an empty one would assert a false "nobody can call". Defer
-            # unconditionally; ``no_index_cursor`` is marked ``deferred_pending_index`` so
-            # ``deferred_reconciler`` re-resolves this to the exact set once backfill
-            # completes (rather than emitting a sticky ``lower_bound`` the self-heal misses).
+            # Not indexed to head: a partial set would freeze and an empty one would falsely say "nobody". Always defer;
+            # ``no_index_cursor`` is marked for the reconciler.
             return _check_only(authority, descriptor, ["no_index_cursor"])
         if not rows:
-            # Indexed, but the authority emitted NONE of the three RolesAuthority
-            # role events. We can't confirm it actually is a Solmate
-            # RolesAuthority whose canCall semantics this adapter faithfully
-            # models — it may be a custom Authority with entirely different logic
-            # — so asserting an exact-empty set would be a false "nobody". Fail
-            # closed to a probe; this adapter is correct-by-construction only for
-            # confirmed RolesAuthorities.
+            # Indexed but no role events: can't confirm this is a RolesAuthority, so fail closed to a probe.
             return _check_only(authority, descriptor, ["authority_unconfirmed_no_role_events"])
         logger.debug(
             "solmate_roles decision",
@@ -219,13 +187,7 @@ class SolmateRolesAuthorityAdapter:
 
 def _check_only(authority: str | None, descriptor: dict, basis: list[str]) -> CapabilityExpr:
     extra: dict[str, Any] = {"basis": basis, "adapter": "solmate_roles_authority"}
-    # Tag index-cold deferrals so the deferred-resolution reconciler re-resolves
-    # this function once the authority's role events finish indexing.
-    # ``no_index_cursor`` is the only basis here that is *waiting on the durable
-    # index*; the others are settled answers (``*_unresolved`` = missing context,
-    # ``authority_unconfirmed_no_role_events`` = a warm authority that emitted no
-    # role events), so they are deliberately NOT marked — marking them would make
-    # the reconciler re-resolve forever.
+    # Only ``no_index_cursor`` waits on the index; marking the settled bases would make the reconciler loop forever.
     if "no_index_cursor" in basis:
         extra["deferred_pending_index"] = True
     logger.debug(
@@ -271,9 +233,9 @@ def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str 
 
 
 def _resolve_target_selector(descriptor: dict, ctx: EvaluationContext) -> str | None:
-    """The selector of the function being authorized — Solmate's ``requiresAuth``
-    passes ``msg.sig``, so it's the function under analysis, carried on the
-    CallFrame. Falls back to a single-entry ``selector_context``."""
+    """The selector being authorized: ``requiresAuth`` passes ``msg.sig``, carried on the CallFrame, else a
+    single-entry ``selector_context``.
+    """
     frame = ctx.call_frame
     if frame is not None:
         for value in (getattr(frame, "current_function_selector", None), getattr(frame, "current_msg_sig", None)):
@@ -305,10 +267,7 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 
 
 def _is_nonzero_address(value: Any) -> TypeGuard[str]:
-    # A renounced/unset authority is the zero address. Treat it as "no authority"
-    # so the function settles to ``authority_unresolved`` (a non-deferred external
-    # check) instead of stranding a ``no_index_cursor`` deferral that waits forever
-    # on a 0x0 event cursor the indexer will never seed.
+    # A zero authority settles to ``authority_unresolved`` rather than a deferral on a cursor that will never exist.
     return _is_address(value) and value.lower() != _ZERO_ADDRESS
 
 

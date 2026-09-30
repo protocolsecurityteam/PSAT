@@ -1,5 +1,3 @@
-"""Historical principal intervals derived from semantic authority events."""
-
 from __future__ import annotations
 
 import json
@@ -23,10 +21,7 @@ logger = logging.getLogger(__name__)
 
 MAX_LOGS_PER_TOPIC = int(os.getenv("PSAT_PRINCIPAL_HISTORY_MAX_LOGS_PER_TOPIC", "10000"))
 
-# Process-wide cache of an authority's full role-event log history, keyed
-# (chain_id, authority, topic0) so the contracts sharing one authority fetch it
-# once. Size-capped with oldest-fraction eviction; entries carry a monotonic
-# insert time and a medium TTL so a later grant/revoke is eventually re-read.
+# Shared by contracts using one authority; TTL so later grants/revokes are re-read.
 _LOG_CACHE: dict[tuple[int, str, str], tuple[list[dict[str, Any]], float]] = {}
 _LOG_CACHE_LOCK = threading.Lock()
 _LOG_CACHE_MAX = 256
@@ -34,7 +29,6 @@ _LOG_CACHE_TTL_S = float(os.getenv("PSAT_PRINCIPAL_LOG_CACHE_TTL_S", "1800"))
 
 
 def clear_log_cache() -> None:
-    """Clear the process-wide authority-log cache. For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
 
     with _LOG_CACHE_LOCK:
@@ -43,7 +37,6 @@ def clear_log_cache() -> None:
 
 
 def _evict_log_cache_if_needed() -> None:
-    """Drop the oldest 25% of _LOG_CACHE entries when the bound is reached (caller holds _LOG_CACHE_LOCK)."""
     if len(_LOG_CACHE) < _LOG_CACHE_MAX:
         return
     cutoff = sorted(_LOG_CACHE.values(), key=lambda v: v[1])[len(_LOG_CACHE) // 4][1]
@@ -52,7 +45,6 @@ def _evict_log_cache_if_needed() -> None:
 
 
 def _log_principal_log_pressure() -> None:
-    """Log when _LOG_CACHE crosses 50/75/95% of its bound (caller holds the lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("principal_log", len(_LOG_CACHE), _LOG_CACHE_MAX)
@@ -67,13 +59,7 @@ def build_principal_history(
     predicate_trees: dict[str, Any] | None,
     state_var_values: dict[str, str],
 ) -> dict[str, Any]:
-    """Build a historical permission artifact for external semantic checks.
-
-    The artifact is deliberately separate from ``FunctionPrincipal`` rows:
-    rows remain current-state caller principals, while this payload records
-    role/capability intervals when the external authority exposes enough
-    event structure to replay them.
-    """
+    """Historical role/capability intervals, kept separate from ``FunctionPrincipal`` rows, which stay current-state."""
     contract_address = contract_address.lower()
     checks = _external_authority_checks(
         contract_address=contract_address,
@@ -537,8 +523,7 @@ def _event_base(log: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fetch_abi(address: str, chain_id: int) -> list[dict[str, Any]]:
-    # ABI is served by services.clients.etherscan.get, which carries the durable PG layer
-    # and a bounded in-memory LRU — no third copy here.
+    # Carries the PG layer and LRU; no third cache here.
     from services.clients.etherscan import get
 
     data = get("contract", "getabi", chain_id=chain_id, address=address)

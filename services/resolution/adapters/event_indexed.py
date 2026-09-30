@@ -1,10 +1,5 @@
-"""Generic event-indexed adapter.
-
-Covers any storage var whose writes are observable through events.
-The static stage's ``mapping_events.py`` detector populates
-``set_descriptor.enumeration_hint`` with EventHint records describing
-the event address, topic, key positions, and fold direction. This
-adapter consumes those records directly with no per-standard adapter.
+"""Generic event-indexed adapter: folds ``set_descriptor.enumeration_hint`` records (from the static
+``mapping_events.py`` detector) into member sets, with no per-standard logic.
 """
 
 from __future__ import annotations
@@ -25,41 +20,26 @@ logger = logging.getLogger(__name__)
 
 _ZERO_ADDRESS = "0x" + "0" * 40
 
-# Discriminates the durable value fold's three outcomes for the caller:
-#   ok     — a resolved finite_set (warm head, or a populated cold lower bound)
-#   cold   — the durable index for this event address has no backfill_complete
-#            cursor, so the fold is empty-and-incomplete; the caller defers
-#   absent — structural: no repo, repo lacks fold_event_values, no event
-#            address, or a repo error; the caller falls through to the live replay
+# ok: a resolved finite_set. cold: no backfill_complete cursor; caller defers. absent: structural (no repo, no event
+# address, repo error); caller falls through to live replay.
 _FoldStatus = Literal["ok", "cold", "absent"]
 
 
 def _descriptor_is_caller_keyed(descriptor: dict) -> bool:
-    """True when one of the descriptor's key sources is the caller, so an
-    unresolved membership is a caller-discriminating gate (basis tag
-    ``caller_keyed_membership_allowlist`` keeps the earned-public projection
-    fail-closed)."""
+    """Whether a key source is the caller, so an unresolved membership keeps the
+    ``caller_keyed_membership_allowlist`` tag.
+    """
     key_sources = descriptor.get("key_sources") or []
     return any(k.get("source") in _CALLER_KEY_SOURCES for k in key_sources if isinstance(k, dict))
 
 
 def _implicit_membership_value_predicate(descriptor: dict) -> dict | None:
-    """Synthesize the value predicate a caller-keyed boolean membership ACL
-    implies when the descriptor carries no explicit ``value_predicate``.
+    """The implicit ``{value != 0}`` predicate for a caller-keyed boolean membership ACL with no explicit
+    ``value_predicate``.
 
-    A leaf like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` read for
-    truthiness authorizes exactly the caller keys whose latest stored value is
-    nonzero — i.e. an implicit ``{value != 0}``. The membership-truthy keys are
-    the same set the writer-side ``set``-direction fold produces; the leaf's
-    own truthy/falsy polarity is applied upstream by the predicate evaluator,
-    so this always yields the truthy-key set.
-
-    Returns the synthesized ``{op: any_nonzero}`` predicate only for a
-    ``mapping_membership`` descriptor that (a) is keyed on the caller and
-    (b) carries a ``set``-direction hint with ``value_position is not None``
-    (the gate that structurally excludes caller-keyed data-maps with no value
-    slot). Returns ``None`` for everything else, leaving unrelated descriptors
-    on their existing path.
+    ``allowedForwardedEigenpodCalls[msg.sender][selector]`` authorizes callers whose latest value is nonzero (polarity
+    is applied upstream). Only for caller-keyed ``mapping_membership`` descriptors with a ``set`` hint that has a
+    ``value_position``; ``None`` otherwise.
     """
     if descriptor.get("kind") != "mapping_membership":
         return None
@@ -80,29 +60,23 @@ def _implicit_membership_value_predicate(descriptor: dict) -> dict | None:
 
 
 class EventIndexedAdapter:
-    """Generic adapter for storage vars with enumeration_hint
-    populated. Folds event-add/remove records into a current member
-    set."""
+    """Generic adapter for storage vars with ``enumeration_hint``: folds add/remove events into a current member set."""
 
     @classmethod
     def matches(cls, descriptor: dict, ctx: EvaluationContext) -> int:
         hints = descriptor.get("enumeration_hint")
         if not hints:
             return 0
-        # Require at least one add/remove event hint with topic0.
+        # Needs at least one add/remove hint with topic0.
         for hint in hints:
             if hint.get("topic0") and hint.get("direction") in ("add", "remove"):
                 return 50
-        # D.2 — value-predicate dispatch. ``set`` direction + a
-        # ``value_predicate`` on the descriptor + a ``value_position``
-        # in the hint is the shape ``OwnerSet(addr, val)`` produces.
+        # D.2: ``set`` direction + ``value_predicate`` + ``value_position`` is the ``OwnerSet(addr, val)`` shape.
         if descriptor.get("value_predicate"):
             for hint in hints:
                 if hint.get("topic0") and hint.get("direction") == "set" and hint.get("value_position") is not None:
                     return 55
-        # A caller-keyed boolean membership ACL carries the same set-direction
-        # value hint but no explicit value_predicate: the truthy read implies
-        # ``{value != 0}``. Route it through the same value-aware fold.
+        # Caller-keyed boolean ACLs take the same value fold with an implicit ``{value != 0}``.
         if _implicit_membership_value_predicate(descriptor) is not None:
             return 55
         return 0
@@ -112,13 +86,8 @@ class EventIndexedAdapter:
         return True
 
     def enumerate(self, descriptor: dict, ctx: EvaluationContext) -> CapabilityExpr:
-        # D.2 — when the descriptor carries a ValuePredicate and at
-        # least one ``set``-direction hint, dispatch to the value-aware
-        # fold path (latest-value-per-key, filtered by predicate)
-        # rather than the add/remove present-set fold. A caller-keyed
-        # boolean membership ACL supplies an implicit ``{value != 0}``
-        # predicate the same way (the truthy read), routing through the
-        # identical fold.
+        # D.2: a value predicate (explicit or implicit) with a ``set`` hint goes to the latest-value fold instead of the
+        # present-set fold.
         explicit_predicate = descriptor.get("value_predicate")
         implicit_predicate = None if explicit_predicate else _implicit_membership_value_predicate(descriptor)
         value_predicate = explicit_predicate or implicit_predicate
@@ -130,11 +99,8 @@ class EventIndexedAdapter:
                 if h.get("direction") == "set" and h.get("value_position") is not None and h.get("topic0")
             ]
             if set_hints:
-                # A caller-keyed membership ACL folds latest-value-per-CALLER:
-                # the hint's ``key_position`` points at the innermost mapping
-                # key (e.g. the selector), so the fold must be re-keyed on the
-                # caller's own event-arg position. For an explicit-predicate
-                # descriptor ``key_position`` is already the enumerated key.
+                # A caller-keyed ACL must fold on the caller's event-arg position, not the hint's innermost key (e.g.
+                # the selector).
                 fold_key_position = (
                     _caller_event_arg_position(descriptor, set_hints[0]) if implicit_predicate is not None else None
                 )
@@ -193,25 +159,16 @@ class EventIndexedAdapter:
             }:
                 return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
             if result.confidence == "partial" and result.partial_reason == "ambiguous_event_direction":
-                # An add/remove conflict the fold could not decide from the
-                # event payload: no member set exists, not even a lower bound —
-                # settle to the gated external check, never a finite_set. A
-                # caller-keyed gate additionally carries the caller-gate basis
-                # tag so the earned-public projection keeps the function gated
-                # (an undecidable allowlist is still an allowlist).
+                # An undecidable add/remove conflict has no member set at all; settle to a gated check (caller-keyed
+                # gates keep the caller-gate tag).
                 basis = ["ambiguous_event_direction"]
                 if _descriptor_is_caller_keyed(descriptor):
                     basis.append("caller_keyed_membership_allowlist")
                 return self._external_check(descriptor, first_hint, ctx, basis)
             if result.confidence == "partial" and result.partial_reason == "no_index_cursor":
-                # A cold durable index (no backfill_complete cursor) defers to
-                # external_check_only tagged ``deferred_pending_index`` rather
-                # than a live genesis-scan replay: ``deferred_reconciler`` (live
-                # in event_log_indexer) re-resolves once the indexer backfills
-                # the event address. Mirrors the value-fold cold path
-                # (_deferred_value_check). A caller-keyed gate also carries
-                # ``caller_keyed_membership_allowlist`` (a CALLER_GATE_BASIS_TAGS
-                # member) so the earned-public projection keeps it gated.
+                # Cold index defers with ``deferred_pending_index`` instead of a genesis-scan replay;
+                # ``deferred_reconciler`` re-resolves after backfill. Caller-keyed gates carry
+                # ``caller_keyed_membership_allowlist`` to stay gated.
                 basis = ["no_index_cursor"]
                 if _descriptor_is_caller_keyed(descriptor):
                     basis.append("caller_keyed_membership_allowlist")
@@ -256,11 +213,7 @@ class EventIndexedAdapter:
             "callee_function": descriptor.get("callee_function"),
             "callee_signature": descriptor.get("callee_signature"),
         }
-        # See solmate_roles._check_only: tag only the index-cold ``no_index_cursor``
-        # deferral so the deferred-resolution reconciler retries it once the event
-        # address's logs finish indexing. Structural/transient bases
-        # (event_address_unresolved, unresolved_event_key, event_log_backend_error)
-        # are not waiting on the index and are left unmarked.
+        # Only ``no_index_cursor`` waits on the index (see solmate_roles._check_only).
         if "no_index_cursor" in basis:
             extra["deferred_pending_index"] = True
         target = _resolve_event_address(descriptor, hint, ctx)
@@ -289,29 +242,12 @@ class EventIndexedAdapter:
         ctx: EvaluationContext,
         fold_key_position: int | None = None,
     ) -> CapabilityExpr:
-        """D.2 fold: latest-value-per-key, filtered by ``value_predicate``.
+        """D.2 fold: latest value per key, filtered by ``value_predicate``.
 
-        Folds over the durable ``indexed_event_logs`` index (``ctx.event_log_repo``,
-        the same data source the add/remove path reads), so it issues no live
-        request and is unaffected by upstream rate-limiting or token plumbing.
-        The result is a ``finite_set`` of keys whose latest stored value
-        satisfies the predicate; a not-yet-complete backfill demotes ``quality``
-        to ``lower_bound``. Only when the durable index is unavailable or holds
-        none of these events does it fall back to an on-demand event replay
-        (forwarding the token + block), and any failure is fail-closed
-        (``unsupported``), never raised.
-
-        ``fold_key_position`` overrides the hint's ``key_position`` when the
-        enumerated key is not the hint's innermost mapping key (a caller-keyed
-        membership ACL folds on the caller's event-arg position).
-
-        When the durable index for the event address is cold (no
-        ``backfill_complete`` cursor) the fold defers to ``external_check_only``
-        with ``deferred_pending_index`` rather than blocking on a live replay:
-        ``deferred_reconciler`` re-resolves this function once the indexer
-        backfills the event address. The structural-absent case (no repo / no
-        ``fold_event_values`` / no event address) still falls through to the
-        live replay so offline and non-indexed deployments keep resolving.
+        Reads the durable ``indexed_event_logs`` (no live request); an incomplete backfill demotes to ``lower_bound``.
+        ``fold_key_position`` overrides the hint's key (caller-keyed ACLs). A cold index defers to
+        ``external_check_only`` with ``deferred_pending_index``; structural absence falls back to live replay; any
+        failure is ``unsupported``.
         """
         event_address = next(
             (addr for addr in (_resolve_event_address(descriptor, hint, ctx) for hint in set_hints) if addr),
@@ -334,22 +270,9 @@ class EventIndexedAdapter:
         ctx: EvaluationContext,
         event_address: str | None,
     ) -> CapabilityExpr:
-        """Defer a cold-index value fold to ``external_check_only`` so the
-        deferred-resolution reconciler re-resolves it once the event address's
-        logs finish indexing.
-
-        ``external_check_only`` is the gated safe baseline (it can neither
-        manufacture authority nor open the function); ``deferred_pending_index``
-        tags it for ``deferred_reconciler`` (live in ``event_log_indexer``),
-        which keys on ``target_address`` to detect the backfill. Mirrors
-        ``_external_check`` (add/remove path) and ``solmate_roles._check_only``.
-
-        The basis carries ``caller_keyed_membership_allowlist`` (a
-        ``CALLER_GATE_BASIS_TAGS`` member, asserted in the adapter tests) because
-        an unresolved caller-keyed value gate is a caller-discriminating
-        authorization: the earned-public projection must treat the deferral as a
-        root-authority blocker so the function stays gated until the index warms,
-        never opening on a sibling public path.
+        """Defer a cold-index value fold to a gated ``external_check_only`` tagged ``deferred_pending_index`` (keyed
+        on ``target_address`` by ``deferred_reconciler``). The ``caller_keyed_membership_allowlist`` basis keeps
+        the function gated until the index warms.
         """
         return CapabilityExpr.external_check_only(
             ExternalCheck(
@@ -374,25 +297,15 @@ class EventIndexedAdapter:
         key_sources: list[dict],
         fold_key_position: int | None,
     ) -> tuple[_FoldStatus, CapabilityExpr | None]:
-        """Fold the value predicate over the durable index, returning a tagged
-        outcome the caller routes on:
+        """Fold the value predicate over the durable index:
 
-        - ``("ok", finite_set)`` — durable rows resolved (warm-head exact, or a
-          populated cold lower bound).
-        - ``("cold", None)`` — the index for the event address holds none of
-          these events because its backfill cursor isn't complete
-          (``partial_reason == "no_index_cursor"``). The caller defers.
-        - ``("absent", None)`` — structural: no repo / no ``fold_event_values`` /
-          no resolvable (nonzero) event address / a repo error. The caller falls
-          through to the live replay (offline + non-indexed deployments resolve
-          only there; a never-seeded zero-address cursor must never defer).
+        - ``("ok", finite_set)``: rows resolved (warm exact, or populated cold lower bound);
+        - ``("cold", None)``: backfill incomplete, caller defers;
+        - ``("absent", None)``: structural (no repo, no nonzero event address, repo error), caller uses live replay.
         """
         repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
         fold_values = getattr(repo, "fold_event_values", None)
-        # A zero / renounced event address never gets an indexer cursor, so a
-        # cold fold against it would defer forever. Treat it as structural so the
-        # live replay (fail-closed) settles it instead — mirrors solmate_roles'
-        # nonzero-authority anti-stranding guard.
+        # A zero event address never gets a cursor, so deferring would wait forever.
         if not callable(fold_values) or event_address is None or event_address == _ZERO_ADDRESS:
             return "absent", None
 
@@ -419,12 +332,7 @@ class EventIndexedAdapter:
         except Exception:
             return "absent", None
         if not result.entries and not result.complete:
-            # An empty, not-complete fold splits two ways. A cold index
-            # (``no_index_cursor``: no backfill_complete cursor) is waiting on the
-            # indexer — defer so the reconciler re-resolves once it warms, rather
-            # than blocking on a live replay. Any other partial reason
-            # (unresolved key, etc.) is structural — fall through to the live
-            # replay, which is the only resolver in that case.
+            # A cold index defers; any other partial reason is structural and falls through to live replay.
             if result.partial_reason == "no_index_cursor":
                 return "cold", None
             return "absent", None
@@ -447,14 +355,9 @@ class EventIndexedAdapter:
         event_address: str | None,
         fold_key_position: int | None,
     ) -> CapabilityExpr:
-        """On-demand event replay fallback (used only when the durable index is
-        unavailable or holds none of these events). Forwards the bearer token and
-        the resolution block; any failure is fail-closed."""
+        """Live event replay fallback, used only when the durable index can't answer. Failures are fail-closed."""
         contract_address = event_address or ctx.contract_address or ""
-        # Reconstruct WriterEventSpec dicts the enumerator expects from
-        # the EventHint payload. The hint already carries ``topic0``,
-        # ``event_signature``, ``key_position`` etc. — we just rename
-        # to the spec keys.
+        # Rebuild WriterEventSpec dicts from the hint.
         writer_specs = []
         for hint in set_hints:
             key_position = fold_key_position if fold_key_position is not None else int(hint.get("key_position") or 0)
@@ -489,11 +392,7 @@ class EventIndexedAdapter:
             kwargs["hypersync_url"] = hypersync_url
         if isinstance(ctx.block, int):
             kwargs["to_block"] = ctx.block
-        # Floor the scan at the event address's deploy block (deploy→head, not
-        # genesis→head): a contract emits no events before it exists, so the log
-        # set is identical, but the empty pre-deployment range is never fetched.
-        # When no floor can be resolved we DEFER (skip the live scan) rather than
-        # scan from genesis — fail-closed to the gated external-check baseline.
+        # Floor at the deploy block; with no floor, defer rather than scan from genesis.
         from ..creation_block_floor import resolve_scan_floor
 
         floor = resolve_scan_floor(contract_address, ctx.chain_id, session=ctx.session)
@@ -522,14 +421,9 @@ class EventIndexedAdapter:
 
 
 def _caller_event_arg_position(descriptor: dict, hint: dict) -> int | None:
-    """Event-arg position holding the CALLER key for a caller-keyed membership.
+    """Event-arg position of the caller key for a caller-keyed membership.
 
-    The hint's ``key_position`` names the innermost mapping key (e.g. the
-    selector in ``mapping[msg.sender][selector]``). The value fold for a
-    caller ACL must instead key on the caller. ``key_sources`` gives the caller
-    key index; ``topics_to_keys`` / ``data_to_keys`` invert from key index to
-    event-arg position (a topic arg is the n-th ``indexed_positions`` entry;
-    a data arg is the m-th non-indexed entry).
+    ``key_sources`` gives the key index; ``topics_to_keys`` / ``data_to_keys`` invert it to an arg position.
     """
     key_sources = descriptor.get("key_sources") or []
     caller_key_index = next(

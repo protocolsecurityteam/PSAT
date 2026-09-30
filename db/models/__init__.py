@@ -1,8 +1,7 @@
-"""SQLAlchemy models for PSAT job queue and artifact storage.
+"""SQLAlchemy models.
 
-Split into submodules; this package imports every submodule so all mappers
-register on ``Base.metadata`` (alembic autogenerate depends on that), and
-re-exports the full former ``db.models`` module surface.
+Imports every submodule so all mappers register on ``Base.metadata`` (alembic autogenerate needs that) and re-exports
+the former ``db.models`` surface.
 """
 
 from __future__ import annotations

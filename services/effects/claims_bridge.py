@@ -1,28 +1,15 @@
 """Effects → claims bridge.
 
-Turns a *proven* effect verdict into a registry claim so the frontend renders it
-through the one shared claims vocabulary (``site/src/vocab/``) with zero
-duplicated display logic. This is the consumption boundary where the write-only
-verdict substrate becomes "labels-observable, scoring-deferred".
+Turns a proven effect verdict into a registry claim so the frontend renders it through the shared claims vocabulary
+(``site/src/vocab/``).
 
-Design constraints this module honours verbatim:
+- The registry is the sole minter: :func:`services.static.claims.registry.emit_claim` and
+:func:`resolve_claim_precedence`, never hand-built dicts.
+- Fail-closed: only ``proven`` mints. Tier-0 historical verdicts mint only if ``current_check_passed is True``.
+- The witness is a pointer (``effect_verdict_id``, ``effect_class``, ``behavior_hash``, ``verdict_tier``) plus a small
+observed summary; transcripts stay in the artifact store.
 
-- **Registry is the sole minter.** Claims are built only through
-  :func:`services.static.claims.registry.emit_claim` and collapsed through
-  :func:`resolve_claim_precedence` — never hand-built dicts. An id not in the
-  registry cannot escape (the same anti-creep invariant static relies on).
-- **Fail-closed.** Only ``verdict == proven`` mints. ``unknown`` / degraded
-  mint nothing. A Tier-0 *historical* verdict mints only when its current-state
-  check passed (``current_check_passed is True``); a failed current check proves
-  *past* capability, and a present-tense label would overclaim.
-- **Witness is a pointer, not a payload.** The claim witness records the verdict
-  identity (``effect_verdict_id`` / ``effect_class`` / ``behavior_hash`` /
-  ``verdict_tier``) plus a minimal observed summary. Transcripts never enter
-  ``EffectiveFunction.claims`` — they live in the artifact store.
-
-Pure functions, no I/O: the two call sites (``workers.effects_worker`` and
-``services.policy.effective_permissions_writer``) do the DB reads/writes and
-hand this module plain verdict-shaped objects.
+Pure; callers (``workers.effects_worker``, ``services.policy.effective_permissions_writer``) do the I/O.
 """
 
 from __future__ import annotations
@@ -52,23 +39,13 @@ from services.static.claims.types import TIER_PRECEDENCE, Claim, Tier
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 
-# The effects worker runs in its own process and never calls ``build_claims``, so
-# the standard matcher claims (``upgrade.implementation``, ``flow.out``, …) would
-# not be registered when the bridge emits. Populate the registry at import — the
-# same import every matcher module runs, idempotent — so ``emit_claim`` resolves
-# every id the mapping below reaches.
+# The effects worker never runs ``build_claims``, so register matcher claims at import (idempotent) so ``emit_claim``
+# resolves every id below.
 discover()
 
-# The observed-authority claim: what the authority-change recipe
-# actually proves is that calling F opens a permission gate to callers that
-# previously could not pass it (``recipes.authority_change`` — ≥2 random
-# identities rejected before, all accepted after). None of the existing static
-# authority sentences is honest for that: ``roles.grant`` asserts a *recognized-
-# standard* role scheme, ``authority.replace`` a contract swap,
-# ``authorized_caller.rotate`` a scalar-pointer rotation — the mechanism-agnostic
-# witness proves none of those. So it gets its own honest id, registered like the
-# policy-tier ``transfer_policy.configure``: never minted by the static pass
-# (gate/trigger inert), only by this bridge through ``emit_claim``.
+# The authority-change recipe proves only that calling F opens a gate to previously rejected callers. No static
+# authority claim says exactly that (``roles.grant``, ``authority.replace``, ``authorized_caller.rotate`` each assert a
+# mechanism), so it gets its own id, minted only here.
 AUTHORITY_GRANT = "authority.grant"
 
 
@@ -92,15 +69,13 @@ if not is_registered(AUTHORITY_GRANT):
         )
     )
 
-# The provenance tier every bridge-minted claim carries (shared vocabulary;
-# the annotation pins it inside the claims ``Tier`` Literal).
 OBSERVED_TIER: Tier = WITNESS_TIER_BEHAVIORAL_OBSERVED
 
 
 class VerdictLike(Protocol):
-    """The verdict shape the bridge reads — satisfied by ``db.models.EffectVerdict``
-    and by lightweight test doubles. Read-only members so a concrete row (whose
-    ``id`` is a non-null ``int``) structurally matches without invariance friction."""
+    """The verdict shape the bridge reads (``db.models.EffectVerdict`` or test doubles); read-only members avoid
+    invariance friction.
+    """
 
     @property
     def id(self) -> int | None: ...
@@ -121,16 +96,14 @@ class VerdictLike(Protocol):
 
 
 def _claim_id_for(verdict: VerdictLike) -> str | None:
-    """The honest claim id for a proven verdict's effect class, or ``None`` when
-    the class carries no present-tense existential claim."""
+    """The claim id for a proven verdict's class, or ``None`` if it carries no present-tense claim."""
     ec = verdict.effect_class
     if ec == EFFECT_CLASS_CODE_UPGRADE:
         return "upgrade.implementation"
     if ec == EFFECT_CLASS_VALUE_OUT:
         return "flow.out"
     if ec == EFFECT_CLASS_SUPPLY:
-        # The recipe records a signed delta as ``supply_delta_sign`` (mint/burn);
-        # the sign IS the label. Absent/unknown sign fails closed (no claim).
+        # The recorded sign is the label; absent or unknown fails closed.
         witness = verdict.witness or {}
         sign = witness.get("supply_delta_sign") if isinstance(witness, dict) else None
         if sign == "mint":
@@ -139,10 +112,7 @@ def _claim_id_for(verdict: VerdictLike) -> str | None:
             return "supply.burn"
         return None
     if ec == EFFECT_CLASS_FREEZE_PAUSE:
-        # The pause recipe only ever witnesses a FREEZE (entry points that newly
-        # revert after the latch flip) — it has no unpause direction — so a proven
-        # freeze_pause verdict is always ``pause.set``. ``pause.unset`` stays a
-        # static-only claim until an unfreeze recipe exists to witness it.
+        # The pause recipe only witnesses freezes, so it's always ``pause.set``; ``pause.unset`` stays static-only.
         return "pause.set"
     if ec == EFFECT_CLASS_AUTHORITY_CHANGE:
         return AUTHORITY_GRANT
@@ -150,8 +120,7 @@ def _claim_id_for(verdict: VerdictLike) -> str | None:
 
 
 def _mints(verdict: VerdictLike) -> bool:
-    """Fail-closed gate: only a proven verdict mints, and a Tier-0 historical
-    verdict mints only when its current-state check passed."""
+    """Only proven verdicts mint; Tier-0 historical ones need a passed current-state check."""
     if verdict.verdict != VERDICT_PROVEN:
         return False
     if verdict.tier == TIER_HISTORICAL and verdict.current_check_passed is not True:
@@ -160,9 +129,7 @@ def _mints(verdict: VerdictLike) -> bool:
 
 
 def verdict_to_claim(verdict: VerdictLike) -> Claim | None:
-    """Mint the registry claim for one proven verdict, or ``None`` when the
-    verdict fails the fail-closed gate or maps to no claim. The witness is a pointer to the
-    verdict (never the transcript)."""
+    """Mint the claim for one proven verdict, or ``None``. The witness points at the verdict, never the transcript."""
     if not _mints(verdict):
         return None
     claim_id = _claim_id_for(verdict)
@@ -181,94 +148,32 @@ def verdict_to_claim(verdict: VerdictLike) -> Claim | None:
 
 
 def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
-    """A tiny, transcript-free summary of what was observed — enough to read the
-    witness without opening the artifact. Never the raw transcript."""
+    """A small transcript-free summary of what was observed."""
     raw = verdict.witness if isinstance(verdict.witness, dict) else {}
-    # ``observed_blast_radius`` / ``auto_expiry`` / ``duration_bound_seconds`` are the
-    # freeze-severity fields the fork pause recipe records on ``effect_verdicts.witness``
-    # (``anvil.pause_recipe``). The dict-comp keeps only keys PRESENT on the
-    # witness, so adding them is a no-op for every non-freeze class.
+    # Only keys present on the witness are kept. Contract for the scorer reading ``claim.witness["observed"]``:
     #
-    # CONTRACT for the eventual scorer that reads ``claim.witness["observed"]`` — these
-    # fallbacks are load-bearing; a consumer that ignores them re-introduces the exact
-    # "empty blast radius reads as harmless" bug this projection exists to fix:
-    #   * An absent/empty ``observed_blast_radius`` is NOT "no freeze" — it is an
-    #     UNPROVEN LOWER BOUND. Only 7/65 freeze_pause verdicts observe a radius; the
-    #     other 58 take the no-blast ``unknown`` path (``anvil.py``) and mint NO
-    #     behavioral claim at all (the ``_mints`` gate), keeping only a static
-    #     ``pause.set``. Score those from the static claim, flagged low-confidence —
-    #     never as a proven harmless pause.
-    #   * ``duration_bound_seconds`` is a STATIC read (``calldata.read_max_pause_duration``),
-    #     cross-checked on-fork only as an upper bound. Trust it as a severity-REDUCER
-    #     ONLY when ``auto_expiry is True``; ``auto_expiry is False`` means the fork
-    #     contradicted the static constant, so the bound is not a mitigation.
-    #   * ``duration_bound_seconds is None`` is TWO different facts and
-    #     ``duration_bound_source`` is the only thing that tells them apart
-    #     (``config.DURATION_BOUND_*``): ``no_time_reference`` = PROVEN indefinite
-    #     latch = the MOST severe freeze, never zero/short — and it is asserted only
-    #     when no leaf in the latch's whole guard tree reads a clock AND no operand
-    #     anywhere in that tree stands for something never read (lists known-complete,
-    #     no undecomposed expression, no unentered callee), because a lowered ``||``, a
-    #     pre-widening two-slot operand list, and a clock read through a view helper or
-    #     a time oracle each hide a clock from the leaf that reads the latch — and the
-    #     third hides it from a whole-tree ``block.timestamp`` walk as well;
-    #     ``not_determined`` (and an ABSENT source, which is every row written
-    #     before ``duration_bound_source`` existed) = the window was
-    #     not established — score it as a confidence gap, never as indefinite and
-    #     never as bounded. The previous contract read this line as "None + None =
-    #     indefinite", and it was false on all four rows that had it: every proven
-    #     ``freeze_pause`` verdict in the corpus is a ``pauseUntil`` timestamp latch
-    #     whose window lives in storage.
-    #   * ``pause.unset`` is entirely unwitnessed (no unfreeze recipe; freeze_pause always
-    #     maps to ``pause.set``). Do not fabricate an unset/auto-recover fact from these.
-    # ``backing`` is the fork-observed mint-backing object
-    # ``{inflow_observed, minted, ...}`` recorded on EFFECT_CLASS_SUPPLY verdicts —
-    # present only on ``supply.mint``. ``inflow_observed is False`` is a witnessed
-    # dilution signal (supply rose with no asset inflow in the same call); the
-    # scorer must NOT read absence of this key as "backed". The per-execution
-    # Transfer COUNTS are state-plane and live on ``observed_residue``
-    # (``backing_inflow_transfers`` / ``backing_mint_transfers``), absent on a
-    # deployment whose verdict came from a cache hit.
-    #
-    # ``input_seeded`` / ``contract_balance_seeded`` are the SYNTHESIS QUALIFIERS of
-    # a proven verdict and both weaken it — they must reach the consumer or the
-    # claim reads stronger than the observation:
-    #   * ``input_seeded`` — the acting principal was given the input asset the
-    #     function pulls. The effect itself is still fully observed; what is NOT
-    #     claimed is that this principal holds that asset today.
-    #   * ``contract_balance_seeded`` — the TARGET CONTRACT's own ETH balance was
-    #     overridden before the payout executed. The verdict then means "would move
-    #     value if the contract were funded" (a capability of the code), NOT "moves
-    #     value in current state". A scorer must not treat it as a live outflow of
-    #     present treasury, and must not read its ABSENCE as "the contract is
-    #     funded" — absence only means no balance override was needed.
-    # ``destination_shape`` / ``shape_proved_by`` are the fork's three-valued answer to
-    # "where can this outflow go", and NO claim in the database carried either.
-    # The two rows that made it visible are approve-then-pull outflows whose
-    # transfer sink lives in the CALLEE, so the static flows matcher emitted nothing at
-    # all: the merged claim carried $472M of reach and not one word about the
-    # destination, indistinguishable from a destination we examined and could not
-    # classify. The class is 7 functions (2 manifest, 5 latent) and it grows as
-    # coverage improves — every new successful probe converts a latent row — so the
-    # forwarding is unconditional rather than scoped to the rows that show it today.
-    #
-    # CONTRACT: ``shape_proved_by`` names the EVIDENCE — "static" (a universal proof
-    # from the code), "simulation" (a sentinel that landed, proving caller_arbitrary),
-    # or "none" (no evidence obtained). ``"none"`` means the destination contributes
-    # ZERO severity in either direction: it is a confidence gap, not a fixed
-    # destination and not a theft-shaped one.
+    # * Freeze: an absent or empty ``observed_blast_radius`` is an unproven lower bound, not "no freeze" (most freeze
+    # verdicts take the no-blast unknown path and mint nothing; score those from the static ``pause.set``, low
+    # confidence).
+    # * ``duration_bound_seconds`` is a static read, cross-checked on-fork as an upper bound; trust it as a reducer only
+    # when ``auto_expiry is True``.
+    # * ``duration_bound_seconds is None`` means two things, told apart by ``duration_bound_source``
+    # (``config.DURATION_BOUND_*``): ``no_time_reference`` is a proven indefinite latch (most severe; asserted only when
+    # nothing in the latch's guard tree could hide a clock read); ``not_determined`` or absent is a confidence gap.
+    # * ``pause.unset`` is unwitnessed; don't fabricate it.
+    # * ``backing`` (supply.mint only): ``inflow_observed is False`` is witnessed dilution; absence isn't "backed".
+    # Transfer counts live on ``observed_residue``.
+    # * ``input_seeded`` / ``contract_balance_seeded`` weaken the verdict and must reach the consumer; the latter means
+    # "would move value if funded", and its absence doesn't mean funded.
+    # * ``destination_shape`` / ``shape_proved_by`` always forwarded (callee-side sinks produced no static flow, leaving
+    # reach with no destination). ``shape_proved_by`` is "static", "simulation", or "none" (a confidence gap
+    # contributing no severity either way).
     keep = (
         "supply_delta_sign",
         "destination_shape",
         "shape_proved_by",
-        # The SUBJECT of a ``caller_arbitrary`` proof — the parameter the sentinel
-        # was substituted into. Code-plane and cache-safe (it names a slot of the
-        # synthesized calldata, not an address or a height). Without it the shape
-        # travels as a proof with no stated subject, and the scorer's exec join
-        # (``distill._fork_caller_arbitrary_param``) cannot tell a sentinel that
-        # rode the call target from one that rode an executor payload — so it
-        # refuses every such verdict rather than guess, which is where the 15
-        # already-proven witnesses of this corpus sit today.
+        # The parameter a ``caller_arbitrary`` proof is about. Without it ``distill._fork_caller_arbitrary_param`` can't
+        # tell a call-target sentinel from a payload one and refuses.
         "sentinel_param",
         "gate_mutation",
         "historical",
@@ -281,15 +186,9 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
         "backing",
         "input_seeded",
         "contract_balance_seeded",
-        # WHEN the observation was taken and how far the pin that fixed it
-        # reaches (``config.BLOCK_SOURCES``). Both keys are absent together
-        # whenever the height is not proven — a failed head pin, a fork spawned
-        # unpinned, a cache hit that observed nothing at this deployment — and
-        # that absence is the third state: the verdict stands, its height does
-        # not. A consumer must not read an absent height as "current", and must
-        # not compare two verdicts as one world state unless both carry the same
-        # height; ``invocation_pin`` in particular does NOT make a run coherent
-        # (one run spanned 51 heights over 495 blocks).
+        # When the observation was taken and the pin's scope (``config.BLOCK_SOURCES``); absent together when unproven.
+        # Absent isn't "current", and verdicts are comparable only at equal heights (``invocation_pin`` doesn't make a
+        # run coherent).
         "block_number",
         "block_source",
     )
@@ -301,70 +200,22 @@ def _observed_summary(verdict: VerdictLike) -> dict[str, Any]:
     return summary
 
 
-# Downstream value-reach. Read from ``effect_verdicts.observed_residue``, NOT
-# from ``witness``: holder addresses and USD are per-deployment state, and while
-# they lived on the witness they were copied into the code-plane behavioral cache
-# and re-published as a DIFFERENT deployment's observation on every cache hit.
-# ``observed_residue`` is the state-plane column and is never a cache key.
+# Downstream value reach, from ``observed_residue`` (per-deployment state, never a cache key), not ``witness``. Scorer
+# contract, with ``reach_determined`` as discriminator:
 #
-# CONTRACT for the eventual scorer, in three states with ``reach_determined`` as
-# the discriminator:
-#   * ``reach_determined is True`` — MEASURED. ``observed_reach_value_usd`` is a
-#     conservative upper bound (a holder's full on-chain balance attributed when
-#     value provably leaves it) over ``observed_reach_holders``.
-#   * ``reach_determined is False`` (with ``reach_indeterminate: True``) — NOT
-#     measured: no holder was observed moving value, which is NOT "reach is
-#     nothing". ``observed_reach_value_usd`` is ABSENT on such a row and
-#     ``observed_reach_floor_usd`` carries the acting deployment's own balance as a
-#     floor. The floor used to be published as ``observed_reach_value_usd``
-#     itself, so a scorer reading the number and ignoring the flag scored "$0
-#     reach" for a zero-balance router that can move millions — an unproven
-#     value read as a proven zero.
-#     ``observed_reach_floor_usd`` is itself THREE-STATE and its absence is the
-#     third: the key is present with a positive figure (a witnessed floor),
-#     present at ``0.0`` (a balance row was read and summed to zero — weak, and
-#     still not a measured reach), or ABSENT beside ``reach_indeterminate: True``,
-#     meaning NO balance row was witnessed for the acting deployment at all and
-#     there is no floor to state. It is never ``null``; a scorer must read the
-#     KEY's presence, never a ``.get()`` that folds absence into a zero.
-#   * ``reach_determined is False`` WITHOUT ``reach_indeterminate`` — value WAS
-#     observed leaving a holder and its USD is NOT determined, because at least one
-#     (holder, asset) pair that moved has no priced holding on record.
-#     ``observed_reach_unvalued_pairs`` names those pairs — holder, asset and reason
-#     each — and ``observed_reach_priced_usd`` is the priced part, a partial floor,
-#     with ``observed_reach_priced_holders`` naming whose holdings it is made of. Read
-#     the pair key literally: an asset can be priced for one holder and unknown for
-#     another, and the two statements do not contradict each other.
-#     ``observed_reach_unvalued_assets`` is the narrower fact — the assets NO holder
-#     priced — and is published even when EMPTY on this branch, where ``[]`` is the
-#     earned negative and absence of the key means the branch never ran. Reach is
-#     measured PER (HOLDER, ASSET), and 1001 of 1376 local balance rows are unpriced,
-#     so this state is common and must lower confidence rather than produce a small
-#     number. ``observed_reach_unvalued_reasons`` says WHY, and not one of its values asserts
-#     the holder does not hold the asset: ``unpriced_holding`` (we have the row, no
-#     price), ``holdings_at_page_cap`` (the holder's stored rows reach the fetcher's
-#     one-page cap, so assets are probably missing), ``asset_not_in_recorded_holdings``
-#     (not in the set we recorded — and that set is not provably complete, because the
-#     stored rows already dropped every zero-balance entry the page returned). A
-#     scorer must read all three as CONFIDENCE GAPS, never as a small reach.
-#   * ``reach_tvl_check`` is the corroborating CEILING's outcome:
-#     ``within_protocol_tvl`` (the figure is at least possible),
-#     ``exceeds_protocol_tvl`` (REFUSED — ``observed_reach_rejected_usd`` and
-#     ``protocol_tvl_usd`` record the contradiction and there is no reach value), or
-#     ``skipped_no_tvl`` (no ``defillama_tvl`` snapshot — the ceiling did NOT run, and
-#     that is published rather than implied). The worst row in the DB asserted $3.489B
-#     against a protocol TVL of $3.297B with nothing checking. The ceiling bears on
-#     WHICHEVER figure the row publishes: ``observed_reach_value_usd`` on the measured
-#     branch and ``observed_reach_priced_usd`` on the partial-floor branch (the floor
-#     branch used to return before the check, so a floor above the protocol's own
-#     TVL was publishable with no ``reach_tvl_check`` at all). A refusal therefore means
-#     "the row's own USD was contradicted", and on the floor branch the unvalued-asset
-#     keys still stand beside it: the refusal is about the priced part, not about
-#     whether value moved. The key is ABSENT when the row publishes no USD at all
-#     (nothing priced) — absence is "no figure to check", never a check that passed.
-#   * ABSENCE of every key is NOT "no reach": this deployment has no fork
-#     observation of its own yet (its verdict came from a cache hit), so reach was
-#     never attempted here.
+# * ``True``: measured; ``observed_reach_value_usd`` is an upper bound over ``observed_reach_holders``.
+# * ``False`` with ``reach_indeterminate``: nothing observed leaving a holder, not "no reach". No
+# ``observed_reach_value_usd``; ``observed_reach_floor_usd`` is three-state (positive, ``0.0`` weak, or absent meaning
+# no balance row). Check key presence, never ``.get()`` into zero.
+# * ``False`` without ``reach_indeterminate``: value left but some (holder, asset) pair is unpriced.
+# ``observed_reach_unvalued_pairs`` names them; ``observed_reach_priced_usd`` is a partial floor with
+# ``observed_reach_priced_holders``; ``observed_reach_unvalued_assets`` is the assets no holder priced (``[]`` is an
+# earned negative). Reasons (``unpriced_holding``, ``holdings_at_page_cap``, ``asset_not_in_recorded_holdings``) are
+# confidence gaps, never small reach.
+# * ``reach_tvl_check``: ``within_protocol_tvl``, ``exceeds_protocol_tvl`` (refused, with
+# ``observed_reach_rejected_usd`` and ``protocol_tvl_usd``), or ``skipped_no_tvl``. Applies to whichever figure the row
+# publishes; absent when there's no figure.
+# * All keys absent: no fork observation at this deployment yet (a cache hit).
 _REACH_KEYS = (
     "observed_reach_value_usd",
     "observed_reach_holders",
@@ -390,15 +241,8 @@ def _reach_summary(verdict: VerdictLike) -> dict[str, Any]:
     return {k: residue[k] for k in _REACH_KEYS if k in residue}
 
 
-# The execution that PROVED the figures above. Forwarded on the SAME projection
-# and from the same column, because a magnitude and the call that proved it are
-# one fact and a consumer that receives the first without the second publishes a
-# number with no account of itself (the F6 defect).
-#
-# CONTRACT: the key's ABSENCE is the third state and is the common one — every
-# verdict written before the record existed carries none. A consumer must read
-# absence as ``not_determined`` (``utils.execution_record``), never as "no caller",
-# never as an unseeded probe, and never as a route that matches.
+# The execution that proved the figures, forwarded with them (F6). Absent is common (older verdicts) and means
+# ``not_determined`` (``utils.execution_record``).
 def _execution_summary(verdict: VerdictLike) -> dict[str, Any]:
     residue = getattr(verdict, "observed_residue", None)
     if not isinstance(residue, dict) or PROVING_EXECUTION_KEY not in residue:
@@ -407,8 +251,7 @@ def _execution_summary(verdict: VerdictLike) -> dict[str, Any]:
 
 
 def claims_from_verdicts(verdicts: Iterable[Any]) -> list[Claim]:
-    """Every mintable proven verdict, mapped to its claim (fail-closed drops
-    filtered out)."""
+    """Every mintable proven verdict mapped to its claim."""
     out: list[Claim] = []
     for verdict in verdicts:
         claim = verdict_to_claim(verdict)
@@ -417,10 +260,8 @@ def claims_from_verdicts(verdicts: Iterable[Any]) -> list[Claim]:
     return out
 
 
-# The witness keys ``verdict_to_claim`` above owns. A witness carrying ONLY these
-# is a pure pointer to an observation and has no structural detail to donate; a
-# witness carrying anything else was built by a static matcher. No static witness
-# in the registry uses one of these names, so the two key spaces never collide.
+# Keys owned by ``verdict_to_claim``. A witness with only these is a pure pointer; anything else came from a static
+# matcher (no collisions).
 _OBSERVED_WITNESS_KEYS = frozenset({"effect_verdict_id", "effect_class", "behavior_hash", "verdict_tier", "observed"})
 
 
@@ -436,14 +277,11 @@ def _carries_static_detail(claim: Claim) -> bool:
 
 
 def _donor_for(claim_id: str, prior: list[Claim]) -> Claim | None:
-    """The prior claim whose structural detail a freshly observed claim inherits:
-    the strongest one that HAS any, not simply the strongest one.
+    """The prior claim to inherit structural detail from: the strongest that has any.
 
-    Choosing by tier alone is self-defeating once a row has already been damaged.
-    A stripped ``behavioral_observed`` claim outranks the fresh ``standard_exact``
-    static claim sitting beside it, gets picked as its own donor, and donates
-    nothing — so a re-run of the policy stage, which exists to re-supply the
-    static claim, could not repair a single damaged row."""
+    Choosing by tier alone picks an already-stripped observed claim as its own donor, so re-running policy couldn't
+    repair damaged rows.
+    """
     fallback: Claim | None = None
     donor: Claim | None = None
     for claim in prior:
@@ -460,41 +298,18 @@ def _donor_for(claim_id: str, prior: list[Claim]) -> Claim | None:
 def _carry_forward_static_witness(donor: Claim, observed: dict[str, Any]) -> dict[str, Any]:
     """Keep the superseded static witness's structural facts on the observed one.
 
-    Precedence is about TIER — how well we know the claim is true — and a fork
-    observation is the strongest evidence that value moved. It is not evidence
-    about WHERE it can go or HOW MUCH: the probe watched one execution, while
-    ``target_kind``/``amount_kind``/``*_param_index`` are universals the static
-    lattice derived from the code. Dropping them because a stronger tier arrived
-    discarded the only answer to the question the stage exists to ask.
+    A fork observation proves value moved, not where it can go or how much; ``target_kind``, ``amount_kind``,
+    ``*_param_index`` etc. are static universals. Dropping them meant the functions we learned most about published
+    least.
 
-    The effect was perverse: the claim survived at ``behavioral_observed`` while
-    its destination and amount vanished, so the functions we learned the MOST
-    about published the LEAST. Of four sibling ``EtherFiRedemptionManager.redeem*``
-    with identical static flow sets, the one whose probe actually executed was the
-    only one to lose its lattice.
-
-    The carry is the full union of the donor's keys, not a per-family allowlist:
-    ``flow.out`` witnesses carry ``flows``/``direction``/``sink_ids``, but
-    ``pause.set`` carries ``flags``/``polarity`` and ``supply.*`` carries
-    ``supply``/``selector``, and an allowlist silently under-carried all of them.
-    Every carried key is a *structural* universal about the code, which one
-    execution cannot refute, and a claim only mints behind the proven gate — so a
-    carry only ever adds detail to a claim the observation already confirmed.
-
-    ``static_tier`` stamps where that detail came from, because the donor may be
-    as weak as ``policy_derived`` and a consumer reading the whole witness at
-    ``behavioral_observed`` quality would be laundering the tier. A donor that
-    already carries the stamp keeps it: the structural keys are still the ones
-    that static tier established, not the donor's own.
-
-    Observed keys always win on a collision — the observation is the newer, better
-    evidence about anything it genuinely measured."""
+    The donor's keys are carried in full (families use different keys, so an allowlist under-carried). ``static_tier``
+    records where they came from so the observed tier doesn't launder a weak donor; an existing stamp is kept. Observed
+    keys win collisions.
+    """
     static = donor.get("witness")
     if not isinstance(static, dict):
         return observed
-    # The donor's OWN observation pointer is not static detail and must not ride
-    # along: it names a different verdict, and its ``observed`` summary would
-    # survive onto a witness whose pointer has already moved on.
+    # The donor's own observation pointer names a different verdict; don't carry it.
     carried = {k: v for k, v in static.items() if k not in _OBSERVED_WITNESS_KEYS}
     if not carried:
         return observed
@@ -505,24 +320,18 @@ def _carry_forward_static_witness(donor: Claim, observed: dict[str, Any]) -> dic
 
 
 def _drop_superseded(prior: list[Claim], minted: list[Claim]) -> list[Claim]:
-    """Drop any prior claim a freshly minted one restates at the same tier.
-
-    ``resolve_claim_precedence`` keeps the FIRST claim at the strongest tier, so
-    a stale ``behavioral_observed`` claim ahead of its own re-minted replacement
-    wins on a tie and the repair never lands. Dropping it explicitly says that in
-    one place, rather than depending on the tie-break of another module by
-    ordering the list a particular way."""
+    """Drop prior claims a fresh one restates at the same tier; ``resolve_claim_precedence`` keeps the first on a
+    tie, so a stale one would win.
+    """
     restated = {(claim["claim_id"], claim["tier"]) for claim in minted}
     return [claim for claim in prior if (claim.get("claim_id"), claim.get("tier")) not in restated]
 
 
 def merge_observed_claims(existing: Iterable[Claim], verdicts: Iterable[Any]) -> list[Claim]:
-    """Fold this function's proven verdicts into its existing claim list under the
-    registry precedence rule. Idempotent: re-merging the same verdicts is a no-op
-    because ``resolve_claim_precedence`` keeps one claim per (id, strongest tier)
-    and ``behavioral_observed`` outranks every static tier, so a second pass finds
-    nothing stronger to install — and the carry-forward below is itself
-    idempotent, since re-merging copies the same structural keys back."""
+    """Fold proven verdicts into the claim list under registry precedence.
+
+    Idempotent: observed outranks every static tier and the carry-forward copies the same keys.
+    """
     prior = list(existing)
     minted = claims_from_verdicts(verdicts)
     for claim in minted:
@@ -533,10 +342,9 @@ def merge_observed_claims(existing: Iterable[Claim], verdicts: Iterable[Any]) ->
 
 
 def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[Claim]) -> list[str]:
-    """Re-derive the legacy ``effect_labels`` as the union of the labels already
-    present and the registry ``legacy_projection`` of every claim on the function
-    (the same additive dual-write discipline ``project_effect_labels`` uses), so
-    the legacy display path stays in sync with the claims plane."""
+    """Rebuild legacy ``effect_labels`` as existing labels plus every claim's ``legacy_projection`` (additive, like
+    ``project_effect_labels``).
+    """
     projections = legacy_projections()
     labels = {str(label) for label in existing_labels}
     for claim in claims:
@@ -551,16 +359,12 @@ def merge_into_function(
     existing_labels: Iterable[str] | None,
     verdicts: Iterable[Any],
 ) -> tuple[list[Claim], list[str]] | None:
-    """The whole per-function merge: fold proven verdicts into the claims, then
-    re-project the legacy labels. Returns ``(claims, effect_labels)`` or ``None``
-    when nothing minted (so a caller leaves untouched rows exactly as written —
-    the identity path keeps every claim-free function byte-identical).
+    """Fold proven verdicts into the claims, then re-project labels.
 
-    The fold itself is :func:`merge_observed_claims` and must stay that way. This
-    seam once inlined its own precedence call instead, which is how the two paths
-    that merge the same claims came to disagree: the writer carried the static
-    lattice forward and the effects worker — the path that actually mints observed
-    claims — deleted it."""
+    Returns ``(claims, effect_labels)``, or ``None`` when nothing minted so untouched rows stay byte-identical.
+
+    Must go through :func:`merge_observed_claims`; an inlined copy once diverged and deleted the static lattice.
+    """
     existing_claims = list(existing_claims or [])
     if not claims_from_verdicts(verdicts):
         return None

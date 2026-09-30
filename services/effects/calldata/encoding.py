@@ -27,10 +27,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("services.effects.calldata")
 
-# ---------------------------------------------------------------------------
-# Encoding
-# ---------------------------------------------------------------------------
-
 
 def encode_calldata(
     selector: str,
@@ -40,11 +36,9 @@ def encode_calldata(
 ) -> str | None:
     """``selector ++ abi.encode(args)`` with per-index overrides.
 
-    Argument defaults and type parsing come from ``differential_probe`` (one
-    encoder for the codebase); this wrapper adds positional substitution for any
-    type, which the effect probes need (an amount, a recipient, a sentinel).
-    Returns ``None`` — never raises — when the signature is unparseable or a value
-    does not encode, so callers fail closed."""
+    Defaults and parsing come from ``differential_probe``. Returns ``None`` on an unparseable signature or unencodable
+    value.
+    """
     if not isinstance(selector, str) or not selector.startswith("0x") or len(selector) != 10:
         return None
     types = _parse_arg_types(canonical_signature)
@@ -77,8 +71,7 @@ _RESOLVED_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def _array_shape(type_str: str) -> tuple[str, int | None] | None:
-    """``(element_type, fixed_length)`` for an ABI array, ``None`` for a scalar.
-    ``fixed_length`` is ``None`` on a dynamic array."""
+    """``(element_type, fixed_length)`` for an ABI array (``None`` length if dynamic), ``None`` for a scalar."""
     match = _ARRAY_TYPE.match(type_str.strip())
     if match is None:
         return None
@@ -87,10 +80,7 @@ def _array_shape(type_str: str) -> tuple[str, int | None] | None:
 
 
 def _element_type(type_str: str) -> str:
-    """The type a substitution has to satisfy for this slot: the element type of
-    an array, the type itself otherwise. A parameter's ROLE belongs to what it
-    carries, not to its arity — ``uint256[] amounts`` is as much a quantity slot
-    as ``uint256 amount``."""
+    """The type a substitution must satisfy: the element type for arrays, else the type itself."""
     shape = _array_shape(type_str)
     return shape[0] if shape is not None else type_str.strip()
 
@@ -103,43 +93,22 @@ def _arg_values(
     integer_roles: Mapping[int, str] | None = None,
     executor: "ExecutorCall | None" = None,
 ) -> "ProbeArgs":
-    """The substitution policy for a value-moving probe: address params get the
-    caller identity (so a mint/transfer has a real recipient); an integer param
-    takes ``amount`` only where :func:`integer_param_roles` proved it is a
-    quantity, the small id filler where it proved an identifier, and the encoder's
-    default where the role is unproven.
+    """Argument policy for a value-moving probe.
 
-    A token slot gets the identity here too, and it is deliberate that it stays
-    that way until a REAL token is known. Measured on the three etherfi
-    BoringVaults (2026-07-25, mainnet fork): ``enter`` with the encoder's default
-    ``address(0)`` in its ``asset`` slot SUCCEEDS — a call to a codeless address
-    is a no-op success inside ``SafeTransferLib`` — and mints shares against a
-    pull that never happened. That is a fabricated ``supply.mint`` with a
-    fabricated "no inflow", i.e. exactly the witness this stage must never
-    produce. The identity keeps the slot occupied by something the probe never
-    claims is a token; the seeded retry then writes a proven one
-    (:func:`substitute_address_arg`), and the recipe withholds the backing
-    witness entirely when it could not.
+    Address params get the caller identity so transfers have a real recipient. Integer params get ``amount`` only where
+    :func:`integer_param_roles` proved a quantity, the id filler for identifiers, else the encoder default.
 
-    An ARRAY parameter is encoded at length ONE, its element carrying whatever the
-    scalar policy proves for the element type. The encoder's own default for a
-    dynamic array is empty, and an empty array is a loop body that never runs: the
-    batch form of a function then executes, moves nothing, and publishes — and
-    CACHES — "this function moves no value" about a body no probe ever entered. A
-    length-1 array whose element is itself unproven is not a witness either, but
-    it is an honest attempt that the contract's own check gets to reject.
+    Token slots also get the identity until a real token is known: with ``address(0)`` a vault's ``enter`` succeeds
+    (codeless calls no-op in ``SafeTransferLib``) and mints against a pull that never happened. The seeded retry writes
+    a proven token (:func:`substitute_address_arg`), or the recipe withholds backing.
 
-    An ``executor`` (:func:`executor_call`) overrides its own two slots with the
-    inner call it synthesized, and SUPPRESSES the integer roles: every remaining
-    numeric argument of an arbitrary-call executor is a per-call native value, a
-    gas budget or an operation mode, and the probe can prove the contract can
-    satisfy none of them. Zero is both the encoder's default and the only value
-    that asks the executor to forward the call and nothing else — a quantity there
-    would make the vault attach ETH it does not hold and revert the very call this
-    synthesis exists to observe.
+    Arrays are encoded at length one; an empty array runs no loop and would publish (and cache) "moves no value".
 
-    Slots the policy could NOT fill are reported as :attr:`ProbeArgs.vacuous` —
-    see that class for why one predicate covers both mechanisms."""
+    An ``executor`` (:func:`executor_call`) fills its two slots with the synthesized inner call and suppresses integer
+    roles: its other numbers are native value, gas or mode, and zero is the only value that just forwards the call.
+
+    Unfilled slots are reported as :attr:`ProbeArgs.vacuous`.
+    """
     roles = {} if executor is not None else (integer_roles or {})
     overrides = executor.values if executor is not None else {}
     executor_slots = set(executor.slots) if executor is not None else set()
@@ -153,11 +122,8 @@ def _arg_values(
                 shape[0] if shape else type_str, idx, identity=identity, amount=amount, roles=roles
             )
         if value is None:
-            # A slot of the forwarded call the synthesis could not build is vacuous
-            # whatever its type: an executor handed empty calldata calls nothing,
-            # and "called nothing, moved nothing" is not a fact about F. The
-            # executor's OTHER zeros are not vacuous — they are the deliberate
-            # "forward this call and nothing else" the synthesis chose.
+            # A forwarded-call slot with no inner call is vacuous (calls nothing); the executor's deliberate zeros
+            # aren't.
             if idx in executor_slots:
                 vacuous.append(idx)
             elif executor is None and (shape is not None or _INTEGER_TYPE.fullmatch(type_str.strip())):
@@ -171,8 +137,7 @@ def _arg_values(
             try:
                 value = _default_value_for_type(element)
             except Exception:
-                # An element type the encoder can build no value for at all —
-                # leaving the slot to the encoder is the only honest option.
+                # No buildable value; leave it to the encoder.
                 continue
         subs[idx] = [value] * (1 if length is None else length)
     return ProbeArgs(substitutions=subs, vacuous=tuple(vacuous))
@@ -180,21 +145,12 @@ def _arg_values(
 
 @dataclass(frozen=True)
 class ProbeArgs:
-    """An encoded argument vector, plus the slots the policy could not fill.
+    """An encoded argument vector plus the slots the policy couldn't fill.
 
-    ``vacuous`` is ONE predicate, not two detectors that would drift apart: *an
-    argument the effect depends on was left at the encoder's default*. It covers
-    an integer whose role never resolved (a zero-amount call that mints nothing
-    and moves nothing), an array whose element is unproven (a loop that runs over
-    filler), and a forwarded-call slot with no inner call to put in it. All three
-    produce the same false statement downstream — the call RAN and observed
-    nothing, which reads as a structural fact about the function while being a
-    fact about the arguments this prober chose.
-
-    It is a FACT rather than a guess: the synthesizer knows the ABI types and
-    which roles it resolved, so it knows exactly which slots it filled. The
-    consumer's job is to keep such a non-observation out of the behaviour cache —
-    a code-plane cache entry travels to bytecode twins that were never probed."""
+    ``vacuous`` is one predicate: an argument the effect depends on was left at the encoder default (an unresolved
+    integer role, an array of unproven elements, an empty forwarded call). Each makes "ran and observed nothing" a fact
+    about our arguments, so consumers keep it out of the behaviour cache.
+    """
 
     substitutions: dict[int, Any]
     vacuous: tuple[int, ...] = ()
@@ -208,8 +164,7 @@ def _scalar_arg_value(
     amount: int,
     roles: Mapping[int, str],
 ) -> Any | None:
-    """The value :func:`_arg_values` PROVES for one scalar slot, or ``None`` when
-    it proves nothing and the encoder's own default has to stand."""
+    """The value :func:`_arg_values` proves for one scalar slot, or ``None`` (encoder default)."""
     t = type_str.strip()
     if _is_address_type(t):
         return identity.lower() if identity else None
