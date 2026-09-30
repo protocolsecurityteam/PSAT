@@ -1,32 +1,9 @@
-"""W2 — the ordering witness: does a *clearing* write to a storage record
-must-precede every external call the function can make?
+"""W2: does a clearing write to a storage record must-precede every external call the function can make?
 
-The claim this module proves, and nothing wider:
-
-    W2 holds for record ``R`` iff there is a node ``W`` writing ``R`` with a
-    clearing IR shape such that for EVERY node ``C`` performing an external
-    call, ``W`` must-precede ``C``.
-
-``must-precede`` is Slither's CFG dominance (``Node.dominators``), refined with
-the IR index when both sites share a node, and lifted across ONE internal-call
-hop by the composition rule in :func:`_precedes`.
-
-Why this is a new fact rather than a read of the sink list
----------------------------------------------------------
-``effects._build_sink_records`` assigns sink ordinals in DISCOVERY order, not
-execution order: modifier subtrees are positioned at their call site, guard
-sinks land after body sinks, and the ``(kind, target, selector)`` de-dup keeps
-the FIRST index — so a variable written both before and after a call collapses
-onto the earlier write. Reading an ordinal as an ordering fact over-claims in
-exactly the direction this witness must never fail. The external-call
-enumerator here is therefore built from scratch, and it enumerates the two IR
-ops the sink classifier does not handle at all — ``Transfer`` and ``Send``,
-which is what ``payable(x).transfer(v)`` and ``.send(v)`` lower to. Missing
-those would leave a payout invisible to the ordering check.
-
-Fail-closed throughout: the verdict is three-valued, absence of a proof is
-``not_determined`` with the reason that produced it, and the refusal vocabulary
-is closed (:data:`REFUSAL_REASONS`).
+Must-precede is CFG dominance, refined by IR index within a node and lifted across one internal-call hop
+(:func:`_precedes`). Sink ordinals are discovery order, not execution order, so the call enumeration is built here,
+including ``Transfer``/``Send`` which the sink classifier ignores. Fail-closed: proven, or ``not_determined`` with a
+reason from :data:`REFUSAL_REASONS`.
 """
 
 from __future__ import annotations
@@ -39,44 +16,31 @@ from utils.scoring_status import NOT_DETERMINED
 
 from .revert_detect import _ir_is_assert, _ir_is_require
 
-# ---------------------------------------------------------------------------
-# Owner ruling F2-CLEARING (2026-08-09): a boolean member zeroing
-# (``bid.isActive = false``) counts as a clearing write ONLY when a mandatory
-# predicate on that same member sits on the function's revert path — which is
-# what makes the "a re-entry reverts" argument sound rather than name-shaped.
-# The strict shapes (delete / zero-assign / decrement) are unconditional; this
-# one toggle is the whole of the ruling, so reversing it is a one-line change.
-# ---------------------------------------------------------------------------
+# A boolean member zeroed (``bid.isActive = false``) is clearing only with a mandatory predicate on that member on the
+# revert path, so re-entry reverts. Delete, zero-assign and decrement are unconditional.
 FLAG_FLIP_CLEARING_ENABLED = True
 
 
 PROVEN = "proven_ordering"
 
-#: The one basis this module can publish. The verified-guard alternative
-#: satisfier (``w2_verified_guard``) is a different proof and lives in U4.
+# The verified-guard alternative is a separate proof.
 W2_BASIS_CLEAR_DOMINATES_CALLS = "clear_dominates_calls"
 
-#: Per-iteration ordering is all a same-record claim needs, and all dominance
-#: inside a loop body proves. It says nothing cross-iteration and must not
-#: pretend to, so the proof travels with this disclosure.
+# Dominance inside a loop body proves per-iteration ordering only.
 DISCLOSURE_CROSS_ITERATION = "cross_iteration_ordering_not_proven"
 
-# --- the closed refusal vocabulary -----------------------------------------
-#: candidate clearing writes exist, none must-precedes every external call
+# Candidate writes exist but none precedes every external call.
 CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS = "clearing_write_does_not_dominate_calls"
-#: no write to the record has an admissible clearing shape anywhere in reach
 NO_CLEARING_WRITE = "no_clearing_write"
-#: an inline-assembly state access makes the write set unknowable
+# Assembly state access makes the write set unknowable.
 ASSEMBLY_STATE_ACCESS = "assembly_state_access"
-#: the only candidates sit deeper than one hop, or in a sibling callee
+# The only candidates are deeper than one hop or in a sibling callee.
 CROSS_UNIT_ORDERING_UNPROVEN = "cross_unit_ordering_unproven"
-#: write and call are in different loop nestings — per-iteration ordering does
-#: not compose across them
+# Write and call in different loop nestings.
 LOOP_NESTING_MISMATCH = "loop_nesting_mismatch"
-#: the call walk hit its depth cap or a recursive cycle, so "every external
-#: call" is not a set this pass closed
+# The call walk hit its cap or a cycle, so the call set isn't closed.
 CALL_ENUMERATION_INCOMPLETE = "call_enumeration_incomplete"
-#: the caller named no record, or named one with no canonical base
+# No record, or one without a canonical base.
 RECORD_NOT_RESOLVABLE = "record_not_resolvable"
 
 REFUSAL_REASONS: frozenset[str] = frozenset(
@@ -91,7 +55,7 @@ REFUSAL_REASONS: frozenset[str] = frozenset(
     }
 )
 
-# --- clearing shapes, published so a consumer can see WHICH proof it got ----
+# Published so consumers see which proof they got.
 SHAPE_DELETE = "delete"
 SHAPE_ZERO_ASSIGNMENT = "zero_assignment"
 SHAPE_DECREMENT = "decrement"
@@ -100,13 +64,11 @@ SHAPE_FLAG_FLIP = "flag_flip_with_mandatory_predicate"
 
 
 class RecordRef(TypedDict):
-    """The record W1 bound the amount to, in the ENTRY function's terms.
+    """The record W1 bound the amount to, in entry-function terms.
 
-    ``key_kinds`` / ``key_param_indexes`` are positional per index level and
-    carry the same vocabulary the amount producer publishes
-    (``param`` / ``msg_sender`` / ``indeterminate``). A level this pass cannot
-    match exactly is a level it refuses on — a write to a *different* cell of
-    the same mapping is not a clearing write for this record."""
+    Key levels use the amount producer's vocabulary; a level that can't match exactly refuses (another cell of the same
+    mapping isn't this record).
+    """
 
     base_canonical: str
     member_path: NotRequired[list[str]]
@@ -115,8 +77,7 @@ class RecordRef(TypedDict):
 
 
 class OrderingWitness(TypedDict):
-    """Three-valued. ``state`` is the only always-present key; a refusal always
-    carries ``reason``, a proof always carries ``w2_basis``."""
+    """``state`` always; a refusal has ``reason``, a proof ``w2_basis``."""
 
     state: str
     w2_basis: NotRequired[str]
@@ -126,20 +87,14 @@ class OrderingWitness(TypedDict):
     reason: NotRequired[str]
 
 
-# A resolved access path step: ("index", key_kind, key_param_index) or
-# ("member", member_name, None). Ordered from the base variable outwards.
+# ``("index", key_kind, key_param_index)`` or ``("member", name, None)``, base outward.
 _Step = tuple[str, str, "int | None"]
 
-# Ops that hand control to code this compilation unit does not own. "Every
-# external call", not "every dangerous external call" (S1 §2.3 / fork F1): the
-# analysis cannot prove a callee is view, so narrowing would be policy, not a
-# fact. ``LibraryCall`` is here because ``using SafeTransferLib for IERC20``
-# puts the real token call inside it; ``Transfer``/``Send`` are here because
-# nothing else in the pipeline sees them.
+# Ops handing control to code outside this unit; every external call, since calls can't be proven view. ``LibraryCall``
+# covers ``using SafeTransferLib``; ``Transfer``/``Send`` nothing else sees.
 _EXTERNAL_CALL_OPS = frozenset({"HighLevelCall", "LibraryCall", "LowLevelCall", "NewContract", "Transfer", "Send"})
 
-# Inline-assembly SolidityCalls that transfer control. ``sstore``/``sload``/
-# ``keccak256`` and the require/revert family are deliberately absent.
+# Inline-assembly calls that transfer control; ``sstore``/``sload``/hashes and require/revert are excluded.
 _CONTROL_TRANSFER_SOLIDITY_PREFIXES = (
     "selfdestruct(",
     "suicide(",
@@ -151,23 +106,16 @@ _CONTROL_TRANSFER_SOLIDITY_PREFIXES = (
     "create2(",
 )
 
-# How deep the CALL enumeration walks before it declares the set unclosed. The
-# clearing write is capped separately at one hop (S1 §2.3); this cap only
-# governs whether we can claim to have seen every call.
+# Beyond this depth the call set is unclosed; the clearing write has its own one-hop cap.
 _MAX_CALL_WALK_DEPTH = 6
 
-# The clearing write may be in the entry unit (path length 1) or in a callee
-# invoked directly from it (path length 2). Deeper refuses.
+# In the entry unit or a direct callee.
 _MAX_WRITE_PATH = 2
 
-# Ceiling on units walked per query, since the same helper is re-walked once per
-# call site by design.
+# Helpers are re-walked per call site by design.
 _MAX_WALKED_UNITS = 256
 
-# ---------------------------------------------------------------------------
-# Slither shims — duck-typed, matching effects.py's convention of never
-# importing slither at module scope.
-# ---------------------------------------------------------------------------
+# Duck-typed Slither access; slither isn't imported at module scope.
 
 
 def _irs(node: Any) -> list[Any]:
@@ -213,10 +161,8 @@ def _unit_key(unit: Any) -> str:
 
 
 def _is_zero_constant(value: Any) -> bool:
-    """A literal zero — the numeric one only. ``False`` is a different ruling
-    (the flag-flip subclass) and must not enter through this door."""
-    # Deferred: the ``effects`` package imports this module, so the reuse
-    # cannot be a module-scope import.
+    """A numeric zero only; ``False`` belongs to the flag-flip rule."""
+    # Deferred: ``effects`` imports this module.
     from .effects import _is_zero_literal
 
     if _var_kind(value) != "Constant":
@@ -241,18 +187,11 @@ def _is_subtraction_ir(ir: Any) -> bool:
     return _op(ir) == "Binary" and _is_subtraction(str(getattr(ir, "type", None)))
 
 
-# ---------------------------------------------------------------------------
-# Access-path resolution.
-# ---------------------------------------------------------------------------
-
-
 def _ref_defs(unit: Any) -> dict[int, Any]:
-    """``id(ReferenceVariable) -> the Index/Member IR that built it``.
+    """``id(ReferenceVariable) -> Index/Member IR``.
 
-    Only those two ops are recorded: a ``Delete`` re-uses the *parent* ref as
-    its ``lvalue``, so a def map built from every lvalue would overwrite the
-    Index that the deleted ref's own chain has to walk through. First write
-    wins for the same reason."""
+    Only those ops, first write wins: a ``Delete`` reuses the parent ref as lvalue and would overwrite the chain.
+    """
     defs: dict[int, Any] = {}
     for node in _nodes(unit):
         for ir in _irs(node):
@@ -266,9 +205,7 @@ def _ref_defs(unit: Any) -> dict[int, Any]:
 
 
 def _value_defs(unit: Any) -> dict[int, Any]:
-    """``id(TemporaryVariable) -> the IR that computed it``, for reading one
-    level through a condition's own arithmetic and through the ``x = b - amount``
-    form of a decrement."""
+    """``id(TemporaryVariable) -> IR``, to read one level of arithmetic and ``x = b - amount``."""
     defs: dict[int, Any] = {}
     for node in _nodes(unit):
         for ir in _irs(node):
@@ -282,10 +219,7 @@ def _value_defs(unit: Any) -> dict[int, Any]:
 
 
 def _local_defs(unit: Any) -> dict[int, list[Any]]:
-    """``id(LocalVariable) -> every IR that assigns it``. Locals, unlike the
-    SSA-ish temporaries, are re-assignable, so the list is kept whole: a local
-    written twice names no single value and is read as unknown rather than as
-    its first definition."""
+    """``id(LocalVariable) -> every assigning IR``; a local written twice is unknown."""
     defs: dict[int, list[Any]] = {}
     for node in _nodes(unit):
         for ir in _irs(node):
@@ -297,8 +231,6 @@ def _local_defs(unit: Any) -> dict[int, list[Any]]:
 
 
 class _Scope:
-    """Everything the classifier needs about one walked unit."""
-
     __slots__ = ("unit", "refs", "values", "locals", "bindings")
 
     def __init__(self, unit: Any, bindings: dict[int, _Step]) -> None:
@@ -313,9 +245,9 @@ class _Scope:
 
 
 def _key_step(value: Any, bindings: dict[int, _Step]) -> _Step:
-    """Classify one index level in ENTRY terms. ``bindings`` maps a unit's own
-    parameter objects onto what the call site passed, which is what lets
-    ``_balances[account]`` inside ``_burn`` read as the caller's own cell."""
+    """One index level in entry terms; ``bindings`` maps a callee's parameters to the call site's values
+    (``_balances[account]`` in ``_burn`` reads as the caller's cell).
+    """
     if value is None:
         return ("index", "indeterminate", None)
     bound = bindings.get(id(value))
@@ -330,8 +262,7 @@ def _key_step(value: Any, bindings: dict[int, _Step]) -> _Step:
 def _resolve_access_path(
     value: Any, defs: dict[int, Any], bindings: dict[int, _Step]
 ) -> tuple[str, tuple[_Step, ...]] | None:
-    """``(base canonical name, steps)`` for a state-variable access, or ``None``
-    when the chain leaves storage or cannot be followed."""
+    """``(base canonical name, steps)`` for a state access, or ``None``."""
     steps: list[_Step] = []
     current = value
     for _ in range(16):
@@ -360,16 +291,11 @@ def _resolve_access_path(
 
 
 def _record_steps(record: RecordRef) -> tuple[_Step, ...] | None:
-    """The record's own access path. Index levels first, then the member path —
-    the shape ``mapping[key].member`` produces. A record whose real layout
-    interleaves them differently simply never matches, which is the fail-closed
-    direction."""
+    """The record's path: index levels, then members. Interleaved layouts never match (fail-closed)."""
     kinds = record.get("key_kinds")
     indexes = record.get("key_param_indexes")
     members = record.get("member_path")
-    # An ABSENT list is the producer's "not determined" — its sites disagreed or
-    # it never resolved one. Reading it as an empty path would widen the record
-    # to the whole element and let a write to a sibling member clear it.
+    # An absent list is not determined; treating it as empty would let a sibling member's write clear the record.
     if not isinstance(kinds, list) or not isinstance(indexes, list) or not isinstance(members, list):
         return None
     if len(indexes) != len(kinds):
@@ -377,8 +303,7 @@ def _record_steps(record: RecordRef) -> tuple[_Step, ...] | None:
     steps: list[_Step] = []
     for level, kind in enumerate(kinds):
         if kind not in ("param", "msg_sender"):
-            # An indeterminate key names no cell, so no write can be shown to
-            # clear THIS record rather than a sibling one.
+            # An indeterminate key names no cell.
             return None
         if kind == "param" and indexes[level] is None:
             return None
@@ -388,15 +313,8 @@ def _record_steps(record: RecordRef) -> tuple[_Step, ...] | None:
     return tuple(steps)
 
 
-# ---------------------------------------------------------------------------
-# Clearing-write classification.
-# ---------------------------------------------------------------------------
-
-
 def _element_steps(steps: tuple[_Step, ...]) -> tuple[_Step, ...]:
-    """The record's steps with its trailing member path stripped — i.e. the
-    storage ELEMENT the record lives in. Two members of one struct element are
-    the same element; two elements of one mapping are not."""
+    """The record's steps without the trailing member path: its storage element."""
     end = len(steps)
     while end > 0 and steps[end - 1][0] == "member":
         end -= 1
@@ -404,9 +322,7 @@ def _element_steps(steps: tuple[_Step, ...]) -> tuple[_Step, ...]:
 
 
 def _reads_record_value(scope: _Scope, value: Any, target: tuple[str, tuple[_Step, ...]]) -> bool:
-    """Is ``value`` the record's own stored value? Either the record ref itself,
-    or a local assigned from it exactly once. A local written twice names no
-    single value."""
+    """Whether ``value`` is the record's own stored value (the ref, or a local assigned from it exactly once)."""
     if value is None:
         return False
     if scope.path_of(value) == target:
@@ -423,22 +339,15 @@ def _reads_record_value(scope: _Scope, value: Any, target: tuple[str, tuple[_Ste
 
 
 def _subtracts_from_the_record(scope: _Scope, binary: Any, target: tuple[str, tuple[_Step, ...]]) -> bool:
-    """A debit takes the record's own prior value as its minuend.
-    ``amount = cap - used`` is arithmetic that happens to subtract, and may
-    RAISE the record — it is not a clearing write."""
+    """A debit subtracts from the record's own value; ``amount = cap - used`` may raise it."""
     return _reads_record_value(scope, getattr(binary, "variable_left", None), target)
 
 
 def _condition_pins_record(scope: _Scope, value: Any, target: tuple[str, tuple[_Step, ...]], depth: int = 0) -> bool:
-    """Does this condition, taken as a whole, require the member to be TRUE?
-
-    The ruling's soundness argument is that a re-entry REVERTS, which needs the
-    flip to falsify the predicate — not merely to be mentioned by it. So the
-    admissible forms are the positive read (``require(m)``), the explicit
-    ``require(m == true)``, and a top-level ``&&`` conjunct of either. An
-    ``||``, a negation, a comparison against a parameter or another cell, or a
-    predicate on a different element all leave a way for the second entry to
-    pass, and refuse."""
+    """Whether the condition as a whole requires the member to be true, so re-entry reverts: ``require(m)``,
+    ``require(m == true)``, or an ``&&`` conjunct of either. ``||``, negation, comparisons against other values,
+    or another element all leave a way through.
+    """
     if depth > 4 or value is None:
         return False
     if scope.path_of(value) == target:
@@ -455,7 +364,6 @@ def _condition_pins_record(scope: _Scope, value: Any, target: tuple[str, tuple[_
     left = getattr(source, "variable_left", None)
     right = getattr(source, "variable_right", None)
     if binary_type.endswith(".ANDAND"):
-        # Every conjunct must hold, so one that pins the member pins the whole.
         return _condition_pins_record(scope, left, target, depth + 1) or _condition_pins_record(
             scope, right, target, depth + 1
         )
@@ -473,10 +381,9 @@ def _has_mandatory_member_predicate(
     write_ir_index: int,
     target: tuple[str, tuple[_Step, ...]],
 ) -> bool:
-    """The F2-CLEARING conjunct: a require/assert pinning the SAME member true,
-    on the mandatory path to the flip. Mandatory means the predicate's node
-    dominates the flip (or precedes it inside the same node) — a check reachable
-    only under an ``if`` proves nothing about the entries that skip it."""
+    """A require/assert pinning the same member true on the mandatory path to the flip (dominating it, or earlier in
+    its node).
+    """
     for node in _nodes(scope.unit):
         if not (node is write_node or _is_dominated_by(write_node, node)):
             continue
@@ -499,16 +406,11 @@ def _clearing_shape(
     base: str,
     steps: tuple[_Step, ...],
 ) -> str | None:
-    """The admissible shape this IR clears the record with, or ``None``.
-
-    Admissible: ``Delete`` on the record ref or any prefix of it; an
-    ``Assignment`` of a zero literal to it; a subtraction OF ITS OWN VALUE,
-    either compound (``r.shares -= x``) or via the OZ ``_burn`` form
-    (``_balances[a] = b - amount``); and — behind
-    :data:`FLAG_FLIP_CLEARING_ENABLED` — a boolean member of the same element
-    zeroed under a mandatory predicate pinning that member. Everything else is
-    not a clearing write: a caller-supplied value, a struct-wide assignment, an
-    increment, an assembly ``sstore``."""
+    """How this IR clears the record, or ``None``: ``Delete`` of the record or a prefix; assigning zero; subtracting
+    from its own value (``r.shares -= x`` or OZ ``_balances[a] = b - amount``); or, behind the flag, zeroing a
+    bool member of the same element under a pinning predicate. Not caller-supplied values, struct-wide
+    assignments, increments or assembly ``sstore``.
+    """
     op = _op(ir)
     target = (base, steps)
 
@@ -517,7 +419,7 @@ def _clearing_shape(
         if resolved is None:
             return None
         deleted_base, deleted_steps = resolved
-        # Deleting a container clears everything under it, so a PREFIX counts.
+        # Deleting a container clears everything under it.
         if deleted_base == base and steps[: len(deleted_steps)] == deleted_steps:
             return SHAPE_DELETE
         return None
@@ -542,10 +444,7 @@ def _clearing_shape(
                 return SHAPE_ASSIGNED_DIFFERENCE
         return None
 
-    # The F2-CLEARING subclass: a boolean member of the SAME element zeroed. The
-    # quantity member is untouched, so this is a guard-shaped argument, not a
-    # debit — it only holds because a mandatory predicate on that same member
-    # makes the second entry revert.
+    # Only sound because a mandatory predicate on the member makes re-entry revert.
     if not (FLAG_FLIP_CLEARING_ENABLED and op == "Assignment"):
         return None
     if not _is_false_constant(getattr(ir, "rvalue", None)):
@@ -557,19 +456,10 @@ def _clearing_shape(
     return None
 
 
-# ---------------------------------------------------------------------------
-# The walk: external calls and clearing writes, each with its call path.
-# ---------------------------------------------------------------------------
-
-
 class _Site:
-    """A discovered site, positioned by the chain of call sites that reaches it.
-
-    ``path[j]`` is the ``(node, ir index)`` of the call made in ``units[j]``;
-    the LAST element is the site's own ``(node, ir index)``. Keying a site on
-    its whole path — rather than on the callee's name, the way the sink walk
-    does — is what keeps a helper invoked twice at two positions instead of
-    one."""
+    """A site positioned by the chain of call sites reaching it (``path[j]`` is the call in ``units[j]``, the last is
+    the site). Keyed on the whole path so a helper called twice has two positions.
+    """
 
     __slots__ = ("path", "units", "shape")
 
@@ -587,10 +477,7 @@ class _WalkState:
         self.writes: list[_Site] = []
         self.deep_writes: int = 0
         self.incomplete: bool = False
-        # Walking per (unit, call-site) rather than per unit is what keeps a
-        # helper invoked twice from collapsing to one position — and is also
-        # what makes the walk exponential in a wide call graph. Exhausting the
-        # budget is an unclosed call set, i.e. a refusal, never a shortened one.
+        # Per call site walking is exponential in wide graphs; exhausting the budget is a refusal.
         self.budget: int = _MAX_WALKED_UNITS
 
 
@@ -603,9 +490,9 @@ def _is_external_call_ir(ir: Any) -> bool:
 
 
 def _callee_bindings(callee: Any, ir: Any, caller_bindings: dict[int, _Step]) -> dict[int, _Step]:
-    """Map the callee's own parameters onto what the call site passed, in ENTRY
-    terms. Anything not resolvable binds to ``indeterminate``, which makes a
-    key level unmatchable rather than wrongly matched."""
+    """Map the callee's parameters to the call site's values in entry terms; unresolvable ones are ``indeterminate``
+    (unmatchable).
+    """
     bindings: dict[int, _Step] = {}
     arguments = list(getattr(ir, "arguments", []) or [])
     for position, parameter in enumerate(list(getattr(callee, "parameters", []) or [])):
@@ -634,10 +521,7 @@ def _walk(
             if _is_external_call_ir(ir):
                 state.calls.append(_Site(position, unit_chain))
             if _op(ir) == "InternalDynamicCall":
-                # An internal function POINTER: the body it reaches is chosen at
-                # runtime, so neither the calls under it nor its writes are ours
-                # to enumerate. A dynamic call that itself pays out is exactly
-                # the hole a vacuous "no call precedes the clear" would hide.
+                # An internal function pointer: the target is chosen at runtime.
                 state.incomplete = True
             shape = _clearing_shape(scope, ir, node, index, base, steps)
             if shape is not None:
@@ -649,14 +533,11 @@ def _walk(
                 continue
             callee = getattr(ir, "function", None)
             if callee is None or not _nodes(callee):
-                # An unimplemented callee (a `virtual` hook, an unresolved
-                # internal target) has a body we did not read, so the calls
-                # under it are not calls we ruled out.
+                # An unimplemented callee's calls weren't ruled out.
                 state.incomplete = True
                 continue
             key = _unit_key(callee)
             if key in on_path:
-                # Recursion: the call set below this point is not one we closed.
                 state.incomplete = True
                 continue
             if depth + 1 > _MAX_CALL_WALK_DEPTH or state.budget <= 0:
@@ -676,26 +557,16 @@ def _walk(
             )
 
 
-# ---------------------------------------------------------------------------
-# The ordering query.
-# ---------------------------------------------------------------------------
-
-
 def _loop_index(unit: Any, cache: dict[int, dict[int, frozenset[int]]]) -> dict[int, frozenset[int]]:
-    """``node_id -> the loop headers that actually CONTAIN it``.
-
-    Containment is the natural-loop definition: header ``H`` (an ``IFLOOP``)
-    contains ``N`` when ``H`` dominates ``N`` *and* ``N`` can reach ``H`` again
-    along the back edge. Reading enclosure off the dominator set alone would put
-    every node AFTER the loop inside it — they are dominated by the header too —
-    and would attach a cross-iteration residual to a straight-line pair."""
+    """``node_id -> loop headers containing it`` by the natural-loop rule (dominated by the header and able to reach
+    it via the back edge). Dominance alone would put everything after a loop inside it.
+    """
     key = id(unit)
     cached = cache.get(key)
     if cached is not None:
         return cached
     headers = [node for node in _nodes(unit) if _node_type_name(node) == "IFLOOP"]
-    # Nodes that can reach each header again — a backward walk from it, which is
-    # the back edge read in the only direction the CFG exposes.
+    # Nodes that can reach each header again (a backward walk).
     reaches: dict[Any, set[int]] = {}
     for header in headers:
         seen: set[int] = set()
@@ -723,13 +594,11 @@ def _loop_context(node: Any, unit: Any, cache: dict[int, dict[int, frozenset[int
 
 
 def _dominates_all_exits(node: Any, unit: Any) -> bool:
-    """Unconditional within ``unit``, where "exit" means the point control leaves
-    it for whatever runs next.
+    """Whether the write runs on every path out of ``unit``.
 
-    For a MODIFIER that point is the ``PLACEHOLDER``, not the son-less tail: the
-    modified function's body — and every external call in it — runs AT the
-    placeholder, so a write sitting after it runs after the payout. Treating the
-    son-less tail as the exit proves the DAO shape one indirection deep."""
+    For a modifier the exit is the ``_;`` placeholder, where the function body and its calls run, so a write after it
+    runs after the payout.
+    """
     placeholders = [candidate for candidate in _nodes(unit) if _node_type_name(candidate) == "PLACEHOLDER"]
     exits = placeholders or [candidate for candidate in _nodes(unit) if not list(getattr(candidate, "sons", []) or [])]
     if not exits:
@@ -738,7 +607,6 @@ def _dominates_all_exits(node: Any, unit: Any) -> bool:
 
 
 def _precedes(write: _Site, call: _Site, loops: dict[int, dict[int, frozenset[int]]]) -> tuple[bool, str | None, bool]:
-    """``(proved, refusal reason, in a shared loop)`` for one write/call pair."""
     shared = 0
     while (
         shared < len(write.path)
@@ -748,13 +616,10 @@ def _precedes(write: _Site, call: _Site, loops: dict[int, dict[int, frozenset[in
     ):
         shared += 1
     if shared >= len(write.path) or shared >= len(call.path):
-        # One site is on the other's call path — the write is inside the call, or
-        # is the call. Neither proves the write ran first.
+        # The write is inside the call or is the call.
         return False, CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS, False
     if shared == 0 and len(write.path) > 1 and len(call.path) > 1:
-        # Sibling-callee split: S1 §2.3 admits same-unit and one-hop composition
-        # and refuses the rest, rather than composing two callees' interiors
-        # through the entry's dominance.
+        # Sibling callees aren't composed through the entry's dominance.
         return False, CROSS_UNIT_ORDERING_UNPROVEN, False
 
     write_node, write_index = write.path[shared]
@@ -770,9 +635,7 @@ def _precedes(write: _Site, call: _Site, loops: dict[int, dict[int, frozenset[in
     if not ordered:
         return False, CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS, False
 
-    # Below the divergence the write sits inside a callee: it counts only if
-    # entering that callee always runs it, and only if no loop inside the callee
-    # separates the two.
+    # Below the divergence the write must run whenever the callee is entered, with no loop in between.
     for level in range(shared + 1, len(write.path)):
         nested_node = write.path[level][0]
         if not _dominates_all_exits(nested_node, write.units[level]):
@@ -792,10 +655,9 @@ def prove_record_ordering(
     *,
     assembly_state_access: bool,
 ) -> OrderingWitness:
-    """W2 for one ``(function, record)`` pair. Never a bare bool: the verdict is
-    proven-present or ``not_determined`` carrying the reason it refused."""
+    """W2 for one ``(function, record)``: proven, or ``not_determined`` with a reason."""
     if assembly_state_access:
-        # A write we cannot see may be the one that matters.
+        # An unseen write may be the one that matters.
         return _refused(ASSEMBLY_STATE_ACCESS)
 
     base = str(record.get("base_canonical") or "")
@@ -812,10 +674,7 @@ def prove_record_ordering(
 
     if state.incomplete:
         return _refused(CALL_ENUMERATION_INCOMPLETE)
-    # A function with no external call at all satisfies the rule vacuously, and
-    # soundly: there is no control transfer for the write to be racing. It
-    # clears nothing on its own — the consumer asks this question only about a
-    # flow, and a flow exists because value left through one of these ops.
+    # No external call satisfies the rule vacuously; the question is only asked about flows, which imply a call.
     if not state.writes:
         return _refused(CROSS_UNIT_ORDERING_UNPROVEN if state.deep_writes else NO_CLEARING_WRITE)
 
@@ -851,9 +710,7 @@ def prove_record_ordering(
 
 
 def _record_from_flow(flow: dict[str, Any]) -> RecordRef | None:
-    """The record the amount producer bound this flow's amount to, or ``None``
-    where it named none — in which case the ordering question is not asked and
-    no key is published."""
+    """The record this flow's amount was bound to, or ``None`` (no key published)."""
     base = flow.get("amount_record_variable")
     if not isinstance(base, str) or not base:
         return None
@@ -871,14 +728,10 @@ def _record_from_flow(flow: dict[str, Any]) -> RecordRef | None:
 
 
 def attach_record_ordering(flows: list[Any], function: Any, *, assembly_state_access: bool) -> None:
-    """Publish the W2 verdict on every flow whose amount names a storage record.
+    """Publish W2 on every outbound flow whose amount names a record; absent elsewhere.
 
-    Guarded attachment: where no record is named the key is ABSENT, never a
-    ``None`` or a refusal — the ordering question only exists once something
-    has said which record the money came out of. Scoped to OUTBOUND moves for
-    the same reason: on an inbound or merely-routed flow the entry is not the
-    payer, so "was the payer's record debited first" is a different question
-    and must not be answered here by accident."""
+    Inbound and routed flows aren't the entry paying, so the question doesn't apply.
+    """
     for flow in flows:
         if flow.get("direction") != "out":
             continue

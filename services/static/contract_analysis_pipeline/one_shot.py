@@ -1,37 +1,11 @@
-"""One-shot latch analysis — initializer-family gate classification.
+"""One-shot latch analysis: reclassify initializer latch leaves as ``authority_role="one_shot"`` instead of
+``business``, like ``reentrancy_pause``.
 
-Mirrors ``reentrancy_pause``: a tree post-pass that re-classifies latch
-leaves with ``authority_role="one_shot"`` so the resolver projects a typed
-one-shot side condition instead of an opaque ``business`` one. The
-``initializer``/``reinitializer``/``onlyInitializing`` modifier fact was
-already recognized at extraction time (``tracking._function_is_initializer``)
-but routed only to the ``Initialized`` monitoring event — never onto the
-function row. This pass closes that asymmetry.
-
-Detection keys on the standard, never on function/contract names:
-
-  * A-spine (this pass): the OZ Initializable modifier family on an entry
-    point. The latch vars are the state variables the modifier reads —
-    OZ v4's packed ``_initialized``/``_initializing``, or the v5 ERC-7201
-    ``INITIALIZABLE_STORAGE`` constant (Slither folds the namespaced struct
-    read to that constant with a ``member_path``). Leaves in the function's
-    tree that read a latch var are stamped ``one_shot``.
-
-  * The pass also attaches ``one_shot_latch`` — the on-chain location of the
-    persistent version latch (storage slot/offset/size from Slither's
-    storage layout, or the v5 fixed namespaced slot) — to the version-var
-    leaves, so resolution can read the live value on the deployment address
-    and tell a consumed one-shot (inert) from a live one (callable by
-    anyone, then latches). The transient ``_initializing`` flag — recognized
-    by its placeholder-bracketed write in v4, and by the standard's own
-    field name where that write is invisible (the v5 struct member, written
-    through an assembly-bound storage pointer) — is stamped for the badge
-    but carries no latch location: its at-rest value says nothing about
-    consumption.
-
-Whether the latch is *consumed* is mutable on-chain state — deliberately
-not decided here. Static only says "this is a one-shot gate" and where the
-latch lives.
+Keyed on the OZ Initializable modifier family, never names. The latch vars are what the modifier reads (v4
+``_initialized``/``_initializing``, or the v5 ERC-7201 ``INITIALIZABLE_STORAGE`` constant with a ``member_path``).
+Version-var leaves also get ``one_shot_latch``, the on-chain location of the persistent version, so resolution can tell
+a consumed one-shot from a live one (callable by anyone). The transient ``_initializing`` flag is stamped but gets no
+location: it is always false at rest. Whether the latch is consumed is chain state, not decided here.
 """
 
 from __future__ import annotations
@@ -54,48 +28,29 @@ from .slither_compat import (
 
 logger = logging.getLogger(__name__)
 
-# The OZ Initializable modifier family — the same standard set
-# ``tracking._function_is_initializer`` keys the Initialized-event tag on.
+# The same set ``tracking._function_is_initializer`` uses.
 INITIALIZER_MODIFIERS = frozenset({"initializer", "reinitializer", "onlyInitializing"})
 
-# ``expected_version``'s provenance, recorded beside the integer so no consumer
-# can read it as compiler-forced. Both arms key on the closed
-# ``INITIALIZER_MODIFIERS`` name set (the residual); they differ in whether a
-# source literal was actually read, which is not a difference a single label can
-# carry honestly.
+# Provenance of ``expected_version`` so it isn't read as compiler-forced: whether a source literal was read or the
+# standard's constant assumed.
 EXPECTED_VERSION_BASIS_REINITIALIZER_LITERAL = "oz_reinitializer_argument_literal"
 EXPECTED_VERSION_BASIS_INITIALIZER_CONSTANT = "oz_initializer_modifier_standard_constant"
 
-# OZ v5 ERC-7201 InitializableStorage struct layout: the namespaced slot holds
-# ``uint64 _initialized`` then ``bool _initializing``. Slither lowers the
-# struct read to the slot CONSTANT as the state variable, with the member on
-# ``member_path`` — so the member name (the standard's own field name, not a
-# user identifier) is the only way to pick the byte range inside the slot.
-# Only the persistent version member maps to a latch location.
+# OZ v5 InitializableStorage layout (``uint64 _initialized``, ``bool _initializing``); Slither exposes the slot constant
+# plus a member path, so the standard field name picks the byte range. Only the version member maps to a latch.
 _OZ_V5_STRUCT_MEMBERS = {
     "_initialized": {"byte_offset": 0, "size_bytes": 8, "value_type": "uint64"},
 }
 
-# The standard's transient in-flight flag — the v4 state variable and the v5
-# struct member share this field name. It is true only while an initializer
-# is executing and zero at rest, so its value can never witness
-# consumed-vs-live: leaves reading it are stamped for the badge but carry no
-# latch location. Keyed on the standard's own field name because the
-# structural detection (placeholder-bracketed writes) cannot see the v5
-# form — ``$._initializing = true`` writes through an assembly-bound storage
-# pointer Slither reports no state-variable write for.
+# The transient in-flight flag (same name in v4 and v5). Always zero at rest, so no location. Keyed on the field name
+# because v5 writes it through an assembly storage pointer the placeholder test can't see.
 _TRANSIENT_FLAG_NAME = "_initializing"
 
 
 def apply_one_shot_pass(contract: Any, predicate_trees: dict[str, PredicateTree]) -> None:
-    """Stamp one-shot initializer latch leaves across ``predicate_trees``.
-
-    For every entry point carrying an initializer-family modifier, leaves
-    whose operands read the modifier's latch state vars are re-classified
-    ``authority_role="one_shot"`` (business/None leaves only — a leaf the
-    reentrancy/pause pass already claimed keeps its classification, which
-    fails closed to the generic badge). Version-var leaves additionally get
-    the ``one_shot_latch`` location payload.
+    """Stamp one-shot latch leaves across ``predicate_trees``: for initializer-modified entry points, business/None
+    leaves reading the modifier's latch vars become ``one_shot`` (already-classified leaves keep theirs), and
+    version reads get ``one_shot_latch``.
     """
     if not SLITHER_AVAILABLE:
         raise RuntimeError("apply_one_shot_pass requires slither")
@@ -132,18 +87,11 @@ def apply_one_shot_pass(contract: Any, predicate_trees: dict[str, PredicateTree]
     if not stamped_any:
         return
 
-    # Re-stamp confidence so promoted leaves don't keep their previous
-    # business/low value — same discipline as the reentrancy/pause pass.
-    # (Candidates never change ``authority_role``, so they don't need it.)
+    # Promoted leaves need fresh confidence; candidates don't change role.
     from .predicates import apply_confidence_to_tree
 
     for tree in predicate_trees.values():
         apply_confidence_to_tree(tree)
-
-
-# ---------------------------------------------------------------------------
-# Tree stamping
-# ---------------------------------------------------------------------------
 
 
 def _stamp_tree(
@@ -176,8 +124,6 @@ def _maybe_stamp_leaf(
     expected_version: int | None,
     expected_version_basis: str | None,
 ) -> bool:
-    # Already-classified non-business leaves (reentrancy/pause/authority)
-    # keep their classification — fail closed to the generic badge.
     if leaf.get("authority_role") not in ("business", None):
         return False
     read_names: list[str] = [
@@ -195,12 +141,8 @@ def _maybe_stamp_leaf(
         f"one-shot initializer latch: {', '.join(sorted(set(read_names)))} (initializer-family modifier)"
     ]
 
-    # Attach the latch location to version reads only: the transient
-    # in-flight flag is always false at rest, so reading it can't say
-    # consumed-vs-live. Walk operands rather than var names — OZ v5 surfaces
-    # both struct members under the one INITIALIZABLE_STORAGE constant,
-    # distinguished only by ``member_path``, and ``_latch_location`` declines
-    # the transient member. The first operand yielding a location wins.
+    # Location only for version reads. Walk operands: v5 exposes both members under one constant, distinguished by
+    # ``member_path``. First location wins.
     for operand in leaf.get("operands") or []:
         if operand.get("source") != "state_variable":
             continue
@@ -220,11 +162,6 @@ def _maybe_stamp_leaf(
     return True
 
 
-# ---------------------------------------------------------------------------
-# Latch location
-# ---------------------------------------------------------------------------
-
-
 def _latch_location(
     contract: Any,
     state_var: Any,
@@ -232,21 +169,9 @@ def _latch_location(
     expected_version: int | None,
     expected_version_basis: str | None = None,
 ) -> dict[str, Any] | None:
-    """On-chain location of the persistent latch read by ``state_var``.
-
-    Two shapes:
-      * a regular (possibly inherited) storage variable — slot/offset from
-        Slither's storage layout;
-      * the OZ v5 ERC-7201 pattern — the "variable" is the slot CONSTANT
-        (bytes32), the member name on the operand picks the byte range of
-        the standard InitializableStorage struct.
-    Decisive payloads carry ``role="version"`` — the pass's positive claim
-    that the location holds the persistent version member, the only state a
-    consumed-vs-live verdict may be decided from (``one_shot_probe`` keys
-    its selection on it). Returns None when no readable location exists
-    (constant slot whose value can't be folded, immutables, layout failures)
-    or when the read targets the transient in-flight flag — resolution then
-    reports indeterminate rather than guessing.
+    """On-chain location of the persistent latch ``state_var`` reads: a regular storage variable (Slither layout) or
+    the v5 slot constant with the member picking the byte range. ``role="version"`` marks the only location a
+    consumed-vs-live verdict may use. None when unreadable or when it's the transient flag.
     """
     if getattr(state_var, "is_constant", False):
         slot = _bytes32_constant_value(state_var)
@@ -260,8 +185,7 @@ def _latch_location(
             return None
         member_layout = _OZ_V5_STRUCT_MEMBERS.get(member or "")
         if member_layout is None:
-            # A namespaced struct we don't have a standard layout for: record
-            # the slot; resolution may only use the all-zero-slot fact.
+            # A namespaced struct without a known layout: record the slot only.
             return {
                 "kind": "storage",
                 "variable": getattr(state_var, "name", None),
@@ -289,9 +213,7 @@ def _latch_location(
     if getattr(state_var, "is_immutable", False):
         return None
 
-    # The v4 transient flag can reach here through reads the
-    # placeholder-bracket detection doesn't see (an ``onlyInitializing``-only
-    # chain never writes it): same rule — badge only, no location.
+    # The v4 transient flag via reads the placeholder test missed: no location.
     if getattr(state_var, "name", None) == _TRANSIENT_FLAG_NAME:
         return None
 
@@ -343,11 +265,6 @@ def _bytes32_constant_value(state_var: Any) -> str | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Modifier introspection
-# ---------------------------------------------------------------------------
-
-
 def _all_state_variables_read(modifier: Any) -> list[Any]:
     reader = getattr(modifier, "all_state_variables_read", None)
     if reader is None:
@@ -360,10 +277,7 @@ def _all_state_variables_read(modifier: Any) -> list[Any]:
 
 
 def _placeholder_bracketed_writes(modifier: Any) -> set[str]:
-    """State vars written both before and after the modifier's PLACEHOLDER —
-    the transient in-flight flag pattern (``_initializing = true; _;
-    _initializing = false``), structurally the same bracketing the
-    reentrancy analyzer keys on."""
+    """State vars written before and after the modifier's ``_;``: the transient flag pattern."""
     nodes = list(getattr(modifier, "nodes", []) or [])
     placeholder_index = None
     for index, node in enumerate(nodes):
@@ -386,12 +300,11 @@ def _placeholder_bracketed_writes(modifier: Any) -> set[str]:
 
 
 def _expected_version(fn: Any, init_modifiers: list[Any]) -> tuple[int | None, str | None]:
-    """``(version, basis)`` — the version the latch must reach for this gate to
-    be consumed, and where that integer came from. 1 for ``initializer`` (the
-    standard's own constant, not a value read from this source), the literal
-    argument for ``reinitializer(n)``. ``(None, None)`` when it can't be
-    determined statically (non-literal reinitializer version, or an
-    ``onlyInitializing``-only helper) — never a defaulted 1."""
+    """``(version, basis)``: the version the latch must reach for the gate to be consumed.
+
+    1 for ``initializer`` (the standard's constant), the literal for ``reinitializer(n)``, ``(None, None)`` when not
+    static. Never defaulted to 1.
+    """
     names = {getattr(m, "name", "") for m in init_modifiers}
     if "reinitializer" in names:
         literal = _reinitializer_literal(fn)
@@ -422,32 +335,12 @@ def _reinitializer_literal(fn: Any) -> int | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Name-free structural latch candidates (the recall net under the A-spine).
-#
-# A custom one-shot the OZ modifier misses — FiatToken's ``initialized`` bool,
-# a versioned ``_initializedVersion`` counter, Lido's unstructured-storage
-# initialization block — is structurally: a public function whose guard reads
-# non-caller-keyed persistent state that the function itself writes into the
-# guard-falsifying value. Three concrete forms are detected, all stamped as
-# CANDIDATES ONLY (``one_shot_candidate`` — ``authority_role`` and the badge
-# are untouched): a candidate earns a badge solely through the on-chain latch
-# read at resolution time, so a residual false positive costs one wasted read.
-#
-#   1. scalar state var:    require(!initialized) … initialized = true
-#   2. getter + slot link:  require(getContractVersion() == 0) where the
-#      nullary view resolves to a constant-slot read and the function writes
-#      that same slot through a state-mutating assembly helper
-#      (UnstructuredStorage.setStorageUint256-style).
-#   3. modifier-anchored:   the guard leaf saturated in folding (Lido), but a
-#      require-bearing modifier reads exactly one constant slot that the
-#      function then writes — recorded on the tree root.
-#
-# Counters are excluded by the falsification requirement: every write the
-# function makes to the latch must be a constant that permanently violates
-# the guard (``deposit_count += 1`` is not a constant write; a capped
-# ``v < N`` guard is only falsified by writing exactly >= N).
-# ---------------------------------------------------------------------------
+# Name-free latch candidates the OZ modifier check misses (FiatToken ``initialized``, a versioned counter, Lido
+# unstructured storage): a public function whose guard reads non-caller-keyed state the function writes into the
+# guard-falsifying value. Three forms: a scalar state var; a nullary getter resolving to a constant slot the function
+# writes via an assembly helper; a require-bearing modifier reading one constant slot the function writes. Candidates
+# only (``one_shot_candidate``), confirmed by the on-chain read. Counters are excluded: every write must be a constant
+# that permanently falsifies the guard.
 
 _SCALAR_LATCH_TYPES_PREFIXES = ("bool", "uint", "int", "address")
 
@@ -520,9 +413,7 @@ def _scalar_candidate(
     const_writes: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     operands = leaf.get("operands") or []
-    # Partition by position. The equality form this replaces was correct only
-    # because the state-variable test is a pure function of the operand dict;
-    # the invariant here is local to the partition instead.
+    # Partition by position; the state-variable test depends only on the operand.
     sv_idxs = [i for i, op in enumerate(operands) if op.get("source") == "state_variable" and not op.get("member_path")]
     excluded = set(sv_idxs)
     other = [op for i, op in enumerate(operands) if i not in excluded]
@@ -571,8 +462,7 @@ def _scalar_candidate(
 
 
 def _getter_candidate(contract: Any, leaf: LeafPredicate, slot_writes: set[str]) -> dict[str, Any] | None:
-    """``require(<nullaryView>() == 0)`` where the view resolves to one
-    constant-slot read and this function writes the same slot."""
+    """``require(<nullaryView>() == 0)`` where the view reads one constant slot this function writes."""
     if not slot_writes:
         return None
     operands = leaf.get("operands") or []
@@ -580,7 +470,7 @@ def _getter_candidate(contract: Any, leaf: LeafPredicate, slot_writes: set[str])
     other = [op for op in operands if op.get("source") != "view_call"]
     if len(views) != 1 or any(op.get("source") != "constant" for op in other):
         return None
-    # ALLOW must be the unset form: == 0 (post polarity-fold) or falsy.
+    # Must allow in the unset form (``== 0`` or falsy).
     operator = leaf.get("operator")
     guard_constant = _parse_constant(other[0].get("constant_value")) if other else None
     if not ((operator == "eq" and guard_constant == 0) or (operator == "falsy" and guard_constant in (None, 0))):
@@ -614,8 +504,7 @@ def _getter_candidate(contract: Any, leaf: LeafPredicate, slot_writes: set[str])
 
 
 def _modifier_slot_candidate(fn: Any, slot_writes: set[str]) -> dict[str, Any] | None:
-    """A require-bearing modifier reading exactly one constant slot the
-    function then writes — the guard leaf itself saturated in folding."""
+    """A require-bearing modifier reading exactly one constant slot the function writes (the leaf itself saturated)."""
     if not slot_writes:
         return None
     for modifier in getattr(fn, "modifiers", []) or []:
@@ -640,11 +529,10 @@ def _modifier_slot_candidate(fn: Any, slot_writes: set[str]) -> dict[str, Any] |
 
 
 def _is_monotonic_ascent_latch(operator: Any, guard_constant: int | None, written: set[int]) -> bool:
-    """A consuming latch admits while the value sits at a floor and every
-    self-write moves it strictly UP — the FiatToken ``!initialized``/
-    ``_initializedVersion == k`` shape. The inverted polarity (ALLOW while
-    the flag is SET, write clears it — ``unpauseContract``-style toggles)
-    is re-armable by the symmetric setter and must never read as a latch."""
+    """A consuming latch allows at a floor and every self-write moves it up.
+
+    The inverted polarity (allowed while set, write clears it) is re-armable and never a latch.
+    """
     if operator == "falsy":
         return all(value > 0 for value in written)
     if guard_constant is None:
@@ -659,8 +547,7 @@ def _is_monotonic_ascent_latch(operator: Any, guard_constant: int | None, writte
 
 
 def _write_falsifies_guard(operator: Any, guard_constant: int | None, written: int) -> bool:
-    """Does writing ``written`` into the latch make the ALLOW predicate
-    (already polarity-folded by the static stage) false forever after?"""
+    """Whether writing ``written`` makes the (polarity-folded) allow predicate false forever."""
     if operator == "falsy":
         return written != 0
     if operator == "truthy":
@@ -725,14 +612,8 @@ def _nullary_view_by_name(contract: Any, name: Any) -> Any | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# IR surveys (recursive through internal/library calls, cycle-safe)
-# ---------------------------------------------------------------------------
-
-
 def _walk_ir(containers: list[Any]):
-    """Yield every IR operation reachable from ``containers`` (functions /
-    modifiers), recursing through internal and library callees once each."""
+    """Every IR reachable from ``containers``, through internal and library callees once each."""
     visited: set[int] = set()
     stack = [c for c in containers if c is not None]
     while stack:
@@ -751,8 +632,7 @@ def _walk_ir(containers: list[Any]):
 
 
 def _constant_state_var_writes(fn: Any) -> dict[str, dict[str, Any]]:
-    """``{state_var_name: {"values": set[int], "non_constant": bool}}`` over
-    every write reachable from ``fn`` (its body, callees, and modifiers)."""
+    """``{state_var: {values, non_constant}}`` over every write reachable from ``fn``."""
     out: dict[str, dict[str, Any]] = {}
 
     def record(name: str, value: int | None) -> None:
@@ -777,8 +657,7 @@ def _constant_state_var_writes(fn: Any) -> dict[str, dict[str, Any]]:
         elif isinstance(ir, Delete):
             record(name, 0)
         elif not isinstance(ir, (InternalCall, LibraryCall, HighLevelCall, SolidityCall)):
-            # Any other lvalue-bearing op landing on a state var (Binary on a
-            # storage ref, Unpack, …) is a non-constant write.
+            # Any other op landing on a state var is a non-constant write.
             record(name, None)
 
     return out
@@ -802,10 +681,9 @@ def _state_var_base_name(value: Any) -> str | None:
 
 
 def _assembly_slot_writes(fn: Any) -> set[str]:
-    """Constant storage slots written via state-mutating assembly helpers —
-    a nonview callee that contains assembly and takes a bytes32-constant
-    argument (the UnstructuredStorage ``setStorageUint256(POSITION, v)``
-    shape)."""
+    """Constant slots written by state-mutating assembly helpers taking a bytes32 constant
+    (``setStorageUint256(POSITION, v)``).
+    """
     return _assembly_slot_args(
         [fn] + list(getattr(fn, "modifiers", []) or []),
         want_mutating=True,
@@ -813,8 +691,7 @@ def _assembly_slot_writes(fn: Any) -> set[str]:
 
 
 def _assembly_slot_reads(container: Any) -> set[str]:
-    """Constant storage slots read via view assembly helpers reachable from
-    ``container`` (``getStorageUint256(POSITION)``-shape)."""
+    """Constant slots read by view assembly helpers (``getStorageUint256(POSITION)``)."""
     return _assembly_slot_args([container], want_mutating=False)
 
 
@@ -837,8 +714,7 @@ def _assembly_slot_args(containers: list[Any], *, want_mutating: bool) -> set[st
 
 
 def _bytes32_constant_arg_value(argument: Any) -> str | None:
-    """The 0x-hex value of a bytes32 CONSTANT state variable passed as a call
-    argument (``CONTRACT_VERSION_POSITION``), or a literal bytes32 constant."""
+    """The hex value of a bytes32 constant argument, or a literal bytes32."""
     try:
         from slither.core.variables.state_variable import StateVariable
     except Exception:  # pragma: no cover
