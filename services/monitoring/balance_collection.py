@@ -1,8 +1,7 @@
-"""Bounded current-state collection used by resolution and the TVL monitor.
+"""Bounded current-state collection for resolution and the TVL monitor.
 
-Provider calls run between short transactions. Leases and last successful payloads
-are keyed on the physical account; publication still belongs to each protocol's
-observation subject. Failed aggregates cannot roll these observations back.
+Provider calls run between short transactions. Leases and payloads are keyed on the physical account; publication
+belongs to each protocol's subject.
 """
 
 from __future__ import annotations
@@ -90,8 +89,7 @@ def claim_read(target, read_class, *, max_age_seconds: int | None = None, sessio
             state, now = existing
             reason = _read_reason(state, now, max_age_seconds)
             if reason != "due":
-                # Cached/backed-off work is read-only. Publication independently
-                # checks generation before writing, so this needs no row lock.
+                # Cached or backed-off work is read-only; publication rechecks generation, so no lock is needed.
                 return Claim(target, read_class, None, state.generation, state.payload, state.observed_at, reason)
         else:
             session.execute(insert(BalanceCollectionState).values(**key).on_conflict_do_nothing())
@@ -174,8 +172,7 @@ def _publish(session, claim: Claim, payload: dict, observed_at: datetime, writer
     from db.models import ContractBalance
 
     subject = claim.target.subject
-    # A cached physical read can be published to another eligible protocol subject,
-    # but never stamped as a new observation or repeatedly inserted into its history.
+    # A cached read may publish to another protocol's subject, but never as a new observation or a repeated history row.
     status_col = (
         ContractBalanceFetch.native_status if claim.read_class == "native" else ContractBalanceFetch.asset_set_status
     )
@@ -248,8 +245,7 @@ def _dirty(session, target):
         contract = session.get(Contract, target.subject.contract_id)
         if contract is not None:
             mark_protocol_score_dirty(session, contract.protocol_id, "balance_observation")
-    # Entity observations are not owned by a protocol; the score staleness backstop
-    # and the initiating protocol's cycle handle those shared evidence updates.
+    # Entity observations aren't protocol-owned; the score staleness backstop and the initiating cycle handle them.
 
 
 def finish_read(
@@ -270,8 +266,7 @@ def finish_read(
         else:
             state.failures += 1
             state.next_attempt_at = now + timedelta(seconds=min(3600, 30 * 2 ** min(state.failures - 1, 7)))
-        # Partial prefixes are useful positive observations, stored separately by
-        # the projection. Failed reads never replace the last usable payload.
+        # Partial prefixes are stored separately by the projection; failed reads never replace the last usable payload.
         if outcome in ("success", "partial"):
             state.payload = payload
             state.observed_at = now
@@ -327,11 +322,7 @@ def _read_reason(state, now, max_age_seconds):
 
 
 def _read_schedule(subjects, *, ttl, session_factory):
-    """Order by the oldest due component, not a sibling's recent successful read.
-
-    This is only a scheduling snapshot. claim_read rechecks ownership/freshness
-    under lock immediately before each bounded unit of provider work.
-    """
+    """Order by the oldest due component. A snapshot only; claim_read rechecks under lock."""
     if not subjects:
         return [], set(), {}
     keys = {(s.chain_id, s.subject.address.lower()) for s in subjects}
@@ -398,9 +389,8 @@ def collect_balances(
     limit = max(1, int(os.getenv("PSAT_BALANCE_SUBJECTS_PER_PASS", "64")))
     subjects = ordered[:limit]
     report.deferred += sum((s.chain_id, s.subject.address.lower()) in due for s in ordered[limit:])
-    # Native multicalls remain batched. Token reads and native batches compete
-    # by their oldest attempt; neither class always runs first. Acquire leases
-    # only when a unit is about to run, so budget-deferred work keeps its place.
+    # Native multicalls stay batched; token and native units compete by oldest attempt. Leases are taken just before a
+    # unit runs so deferred work keeps its place.
     units = []
     for target in subjects:
         units.append((priorities[tuple(_key(target, "tokens").values())], "tokens", [target]))
@@ -450,8 +440,7 @@ def collect_balances(
                         try:
                             quotes[quote_chain] = read_native_quote(quote_chain, session_factory=session_factory)
                         except RequestBudgetExceeded:
-                            # Persist acquired quantities even when their quote
-                            # cannot fit into this pass's remaining budget.
+                            # Persist quantities even when their quote doesn't fit this pass's budget.
                             quotes[quote_chain] = (None, None)
                         except Exception as exc:
                             logger.warning(

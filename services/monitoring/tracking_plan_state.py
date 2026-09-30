@@ -1,21 +1,7 @@
-"""The tracking-plan state a ``monitoring_config`` carries, in one place.
+"""The tracking-plan state a ``monitoring_config`` carries: the not-determined tokens, the
+staleness merge, and the coverage census.
 
-Three things live here because they are the same vocabulary seen from three
-sides:
-
-  * **the tokens** — every reason a tracking plan could not be read. Produced by
-    ``services.monitoring.enrollment._load_tracking_plan_artifacts`` (five), by
-    its caller for an address no analysis ever ran on (one), and by the PATCH /
-    upsert route for a caller-authored config (one).
-  * **the staleness merge** — what re-enrollment does when the plan is
-    not-determined *and* the row already carries topics a plan read did name.
-  * **the coverage census** — how many monitored contracts are watching on a
-    read plan, on a dated plan, or on nothing but the baseline registry, and
-    for which reason.
-
-The config discriminant is always a POSITIVE token; no state is signalled by
-key absence (see ``_build_monitoring_config``). The four states a row can be
-in, and how they read here:
+State is always signalled by a positive token, never by key absence:
 
 ===========================  ==============================  ================
 ``tracked_topics``           ``tracking_plan_not_determined`` state
@@ -26,12 +12,9 @@ absent                       present                         not_determined
 absent                       absent                          unclassified
 ===========================  ==============================  ================
 
-``ready_stale`` is the state F5 mints: watching continues on the last plan we
-actually read, marked with the instant it stopped being confirmable. It is
-neither fresh (we cannot re-read it) nor ignorance (we know what it said) —
-collapsing it into either is the failure this module exists to prevent.
-``unclassified`` is a row this builder never produced (pre-discriminant), which
-is a not-determined fact about our own record, not about the contract.
+``ready_stale`` keeps watching on the last plan actually read, stamped with when it stopped
+being confirmable; it is neither fresh nor ignorance. ``unclassified`` is a row this builder
+never produced.
 """
 
 from __future__ import annotations
@@ -46,27 +29,19 @@ from sqlalchemy.orm import Session
 from db.models import ContractMaterialization, MonitoredContract, MonitoringEnrollmentQueue
 from utils.chains import chain_cache_token
 
-# --- config keys -----------------------------------------------------------
-
 TRACKED_TOPICS_KEY = "tracked_topics"
 NOT_DETERMINED_KEY = "tracking_plan_not_determined"
 POLLING_PLAN_KEY = "polling_plan"
-#: When the carried-forward topics stopped being confirmable — i.e. the first
-#: re-enrollment that could not re-read the plan. The topics are last-known-good
-#: as of some instant at or before this one.
+# First re-enrollment that could not re-read the plan; topics are last-known-good as of then.
 TRACKED_TOPICS_STALE_SINCE_KEY = "tracked_topics_stale_since"
 POLLING_PLAN_STALE_SINCE_KEY = "polling_plan_stale_since"
-#: Block intervals this row's scanner never covered (written by the
-#: operator cursor-clamp tooling). A scan-plane fact about what was
-#: observed, not a plan-plane statement — see :func:`preserve_scan_plane_facts`.
+# Block intervals the scanner never covered (operator cursor-clamp tooling); see :func:`preserve_scan_plane_facts`.
 SCAN_GAPS_KEY = "scan_gaps"
 
-# --- not-determined tokens -------------------------------------------------
 
 #: ``find_by_address`` raised.
 MATERIALIZATION_LOOKUP_FAILED = "materialization_lookup_failed"
-#: No row / not ready / superseded schema version — ``find_by_address`` reads
-#: all three as a miss.
+# No row, not ready, or superseded schema version.
 NO_CURRENT_MATERIALIZATION = "no_current_materialization"
 #: The bucket answered and holds no such object.
 PLAN_OBJECT_ABSENT = "plan_object_absent"
@@ -80,16 +55,11 @@ CONTRACT_NOT_ANALYZED = "contract_not_analyzed"
 #: Authored by an API caller; no analyzer provenance at all.
 CONFIG_SUPPLIED_BY_CALLER = "config_supplied_by_caller"
 
-# These failures can recover without a new analysis or membership change.
-# Explicit missing/superseded-artifact and plan-load-error outcomes stay on the
-# repair cadence. Storage also classifies corrupt blobs as PLAN_NOT_READABLE;
-# those follow the same capped retries as an unreachable bucket.
+# Can recover without new analysis. Corrupt blobs also read as PLAN_NOT_READABLE and share the capped retries.
 TRANSIENT_PLAN_FAILURES = frozenset({MATERIALIZATION_LOOKUP_FAILED, PLAN_NOT_READABLE})
 
-#: ``mark_enrollment_dirty`` reason for a pass that could not create one or more
-#: monitored rows because the chain head was not determined. The queue row is
-#: how the deferral survives the pass (the reconciler re-drains it) and how the
-#: census counts it — a deferred contract has no row to be counted as.
+# Enrollment deferred because the chain head was undetermined; the queue row carries the deferral and the census counts
+# it.
 HEAD_NOT_DETERMINED_REASON = "head_not_determined"
 
 PLAN_NOT_DETERMINED_TOKENS = frozenset(
@@ -104,14 +74,10 @@ PLAN_NOT_DETERMINED_TOKENS = frozenset(
     }
 )
 
-#: The tokens whose config may inherit the last-read plan. Everything that means
-#: "we could not read the plan this time" does; ``config_supplied_by_caller``
-#: does not — a caller-authored config is a deliberate overwrite, and
-#: resurrecting analyzer topics over it would watch topics the operator just
-#: replaced.
+# Tokens whose config may inherit the last-read plan. Not caller-authored configs: that would resurrect topics the
+# operator just replaced.
 STALENESS_MERGE_TOKENS = PLAN_NOT_DETERMINED_TOKENS - {CONFIG_SUPPLIED_BY_CALLER}
 
-# --- plan states -----------------------------------------------------------
 
 READY_FRESH_WITH_TOPICS = "ready_fresh_with_topics"
 READY_FRESH_PROVEN_EMPTY = "ready_fresh_proven_empty"
@@ -131,26 +97,10 @@ def merge_stale_tracking_plan(
 ) -> dict[str, Any]:
     """Re-enrollment's config, with last-known-good watching preserved.
 
-    Enrollment rebuilds ``monitoring_config`` wholesale, so a plan read that
-    fails *this* time would otherwise replace a witnessed topic list with a
-    not-determined token and nothing to watch — downstream indistinguishable
-    from "the plan was read and named nothing". Dated knowledge is still
-    knowledge: the topics stay, stamped with the instant they stopped being
-    confirmable, alongside the token saying why they cannot be refreshed.
-
-    Returns *new_config* unchanged unless all of:
-
-      * the new config's token is in :data:`STALENESS_MERGE_TOKENS`;
-      * the existing config actually carries topics a plan read named
-        (an empty list carries nothing forward — proven-empty is a claim about
-        the contract that we can no longer make);
-      * the existing config's own provenance is an analyzer plan read, fresh or
-        already-stale — never a caller-authored config.
-
-    The polling plan rides along under the same rule. It is the poll plane's
-    half of the same watching: dropping it would flip ``needs_polling`` off and
-    prune the observed ``last_known_state`` keys it names, which is the same
-    manufactured ignorance one layer down.
+    Without this, a failed plan read would replace witnessed topics with nothing to watch, indistinguishable from "read
+    and named nothing". Topics carry forward, stamped stale, only when the new token is in
+    :data:`STALENESS_MERGE_TOKENS`, the old config has non-empty topics, and its provenance is an analyzer plan read.
+    The polling plan rides along under the same rule.
     """
     token = new_config.get(NOT_DETERMINED_KEY)
     if token not in STALENESS_MERGE_TOKENS:
@@ -166,24 +116,19 @@ def merge_stale_tracking_plan(
 
     stale_since = existing_config.get(TRACKED_TOPICS_STALE_SINCE_KEY)
     if not isinstance(stale_since, str) or not stale_since:
-        # First failure to re-read: from here the topics are dated. A later
-        # failure keeps this instant — re-enrolling does not refresh them.
+        # A later failure keeps the first instant.
         stale_since = (now or _utcnow()).isoformat()
 
     merged = dict(new_config)
     merged[TRACKED_TOPICS_KEY] = list(last_good)
     merged[TRACKED_TOPICS_STALE_SINCE_KEY] = stale_since
-    # Re-derived from the carried topics rather than copied: the flag is a
-    # function of what is being watched, and the watch list is what moved.
+    # Re-derived: the flag is a function of the watch list.
     if any(isinstance(t, Mapping) and t.get("event_type") == "authority_updated" for t in last_good):
         merged["watch_authority"] = True
 
     merged_plan = _merge_polling_plan(new_config.get(POLLING_PLAN_KEY), existing_config.get(POLLING_PLAN_KEY))
     if merged_plan is not None:
-        # Non-None means entries WERE carried (``_merge_polling_plan`` returns
-        # None otherwise), so the stamp is unconditional here — comparing
-        # lengths against the raw new plan would miss a carry whenever that plan
-        # held a malformed entry the merge dropped.
+        # Non-None means entries were carried; comparing lengths would miss malformed entries the merge dropped.
         merged[POLLING_PLAN_KEY] = merged_plan
         merged[POLLING_PLAN_STALE_SINCE_KEY] = existing_config.get(POLLING_PLAN_STALE_SINCE_KEY) or stale_since
 
@@ -194,15 +139,8 @@ def preserve_scan_plane_facts(
     new_config: dict[str, Any],
     existing_config: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """Carry the row's scan-plane record onto a rebuilt config, always.
-
-    Every writer of ``monitoring_config`` — enrollment and the caller-facing
-    routes alike — replaces the whole object. ``scan_gaps`` is not part of what
-    any of them computes: it records block intervals this row's scanner never
-    covered, and dropping it would let the row present continuous coverage over
-    an interval nothing ever read. Unconditional, and independent of the
-    staleness merge: the gaps are true whether or not the plan could be read,
-    and true whether the new config came from the analyzer or from a caller.
+    """Carry ``scan_gaps`` onto any rebuilt config, unconditionally: dropping it would claim continuous coverage over
+    unread intervals.
     """
     gaps = (existing_config or {}).get(SCAN_GAPS_KEY)
     if not isinstance(gaps, list) or not gaps:
@@ -213,12 +151,9 @@ def preserve_scan_plane_facts(
 
 
 def _merge_polling_plan(new_plan: Any, existing_plan: Any) -> list[dict] | None:
-    """Freshly-derived entries, plus last-good entries for the fields the fresh
-    plan cannot name. Returns ``None`` when there is nothing to carry.
+    """Fresh entries win their field; last-good entries fill fields only a readable plan can name.
 
-    The fresh entries win their field outright: they were derived from the
-    contract type this pass. The carried ones are the analyzer-derived slots
-    that only a readable plan can produce.
+    ``None`` if nothing to carry.
     """
     if not isinstance(existing_plan, list) or not existing_plan:
         return None
@@ -233,14 +168,9 @@ def _merge_polling_plan(new_plan: Any, existing_plan: Any) -> list[dict] | None:
 
 
 def _state_from_parts(token: Any, has_topics_key: bool, topics_present: bool, has_stale_since: bool) -> str:
-    """The state table at the top of this module, as code. One implementation
-    so the row-wise classifier and the SQL census cannot drift.
+    """The module's state table as code, shared by the row classifier and the SQL census.
 
-    ``ready_stale`` requires its own witness — the staleness stamp the merge
-    writes, under a token the merge is allowed to act on. Two keys happening to
-    coexist is a coincidence, not evidence: a caller-authored config carrying
-    topics would otherwise be reported as "watching on a dated analyzer plan",
-    which nothing established.
+    ``ready_stale`` requires the merge's stamp under a mergeable token, not just coexisting keys.
     """
     if isinstance(token, str) and token:
         if has_topics_key and topics_present and has_stale_since and token in STALENESS_MERGE_TOKENS:
@@ -252,12 +182,7 @@ def _state_from_parts(token: Any, has_topics_key: bool, topics_present: bool, ha
 
 
 def classify_plan_state(config: Mapping[str, Any] | None) -> str:
-    """The plan state of one ``monitoring_config``.
-
-    Returns a not-determined token verbatim when that is the state, so an
-    unrecognized token is reported as itself rather than folded into a known
-    one.
-    """
+    """The plan state of one config; unknown not-determined tokens are returned verbatim."""
     cfg = config if isinstance(config, Mapping) else {}
     topics = cfg.get(TRACKED_TOPICS_KEY)
     has_topics_key = isinstance(topics, list)
@@ -272,38 +197,14 @@ def classify_plan_state(config: Mapping[str, Any] | None) -> str:
 def plan_coverage_counts(session: Session) -> dict[str, Any]:
     """Census of active monitored contracts by tracking-plan state.
 
-    Answers the question a quiet monitoring fleet cannot: which contracts are
-    quiet because nothing happened, and which are quiet because nothing is
-    being watched for them.
-
-    The four partition members sum to ``contracts``::
-
-        ready_fresh_with_topics + ready_fresh_proven_empty
-          + ready_stale + sum(not_determined.values()) + unclassified
-
-    Two **overlays, not partition members**, ride alongside:
-
-    * ``analysis_failed`` — rows whose address has a ``status='failed'``
-      materialization, i.e. the reason behind some of the
-      ``no_current_materialization`` count (a failed row reads as a miss).
-      Reported separately because "no analysis was ever established" and "the
-      analysis was attempted and failed" are different facts with different
-      remedies, and the second is only visible from the materialization table.
-    * ``enrollment_deferred_protocols`` — protocols whose last enrollment could
-      not create at least one row because the chain head was not determined.
-      It is PROTOCOL-scoped, not contract-scoped, and counts things that have no
-      ``monitored_contracts`` row at all: without it a deferral is invisible on
-      a surface that can only count rows that exist.
+    Partition members sum to ``contracts``. Two overlays ride alongside: ``analysis_failed`` (a failed materialization
+    behind some ``no_current_materialization``) and protocol-scoped ``enrollment_deferred_protocols`` (rows that don't
+    exist yet).
     """
-    # The column is declared ``JSON().with_variant(JSONB(), "postgresql")``, so
-    # the generic type is what builds expressions — cast to reach the JSONB
-    # operators.
+    # The column is generic JSON with a JSONB variant; cast to reach JSONB operators.
     config = cast(MonitoredContract.monitoring_config, JSONB)
     topics = config[TRACKED_TOPICS_KEY]
-    # ``jsonb_typeof`` of a missing key is NULL; coalesce before comparing so a
-    # missing key can never fall through into the array branch. The empty test
-    # is a JSONB equality rather than ``jsonb_array_length``, which errors on a
-    # non-array input.
+    # Coalesce the NULL typeof of a missing key; JSONB equality because ``jsonb_array_length`` errors on non-arrays.
     topics_type = func.coalesce(func.jsonb_typeof(topics), literal("missing"))
     topics_empty = topics == cast(literal("[]"), JSONB)
     token_col = config[NOT_DETERMINED_KEY].astext
@@ -353,11 +254,7 @@ _PARTITION_NON_TOKEN_STATES = frozenset({READY_FRESH_WITH_TOPICS, READY_FRESH_PR
 def _failed_analysis_count(session: Session) -> int:
     """Active monitored contracts whose address has a failed materialization.
 
-    Not a SQL join: ``contract_materializations.chain`` holds chain-id tokens
-    ('1') while ``monitored_contracts.chain`` holds names ('ethereum'), so the
-    columns are only comparable through ``chain_cache_token``. The failed set is
-    small (it is bounded by builds that failed), and when it is empty the second
-    query is skipped entirely.
+    Two queries, not a join: the tables spell chains differently.
     """
     failed = {
         (row.chain, row.address)

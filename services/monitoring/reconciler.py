@@ -1,19 +1,8 @@
 """Drain changed protocols into monitoring, with an infrequent repair sweep.
 
-Enrollment derives ``MonitoredContract`` rows from analysis and governance
-data. Although the writes are idempotent, deriving the controller set builds
-the full governance view and is expensive even when nothing has changed.
-
-Normal work comes from the dirty queue: job completion, policy output,
-membership changes, governance rotations, audit additions, and manual requests.
-The queue is checked every ten minutes by default. An unchanged protocol is
-eligible for the bounded repair sweep only after 24 hours; never-reconciled
-protocols are eligible immediately. The sweep recovers missed notifications
-(including manual DB changes), with additional delay possible under backlog.
-
-Queue leases and dirty_at-guarded completion preserve concurrent changes and
-retry backoff. The repair sweep only inserts missing queue rows, so it cannot
-overwrite an event notification or pull a retry forward.
+Deriving a protocol's controller set builds the full governance view, so work is driven by a dirty queue (job
+completion, policy output, membership and governance changes, manual requests). The daily repair sweep only inserts
+missing queue rows, so it can't overwrite a notification or pull a retry forward.
 """
 
 from __future__ import annotations
@@ -43,28 +32,19 @@ from services.monitoring.tracking_plan_state import NOT_DETERMINED_KEY, TRANSIEN
 logger = logging.getLogger(__name__)
 
 
-# Queue cadence for change notifications and due retries. The independent repair
-# age below controls recovery from missed notifications; backlog and build time
-# can add delay to either path.
 DEFAULT_RECONCILE_INTERVAL_S = int(os.getenv("PSAT_ENROLLMENT_RECONCILE_INTERVAL", "600"))
 
-# Daemon-edge fallback chain for the reconciler loop (inv. 6): the base RPC chain
-# and the ambiguous-protocol default handed to ``_protocol_chain``. Explicit and
-# overridable via env rather than a buried ``chain="ethereum"`` signature default.
+# Base RPC chain and the ambiguous-protocol default for ``_protocol_chain``.
 RECONCILER_FALLBACK_CHAIN = os.getenv("PSAT_RECONCILER_FALLBACK_CHAIN", "ethereum")
 
-# Recovery TTL. A scoped keepalive maintains it during long governance builds;
-# matching lease tokens fence every business commit against an actual takeover.
+# Kept alive during long builds; lease tokens fence every business commit against a takeover.
 DEFAULT_ENROLLMENT_LEASE_TTL_S = 900
 
-# Repair-sweep configuration lives in enrollment_schedule. Queue draining stays
-# independent so real changes and retries do not wait for the daily backstop.
+# Repair-sweep config lives in enrollment_schedule so draining doesn't wait on the daily backstop.
 
-# Per-drain build ceiling. Claim each protocol just before its build so queued
-# protocols never spend their leases waiting behind another protocol.
+# Claim each protocol just before its build so queued leases aren't spent waiting.
 DEFAULT_ENROLLMENT_DRAIN_BATCH = 8
 
-# Backoff ceiling for a repeatedly-failing (poisoned) protocol: 6 hours.
 _BACKOFF_CEILING_S = 6 * 3600
 
 
@@ -79,14 +59,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _protocol_chain(session: Session, protocol_id: int, default: str) -> str:
-    """The chain a protocol's contracts live on (v1 chain-as-island, inv. 15).
-
-    Reads the distinct non-null ``Contract.chain`` values for the protocol and
-    returns the sole chain when unambiguous, else *default*. Used to thread each
-    protocol's own chain (and its eRPC route) into ``enroll_protocol_contracts``
-    instead of the reconciler's mainnet default; ``enroll_protocol_contracts``
-    still resolves each contract's chain independently, so this pins the fallback
-    for NULL-chain rows and the seed RPC.
+    """The protocol's sole ``Contract.chain``, else *default*; pins the fallback for NULL-chain rows and the seed
+    RPC.
     """
     chains = {
         c
@@ -106,13 +80,10 @@ class EnrollmentClaim(NamedTuple):
 
 
 def renew_claim(session: Session, claim: EnrollmentClaim, ttl: int = DEFAULT_ENROLLMENT_LEASE_TTL_S) -> None:
-    """Atomically renew a still-current token, locking it through business commit.
+    """Atomically renew a still-current token, locking it through the business commit.
 
-    Expiry permits another drainer to claim; the changed UUID fences the old
-    owner. An expired but unchanged UUID can renew safely: either this UPDATE
-    wins the row lock, or it observes the new UUID and fails. Requiring an
-    unexpired timestamp would falsely reject a long transaction that itself
-    holds the queue row, preventing both keepalive and takeover.
+    An expired but unchanged token may renew: requiring unexpired would reject a long transaction that itself holds the
+    queue row.
     """
     owned = session.execute(
         update(MonitoringEnrollmentQueue)
@@ -128,8 +99,7 @@ def renew_claim(session: Session, claim: EnrollmentClaim, ttl: int = DEFAULT_ENR
 
 
 def _keepalive_once(claim: EnrollmentClaim, ttl: int) -> None:
-    # Never share the enrollment Session across threads. SKIP LOCKED prevents a
-    # business transaction holding its own queue row from deadlocking cleanup.
+    # One Session per thread. SKIP LOCKED keeps a transaction holding its own queue row from deadlocking cleanup.
     with SessionLocal() as session:
         session.execute(text("SET LOCAL statement_timeout = '5s'"))
         owned = session.execute(
@@ -154,9 +124,8 @@ def _keepalive(claim: EnrollmentClaim, ttl: int):
             try:
                 _keepalive_once(claim, ttl)
             except Exception as exc:
-                # Connectivity trouble is not proof of takeover. Each business
-                # commit still validates the token transactionally and fails
-                # closed if the DB cannot validate it or another owner won.
+                # Connectivity trouble isn't proof of takeover; each business commit still validates the token and fails
+                # closed.
                 logger.info(
                     "enrollment keepalive unavailable; commit fence remains required",
                     extra={"protocol_id": claim.protocol_id, "exc_type": type(exc).__name__},
@@ -178,15 +147,10 @@ def claim_due_enrollments(
     limit: int,
     exclude_protocol_ids: Sequence[int] = (),
 ) -> list[EnrollmentClaim]:
-    """Lease-claim up to *limit* due queue rows, exactly like ``db.queue.claim_job``.
+    """Lease-claim up to *limit* due rows (``dirty_at <= now()``, lease absent or expired).
 
-    A row is *due* when ``dirty_at <= now()`` and its lease is absent or
-    expired. We ``SELECT ... FOR UPDATE SKIP LOCKED`` the oldest-dirty rows,
-    stamp ``lease_id`` + ``lease_expires_at = now() + ttl`` (server clock), and
-    **commit** — the lock is released immediately so the minutes-long
-    governance build never holds a row lock (idle-in-transaction hazard on
-    Neon/pgbouncer, design §2.3). ``dirty_at`` is deliberately left untouched so
-    the success delete can guard on the exact value seen at claim time.
+    Commits immediately so the minutes-long build holds no row lock. ``dirty_at`` is left untouched so success can guard
+    on the claimed value.
     """
     from services.worker_lifecycle import claim_allowed, note_claim
 
@@ -226,12 +190,9 @@ def claim_due_enrollments(
 
 
 def _finish_success(session: Session, claim: EnrollmentClaim) -> None:
-    """Delete the claimed row and stamp the protocol's reconcile time.
+    """Delete the claimed row and stamp the reconcile time.
 
-    The ``dirty_at=:claimed AND lease_id=:mine`` guard keeps a row that was
-    re-dirtied during the build (its ``dirty_at`` advanced): the delete no-ops,
-    so we instead release our lease so the next tick re-drains it against the
-    newer ``dirty_at``.
+    A row re-dirtied during the build survives the guarded delete; only our lease is released.
     """
     renew_claim(session, claim)
     res = session.execute(
@@ -257,12 +218,10 @@ def _finish_success(session: Session, claim: EnrollmentClaim) -> None:
 
 
 def _finish_failure(session: Session, claim: EnrollmentClaim) -> None:
-    """Bump attempts, clear the lease, and push ``dirty_at`` forward with
-    exponential backoff so a poisoned protocol can't wedge the queue.
+    """Bump attempts, clear the lease, and back ``dirty_at`` off exponentially so a poisoned protocol can't wedge the
+    queue.
 
-    If a producer re-dirtied the protocol during this attempt, release only our
-    lease. Its notification (including a deliberate delay) supersedes this
-    attempt and must not be postponed by an older failure.
+    If a producer re-dirtied it meanwhile, only release the lease: the newer notification wins.
     """
     delay_s = min(2 ** (claim.attempts + 1) * 60, _BACKOFF_CEILING_S)
     unchanged = MonitoringEnrollmentQueue.dirty_at == claim.dirty_at
@@ -288,13 +247,9 @@ def _finish_failure(session: Session, claim: EnrollmentClaim) -> None:
 
 
 def _has_transient_plan_failures(session: Session, enrolled: Sequence[MonitoredContract]) -> bool:
-    """Check persisted enrollment results without reloading their ORM graphs.
+    """Whether this pass enrolled rows with transient plan failures, without loading ORM graphs.
 
-    Enrollment commits baseline/last-known-good monitoring even when artifact
-    storage cannot answer. That is useful partial work, but not a completed
-    reconcile: storage recovery emits no dirty notification of its own. Only
-    inspect rows this pass enrolled, not unrelated manual or disabled-chain
-    records that it cannot repair.
+    Such a pass is partial, not complete: storage recovery emits no dirty notification of its own.
     """
     if not enrolled:
         return False
@@ -320,16 +275,9 @@ def drain_enrollment_queue(
     max_claims: int | None = None,
     stop_event: Event | None = None,
 ) -> dict[str, int]:
-    """Claim and process due enrollment-queue rows.
+    """Claim and enroll due queue rows, each in a fresh session; returns ``{"drained", "failed"}``.
 
-    Claims a bounded number with :func:`claim_due_enrollments`, one immediately
-    before each build. Each protocol runs in its **own fresh session** with the full
-    ``enroll_protocol_contracts(..., enroll_controllers=True)`` build. Success
-    deletes the claimed row (``dirty_at``-guarded) and stamps
-    ``last_enrollment_reconcile_at``; failure (including a partially enrolled
-    protocol with transiently unreadable tracking plans) backs the row off. Per-protocol
-    exceptions are logged and swallowed so one poisoned protocol never aborts
-    the drain. Returns ``{"drained", "failed"}`` counts.
+    Failures, including transiently unreadable plans, back off; one poisoned protocol never aborts the drain.
     """
     lease_ttl_s = (
         lease_ttl_s
@@ -378,8 +326,6 @@ def drain_enrollment_queue(
                 _finish_success(work_session, claim)
             drained += 1
         except Exception as exc:
-            # Degraded, not failing: the claim is re-queued with backoff and the
-            # drain continues with the next protocol.
             logger.warning(
                 "enrollment drain failed for a protocol; the claim is re-queued",
                 extra={"protocol_id": claim.protocol_id, "exc_type": type(exc).__name__, "error": str(exc)},
@@ -413,13 +359,7 @@ def run_enrollment_reconciler_loop(
     interval: float = DEFAULT_RECONCILE_INTERVAL_S,
     stop_event: Event | None = None,
 ) -> None:
-    """Long-running reconciler. Each tick = slow-sweep enqueue + queue drain.
-
-    Designed to be hosted by ``workers/protocol_monitor.py --reconcile``. Each
-    pass opens its own ``SessionLocal()`` for the sweep enqueue (the drain opens
-    its own per-protocol sessions) so a connection blip on one tick does not
-    poison the next.
-    """
+    """Long-running reconciler: sweep enqueue plus queue drain each tick, each with its own session."""
     stop_event = stop_event or Event()
     logger.info("starting enrollment reconciler interval=%ss", interval)
     while not stop_event.is_set():
@@ -435,8 +375,7 @@ def run_enrollment_reconciler_loop(
             with SessionLocal() as session:
                 depth = _queue_depth(session)
         except Exception as exc:
-            # The tick is lost, not the loop: the heartbeat below records the
-            # degraded pass and the next interval retries.
+            # The tick is lost, not the loop; the heartbeat records the degraded pass.
             logger.warning(
                 "reconciler tick failed",
                 extra={"exc_type": type(exc).__name__, "error": str(exc)},

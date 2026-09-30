@@ -1,32 +1,11 @@
-"""The role-holder plane's own periodic step: select, fold, read, persist.
+"""The role-holder plane's periodic step: select, fold, read, persist.
 
-Role floors are time-varying facts about deployed state — a grant lands, a
-revoke lands, ``hasRole`` answers differently — so the plane needs an owner that
-runs on a clock rather than only when some job happens to be analysed. It gets
-its own supervised loop for the same reason the restaking plane does: a failed
-``hasRole`` probe must degrade THIS heartbeat and nothing else, and a plane that
-publishes ``not_determined`` on failure must never be able to withdraw a fact
-another cycle proved.
+Role floors change as grants and revokes land, so the plane runs on a clock in its own loop (a failed ``hasRole`` probe
+degrades only this heartbeat). The resolution stage keeps its opportunistic call site.
 
-The resolution stage keeps its call site. It is the opportunistic fast path on
-re-analysis; this loop is the one that closes over registries the stage never
-visits, in an order that does not depend on job traffic.
-
-**Work selection is triggered, not blind.** Every pass reads a per-registry
-watermark (``role_holder_plane_refreshes``) and re-selects a registry only where
-one of its recorded observations has changed: a new AccessControl log past the
-folded height, the cursor pair going warm, or the floors simply aging out. A
-registry a pass ran against and found nothing at is durably "ran, nothing" — it
-does not re-select next pass, and it is not thereby confused with one no pass
-ever reached.
-
-**Nothing here decides what may be published.** ``resolve_role_holder_planes``
-owns every read and refusal semantics this plane has; this module chooses whom
-to call it about, at one pinned height per pass, and records that the call
-happened. In particular it never branches on whether a returned row carried a
-floor or withheld one — the plane makes an all-reverting registry and an
-all-false one indistinguishable on purpose, and a trigger that told them apart
-would reconstruct exactly that.
+Registries are re-selected only when a recorded observation changed (new AccessControl log, cursors going warm, floors
+aging out), so "ran, found nothing" is durable. ``resolve_role_holder_planes`` owns all read and refusal semantics; this
+module only chooses whom to call and records that it did.
 """
 
 from __future__ import annotations
@@ -63,45 +42,34 @@ from utils.chains import supported_chain_ids
 
 logger = logging.getLogger(__name__)
 
-# Per-registry outcomes, emitted on EVERY pass over a registry so the three
-# shapes are distinguishable in logs and in the heartbeat detail. The cold-start
-# failure this loop exists to prevent was invisible precisely because only the
-# third of these was ever recorded.
+# Emitted every pass so all three shapes are visible; only the third used to be recorded.
 OUTCOME_GATE_CLOSED = "gate_closed"
 OUTCOME_NO_ROWS = ROLE_REFRESH_OUTCOME_NO_ROWS
 OUTCOME_ROWS_WRITTEN = ROLE_REFRESH_OUTCOME_ROWS_WRITTEN
-# Reachable only from the resolution stage, which can be handed a job with no
-# runtime address at all. The loop selects from the cursor table, so it always
-# has one.
+# Only reachable from the resolution stage (a job with no runtime address).
 OUTCOME_NO_REGISTRY = "no_registry_address"
 
-# Why a registry was selected. Diagnostic only — never stored, never published.
+# Diagnostic only; never stored or published.
 DUE_NEVER_REFRESHED = "never_refreshed"
 DUE_NEW_ROLE_LOGS = "new_role_logs"
 DUE_CURSORS_WARMED = "cursors_warmed"
 DUE_MAX_AGE = "max_age"
 
 DEFAULT_ROLE_PLANE_INTERVAL = int(os.getenv("PSAT_ROLE_PLANE_INTERVAL", "3600"))
-# Registries per pass. A pass holds one pinned height for all of them, so the
-# bound is also what keeps that height close to the reads taken at it.
+# Also keeps the pass's single pinned height close to its reads.
 DEFAULT_REGISTRIES_PER_PASS = int(os.getenv("PSAT_ROLE_PLANE_REGISTRIES_PER_PASS", "25"))
-# Pinned ``hasRole`` reads per pass, budgeted from each registry's indexed
-# AccessControl log count — an UPPER bound on the distinct (role, account) pairs
-# its fold can propose, so the real read count never exceeds this.
+# Budgeted from indexed AccessControl log counts, an upper bound on proposed (role, account) pairs.
 DEFAULT_READ_BUDGET = int(os.getenv("PSAT_ROLE_PLANE_READ_BUDGET", "500"))
-# How long a floor may stand before it is re-read regardless of log activity.
-# ``holders`` cites a block; the citation ages even when no event lands.
+# Floors cite a block, so they age even without events.
 DEFAULT_MAX_AGE_S = int(os.getenv("PSAT_ROLE_PLANE_MAX_AGE_S", "86400"))
 
 _NO_BLOCK = -1
 
 
 def access_control_gate_open(session: Session, *, chain_id: int, registry_address: str) -> bool:
-    """True iff BOTH AccessControl cursors exist for this registry.
+    """True iff both AccessControl cursors exist.
 
-    Existence, not warmth. A cold cursor still mints a row whose floor is
-    withheld; skipping it would erase the difference between a registry with no
-    roles and a registry nothing was read from. Warmth is the module's to judge.
+    Existence, not warmth: a cold cursor still mints a row with a withheld floor.
     """
     enrolled = {
         str(topic).lower()
@@ -117,13 +85,10 @@ def access_control_gate_open(session: Session, *, chain_id: int, registry_addres
 
 @dataclass(frozen=True)
 class RegistryCandidate:
-    """A cursor-bearing address, with everything the trigger compares against."""
-
     registry_address: str
     gate_open: bool
     cursors_warm: bool
     max_log_block: int | None
-    # Indexed AccessControl log rows — the read-budget cost estimate.
     log_rows: int
     due_reason: str | None
 
@@ -154,12 +119,7 @@ def _due_reason(
     now: datetime,
     max_age_s: int,
 ) -> str | None:
-    """Why this registry is due, or ``None`` if a completed pass still stands.
-
-    Each arm names a CHANGE in something the last pass recorded, which is what
-    keeps "ran and found nothing" from re-selecting forever while still letting
-    every observation that could alter the answer re-open it.
-    """
+    """Why this registry is due, or ``None``. Each arm is a change in something the last pass recorded."""
     if mark is None:
         return DUE_NEVER_REFRESHED
     if cursors_warm and not mark.cursors_warm:
@@ -182,13 +142,9 @@ def collect_candidates(
     now: datetime | None = None,
     max_age_s: int = DEFAULT_MAX_AGE_S,
 ) -> list[RegistryCandidate]:
-    """Every address carrying an AccessControl cursor on this chain, annotated.
+    """Every address with an AccessControl cursor on this chain.
 
-    The universe is the cursor table, so an address with no cursor is not a
-    candidate at all — the same precondition the resolution stage applies, read
-    in bulk. Addresses carrying only ONE of the pair are candidates with
-    ``gate_open`` False: they are counted as gate-closed rather than silently
-    dropped, which is what makes a half-enrolled registry visible.
+    Addresses with only one of the pair are kept as gate-closed so half-enrolled registries stay visible.
     """
     now = now or datetime.now(timezone.utc)
     cursor_rows = session.execute(
@@ -229,8 +185,7 @@ def collect_candidates(
 
     candidates: list[RegistryCandidate] = []
     for row, address in zip(cursor_rows, addresses):
-        # The grouped query is already filtered to the pair, so a distinct count
-        # of two IS ``access_control_gate_open``.
+        # The query is filtered to the pair, so a distinct count of two is the gate.
         gate_open = int(row.topics or 0) == len(ACCESS_CONTROL_TOPIC0S)
         cursors_warm = gate_open and bool(row.warm)
         max_log_block, log_rows = log_stats.get(address, (None, 0))
@@ -264,12 +219,10 @@ def select_due(
     limit: int = DEFAULT_REGISTRIES_PER_PASS,
     read_budget: int = DEFAULT_READ_BUDGET,
 ) -> tuple[list[RegistryCandidate], bool]:
-    """The bounded slice of due registries this pass will run, and whether more remain.
+    """The bounded slice of due registries, and whether more remain.
 
-    Stops at the first registry that would exceed either bound rather than
-    skipping it, so the queue drains in a fixed order and a registry too large
-    for a whole budget still runs — as the first of some later pass — instead of
-    being stepped over forever.
+    Stops at the first registry that won't fit rather than skipping it, so an oversized registry runs first in a later
+    pass instead of never.
     """
     selected: list[RegistryCandidate] = []
     reads = 0
@@ -324,7 +277,7 @@ def refresh_chain_role_holder_planes(
     read_budget: int = DEFAULT_READ_BUDGET,
     max_age_s: int = DEFAULT_MAX_AGE_S,
 ) -> PassCounters:
-    """One chain's pass. Returns the counters; emits no heartbeat of its own."""
+    """One chain's pass; returns counters and emits no heartbeat."""
     counters = PassCounters()
     candidates = collect_candidates(session, chain_id=chain_id, max_age_s=max_age_s)
     counters.registries_considered = len(candidates)
@@ -333,8 +286,7 @@ def refresh_chain_role_holder_planes(
     for candidate in candidates:
         if candidate.gate_open:
             continue
-        # Recorded per registry, not just counted: a registry stuck half-enrolled
-        # is the exact shape that used to be silent.
+        # Per registry: a half-enrolled registry used to be silent.
         logger.info(
             "role holder plane refresh skipped",
             extra={
@@ -352,8 +304,7 @@ def refresh_chain_role_holder_planes(
 
     url = rpc_url or rpc_url_for_chain_id(chain_id)
     if not url:
-        # No route means no read was attempted, which is not a healthy quiet
-        # pass: registries are due and nothing observed them.
+        # Registries are due and nothing observed them: degraded, not quiet.
         counters.notes.append("no_rpc_route")
         counters.failures += 1
         return counters
@@ -361,8 +312,7 @@ def refresh_chain_role_holder_planes(
     if probe_block is None:
         probe_block = pin_probe_block(url, chain_id=chain_id)
     if probe_block is None:
-        # An unanswered head read. Nothing is watermarked, so every due registry
-        # stays due and the pass is reported degraded rather than quiet.
+        # Nothing is watermarked, so every due registry stays due.
         counters.notes.append("no_pinned_head")
         counters.failures += 1
         return counters
@@ -380,9 +330,7 @@ def refresh_chain_role_holder_planes(
             _record_watermark(session, chain_id=chain_id, candidate=candidate, rows_written=written)
             session.commit()
             if written:
-                # §3.4 event 2: role holders are membership-gate anchor-chain
-                # links, so a refreshed plane re-verifies the W3-D1 witnesses
-                # resting on this registry.
+                # Role holders anchor membership-gate chains; re-verify witnesses resting on this registry.
                 from services.discovery.membership_gate import evaluate_role_plane_change
 
                 evaluate_role_plane_change(
@@ -392,8 +340,7 @@ def refresh_chain_role_holder_planes(
                     context=f"role_holder_plane_cycle:{candidate.registry_address}",
                 )
         except Exception as exc:
-            # No watermark, so the registry is still due next pass. One
-            # registry's failure withholds nothing from the others.
+            # No watermark, so it stays due; other registries are unaffected.
             session.rollback()
             counters.failures += 1
             logger.warning(
@@ -435,11 +382,9 @@ def refresh_role_holder_planes(
     read_budget: int = DEFAULT_READ_BUDGET,
     max_age_s: int = DEFAULT_MAX_AGE_S,
 ) -> int:
-    """One pass across every supported chain. Returns the rows written.
+    """One pass across every supported chain; returns rows written.
 
-    Emits exactly one cycle summary, whatever happened — including the pass that
-    selected nothing. A silently-idle refresher and a wedged one are the same
-    thing to an operator unless every pass says which it was.
+    Always emits one cycle summary, including when nothing was selected.
     """
     started = time.monotonic()
     chain_ids = [chain_id] if chain_id is not None else sorted(supported_chain_ids())
@@ -479,9 +424,7 @@ def refresh_role_holder_planes(
         HEARTBEAT_ROLE_HOLDER_PLANE,
         started=started,
         contracts_scanned=total.registries_considered,
-        # The pass reads at ONE pinned height per chain and folds an already
-        # indexed range it did not scan, so no block span describes it. 0
-        # under-claims rather than over-claims.
+        # Reads at one pinned height and folds an already indexed range, so no block span applies.
         blocks_scanned=0,
         events_found=total.rows,
         partial=total.failures > 0,
@@ -506,7 +449,6 @@ def run_role_holder_plane_loop(
     *,
     chain_id: int | None = None,
 ) -> None:
-    """Run the role-holder plane refresher until *stop_event* is set."""
     stop_event = stop_event or Event()
     logger.info("Starting role-holder plane refresher (interval=%ss)", interval)
     while not stop_event.is_set():

@@ -21,10 +21,6 @@ from utils.scoring_status import (
     OPENNESS_VALUES,
 )
 
-# ---------------------------------------------------------------------------
-# Governance event topic0 hashes
-# ---------------------------------------------------------------------------
-
 # OwnershipTransferred(address indexed previousOwner, address indexed newOwner)
 OWNERSHIP_TRANSFERRED_TOPIC0 = "0x" + keccak(text="OwnershipTransferred(address,address)").hex()
 
@@ -49,47 +45,31 @@ REMOVED_OWNER_TOPIC0 = "0x" + keccak(text="RemovedOwner(address)").hex()
 # GnosisSafe ChangedThreshold(uint256 threshold)
 CHANGED_THRESHOLD_TOPIC0 = "0x" + keccak(text="ChangedThreshold(uint256)").hex()
 
-# OZ TimelockController CallScheduled — exact v5 signature (7 params)
+# OZ TimelockController CallScheduled, exact v5 signature (7 params)
 CALL_SCHEDULED_TOPIC0 = "0x" + keccak(text="CallScheduled(bytes32,uint256,address,uint256,bytes,bytes32,uint256)").hex()
 
-# OZ TimelockController CallExecuted — exact v5 signature (5 params)
+# OZ TimelockController CallExecuted, exact v5 signature (5 params)
 CALL_EXECUTED_TOPIC0 = "0x" + keccak(text="CallExecuted(bytes32,uint256,address,uint256,bytes)").hex()
 
 # MinDelayChange(uint256 oldDuration, uint256 newDuration)
 MIN_DELAY_CHANGE_TOPIC0 = "0x" + keccak(text="MinDelayChange(uint256,uint256)").hex()
 
-# GnosisSafe ExecutionSuccess(bytes32 txHash, uint256 payment) —
-# emitted when a Safe tx executes successfully on-chain.
+# GnosisSafe ExecutionSuccess(bytes32 txHash, uint256 payment)
 EXECUTION_SUCCESS_TOPIC0 = "0x" + keccak(text="ExecutionSuccess(bytes32,uint256)").hex()
 
-# GnosisSafe ExecutionFailure(bytes32 txHash, uint256 payment) —
-# emitted when a Safe tx execution reverts (the wrapper still records).
+# GnosisSafe ExecutionFailure(bytes32 txHash, uint256 payment); the wrapper still records
 EXECUTION_FAILURE_TOPIC0 = "0x" + keccak(text="ExecutionFailure(bytes32,uint256)").hex()
 
-# GnosisSafe module-triggered execution (no signer threshold needed —
-# the module is pre-authorized via enableModule). The module address is
-# indexed in topics[1]. There's no SafeTx hash on these events because
-# the call doesn't go through the SafeTx wrapping path.
+# Module executions skip the signer threshold; the module is in topics[1] and there is no SafeTx hash.
 EXECUTION_FROM_MODULE_SUCCESS_TOPIC0 = "0x" + keccak(text="ExecutionFromModuleSuccess(address)").hex()
 EXECUTION_FROM_MODULE_FAILURE_TOPIC0 = "0x" + keccak(text="ExecutionFromModuleFailure(address)").hex()
 
-# Safe module enable/disable and guard swap. An enabled module can move the
-# Safe's assets WITHOUT meeting the k/n signer threshold, so these are the
-# events that decide whether k/n bounds protection at all; the pipeline could
-# already see a module EXECUTE (above) but not one being ENABLED.
-#
-# Indexing differs by release and the topic0 does not: the ``address`` argument
-# is indexed from 1.4.1 and non-indexed on 1.1.1/1.3.0, so the same topic0
-# carries the module in ``topics[1]`` on some Safes and in the data word on
-# others. A decoder that reads only topics silently returns nothing on a 1.3.0
-# Safe — see the topics-or-data read in ``parse_governance_log``.
+# Module enable/disable and guard swaps decide whether k/n bounds protection at all. The address is indexed from Safe
+# 1.4.1 but in the data word on 1.1.1/1.3.0 with the same topic0, so decoding reads topics or data.
 ENABLED_MODULE_TOPIC0 = "0x" + keccak(text="EnabledModule(address)").hex()
 DISABLED_MODULE_TOPIC0 = "0x" + keccak(text="DisabledModule(address)").hex()
 CHANGED_GUARD_TOPIC0 = "0x" + keccak(text="ChangedGuard(address)").hex()
 
-# ---------------------------------------------------------------------------
-# Topic -> event_type mapping
-# ---------------------------------------------------------------------------
 
 GOVERNANCE_EVENT_TOPICS: dict[str, str] = {
     OWNERSHIP_TRANSFERRED_TOPIC0: "ownership_transferred",
@@ -114,51 +94,15 @@ GOVERNANCE_EVENT_TOPICS: dict[str, str] = {
 
 ALL_EVENT_TOPICS: dict[str, str] = {**PROXY_EVENT_TOPICS, **GOVERNANCE_EVENT_TOPICS}
 
-# ---------------------------------------------------------------------------
-# Synthetic effect_tags for hand-rolled events
-# ---------------------------------------------------------------------------
 
-# Synthesizes ``effect_tags`` from a canonical event_type. Two consumers:
+# Synthesized ``effect_tags`` per canonical hand-rolled event_type, so hand-rolled events get the same shape
+# ``parse_tracked_log`` produces, and untagged legacy specs or bare event_types still dispatch.
 #
-#   1. ``parse_governance_log`` / ``parse_any_log`` attach tags to every
-#      hand-rolled event so downstream sees the same shape ``parse_tracked_log``
-#      produces from the static analysis tracking_plan.
-#   2. ``_update_state_from_event`` / ``_should_watch`` /
-#      ``_sync_relational_tables`` / ``should_trigger_reanalysis`` fall
-#      back to this map when ``parsed["effect_tags"]`` is missing —
-#      catches legacy monitoring_config specs persisted before tags
-#      landed in the spec shape, and bare-event_type callers.
-#
-# Tag-driven dispatch unifies hand-rolled and per-contract event handling
-# under one shape; the previous parallel event_type → config_keys maps
-# in unified_watcher and reanalysis collapse into a single source of
-# truth.
-#
-# Conventions:
-#   - Real state-variable names ("owner", "admin", "implementation",
-#     "paused", "owners", "threshold", "min_delay", "beacon", "facets")
-#     match what the static analyzer emits for those slots.
-#   - Underscore-prefixed names are synthetic markers for events that
-#     don't mutate a single named slot — used so the watcher's config
-#     gating still has something to key off:
-#       ``_roles``        — RoleGranted / RoleRevoked (AccessControl
-#                            doesn't expose a single state-var name)
-#       ``_timelock_op``  — CallScheduled / CallExecuted (activity,
-#                            no persistent state change)
-#       ``_safe_op``      — ExecutionSuccess / ExecutionFailure (Safe
-#                            tx wrapper activity)
-#       ``_safe_module_op`` — ExecutionFromModule[Success|Failure]
-#                            (Safe module call activity)
-#       ``_safe_modules``   — EnabledModule / DisabledModule (the module
-#                            SET changed; the Safe exposes no named
-#                            state var for the linked list)
-#       ``_safe_guard``     — ChangedGuard (guard slot swap)
-#   - ``delegates: True`` marks events that signal a delegate-target swap.
-#     Set on every proxy-impl event (Upgraded, NewImplementation,
-#     BeaconUpgraded, DiamondCut, etc.) so the upgrade-triggered paths
-#     (reanalysis, coverage refresh, UpgradeEvent insert) fire uniformly.
+# Real slot names match the analyzer's. Underscore names are markers for events with no single named slot: ``_roles``
+# (AccessControl), ``_timelock_op``, ``_safe_op``, ``_safe_module_op``, ``_safe_modules`` (module set) and
+# ``_safe_guard``. ``delegates: True`` marks delegate-target swaps so every upgrade path fires uniformly.
 _HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
-    # Proxy / upgrade events — see services/discovery/upgrade_history.py
+    # Proxy / upgrade events (see services/discovery/upgrade_history.py)
     "upgraded": {"writes": ["implementation"], "delegates": True},
     "admin_changed": {"writes": ["admin"]},
     "beacon_upgraded": {"writes": ["beacon"], "delegates": True},
@@ -168,7 +112,6 @@ _HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
     "target_updated": {"writes": ["implementation"], "delegates": True},
     "upgraded_revision": {"writes": ["implementation"], "delegates": True},
     "diamond_cut": {"writes": ["facets"], "delegates": True},
-    # Governance events
     "ownership_transferred": {"writes": ["owner"]},
     "paused": {"writes": ["paused"]},
     "unpaused": {"writes": ["paused"]},
@@ -187,10 +130,8 @@ _HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
     "safe_module_enabled": {"writes": ["_safe_modules"]},
     "safe_module_disabled": {"writes": ["_safe_modules"]},
     "safe_guard_changed": {"writes": ["_safe_guard"]},
-    # Per-contract canonical types from ``parse_tracked_log``. Events
-    # produced through that path already carry tags from the spec; the
-    # entries here are the synthesis fallback for callers that pass only
-    # an event_type (legacy specs without tags, bare reanalysis checks).
+    # Per-contract types from ``parse_tracked_log`` already carry spec tags; these are the fallback for bare
+    # event_types.
     "ownership_transfer_started": {"writes": ["pendingOwner"]},
     "authority_updated": {"writes": ["authority"]},
     "initialized": {"writes": ["_initialized"], "is_initializer": True},
@@ -199,13 +140,7 @@ _HANDROLLED_EVENT_TYPE_TO_TAGS: dict[str, dict] = {
 
 
 def _attach_effect_tags(event: dict | None) -> dict | None:
-    """If *event* carries a canonical hand-rolled event_type, attach the
-    matching ``effect_tags`` (in place) so the watcher's tag-driven
-    dispatch sees the same shape it gets from ``parse_tracked_log``.
-
-    No-op when event_type isn't in the synthesis map — e.g. an unknown
-    or per-contract event with tags already in its spec.
-    """
+    """Attach synthesized ``effect_tags`` in place for a canonical hand-rolled event_type; no-op otherwise."""
     if not event:
         return event
     event_type = event.get("event_type")
@@ -214,26 +149,17 @@ def _attach_effect_tags(event: dict | None) -> dict | None:
     tags = _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event_type)
     if tags is None:
         return event
-    # Copy so the module-level dict is never mutated by callers.
+    # Copy so callers can't mutate the module dict.
     event["effect_tags"] = {k: (list(v) if isinstance(v, list) else v) for k, v in tags.items()}
     return event
-
-
-# ---------------------------------------------------------------------------
-# Strict word decoding (Safe module/guard addresses)
-# ---------------------------------------------------------------------------
 
 
 def _strict_word(raw: object, index: int = 0) -> str | None:
     """Word *index* of a ``0x``-prefixed ABI body, lowercased, or ``None``.
 
-    Strict for the same reason ``restaking_reads.decode_word`` is. ``"0x"`` is
-    not a zero word, and the ``.replace("0x", "").zfill(64)`` shape used by the
-    older decoders left-pads an empty topic into the zero address and strips a
-    ``0x`` occurring anywhere in the body, leaving a short string that slices to
-    a wrong address. ``bytes.fromhex`` rather than ``int(..., 16)`` because
-    ``int`` accepts ``_`` separators and surrounding whitespace; it ignores
-    ASCII whitespace itself, hence the explicit byte-length check after it.
+    Strict like ``restaking_reads.decode_word``: ``"0x"`` is not a zero word, and ``replace("0x", "").zfill(64)`` turned
+    empty topics into the zero address. ``bytes.fromhex`` plus a length check, since ``int(..., 16)`` accepts ``_`` and
+    whitespace.
     """
     if not isinstance(raw, str) or not raw.startswith("0x"):
         return None
@@ -251,30 +177,15 @@ def _strict_word(raw: object, index: int = 0) -> str | None:
 
 
 def _strict_word_address(raw: object, index: int = 0) -> str | None:
-    """The address held by word *index*, or ``None``.
-
-    ``None`` when the word is malformed (see :func:`_strict_word`) or when its
-    top 12 bytes are set — an ABI-encoded address is left-padded with zeros, so
-    a word that is not is not an address and publishing its low 20 bytes would
-    invent one. An event that does not decode publishes no address at all.
-    """
+    """The address in word *index*, or ``None`` if malformed or its top 12 bytes are set (not an ABI address)."""
     word = _strict_word(raw, index)
     if word is None or word[:24] != "0" * 24:
         return None
     return "0x" + word[24:]
 
 
-# ---------------------------------------------------------------------------
-# Governance log parser
-# ---------------------------------------------------------------------------
-
-
 def parse_governance_log(log: dict) -> dict | None:
-    """Parse a governance event log entry.
-
-    Returns a dict with event_type, block_number, tx_hash, and parsed fields,
-    or None if the log is not a recognised governance event.
-    """
+    """Parse a governance log into event_type, block_number, tx_hash and fields; ``None`` if unrecognised."""
     topics = log.get("topics", [])
     if not topics:
         return None
@@ -288,10 +199,8 @@ def parse_governance_log(log: dict) -> dict | None:
         "event_type": event_type,
         "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
         "tx_hash": log.get("transactionHash"),
-        # log_index disambiguates multiple events in the same tx (e.g.
-        # OZ TimelockController ``scheduleBatch`` / ``executeBatch`` emit
-        # one CallScheduled / CallExecuted per call in the batch). Drives
-        # the dedupe key in unified_watcher so batch ops aren't collapsed.
+        # Batch timelock ops emit one event per call in one tx; log_index keeps the watcher's dedupe from collapsing
+        # them.
         "log_index": _hex_to_int(log.get("logIndex", "0x0")),
     }
 
@@ -347,14 +256,9 @@ def parse_governance_log(log: dict) -> dict | None:
             event["threshold"] = _hex_to_int(data)
 
     elif event_type == "timelock_scheduled":
-        # topics[1] = id (bytes32), topics[2] = index (uint256)
-        # data = (address target, uint256 value, bytes data, bytes32 predecessor, uint256 delay)
-        # ABI layout: 5 head words (32B each) then dynamic bytes at the
-        # offset stored in word 3. We read the static fields (target,
-        # value, predecessor, delay) and the calldata's first 4-byte
-        # selector — enough to render "setX on AuctionManager (delay 3d)"
-        # without having to fully decode the call args, which would
-        # require the target's ABI.
+        # topics[1] = id, topics[2] = index; data = (target, value, bytes data, predecessor, delay). Read the static
+        # words plus the calldata selector, enough to render "setX on AuctionManager (delay 3d)" without the target's
+        # ABI.
         if len(topics) >= 3:
             event["operation_id"] = topics[1]
             event["index"] = _hex_to_int(topics[2])
@@ -362,11 +266,10 @@ def parse_governance_log(log: dict) -> dict | None:
             if len(raw) >= 5 * 64:
                 event["target"] = "0x" + raw[24:64]  # right-most 20 bytes of word 0
                 event["value"] = int(raw[64:128], 16)
-                # word 2: offset to the bytes data (relative to start of data region)
+                # word 2: offset to the bytes data
                 bytes_offset = int(raw[128:192], 16) * 2  # bytes → hex chars
                 event["predecessor"] = "0x" + raw[192:256]
                 event["delay"] = int(raw[256:320], 16)
-                # Selector + calldata length, when present
                 if bytes_offset and bytes_offset + 64 <= len(raw):
                     cd_len = int(raw[bytes_offset : bytes_offset + 64], 16)
                     event["calldata_length"] = cd_len
@@ -374,12 +277,8 @@ def parse_governance_log(log: dict) -> dict | None:
                         event["selector"] = "0x" + raw[bytes_offset + 64 : bytes_offset + 64 + 8]
 
     elif event_type == "timelock_executed":
-        # topics[1] = id (bytes32), topics[2] = index (uint256)
-        # data = (address target, uint256 value, bytes data)
-        # ABI layout: 3 head words (32B each), bytes follows at the
-        # offset stored in word 2. Decode the same static fields as
-        # CallScheduled minus predecessor/delay (those aren't emitted
-        # on execution).
+        # topics[1] = id, topics[2] = index; data = (target, value, bytes data), same static fields minus
+        # predecessor/delay.
         if len(topics) >= 3:
             event["operation_id"] = topics[1]
             event["index"] = _hex_to_int(topics[2])
@@ -395,29 +294,16 @@ def parse_governance_log(log: dict) -> dict | None:
                         event["selector"] = "0x" + raw[bytes_offset + 64 : bytes_offset + 64 + 8]
 
     elif event_type == "delay_changed":
-        # data = (uint256 oldDuration, uint256 newDuration) — both non-indexed
+        # data = (uint256 oldDuration, uint256 newDuration)
         if data and data != "0x" and len(data.replace("0x", "")) >= 128:
             raw = data.replace("0x", "").zfill(128)
             event["old_delay"] = int(raw[:64], 16)
             event["new_delay"] = int(raw[64:128], 16)
 
     elif event_type in ("safe_tx_executed", "safe_tx_failed"):
-        # Execution[Success|Failure](bytes32 txHash, uint256 payment). txHash is
-        # the Safe-internal SafeTx hash (EIP-712), not the on-chain tx hash.
-        #
-        # The singletons disagree about whether txHash is indexed — 1.4.1
-        # indexes it (topics[1] + a one-word body holding payment), 1.3.0 and
-        # earlier do not (topic0 only + a two-word body) — and since indexing
-        # does not enter the signature, topic0 is identical either way. This is
-        # the same divergence the module/guard read below is hardened against.
-        # Reading the body only decoded every 1.4.1 execution as neither field.
-        #
-        # Each field is published only from bytes the log carried, and only from
-        # the layout the log proves it is in: a second topic proves txHash is
-        # indexed, so the body is payment alone; without it the body must have
-        # room for both words. A body matching neither layout publishes nothing —
-        # left-padding a short body would mint ``payment: 0``, a witnessed
-        # "no fee was refunded", out of bytes nobody emitted.
+        # Execution[Success|Failure](bytes32 txHash, uint256 payment); txHash is the Safe's EIP-712 hash. Safe 1.4.1
+        # indexes txHash (one-word body), 1.3.0 doesn't (two-word body), same topic0. Decode by the layout the log
+        # proves; a body matching neither publishes nothing rather than minting ``payment: 0``.
         body = data[2:] if isinstance(data, str) and data.startswith("0x") else ""
         if len(topics) >= 2:
             hash_word = _strict_word(topics[1])
@@ -432,27 +318,15 @@ def parse_governance_log(log: dict) -> dict | None:
             event["payment"] = int(raw[64:128], 16)
 
     elif event_type in ("safe_module_executed", "safe_module_failed"):
-        # ExecutionFromModule[Success|Failure](address indexed module).
-        # No SafeTx hash + no payment — the call bypasses the SafeTx
-        # wrapping path because the module is pre-authorised. Just the
-        # module address in topics[1], published only when that topic is a
-        # whole, well-formed word — an undecodable log names no module.
+        # ExecutionFromModule[Success|Failure](address indexed module): only published from a well-formed topic.
         module = _strict_word_address(topics[1]) if len(topics) >= 2 else None
         if module is not None:
             event["module"] = module
 
     elif event_type in ("safe_module_enabled", "safe_module_disabled", "safe_guard_changed"):
-        # EnabledModule/DisabledModule/ChangedGuard(address). Indexed from Safe
-        # 1.4.1, non-indexed on 1.1.1/1.3.0 — same topic0 either way. Read
-        # topics[1] when the emitter indexed it, else the single data word;
-        # topics-only would decode 1.3.0 as "no address" and 1.3.0 is 9 of the
-        # 19 Safes on this corpus.
-        #
-        # Either source must decode as a whole word before anything is
-        # published: an empty topic left-padded to width is the ZERO ADDRESS,
-        # which on ``safe_guard_changed`` is the word for "guard removed" — a
-        # protection-withdrawal fact minted from a log that carried no address.
-        # A body that does not decode yields no key at all, not a zero.
+        # Enabled/DisabledModule and ChangedGuard: topics[1] when indexed (1.4.1), else the data word (1.3.0, about half
+        # our Safes). Must decode as a whole word: a padded empty topic is the zero address, which for a guard means
+        # "guard removed".
         key = "guard" if event_type == "safe_guard_changed" else "module"
         if len(topics) >= 2 and topics[1]:
             decoded = _strict_word_address(topics[1])
@@ -466,31 +340,16 @@ def parse_governance_log(log: dict) -> dict | None:
 
 
 def parse_any_log(log: dict) -> dict | None:
-    """Try to parse a log as a proxy upgrade event first, then governance.
-
-    Returns the parsed event dict or None.
-    """
+    """Parse a log as a proxy upgrade event first, then governance; ``None`` if neither."""
     result = parse_upgrade_log(log)
     if result is not None:
-        # ``parse_upgrade_log`` lives in services/discovery/upgrade_history.py
-        # — importing the tag synthesizer there would create a circular
-        # import. Attach tags here at the consolidated entry point so the
-        # watcher always sees tagged events regardless of which decoder
-        # produced them. Rebuilt as a plain dict: the watcher pipeline mutates
-        # the event beyond the parse record's declared keys.
+        # Tags are attached here because ``upgrade_history`` can't import the synthesizer (cycle). Rebuilt as a plain
+        # dict since the watcher adds keys.
         return _attach_effect_tags(dict(result))
     return parse_governance_log(log)
 
 
-# ---------------------------------------------------------------------------
-# Per-contract topic extraction from the analysis tracking_plan
-# ---------------------------------------------------------------------------
-
-# Map canonical event_type → ``(old_key, new_key)`` semantic-key pair.
-# Drives the name-aware arg fill in ``_assign_semantic_keys`` so that
-# downstream state/relational sync can read ``parsed["new_owner"]``
-# regardless of whether the ABI named the input ``newOwner``,
-# ``new_owner``, ``user``, or nothing at all.
+# event_type -> (old_key, new_key), so sync can read ``parsed["new_owner"]`` whatever the ABI named the argument.
 _EVENT_TYPE_TO_SEMANTIC_KEYS: dict[str, tuple[str, str]] = {
     "ownership_transferred": ("old_owner", "new_owner"),
     "ownership_transfer_started": ("old_owner", "new_owner"),
@@ -500,9 +359,7 @@ _EVENT_TYPE_TO_SEMANTIC_KEYS: dict[str, tuple[str, str]] = {
 }
 
 
-# Legacy controller_id → event_type map. Preserved only for monitoring_config
-# rows persisted before effect_tags landed in the spec shape — once those rows
-# get re-enrolled (every protocol re-analysis), this can be deleted.
+# Legacy controller_id -> event_type for configs predating effect_tags; deletable once everything re-enrolls.
 _CONTROLLER_ID_TO_EVENT_TYPE: dict[str, str] = {
     "owner": "ownership_transferred",
     "_owner": "ownership_transferred",
@@ -514,27 +371,15 @@ _CONTROLLER_ID_TO_EVENT_TYPE: dict[str, str] = {
 }
 
 
-# Per-canonical-family corroboration vocabulary. A canonical event_type is
-# a semantic claim about what THIS event announces — so the event's own ABI
-# must corroborate the family before the type may be minted. The emitter's
-# write set alone is not that evidence: a multi-write emitter (an
-# ``initialize()`` that seeds ``_owner``, ``_paused`` and four config slots)
-# donates its whole slot set to every event it emits, so writes-only
-# classification stamps ``ownership_transferred`` on ``Initialized(uint8)``
-# and ``initialized`` on ``EEthSet(address)``.
-#
-# ``name`` hints are lowercase substrings of the event name; the arg-shape
-# check requires the signature's parameter list to carry the family's
-# payload type (the semantic-key fill for the address families reads an
-# address arg — a family claim over a signature with no address arg would
-# alias a non-address value into ``old_owner``/``new_owner``).
+# Per-family corroboration: the event's own ABI must support the family before its canonical type is minted. The
+# emitter's write set alone isn't evidence (an ``initialize()`` that seeds ``_owner`` would stamp
+# ``ownership_transferred`` on ``Initialized(uint8)``). ``name`` hints are lowercase substrings; address families also
+# need an address argument.
 _CANONICAL_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "ownership_transferred": ("owner",),
     "ownership_transfer_started": ("owner",),
     "authority_updated": ("auth",),
-    # Curve/Vyper's 2-step admin transfer announces the ``future_admin`` /
-    # ``admin`` write as CommitOwnership/ApplyOwnership — ownership
-    # vocabulary corroborates the admin family too.
+    # Curve/Vyper announce admin transfers as CommitOwnership/ApplyOwnership.
     "admin_changed": ("admin", "owner"),
     "initialized": ("initial",),
     "signer_updated": ("owner", "signer"),
@@ -542,9 +387,7 @@ _CANONICAL_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "upgraded": ("upgrad", "implementation", "beacon"),
 }
 
-# Families whose parsed payload is an address (semantic keys / delegate
-# target). ``initialized`` carries a version uint (or nothing) and
-# ``threshold_changed`` a uint — no address required.
+# Families whose payload is an address; ``initialized`` and ``threshold_changed`` carry uints.
 _CANONICAL_ADDRESS_ARG_FAMILIES = frozenset(
     {
         "ownership_transferred",
@@ -559,12 +402,9 @@ _CANONICAL_UINT_ARG_FAMILIES = frozenset({"threshold_changed"})
 
 
 def _event_corroborates(event_type: str, signature: str | None) -> bool:
-    """True when the event's own signature corroborates the canonical
-    family claim *event_type*: name hint present AND the parameter list
-    carries the family's payload type.
+    """True when the signature corroborates *event_type*: a name hint and the family's payload type.
 
-    An absent/empty signature is the not-determined state — it cannot
-    corroborate anything, so no canonical type is minted from it.
+    A missing signature corroborates nothing.
     """
     hints = _CANONICAL_NAME_HINTS.get(event_type)
     if hints is None:
@@ -585,38 +425,17 @@ def _event_corroborates(event_type: str, signature: str | None) -> bool:
 
 
 def _classify_from_writes(writes: list[str] | set[str] | None, signature: str | None = None) -> str | None:
-    """Derive a canonical event_type from the state vars an event's emitter
-    writes, corroborated by the event's own signature. Returns None when
-    no corroborated canonical type matches — caller falls back to the
-    terminal ``<stem>:<id>`` form (see :func:`_resolve_event_type`).
+    """A canonical event_type from the emitter's writes, corroborated by the event's signature; ``None`` falls back
+    to the terminal ``<stem>:<id>`` form.
 
-    A family is minted only when BOTH hold: the emitter writes one of the
-    family's slots AND the event's own name/arg-shape corroborate the
-    family (:func:`_event_corroborates`). The write set alone is donated
-    by the emitter to every event it emits, so on its own it is not
-    evidence of what this event announces.
-
-    Priority order resolves multi-write emitters:
-      1. ``owner`` / ``_owner`` — commit-phase ownership transfer wins
-         over the started-phase even when both are written (OZ
-         Ownable2Step ``acceptOwnership``).
-      2. ``pendingOwner`` — start-phase only when ``owner`` is untouched
-         (OZ Ownable2Step ``transferOwnership``).
-      3. ``authority`` — Solmate Auth / DSAuth registry swap.
-      4. ``admin`` family — Compound, Aave, Curve admin slots.
-      5. Initializer slots — OZ Initializable ``_initialized`` /
-         ``_initializing``.
-      6. Safe-shaped — ``owners`` array, ``threshold``.
+    Priority for multi-write emitters: ``owner`` (Ownable2Step commit beats start), ``pendingOwner``, ``authority``, the
+    admin family, initializer slots, then Safe-shaped ``owners``/``threshold``.
     """
     if not writes:
         return None
     write_set = set(writes)
-    # Explicit priority — owner wins over pendingOwner so Ownable2Step
-    # commit phase classifies correctly when both are written. A family
-    # the signature does not corroborate is skipped, so a multi-write
-    # emitter's event lands on the family it actually announces
-    # (``Initialized(uint8)`` from an owner-seeding initializer passes
-    # over ``ownership_transferred`` and classifies ``initialized``).
+    # Uncorroborated families are skipped, so ``Initialized(uint8)`` from an owner-seeding initializer lands on
+    # ``initialized``.
     for canonical, candidates in (
         ("ownership_transferred", ("owner", "_owner")),
         ("ownership_transfer_started", ("pendingOwner", "_pendingOwner")),
@@ -632,11 +451,9 @@ def _classify_from_writes(writes: list[str] | set[str] | None, signature: str | 
 
 
 def _classify_from_tags(effect_tags: dict | None, signature: str | None = None) -> str | None:
-    """Tag-driven event_type derivation. Tries writes first, then falls
-    back to the is_initializer flag for cases where the slot isn't named
-    ``_initialized`` (rare but possible in OZ forks). Every canonical
-    outcome requires the event's own signature to corroborate the family
-    (:func:`_event_corroborates`)."""
+    """Classify from writes, falling back to ``is_initializer`` for forks that don't name the slot ``_initialized``;
+    always corroborated.
+    """
     if not isinstance(effect_tags, dict):
         return None
     by_writes = _classify_from_writes(effect_tags.get("writes"), signature)
@@ -645,9 +462,7 @@ def _classify_from_tags(effect_tags: dict | None, signature: str | None = None) 
     if effect_tags.get("is_initializer") and _event_corroborates("initialized", signature):
         return "initialized"
     if effect_tags.get("delegates") and _event_corroborates("upgraded", signature):
-        # Bare delegatecall in the emitter body (not just storing an
-        # impl slot) means the function pivots delegate execution
-        # itself — proxy fallback patterns, custom upgrade choreography.
+        # A bare delegatecall in the emitter means it pivots delegate execution itself.
         return "upgraded"
     return None
 
@@ -658,28 +473,11 @@ def _assign_semantic_keys(
     inputs: list[dict],
     args_in_order: list[object],
 ) -> None:
-    """Fill ``old_*`` / ``new_*`` semantic-key aliases on *event*.
+    """Fill ``old_*``/``new_*`` semantic-key aliases on *event*.
 
-    Resolution order picks the right answer across every governance
-    ABI we've seen:
-
-      1. **Name-aware** — input names beginning ``new*`` claim the new
-         slot; ``previous*`` / ``old*`` claim the old slot. Wins for
-         OZ ``previousOwner`` / ``newOwner`` and Compound ``newAdmin``.
-      2. **Positional remainder for 2-arg events** — if exactly one
-         slot was filled by name, the *other* arg fills the other
-         slot. This is the Solmate ``user`` / ``newOwner`` case:
-         ``user`` doesn't name-match, but for a two-arg event whose
-         second arg already claimed ``new``, the first arg is the
-         old value. (Solmate's ``setOwner`` is gated by ``onlyOwner``
-         so ``msg.sender == currentOwner`` at emission, making the
-         ``user`` arg effectively the previous owner.)
-      3. **Two anonymous args** — neither name matches, positional
-         (old, new) by convention.
-      4. **Single arg event** — convention is "this is the new value",
-         no old recorded. DSAuth ``LogSetOwner(address indexed owner)``
-         and Compound ``NewAdmin(address newAdmin)`` both fall here
-         when name match misses.
+    In order: names (``new*``, ``previous*``/``old*``); for two-arg events with one name match, the other arg takes the
+    other slot (Solmate ``user``/``newOwner``, where ``user`` is the owner by the onlyOwner gate); two unnamed args are
+    (old, new); a single arg is the new value.
     """
     keys = _EVENT_TYPE_TO_SEMANTIC_KEYS.get(event_type)
     if not keys:
@@ -712,12 +510,8 @@ def _assign_semantic_keys(
         event[new_key] = args_in_order[new_idx]
 
 
-# The one ``authority_provenance`` value that PROVES a tracked write target
-# is a controller: a lowered predicate leaf requires the caller to equal / be
-# a member of it (schemas/contract_analysis.py ``ControllerProvenance``).
-# ``call_target`` — "called, and no gate was proven" — is not that proof, and
-# an absent key is the third state, not determined. Only the proven value may
-# mint the ``controller_changed`` claim.
+# Only ``caller_gate`` proves a tracked write target is a controller; ``call_target`` or absence may not mint
+# ``controller_changed``.
 _PROVEN_CONTROLLER_PROVENANCE: ControllerProvenance = "caller_gate"
 
 
@@ -730,38 +524,11 @@ def _resolve_event_type(
 ) -> str:
     """Pick the canonical event_type for a tracked event.
 
-    Resolution order:
-      1. ``effect_tags`` — primary signal, corroborated by *signature*.
-         The emitter's state writes say which slots the surrounding
-         function touches; the event's own name/arg-shape say what THIS
-         event announces. A canonical family type is minted only when
-         both agree (:func:`_classify_from_tags`) — a write set alone is
-         donated by a multi-write emitter to every event it emits and is
-         not evidence of the event's meaning.
-      2. ``_CONTROLLER_ID_TO_EVENT_TYPE`` — back-compat path for legacy
-         specs without effect_tags (older monitoring_config rows). Falls
-         away once everything re-enrolls. Same corroboration bar: the
-         controller_id names the tracked slot, not the event, so the
-         canonical family it maps to must also be corroborated by the
-         event's own signature.
-      3. Terminal fallback — the event is recorded but not semantically
-         classified, so the published type says only what is earned:
-
-           * ``controller_changed:<id>`` when *authority_provenance*
-             proves the write target gates callers. This is a positive
-             claim that an authority binding moved.
-           * ``state_changed:<id>`` for every other input — a proven
-             ``call_target``, and a not-determined (absent) provenance
-             alike. It claims only "this tracked slot was written",
-             which is true whether or not the slot controls anything;
-             it is not a claim that the slot is *not* a controller.
-
-         Both non-proven inputs collapse onto the neutral form on
-         purpose: the neutral form asserts nothing about control in
-         either direction, so nothing downstream can read the
-         not-determined state as a proven one. The discriminator itself
-         stays in the tracking plan for anyone who needs the three
-         states apart.
+    1. ``effect_tags`` corroborated by *signature* (:func:`_classify_from_tags`).
+    2. ``_CONTROLLER_ID_TO_EVENT_TYPE`` for legacy untagged specs, same corroboration bar.
+    3. Otherwise ``controller_changed:<id>`` when *authority_provenance* proves a caller gate, else the neutral
+    ``state_changed:<id>`` (for both ``call_target`` and absent provenance), which claims only that the slot was
+    written.
     """
     by_tags = _classify_from_tags(effect_tags, signature)
     if by_tags:
@@ -776,46 +543,23 @@ def _resolve_event_type(
     return f"{stem}:{cid}"
 
 
-# ---------------------------------------------------------------------------
-# Three-tier witness taxonomy
-# ---------------------------------------------------------------------------
-
-# What a runtime occurrence of an enrolled event is ALLOWED to claim.
-#
-#   self_describing — the event's own decoded args state the change, and that
-#                     statement is qualified (canonical family corroborated by
-#                     signature, an old/new pair attributable to the tracked
-#                     slot, or a proven emit-write correspondence from a
-#                     proven-restricted writer). Publishes directly.
-#   hint            — the spec exists only because the emitter's write set was
-#                     donated to it. An occurrence proves a writer ran, not
-#                     that the value moved, so it publishes nothing on its own;
-#                     it marks the controller for a verification read whose
-#                     diff is the witness.
-#   activity        — no read is possible and no qualification holds. Nothing
-#                     is published and nothing is notified: there is no fact
-#                     here beyond "some function of this contract ran".
+# What an occurrence may claim. ``self_describing``: the decoded args qualify as the change; publishes directly.
+# ``hint``: the spec only exists via the write set, so an occurrence triggers a verification read whose diff is the
+# witness. ``activity``: nothing can be read or qualified; publishes and notifies nothing.
 WITNESS_TIER_SELF_DESCRIBING = "self_describing"
 WITNESS_TIER_HINT = "hint"
 WITNESS_TIER_ACTIVITY = "activity"
 WITNESS_TIERS = frozenset({WITNESS_TIER_SELF_DESCRIBING, WITNESS_TIER_HINT, WITNESS_TIER_ACTIVITY})
 
-# Openness of the functions that emit the event, as the analyzer proved it
-# (one shared vocabulary: utils.scoring_status). Absent is NOT ``open`` and NOT
-# ``restricted`` — it is the third state, and it only ever demotes a tier
-# (invariant 4).
+# Emitting functions' openness (utils.scoring_status). Absent is a third state that can only demote a tier.
 
-# ``monitored_events.event_type`` is varchar(100). A claim that cannot be
-# stored under its own identity is not a claim we can publish, so a spec whose
-# minted type would overflow is demoted rather than truncated — a truncated
-# controller id names a different slot.
+# varchar(100): an overflowing type is demoted, never truncated (a truncated id names a different slot).
 MAX_EVENT_TYPE_LENGTH = 100
 
 VALUE_CHANGED_STEM = "value_changed"
 MEMBER_CHANGED_STEM = "member_changed"
 
-# Signal classes stamped into tracking plans and read back by salience and the
-# polling planner — one home so the classifier and its readers cannot drift.
+# Signal classes shared by the classifier, salience and the polling planner.
 SIGNAL_CLASS_CONFIG = "config"
 SIGNAL_CLASS_METRIC = "metric"
 
@@ -827,19 +571,14 @@ def value_changed_event_type(controller_id: str | None) -> str:
 
 
 def member_changed_event_type(mapping_var: str | None) -> str:
-    """Event type for a qualified member change on *mapping_var*.
-
-    The key / value / direction ride in ``data`` — never in the type string,
-    which would make every entry its own event type and defeat the identity
-    index.
+    """Event type for a member change on *mapping_var*; key, value and direction ride in ``data`` so each entry
+    doesn't become its own type.
     """
     var = (mapping_var or "").strip()
     return f"{MEMBER_CHANGED_STEM}:{var}" if var else MEMBER_CHANGED_STEM
 
 
-# How much an occurrence of a spec is allowed to claim, as an order. Used to
-# resolve a topic0 donated to more than one controller by evidence rather than
-# by the controllers' label order.
+# Resolves a topic0 donated to several controllers by evidence, not label order.
 _TIER_STRENGTH = {
     WITNESS_TIER_ACTIVITY: 0,
     WITNESS_TIER_HINT: 1,
@@ -848,13 +587,8 @@ _TIER_STRENGTH = {
 
 
 def _member_key_is_extractable(member_witness: object, inputs: list[dict]) -> bool:
-    """Can the proven key actually be read off a log of this event?
-
-    ``member_changed`` names the mapping; the ENTRY is named only by
-    ``data.key``. A record whose ``key_position`` falls outside the event's own
-    parameter list would publish "some entry of M moved" with no entry — a claim
-    weaker than the type asserts, and one nothing can act on. The spec does not
-    qualify at all rather than publish it.
+    """Whether the proven key position lies within the event's parameters; without the entry key the spec doesn't
+    qualify.
     """
     if not is_member_witness(member_witness):
         return False
@@ -865,24 +599,14 @@ def _member_key_is_extractable(member_witness: object, inputs: list[dict]) -> bo
 
 
 def is_member_changed_event_type(event_type: object) -> bool:
-    """True for the qualified-member-change vocabulary.
-
-    Such an event proves that ONE ENTRY of a mapping/struct moved. It carries
-    no statement about the variable's value as a whole — a mapping has no
-    single value — so the slot-shaped consumers (``last_known_state``
-    reflection, ``ControllerValue`` rows) must not read an entry's key or value
-    as the slot's.
+    """True for member-change types: one entry moved, not the variable's value, so slot-shaped consumers must not
+    read it as one.
     """
     return isinstance(event_type, str) and event_type.startswith(f"{MEMBER_CHANGED_STEM}:")
 
 
 def member_witness_mapping_var(raw: object) -> str:
-    """The mapping/struct variable a correspondence record testifies about, or
-    ``""`` when the record names none.
-
-    A record without a variable cannot mint ``member_changed:<mapping_var>`` —
-    a bare ``member_changed`` would say an entry moved somewhere.
-    """
+    """The mapping/struct variable a correspondence record testifies about, or ``""``."""
     if not is_member_witness(raw):
         return ""
     name = raw.get("mapping_name") if isinstance(raw, dict) else None
@@ -890,37 +614,22 @@ def member_witness_mapping_var(raw: object) -> str:
 
 
 def normalized_writer_openness(raw: object) -> str:
-    """Map a spec's ``writer_openness`` onto the three-state vocabulary.
-
-    Anything absent, misspelled or non-string is ``not_determined``: the
-    absence of a proof is not the proof of an absence.
-    """
+    """``writer_openness`` in the three-state vocabulary; anything unrecognized is ``not_determined``."""
     if isinstance(raw, str) and raw.strip().lower() in OPENNESS_VALUES:
         return raw.strip().lower()
     return OPENNESS_NOT_DETERMINED
 
 
 def is_member_witness(raw: object) -> TypeGuard[dict]:
-    """True only for a populated correspondence record.
+    """True only for a populated dict.
 
-    This is the G2↔G3 trust boundary and the strongest promotion in the
-    taxonomy — it is what lets a mapping write publish directly. A truthy
-    non-dict (``True``, ``"yes"``, ``1``, a stray list) is not a proof of
-    emit-write correspondence, and accepting one would let a serialization bug
-    upstream promote every event on the contract. An empty dict is the same
-    absence written differently.
+    This gate lets a mapping write publish directly, so truthy non-dicts (a serialization bug) must not pass.
     """
     return isinstance(raw, dict) and bool(raw)
 
 
 def _is_canonical_family(event_type: str | None) -> bool:
-    """True when *event_type* is a canonical family name rather than one of
-    the terminal ``<stem>:<controller_id>`` / bare-stem forms.
-
-    A canonical family was only minted when the event's own signature
-    corroborated it (:func:`_event_corroborates`), so the family name itself
-    is the qualification.
-    """
+    """True for canonical family names, which were only minted with signature corroboration."""
     if not isinstance(event_type, str) or not event_type:
         return False
     if ":" in event_type:
@@ -940,20 +649,8 @@ def _event_states_the_change(
     effect_tags: dict | None,
     controller_id: str | None,
 ) -> bool:
-    """True when the event's own ABI carries an old/new pair that is
-    ATTRIBUTABLE to the tracked controller.
-
-    Two facts, both required:
-
-      * the parameter list names both a ``new*`` and an ``old*``/``previous*``
-        argument — the event states a transition, not just a value; and
-      * the emitter writes exactly one slot and that slot is this controller —
-        so the pair can only be about this controller.
-
-    The second half is what keeps this from being the write-set donation
-    problem in a new costume: a multi-write emitter donates its whole slot set
-    to every event it emits, so an old/new pair on such an event says nothing
-    about which of those slots moved.
+    """True when the event's ABI has a ``new*`` and an ``old*``/``previous*`` argument and the emitter writes exactly
+    this one controller, so the pair can only be about it.
     """
     if not isinstance(inputs, list) or len(inputs) < 2:
         return False
@@ -980,20 +677,12 @@ def _event_states_the_change(
     return has_new and has_old
 
 
-# Slot shapes whose value an old/new argument pair can actually be ABOUT: a
-# single cell. Everything else — mapping, array, struct, enum — holds many
-# values at once, so a bare pair names no particular one of them.
+# Single-cell shapes; a pair on a mapping, array or struct names no particular value.
 _SCALAR_SLOT_TYPE_KINDS = frozenset({"address", "contract", "primitive"})
 
 
 def read_spec_is_scalar_slot(read_spec: object) -> bool:
-    """True only when the controller's slot is PROVEN to hold a single value.
-
-    Absent, empty or unrecognized ``type_kind`` returns False. That is the
-    not-determined state and it refuses, because this predicate gates a
-    promotion: the absence of a proof that the slot is scalar is not a proof
-    that it is (invariant 4).
-    """
+    """True only when the slot is proven to hold one value; unknown ``type_kind`` refuses."""
     if not isinstance(read_spec, dict):
         return False
     return str(read_spec.get("type_kind") or "").strip().lower() in _SCALAR_SLOT_TYPE_KINDS
@@ -1012,21 +701,8 @@ def classify_witness_tier(
 ) -> str:
     """Assign the witness tier for one enrolled event spec.
 
-    Every input is a proof or it is nothing: an absent member witness, an
-    unproven writer openness, an unreadable controller each demote. No input
-    can promote (invariant 4), so the worst-informed spec lands on
-    ``activity``, which publishes nothing at all.
-
-    *poll_decodable* is the caller's proof that the controller can be read
-    back — ``polling_plan._is_poll_decodable`` at enrollment, the presence of a
-    projected polling entry at runtime. When F8 teaches that predicate to
-    project struct members, member-path controllers become ``hint`` here with
-    no change to this function.
-
-    *controller_scalar_proven* is the caller's proof that the slot holds a
-    single value (:func:`read_spec_is_scalar_slot`). It gates the old/new arm
-    only, and defaults to False so a caller that cannot prove it gets the
-    refusal rather than the promotion.
+    Inputs can only demote, never promote, so the least-informed spec lands on ``activity``. *poll_decodable* proves the
+    controller can be read back; *controller_scalar_proven* gates the old/new arm and defaults to refusal.
     """
     if is_member_witness(member_witness) and normalized_writer_openness(writer_openness) == OPENNESS_RESTRICTED:
         if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
@@ -1035,16 +711,9 @@ def classify_witness_tier(
     if _is_canonical_family(event_type):
         return WITNESS_TIER_SELF_DESCRIBING
 
-    # The old/new arm requires the slot to be a single cell as well as the pair
-    # to be attributable. On a mapping the pair is a keyless ENTRY transition:
-    # ``TokenMaxPositionWeightLimitUpdated(oldLimit, newLimit)`` writes
-    # ``_tokenInfos`` and names no key, so publishing it under the slot stem
-    # ``state_changed:state_variable:_tokenInfos`` lands one entry's limit in
-    # ``last_known_state`` and ``ControllerValue`` as the whole mapping's value
-    # — the P1c wrong-claim shape, and reached without the member-witness
-    # guards, which key off the ``member_changed`` type this stem is not.
-    # A member-witness-qualified spec never arrives here: that arm returns
-    # above, which is what makes the key-carrying case still publishable.
+    # The old/new arm also needs a single-cell slot: on a mapping, a keyless pair like
+    # ``TokenMaxPositionWeightLimitUpdated(oldLimit, newLimit)`` would publish one entry's limit as the whole mapping's
+    # value. Member-witness specs returned above.
     if controller_scalar_proven and _event_states_the_change(inputs, effect_tags, controller_id):
         if len(event_type or "") <= MAX_EVENT_TYPE_LENGTH:
             return WITNESS_TIER_SELF_DESCRIBING
@@ -1056,27 +725,16 @@ def classify_witness_tier(
 
 
 def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
-    """Walk a ``ControlTrackingPlan`` and return per-contract topic specs.
+    """Per-contract topic specs from a ``ControlTrackingPlan``; ``[]`` without one.
 
-    Each entry has shape ``{topic0, signature, event_type, controller_id,
-    inputs, effect_tags, witness_tier, writer_openness}`` (plus
-    ``member_witness`` when the plan carries one). Topic0s already in
-    ``ALL_EVENT_TOPICS`` are skipped so the hand-rolled decoders keep
-    ownership of OZ / Safe / Timelock / proxy events. Returns ``[]`` when
-    *tracking_plan* is None or has no events.
-
-    ``effect_tags`` flows through from the static analysis pipeline
-    (``services/static/contract_analysis_pipeline/tracking.py``). The
-    watcher reads them to classify and route events without falling
-    back on a hand-curated event-name list.
-
-    ``witness_tier`` is what decides at runtime whether an occurrence may
-    publish a change claim at all — see :func:`classify_witness_tier`.
+    Each entry: ``{topic0, signature, event_type, controller_id, inputs, effect_tags, witness_tier, writer_openness}``
+    plus optional ``member_witness``. Topic0s in ``ALL_EVENT_TOPICS`` are skipped so hand-rolled decoders keep
+    OZ/Safe/Timelock/proxy events. ``witness_tier`` decides at runtime whether an occurrence may publish
+    (:func:`classify_witness_tier`).
     """
     if not tracking_plan:
         return []
-    # Local import: polling_plan defers its own event_topics import to call
-    # time to keep the two modules acyclic; keep the favour symmetrical.
+    # Local import to keep the modules acyclic.
     from services.monitoring.polling_plan import _is_poll_decodable
 
     by_topic: dict[str, dict] = {}
@@ -1093,9 +751,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             topic0 = (ev.get("topic0") or "").lower()
             if not topic0 or not topic0.startswith("0x"):
                 continue
-            # Hand-rolled registry wins for OZ/Safe/Timelock/proxy events —
-            # those decoders carry semantics (batch indexing, calldata
-            # selectors, etc.) the generic path can't reproduce.
+            # Hand-rolled decoders carry semantics (batch indexing, selectors) the generic path can't.
             if topic0 in ALL_EVENT_TOPICS:
                 continue
             effect_tags = ev.get("effect_tags") if isinstance(ev.get("effect_tags"), dict) else None
@@ -1103,22 +759,14 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             event_type = _resolve_event_type(
                 controller_id,
                 effect_tags,
-                # ``authority_provenance`` is absent on a plan whose target
-                # never earned the gate proof — pass it through as-is so the
-                # resolver sees the same three states the plan carries.
+                # Passed through as-is so the resolver sees all three states.
                 authority_provenance=tc.get("authority_provenance"),
                 signature=ev.get("signature"),
             )
             member_witness = ev.get("member_witness")
             writer_openness = normalized_writer_openness(ev.get("writer_openness"))
-            # A qualified member change publishes under the variable whose entry
-            # moved, not under the tracked-slot stem: the stem claims "this slot
-            # was written", while the correspondence proves the stronger and
-            # more specific fact that THIS entry of THIS mapping changed, and
-            # the key/value/direction ride in ``data`` (never in the type, which
-            # would give every entry its own event type and defeat the identity
-            # index). A canonical family already carries a semantic claim of its
-            # own and keeps it.
+            # A qualified member change publishes under the mapping whose entry moved, with key/value/direction in
+            # ``data``. Canonical families keep their own claim.
             mapping_var = member_witness_mapping_var(member_witness)
             qualified = (
                 bool(mapping_var)
@@ -1129,11 +777,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             )
             if qualified:
                 event_type = member_changed_event_type(mapping_var)
-            # A qualification that cannot be published is not a qualification.
-            # When any arm above refuses, the witness is dropped from the spec
-            # entirely rather than left to promote a spec that publishes under
-            # the slot stem — a ``state_changed:`` row carrying an entry key
-            # where its consumers read a slot value.
+            # A qualification that can't be published is dropped so it can't promote a slot-stem spec.
             witness_for_tier = member_witness if qualified else None
             spec: dict = {
                 "topic0": topic0,
@@ -1151,8 +795,7 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
                     poll_decodable=poll_decodable,
                     controller_scalar_proven=controller_scalar_proven,
                 ),
-                # Published even when not determined: the third state has to
-                # be visible to a consumer, not inferred from a missing key.
+                # Published even when not determined, so the third state is visible.
                 "writer_openness": writer_openness,
             }
             if effect_tags:
@@ -1160,10 +803,8 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
             if is_member_witness(witness_for_tier):
                 spec["member_witness"] = witness_for_tier
             if topic0 in by_topic:
-                # One topic0 can be donated to several controllers. Which spec
-                # wins decided the published claim, and it was decided by the
-                # controllers' alphabetical label order — so resolve it by
-                # evidence instead: the strongest tier, first-seen on a tie.
+                # Resolve a topic0 donated to several controllers by strongest tier, first-seen on a tie (not
+                # alphabetical label).
                 if _TIER_STRENGTH[spec["witness_tier"]] <= _TIER_STRENGTH[by_topic[topic0]["witness_tier"]]:
                     continue
             else:
@@ -1173,66 +814,40 @@ def extract_governance_topics(tracking_plan: dict | None) -> list[dict]:
 
 
 def parse_tracked_log(log: dict, spec: dict) -> dict | None:
-    """Generic per-contract event decoder driven by an ABI input list.
+    """Decode a per-contract event from *spec*'s ABI inputs, or ``None`` if the log doesn't match.
 
-    *spec* is one entry from ``extract_governance_topics``. Walks the
-    inputs splitting indexed (topics[1:]) from non-indexed (data) and
-    decodes each by type via ``eth_abi``. Outputs:
-
-      - ``event_type``, ``block_number``, ``tx_hash``, ``log_index``
-      - one key per input under its ABI name (``user``, ``newOwner``, …)
-      - semantic-key aliases (``old_owner``/``new_owner``, ``old_authority``/
-        ``new_authority``) when the event_type has a registered mapping, so
-        existing state/relational sync paths keep working.
-
-    Returns None when the log shape doesn't match the spec (wrong topic
-    count, undecodable non-indexed data, etc.) — caller treats None the
-    same as an unparseable hand-rolled log.
+    Outputs event_type, block_number, tx_hash, log_index, one key per input name, and semantic-key aliases
+    (``old_owner``/``new_owner``...) for registered event_types.
     """
-    # Local import: eth_abi pulls in a chunk of typing/cython init on first
-    # use; keeping it lazy avoids paying the cost when no contract has any
-    # tracked_topics (the common case for pre-tracking-plan rows).
+    # Lazy: eth_abi's first import is slow and most contracts have no tracked topics.
     from eth_abi.abi import decode as eth_abi_decode
 
     inputs = spec.get("inputs") or []
     topics = log.get("topics") or []
     data = log.get("data") or "0x"
 
-    # Declaration index kept alongside each input: the topic/data split
-    # reorders args, while a member witness's ``key_position`` /
-    # ``value_position`` are positions in the DECLARED arg list. Reading them
-    # off the reordered list would publish the wrong argument as the key.
+    # Keep declaration indexes: member-witness positions refer to declared order, not the topic/data split.
     indexed_inputs = [(idx, i) for idx, i in enumerate(inputs) if i.get("indexed")]
     non_indexed_inputs = [(idx, i) for idx, i in enumerate(inputs) if not i.get("indexed")]
 
-    # topics[0] is the event sig; indexed args live in topics[1:].
     if len(topics) < 1 + len(indexed_inputs):
         return None
 
     event: dict = {
-        # A spec with no event_type was never classified at all, so the
-        # neutral stem is the only earned answer here too.
+        # An unclassified spec only earns the neutral stem.
         "event_type": spec.get("event_type") or "state_changed",
         "block_number": _hex_to_int(log.get("blockNumber", "0x0")),
         "tx_hash": log.get("transactionHash"),
         "log_index": _hex_to_int(log.get("logIndex", "0x0")),
     }
-    # Effect tags ride along on the parsed event so the watcher can
-    # branch on them (state sync, relational sync, reanalysis trigger)
-    # without re-deriving from event_type. Absent on hand-rolled
-    # events (parse_governance_log path), present on every per-contract
-    # event whose tracking_plan carries them.
+    # Tags ride on the event so the watcher needn't re-derive from event_type.
     spec_tags = spec.get("effect_tags")
     if isinstance(spec_tags, dict) and spec_tags:
         event["effect_tags"] = spec_tags
-    # Attach the ABI input list (declaration order, not topic order) so
-    # downstream write-target resolution can do positional / name-prefix
-    # heuristics for non-OZ ABIs. Compound's ``NewAdmin(address newAdmin)``
-    # and similar shapes need this to map a custom write_target like
-    # ``protocolAdmin`` to the ``newAdmin`` arg.
+    # ABI inputs in declaration order, for write-target resolution on non-OZ ABIs (``NewAdmin(newAdmin)`` for
+    # ``protocolAdmin``).
     event["_inputs"] = list(inputs)
 
-    # Decode indexed args from topics.
     args_in_order: list[object] = []
     by_declaration: dict[int, object] = {}
     for i, (decl_index, spec_in) in enumerate(indexed_inputs):
@@ -1246,16 +861,13 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
         elif sol_type.startswith("bytes") and sol_type != "bytes":
             decoded = topic  # fixed-size bytes ride as the raw 32-byte topic
         else:
-            # Dynamic types (string, bytes, arrays) are stored as the
-            # keccak of the value when indexed — we can't recover the
-            # original, just preserve the hash.
+            # Indexed dynamic types are stored as their keccak; keep the hash.
             decoded = topic
         name = spec_in.get("name") or f"arg{i}"
         event[name] = decoded
         args_in_order.append(decoded)
         by_declaration[decl_index] = decoded
 
-    # Decode non-indexed args from data.
     if non_indexed_inputs:
         try:
             raw = bytes.fromhex((data or "0x").removeprefix("0x"))
@@ -1265,7 +877,7 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
             return None
         for i, (decl_index, spec_in) in enumerate(non_indexed_inputs):
             val = decoded_tuple[i]
-            # Normalize bytes → 0x-hex so JSONB-serializability is preserved.
+            # Bytes to 0x-hex for JSONB.
             if isinstance(val, (bytes, bytearray)):
                 val = "0x" + bytes(val).hex()
             name = spec_in.get("name") or f"arg{len(indexed_inputs) + i}"
@@ -1273,12 +885,6 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
             args_in_order.append(val)
             by_declaration[decl_index] = val
 
-    # Semantic-key aliases (``old_owner`` / ``new_owner``, etc.) keyed
-    # off event_type. Name-aware fill so single-arg events
-    # (``LogSetOwner(address indexed owner)``,
-    # ``NewAdmin(address newAdmin)``) and two-arg variants with
-    # non-standard ABI names (Solmate's ``user`` / ``newOwner``) all
-    # surface the canonical sync keys.
     _assign_semantic_keys(event, event["event_type"], inputs, args_in_order)
     if not _assign_member_witness_keys(event, spec, by_declaration):
         return None
@@ -1286,29 +892,15 @@ def parse_tracked_log(log: dict, spec: dict) -> dict | None:
     return event
 
 
-# The three keys a ``member_changed`` row's payload is: which entry, what it now
-# holds, and which way it moved. On such a row they are the WITNESSED values, so
-# an identically-named ABI parameter must not survive underneath them.
+# A member-change payload; these are witnessed values, so same-named ABI params must not survive underneath.
 _MEMBER_PAYLOAD_KEYS = ("key", "value", "direction")
 
 
 def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[int, object]) -> bool:
-    """Fill ``key`` / ``value`` / ``direction`` on a qualified member change.
+    """Fill ``key``/``value``/``direction`` on a member change; False if the log can't carry its type's claim.
 
-    Returns False when the log cannot carry the claim its spec's type makes —
-    the caller then treats it as an unparseable log and publishes nothing.
-
-    Gated on the event_type stem, not on the presence of a witness record: only
-    a spec that mints ``member_changed:<mapping_var>`` has fixed the meaning of
-    these three keys, so a spec carrying a record under some other type keeps
-    its ABI names untouched.
-
-    Each key is CLEARED before it is filled, and each is filled only from what
-    the record proves. Leaving the decode loop's same-named parameter in place
-    was the hole: ``WardAdded(address indexed usr, uint256 value)`` for
-    ``wards[usr] = true`` would publish ``data.value`` — the amount that
-    happened to ride along — as the witnessed new value of the entry, while the
-    record proved the event states no value at all.
+    Gated on the type stem. Each key is cleared before filling, only from what the record proves: otherwise
+    ``WardAdded(address indexed usr, uint256 value)`` would publish an unrelated amount as the entry's new value.
     """
     event_type = event.get("event_type")
     if not isinstance(event_type, str) or not event_type.startswith(f"{MEMBER_CHANGED_STEM}:"):
@@ -1320,8 +912,7 @@ def _assign_member_witness_keys(event: dict, spec: dict, by_declaration: dict[in
         event.pop(payload_key, None)
     key_position = witness.get("key_position")
     if not isinstance(key_position, int) or isinstance(key_position, bool) or key_position not in by_declaration:
-        # The type names the mapping; only ``data.key`` names the entry. A row
-        # that cannot say which entry moved is not the claim this type makes.
+        # Without ``data.key`` the row can't say which entry moved.
         return False
     event["key"] = by_declaration[key_position]
     value_position = witness.get("value_position")
