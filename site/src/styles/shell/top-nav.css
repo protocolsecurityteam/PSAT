@@ -25,16 +25,11 @@
   font-weight: 800;
   letter-spacing: -0.04em;
   color: #e2e8f0;
-  background: none;
-  border: none;
-  box-shadow: none;
   padding: 6px 12px 6px 4px;
-  cursor: pointer;
   margin-right: 8px;
 }
 
 .top-nav-brand:hover {
-  transform: none;
   opacity: 0.8;
 }
 
@@ -47,7 +42,6 @@
 .top-nav-submit-btn {
   font-size: 13px;
   padding: 7px 16px;
-  border-radius: 12px;
 }
 
 .top-nav-context {

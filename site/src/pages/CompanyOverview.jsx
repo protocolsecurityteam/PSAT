@@ -149,7 +149,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   if (error) return (
     <div className="page"><section className="panel">
       <p className="empty" role="alert">Failed to load company overview: {error}</p>
-      <button type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
+      <button className="btn" type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
     </section></div>
   );
   if (!data) return <div className="page"><section className="panel"><p className="empty">Loading...</p></section></div>;
@@ -312,7 +312,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
           {functionError ? (
             <div className="panel">
               <p role="alert">Failed to load control surface functions: {functionError}</p>
-              <button type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
+              <button className="btn" type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
             </div>
           ) : <Suspense fallback={<LoadingFallback label="Loading control surface..." />}>
             <ProtocolSurface

@@ -175,18 +175,13 @@
   background: #131820;
   color: #8a94a6;
   font-size: 11px;
-  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  cursor: pointer;
-  box-shadow: none;
   transition: background 120ms ease;
 }
 
 .ps-ops-category-header:hover {
   background: #1a2030;
-  transform: none;
-  box-shadow: none;
 }
 
 .ps-ops-chevron {
@@ -281,13 +276,11 @@
   padding: 4px 8px; border-radius: 6px;
   border: 1px solid rgba(148, 163, 184, 0.18); background: #141820;
   color: #e8edf3; cursor: pointer; font-size: 11px; font-weight: 400; line-height: 1.1;
-  /* Override the global button shadow and lift. */
-  box-shadow: none;
   transition: background 120ms ease, border-color 120ms ease;
 }
-.ps-caller-btn:hover { background: #1a2030; border-color: rgba(148, 163, 184, 0.35); transform: none; box-shadow: none; }
+.ps-caller-btn:hover { background: #1a2030; border-color: rgba(148, 163, 184, 0.35); }
 .ps-caller-status { align-self: flex-start; color: #94a3b8; }
-.ps-caller-status:hover { background: #1a2030; transform: none; box-shadow: none; }
+.ps-caller-status:hover { background: #1a2030; }
 .ps-caller-ic {
   width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;

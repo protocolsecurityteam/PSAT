@@ -7,8 +7,7 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
-/* The one commit control on in-card references; the body only previews. Zeroes
-   the global button chrome. */
+/* The one commit control on in-card references; the body only previews. */
 .ps-goto-arrow {
   flex-shrink: 0;
   margin-left: auto;
@@ -17,21 +16,16 @@
   justify-content: center;
   padding: 0 2px;
   background: none;
-  border: none;
-  box-shadow: none;
   border-radius: 3px;
   color: #475569;
   font-size: 13px;
   line-height: 1;
-  cursor: pointer;
   transition: color 100ms ease;
 }
 
 .ps-goto-arrow:hover {
   color: #cbd5e1;
   background: none;
-  box-shadow: none;
-  transform: none;
 }
 
 .ps-principal-clickable:hover .ps-goto-arrow,

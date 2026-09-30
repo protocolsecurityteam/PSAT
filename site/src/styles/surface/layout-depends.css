@@ -114,7 +114,6 @@
   flex: 1 1 auto;
 }
 
-/* Ghost button; zeroes the global button chrome like .ps-governs-expand. */
 .ps-depends-toggle {
   flex: 0 0 auto;
   margin-left: auto;
@@ -123,15 +122,12 @@
   justify-content: flex-end;
   gap: 4px;
   background: none;
-  border: none;
-  box-shadow: none;
   border-radius: 3px;
   padding: 0 2px;
   color: #64748b;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  cursor: pointer;
   text-align: right;
   white-space: nowrap;
 }
@@ -139,8 +135,6 @@
 .ps-depends-toggle:hover {
   color: #94a3b8;
   background: none;
-  box-shadow: none;
-  transform: none;
 }
 
 .ps-depends-caret {

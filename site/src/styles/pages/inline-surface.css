@@ -39,8 +39,6 @@
   color: #cbd5e1;
   font-size: 13px;
   font-weight: 600;
-  letter-spacing: -0.01em;
-  cursor: pointer;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease,
     transform 140ms ease;
 }

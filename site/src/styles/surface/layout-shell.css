@@ -64,7 +64,7 @@
   cursor: pointer;
 }
 
-.ps-filter-pill:hover { color: #e2e8f0; transform: none; }
+.ps-filter-pill:hover { color: #e2e8f0; }
 
 .ps-filter-overlay:not(.ps-filter-overlay--collapsed) .ps-filter-pill {
   padding: 0 2px 6px;
@@ -109,11 +109,6 @@
   min-width: 0;
   flex-wrap: wrap;
   padding: 0;
-}
-
-/* Flatten forms.css's hover lift so chips don't bounce. */
-.ps-filter-overlay button:hover {
-  transform: none;
 }
 
 .ps-layout {

@@ -104,14 +104,10 @@
   align-items: center;
   padding: 28px 28px;
   background: rgba(244, 237, 225, 0.015);
-  border: none;
   border-bottom: 1px solid var(--line-soft);
   border-radius: 0;
-  cursor: pointer;
   text-align: left;
   font: inherit;
-  color: inherit;
-  box-shadow: none;
   transition: background 140ms ease, border-color 140ms ease, padding 140ms ease;
 }
 

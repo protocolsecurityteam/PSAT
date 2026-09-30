@@ -1,14 +1,9 @@
-/* Zero the global button chrome: the teal shadow glows under each tab and the
-   radius/lift fight the flat tabs. */
 .ps-machine-tab {
   /* Shrink 0 so a tab never gets narrower than its label (`flex: 1` forced
      equal slots the labels overflowed). */
   flex: 1 0 auto;
-  background: none;
-  border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  box-shadow: none;
   color: #64748b;
   font-size: 9.5px;
   font-weight: 600;
@@ -16,7 +11,6 @@
   white-space: nowrap;
   /* Keeps all six tabs inside the ~300px default bar. */
   padding: 8px 2px 6px;
-  cursor: pointer;
   display: flex;
   align-items: baseline;
   justify-content: center;
@@ -26,8 +20,6 @@
 
 .ps-machine-tab:hover {
   color: #94a3b8;
-  box-shadow: none;
-  transform: none;
 }
 
 .ps-machine-tab.active {
@@ -152,15 +144,12 @@
   color: #f59e0b;
 }
 
-/* Zero the global button chrome. */
 .ps-governs-expand {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   background: none;
-  border: none;
-  box-shadow: none;
   border-radius: 3px;
   padding: 0 2px;
   margin: 0;
@@ -169,14 +158,11 @@
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  cursor: pointer;
 }
 
 .ps-governs-expand:hover {
   color: #94a3b8;
   background: none;
-  box-shadow: none;
-  transform: none;
 }
 
 .ps-governs-caret {

@@ -328,7 +328,7 @@ export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, on
             Stop
           </button>
         ) : (
-          <button type="submit" disabled={!input.trim()}>
+          <button className="btn" type="submit" disabled={!input.trim()}>
             Send
           </button>
         )}

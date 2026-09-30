@@ -415,7 +415,7 @@ export default function AddressesModal({ companyName, onClose }) {
               onChange={(e) => setNewName(e.target.value)}
               disabled={analyzing}
             />
-            <button type="submit" disabled={analyzing || !newAddress.trim()}>
+            <button className="btn" type="submit" disabled={analyzing || !newAddress.trim()}>
               {analyzing ? "Queuing…" : "Analyze"}
             </button>
             {analyzeResult && (

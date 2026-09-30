@@ -208,7 +208,7 @@ export default function AuditsAdminModal({ companyName, onClose }) {
             onChange={(e) => setForm((f) => ({ ...f, source_repo: e.target.value }))}
             disabled={adding}
           />
-          <button type="submit" disabled={adding || !form.url || !form.auditor || !form.title}>
+          <button className="btn" type="submit" disabled={adding || !form.url || !form.auditor || !form.title}>
             {adding ? "Adding…" : "Add audit"}
           </button>
           {addResult && (

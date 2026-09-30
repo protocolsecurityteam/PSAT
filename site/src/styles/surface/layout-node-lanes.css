@@ -120,23 +120,19 @@
   flex-shrink: 0;
 }
 
-/* Zeroes the global button chrome (shadow, weight, lift). */
 .ps-selection-clear {
   margin-top: 2px;
   padding: 3px 6px;
-  background: transparent;
   border: 1px solid #3f3f46;
   border-radius: 3px;
   color: #a1a1aa;
   font-size: 10px;
   font-weight: 400;
   letter-spacing: 0.04em;
-  cursor: pointer;
   align-self: flex-end;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  box-shadow: none;
 }
 
 .ps-selection-clear kbd {
@@ -153,7 +149,6 @@
 .ps-selection-clear:hover {
   border-color: #71717a;
   color: #e4e4e7;
-  transform: none;
 }
 
 .ps-selection-legend-swatch--out {

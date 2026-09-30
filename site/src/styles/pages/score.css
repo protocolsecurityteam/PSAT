@@ -209,16 +209,12 @@
   border: 1px solid var(--panel-border);
   border-radius: 999px;
   padding: 6px 16px;
-  cursor: pointer;
-  /* Cancel the global button gradient and lift shadow. */
-  box-shadow: none;
   letter-spacing: normal;
 }
 
 .sc-expand-btn:hover {
   color: var(--ink);
   border-color: rgba(148, 163, 184, 0.3);
-  transform: none;
 }
 .sc-expand-btn .sc-chev { transition: transform 0.15s; font-size: 10px; }
 .sc-expand-btn.sc-open .sc-chev { transform: rotate(180deg); }
@@ -304,12 +300,12 @@ h2.sc-band-title {
   padding: 0;
   border: 1px solid var(--panel-border);
   border-radius: 50%;
-  background: none;
   font-size: 9px;
-  font-weight: 700;
   line-height: 1;
   color: var(--muted);
-  cursor: pointer;
+}
+.sc-cap-q:hover {
+  transform: translateY(-1px);
 }
 .sc-cap-q:hover,
 .sc-cap-q[aria-expanded="true"] {
@@ -393,19 +389,15 @@ h2.sc-band-title {
 .sc-targets .sc-ndp { color: var(--nd); font-style: italic; }
 
 .sc-tbtn {
-  background: none;
-  border: none;
   font: inherit;
   color: var(--teal);
-  cursor: pointer;
   padding: 0;
-  box-shadow: none;
   border-radius: 0;
   font-weight: inherit;
   letter-spacing: normal;
 }
 
-.sc-tbtn:hover { text-decoration: underline; transform: none; }
+.sc-tbtn:hover { text-decoration: underline; }
 
 /* Entity controls look exactly like the surrounding text except for cursor and
    hover underline. */
@@ -455,21 +447,17 @@ h2.sc-band-title {
 
 .sc-tail-btn {
   display: block;
-  background: none;
-  border: none;
   font: inherit;
   font-size: 11.5px;
   color: var(--faint);
-  cursor: pointer;
   text-align: left;
   padding: 6px 8px 0 78px;
-  box-shadow: none;
   border-radius: 0;
   font-weight: inherit;
   letter-spacing: normal;
 }
 
-.sc-tail-btn:hover { color: var(--muted); transform: none; }
+.sc-tail-btn:hover { color: var(--muted); }
 .sc-tail-flush { padding-left: 0; }
 .sc-tail-chev { margin: 0 6px; font-size: 9px; }
 

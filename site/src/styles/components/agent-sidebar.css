@@ -68,15 +68,12 @@
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  box-shadow: none;
   transition: border-color 120ms ease, background 120ms ease;
 }
 
 .agent-suggestion:hover:not(:disabled) {
   background: #141a26;
   border-color: rgba(148, 163, 184, 0.24);
-  transform: none;
-  box-shadow: none;
 }
 
 .agent-suggestion:disabled {
@@ -155,23 +152,18 @@
 .agent-link {
   display: inline;
   background: transparent;
-  border: 0;
   padding: 0;
   margin: 0;
   font: inherit;
   color: var(--teal);
   text-decoration: underline;
   text-underline-offset: 2px;
-  cursor: pointer;
-  box-shadow: none;
   transition: color 100ms ease;
 }
 
 .agent-link:hover {
   color: #5eead4;
   background: transparent;
-  transform: none;
-  box-shadow: none;
 }
 
 .agent-link-addr {
@@ -204,19 +196,14 @@
   gap: 6px;
   padding: 6px 10px;
   background: transparent;
-  border: 0;
   color: var(--ink);
-  cursor: pointer;
   font: inherit;
   text-align: left;
-  box-shadow: none;
   border-radius: 0;
 }
 
 .agent-tool-hdr:hover {
   background: rgba(148, 163, 184, 0.06);
-  transform: none;
-  box-shadow: none;
 }
 
 .agent-tool-icon { font-size: 10px; }
@@ -296,7 +283,6 @@
   align-items: center;
   gap: 4px;
   background: transparent;
-  border: 0;
   padding: 0;
   margin-bottom: 3px;
   font-size: 9px;
@@ -305,15 +291,11 @@
   text-transform: uppercase;
   color: var(--muted);
   font-style: normal;
-  cursor: pointer;
-  box-shadow: none;
 }
 
 .agent-reasoning-hdr:hover {
   color: #cbd5e1;
-  transform: none;
   background: transparent;
-  box-shadow: none;
 }
 
 .agent-reasoning-toggle {

@@ -57,12 +57,9 @@
   width: 100%;
   text-align: left;
   background: transparent;
-  border: 0;
-  box-shadow: none;
   padding: 4px 5px;
   margin: -4px -5px;
   border-radius: 8px;
-  color: inherit;
   font: inherit;
   cursor: pointer;
 }
@@ -200,20 +197,15 @@
   min-width: 0;
   text-align: left;
   background: transparent;
-  border: 0;
-  color: inherit;
   font: inherit;
-  cursor: pointer;
   padding: 9px 11px;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  box-shadow: none;
 }
 
 .ps-audits-arow-btn:hover {
   background: #182031;
-  transform: none;
 }
 
 .ps-audits-arow-top {
@@ -271,21 +263,16 @@
 .ps-audits-arow-read {
   flex-shrink: 0;
   background: rgba(45, 212, 191, 0.10);
-  border: 0;
   border-left: 1px solid rgba(148, 163, 184, 0.14);
   color: #2dd4bf;
   font-size: 11px;
-  font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 12px;
-  cursor: pointer;
-  box-shadow: none;
 }
 
 .ps-audits-arow-read:hover {
   background: rgba(45, 212, 191, 0.20);
   color: #a7f3d0;
-  transform: none;
 }
 
 .ps-audits-cc-wrap {
@@ -376,17 +363,13 @@
   border: 1px solid rgba(148, 163, 184, 0.22);
   color: #94a3b8;
   font-size: 11px;
-  font-weight: 700;
   border-radius: 6px;
   padding: 4px 9px;
-  cursor: pointer;
-  box-shadow: none;
 }
 
 .ps-audits-back:hover {
   color: #e2e8f0;
   background: rgba(148, 163, 184, 0.08);
-  transform: none;
 }
 
 .ps-audits-contract-card {

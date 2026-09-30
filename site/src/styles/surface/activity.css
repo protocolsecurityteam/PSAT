@@ -134,16 +134,12 @@
   padding: 7px 9px;
   cursor: pointer;
   text-align: left;
-  color: inherit;
   font: inherit;
-  /* Zero the global button chrome. */
-  box-shadow: none;
   transition: none;
 }
 .ps-activity-recent-row:hover:not(:disabled) {
   border-color: rgba(45, 212, 191, 0.26);
   background: rgba(20, 26, 36, 0.55);
-  transform: none;
 }
 .ps-activity-recent-row:disabled { cursor: default; opacity: 0.7; }
 .ps-activity-recent-main { min-width: 0; display: grid; gap: 3px; }
@@ -268,17 +264,11 @@
   color: var(--status-mute);
   text-decoration: underline dotted;
   cursor: pointer;
-  background: none;
-  border: none;
   border-radius: 0;
   font-family: inherit;
   padding: 0;
-  /* Zero the global button chrome (the teal shadow reads blue; the lift is
-     wrong on a text link). */
-  box-shadow: none;
   transition: none;
 }
-.ps-activity-link-btn:hover { transform: none; }
 .ps-activity-link-btn:disabled { opacity: 0.5; cursor: default; }
 .ps-activity-webhook-form { display: grid; gap: 6px; }
 .ps-activity-webhook-input {
@@ -391,7 +381,9 @@
   border: 1px solid var(--line);
   background: transparent;
   color: var(--status-mute);
-  cursor: pointer;
+}
+.ps-activity-salience-opt:hover {
+  transform: translateY(-1px);
 }
 .ps-activity-salience-opt.on {
   background: rgba(148, 163, 184, 0.16);
@@ -413,32 +405,22 @@
 .ps-activity-routine-toggle {
   font: inherit;
   font-size: 10.5px;
-  font-weight: 700;
   text-align: left;
   padding: 3px 0;
-  border: 0;
-  background: transparent;
   color: var(--status-mute);
-  cursor: pointer;
   border-bottom: 1px dotted rgba(148, 163, 184, 0.28);
   justify-self: start;
 }
 .ps-activity-dot.routine { opacity: 0.45; }
 
-/* Flat on purpose: forms.css gives every bare <button> a gradient and shadow. */
 .ps-activity-target { color: var(--muted); }
 .ps-activity-target-link {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  transform: none;
   padding: 0;
   font: inherit;
   color: var(--ink);
-  cursor: pointer;
   border-bottom: 1px dotted rgba(148, 163, 184, 0.45);
 }
-.ps-activity-target-link:hover { border-bottom-color: var(--ink); box-shadow: none; transform: none; }
+.ps-activity-target-link:hover { border-bottom-color: var(--ink); }
 .ps-activity-target .ps-goto-arrow { margin-left: 4px; }
 /* Off-graph targets have no name, so the full address wraps. */
 .ps-activity-target-addr { word-break: break-all; color: var(--ink); }

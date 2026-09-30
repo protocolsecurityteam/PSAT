@@ -195,7 +195,7 @@ export default function App() {
         </div>
         <div className="top-nav-right">
           {isAdmin && isMonitor && (
-            <button className="top-nav-submit-btn" onClick={() => setFormOpen(!formOpen)}>
+            <button className="btn top-nav-submit-btn" onClick={() => setFormOpen(!formOpen)}>
               {formOpen ? "Close" : "+ New Analysis"}
             </button>
           )}
@@ -221,7 +221,7 @@ export default function App() {
             <label><span>Run name</span><input value={form.name} onChange={(e) => setForm((c) => ({ ...c, name: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Chain</span><input value={form.chain} onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Analyze limit</span><input type="number" min="1" max="200" value={form.analyzeLimit} onChange={(e) => setForm((c) => ({ ...c, analyzeLimit: e.target.value }))} /></label>
-            <button type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
+            <button className="btn" type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
           </form>
         </div>
       )}

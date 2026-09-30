@@ -20,14 +20,12 @@
 }
 
 .ps-balance-filter {
-  background: none;
   border: 1px solid rgba(148, 163, 184, 0.15);
   border-radius: 4px;
   color: #64748b;
   font-size: 9px;
   font-weight: 600;
   padding: 2px 8px;
-  cursor: pointer;
   margin-bottom: 6px;
   transition: color 120ms, border-color 120ms;
 }

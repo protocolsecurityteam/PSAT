@@ -17,7 +17,6 @@
   font: 600 11px "Instrument Sans", system-ui;
   padding: 4px 10px;
   border-radius: 999px;
-  cursor: pointer;
   display: inline-flex;
   gap: 5px;
   align-items: center;
@@ -366,12 +365,12 @@
   border-radius: 999px;
   border: 1px solid var(--panel-border);
   background: rgba(13, 17, 25, 0.4);
-  cursor: pointer;
   font: 600 11.5px "Instrument Sans", system-ui;
   color: #cbd5e1;
 }
 .sys-pill:hover {
   border-color: rgba(148, 163, 184, 0.3);
+  transform: translateY(-1px);
 }
 .sys-pill .d {
   width: 8px;
