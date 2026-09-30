@@ -1,8 +1,6 @@
-// Plain-language readings of the scorer's capability ids, for the "?" beside
-// a deduction row's label. The set is FIXED: these are exactly the keys of the
-// scorer's BASE_SEVERITY table (services/scoring/constants.py) — the only
-// capabilities a scored finding can carry. An id without an entry gets no "?"
-// at all: a missing definition must not be papered over with a guessed one.
+// Plain readings of the scorer's capability ids: exactly the keys of
+// BASE_SEVERITY (services/scoring/constants.py). Missing ids get no "?" rather
+// than a guessed definition.
 export const CAPABILITY_GLOSSARY = {
   "upgrade.implementation":
     "Replace the contract's implementation code behind its proxy. The holder can change what the contract does entirely — including the logic that guards its funds.",

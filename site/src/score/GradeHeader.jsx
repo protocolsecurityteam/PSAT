@@ -2,10 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 
 import { letterFor } from "./gradeBands.js";
 
-// Callout labels are absolutely positioned at the midpoint of the span they
-// name, so two adjacent groups can overlap at some widths. Measure the rendered
-// boxes and drop the smaller-sum label into the row's tooltip rather than
-// letting two labels sit on top of each other.
+// Adjacent callout labels can overlap at some widths; the smaller one moves
+// into the tooltip.
 function useCalloutCollisions(callouts) {
   const refs = useRef(new Map());
   const [hidden, setHidden] = useState(() => new Set());
@@ -58,9 +56,8 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
     .join(" · ");
   const subsumed = doc?.provenance?.population?.subsumed_rows;
   const exposure = doc.grade_exposure;
-  // λ can be absent outside the withheld state too — the fold refuses to
-  // reconstruct one over an unwitnessed raw. With no λ there is no number to
-  // print and no bar to lay out: "0.0 kept" would be a fabricated reading.
+  // The fold refuses a λ over an unwitnessed raw, so λ can be absent outside
+  // the withheld state; "0.0 kept" would be fabricated.
   const hasLambda = typeof lambda === "number" && Number.isFinite(lambda);
 
   return (

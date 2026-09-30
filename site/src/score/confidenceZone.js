@@ -1,17 +1,11 @@
-// The "possible deductions" projection: provenance.unresolved_levers rendered
-// as questions, never as charges. Nothing derived here enters λ, the letter or
-// the exposure grade — every figure is an at-most on what ANSWERING the
-// question could put at stake, and a question with no answer yet is a third
-// state that must not collapse into either a zero or a charge.
-//
-// Pure functions, no React.
+// The "possible deductions" projection: unresolved_levers as questions, never
+// charges. Nothing here enters λ, the letter or exposure; every figure is an
+// at-most, and an unanswered question never collapses into zero or a charge.
 
 import { controllerAddress, principalChip, timelockProposer } from "./derive.js";
 
-// The category a missing-witness token belongs to. This is a fixed 1:1 table,
-// not an allow-list with a default: a token no category claims renders as
-// not-determined WITH the raw token beside it, because a class the page cannot
-// name is still a class the document published.
+// A fixed 1:1 table, not an allow-list: an unclaimed token renders
+// not-determined with the raw token beside it.
 export const MISSING_WITNESS_CATEGORIES = [
   {
     id: "reachability",
@@ -54,11 +48,7 @@ export function categoryById(id) {
   return CATEGORY_BY_ID.get(id) || null;
 }
 
-// Which question a basis IS, read off the basis name rather than off its
-// tokens: `reached_unwitnessed` holds entities the row provably reaches whose
-// magnitude is unmeasured, `behind_unestablished_hops` holds entities behind a
-// link that was never established. The dollars decide which one the row is
-// about — the basis carrying the ceiling is the question holding the stake.
+// Read off the basis name. The dollars decide which question the row is about.
 const CATEGORY_OF_BASIS = {
   reached_unwitnessed: "magnitude",
   behind_unestablished_hops: "reachability",
@@ -77,10 +67,8 @@ function unknownTokensOf(missing) {
   return out;
 }
 
-// One status line per basis that carries dollars. A basis whose ceiling is a
-// proven $0 renders NOTHING here: it holds none of the money the row is about,
-// and printing it beside the one that does invites the two figures to be added.
-// A basis whose ceiling was never bounded (null) is louder, not quieter.
+// A proven-$0 basis renders nothing, so it can't be added to the one that holds
+// the money. An unbounded (null) basis is louder.
 export function statusLines(lever) {
   const lines = [];
   for (const [basis, entry] of Object.entries(lever?.by_basis || {})) {
@@ -97,16 +85,9 @@ export function statusLines(lever) {
   return lines;
 }
 
-// Every entity the dollar-carrying bases declined to price, folded to one
-// count. The reasons (`unpriced`, `no_rows`) differ but the consequence does
-// not: these contracts contribute nothing to the ceiling, so the real ceiling
-// may be higher — which is what the chip says. A refused set is never rendered
-// as a $0.
-//
-// Dollar-carrying is the same test the status lines use — every basis except a
-// proven $0. A basis whose ceiling is null carries dollars nobody could bound,
-// usually because EVERY entity in it was refused; skipping it would drop the
-// chip exactly where the ceiling is most incomplete.
+// Entities the dollar-carrying bases declined to price, as one count: the real
+// ceiling may be higher. Never rendered as $0. Null-ceiling bases count too;
+// that's where the ceiling is most incomplete.
 export function refusalCount(lever) {
   let total = 0;
   for (const entry of Object.values(lever?.by_basis || {})) {
@@ -118,17 +99,13 @@ export function refusalCount(lever) {
   return total;
 }
 
-// A lever with no question left to ask: its act ranks benign by design, or its
-// ceiling resolved to a proven $0. Both are earned answers, not gaps, so they
-// leave the queue rather than sitting in it at zero.
+// Benign by design or a proven $0: earned answers, so they leave the queue.
 export function isClosed(lever, row) {
   if (row?.finding?.severity_proven === 0) return true;
   return usdOrNull(lever?.ceiling_usd) === 0;
 }
 
-// The entities holding the dollars this row's ceiling is made of. Read off the
-// bases that carry money — an entity itemised under a $0 basis holds none of it
-// and must not widen a pool.
+// Only bases carrying money; a $0-basis entity must not widen a pool.
 export function ceilingBearingEntities(lever) {
   const entities = new Set();
   for (const entry of Object.values(lever?.by_basis || {})) {
@@ -155,33 +132,21 @@ function stableString(value) {
   return JSON.stringify(value === undefined ? null : value);
 }
 
-// The kind chip a row wears — read here as well as rendered, so the grouping
-// and the row can never disagree about what the row says. The row's own chip
-// is preferred: it was derived with the document in hand, so a merged unit's
-// member shapes survive; re-deriving from the finding alone would drop them.
+// The row's own chip wins: it was derived with the document, so a merged unit's
+// member shapes survive.
 export function leverChip(lever, row) {
   return row?.chip || principalChip(row?.finding || { principal_kind: "", principal: lever?.principal });
 }
 
-// No longer printed on the row — the chip click reaches the principal card
-// where the proposer state lives — but still part of the group key: rows that
-// answered the proposer question differently never merge.
+// Not printed on the row but part of the group key: differently-answered rows
+// never merge.
 function proposerUnproven(row) {
   return row?.finding ? timelockProposer(row.finding)?.proven === false : false;
 }
 
-// Two levers become one row only when the row would say exactly the SAME thing
-// about both — because a grouped row renders the lead's claim once and hangs
-// every holder's address off it. Anything the row takes from the lead is
-// therefore part of the key: the eight transfer_policy holders look like one
-// question and are not, since one of them holds removeAsset rather than
-// addAsset, three are Safes rather than EOAs, and their points ceilings run
-// 6.75 / 4.125 / 2.625. Merging them published a function, a principal kind and
-// a ceiling for holders the document never gave them to.
-//
-// Only the controller ADDRESS may vary inside a group — it is the one thing the
-// row aggregates rather than asserts. Any field added to the rendered row must
-// be added here too, or the row will start speaking for holders again.
+// Levers merge only when the row would say exactly the same thing about both; a
+// grouped row renders the lead's claim once. Only the controller address may
+// vary. Any field added to the row must be added here too.
 export function claimSignature(lever, row) {
   const chip = leverChip(lever, row);
   return stableString({
@@ -205,11 +170,9 @@ export function claimSignature(lever, row) {
 const POOL_EPSILON_USD = 0.01;
 const POOL_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-// One pot of money reachable by several questions. Membership needs the same
-// chain, the same ceiling, and an OVERLAP in the entities the ceiling is made
-// of — containment counts, equality is not required. Rows in a pool print the
-// pot once so a reader cannot add them together; a row whose ceiling merely
-// happens to be similar is not in the pool, because it is not the same money.
+// One pot reachable by several questions: same chain, same ceiling, and
+// overlapping ceiling entities. Pooled rows print the pot once so it can't be
+// added up.
 export function assignPools(rows) {
   const pools = [];
   for (const row of rows) {
@@ -243,11 +206,8 @@ export function assignPools(rows) {
 
 const VISIBLE_LEVER_ROWS = 6;
 
-// The whole table. `deductionRows` is the projection Deductions already renders
-// from — the lever rollup carries no functions or targets of its own, so the
-// proven half of every row is the SAME derivation the deduction beside it uses,
-// joined on (capability, principal, chain). A lever with no matching finding
-// keeps its row and shows only what the lever itself witnesses.
+// `deductionRows` supplies the proven half of each row, joined on (capability,
+// principal, chain), since the lever rollup carries no functions or targets.
 export function confidenceZone(doc, deductionRows) {
   const rollup = doc?.provenance?.unresolved_levers;
   if (!rollup) return { published: false, rows: [], head: [], tail: [], remaining: 0, open: 0 };
@@ -255,9 +215,7 @@ export function confidenceZone(doc, deductionRows) {
   for (const row of deductionRows || []) byKey.set(joinKey(row.finding), row);
   const grouped = new Map();
   const rows = [];
-  // Arrival order is the producer's ranking by points ceiling. It is never
-  // re-sorted here: a client-side rank would be a second opinion on a figure
-  // the document already published.
+  // The producer's ranking; never re-sorted client-side.
   for (const lever of rollup.levers || []) {
     const row = byKey.get(joinKey(lever)) || null;
     if (isClosed(lever, row)) continue;
@@ -286,8 +244,7 @@ export function confidenceZone(doc, deductionRows) {
     rows,
     head: rows.slice(0, VISIBLE_LEVER_ROWS),
     tail,
-    // The tail counts LEVERS, not rows: it stands for the questions still to
-    // read, and a grouped row hides more than one of them.
+    // Counts levers, not rows: a grouped row hides several questions.
     remaining: tail.reduce((count, entry) => count + entry.levers.length, 0),
     open: rows.reduce((count, entry) => count + entry.levers.length, 0),
   };

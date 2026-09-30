@@ -1,9 +1,8 @@
 import HelpTag from "./HelpTag.jsx";
 import { capabilityDefinition } from "./capabilityGlossary.js";
 
-// A deduction row's capability id, kept verbatim (the id IS the claim's name)
-// with a "?" that opens its plain-language reading. An id the glossary does
-// not carry renders as the bare id — no button, no invented definition.
+// The capability id verbatim, with a "?" for its plain reading. Ids the
+// glossary lacks render bare: no invented definition.
 export default function CapabilityTag({ capability }) {
   const definition = capabilityDefinition(capability);
   if (!definition) return <span className="sc-cap">{capability}</span>;
