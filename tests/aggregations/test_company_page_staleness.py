@@ -138,7 +138,8 @@ def test_heartbeat_touches_no_revision_but_completion_does(prepared):
     session.execute(update(Job).where(Job.id == job.id).values(status=JobStatus.completed))
     session.commit()
     touched = {key for key, *_ in set(revisions(session)) - set(before)}
-    assert {f"legacy:job:{job.id}", f"address:{address}"} <= touched
+    assert f"address:{address}" in touched
+    assert not any(key.startswith("legacy:") for key in touched)
 
 
 def test_migration_round_trip():
@@ -162,9 +163,15 @@ def test_migration_round_trip():
         def columns(table):
             return {c["name"] for c in sa.inspect(engine).get_columns(table)}
 
+        def nullable(table, column):
+            return next(c["nullable"] for c in sa.inspect(engine).get_columns(table) if c["name"] == column)
+
+        assert not nullable("company_page_snapshots", "protocol_id")
+
         command.downgrade(config, "e1c72a9d4b03")
         assert "version" in columns("company_page_snapshots")
         assert "changed_at" not in columns("company_page_revisions")
+        assert nullable("company_page_snapshots", "protocol_id")
         run_alembic_upgrade(url)
         assert "version" not in columns("company_page_snapshots")
         assert {"schema_version", "functions_semantic_epoch", "summary_builder_digest"} <= columns(

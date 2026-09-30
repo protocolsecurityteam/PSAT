@@ -73,13 +73,12 @@ def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
 
 
 def eligible_company_protocol_ids(session: Session) -> list[int]:
-    """Find modern company pages using the live resolver's membership rules.
+    """Find company pages using the live resolver's membership rules.
 
     Reanalysis may repoint Contract.job_id before it completes. Match historical
     completed jobs by address and chain instead. Address-bearing jobs have a
     non-null chain_id enforced by ck_jobs_chain_id_required_for_address.
     Project distinct scalar chain pairs, never job requests or ORM graphs.
-    Legacy company-only identities are discovered separately for preparation.
     """
     rows = session.execute(
         select(Contract.protocol_id, Contract.chain, Job.chain_id)
@@ -95,26 +94,16 @@ def eligible_company_protocol_ids(session: Session) -> list[int]:
     return sorted({pid for pid, chain, job_chain_id in rows if job_chain_id == _contract_chain_id(chain)})
 
 
-def eligible_company_names(session: Session) -> dict[str, int | None]:
-    """Small identity projection; legacy graphs are resolved only by the builder."""
-    companies: dict[str, int | None] = {
+def eligible_company_names(session: Session) -> dict[str, int]:
+    """Company name -> protocol id. A company is a Protocol row; a Job.company
+    string alone (a run before discovery creates the row, or an alias spelling
+    of an existing protocol) never identifies one."""
+    return {
         name: pid
         for name, pid in session.execute(
             select(Protocol.name, Protocol.id).where(Protocol.id.in_(eligible_company_protocol_ids(session)))
         )
     }
-    for name in session.scalars(
-        select(Job.company)
-        .where(
-            Job.company.is_not(None),
-            Job.company != "",
-            ~select(Protocol.id).where(Protocol.name == Job.company).exists(),
-        )
-        .distinct()
-    ):
-        if name is not None:
-            companies[name] = None
-    return companies
 
 
 def _job_chain_name(job: Job) -> str:
@@ -154,96 +143,46 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
     etherfi contract carries Job.protocol_id=etherfi even though the
     WstETH Contract row is correctly a non-member. Filtering by
     Contract.protocol_id keeps the surface page consistent with the
-    gate's witnessed member set.
-
-    Legacy fallback: no Protocol row but a Job has ``company == name``;
-    we walk ``request.parent_job_id`` chains across all completed jobs to
-    backfill the company graph.
+    gate's witnessed member set. No Protocol row means no company.
     """
     protocol_row = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
-
-    if protocol_row:
-        track(session, "protocol", [protocol_row.id])
-        # Join Jobs to Contracts on the natural key. The address column on
-        # contracts is already stored lowercased (see db/queue/discovery.py); jobs
-        # store the address as-provided, so lowercase the job side for the
-        # join. The SQL join stays address-only (a name-string ``Contract.chain``
-        # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,
-        # and a raw string compare would drop legitimate rows on alias / NULL
-        # mismatch); chain agreement is enforced in Python below via the registry
-        # so a mainnet job never pairs with a same-address L2 contract.
-        # On mainnet-only data every pair agrees, so output is unchanged.
-        rows = session.execute(
-            select(Job, Contract.chain)
-            .join(Contract, Contract.address == func.lower(Job.address))
-            .where(
-                Contract.protocol_id == protocol_row.id,
-                Job.status == JobStatus.completed,
-                # A collection retry has no full-analysis artifacts of its own.
-                Job.request["effects_resume_work_id"].astext.is_(None),
-                Job.address.isnot(None),
-            )
-        ).all()
-        # One job per (chain, address) entity — newest wins. Duplicate jobs at
-        # one entity are legal (an admin re-analysis, or a cascade child that
-        # raced the spawn dedup); every downstream pass renders per JOB, so
-        # collapsing here is what keeps the surface at one card per entity.
-        best_by_entity: dict[str, Job] = {}
-        for job, contract_chain in rows:
-            if not _job_matches_contract_chain(job, contract_chain):
-                continue
-            key = _entity_key(contract_chain, job.address)
-            prev = best_by_entity.get(key)
-            if prev is None or _job_recency(job) > _job_recency(prev):
-                best_by_entity[key] = job
-        return protocol_row, list(best_by_entity.values())
-
-    # Only completed rows have a response-relevant updated_at; heartbeats on
-    # in-progress jobs must not reorder legacy membership.
-    company_job = session.execute(
-        select(Job)
-        .where(Job.company == name, Job.status == JobStatus.completed)
-        .order_by(Job.updated_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if company_job is None:
+    if protocol_row is None:
         return None, []
 
-    company_job_id = str(company_job.id)
-    all_completed = (
-        session.execute(
-            select(Job).where(Job.status == JobStatus.completed, Job.request["effects_resume_work_id"].astext.is_(None))
+    track(session, "protocol", [protocol_row.id])
+    # Join Jobs to Contracts on the natural key. The address column on
+    # contracts is already stored lowercased (see db/queue/discovery.py); jobs
+    # store the address as-provided, so lowercase the job side for the
+    # join. The SQL join stays address-only (a name-string ``Contract.chain``
+    # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,
+    # and a raw string compare would drop legitimate rows on alias / NULL
+    # mismatch); chain agreement is enforced in Python below via the registry
+    # so a mainnet job never pairs with a same-address L2 contract.
+    # On mainnet-only data every pair agrees, so output is unchanged.
+    rows = session.execute(
+        select(Job, Contract.chain)
+        .join(Contract, Contract.address == func.lower(Job.address))
+        .where(
+            Contract.protocol_id == protocol_row.id,
+            Job.status == JobStatus.completed,
+            # A collection retry has no full-analysis artifacts of its own.
+            Job.request["effects_resume_work_id"].astext.is_(None),
+            Job.address.isnot(None),
         )
-        .scalars()
-        .all()
-    )
-    jobs_by_id = {str(j.id): j for j in all_completed}
-    jobs_by_id[company_job_id] = company_job
-
-    def belongs_to_company(job: Job) -> bool:
-        seen: set[str] = set()
-        current: Job | None = job
-        while current is not None:
-            if current.company == name:
-                return True
-            request = current.request if isinstance(current.request, dict) else {}
-            parent_id = request.get("parent_job_id")
-            if not isinstance(parent_id, str) or parent_id in seen:
-                return False
-            seen.add(parent_id)
-            current = jobs_by_id.get(parent_id)
-        return False
-
-    # Same one-job-per-entity collapse as the protocol path (newest wins).
-    legacy_best: dict[str, Job] = {}
-    for j in all_completed:
-        if not j.address or not belongs_to_company(j):
+    ).all()
+    # One job per (chain, address) entity — newest wins. Duplicate jobs at
+    # one entity are legal (an admin re-analysis, or a cascade child that
+    # raced the spawn dedup); every downstream pass renders per JOB, so
+    # collapsing here is what keeps the surface at one card per entity.
+    best_by_entity: dict[str, Job] = {}
+    for job, contract_chain in rows:
+        if not _job_matches_contract_chain(job, contract_chain):
             continue
-        key = _entity_key(_job_chain_name(j), j.address)
-        prev = legacy_best.get(key)
-        if prev is None or _job_recency(j) > _job_recency(prev):
-            legacy_best[key] = j
-    return None, list(legacy_best.values())
+        key = _entity_key(contract_chain, job.address)
+        prev = best_by_entity.get(key)
+        if prev is None or _job_recency(job) > _job_recency(prev):
+            best_by_entity[key] = job
+    return protocol_row, list(best_by_entity.values())
 
 
 def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]:

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from db.models import CompanyPageSnapshot as Page
 from db.models import Contract, EffectiveFunction, PendingEffectsWork, TvlSnapshot
@@ -174,62 +174,33 @@ def test_unrelated_deploys_reuse_but_builder_changes_serve_stale_until_rebuilt(p
         assert source(session, protocol.name, section) == "prepared"
 
 
-def test_legacy_company_is_prepared_and_new_descendants_invalidate(prepared):
-    from sqlalchemy import select
+@pytest.mark.parametrize("company", ["unresolved-company", "Prepared Example"], ids=["no-protocol", "alias"])
+def test_company_string_without_a_protocol_row_gets_no_page(prepared, company):
+    from fastapi import HTTPException
 
-    from db.models import Protocol
+    from services.aggregations import CompanyNotFound
+    from services.aggregations.company_overview.payload import build_company_summary
 
     session, protocol, factory = prepared
-    assert worker.refresh_one(factory) == "prepared"
-    name = "legacy-company"
-    address = _addr("legacy")
-    root = _add_job(session, address=address, company=name)
+    # A company run's jobs carry the requested spelling before, or instead of,
+    # the Protocol row's name; their completed children must not form a page.
+    address = _addr("company-tagged")
+    root = _add_job(session, address=address, company=company)
     _add_contract(session, address=address, job=root)
-    assert pages.prepared_or_pending(session, request(), name).status_code == 503
-    assert worker.refresh_one(factory) == "prepared"
-    for section in pages.SECTIONS:
-        assert pages.prepared_or_pending(session, request(), name, section=section).status_code == 200
-    assert session.scalar(select(Protocol).where(Protocol.name == name)) is None
-    child_address = _addr("legacy-child")
-    child = _add_job(session, address=child_address, request={"parent_job_id": str(root.id)})
+    child_address = _addr("company-tagged-child")
+    child = _add_job(session, address=child_address, company=company, request={"parent_job_id": str(root.id)})
     _add_contract(session, address=child_address, job=child)
-    ready(session)
-    assert source(session, name) == "prepared-stale"
     assert worker.refresh_one(factory) == "prepared"
-    response = pages.read_response(session, request(), name)
-    assert response is not None
-    assert json.loads(bytes(response.body))["contract_count"] == 2
-    # Adopting the name as a protocol replaces the legacy cache, without a
-    # duplicate claim or returning the old graph for the new identity.
-    adopted = _add_protocol(session, name)
-    session.execute(update(Contract).where(Contract.job_id == root.id).values(protocol_id=adopted.id))
-    ready(session)
-    assert pages.read_response(session, request(), name) is None
-    assert worker.refresh_one(factory) == "prepared"
-    response = pages.read_response(session, request(), name)
-    assert response is not None
-    assert json.loads(bytes(response.body))["protocol_id"] == adopted.id
-
-
-def test_heartbeat_on_in_progress_company_job_does_not_change_legacy_membership(prepared):
-    from uuid import uuid4
-
-    from db.models import Job, JobStatus
-    from db.queue.jobs import heartbeat_job
-    from services.aggregations.company_overview import resolve_company_jobs
-
-    session, _, _ = prepared
-    name = "legacy-heartbeat"
-    lease = uuid4()
-    proxy = _add_job(session, address=_addr("legacy-proxy"), company=name, status=JobStatus.processing)
-    session.execute(update(Job).where(Job.id == proxy.id).values(lease_id=lease))
-    _add_job(session, address=_addr("legacy-root"), company=name)
-    # Implementation children carry no company; only the parent walk links them.
-    _add_job(session, address=_addr("legacy-impl"), request={"parent_job_id": str(proxy.id)})
-    before = {job.id for job in resolve_company_jobs(session, name)[1]}
-    heartbeat_job(session, proxy.id, lease_id=lease)
-    session.expire_all()
-    assert {job.id for job in resolve_company_jobs(session, name)[1]} == before
+    assert worker.refresh_one(factory) == "idle"
+    assert session.scalars(select(Page.company_name)).all() == [protocol.name]
+    for section in pages.SECTIONS:
+        with pytest.raises(HTTPException) as caught:
+            pages.prepared_or_pending(session, request(), company, section=section)
+        assert caught.value.status_code == 404
+    with pytest.raises(CompanyNotFound):
+        worker.build_company_overview(session, company)
+    with pytest.raises(CompanyNotFound):
+        build_company_summary(session, company)
 
 
 def test_protocol_without_completed_members_does_not_wait_forever(prepared):

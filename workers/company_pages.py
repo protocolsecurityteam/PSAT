@@ -14,7 +14,7 @@ import signal
 from datetime import timedelta
 from threading import Event
 
-from sqlalchemy import and_, case, delete, func, not_, or_, select, text, update
+from sqlalchemy import and_, case, func, not_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import CompanyPageSnapshot as Page
@@ -55,25 +55,18 @@ def refresh_one(session_factory=SessionLocal) -> str:
     # transaction while trying to insert already-existing primary keys.
     with session_factory() as seed:
         identities = eligible_company_names(seed)
-        # A formerly legacy name can acquire real membership. Retire its old
-        # cache identity without creating or changing any domain records.
-        seed.execute(
-            delete(Page).where(
-                Page.protocol_id.is_(None), select(Protocol.id).where(Protocol.name == Page.company_name).exists()
-            )
-        )
         existing = set(seed.scalars(select(Page.cache_key)))
         missing = [
             {"cache_key": key, "company_name": name, "protocol_id": pid}
             for name, pid in identities.items()
-            if (key := f"protocol:{pid}" if pid is not None else f"legacy:{name}") not in existing
+            if (key := f"protocol:{pid}") not in existing
         ]
         if missing:
             seed.execute(pg_insert(Page).values(missing).on_conflict_do_nothing())
         seed.commit()
     with session_factory() as write:
         now = func.statement_timestamp()
-        renamed = Page.company_name.is_distinct_from(func.coalesce(Protocol.name, Page.company_name))
+        renamed = Page.company_name != Protocol.name
         missing, due, fresh = {}, {}, {}
         for section in SECTIONS:
             columns = section_columns(section)
@@ -96,15 +89,15 @@ def refresh_one(session_factory=SessionLocal) -> str:
             select(
                 Page.cache_key,
                 Page.protocol_id,
-                func.coalesce(Protocol.name, Page.company_name),
+                Protocol.name,
                 Page.company_name,
                 Page.attempts,
                 *(due[s].label("due_" + s) for s in SECTIONS),
                 *(fresh[s].label("fresh_" + s) for s in SECTIONS),
             )
-            .outerjoin(Protocol, Protocol.id == Page.protocol_id)
+            .join(Protocol, Protocol.id == Page.protocol_id)
             .where(
-                func.coalesce(Protocol.name, Page.company_name).in_(identities),
+                Protocol.name.in_(identities),
                 Page.next_attempt_at <= func.clock_timestamp(),
                 or_(*due.values()),
             )

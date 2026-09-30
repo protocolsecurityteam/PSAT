@@ -193,23 +193,13 @@ def test_resolve_company_jobs_excludes_orphan_contracts(db_session):
     )
 
 
-def test_resolve_company_jobs_legacy_fallback_with_parent_chain(db_session):
-    """Legacy data: no Protocol row. Parent → child via ``parent_job_id``."""
-    company = f"legacy-{uuid.uuid4().hex[:8]}"
-    parent_addr = _addr("p")
+def test_company_tagged_jobs_without_a_protocol_are_not_a_company(db_session):
+    company = f"unresolved-{uuid.uuid4().hex[:8]}"
+    parent = _add_job(db_session, address=_addr("p"), company=company, name="parent")
     child_addr = _addr("c")
-    parent = _add_job(db_session, address=parent_addr, company=company, name="parent")
-    child = _add_job(
-        db_session,
-        address=child_addr,
-        name="child",
-        request={"address": child_addr, "parent_job_id": str(parent.id)},
-    )
-    _add_job(db_session, address=_addr("o"), name="other")
+    _add_job(db_session, address=child_addr, request={"address": child_addr, "parent_job_id": str(parent.id)})
 
-    protocol, jobs = resolve_company_jobs(db_session, company)
-    assert protocol is None
-    assert {j.id for j in jobs} == {parent.id, child.id}
+    assert resolve_company_jobs(db_session, company) == (None, [])
 
 
 def test_resolve_company_jobs_unknown_returns_empty(db_session):

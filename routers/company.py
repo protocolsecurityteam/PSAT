@@ -136,11 +136,11 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
     response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
     response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
-        protocol_row, jobs = resolve_company_jobs(session, company_name)
-        if protocol_row is None and not jobs:
+        protocol_row, _ = resolve_company_jobs(session, company_name)
+        if protocol_row is None:
             _log_endpoint("/api/company/{name}/addresses", company=company_name, started=started, outcome="not_found")
             raise HTTPException(status_code=404, detail="Company not found")
-        addresses = all_addresses_for_protocol(session, protocol_row, jobs)
+        addresses = all_addresses_for_protocol(session, protocol_row)
     _log_endpoint(
         "/api/company/{name}/addresses",
         company=company_name,
@@ -510,11 +510,7 @@ def refresh_company(company_name: str) -> dict:
         if not enabled():
             raise HTTPException(409, "Prepared company responses are disabled")
         # Touch revisions, never lock the result row held by a running builder.
-        keys = (
-            [f"protocol:{protocol_id}:manual", f"summary:protocol:{protocol_id}:manual"]
-            if protocol_id is not None
-            else ["legacy:job:manual"]
-        )
+        keys = [f"protocol:{protocol_id}:manual", f"summary:protocol:{protocol_id}:manual"]
         session.execute(text("SELECT psat_page_touch(:keys)"), {"keys": keys})
         session.commit()
     return {"status": "preparing"}

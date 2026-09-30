@@ -14,8 +14,8 @@ class CompanyPageSnapshot(Base):
     __tablename__ = "company_page_snapshots"
 
     cache_key: Mapped[str] = mapped_column(String(300), primary_key=True)
-    protocol_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("protocols.id", ondelete="CASCADE"), unique=True
+    protocol_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("protocols.id", ondelete="CASCADE"), unique=True, nullable=False
     )
     company_name: Mapped[str] = mapped_column(String(255), index=True)
     source_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

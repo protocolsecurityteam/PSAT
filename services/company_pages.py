@@ -107,7 +107,7 @@ def _revision_value(key):
     # Only group fingerprints need a function call. Ordinary dependencies use
     # the indexed join below, not one SQL-function invocation per contract.
     return case(
-        (or_(key.contains("protocol:"), key == "legacy:jobs"), func.psat_page_revision(key)),
+        (key.contains("protocol:"), func.psat_page_revision(key)),
         else_=cast(CompanyPageRevision.token, String),
     )
 
@@ -186,9 +186,7 @@ def servable(section: str):
     return func.coalesce(and_(_markers_current(section), or_(fresh, _within_stale_limit(section))), False)
 
 
-def dependencies_for(protocol_id: int | None, section: str) -> set[str]:
-    if protocol_id is None:
-        return {"legacy:jobs", "summary:all"} if section == "summary" else {"legacy:jobs", "all", "overview:all"}
+def dependencies_for(protocol_id: int, section: str) -> set[str]:
     if section == "summary":
         return {"summary:all", f"summary:protocol:{protocol_id}"}
     deps = {"all", f"protocol:{protocol_id}"}
@@ -236,8 +234,7 @@ def revisions_current(section: str = "overview"):
             revisions.has_key("overview:all"),
             revisions.has_key(literal("overview:protocol:") + cast(page.protocol_id, String)),
         ]
-    legacy_required = and_(revisions.has_key(prefix + "all"), revisions.has_key("legacy:jobs"))
-    return and_(case((page.protocol_id.is_(None), legacy_required), else_=and_(*required)), ~exists(changed))
+    return and_(*required, ~exists(changed))
 
 
 def read_response(
@@ -256,15 +253,9 @@ def read_response(
             columns.digest == builder_digest(),
             revisions_current(section),
         )
-        .outerjoin(Protocol, Protocol.id == CompanyPageSnapshot.protocol_id)
+        .join(Protocol, Protocol.id == CompanyPageSnapshot.protocol_id)
         .where(
-            or_(
-                Protocol.name == name,
-                and_(
-                    CompanyPageSnapshot.protocol_id.is_(None),
-                    ~select(Protocol.id).where(Protocol.name == name).correlate(None).exists(),
-                ),
-            ),
+            Protocol.name == name,
             CompanyPageSnapshot.company_name == name,
             _markers_current(section),
         )

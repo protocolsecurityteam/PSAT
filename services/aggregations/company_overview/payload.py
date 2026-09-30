@@ -55,19 +55,10 @@ def _protocol_inventory_filter(protocol_id: int):
     )
 
 
-def _all_addresses_count(session: Session, protocol_row: Protocol | None, jobs: list[Job]) -> int:
-    if protocol_row:
-        return int(
-            session.execute(
-                select(func.count()).select_from(Contract).where(_protocol_inventory_filter(protocol_row.id))
-            ).scalar_one()
-        )
-    fallback_job_ids = [j.id for j in jobs]
-    if not fallback_job_ids:
-        return 0
+def _all_addresses_count(session: Session, protocol_row: Protocol) -> int:
     return int(
         session.execute(
-            select(func.count()).select_from(Contract).where(Contract.job_id.in_(fallback_job_ids))
+            select(func.count()).select_from(Contract).where(_protocol_inventory_filter(protocol_row.id))
         ).scalar_one()
     )
 
@@ -187,21 +178,10 @@ def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict
     return out
 
 
-def all_addresses_for_protocol(
-    session: Session, protocol_row: Protocol | None, jobs: list[Job]
-) -> list[dict[str, Any]]:
-    if protocol_row:
-        all_contract_rows = (
-            session.execute(select(Contract).where(_protocol_inventory_filter(protocol_row.id))).scalars().all()
-        )
-    else:
-        fallback_job_ids = [j.id for j in jobs]
-        if fallback_job_ids:
-            all_contract_rows = list(
-                session.execute(select(Contract).where(Contract.job_id.in_(fallback_job_ids))).scalars()
-            )
-        else:
-            all_contract_rows = []
+def all_addresses_for_protocol(session: Session, protocol_row: Protocol) -> list[dict[str, Any]]:
+    all_contract_rows = (
+        session.execute(select(Contract).where(_protocol_inventory_filter(protocol_row.id))).scalars().all()
+    )
 
     # Prefetch impl-name lookup so proxy rows can expose the implementation
     # contract name alongside their own generic "UUPSProxy"/"ERC1967Proxy"
@@ -245,9 +225,7 @@ def all_addresses_for_protocol(
     )
 
 
-def _latest_tvl(session: Session, protocol_row: Protocol | None) -> TvlSummary | None:
-    if protocol_row is None:
-        return None
+def _latest_tvl(session: Session, protocol_row: Protocol) -> TvlSummary | None:
     latest_tvl = session.execute(
         select(TvlSnapshot)
         .where(TvlSnapshot.protocol_id == protocol_row.id)
@@ -277,9 +255,7 @@ def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -
     }
 
 
-def _balance_effects_coverage(session: Session, protocol: Protocol | None) -> dict[str, int]:
-    if protocol is None:
-        return {"incomplete": 0, "degraded": 0}
+def _balance_effects_coverage(session: Session, protocol: Protocol) -> dict[str, int]:
     states: dict[str, int] = {
         state: count
         for state, count in session.execute(
@@ -294,8 +270,7 @@ def _balance_effects_coverage(session: Session, protocol: Protocol | None) -> di
 def assemble_company_payload(
     session: Session,
     name: str,
-    protocol_row: Protocol | None,
-    jobs: list[Job],
+    protocol_row: Protocol,
     governance: GovernanceView,
     reach: ReachBlock,
     *,
@@ -303,7 +278,7 @@ def assemble_company_payload(
 ) -> CompanyOverviewResponse:
     payload: CompanyOverviewResponse = {
         "company": name,
-        "protocol_id": protocol_row.id if protocol_row else None,
+        "protocol_id": protocol_row.id,
         "contract_count": len(governance.contracts),
         "contracts": governance.contracts,
         "principals": governance.principals,
@@ -313,7 +288,7 @@ def assemble_company_payload(
         # Just the count here — the full inventory (~167 KB for ether.fi) is
         # served by /api/company/{name}/addresses and fetched lazily by
         # AddressesModal when the user opens it.
-        "all_addresses_count": _all_addresses_count(session, protocol_row, jobs),
+        "all_addresses_count": _all_addresses_count(session, protocol_row),
     }
 
     if include_summary:
@@ -324,7 +299,7 @@ def assemble_company_payload(
 
 def build_company_summary(session: Session, name: str) -> dict[str, Any]:
     protocol = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
-    if protocol is None and not session.scalar(select(Job.id).where(Job.company == name).limit(1)):
+    if protocol is None:
         raise CompanyNotFound(name)
     return {
         "tvl": _latest_tvl(session, protocol),
@@ -338,7 +313,7 @@ def build_company_overview(session: Session, name: str, *, include_summary: bool
 
     with _time_phase(timings_ms, "resolve_jobs"):
         protocol_row, jobs = resolve_company_jobs(session, name)
-    if not jobs:
+    if protocol_row is None or not jobs:
         raise CompanyNotFound(name)
     with _time_phase(timings_ms, "prefetch_contracts"):
         contracts_by_job_id = prefetch_contracts(session, jobs)
@@ -350,7 +325,7 @@ def build_company_overview(session: Session, name: str, *, include_summary: bool
         reach = _company_reach(session, contracts_by_job_id)
     with _time_phase(timings_ms, "assemble_payload"):
         payload = assemble_company_payload(
-            session, name, protocol_row, jobs, governance, reach, include_summary=include_summary
+            session, name, protocol_row, governance, reach, include_summary=include_summary
         )
 
     total_ms = int((time.monotonic() - start) * 1000)
