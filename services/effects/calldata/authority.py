@@ -19,24 +19,12 @@ from .trees import _authority_roles, _gate_ref, _mandatory_state_vars
 
 logger = logging.getLogger("services.effects.calldata")
 
-# ---------------------------------------------------------------------------
-# authority-change
-# ---------------------------------------------------------------------------
-
 
 def _normal_state_pairs(fn: FunctionFacts) -> set[tuple[str, str | None]]:
-    """``(var, member)`` pairs F writes, restricted to the hygiene class the
-    role-fact consumers trust (a reentrancy latch or a constant is not an effect)
-    and to body-origin writes.
-
-    Same reason as :func:`_latch_pairs`: a guard-origin entry is the modifier's
-    own bookkeeping read on F's gate, not an effect F causes, so it must not be
-    taken as "the state F mutates" when picking a gate target. Narrower surface
-    than the pause case — ``hygiene_class`` already excludes ``reentrancy_guard``
-    — and measured impact on the etherfi candidate set was zero (10 candidates
-    carry a guard-origin ``normal`` write; none of them selected a different gate
-    target). Kept anyway: an unsound input path that today's data happens not to
-    trip is how a wrong verdict reaches a protocol nobody sampled."""
+    """``(var, member)`` pairs F writes, limited to the hygiene class role-fact consumers trust and to body-origin
+    writes. Guard-origin entries are the modifier's own bookkeeping, not an effect F causes (see
+    :func:`_latch_pairs`).
+    """
     pairs: set[tuple[str, str | None]] = set()
     for write in fn.effect_info.get("state_writes") or []:
         if not isinstance(write, dict) or write.get("hygiene_class") != "normal":
@@ -52,9 +40,10 @@ def _normal_state_pairs(fn: FunctionFacts) -> set[tuple[str, str | None]]:
 
 
 def _authority_gate_target(facts: ContractFacts, fn: FunctionFacts) -> str | None:
-    """A function G whose MANDATORY, caller-authority gate reads state that F
-    writes — i.e. the gate F can move. Deterministic (sorted) pick; ``None`` when
-    no such G exists."""
+    """A function G whose mandatory caller-authority gate reads state F writes (the gate F can move).
+
+    Sorted pick; ``None`` if none.
+    """
     written = _normal_state_pairs(fn)
     if not written:
         return None
@@ -64,17 +53,18 @@ def _authority_gate_target(facts: ContractFacts, fn: FunctionFacts) -> str | Non
         tree = facts.trees[name]
         if not _authority_roles(tree) & set(_AUTHORITY_ROLES):
             continue
-        # Var-level, for the same member-path reason as ``guarded_functions``.
+        # Var-level, as in ``guarded_functions``.
         if _mandatory_state_vars(tree) & {var for var, _member in written}:
             return name
     return None
 
 
 def synthesize_authority(candidate: Candidate, facts: ContractFacts, fn: FunctionFacts) -> AuthorityPlanInputs | None:
-    """Applicable when F writes state that some other function reads as a
-    mandatory caller-authority gate. The mutation keeps encoder defaults — we do
-    not guess a grantee; the recipe only opens on a gate that opens to ALL the
-    random identities, so a guessed one could never help."""
+    """Applicable when F writes state another function reads as a mandatory caller-authority gate.
+
+    The mutation keeps encoder defaults: the recipe only opens on a gate that opens to all random identities, so
+    guessing a grantee couldn't help.
+    """
     target = _authority_gate_target(facts, fn)
     if target is None:
         return None

@@ -12,15 +12,11 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 
 logger = logging.getLogger("services.effects.calldata")
 
-# ---------------------------------------------------------------------------
-# Predicate-tree walking (mirrors ``claims.matchers._facts._mandatory_operands``)
-# ---------------------------------------------------------------------------
+# Mirrors ``claims.matchers._facts._mandatory_operands``.
 
 
 def _mandatory_leaves(tree: Any) -> Iterator[dict[str, Any]]:
-    """Leaves reachable with every ancestor a conjunction — the operand's value
-    can force a revert with no ``OR`` escape. Same separator the claims plane uses
-    to distinguish a real gate from a branch-mode selector."""
+    """Leaves reached through conjunctions only, so the operand can force a revert with no ``OR`` escape."""
 
     def walk(node: Any, mandatory: bool) -> Iterator[dict[str, Any]]:
         if not isinstance(node, dict):
@@ -66,16 +62,10 @@ def _mandatory_state_pairs(tree: Any) -> set[tuple[str, str | None]]:
 
 
 def guarded_functions(trees: Mapping[str, Any], pairs: Iterable[tuple[str, str | None]]) -> list[str]:
-    """Every function whose MANDATORY gate reads one of ``pairs`` — static's
-    predicted guard set (the scored denominator for the freeze/pause class).
+    """Every function whose mandatory gate reads one of ``pairs``: static's predicted guard set.
 
-    Matching is on the state-variable NAME; ``member_path`` is a refinement that
-    is NOT required to agree. It cannot be: an ERC-7201 latch is recorded as a
-    write to the slot var with an EMPTY member path (``PAUSABLE_STORAGE_SLOT``)
-    while the read operand carries ``member_path=["paused"]``, so a strict pair
-    match returns an empty guard set for every namespaced-storage pause. Var-level
-    matching over-includes at worst, which only widens the probe set — the
-    observed radius stays a lower bound and the scored denominator is unchanged.
+    Matched on variable name only: an ERC-7201 latch is written with an empty member path but read with
+    ``member_path=["paused"]``. Over-inclusion only widens the probe set.
     """
     wanted_vars = {var for var, _member in pairs}
     if not wanted_vars:
@@ -88,9 +78,7 @@ def _mandatory_state_vars(tree: Any) -> set[str]:
 
 
 def _param_index_by_name(tree: Any) -> dict[str, int]:
-    """``param name -> positional index`` recovered from predicate-tree leaf
-    operands (the only place the static plane records both). Absent ⇒ the caller
-    fails closed rather than guessing a slot."""
+    """``param name -> index`` from predicate-tree operands; absent means fail closed."""
     out: dict[str, int] = {}
     for leaf in _all_leaves(tree):
         for op in _operands(leaf):
@@ -108,22 +96,11 @@ def _authority_roles(tree: Any) -> set[str]:
 
 
 def _gate_ref(tree: Any) -> str:
-    """A gate STRUCTURE descriptor — authority roles, never an address.
+    """A gate-structure descriptor (roles, never an address).
 
-    ``gate:none`` is emitted for a tree-less function, which covers BOTH a
-    proven-ungated one and one whose real gate the static plane could not lower
-    (``guard_extraction_uncertain`` and the rest of the tree-less residue) — so
-    it is not on its own a claim that no gate exists. It never has to be: the
-    other half of the cache identity is the kernel ``behavior_hash``, which is
-    the whole metadata-stripped runtime bytecode (immutables masked).
-    The gate lives inside that bytecode, so two rows can share a ``gate:none``
-    only when their code — and therefore their gate — is identical, and masking
-    an immutable authority erases the ADDRESS a gate compares against, never the
-    comparison. ``tests/test_effects_hashing.py`` pins that.
-
-    The consumers of an absent role (the authority-change gate-moving pick, the pauser
-    probe) each fail closed to a probe that is not synthesized, so a gate that
-    did not lower costs recall, never a widened verdict.
+    ``gate:none`` covers both ungated and un-lowerable gates, which is fine because the cache identity also includes the
+    kernel ``behavior_hash`` (whole stripped bytecode), so rows sharing ``gate:none`` share their gate.
+    ``tests/test_effects_hashing.py`` pins that. Consumers of an absent role fail closed to no probe.
     """
     roles = sorted(_authority_roles(tree))
     return "gate:" + ("+".join(roles) if roles else "none")

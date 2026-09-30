@@ -1,5 +1,4 @@
-"""Effects resolution: behavioral-hash identity, selection/ordering, and the
-fork/eth_call simulation harness. Feature-flagged via PSAT_EFFECTS_STAGE.
-``claims_bridge`` bridges *proven* verdicts into registry claims so the frontend
-renders them as observable labels; the score does not consume effect verdicts,
-and how it should consume them is unspecified."""
+"""Effects resolution: behavioural-hash identity, selection/ordering, and the fork/eth_call simulation harness (flag
+``PSAT_EFFECTS_STAGE``). ``claims_bridge`` turns proven verdicts into registry claims; the score doesn't consume
+verdicts yet.
+"""

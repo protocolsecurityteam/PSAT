@@ -1,7 +1,7 @@
 """Resume selected effects once deferred token collection supplies their inputs.
 
-This is a collection dependency, not a general effects retry or coverage queue.
-All writes use the caller's transaction; completed work is never rearmed.
+A collection dependency, not a general retry or coverage queue. All writes use the caller's transaction; completed work
+is never rearmed.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ MAX_ATTEMPTS = 4
 
 
 def balance_owners(session, protocol_id, chain_id, addresses):
-    """Resolve observed holders separately from the contracts supplying code."""
     wanted = {a.lower() for a in addresses}
     owners = {}
     for cid, address, chain in session.execute(
@@ -41,7 +40,6 @@ def balance_owners(session, protocol_id, chain_id, addresses):
 
 
 def needs_token_inventory(session, candidate):
-    """Only a token argument/executor payload needs a discovered token universe."""
     from services.effects.calldata.executor import executor_call
     from services.effects.calldata.facts import load_contract_facts, resolve_function
     from services.effects.calldata.flows import _flow_directions
@@ -81,7 +79,6 @@ def dependent_families(session, candidate):
 
 
 def collected_owners(session, owner_ids):
-    """An accepted empty portfolio also resolves the collection prerequisite."""
     if not owner_ids:
         return set()
     return set(
@@ -97,11 +94,9 @@ def collected_owners(session, owner_ids):
 
 
 def prepare_work(session, candidates, *, protocol_id, chain_id, job_id):
-    """Remember missing collection inputs for already-selected functions only.
+    """Record missing collection inputs for already-selected functions only.
 
-    Existing probes still run: their getter/seeding paths may succeed without a
-    portfolio. No resource-cap exclusions, unknown verdict backfill, or new token
-    eligibility is introduced here.
+    Existing probes still run (their seeding may succeed without a portfolio); nothing else changes.
     """
     owners = balance_owners(session, protocol_id, chain_id, [c.probe_target for c in candidates])
     collected = collected_owners(session, list(owners.values()))
@@ -154,8 +149,7 @@ def prepare_work(session, candidates, *, protocol_id, chain_id, job_id):
                 continue
         row.queued_job_id = job_id
         row.state = "queued"
-        # Capture inputs actually supplied to this analysis, not observations
-        # published concurrently while its probes are running.
+        # The inputs actually supplied, not ones published while probes ran.
         row._inputs_ready = ready[c.function_id]
         owned[(row.function_id, row.effect_family)] = row
     return owned
@@ -164,8 +158,7 @@ def prepare_work(session, candidates, *, protocol_id, chain_id, job_id):
 def finish_work(session, rows, *, job_id):
     """Close after input-backed analysis or proof; otherwise await collection.
 
-    Call after verdict/claim persistence. An unknown result with available inputs
-    is an ordinary analysis outcome, not a reason for another collection retry.
+    Call after persistence. An unknown with inputs available is an ordinary outcome, not a retry reason.
     """
     owned = [row for row in rows.values() if row.queued_job_id == job_id]
     waiting = [row.function_id for row in owned if not row._inputs_ready]
@@ -192,7 +185,6 @@ def finish_work(session, rows, *, job_id):
 
 
 def reconcile_pending_effects(session, protocol_id=None, limit=25):
-    """Queue only recorded collection gaps, retaining ordinary job lease recovery."""
     from services.effects.selection import _MAX_TOKEN_ARG_CANDIDATES, _token_holdings_by_contract
 
     now = datetime.now(timezone.utc)
