@@ -1,4 +1,4 @@
-"""Unified protocol monitoring — scans blocks for all governance + proxy events."""
+"""Unified protocol monitoring: the event scanner and the state poller for governance and proxy changes."""
 
 from __future__ import annotations
 
@@ -137,13 +137,8 @@ def get_latest_block(rpc_url: str, *, chain_id: int | None = None) -> int:
 
 @dataclass
 class _Cohort:
-    """A block-aligned batch of monitored contracts scanned together.
-
-    Members share a chain and a ``last_scanned_block // MAX_BLOCK_RANGE``
-    bucket, and are capped at ``PSAT_SCAN_ADDRESS_BATCH`` addresses so one
-    eth_getLogs request stays under provider multi-address caps. ``cursor``
-    is the running max-scanned block for the batch; it only advances in the
-    transaction that persisted a window's events.
+    """Contracts scanned together: one chain and block bucket, capped at ``PSAT_SCAN_ADDRESS_BATCH`` addresses per
+    eth_getLogs. ``cursor`` only advances in the transaction that persisted a window's events.
     """
 
     chain: str
@@ -152,22 +147,14 @@ class _Cohort:
     cursor: int
     done: bool = False
     failed: bool = False
-    #: Windows this cohort has been served in the current pass. Only the
-    #: runaway backstop reads it (see ``scan_for_events``).
+    # Read only by the runaway backstop.
     windows_this_pass: int = 0
-    #: Set each time the cohort is considered: its lag exceeds
-    #: ``PSAT_SCAN_RUNAWAY_LAG_BLOCKS``.
+    # Lag exceeds the chain's runaway threshold.
     runaway: bool = False
 
 
 class ScanResult(list):
-    """The new events from one scan pass, plus pass-level heartbeat metrics.
-
-    Subclasses ``list`` so every existing caller that treats the return as a
-    list of ``MonitoredEvent`` (``len``, iteration, indexing, truthiness) keeps
-    working, while ``run_scan_loop`` reads ``budget_exhausted`` to pick the
-    busy vs. full re-run interval.
-    """
+    """A pass's new events plus heartbeat metrics; a ``list`` subclass so callers can treat it as events."""
 
     def __init__(
         self,
@@ -190,13 +177,7 @@ class ScanResult(list):
 
 
 def _scan_topics_union(session: Session) -> list[str]:
-    """Registry topic0s ∪ the per-pass set of tracked-topic topic0s.
-
-    The hand-rolled registry owns OZ / Safe / Timelock / proxy events
-    (semantics beyond raw decode); the ``SELECT DISTINCT`` over
-    ``monitoring_config->'tracked_topics'`` covers the long tail of per-emitter
-    ABI variants (Solmate, DSAuth, Compound, …) without hydrating any row.
-    """
+    """Registry topic0s plus the distinct per-contract tracked topic0s (read without hydrating rows)."""
     rows = session.execute(
         text(
             """
@@ -218,12 +199,7 @@ def _scan_topics_union(session: Session) -> list[str]:
 
 
 def _notify_committed_events(session: Session, events: list[MonitoredEvent]) -> None:
-    """Notify a batch of already-committed events, swallowing failures.
-
-    Shared by the scanner (per window) and the poller (per chunk): both notify
-    only after the events are durable, so a notification failure must not leave
-    the session pending-rollback and abort the rest of the pass.
-    """
+    """Notify already-committed events, swallowing failures so the pass continues."""
     if not events:
         return
     try:
@@ -232,31 +208,16 @@ def _notify_committed_events(session: Session, events: list[MonitoredEvent]) -> 
         notify_protocol_events(session, events)
     except Exception as exc:
         logger.warning("Protocol notification failed: %s", exc, extra={"exc_type": type(exc).__name__})
-        # The events are already committed; a failed read here must not leave
-        # the session in a pending-rollback state that would abort the pass.
+        # Events are committed; don't leave the session pending-rollback.
         session.rollback()
 
 
 def _poll_entry_for_controller(mc: MonitoredContract, controller_id: str | None) -> dict | None:
-    """The persisted polling-plan entry PROVEN to read *controller_id*, or None.
+    """The polling-plan entry proven to read *controller_id* (``source == "analyzer:<id>"``), or None.
 
-    The proof is the entry's ``source``: ``build_polling_plan`` stamps
-    ``analyzer:<controller_id>`` on exactly the entry it projected from that
-    controller's read spec, so the match is an identity rather than a
-    resemblance.
-
-    A name match on ``entry["field"]`` is deliberately NOT accepted. Two
-    different slots share a name routinely — ``build_polling_plan`` drops an
-    analyzer entry whose field collides with a vendored standard
-    (``_VENDORED_FIELD_WINS``), so an analyzer controller called
-    ``implementation`` would name-match the vendored EIP-1967 slot entry and a
-    read against it would publish one storage location's value under a
-    different controller's id. It would also let runtime re-classification
-    PROMOTE a spec whose analyzer proved no getter at all, which is invariant 4
-    inverted. The cost of refusing it is bounded and stated: such a controller
-    is recorded not-determined instead of read, ``last_known_state`` is not
-    advanced, and the rotation poller — which does poll the vendored entry —
-    remains the backstop that catches the change within one poll interval.
+    No name matching: an analyzer controller called ``implementation`` would match the vendored EIP-1967 entry and
+    publish one slot's value under another's id. Unmatched controllers are recorded not-determined; the rotation poller
+    is the backstop.
     """
     plan = (mc.monitoring_config or {}).get("polling_plan")
     if not isinstance(plan, list) or not controller_id:
@@ -270,12 +231,9 @@ def _poll_entry_for_controller(mc: MonitoredContract, controller_id: str | None)
 
 @dataclass
 class _DirtyController:
-    """One controller a hint occurrence marked for verification this pass.
+    """A controller a hint marked for verification this pass.
 
-    Repeat occurrences within the pass coalesce onto the same key, so the read
-    count is bounded by distinct controllers rather than by traffic. The
-    marking is in-memory only: a crash before the read loses the hint, the next
-    occurrence re-marks, and the regular poller remains the backstop.
+    Repeats coalesce; in-memory only (the poller is the backstop after a crash).
     """
 
     monitored_contract_id: uuid.UUID
@@ -286,12 +244,8 @@ class _DirtyController:
     block_number: int
 
 
-# Per-controller cursor for verification-read fairness: monotonic clock of the
-# last pass that actually READ this controller. Process-local on purpose — the
-# scanner is a per-chain singleton under its daemon lease, so this is already
-# the right scope, and a restart merely resets everyone to never-verified.
-# It orders the budget, so it is a fairness heuristic and never a witness: no
-# published value depends on it.
+# Monotonic time of each controller's last verification read, for fair budget ordering. Process-local (the scanner is a
+# per-chain singleton); never a witness.
 _LAST_VERIFIED_AT: dict[tuple[uuid.UUID, str], float] = {}
 _LAST_VERIFIED_MAX = 4096
 
@@ -305,16 +259,10 @@ def _prune_verification_cursors() -> None:
 
 
 def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
-    """The witness tier of one enrolled tracked-topic *spec*.
+    """The witness tier of one tracked-topic *spec*.
 
-    Enrollment stamps ``witness_tier``; that value wins. A spec persisted
-    before the taxonomy landed carries none, so it is re-classified here from
-    what the row does carry — with the controller's readability taken from the
-    persisted polling plan, which is the same projection
-    ``_is_poll_decodable`` produced at enrollment. Re-classifying rather than
-    grandfathering is the demotion-only rule applied to legacy rows: an
-    unclassified spec has no proof, and a bare occurrence must not publish a
-    change claim just because nobody has re-enrolled the contract yet.
+    Enrollment's stamp wins. Unstamped legacy specs are re-classified with readability from the persisted polling plan,
+    so they can only demote.
     """
     tier = spec.get("witness_tier")
     if tier in WITNESS_TIERS:
@@ -326,20 +274,12 @@ def _resolve_spec_tier(spec: dict, mc: MonitoredContract) -> str:
         controller_id=spec.get("controller_id"),
         inputs=spec.get("inputs"),
         effect_tags=spec.get("effect_tags"),
-        # The member witness promotes only a spec that publishes under the
-        # member vocabulary. Enrollment refuses to mint that type when the
-        # qualification cannot be published (no mapping named, a type that would
-        # overflow the column, a key outside the event's args) — honouring the
-        # record here regardless would promote a row that publishes under the
-        # slot stem, and every slot-shaped consumer downstream keys off the type.
+        # The member witness only counts for specs that publish as member changes; enrollment refused that type when it
+        # couldn't be published.
         member_witness=spec.get("member_witness") if is_member_changed_event_type(event_type) else None,
         writer_openness=spec.get("writer_openness"),
         poll_decodable=poll_entry is not None,
-        # A legacy spec carries no read_spec, so the only scalar proof on the
-        # row is the projected polling entry: ``build_polling_plan`` emits one
-        # solely for a slot it can decode as a single value, and stamps that
-        # slot's own ``type_kind`` on it. No entry is not-determined, which
-        # refuses — a demotion, which legacy rows are allowed to take.
+        # Legacy specs have no read_spec; the projected polling entry is the only scalar proof, and no entry refuses.
         controller_scalar_proven=read_spec_is_scalar_slot(poll_entry),
     )
 
@@ -353,24 +293,13 @@ def _process_window(
     dirty: dict[tuple[uuid.UUID, str], _DirtyController] | None = None,
     counters: dict[str, int] | None = None,
 ) -> list[MonitoredEvent]:
-    """Decode a window's logs and run the full side-effect pipeline.
+    """Decode a window's logs and run the side-effect pipeline, without committing (the caller commits with the
+    cursor).
 
-    Hydrates only the cohort members that actually emitted a log, then reuses
-    the existing decode / watch-gate / state-update / relational-sync /
-    reanalysis pipeline. Events are added to ``session`` but not committed —
-    the caller advances the cursor and commits in one transaction.
-
-    Per-contract events are gated on their spec's witness tier: only
-    ``self_describing`` occurrences reach the insert. A ``hint`` occurrence
-    marks its controller in *dirty* for the pass's verification read and
-    publishes nothing here; an ``activity`` occurrence publishes nothing at
-    all. Hand-rolled OZ / Safe / Timelock / proxy events decode through
-    ``parse_any_log``, carry no spec, and are unchanged.
-
-    *counters* is the pass's tally. A log that matched an enrolled spec and then
-    would not decode is dropped — correctly, nothing about it is publishable —
-    but the drop is otherwise traceless, and a decoder that has drifted from the
-    plan looks exactly like a quiet contract.
+    Only members that emitted a log are hydrated. Per-contract events are gated on witness tier: ``self_describing``
+    inserts, ``hint`` marks *dirty* for a verification read, ``activity`` publishes nothing. Hand-rolled events are
+    unaffected. *counters* records logs that matched a spec but wouldn't decode, which would otherwise look like a quiet
+    contract.
     """
     if not fetched_logs:
         return []
@@ -393,8 +322,7 @@ def _process_window(
     if not mc_by_addr:
         return []
 
-    # Per-emitter topic0 → tracked-topic spec, built from the hydrated rows'
-    # monitoring_config (the analysis tracking_plan persisted at enrollment).
+    # Per emitter: topic0 -> tracked-topic spec.
     tracked_specs_by_emitter: dict[str, dict[str, dict]] = {}
     for addr, mc in mc_by_addr.items():
         topics_list = (mc.monitoring_config or {}).get("tracked_topics") or []
@@ -406,14 +334,9 @@ def _process_window(
         if spec_map:
             tracked_specs_by_emitter[addr] = spec_map
 
-    # No pre-read dedupe: the partial unique index (monitored_contract_id,
-    # tx_hash, log_index, event_type) is the identity of a scan event, so the
-    # insert below uses ON CONFLICT DO NOTHING and gates every side effect on
-    # winning the row. That subsumes both the old pass-wide preload AND the
-    # in-scan 5-tuple guard — a duplicate within the window (provider echo) or
-    # across passes (overlap after a failed window) loses the ON CONFLICT and
-    # is skipped. Batch timelock ops share tx+block+type but carry distinct
-    # log_index, so their identities differ and all rows land.
+    # No pre-read dedupe: the partial unique index (monitored_contract_id, tx_hash, log_index, event_type) is the
+    # identity, so the insert uses ON CONFLICT DO NOTHING and every side effect is gated on winning it. Batch timelock
+    # ops differ by log_index.
     new_events: list[MonitoredEvent] = []
 
     for fl in fetched_logs:
@@ -451,27 +374,16 @@ def _process_window(
         if mc.monitoring_config and not _should_watch(mc, parsed):
             continue
 
-        # Pre-enrollment floor: an event below the contract's enrollment_block
-        # predates monitoring (a cohort scans from its MIN member cursor, so a
-        # low-cursor cohort-mate can drag this contract's ancient events into a
-        # window). Record it for the timeline with a marker, but never notify,
-        # sync, or reanalyze — those are for changes since we started watching.
-        # A NULL floor (legacy rows) disables suppression: notify, as before.
+        # Events before enrollment_block predate monitoring (a low-cursor cohort-mate can drag them in): recorded with a
+        # marker but never notified, synced or reanalyzed. NULL floors (legacy) don't suppress.
         is_historical = mc.enrollment_block is not None and parsed["block_number"] < mc.enrollment_block
 
         witness_tier: str | None = None
         if spec is not None:
             witness_tier = _resolve_spec_tier(spec, mc)
             if witness_tier != WITNESS_TIER_SELF_DESCRIBING:
-                # An occurrence is not a change. A hint controller earns one
-                # coalesced verification read this pass whose diff — or
-                # earned negative — is the witness; an activity occurrence has
-                # no readable witness at all. Neither publishes a row here.
-                #
-                # A pre-enrollment hint never marks: the read would compare
-                # the CURRENT slot against last_known_state and publish the
-                # result as a live change, which is the pre-enrollment floor
-                # defeated by a different route.
+                # An occurrence isn't a change: a hint earns one coalesced verification read; activity has no witness.
+                # Historical hints never mark, since the read would publish current state as a live change.
                 if witness_tier == WITNESS_TIER_HINT and dirty is not None and not is_historical:
                     controller_id = spec.get("controller_id")
                     entry = _poll_entry_for_controller(mc, controller_id)
@@ -489,11 +401,7 @@ def _process_window(
                                 ),
                             )
                         elif record_unresolvable_read(mc, controller_id):
-                            # The spec was classified hint but no polling entry
-                            # is PROVEN to read this controller, so the hint
-                            # resolves to nothing. Dropping it silently would
-                            # make an unverifiable interval look like a quiet
-                            # one; invariant 9 wants the skip on the record.
+                            # Hint with no proven read binding: record the skip instead of looking quiet.
                             flag_modified(mc, "last_poll_status")
                 continue
 
@@ -503,18 +411,10 @@ def _process_window(
             if k not in ("event_type", "block_number", "tx_hash", "log_index", "_emitter")
         }
         if witness_tier is not None:
-            # Rides on the row so a consumer reads the claim's strength off
-            # the event rather than re-deriving it from a config that may
-            # since have been re-enrolled.
+            # Carried on the row so consumers needn't re-derive it from a config that may have changed.
             event_data["witness_tier"] = witness_tier
-            # The spec that classified and decoded this event came out of a
-            # tracking plan that could not be re-read at the last enrollment
-            # (F5 keeps the last-good topics rather than manufacturing an
-            # empty watch-list). The row is real, but the WATCH-LIST behind it
-            # is only as current as that timestamp, so the event carries it
-            # rather than reading fresh-equivalent. Read-verified events do not
-            # carry it: their claim rests on the read, which is current
-            # regardless of when the plan was last refreshed.
+            # The spec came from a plan that couldn't be re-read at the last enrollment; the event carries that
+            # timestamp. Read-verified events don't need it.
             stale_since = (mc.monitoring_config or {}).get(TRACKED_TOPICS_STALE_SINCE_KEY)
             if stale_since:
                 event_data["plan_stale_since"] = stale_since
@@ -523,10 +423,8 @@ def _process_window(
             event_data = dict(event_data)
             event_data["historical"] = True
 
-        # Mint site 1 of 3. Assigned BEFORE the insert so the level is durable
-        # in the same write as the row rather than in a follow-up UPDATE that a
-        # crash could lose. For enrichable types (the Safe executions) this is
-        # provisional: enrich_events re-rates them below, before the commit.
+        # Mint site 1 of 3. Assigned before the insert so the level lands with the row; provisional for enrichable
+        # types.
         salience, salience_basis = assign_salience(session, event_type, event_data, mc)
         event_data["salience"] = salience
         event_data["salience_basis"] = salience_basis
@@ -549,16 +447,11 @@ def _process_window(
             )
             .returning(MonitoredEvent.id)
         )
-        # Gate EVERY side effect on the insert winning: a duplicate (lost to a
-        # concurrent/replayed pass) must not double-post Discord, double-queue
-        # reanalysis, or re-sync relational tables (design HR2).
+        # Gate every side effect on winning the insert: no double Discord posts, reanalysis or sync.
         if session.execute(insert_stmt).first() is None:
             continue
 
-        # The core insert wrote the row but left the ORM identity map empty.
-        # Rehydrate it as a persistent instance from the values we already hold
-        # (make_transient_to_detached + add: no SELECT round-trip) so the later
-        # data mutation flushes as an UPDATE.
+        # Rehydrate the inserted row as a persistent instance (no SELECT) so later data changes flush as an UPDATE.
         monitored_event = MonitoredEvent(
             id=event_id,
             monitored_contract_id=mc.id,
@@ -572,9 +465,7 @@ def _process_window(
         session.add(monitored_event)
 
         if is_historical:
-            # Persisted with its ``historical`` marker, but excluded from the
-            # notify list and all side effects: applying a pre-enrollment event
-            # would page on 8-year-old news and overwrite current state.
+            # Stored with its ``historical`` marker but no notification or side effects.
             logger.info(
                 "Recorded historical %s on %s (block %d < enrollment %s) — not notified",
                 event_type,
@@ -619,14 +510,10 @@ def _process_window(
 
 
 def _verification_read_order(dirty: dict[tuple[uuid.UUID, str], _DirtyController]) -> list[_DirtyController]:
-    """Dirty controllers, least-recently-verified first.
+    """Dirty controllers, least-recently-verified first (never-verified first), so a fixed order can't starve the
+    tail.
 
-    A stable address+id sort would hand the budget to the same controllers
-    every pass and starve the tail indefinitely — the alphabetically-late
-    controllers of a busy fleet would never be read at all, while their
-    contracts' status maps filled with over-budget markers that no pass ever
-    cleared. Never-verified controllers sort first (cursor 0.0); the trailing
-    address+id key only breaks ties so the order stays deterministic.
+    Address and id only break ties.
     """
     return sorted(
         dirty.values(),
@@ -640,25 +527,11 @@ def _verification_read_order(dirty: dict[tuple[uuid.UUID, str], _DirtyController
 
 @dataclass
 class _VerificationOutcome:
-    """One verification pass: the events to notify, and whether any unit's work
-    was lost.
+    """One verification pass: events to notify and what was lost.
 
-    ``units_failed`` exists because a deadlocked unit is recovered silently —
-    its rows AND its not-determined markers roll back together, so unlike every
-    other failure in this module it ends with no surviving signal at all. The
-    caller folds it into the pass's ``degraded`` flag, matching the poller's
-    ``chunks_failed > 0 ⇒ partial=True``: a pass that lost work must not report
-    clean.
-
-    ``reads_failed`` / ``reads_over_budget`` are this pass's own bookkeeping,
-    emitted on the heartbeat. The DB markers (verify_status.py) answer "what is
-    marked right now", and the poller erases them on its next answered pass, so
-    on a healthy deployment they are usually gone before anyone looks. These
-    count the outcomes the pass actually observed, whatever later happens to the
-    markers — including the outcomes that could not be marked at all (no field
-    name to key on) and those whose marker rolled back with a deadlocked unit.
-    ``None`` is the third state: the pass did not get far enough to observe,
-    which is not a zero.
+    ``units_failed`` exists because a deadlocked unit rolls back its rows and markers together, leaving no other signal;
+    the caller marks the pass degraded. ``reads_failed``/``reads_over_budget`` count this pass's outcomes (the DB
+    markers get erased by the poller). ``None`` means the pass didn't get far enough, not zero.
     """
 
     events: list[MonitoredEvent]
@@ -672,31 +545,14 @@ def _resolve_verification_reads(
     dirty: dict[tuple[uuid.UUID, str], _DirtyController],
     rpc_by_chain: dict[str, str],
 ) -> _VerificationOutcome:
-    """Read back every controller a hint occurrence marked this pass and
-    publish only what the read proves.
+    """Read back every controller a hint marked this pass and publish only what the read proves.
 
-    One read per dirty controller — occurrences coalesced onto the same key
-    upstream, so traffic volume does not multiply reads. Outcomes:
+    Moved: a ``value_changed:<controller_id>`` event with old/new plus the poll path's side effects. Held: nothing
+    published. First observation: baseline seeded, nothing published. No observation: a not-determined marker
+    (verify_status).
 
-      * the value moved      → a witnessed ``value_changed:<controller_id>``
-        event carrying ``old``/``new``, plus the same proxy write-through,
-        relational sync and reanalysis dispatch a poll-detected change drives;
-      * the value held       → an earned negative. Nothing is published: the
-        absence of a row IS the statement that nothing changed;
-      * first observation    → the baseline is seeded and nothing is
-        published. There is no old value to have moved from;
-      * no observation       → a not-determined marker on the contract's
-        poll-status map (verify_status.py). Never a change claim, never a
-        silent drop.
-
-    Transaction shape mirrors the rotation poller's: every RPC for a chain is
-    issued BEFORE that chain's writes are staged, and each chain's writes
-    commit as their own unit under deadlock isolation. Holding row locks on
-    ``monitored_contracts`` across network IO is what the scanner's cohort
-    UPDATE deadlocks against, so a chain that loses the race is rolled back and
-    left for the next pass while the others still land.
-
-    Events are committed here, then returned for the caller to notify.
+    All RPC for a chain precedes its writes, and each chain commits separately under deadlock isolation (row locks held
+    across network IO deadlock with the scanner). Events are committed here and returned for notification.
     """
     if not dirty:
         return _VerificationOutcome([])
@@ -714,7 +570,7 @@ def _resolve_verification_reads(
         .all()
     }
 
-    # --- read phase: all network IO, no staged writes --------------------
+    # Read phase: all network IO, no staged writes.
     by_chain: dict[str, list[_DirtyController]] = defaultdict(list)
     for member in within:
         by_chain[member.chain].append(member)
@@ -744,13 +600,11 @@ def _resolve_verification_reads(
             results = [(None, "transport")] * len(calls)
         answers[chain] = list(zip(dispatch, results))
 
-    # --- write phase: per chain, committed as its own unit ----------------
+    # Write phase: one committed unit per chain.
     new_events: list[MonitoredEvent] = []
     units_failed = 0
     reads_failed = 0
-    # A scheduling fact of this pass, counted before any write: these controllers
-    # were dirty and the pass declined to read them. True whether or not each
-    # marker lands.
+    # Declined reads are counted before any write lands.
     reads_over_budget = len(over)
     now = time.monotonic()
 
@@ -789,11 +643,7 @@ def _resolve_verification_reads(
                     member.entry.get("type"),
                 )
                 if new_value is None:
-                    # ``parsed_ok`` True is the type's conventional empty (a
-                    # zero address), which the poller's own storage convention
-                    # keeps out of last_known_state; matching it keeps the two
-                    # readers of the same slot from disagreeing about what is
-                    # stored.
+                    # A parsed zero address stays out of last_known_state, matching the poller.
                     if not parsed_ok:
                         reads_failed += 1
                         if record_verify_status(mc, field, VERIFY_NO_VALUE):
@@ -818,19 +668,14 @@ def _resolve_verification_reads(
                     "controller_id": member.controller_id,
                     "old": str(old_value),
                     "new": str(new_value),
-                    # The witness is the read, not the log that triggered it.
+                    # The witness is the read, not the triggering log.
                     "witness": "read_verified",
-                    # WHICH plan entry was read, so the binding between the
-                    # published controller id and the storage location that
-                    # answered is on the record rather than inferred.
+                    # Which plan entry answered.
                     "read_entry_source": member.entry.get("source"),
                     "hint_block_number": member.block_number,
                 }
-                # Mint site 2 of 3. The plan entry that answered is in scope
-                # here and nowhere downstream, so its signal_class rides onto
-                # the row — which is also where the salience census reads the
-                # basis from. An entry with no class stamps nothing and the
-                # rule falls through to not_determined (visible).
+                # Mint site 2 of 3: the answering entry's signal_class is only in scope here. No class stamps nothing
+                # (visible not_determined).
                 stamp_signal_class(event_data, member.entry)
                 salience, salience_basis = assign_salience(session, event_type, event_data, mc)
                 event_data["salience"] = salience
@@ -839,10 +684,7 @@ def _resolve_verification_reads(
                     id=uuid.uuid4(),
                     monitored_contract_id=mc.id,
                     event_type=event_type,
-                    # A read observes a slot, not a log: no block and no tx are
-                    # knowable. ``log_index`` stays NULL, which keeps these rows
-                    # outside the partial identity index exactly like the poll
-                    # path's rows (invariant 12 is preserved, not extended).
+                    # A read has no block or tx; NULL ``log_index`` keeps it out of the identity index, like poll rows.
                     block_number=0,
                     tx_hash="",
                     data=event_data,
@@ -865,15 +707,8 @@ def _resolve_verification_reads(
                         updated["reanalysis_job_id"] = str(reanalysis_job.id)
                         event.data = updated
                 except _DB_ERROR_TYPES:
-                    # maybe_queue_reanalysis's first statement is a Job SELECT
-                    # whose autoflush flushes the staged last_known_state
-                    # UPDATE — the same rows the scanner's cohort UPDATE locks,
-                    # so this is a deadlock candidate. Any DB error here has
-                    # already poisoned the session; let it reach the unit
-                    # handler, which owns the rollback. Swallowing it would
-                    # leave the session pending-rollback and the next member's
-                    # sync would raise PendingRollbackError past that handler,
-                    # taking the whole verification pass with it.
+                    # The reanalysis Job SELECT autoflushes the staged UPDATE (a deadlock candidate). DB errors have
+                    # poisoned the session: re-raise to the unit handler, which owns rollback.
                     raise
                 except Exception as exc:
                     logger.warning(
@@ -885,7 +720,7 @@ def _resolve_verification_reads(
             session.commit()
         except _DB_ERROR_TYPES as exc:
             if not _is_deadlock_error(exc):
-                # Connection loss and friends are not per-unit recoverable.
+                # Not recoverable per unit.
                 raise
             session.rollback()
             logger.warning(
@@ -893,7 +728,7 @@ def _resolve_verification_reads(
                 unit,
                 extra={"exc_type": type(getattr(exc, "orig", None) or exc).__name__},
             )
-            # The unit's rows went back with it, so none of them are notified.
+            # The unit's rows rolled back, so none are notified.
             units_failed += 1
             for member, _answer in members:
                 _LAST_VERIFIED_AT.pop((member.monitored_contract_id, member.controller_id), None)
@@ -910,32 +745,20 @@ def _resolve_verification_reads(
 
 
 def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
-    """Scan new blocks for all governance and proxy events, bounded per pass.
+    """Scan new blocks for governance and proxy events, bounded per pass.
 
-    Contracts are loaded columns-only (no ORM hydration, no ``monitoring_config``
-    JSONB), grouped into block-aligned address-capped cohorts, and scanned
-    most-behind-first under per-cohort and per-pass window budgets. Each window
-    is one multi-address eth_getLogs (via the shared bisect-on-reject fetcher)
-    clamped to ``head − CONFIRMATION_DEPTH``; its events + monotonic cursor
-    advance commit together, then notify. A failed window ends that cohort's
-    turn without advancing its cursor (behind ≠ skipped); other cohorts
-    continue. Returns the pass's new events plus heartbeat metrics.
+    Contracts load columns-only, group into cohorts, and scan most-behind-first under per-cohort and per-pass window
+    budgets. Each window is one multi-address eth_getLogs up to ``head - CONFIRMATION_DEPTH``; events and the cursor
+    commit together, then notify. A failed window ends the cohort's turn without advancing (behind is not skipped).
     """
     started = time.monotonic()
 
     address_batch = max(1, _scan_int_env("PSAT_SCAN_ADDRESS_BATCH", 200))
     max_windows_cohort = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", 25))
     max_windows_pass = max(1, _scan_int_env("PSAT_SCAN_MAX_WINDOWS_PER_PASS", 50))
-    # Runaway backstop: a cohort further behind confirmed head than the
-    # wall-clock budget of its OWN chain is not backfilling, it is broken (a
-    # floor-0 legacy row, a cursor restored from an old snapshot).
-    # Most-behind-first would hand it every window of every pass while the rest
-    # of the fleet sits at head. It is served last and capped at
-    # ``runaway_windows`` windows per pass — still advancing (behind ≠ skipped),
-    # never monopolising — and counted onto the heartbeat so the condition is
-    # visible rather than merely slow. The repair is the operator-run
-    # cursor-clamp tooling; the scanner's own "behind" alarm
-    # (ops_alerts) already fires on the lag.
+    # A cohort further behind than its chain's wall-clock budget has a broken cursor, not a backfill. It runs last,
+    # capped at ``runaway_windows`` per pass, and is counted on the heartbeat. Operators repair it with cursor-clamp
+    # tooling.
     runaway_windows = max(1, _scan_int_env("PSAT_SCAN_RUNAWAY_WINDOWS_PER_PASS", DEFAULT_RUNAWAY_WINDOWS_PER_PASS))
 
     index_rows = session.execute(
@@ -948,9 +771,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     ).all()
 
     if not index_rows:
-        # Nothing enrolled yet — still emit a cycle so a dead watcher (or a
-        # never-populated monitored_contracts table) is distinguishable from
-        # a healthy idle one.
+        # Beat even with nothing enrolled, so dead and idle differ.
         emit_monitor_cycle(
             HEARTBEAT_PROTOCOL_SCANNER,
             started=started,
@@ -962,8 +783,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         )
         return ScanResult([])
 
-    # Cohorts: (chain, block bucket) groups, split at the address batch size.
-    # The bucket width is the chain's own getLogs range (mainnet == MAX_BLOCK_RANGE).
+    # Cohorts are (chain, block bucket) groups split at the batch size; buckets use the chain's getLogs range.
     grouped: dict[tuple[str, int], list] = defaultdict(list)
     for row in index_rows:
         grouped[(row.chain, row.last_scanned_block // _max_getlogs_range_for(row.chain))].append(row)
@@ -981,11 +801,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 )
             )
 
-    # Layer-1 singleton gate: a scan pass runs only under the
-    # per-chain daemon lease. Acquire at pass start; a chain whose lease is
-    # held elsewhere is skipped. If none are held we still beat (note=
-    # 'lease_lost') so the fleet view sees a live-but-yielding process, not a
-    # dead one.
+    # Scan only under the per-chain daemon lease; with none held, still beat (``lease_lost``).
     lease_holder = _LEASE_HOLDER
     lease_ttl = _scan_int_env("PSAT_DAEMON_LEASE_TTL_S", DEFAULT_DAEMON_LEASE_TTL_S)
     held_chains = {
@@ -1006,14 +822,10 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         return ScanResult([])
     cohorts = [c for c in cohorts if c.chain in held_chains]
 
-    # Per-chain runaway threshold, resolved once per pass (see the module
-    # constants): the same block count is months on one chain and weeks on
-    # another, so the budget converts through each chain's own block time.
+    # Resolved per chain, since block time differs.
     runaway_lag_by_chain = {chain: _runaway_lag_blocks_for(chain) for chain in {c.chain for c in cohorts}}
 
-    # Each cohort's chain resolves its OWN eRPC route from the registry
-    # (``rpc_url`` is the mainnet seed / local-fork override). Mainnet keeps the
-    # incoming URL verbatim, so its head reads and getLogs are unchanged.
+    # Each chain resolves its own route; mainnet keeps the incoming URL.
     rpc_by_chain = {chain: rpc_for_chain(chain, rpc_url) for chain in {c.chain for c in cohorts}}
     fetchers: dict[str, RpcEventLogFetcher] = {}
     head_by_chain: dict[str, int] = {}
@@ -1040,11 +852,9 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
     blocks_scanned = 0
     degraded = False
     budget_exhausted = False
-    # Hint occurrences accumulate across the whole pass so repeats on the same
-    # controller — the exact shape of the crowd-traffic problem — collapse to
-    # one read. In-memory only, by design: no persistence, no migration.
+    # Accumulated across the pass so repeated hints on one controller cost one read.
     dirty_controllers: dict[tuple[uuid.UUID, str], _DirtyController] = {}
-    # Pass-scoped counts of what the decode dropped (see ``_process_window``).
+    # Pass-scoped decode drops (see ``_process_window``).
     scan_counters: dict[str, int] = {}
 
     while windows_scanned < max_windows_pass:
@@ -1066,8 +876,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
         if not eligible:
             break
 
-        # Healthy cohorts first, most-behind-first within each group; a runaway
-        # cohort is only reached once nothing else is waiting.
+        # Healthy cohorts first, most-behind-first; runaways only when nothing else waits.
         eligible.sort(key=lambda item: (item[0].runaway, -(item[1] - item[0].cursor)))
         cohort, confirmed_head = eligible[0]
 
@@ -1083,8 +892,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 break
             window_end = min(cohort.cursor + _max_getlogs_range_for(cohort.chain), confirmed_head)
 
-            # A cohort always has ≥1 address — an empty list would match ANY
-            # address on the wire, so the getLogs is never issued without one.
+            # An empty address list would match any address.
             if not cohort.addresses:
                 cohort.done = True
                 break
@@ -1097,8 +905,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                     to_block=window_end,
                 )
             except Exception as exc:
-                # The fetcher's own bisect already gave up. End this cohort's
-                # turn WITHOUT advancing its cursor — behind ≠ skipped.
+                # The fetcher's bisect gave up; don't advance the cursor.
                 logger.warning(
                     "eth_getLogs failed for blocks %d-%d: %s",
                     window_start,
@@ -1114,19 +921,11 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
                 session, cohort, fetched_logs, window_start, window_end, dirty_controllers, scan_counters
             )
 
-            # Enrich after the ON-CONFLICT insert has decided which rows are
-            # real (no spend on rows a concurrent scanner won), inside the same
-            # transaction that commits the window, and BEFORE the commit that
-            # precedes _notify_committed_events — so the Discord embed and the
-            # salience gate both see the post-enrichment row. Reanalysis
-            # dispatch deliberately stays inside _process_window and does NOT
-            # depend on enrichment: side effects follow claim strength, not
-            # richness.
+            # Enrich after the insert decides which rows are real, before the commit that precedes notification.
+            # Reanalysis doesn't depend on enrichment.
             enrich_events(session, window_events, rpc_by_chain)
 
-            # Advance cursors monotonically in the SAME transaction that
-            # persists this window's events. GREATEST means a stale or zombie
-            # writer can only no-op, never rewind.
+            # Advance cursors in the same transaction as the events; GREATEST means stale writers can't rewind.
             session.execute(
                 update(MonitoredContract)
                 .where(MonitoredContract.id.in_(cohort.member_ids))
@@ -1135,8 +934,7 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             )
             session.commit()
 
-            # Notify per window so a long catch-up doesn't buffer thousands of
-            # notifications; the events are already durably committed.
+            # Per window, so long catch-ups don't buffer notifications.
             _notify_committed_events(session, window_events)
 
             cohort.cursor = window_end
@@ -1146,24 +944,13 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             turn_windows += 1
             cohort.windows_this_pass += 1
 
-            # Renew now that this window is durably committed. renew_daemon_lease
-            # commits even when it LOSES, so a lost renew aborts the pass AFTER
-            # this committed window (never rewind, never fetch again). Dropping
-            # the chain from held_chains ends its cohorts' eligibility above.
+            # Renew after the durable commit; a lost renew ends the chain's cohorts without undoing this window.
             if not renew_daemon_lease(session, _scanner_lease_name(cohort.chain), lease_holder, lease_ttl):
                 held_chains.discard(cohort.chain)
                 break
 
-    # Hint resolution runs once, after the window loop, so a controller hit in
-    # several windows is read once for the whole pass.
-    #
-    # Only under a still-held lease. A ``value_changed`` row carries
-    # ``log_index NULL`` and so sits outside ``uq_monitored_events_identity``:
-    # there is no ON CONFLICT to catch a second scanner's duplicate, and a
-    # duplicate here is a duplicate Discord post and a duplicate reanalysis
-    # job. A chain whose renew lost is dropped from ``held_chains`` above; its
-    # dirty controllers are dropped with it and re-marked by whoever does hold
-    # the lease.
+    # Resolve hints once per pass, only for chains whose lease is still held: ``value_changed`` rows have NULL
+    # ``log_index`` and no ON CONFLICT guard, so a second scanner would double-post.
     held_dirty = {key: member for key, member in dirty_controllers.items() if member.chain in held_chains}
     if len(held_dirty) != len(dirty_controllers):
         logger.info(
@@ -1178,32 +965,26 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             exc,
             extra={"exc_type": type(exc).__name__},
         )
-        # The windows above are already committed; a failure here must not
-        # roll them back or abort the pass summary.
+        # Windows are committed; don't roll them back.
         session.rollback()
         degraded = True
-        # Zero would read as "no read failed this pass"; what happened is that
-        # the pass stopped before its outcomes were countable.
+        # Not zero: the pass stopped before outcomes were countable.
         verification = _VerificationOutcome([], reads_failed=None, reads_over_budget=None)
     if verification.units_failed:
-        # A deadlocked unit rolled back its events AND its not-determined
-        # markers, so this is the one failure in the pass that leaves no
-        # surviving signal of itself. Reporting the cycle clean would publish
-        # "nothing to see" for an interval nobody verified.
+        # A deadlocked unit left no other trace; don't report clean.
         degraded = True
     if verification.events:
         _notify_committed_events(session, verification.events)
         total_new_events.extend(verification.events)
 
-    # Budget-exhausted only if we stopped at the hard pass cap with work left.
+    # Only when stopped at the hard cap with work left.
     if windows_scanned >= max_windows_pass:
         budget_exhausted = any(
             not c.done and not c.failed and c.cursor < (_head_for(c.chain) - _confirmation_depth_for(c.chain))
             for c in cohorts
         )
 
-    # max_lag_blocks: head − min cursor across all contracts (raw head, so
-    # "behind" is the operator-facing number, independent of confirmation depth).
+    # Head minus min cursor across contracts, against raw head.
     max_lag = 0
     for cohort in cohorts:
         max_lag = max(max_lag, _head_for(cohort.chain) - cohort.cursor)
@@ -1238,17 +1019,11 @@ def scan_for_events(session: Session, rpc_url: str) -> ScanResult:
             "budget_exhausted": budget_exhausted,
             "runaway_cohorts": runaway_cohorts,
             "verification_units_failed": verification.units_failed,
-            # Pass-scoped complement to the not-determined markers those reads
-            # leave on the contracts: the markers are erased by the poller's next
-            # answered pass, so on a healthy fleet the fleet census
-            # (``watchers.verification_gaps``) is usually blind to an
-            # intermittent failure that this per-pass number recorded. ``None``
-            # means the verification pass itself did not complete — not zero.
+            # Per-pass complement to the markers, which the poller erases. ``None`` means the verification pass didn't
+            # complete.
             "verification_reads_failed": verification.reads_failed,
             "verification_reads_over_budget": verification.reads_over_budget,
-            # Logs that matched an enrolled tracked-topic spec and would not
-            # decode. Not a partial — nothing was withheld that was ever
-            # observed — but a spec/decoder drift shows up here and nowhere else.
+            # Not partial (nothing observed was withheld), but reveals spec/decoder drift.
             "undecodable_tracked_logs": scan_counters.get("undecodable_tracked_logs", 0),
         },
     )
@@ -1268,27 +1043,17 @@ def _sync_relational_tables(
     mc: MonitoredContract,
     parsed: dict,
 ) -> None:
-    """Propagate a detected event to the relational Contract / ControllerValue /
-    UpgradeEvent tables so the API serves up-to-date data.
+    """Propagate a detected event to Contract / ControllerValue / UpgradeEvent, one update per ``effect_tags.writes``
+    target (legacy events synthesize tags).
 
-    Tag-driven: each ``effect_tags.writes`` target drives one row update.
-    Legacy events without tags synthesize them from event_type via
-    ``_HANDROLLED_EVENT_TYPE_TO_TAGS``.
-
-    Only updates rows when the MonitoredContract has a linked contract_id.
-
-    A controller rotation (owner/admin/authority/implementation actually
-    moving) marks the protocol dirty so the enrollment reconciler picks up any
-    newly-installed governance Safe within one drain tick instead of waiting
-    for the slow sweep.
+    Needs a linked contract_id. A controller rotation marks the protocol dirty so a new governance Safe is enrolled
+    within one drain tick.
     """
     if not mc.contract_id:
         return
 
     event_type = parsed["event_type"]
-    # Same reason as in ``_update_state_from_event``: a ``ControllerValue`` row
-    # is the slot's current value, and one entry of a mapping is not that. The
-    # entry change is published as its own event and stops there.
+    # A mapping entry is not the slot's value; the entry change stops at its own event.
     if is_member_changed_event_type(event_type):
         return
 
@@ -1305,9 +1070,7 @@ def _sync_relational_tables(
             contract = session.get(Contract, mc.contract_id)
         return contract
 
-    # Upgrade path: a delegate-target swap → Contract.implementation,
-    # UpgradeEvent row, coverage refresh. Load-bearing semantics that
-    # generic ControllerValue reflection can't reproduce.
+    # Delegate-target swaps update Contract.implementation, add an UpgradeEvent and refresh coverage.
     impl_writes = {"implementation", "beacon", "facets"}
     if delegates and any(w in impl_writes for w in writes if isinstance(w, str)):
         new_impl = parsed.get("implementation") or parsed.get("beacon")
@@ -1326,22 +1089,15 @@ def _sync_relational_tables(
                         new_impl=new_impl,
                         block_number=parsed.get("block_number"),
                         tx_hash=parsed.get("tx_hash"),
-                        # timestamp stays NULL: a log carries a block, not a
-                        # block time, and the scanner reads historical windows
-                        # so detection time is not a usable stand-in. NULL is
-                        # read as "not determined" by every consumer.
+                        # A log has a block, not a block time, and historical windows make detection time meaningless:
+                        # NULL (not determined).
                         source=UPGRADE_SOURCE_EVENT_SCAN,
                     )
                 )
-                # Coverage windows are derived from UpgradeEvent history, so a
-                # new upgrade can change which audits apply to the previous impl
-                # (it's now bounded) and the new one (newly current). Rebuild
-                # coverage for every audit in the protocol — it's idempotent.
+                # Coverage windows derive from upgrade history; rebuild for the protocol (idempotent).
                 _refresh_coverage_after_upgrade(session, c.protocol_id)
 
-    # Per-write-target row sync: top-level Contract.admin shadow for
-    # admin writes, plus ControllerValue rows keyed by any of the common
-    # prefix forms ({target}, state_variable:{target}, external_contract:{target}).
+    # Contract.admin shadow plus ControllerValue rows in all three id forms.
     for write_target in writes:
         if not isinstance(write_target, str):
             continue
@@ -1374,27 +1130,17 @@ def _sync_relational_tables(
 
 
 def _refresh_coverage_after_upgrade(session: Session, protocol_id: int | None) -> None:
-    """Rebuild ``audit_contract_coverage`` for a protocol after an upgrade.
-
-    Called from the event- and poll-sync paths so impl_era windows stay in
-    sync with the live upgrade history. Swallows exceptions so a coverage
-    bug can never block a detected upgrade from being recorded.
+    """Rebuild ``audit_contract_coverage`` after an upgrade, swallowing errors so a coverage bug can't block
+    recording the upgrade.
     """
     if not protocol_id:
         return
-    # Local import keeps the coverage module off the hot path at
-    # module-load time and avoids the import cycle
-    # unified_watcher → audits.coverage → db.models (which is fine) but
-    # keeps the surface clean.
+    # Local import keeps coverage off the hot path.
     from services.audits.coverage import upsert_coverage_for_protocol
 
     try:
-        # Defer source-equivalence to ``CoverageVerifyWorker``: matches the
-        # coverage_worker / audit_scope_extraction / upgrade_history call
-        # sites which also pass False. Holding verify inline on every
-        # detected upgrade fanned out 4-way Etherscan + GitHub bursts that
-        # cascaded into the shared rate-limit window (#82). The verify
-        # worker drains the resulting ``pending`` rows at a controlled rate.
+        # Source-equivalence is deferred to ``CoverageVerifyWorker``; inline verification caused Etherscan/GitHub
+        # rate-limit cascades (#82).
         upsert_coverage_for_protocol(session, protocol_id, verify_source_equivalence=False)
     except Exception as exc:
         logger.warning(
@@ -1414,48 +1160,15 @@ def _update_controller_value_rows(
     observed_via: str,
     block_number: int | None = None,
 ) -> bool:
-    """Write *new_value* into every ControllerValue row keyed by the
-    three canonical controller_id forms the analyzer emits
-    (``{name}``, ``state_variable:{name}``, ``external_contract:{name}``).
+    """Write *new_value* into the ControllerValue rows for all three controller_id forms; True iff a value moved.
 
-    Shared between event-driven sync (``_sync_relational_tables``) and
-    poll-driven sync (``_sync_relational_from_poll``) so the two paths
-    converge on the same row-keying rules and a custom slot like
-    ``protocolAdmin`` propagates through either path without per-slot
-    code. Returns True iff a row's value actually moved — the caller uses
-    that to decide whether a governance rotation needs re-enrollment.
+    Shared by event and poll sync so custom slots work through either. On a move, ``resolved_type`` and ``details`` are
+    cleared: they describe the old address and this code can't re-classify. Keeping them once published a new EOA as
+    ``timelock`` with the old delay (a false scoring credit), and gave a new Safe the old one's owners.
+    ``block_number``/``observed_via`` are reset too (None from polls).
 
-    When the value moves, ``resolved_type`` and ``details`` are CLEARED, not
-    carried over. They are the classifier's answer about the OLD address:
-    ``("safe", {"address", "owners", "threshold"})`` or
-    ``("timelock", {"address", "delay", "owner"})``. This function has no RPC
-    and cannot re-classify, so the only honest states are NULL — not
-    determined, re-derived by the next resolution run.
-
-    Carrying them is not a cosmetic staleness. ``company_overview`` republishes
-    the stale payload under the NEW address (``_record_principal_lookup`` keys
-    on ``cv.value`` while merging ``cv.details``), and
-    ``_principal_lookup_type`` promotes on ``details`` alone via
-    ``_has_timelock_delay`` — so a Timelock -> EOA rotation publishes a
-    freshly-installed EOA as ``resolved_type="timelock"`` carrying the old
-    ``delay``, which is a credit-bearing scoring input. That is a safety-inflating
-    false credit, on top of a false statement about a named individual's keys.
-    A Safe -> Safe rotation is the milder half: the new Safe inherits the old
-    one's ``owners``/``threshold`` and ``details["address"]`` stays the OLD
-    Safe, which ``setdefault("address", addr)`` downstream cannot correct
-    because the key is already present.
-
-    ``block_number``/``observed_via`` are reassigned for the same reason: they
-    described the old read. The poll path knows no block, so it passes None —
-    "not determined", never the stale one.
-
-    Rows are updated in place rather than appended. ``controller_values`` is
-    read as CURRENT state by every consumer (company_overview's ``controllers``
-    map, capability_resolver, enrollment, chat) with no ordering or dedup, and
-    the resolution worker deletes-then-reinserts the whole per-contract set on
-    each run, so an append-only key would multiply every existing read without
-    accumulating coherent history. The history planes are ``upgrade_events``
-    and the ``principal_history`` artifact.
+    Rows update in place: consumers read ``controller_values`` as current state without dedup. History lives in
+    ``upgrade_events`` and ``principal_history``.
     """
     if not mc.contract_id:
         return False
@@ -1494,16 +1207,10 @@ def _write_through_proxy_read(
     new_value: object,
     old_value: object,
 ) -> None:
-    """Record a slot-read implementation change on the WatchedProxy plane.
+    """Record a slot-read implementation change on WatchedProxy.
 
-    Shared by every reader of a slot — the rotation poller and the scan pass's
-    verification reads — because whichever one observes the change first is the
-    one that advances ``last_known_state``, which silences the other. A reader
-    that skipped this would stop ``ProxyUpgradeEvent`` rows appearing and would
-    freeze ``WatchedProxy.last_known_implementation``, whose value is what the
-    NEXT scanner-detected upgrade publishes as its ``old_implementation``: a
-    stale pointer there turns one missed write-through into a wrong old-value
-    claim on every upgrade after it.
+    Shared by the poller and verification reads, since whichever sees the change first silences the other. Skipping it
+    freezes ``last_known_implementation``, which every later scanner-detected upgrade publishes as its old value.
     """
     if field_name != "implementation" or not mc.watched_proxy_id:
         return
@@ -1513,8 +1220,7 @@ def _write_through_proxy_read(
     session.add(
         ProxyUpgradeEvent(
             watched_proxy_id=wp.id,
-            # A read observes a slot, not a log: no block and no tx are
-            # knowable, which is what the poll path has always recorded here.
+            # A read has no block or tx.
             block_number=0,
             tx_hash="",
             old_implementation=str(old_value) if old_value else None,
@@ -1532,19 +1238,11 @@ def _sync_relational_from_poll(
     new_value: object,
     old_value: object,
 ) -> None:
-    """Propagate a polling-detected state change to relational tables.
+    """Propagate a poll-detected change to relational tables.
 
-    ``implementation`` keeps the dedicated branch — the
-    Contract.implementation shadow + UpgradeEvent row + coverage refresh
-    are side effects ControllerValue can't reproduce. Every other field
-    flows through the generic ControllerValue updater so custom slots
-    (``protocolAdmin``, ``feeRecipient``) sync without per-slot code.
-
-    A controller rotation marks the protocol dirty so a newly-installed
-    governance Safe is enrolled within one drain tick.
-    The caller only reaches here when ``new_value != old_value``, so an
-    implementation swap (or a governance-relevant slot moving) is always a real
-    change.
+    ``implementation`` keeps its dedicated branch (shadow column, UpgradeEvent, coverage refresh); everything else goes
+    through the generic ControllerValue updater. A rotation marks the protocol dirty. Only called when the value
+    actually changed.
     """
     if not mc.contract_id:
         return
@@ -1559,19 +1257,12 @@ def _sync_relational_from_poll(
                     proxy_address=mc.address,
                     old_impl=str(old_value) if old_value else None,
                     new_impl=str(new_value),
-                    # A poll reads a slot, not a log: no block and no tx are
-                    # knowable here. NULL says that; 0 would claim the upgrade
-                    # happened before the genesis deployment, and since every
-                    # consumer orders by block_number NULLS LAST, this row
-                    # would sort to the front of the era sequence and shift
-                    # every impl window by one.
+                    # No block is knowable. NULL, not 0: 0 would sort first among NULLS LAST and shift every impl
+                    # window.
                     block_number=None,
                     tx_hash=None,
-                    # Detection time, not a block time — bounded above by one
-                    # poll interval. Only ``source`` distinguishes the two
-                    # readings of this column; leaving it NULL is what
-                    # collapsed every post-upgrade audit to low confidence
-                    # once before (upgrade_history.project_to_events).
+                    # Detection time (within one poll interval), distinguished by ``source``. NULL here once collapsed
+                    # post-upgrade audit confidence.
                     timestamp=datetime.now(timezone.utc),
                     source=UPGRADE_SOURCE_POLL,
                 )
@@ -1581,8 +1272,7 @@ def _sync_relational_from_poll(
                 mark_enrollment_dirty(session, contract.protocol_id, _GOVERNANCE_ROTATION_REASON)
         return
 
-    # A poll reads a slot; no block is knowable here, so block_number goes
-    # NULL rather than keeping the block of the previous (now wrong) read.
+    # NULL block rather than the previous read's.
     if _update_controller_value_rows(
         session,
         mc,
@@ -1597,16 +1287,10 @@ def _sync_relational_from_poll(
                 mark_enrollment_dirty(session, contract.protocol_id, _GOVERNANCE_ROTATION_REASON)
 
 
-# ---------------------------------------------------------------------------
-# State polling
-# ---------------------------------------------------------------------------
-
-
 def _rpc_call_for_entry(address: str, entry: dict) -> tuple[str, list] | None:
-    """Translate a polling-plan entry into a JSON-RPC ``(method, params)``
-    pair. Returns ``None`` for unrecognized entry kinds — the loop drops
-    those silently so a forward-compatible schema addition can't break
-    a running watcher."""
+    """Polling-plan entry to JSON-RPC ``(method, params)``; ``None`` for unknown kinds, which are skipped so schema
+    additions can't break a running watcher.
+    """
     kind = entry.get("kind")
     if kind == "getter_call":
         selector = entry.get("selector")
@@ -1628,27 +1312,12 @@ def _apply_poll_result(
     raw: str | None,
     new_events: list[MonitoredEvent],
 ) -> bool:
-    """Decode one poll result and, when the value changed, persist the new
-    ``last_known_state``, emit a ``state_changed_poll`` event, and run the
-    downstream sync (proxy write-through, relational, reanalysis, per-entry
-    scanner-duplicate suppression).
+    """Decode one poll result; on change, persist ``last_known_state``, emit ``state_changed_poll``, and run
+    downstream sync.
 
-    The computation is identical to the pre-rotation inline driver; only the
-    framing moved from a single flat loop to per-chunk dispatch.
-
-    Only answered, error-free RPC results reach here — the poll loop routes
-    errored calls to the contract's ``last_poll_status`` map instead — so an
-    unparsed decode below means exactly "the call returned nothing
-    parseable" (empty ``0x`` / short body / undecodable type), never a
-    swallowed revert.
-
-    Returns True iff the response parsed as the entry's declared type — an
-    observed outcome. That includes a parse to the type's conventional
-    empty (the zero address), which by ``decode_poll_outcome``'s contract
-    stays out of ``last_known_state``: an answered zero is a value the
-    wire delivered, not a missing one. False means the answer contained
-    nothing parseable and is the caller's signal to publish the entry as
-    ``no_value`` rather than ``ok``.
+    Only answered, error-free results arrive here, so an unparsed decode means an empty or unparseable body. Returns
+    True iff the body parsed as the declared type (including a zero address); False tells the caller to publish
+    ``no_value``.
     """
     field_name = entry.get("field")
     if not isinstance(field_name, str) or not field_name:
@@ -1662,13 +1331,11 @@ def _apply_poll_result(
     if new_value == old_value:
         return True
 
-    # Always record the new value in last_known_state, even on the
-    # first observation — subsequent polls then have a baseline.
+    # Recorded even on first observation, as the baseline.
     state[field_name] = new_value
     mc.last_known_state = state
     flag_modified(mc, "last_known_state")
 
-    # First observation after enrollment isn't a real state change.
     if old_value is None:
         logger.debug(
             "Initial %s observation on %s: %s (no event emitted)",
@@ -1678,11 +1345,7 @@ def _apply_poll_result(
         )
         return True
 
-    # Suppress when the event scanner already recorded the same
-    # mutation. Per-entry suppress lists come from the enrollment-
-    # time projection: vendored entries carry the canonical
-    # event_types for their slot, analyzer-derived entries carry
-    # event_types whose ``effect_tags.writes`` includes this field.
+    # Skip if the scanner already recorded this mutation (per-entry suppress lists from enrollment).
     scan_types = entry.get("suppress_when_scan_event_types") or []
     if isinstance(scan_types, list) and scan_types:
         suppression_cutoff = datetime.now(timezone.utc) - timedelta(
@@ -1705,9 +1368,7 @@ def _apply_poll_result(
             )
             return True
 
-    # Mint site 3 of 3. Same construction as the verification read: the plan
-    # entry is in scope only here, so its signal_class is stamped onto the row
-    # and the salience rule reads it back off ``data``.
+    # Mint site 3 of 3: stamp the entry's signal_class for salience.
     event_data: dict[str, Any] = {
         "field": field_name,
         "old_value": str(old_value),
@@ -1739,10 +1400,8 @@ def _apply_poll_result(
 
     _write_through_proxy_read(session, mc, field_name, new_value, old_value)
 
-    # Propagate to relational tables
     _sync_relational_from_poll(session, mc, field_name, new_value, old_value)
 
-    # Queue a re-analysis job if the state change warrants it
     try:
         poll_data = {
             "field": field_name,
@@ -1760,15 +1419,8 @@ def _apply_poll_result(
             updated["reanalysis_job_id"] = str(reanalysis_job.id)
             event.data = updated
     except _DB_ERROR_TYPES:
-        # maybe_queue_reanalysis's first statement is a Job SELECT whose
-        # autoflush flushes the staged last_known_state UPDATE — the same row
-        # the scanner's cohort UPDATE locks, so this is a deadlock candidate.
-        # Any DB error here has already poisoned the session; let it reach the
-        # chunk handler, which owns rollback + retry-first. Swallowing it would
-        # leave the session pending-rollback and the next statement would raise
-        # PendingRollbackError (not a DB error) past that handler, killing the
-        # pass. Only genuinely local reanalysis-logic failures fall through to
-        # the warn-and-continue below so they can't block a real detection.
+        # The reanalysis Job SELECT autoflushes the staged UPDATE (a deadlock candidate). DB errors re-raise to the
+        # chunk handler; only local reanalysis failures fall through to the warning.
         raise
     except Exception as exc:
         logger.warning(
@@ -1781,80 +1433,23 @@ def _apply_poll_result(
 
 
 def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEvent]:
-    """Poll for state changes by walking each contract's persisted
-    ``polling_plan``.
+    """Poll for state changes by walking each contract's persisted ``polling_plan``.
 
-    The plan is built at enrollment (``polling_plan.build_polling_plan``)
-    from the static analyzer's tracked_controllers, plus vendored proxy
-    storage slots and Safe/Timelock standard ABIs.
+    Each pass claims the ``PSAT_POLL_CONTRACTS_PER_PASS`` least-recently-polled contracts and packs their entries into
+    ``MAX_BATCH_SIZE`` chunks (never splitting a contract). Each chunk is decoded, synced, stamped, committed and
+    notified on its own.
 
-    Rotation: each pass claims only the
-    ``PSAT_POLL_CONTRACTS_PER_PASS`` least-recently-polled active
-    ``needs_polling`` contracts (``last_polled_at ASC NULLS FIRST``), so the
-    pass is O(slice) in memory rather than O(all monitored contracts). Their
-    plan entries are expanded and packed into ``MAX_BATCH_SIZE``-call chunks —
-    a contract's calls never split across a chunk — and each chunk is decoded,
-    synced, stamped (``last_polled_at`` = server ``now()``), committed, and its
-    events notified, all on its own.
+    Answered chunks overwrite ``last_poll_status`` with ``{field: "ok" | "error" | "no_value"}``: ``ok`` parsed
+    (including a zero address), ``error`` a per-call JSON-RPC error, ``no_value`` an empty or unparseable body. A
+    missing field wasn't polled. Transport failures observed nothing: no status, no stamp, retry first next pass.
+    Per-call errors stamp and rotate, otherwise always-reverting legacy entries would pin the front forever. Any error,
+    no_value or transport failure marks the pass partial.
 
-    Per-entry outcomes are published: an answered chunk overwrites each of
-    its contracts' ``last_poll_status`` with
-    ``{field: "ok" | "error" | "no_value"}`` for every entry dispatched
-    this pass — ``ok`` = the call answered and its body parsed as the
-    entry's declared type, INCLUDING the type's conventional empty (a
-    zero-address ``owner()`` on a renounced contract is an observed
-    value, published ``ok``, even though ``decode_poll_outcome``'s
-    storage convention keeps it out of ``last_known_state``); ``error`` =
-    the node answered THIS call with a per-call JSON-RPC error (e.g. a
-    revert on a getter the address doesn't expose); ``no_value`` = the
-    call answered without error but returned nothing that parses as the
-    declared type (empty ``0x`` from a codeless address or permissive
-    fallback, short body, undecodable type). A field absent from the map
-    was not polled. The status map is what keeps a dead entry
-    distinguishable from a never-polled one.
+    A chunk that deadlocks with the scanner rolls back and retries first; other DB errors end the pass. Contracts
+    without a plan still rotate until the reconciler backfills one.
 
-    Statuses are written only from batches the node actually answered. A
-    wholesale transport failure (``rpc_batch_request_classified`` reports
-    those slots as ``transport`` instead of raising) observed nothing, so
-    it publishes nothing: the chunk neither overwrites statuses nor
-    stamps, its contracts sort first next pass (retry-first — an outage
-    self-heals and must not masquerade as an earned per-entry negative).
-    Per-call ``error`` entries DO stamp and rotate normally:
-    always-reverting entries exist in persisted pre-``unknown``-strategy
-    plans, and an unstamped-on-revert rule would pin their contracts to
-    the front of the rotation forever — their outcome is published, not
-    retried. Any errored, unparseable, or transport-failed entry marks
-    the pass ``partial``; an answered conventional-empty does not — it
-    is a successful observation, and a pass made only of those is a
-    healthy (``running``) pass.
-
-    A chunk whose write side deadlocks against the scanner's cohort UPDATE
-    is rolled back and left unstamped so its contracts sort first next pass
-    (retry-first), and the pass continues with the remaining chunks,
-    reporting ``partial``. Only a Postgres deadlock is recovered per-chunk;
-    any other database error (e.g. a lost connection) is re-raised to end
-    the pass honestly.
-
-    Contracts whose ``monitoring_config`` lacks a ``polling_plan`` still
-    rotate (they get stamped with an empty chunk) — the reconciler
-    (``services/monitoring/reconciler.py``) backfills the plan within its
-    interval so this is a bounded transient on freshly-migrated rows.
-
-    Singleton correctness: the poll path is gated by the
-    ``protocol_poller:<chain>`` daemon lease and the lease is **load-bearing,
-    not belt-and-braces**. ``state_changed_poll`` rows carry ``tx_hash=''`` /
-    block 0 and stay ``log_index NULL``, so they sit outside the partial
-    identity index by design; there is no Layer-2 idempotency to catch a
-    duplicate poll detection. Two concurrent poll passes without the lease MAY
-    double-insert poll events — an accepted risk.
-
-    The scan path's lease used to be belt-and-braces for exactly the opposite
-    reason — every scan row won or lost an ON CONFLICT on the identity index.
-    That is no longer true of the whole path: the verification reads
-    ``scan_for_events`` runs mint ``value_changed`` rows with the same
-    ``log_index NULL`` shape as these, so the scanner lease is load-bearing for
-    that half. ``scan_for_events`` therefore resolves hints only for chains
-    whose lease it still holds.
+    The ``protocol_poller:<chain>`` lease is load-bearing: poll rows have NULL ``log_index`` and no identity-index
+    protection, so concurrent passes could double-insert. The same holds for the scanner's verification reads.
     """
     started = time.monotonic()
     slice_size = int(os.getenv("PSAT_POLL_CONTRACTS_PER_PASS", str(DEFAULT_POLL_CONTRACTS_PER_PASS)))
@@ -1883,9 +1478,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         )
         return []
 
-    # Acquire the per-chain poll lease before any RPC. A chain held elsewhere is
-    # dropped; if none are held, yield the pass (note='lease_lost') so the fleet
-    # view sees a live process, not a dead one.
+    # Acquire the per-chain lease before any RPC; with none held, yield (``lease_lost``) but still beat.
     lease_holder = _LEASE_HOLDER
     lease_ttl = int(os.getenv("PSAT_DAEMON_LEASE_TTL_S", str(DEFAULT_DAEMON_LEASE_TTL_S)))
     held_chains = {
@@ -1906,8 +1499,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         return []
     contracts = [mc for mc in contracts if mc.chain in held_chains]
 
-    # Oldest rotation cursor in the selected slice, measured before we stamp —
-    # a NULL (never-polled) member reads as unbounded age (reported as None).
+    # Oldest cursor in the slice before stamping; never-polled reads as None.
     now = datetime.now(timezone.utc)
     polled_ats = [mc.last_polled_at for mc in contracts]
     if any(ts is None for ts in polled_ats):
@@ -1915,22 +1507,14 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     else:
         oldest_age_s = int((now - min(ts for ts in polled_ats if ts)).total_seconds())
 
-    # Partition by chain FIRST so a chunk never mixes chains — its single batch
-    # RPC goes to that chunk's own chain (mainnet keeps the incoming ``rpc_url``).
-    # Within a chain, pack whole contracts into <=MAX_BATCH_SIZE-call chunks — a
-    # contract's calls never split across a chunk boundary, so its dispatch
-    # indexes stay contiguous within one batch. Single-chain (the common case)
-    # packs identically to before, since contract order within a chain is kept.
+    # Partition by chain so a chunk's batch goes to one chain; pack whole contracts into chunks.
     contracts_by_chain: dict[str, list[MonitoredContract]] = defaultdict(list)
     for mc in contracts:
         contracts_by_chain[mc.chain].append(mc)
 
     chunks: list[tuple[str, list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]]]] = []
-    # Plan entries this pass could not turn into a call. Dropping them is
-    # deliberate (a forward-compatible schema addition must not break a running
-    # watcher), but they vanished from every accounting: a plan the analyzer
-    # rewrote into a kind this build does not know reads exactly like a contract
-    # with nothing to poll.
+    # Entries that couldn't become calls: skipped deliberately, but counted so a plan in an unknown kind doesn't look
+    # like nothing to poll.
     entries_unrecognized = 0
     for chunk_chain, chain_contracts in contracts_by_chain.items():
         current: list[tuple[MonitoredContract, list[tuple[dict, tuple[str, list]]]]] = []
@@ -1974,21 +1558,11 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
                 dispatch.append((mc, len(batch_calls), entry))
                 batch_calls.append(call)
 
-        # ``_classified`` keeps the two failure shapes apart: a reverting
-        # getter is an answered call (``"error"``, an earned per-entry
-        # negative), while a batch the node never answered leaves its
-        # slots ``"transport"`` (outcome unobserved; the helper never
-        # raises).
+        # Keeps reverts (``error``, an answered negative) apart from unanswered slots (``transport``); never raises.
         results = rpc_batch_request_classified(chunk_rpc_url, batch_calls) if batch_calls else []
 
         if any(status == "transport" for _raw, status in results):
-            # Nothing was observed for at least one slot, so nothing is
-            # published for the whole chunk (a >MAX_BATCH_SIZE plan can
-            # split across posts; partially-answered chunks are treated
-            # the same, conservatively): statuses stay as they were,
-            # ``last_polled_at`` is NOT stamped, so these contracts sort
-            # first next pass — retry-first for outages, which self-heal,
-            # unlike per-call reverts which stamp and rotate below.
+            # Some slot unobserved: publish nothing for the chunk and leave it unstamped to retry first.
             chunks_transport_failed += 1
             logger.warning(
                 "Poll chunk transport-failed; nothing published, retrying next pass: %s",
@@ -1997,12 +1571,8 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             )
             continue
 
-        # Decode + apply + stamp + commit as one unit under deadlock isolation.
-        # The scanner advances cursors with a bulk UPDATE over the same
-        # monitored_contracts rows this chunk touches, so any of the apply-loop
-        # autoflush, the suppression SELECT, the stamp, or the commit can be the
-        # side Postgres aborts. Collect the chunk's events locally so a rollback
-        # discards exactly the detections that rolled back with it.
+        # Decode, apply, stamp and commit as one unit under deadlock isolation; any of those can lose to the scanner's
+        # cursor UPDATE. Events are collected locally so a rollback discards exactly its detections.
         chunk_events: list[MonitoredEvent] = []
         chunk_entry_errors = 0
         chunk_entries_no_value = 0
@@ -2021,10 +1591,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
                     chunk_entries_no_value += 1
                 if isinstance(field_name, str) and field_name:
                     statuses[mc.id][field_name] = "ok" if decoded else "no_value"
-            # Overwrite wholesale: the chunk dispatches every recognizable
-            # entry of each contract's plan, so this pass's outcomes ARE
-            # the full per-field truth; a field absent from the map was
-            # not polled (unrecognized kind, missing selector, no plan).
+            # Overwrite wholesale: this pass dispatched every recognizable entry.
             for mc, _entries in chunk:
                 mc.last_poll_status = statuses[mc.id]
                 flag_modified(mc, "last_poll_status")
@@ -2034,13 +1601,9 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             session.commit()
         except _DB_ERROR_TYPES as exc:
             if not _is_deadlock_error(exc):
-                # Connection loss and other DB failures aren't per-chunk
-                # recoverable — let the pass die so run_poll_loop records an
-                # honest degraded cycle rather than masking it.
+                # Not recoverable per chunk; let the pass die and record an honest degraded cycle.
                 raise
-            # Postgres aborted this chunk. Roll back (which also reverts the
-            # in-memory last_known_state mutations the apply loop staged) and
-            # leave the chunk unstamped so it sorts first next pass; press on.
+            # Deadlock: roll back (including staged state mutations), leave unstamped, continue.
             session.rollback()
             chunks_failed += 1
             logger.warning(
@@ -2050,20 +1613,13 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             )
             continue
 
-        # Chunk is durable. Notify its events now — mirroring the scanner's
-        # per-window notify — so a later chunk's failure can't strand
-        # already-committed detections. A chunk that rolled back never reaches
-        # here, so its events are never notified (and its entry errors were
-        # discarded with it — chunks_failed already marks the pass partial).
+        # Durable: notify now so a later chunk's failure can't strand these.
         entry_errors += chunk_entry_errors
         entries_no_value += chunk_entries_no_value
         _notify_committed_events(session, chunk_events)
         new_events.extend(chunk_events)
 
-        # Renew now that this chunk is durable. renew commits even when it
-        # LOSES, so a lost renew aborts the remaining chunks AFTER this one —
-        # never roll back. Conservative for multi-chain (any chain's loss ends
-        # the pass; those contracts just retry next pass); ships ethereum-only.
+        # Renew after the durable commit; a lost renew stops the remaining chunks without rollback.
         renewed = [
             renew_daemon_lease(session, _poller_lease_name(chain), lease_holder, lease_ttl) for chain in held_chains
         ]
@@ -2076,13 +1632,8 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
         contracts_scanned=len(contracts),
         blocks_scanned=0,
         events_found=len(new_events),
-        # A pass is partial iff some dispatched entry produced no
-        # observation this tick: the chunk rolled back (deadlock), was
-        # never answered (transport), a call errored, or an answered call
-        # parsed to nothing (``no_value``). An answered conventional-empty
-        # (zero address) counts as ``ok`` upstream and does NOT mark the
-        # pass partial — the basis for ``partial`` is a failure to
-        # observe, never the observed value itself.
+        # Partial iff some entry produced no observation (deadlock, transport, error, no_value); an answered zero
+        # address is ``ok``.
         partial=chunks_failed > 0 or chunks_transport_failed > 0 or entry_errors > 0 or entries_no_value > 0,
         extra_detail={
             "contracts_selected": len(contracts),
@@ -2091,9 +1642,7 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
             "chunks_transport_failed": chunks_transport_failed,
             "entry_errors": entry_errors,
             "entries_no_value": entries_no_value,
-            # NOT a partial: an entry this build cannot dispatch was never
-            # dispatched, so nothing failed to be observed. Published so the
-            # silent drop is countable.
+            # Not partial: never dispatched, so nothing failed to be observed.
             "entries_unrecognized": entries_unrecognized,
             "oldest_last_polled_age_s": oldest_age_s,
         },
@@ -2101,26 +1650,13 @@ def poll_for_state_changes(session: Session, rpc_url: str) -> list[MonitoredEven
     return new_events
 
 
-# ---------------------------------------------------------------------------
-# Blocking loops
-# ---------------------------------------------------------------------------
-
-
 def run_scan_loop(
     rpc_url: str,
     interval: float = DEFAULT_SCAN_INTERVAL,
     stop_event: Event | None = None,
 ) -> None:
-    """Run the unified event scanner in a blocking loop.
-
-    ``scan_for_events`` now commits and notifies per window, so a long
-    catch-up drains at RPC speed without buffering. When a pass exhausts its
-    window budget with work still queued, re-run after the short busy interval
-    instead of the full scan interval.
-
-    ``stop_event`` (supplied by the thread supervisor) lets a shutdown break the
-    inter-pass wait mid-interval instead of sleeping out the full interval;
-    callers that omit it keep the original blocking-forever behaviour.
+    """Run the event scanner in a blocking loop, re-running after the short busy interval when a pass exhausts its
+    window budget. *stop_event* interrupts the wait on shutdown.
     """
     stop_event = stop_event or Event()
     logger.info("Starting unified protocol monitor (interval=%ss)", interval)
@@ -2136,8 +1672,7 @@ def run_scan_loop(
                 sleep_for = busy_interval
         except Exception as exc:
             logger.warning("Scan cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
-            # ``scan_for_events`` raised before it could emit its own cycle
-            # summary — still beat so the fleet view sees a degraded cycle.
+            # It raised before its own summary; still beat as degraded.
             record_heartbeat(
                 HEARTBEAT_PROTOCOL_SCANNER,
                 status="degraded",
@@ -2152,26 +1687,15 @@ def run_poll_loop(
     stop_event: Event | None = None,
     startup_offset_s: float | None = None,
 ) -> None:
-    """Run the unified state polling loop.
+    """Run the state polling loop; notification happens per chunk inside ``poll_for_state_changes``.
 
-    ``stop_event`` lets the supervisor cut the inter-pass wait short on
-    shutdown; omitting it preserves the original blocking-forever behaviour.
-
-    Notification happens per chunk inside ``poll_for_state_changes`` (so a later
-    chunk's failure can't strand committed detections); this loop only schedules
-    passes. Its first pass is offset from the scanner's (``_poll_startup_offset``)
-    so the two equal-interval loops don't fire in lockstep and deadlock on
-    ``monitored_contracts`` every cycle. ``startup_offset_s`` overrides that shift
-    — the standalone ``--poll`` runner passes 0 because there is no co-scheduled
-    scanner in its process to de-phase from.
+    The first pass is offset from the scanner's (``_poll_startup_offset``) so the equal-interval loops don't deadlock in
+    lockstep; ``startup_offset_s=0`` for the standalone ``--poll`` runner. *stop_event* interrupts the wait on shutdown.
     """
     stop_event = stop_event or Event()
     logger.info("Starting unified protocol poller (interval=%ss)", interval)
     offset = _poll_startup_offset(interval) if startup_offset_s is None else max(0.0, startup_offset_s)
-    # One beat before the offset wait: a never-beaten heartbeat classifies as
-    # stale (process_meta.is_stale(None)) and the ops watchdog pages on the
-    # first tick, so on a fresh DB the offset gap would otherwise emit a false
-    # "poller down" + "recovered" pair on every preview deploy.
+    # Beat before the offset wait; an unbeaten heartbeat reads stale and would page on fresh deploys.
     record_heartbeat(HEARTBEAT_PROTOCOL_POLLER, status="starting", detail={"note": "starting", "partial": False})
     if offset and stop_event.wait(offset):
         return
@@ -2183,8 +1707,7 @@ def run_poll_loop(
                     logger.info("Poll detected %d state change(s)", len(new_events))
         except Exception as exc:
             logger.warning("Poll cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
-            # ``poll_for_state_changes`` raised before it could emit its own
-            # cycle summary — still beat so the fleet view sees a degraded cycle.
+            # It raised before its own summary; still beat as degraded.
             record_heartbeat(
                 HEARTBEAT_PROTOCOL_POLLER,
                 status="degraded",

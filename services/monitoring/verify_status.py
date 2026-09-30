@@ -1,31 +1,8 @@
-"""Per-controller outcome markers for scan-pass verification reads (F2/F9b).
+"""Per-controller markers for scan-pass verification reads that did not answer.
 
-A hint occurrence resolves through one read per dirty controller. Three
-outcomes are publishable facts and one is not:
-
-  * the value moved            → a witnessed ``value_changed`` event;
-  * the value did not move     → an earned negative, published as nothing;
-  * the read did not happen or did not answer → **not determined**, and that
-    third state has to be visible to an operator rather than dropped.
-
-The last case is what this module carries. Markers are written into the
-existing ``monitored_contracts.last_poll_status`` JSONB under the controller's
-polling field, the same ``{field: outcome}`` shape the poller writes, so
-nothing downstream needs a new column to see them.
-
-Lifetime is deliberately that of the poll-status map: the poller overwrites it
-wholesale on every answered pass, so a marker states "the most recent
-observation of this field was a verification read that did not answer", not a
-durable history. It is an ops signal, not evidence.
-
-``count_verification_read_gaps`` is the F9b counter, published on the F9a
-surface as ``watchers.verification_gaps`` (``services/aggregations/fleet.py``)
-and collected by ``ops_alerts.collect_verification_gaps``. Because of that
-lifetime it is a **census of the markers present when it runs**, not a tally of
-what happened — see the function's own contract, and the scanner heartbeat's
-pass-scoped counters (``verification_reads_failed`` /
-``verification_reads_over_budget``) for the complement that does not depend on a
-marker surviving.
+A hint read has three outcomes: the value moved (a ``value_changed`` event), it did not (published as nothing), or the
+read never answered (not determined, which must stay visible). Markers live in ``last_poll_status`` under the
+controller's field, and the poller overwrites that map on every answered pass, so they are an ops signal, not history.
 """
 
 from __future__ import annotations
@@ -37,39 +14,27 @@ from sqlalchemy.orm import Session
 
 from db.models import MonitoredContract
 
-# The node answered this specific call with an error (a revert on a getter the
-# address does not expose). An earned per-call negative about the CALL — never
-# about the value.
+# The node answered this call with an error (e.g. a revert): a negative about the call, never the value.
 VERIFY_ERROR = "verify_error"
-# The batch itself was never answered. Nothing was observed, including whether
-# the call would have errored.
+# The batch was never answered.
 VERIFY_UNANSWERED = "verify_unanswered"
-# Answered without error, but the body carried nothing that parses as the
-# entry's declared type.
+# Answered, but nothing parses as the entry's declared type.
 VERIFY_NO_VALUE = "verify_no_value"
-# The controller was marked dirty but the pass ran out of read budget before
-# reaching it. Recorded rather than dropped: a skipped read is not a negative.
+# Dirty but out of read budget; a skipped read is not a negative.
 VERIFY_OVER_BUDGET = "verify_over_budget"
-# The spec classified as hint but no polling entry is PROVEN to read its
-# controller, so the hint resolves to nothing at all. Distinct from a failed
-# read: nothing was attempted, and nothing could have been.
+# Hint with no polling entry proven to read its controller: nothing could be attempted.
 VERIFY_NO_READ_BINDING = "verify_no_read_binding"
 
 VERIFY_FAILURE_STATUSES = frozenset({VERIFY_ERROR, VERIFY_UNANSWERED, VERIFY_NO_VALUE})
 VERIFY_SKIP_STATUSES = frozenset({VERIFY_OVER_BUDGET, VERIFY_NO_READ_BINDING})
 VERIFY_STATUSES = VERIFY_FAILURE_STATUSES | VERIFY_SKIP_STATUSES
 
-# Controller-keyed entries live under this prefix so they cannot collide with
-# a polling entry's ``field`` key, which is what the poller owns.
+# Prefix so controller keys can't collide with the poller's field keys.
 CONTROLLER_STATUS_PREFIX = "controller:"
 
 
 def record_verify_status(mc: MonitoredContract, field: str | None, status: str) -> bool:
-    """Stamp *status* for *field* on the contract's poll-status map.
-
-    Returns True when a marker was written. A missing field name means there is
-    nowhere honest to record the outcome, so nothing is written.
-    """
+    """Stamp *status* for *field*; returns whether a marker was written (nothing without a field name)."""
     if not isinstance(field, str) or not field or status not in VERIFY_STATUSES:
         return False
     current = dict(mc.last_poll_status or {})
@@ -79,21 +44,10 @@ def record_verify_status(mc: MonitoredContract, field: str | None, status: str) 
 
 
 def record_unresolvable_read(mc: MonitoredContract, controller_id: str | None) -> bool:
-    """Record that a hint could not be resolved because no read is bound to
-    *controller_id*.
+    """Record, keyed by controller, that a hint has no bound read; returns False if already recorded.
 
-    Keyed on the controller rather than a polling field, because the absence of
-    a bound entry is exactly why there is no field name to key on. One key per
-    controller, so repeat occurrences do not grow the map.
-
-    Returns False — writing nothing — when the marker is already recorded. This
-    is called once per unbound hint OCCURRENCE, and an unbound controller is
-    usually one whose events are frequent (that is why it was hinted at all),
-    so re-stamping an identical value would emit a ``monitored_contracts``
-    UPDATE on every window forever, inside the same transaction that carries
-    the scanner's cursor UPDATE — the documented deadlock counterpart to the
-    poller. The state is idempotent, so the second write says nothing the first
-    did not.
+    The no-op matters: unbound controllers emit often, and re-stamping would UPDATE ``monitored_contracts`` every window
+    inside the scanner's cursor transaction, the documented deadlock with the poller.
     """
     if not isinstance(controller_id, str) or not controller_id:
         return False
@@ -106,31 +60,16 @@ def record_unresolvable_read(mc: MonitoredContract, controller_id: str | None) -
     return True
 
 
-#: What the counts below are counts OF, carried in the payload rather than only
-#: in this docstring: the markers a read of ``last_poll_status`` finds AT THAT
-#: INSTANT. The poller rewrites that map wholesale on every answered pass, so a
-#: bucket at 0 means "no marker is present now" — it is not proof that no
-#: verification read failed or was skipped since the last poll.
+# The counts are of markers present at read time; a 0 is not proof no read failed since the last poll.
 CENSUS_BASIS = "current_markers"
 
 
 def count_verification_read_gaps(session: Session) -> dict[str, Any]:
-    """Fleet census of verification reads that produced no observation (F9b).
+    """Fleet census of verification-read markers, by bucket, plus ``contracts_affected``.
 
-    Three buckets, all counting KEYS, plus ``contracts_affected`` counting
-    distinct contracts carrying at least one. They stay apart because they are
-    different facts about different things: an over-budget skip is a capacity
-    fact about this deployment, a failed read is a fact about the chain or the
-    plan, and a missing read binding is a fact about the analysis — the
-    controller was classified readable at enrollment but no polling entry is
-    proven to read it.
-
-    **A zero here is not an earned negative.** The numbers are a point-in-time
-    marker census (``basis``), and markers live only until the poller's next
-    answered pass over the contract, so an intermittent failure is routinely
-    erased before anyone reads this. The per-pass counters on the scanner
-    heartbeat are what state how many reads failed or were skipped in a given
-    pass; the two are complements and neither substitutes for the other.
+    Buckets stay separate because they are different facts: over-budget is capacity, a failed read is the chain or plan,
+    a missing binding is the analysis. A zero is not an earned negative; the scanner heartbeat's per-pass counters are
+    the complement.
     """
     rows = session.execute(
         select(MonitoredContract.last_poll_status).where(MonitoredContract.is_active == True)  # noqa: E712

@@ -27,19 +27,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 def sweep_enqueue_stale(session: Session, k: int | None = None, *, min_age_s: int | None = None) -> list[int]:
-    """Enqueue up to *k* protocols overdue for repair (NULLS FIRST).
+    """Enqueue up to *k* protocols overdue for repair (never-reconciled first) and return the ids inserted.
 
-    The convergence backstop for drift from write sites that don't mark dirty
-    (psql fix-ups, unknown paths). A successful reconcile must be at least
-    ``PSAT_RECONCILE_SWEEP_MIN_AGE_S`` old (default 24 hours), unless the
-    protocol has never been reconciled. Inserts with reason ``'sweep'`` and
-    commits. Returns only the protocol ids actually inserted.
-
-    Candidates already sitting in the queue are excluded: re-marking them would
-    reset ``dirty_at`` to now() and so pull a poisoned row out of its
-    ``_finish_failure`` backoff every tick, re-triggering a full governance
-    build forever. Skipping queued rows keeps the exponential backoff intact and
-    frees the sweep slot for a genuinely un-enqueued stale protocol.
+    The backstop for drift from writes that don't mark dirty. Rows already queued are skipped: re-marking would reset
+    ``dirty_at`` and pull a poisoned row out of its failure backoff every tick.
     """
     k = k if k is not None else _env_int("PSAT_RECONCILE_SWEEP_K", DEFAULT_RECONCILE_SWEEP_K)
     if k <= 0:
