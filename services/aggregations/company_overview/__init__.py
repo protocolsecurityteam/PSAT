@@ -1,30 +1,12 @@
-"""Company-level governance overview.
-
-Decomposed from a single ~700-line endpoint into stages so each step is
-testable on its own. ``build_company_overview`` is the orchestrator
-called by the router.
-
-Stages (each returns plain Python data, not ORM rows that pin a session):
+"""Company-level governance overview, staged so each step is testable:
 
 1. ``resolve_company_jobs`` — the protocol's completed member jobs.
-2. ``prefetch_contracts`` — batch fetch ``Contract`` rows by ``job_id``,
-   with an address+chain fallback for jobs whose Contract row was
-   reassigned by ``copy_static_cache`` to a newer job.
-3. ``resolve_implementation_contracts`` — for proxy contracts in the
-   inventory, locate the impl Contract row keyed by impl address.
-4. ``build_governance_view`` — merges the above with prefetched child
-   tables to produce the contract entries, ownership hierarchy,
-   non-contract principals, and inter-contract fund-flow edges.
-5. ``assemble_company_payload`` — adds the protocol-wide views
-   (all_addresses, latest TVL) and shapes the final dict.
+2. ``prefetch_contracts`` — Contract rows by job, address+chain fallback for ``copy_static_cache`` reassignment.
+3. ``resolve_implementation_contracts`` — impl rows for proxies.
+4. ``build_governance_view`` — contract entries, hierarchy, principals, fund flows.
+5. ``assemble_company_payload`` — protocol-wide views and final dict.
 
-Package layout: ``entity_keys`` (composite chain::address tokens),
-``jobs`` (stages 1–3), ``prefetch`` (child-table fan-out), ``principals``
-(controller vocabulary + principal lookup), ``governance_view`` (stage 4),
-``functions_view`` (the /functions payload), ``payload`` (stage 5 + the
-orchestrators). This ``__init__`` re-exports the full pre-split module
-surface — including the private names tests and sibling services import —
-so ``services.aggregations.company_overview.X`` keeps resolving unchanged.
+This ``__init__`` re-exports the pre-split surface, including private names tests import.
 """
 
 from .entity_keys import _coalesce_chain, _entity_addr, _entity_chain, _entity_key

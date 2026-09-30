@@ -1,8 +1,6 @@
-"""Aggregation services that build the larger response payloads.
+"""Aggregation services building larger response payloads: ``build_*(session) -> dict``.
 
-Each module exposes a ``build_*`` entrypoint that takes a SQLAlchemy
-``Session`` and returns a plain ``dict``. Routers call them; nothing in
-this package imports FastAPI.
+Nothing here imports FastAPI.
 """
 
 from .analysis_detail import build_analysis_detail

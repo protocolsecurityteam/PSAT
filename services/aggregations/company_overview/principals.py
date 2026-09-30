@@ -1,5 +1,3 @@
-"""Governance principal vocabulary + principal-lookup assembly."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -10,36 +8,20 @@ from schemas.control_tracking import MonitoredContractType, ResolvedControllerTy
 _PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
 _PRINCIPAL_TYPES_SQL = tuple(sorted(_PRINCIPAL_TYPES))
 
-# Settled controlling-key kinds: a concrete controller identity. Excludes
-# ``contract`` (a way-point whose ultimate key is unestablished) and the
-# not-determined arms.
+# Excludes ``contract`` (a way-point) and not-determined arms.
 _SETTLED_CONTROLLER_TYPES: frozenset[ResolvedControllerType] = frozenset({"safe", "timelock", "eoa", "proxy_admin"})
-# Governance mechanisms that are themselves CONTRACTS. Excludes ``eoa``
-# deliberately: a bare key can control, but it is not an enrollable contract.
-# ``proxy_admin`` enrolls under the historical ``"proxy"`` contract_type.
+# Governance mechanisms that are contracts; ``eoa`` can control but can't enroll. ``proxy_admin`` enrolls as
+# ``"proxy"``.
 _MONITORED_TYPE_FOR_CONTROLLER: dict[ResolvedControllerType, MonitoredContractType] = {
     "safe": "safe",
     "timelock": "timelock",
     "proxy_admin": "proxy",
 }
-# str-keyed view: governance principal dicts are untyped at this boundary.
 _MONITORED_TYPE_LOOKUP: dict[str, MonitoredContractType] = {k: v for k, v in _MONITORED_TYPE_FOR_CONTROLLER.items()}
-# Mechanisms that interpose on a governed call path (delay / admin hop) —
-# a passthrough entity is attributed to what sits behind it.
 _PASSTHROUGH_CONTROLLER_TYPES: frozenset[ResolvedControllerType] = frozenset({"timelock", "proxy_admin"})
 
-# ControllerValue.controller_id values that denote a contract's *active*
-# owner. The substring heuristic ``"owner" in controller_id.lower()`` used
-# to drive this and false-positives on ``pendingOwner``, ``previousOwner``,
-# ``roleOwner``, ``ownerFee``, etc. Combined with last-write-wins
-# assignment in the CV iteration, OZ Ownable2Step contracts (both
-# ``owner()`` and ``pendingOwner()`` tracked) routinely latched the
-# not-yet-accepted pending owner — and the wrong owner cascaded into the
-# ownership hierarchy and the controls/controls_value fund flow.
-#
-# Exact whitelist instead. Covers the canonical Ownable variants: bare
-# state-var name (``owner`` / ``_owner``) and the prefixed
-# ``state_variable:`` form the tracker emits today.
+# Exact whitelist: the old ``"owner" in id`` substring matched ``pendingOwner`` etc., and Ownable2Step contracts latched
+# the pending owner.
 _ACTIVE_OWNER_CONTROLLER_IDS = frozenset(
     {
         "owner",
@@ -55,23 +37,11 @@ def _is_active_owner_controller(controller_id: str | None) -> bool:
 
 
 def _trim_control_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Drop mapping-entry leaf nodes (and edges pointing at them) from a
-    contract's local control_graph.
+    """Drop mapping-entry leaf nodes and edges to them.
 
-    The frontend walker in ``site/src/surface/layout/controlGraph.js``
-    emits any non-contract ``to`` of an edge from a reachable source as
-    an "indirect principal" in the function inspector. Contracts like
-    ``EtherFiNodesManager`` store hundreds of validator addresses in a
-    mapping; those addresses end up as nodes of ``type:"unknown"`` with
-    labels like ``"deployedEtherFiNodes"``. They are not principals —
-    they are stored EVM data — and they balloon the payload (~900 KB
-    on ether.fi) while filling the inspector with noise.
-
-    A node is dropped iff its type is not a recognised principal AND it
-    never appears as the source of any edge in this contract's local
-    edges list (so the walker can never recurse out of it). All edges
-    targeting a dropped node are dropped with it so the walker never
-    emits a ghost entry.
+    The frontend walker (``controlGraph.js``) shows any non-contract edge target as an indirect principal; mapping
+    contents (validator addresses in ``EtherFiNodesManager``) are data, not principals, and cost ~900 KB. A node is
+    dropped iff it isn't a principal type and never sources an edge.
     """
     sources = {(e.get("from") or "").lower() for e in edges}
     dropped: set[str] = set()
@@ -166,11 +136,7 @@ def _build_principal_lookup(
             continue
         seen_contract_ids.add(contract.id)
         summary = contract.summary
-        # ``is True``: the column is three-state, and only a proven timelock earns
-        # the strong ``timelock`` type (priority 3, a settled key for
-        # ``terminalControllerNote``). A NULL or a missing row falls to
-        # ``contract`` — the WEAK, non-terminal way-point type — so the
-        # not-determined case cannot be promoted into a settled controller.
+        # Only a proven timelock earns the settled ``timelock`` type; NULL falls to the weak ``contract`` way-point.
         contract_type = "timelock" if summary is not None and summary.has_timelock is True else "contract"
         _record_principal_lookup(
             lookup,
@@ -200,35 +166,16 @@ def _build_principal_lookup(
                 details=node.details,
             )
 
-    # The terminal-controller walk, forwarded from ``principal_labels`` — the only
-    # place it is persisted. Its one correct consumer,
-    # ``claimsVocab.terminalControllerNote`` (rendered by ``InspectorCard``),
-    # handles all six statuses and could never receive the data.
+    # Forward the terminal-controller walk from ``principal_labels`` for ``terminalControllerNote``. Deliberately
+    # narrow:
     #
-    # Deliberately narrow, and it is the narrowness that keeps this attributable:
+    # * Only ``terminal_principal``: forwarding ``terminal`` could publish a settled key beside a ``resolved_type``
+    # still saying ``contract``.
+    # * Only addresses the lookup already carries, so the principal set doesn't widen.
+    # * ``setdefault``, so a record arriving with a CGN/CV row wins.
     #
-    # * ONLY ``terminal_principal`` is forwarded. ``principal_labels.details`` also
-    #   carries ``terminal``, ``signer_overlap`` and ``shared_deployer``, and
-    #   forwarding ``terminal`` would let one plane's typing publish a SETTLED key
-    #   (``terminalControllerNote`` returns null on ``terminal === true``) beside a
-    #   ``resolved_type`` from another plane that still says ``contract`` — an
-    #   inconsistent record, and in the reassuring direction. The other two are
-    #   attribution facts with their own hedged copy and their own review.
-    # * only addresses the lookup ALREADY carries are annotated. Admitting new
-    #   addresses would widen the published principal set, which is a different
-    #   change from connecting the renderer.
-    # * ``setdefault``, so a record already merged in from a CGN/CV ``details``
-    #   payload wins — this pass adds the fact where it is missing, never
-    #   overwrites one that arrived with the row.
-    #
-    # Status vocabulary: see ``services.governance.principals`` (the single
-    # declaration point). Non-terminated statuses all render through
-    # ``terminalControllerNote``'s honest "unresolved (<status>)" fall-through,
-    # including ``controllers_not_determined`` — the canonical-getter-silence
-    # state that replaced the refuted ``no_controller`` proven-absence claim
-    # (persisted pre-fix rows may still carry the old token until the next
-    # policy run rewrites them; the renderer folds it into the same unresolved
-    # copy, so no reader can mistake either for a settled key).
+    # Status vocabulary lives in ``services.governance.principals``; pre-fix rows may carry ``no_controller``, which
+    # renders as unresolved too.
     for address, record in (terminal_walk_by_address or {}).items():
         entry = lookup.get(address)
         if entry is None:
@@ -257,8 +204,6 @@ def _principal_lookup_meta(
 
 
 def _claim_ids_list(claims: Any) -> list[str]:
-    """``claim_id`` strings from a stored ``EffectiveFunction.claims`` JSONB list
-    (``[{claim_id, tier, witness}, ...]``); anything else reads as empty."""
     if not isinstance(claims, list):
         return []
     out: list[str] = []

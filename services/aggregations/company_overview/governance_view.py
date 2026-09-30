@@ -1,6 +1,3 @@
-"""``build_governance_view`` — contracts list, ownership hierarchy, fund
-flows and principals."""
-
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -49,7 +46,6 @@ def build_governance_view(
     contracts_by_job_id: dict[Any, Contract],
     impl_job_by_entity: dict[str, Job],
 ) -> GovernanceView:
-    """Build the contracts list + ownership hierarchy + fund flows + principals."""
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
     children = _prefetch_child_tables(session, relevant_contract_ids)
     from services.monitoring.balance_reads import partial_asset_rows
@@ -70,19 +66,15 @@ def build_governance_view(
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
-    # Keyed by ADDRESS, unlike every sibling stage's contract_id map — the walk is a
-    # fact about the address, not about the subject contract that recorded it.
+    # Keyed by address: the walk is a fact about the address, not the recording contract.
     terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # pyright: ignore[reportAssignmentType]
 
     def _fetch_for(balance_row: Any) -> Any | None:
         fetch_id = getattr(balance_row, "fetch_id", None)
         return balance_fetch_by_id.get(int(fetch_id)) if fetch_id is not None else None
 
-    # Fold each proxy's secondary-impl child rows into its PRIMARY impl's
-    # contract_id buckets. The flow/principal passes key on the primary impl
-    # (the proxy's lookup contract), so a governor/admin Safe that holds
-    # authority only on the secondary (admin) impl's functions still surfaces as
-    # a controller of the proxy node.
+    # Fold secondary-impl rows into the primary impl's buckets so a Safe with authority only on the admin impl still
+    # surfaces as a proxy controller.
     for job in jobs:
         cr = contracts_by_job_id.get(job.id)
         secondaries = _secondary_impl_contracts(cr, impl_job_by_entity, contracts_by_job_id)
@@ -109,11 +101,7 @@ def build_governance_view(
                 fp_in_contract_by_cid[primary_cid] = set(fp_in_contract_by_cid.get(primary_cid) or set()) | set(
                     extra_addrs
                 )
-            # The second-pass CGN principal gate (:_build_flows_and_principals)
-            # admits a Safe/EOA/timelock only if it holds FP authority on the
-            # PRIMARY impl's cid. A governor that gates only the secondary impl's
-            # functions lives in fp_all_addrs under the secondary cid, so fold it
-            # up too — the sibling projections above already do.
+            # The CGN principal gate checks the primary cid, so fold secondary-impl governors up too.
             extra_all = fp_all_addrs_by_cid.get(sc.id)
             if extra_all:
                 fp_all_addrs_by_cid[primary_cid] = set(fp_all_addrs_by_cid.get(primary_cid) or set()) | set(extra_all)
@@ -141,16 +129,13 @@ def build_governance_view(
         impl_job_id = str(impl_job.id) if impl_job else None
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
 
-        # Split-proxy secondary logic contracts (admin-impl set). Their
-        # functions + principals attribute to this proxy node too.
         secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_entity, contracts_by_job_id)
 
         summary_row = impl_contract.summary if impl_contract else None
         if not summary_row and contract_row:
             summary_row = contract_row.summary
 
-        # Prefer a logic contract's controller snapshot for proxies — the impl
-        # (or a secondary impl) read against proxy storage, whichever has rows.
+        # Prefer the logic contract's controller snapshot (read against proxy storage).
         lookup_contract = contract_row
         if is_proxy:
             for candidate in [impl_contract, *secondary_impl_contracts]:
@@ -167,9 +152,7 @@ def build_governance_view(
                     owner = cv.value.lower()
 
         upgrade_entry = (upgrade_events_count_by_cid.get(contract_row.id) if contract_row else None) or {}
-        # ``count`` is None whenever the rows support no PROVEN upgrade action —
-        # including the post-exclusion zero, which the UI would otherwise render
-        # as the earned negative "0 upgrades".
+        # ``None`` when no proven upgrade exists, including post-exclusion zero, which would render as "0 upgrades".
         upgrade_count = upgrade_entry.get("count")
         upgrade_count_basis = upgrade_entry.get("basis")
         last_upgrade_entry = (last_upgrade_by_cid.get(contract_row.id) if contract_row else None) or {}
@@ -177,15 +160,11 @@ def build_governance_view(
         last_ts = last_upgrade_entry.get("timestamp")
         last_upgrade_timestamp = last_ts.isoformat() if last_ts is not None else None
 
-        # Effects from every logic contract of this node: the impl (or the row
-        # itself for non-proxies) plus any secondary impls.
         primary_ef_cid = (impl_contract.id if impl_contract else None) or (contract_row.id if contract_row else None)
         ef_contract_ids = [primary_ef_cid] if primary_ef_cid else []
         ef_contract_ids += [sc.id for sc in secondary_impl_contracts]
 
-        # ``value_effects`` stays a Plane-0 fact off legacy labels (it drives the
-        # role classification + fund-flow lane); the capability chips key off
-        # Plane-1 claims per function, legacy labels the claim-less fallback.
+        # ``value_effects`` stays on legacy labels (drives role + fund-flow lane); capability chips are claims-first.
         value_effects: list[str] = []
         caps_set: set[str] = set()
         for cid in ef_contract_ids:
@@ -195,17 +174,9 @@ def build_governance_view(
                         value_effects.append(label)
                 caps_set |= _function_capabilities(rec["labels"], rec["claims"])
 
-        # Two non-label extras layered on: ``upgradeable`` (it's a proxy shell)
-        # and ``pause`` from the summary flag (a contract can be pausable without
-        # a pause_toggle EffectiveFunction surfacing).
         if is_proxy:
             caps_set.add("upgradeable")
-        # ``is True``, not truthiness: the column is three-state and a ``None``
-        # means the pause detector did not answer (or there is no summary row at
-        # all). A capability chip is a positive claim — "this contract can be
-        # paused" — so only a proven ``True`` earns one. Absence of the chip is
-        # NOT published as proof of the opposite; the three-state flag below is
-        # where a consumer reads that.
+        # Three-state column: only a proven ``True`` earns the chip; absence isn't published as proof of the opposite.
         if summary_row is not None and summary_row.is_pausable is True:
             caps_set.add("pause")
         capabilities: list[str] = sorted(caps_set)
@@ -219,18 +190,8 @@ def build_governance_view(
         if not contract_name:
             contract_name = (contract_row.contract_name if contract_row else None) or job.name or ""
         standards = list(summary_row.standards or []) if summary_row else []
-        # Three states through the payload. ``False`` used to be published for a
-        # contract that HAS NO SUMMARY ROW — 3 of the 56 entries the endpoint
-        # serves on the local corpus (lower bound; every dependency-only contract
-        # without a summary takes this path) — so "this contract cannot be paused
-        # / has no timelock / is not
-        # a factory" was asserted on the strength of never having looked. The
-        # producer's own columns are three-state (``bool | None``), and a row
-        # whose column is NULL means the detector ran and could not tell; both
-        # routes to "nobody answered" publish ``None`` here, and
-        # ``summary_evidence`` below names WHICH route it was — the two are
-        # different questions for whoever wants to fix it (re-run the stage vs
-        # improve the detector), and the same answer for anyone reading the flag.
+        # Three states through the payload. ``False`` used to be published for contracts with no summary row, asserting
+        # facts nobody checked. ``summary_evidence`` says which route produced a ``None``.
         is_factory = summary_row.is_factory if summary_row else None
         has_timelock = summary_row.has_timelock if summary_row else None
         is_pausable = summary_row.is_pausable if summary_row else None
@@ -250,24 +211,16 @@ def build_governance_view(
         else:
             role = "utility"
 
-        # ``role`` has no not-determined member and every consumer needs one:
-        # each branch above except the last fires on a POSITIVE fact (a name, an
-        # observed value effect, a declared standard, a proven timelock/factory),
-        # so only the ``utility`` fall-through can be reached by a chain of
-        # not-determined inputs. Published as its own key rather than folded into
-        # ``role`` so the existing role vocabulary — read by the canvas, the
-        # layout bands and ``protocolScore`` — keeps its meaning, and a consumer
-        # that cares can refuse to treat this row's ``utility`` as evidence.
+        # Only the ``utility`` fall-through is reachable from all-not-determined inputs; published separately so the
+        # role vocabulary keeps its meaning.
         role_evidence = (
             "witnessed"
             if role != "utility" or (summary_row is not None and has_timelock is not None and is_factory is not None)
             else "not_determined"
         )
 
-        # Balances are FILED against the row whose ADDRESS was read — a proxy's
-        # holdings belong to the proxy's own row (resolution_worker._fetch_balances),
-        # which is this entry's row. ``lookup_contract`` answers governance lookups
-        # and may be the implementation's row, where no balance is ever filed.
+        # Balances are filed against the row whose address was read (the proxy's own row); ``lookup_contract`` may be
+        # the impl, where nothing is filed.
         balance_contract = contract_row or lookup_contract
         balances_list = []
         total_usd: float | None = None
@@ -279,9 +232,7 @@ def build_governance_view(
                 if usd is None:
                     unvalued_rows += 1
                 if getattr(_fetch_for(b), "asset_set_status", None) == ASSET_SET_STATUS_AT_PAGE_CAP:
-                    # WEAKEST WINS across the rows: one contributing fetch that was
-                    # cut off means this list may be missing entries, whatever the
-                    # others recorded.
+                    # Weakest wins: one truncated contributing fetch means entries may be missing.
                     at_page_cap = True
                 balances_list.append(
                     {
@@ -291,27 +242,12 @@ def build_governance_view(
                         "raw_balance": b.raw_balance,
                         "decimals": b.decimals,
                         "usd_value": usd,
-                        # ``usd_value: null`` and ``usd_value: 0`` are one
-                        # truthiness test apart in JS and mean opposite things —
-                        # "we do not know what this holding is worth" versus
-                        # "priced, and the figure is zero to eighteen decimals".
-                        # The state is published rather than left to be inferred
-                        # from the value's shape.
-                        #
-                        # ``not_determined`` deliberately does not name a CAUSE:
-                        # ``services/clients/etherscan`` distinguishes "no price returned"
-                        # from "no token divisor returned" (which would make any
-                        # USD figure wrong by 10^n), but neither writer persists
-                        # ``decimals_reported``, so the DB cannot tell them apart
-                        # and this payload must not pretend otherwise.
+                        # ``null`` vs ``0`` are one truthiness test apart in JS and mean opposite things.
+                        # ``not_determined`` names no cause: no writer persists ``decimals_reported``, so no-price vs
+                        # no-divisor can't be told apart.
                         "usd_value_state": "measured" if usd is not None else "not_determined",
-                        # Kept for continuity, and NOT a money fact: the producer
-                        # writes 0 for "no price known", and a row written before
-                        # the column widened to Numeric(38,18) may carry the same
-                        # 0 for a real quote its eighth decimal could not hold —
-                        # so 0 is ambiguous between the two and a consumer reading
-                        # this column directly reads both as worthless. Read
-                        # ``usd_value`` / ``usd_value_state``.
+                        # Not a money fact: 0 means no price known, or an old real quote truncated before the
+                        # Numeric(38,18) widening. Read ``usd_value`` / ``usd_value_state``.
                         "price_usd": float(b.price_usd) if b.price_usd is not None else None,
                         "decimals_known": getattr(b, "decimals_known", None),
                         "observed_at": b.observed_at.isoformat() if getattr(b, "observed_at", None) else None,
@@ -321,36 +257,21 @@ def build_governance_view(
                         "source": b.source,
                     }
                 )
-                # Delivery shape does NOT gate this sum. A priced holding is a real
-                # dollar figure whatever the shape of its arrival, and dropping one
-                # here would publish a total lower than the money that was measured.
-                # It costs nothing on today's data — every ``fan_out_all`` reading in
-                # the census is unpriced and already contributes $0 — but the reason
-                # it is not gated is the invariant, not the coincidence.
+                # Delivery shape doesn't gate the sum: a priced holding is real money however it arrived.
                 if usd is not None:
                     total_usd = (total_usd or 0.0) + usd
-        # Whether this contract's holdings list is the whole set. There is no
-        # ``complete`` member ON PURPOSE, and the witness is the FETCH's recorded
-        # ``asset_set_status``, never a length. The fetch pages the endpoint to
-        # exhaustion and the stored list routinely exceeds
-        # ``TOKEN_BALANCE_PAGE_SIZE`` without having been cut off at all, so
-        # comparing its length to the cap read a complete list as a truncated one.
-        # ``at_page_cap`` is the producer's own statement that what it stored is a
-        # prefix, and it is the only positive statement available — the other arm is
-        # not-determined, never "whole".
+        # No ``complete`` member on purpose. The witness is the fetch's ``asset_set_status``, never list length (the
+        # fetch pages past ``TOKEN_BALANCE_PAGE_SIZE``).
         holdings_coverage = {
             "rows": len(balances_list),
             "page_cap": TOKEN_BALANCE_PAGE_SIZE,
             "state": ("may_be_incomplete" if at_page_cap else "not_determined"),
-            # Rows inside the stored set whose USD value was never determined.
-            # ``total_usd`` skips them, so any non-zero total is a lower bound
-            # whenever this is non-zero — independently of truncation.
+            # Non-zero means ``total_usd`` is a lower bound.
             "unvalued_rows": unvalued_rows,
             "scope": "observed provider holdings; completeness not established",
         }
 
-        # A newer interrupted page is a separate observation set. Never add it
-        # to the accepted snapshot's amounts: assets may overlap at different times.
+        # A newer interrupted page is a separate observation; never add it to the accepted snapshot.
         partial_rows = partial_by_cid.get(balance_contract.id, []) if balance_contract else []
         displayed_fetches = (
             {b.fetch_id for b in balances_by_cid.get(balance_contract.id, [])} if balance_contract else set()
@@ -376,10 +297,7 @@ def build_governance_view(
 
         entry: dict[str, Any] = {
             "partial_balance_observations": partial_observations,
-            # Canonical lowercase: node ids and selection keys downstream
-            # assume one form, but a legacy job row can hold a checksummed
-            # address (ingress normalizes only since the AnalyzeRequest
-            # validator landed).
+            # Legacy job rows may hold checksummed addresses.
             "address": (job.address or "").lower(),
             "name": contract_name,
             "contract_id": contract_row.id if contract_row else None,
@@ -398,12 +316,7 @@ def build_governance_view(
             "source_verified": summary_row.source_verified if summary_row else None,
             "chain": contract_row.chain if contract_row else None,
             "upgrade_count": upgrade_count,
-            # Never a proven-complete count: it is an upper bound whose coverage
-            # (how many of the events carry a receipt fact, how many proven
-            # deployments were removed) is stated rather than implied, together
-            # with the three refusals — signer set, decoy verdict, and whether
-            # the recording surface saw everything — that this plane cannot
-            # answer at all.
+            # An upper bound with stated coverage plus the three questions this plane can't answer.
             "upgrade_count_basis": upgrade_count_basis,
             "last_upgrade_block": last_upgrade_block,
             "last_upgrade_timestamp": last_upgrade_timestamp,
@@ -414,11 +327,7 @@ def build_governance_view(
             "is_pausable": is_pausable,
             "has_timelock": has_timelock,
             "is_factory": is_factory,
-            # Which route a ``None`` on the three flags above took: ``absent``
-            # means no ContractSummary row exists for this entry (nor for its
-            # implementation), ``present`` means the row exists and the column
-            # itself is NULL. Never omitted, so key-absence marks a pre-fix
-            # payload rather than either state.
+            # ``absent``: no ContractSummary row; ``present``: row exists, column NULL. Never omitted.
             "summary_evidence": "present" if summary_row is not None else "absent",
             "capabilities": capabilities,
             "balances": balances_list,
@@ -454,11 +363,7 @@ def build_governance_view(
         if owner:
             owner_groups.setdefault(owner, []).append(entry)
 
-    # Deduplicate: remove standalone impl contracts already represented via a
-    # proxy — both the EIP-1967 impl and any split-proxy secondary impls (the
-    # latter were analysed standalone in older runs). Keyed by the composite
-    # entity token (a proxy's impl is on the proxy's own chain) so a same-address
-    # standalone on ANOTHER chain isn't collapsed away.
+    # Drop standalone impls already represented under a proxy; composite keys so another chain's twin isn't collapsed.
     impl_entities = {_entity_key(c.get("chain"), c["implementation"]) for c in contracts if c.get("implementation")}
     for c in contracts:
         for saddr in c.get("secondary_implementations") or []:
@@ -491,36 +396,16 @@ def build_governance_view(
         reach_edges,
     )
 
-    # Reshape FP-by-contract-id into FP-by-contract-address so each principal
-    # gets a ``primary_for`` list — the contracts it canonically governs,
-    # consumed by Surface group containment (see
-    # ``services.governance.primary_controller``). Two transforms make this
-    # correct across protocols, not just for directly-Safe-owned contracts:
+    # FP-by-cid reshaped to FP-by-entity for ``primary_for`` (Surface group containment):
     #
-    #   1. Proxy→impl keying. EffectiveFunction / FunctionPrincipal rows live
-    #      on the *implementation* contract, but the canvas renders and groups
-    #      by the *proxy* address. Map impl→proxy so a principal's primary_for
-    #      lands on the address the frontend actually draws; without this every
-    #      proxied contract silently drops out of all groups.
+    #   1. Proxy->impl keying: FP rows live on impls but the canvas draws proxies; without it proxied contracts drop out
+    # of every group.
+    #   2. Governance pass-through: an in-protocol Timelock/ProxyAdmin is never a principal, so
+    # ``assign_primary_controllers`` resolves one hop further. Only FP edges are followed, so fund-destination Safes
+    # can't re-enter.
     #
-    #   2. Governance pass-through. When a protocol is governed via an
-    #      in-protocol Timelock / ProxyAdmin, the governed contracts' direct FP
-    #      caller resolves to that governance contract — which is itself
-    #      in-protocol and therefore never a principal. We hand the set of such
-    #      contracts to ``assign_primary_controllers`` so it resolves authority
-    #      one hop further, to the terminal Safe/EOA. Only FP (call-authority)
-    #      edges are followed, so fund-destination Safes (which hold no FP row)
-    #      cannot be re-introduced.
-    # cid → the composite entity token of the contract's OWN (chain, address).
-    # The whole attribution fold below stays in composite-entity space so a
-    # same-address twin on another chain never merges into this chain's
-    # authority sets: two standalone CREATE2 twins render to distinct
-    # ``<chain>::<address>`` keys, so ``assign_primary_controllers`` runs a
-    # separate contest per chain. The per-principal OUTPUT fields (primary_for /
-    # co_controls / controls_detail / other_callers) are rendered back to BARE
-    # addresses at the landing points — the frontend composes those with the
-    # active chain (site/src/surface/layout/elkLayout.js), so the serialized
-    # values must stay bare.
+    # The fold stays in composite-entity space so twins run separate per-chain contests; output fields are rendered back
+    # to bare addresses (the frontend composes them with the active chain).
     contract_entity_by_cid: dict[int, str] = {
         c.id: _entity_key(c.chain, c.address) for c in contracts_by_job_id.values() if c is not None and c.address
     }
@@ -528,12 +413,9 @@ def build_governance_view(
     for c in contracts:
         if not (c.get("is_proxy") and c.get("address")):
             continue
-        # An impl renders under its proxy only on the proxy's own chain.
         proxy_entity = _entity_key(c.get("chain"), c["address"])
         if c.get("implementation"):
             impl_entity_to_proxy_entity[_entity_key(c.get("chain"), c["implementation"])] = proxy_entity
-        # Secondary impls render under the proxy too, so their FunctionPrincipal
-        # authority (e.g. a governor over admin functions) attributes here.
         for saddr in c.get("secondary_implementations") or []:
             impl_entity_to_proxy_entity[_entity_key(c.get("chain"), saddr)] = proxy_entity
 
@@ -541,15 +423,10 @@ def build_governance_view(
         own_entity = contract_entity_by_cid.get(cid)
         if not own_entity:
             return None
-        # Fold onto the proxy (its own chain) if this cid is a proxy's impl; else
-        # render under the contract's own entity.
         return impl_entity_to_proxy_entity.get(own_entity) or own_entity
 
-    # ``{contract_entity: {caller_entity}}`` — the FP authority graph the
-    # primary-controller contest walks. Callers are composited with the chain of
-    # the contract they call (a caller and its target are always same-chain), so
-    # an in-protocol governance contract is one node whether it appears as a
-    # contract key or as a passthrough caller — the graph stays connected.
+    # Callers are composited with their target's chain (always same-chain) so a governance contract is one node as key
+    # and as caller.
     fp_addrs_by_contract_entity: dict[str, set[str]] = {}
     for cid, addrs in fp_all_addrs_by_cid.items():
         rendered = _rendered_entity(cid)
@@ -564,14 +441,9 @@ def build_governance_view(
         for entity in fp_addrs_by_contract_entity
         if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in _PASSTHROUGH_CONTROLLER_TYPES
     }
-    # Bare-address mirror for the caller_detail capability walk below, whose inner
-    # caller keys stay bare addresses.
     governance_passthrough_addrs = {_entity_addr(e) for e in governance_passthrough}
 
-    # Per-function caller/labels/claims rows keyed to the rendered (proxy)
-    # address — same keying as the FP graph above. Feeds the primary contest
-    # (authority-tier ranking + veto gating), the co-controller rule, and the
-    # per-(controller, contract) capability detail below.
+    # Feeds the primary contest, the co-controller rule and capability detail.
     fp_function_detail_by_entity: dict[str, list[dict[str, Any]]] = {}
     for cid, functions in fp_function_detail_by_cid.items():
         rendered = _rendered_entity(cid)
@@ -586,22 +458,12 @@ def build_governance_view(
         fp_function_detail_by_contract=fp_function_detail_by_entity,
     )
 
-    # Co-controllers: principals holding real (privileged or tightly-gated)
-    # authority on a contract they lost the primary contest for. Surfaced as
-    # their own guardian-rail nodes (not group containers) and enrolled in
-    # monitoring, so a pause / fund-recovery guardian Safe isn't invisible just
-    # because a bigger governance Safe won the same contracts. See
-    # ``services.governance.primary_controller.assign_co_controllers``.
+    # Principals with real authority on a contract they lost the primary contest for, shown as guardian-rail nodes and
+    # monitored. See ``assign_co_controllers``.
     co_controls = assign_co_controllers(principals, fp_function_detail_by_entity, primary_for)
 
-    # Rendering home for machinery contracts whose operand unit lives in
-    # another principal's group — passthrough timelocks (etherfi's 2d operating
-    # timelock: driven by the ops Safe, acting entirely on the core-governance
-    # box), Pauser fan-outs, single-target bridge receivers. Published as
-    # ``grouped_with`` on the machinery's contract entry; the frontend group
-    # assignment honors it as a placement override while ``primary_for`` —
-    # enrollment, accordion, every authority claim — still names the true
-    # controller. See ``assign_operand_render_groups``.
+    # Rendering home for machinery whose operand unit lives in another principal's group (passthrough timelocks, pauser
+    # fan-outs); ``primary_for`` still names the true controller.
     render_groups = assign_operand_render_groups(
         fp_addrs_by_contract_entity,
         {_entity_key(c.get("chain"), c["address"]) for c in contracts if c.get("address")},
@@ -616,23 +478,14 @@ def build_governance_view(
 
     principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
 
-    # Per-(controller, contract) capability detail: the concrete functions — and
-    # effect-category tags — each FP caller can actually invoke. Lets the canvas
-    # show "pause · recover" instead of a generic "controlled", from verified
-    # call rights (FunctionPrincipal), not the CGN-derived ``controls`` list.
-    # ``caller_detail[contract_entity][caller_lc] = {functions, labels}`` — the
-    # contract key is the composite ``<chain>::<address>`` entity (so twins stay
-    # separate), the caller key a bare address. EVERY FP caller is kept here,
-    # including in-protocol governance *contracts* (timelocks / proxy-admins) —
-    # they're the passthrough hop a governance Safe reaches its contracts
-    # through, so the capability resolution below needs them. Non-principal
-    # callers are filtered out at the consumption points.
+    # Per-(controller, contract) functions and capability tags from FunctionPrincipal, so the canvas shows "pause ·
+    # recover". Keeps every FP caller, including governance contracts needed for passthrough; non-principals are
+    # filtered at consumption.
     caller_detail: dict[str, dict[str, dict[str, set[str]]]] = {}
     for caddr, functions in fp_function_detail_by_entity.items():
         for fn in functions:
             fname = fn.get("function")
-            # Capability chips are computed per function (claims-first) then
-            # unioned, so the claims-vs-legacy choice stays per-function.
+            # Per function, so claims-vs-legacy stays per-function.
             fn_caps = _function_capabilities(fn.get("labels") or (), fn.get("claims") or ())
             for a in fn.get("callers", ()):
                 la = (a or "").lower()
@@ -643,16 +496,8 @@ def build_governance_view(
                     detail["functions"].add(fname)
                 detail["capabilities"].update(fn_caps)
 
-    # Invert to per-principal: the contracts it can call, with functions +
-    # capability tags. Drives the sidebar "Can Call" and the on-select chips for
-    # BOTH co-controllers and primaries. Two sources merged:
-    #   1. Direct FP authority (caller_detail).
-    #   2. Passthrough — capabilities held via an in-protocol governance
-    #      contract (timelock / proxy-admin) the principal controls, the same
-    #      hop assign_primary_controllers used to award primary_for. Without
-    #      this the governance Safe that acts only through its timelock would
-    #      show no capabilities on the 20 contracts it governs (just
-    #      "controlled"). One hop — covers Safe → Timelock → contracts.
+    # Per-principal capabilities: direct FP authority plus one passthrough hop via a governance contract the principal
+    # controls. Without the hop, a Safe acting only through its timelock shows no capabilities.
     detail_acc: dict[str, dict[str, dict[str, set[str]]]] = {}
 
     def _accumulate(principal_lc: str, contract_lc: str, src: dict[str, set[str]]) -> None:
@@ -662,15 +507,13 @@ def build_governance_view(
         slot["functions"].update(src.get("functions", ()))
         slot["capabilities"].update(src.get("capabilities", ()))
 
-    # detail_acc keys: principal (bare address) → contract (composite entity).
     for caddr, callers_map in caller_detail.items():
         for la, detail in callers_map.items():
             if la in principal_meta:  # direct rights belong to principals, not contract callers
                 _accumulate(la, caddr, detail)
     for la, owned in primary_for.items():
         for caddr in owned:
-            # The governance contract's own entity shares the governed contract's
-            # chain (control is intra-chain), so rebuild it from the bare caller.
+            # Control is intra-chain.
             caddr_chain = _entity_chain(caddr)
             for gov_addr, gov_detail in caller_detail.get(caddr, {}).items():
                 gov_entity = _entity_key(caddr_chain, gov_addr)
@@ -679,7 +522,6 @@ def build_governance_view(
 
     detail_by_principal: dict[str, list[dict[str, Any]]] = {}
     for la, by_contract in detail_acc.items():
-        # Render the contract entity back to a bare address for the payload.
         rows = [
             {
                 "address": _entity_addr(caddr),
@@ -694,33 +536,18 @@ def build_governance_view(
 
     for p in principals:
         p_addr_lc = (p.get("address") or "").lower()
-        # primary_for / co_controls carry composite contract entities internally;
-        # the serialized fields are bare addresses (the frontend re-composes them
-        # with the active chain).
+        # Serialized as bare addresses; the frontend re-composes with the active chain.
         p["primary_for"] = sorted({_entity_addr(e) for e in primary_for.get(p_addr_lc, [])})
         p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_addr_lc, [])})
-        # The chains the flattening above discards, kept as their own field:
-        # the per-chain contests already ran, so the set of chains this
-        # principal won or co-controls ON is a computed fact — enrollment needs
-        # it to put a controller's MonitoredContract row on the chain of the
-        # contracts it governs instead of a caller-supplied default.
+        # Enrollment needs the chains a principal controls on, rather than a caller default.
         p["controls_chains"] = sorted(
             {_entity_chain(e) for e in primary_for.get(p_addr_lc, [])}
             | {_entity_chain(e) for e in co_controls.get(p_addr_lc, [])}
         )
         p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
 
-    # Per-edge ``capabilities``: what THE SOURCE can do to THE TARGET, from
-    # the same FunctionPrincipal-derived machinery that feeds
-    # ``controls_detail`` — so an edge chip and the principal's own detail
-    # panel can never disagree about the same (source, target) pair.
-    # ``detail_acc`` (principal sources; includes the one-hop governance
-    # passthrough) is consulted first, then ``caller_detail`` (contract
-    # sources with direct FP rights). A source with no witnessed rights on
-    # the target publishes ``[]`` — same convention as the contract-level
-    # list: a capability chip is a positive claim, and its absence is not
-    # published as proof of inability (the edge itself still states the
-    # ownership/controller relationship via ``type``).
+    # What the source can do to the target, from the same machinery as ``controls_detail`` so edge and panel can't
+    # disagree. ``[]`` isn't proof of inability.
     for flow in fund_flows:
         src_lc = (flow.get("from") or "").lower()
         target_entity = _entity_key(flow.get("to_chain"), flow.get("to"))
@@ -729,17 +556,8 @@ def build_governance_view(
             detail = caller_detail.get(target_entity, {}).get(src_lc)
         flow["capabilities"] = sorted(detail["capabilities"]) if detail else []
 
-    # Per-contract "other callers": principal-callers holding FP authority that
-    # are neither the contract's primary owner nor a co-controller of it — the
-    # permissionless / lower-privilege long tail (e.g. AuctionManager's
-    # whitelisted ``createBid`` bidders). The canvas renders these in aggregate
-    # as a "+N callers" affordance per contract, so an authorized caller is
-    # never silently invisible, without drawing 30+ cross-group edges or minting
-    # a node per bidder. Each carries its own functions / capabilities so the
-    # sidebar list says what each caller can do. Restricted to FP-typed
-    # principals, so state-variable destinations / CGN noise don't leak in.
-    # Keyed by composite contract entity (primary_for / co_controls carry those);
-    # the principal values stay bare addresses.
+    # FP principals that are neither primary nor co-controller (e.g. whitelisted bidders), rendered as "+N callers".
+    # FP-typed only, so state-var noise can't leak in.
     primary_by_contract: dict[str, str] = {c: paddr for paddr, owned in primary_for.items() for c in owned}
     co_by_contract: dict[str, set[str]] = {}
     for paddr, owned in co_controls.items():
@@ -808,33 +626,14 @@ _ZERO_ADDR = "0x0000000000000000000000000000000000000000"
 def _protocol_reach_edges(
     session: Session, protocol_ids: set[int]
 ) -> list[tuple[str, str, str, str | None, str | None]]:
-    """The control edges the scorer's closure walks, protocol-wide.
+    """Protocol-wide control edges the scorer's closure walks.
 
-    DISPLAY EDGES ONLY: each row is a witnessed relation the frontend draws
-    and names, never a transitive claim. The reach *claims* — walked /
-    not_determined / absent, per entity — travel in the top-level ``reach``
-    block (:mod:`services.scoring.reach`), which is the scorer's own verdict
-    per hop; nothing here says any path along these edges is established.
+    Display edges only; reach claims live in the top-level ``reach`` block.
 
-    Mirrors ``services.scoring.planes.load_control_closure`` exactly: every
-    ``ControlGraphEdge`` row of the protocol whose relation is in
-    ``SCORER_REACH_RELATIONS`` (reversed to authority direction), plus the
-    ``Contract.admin`` AND ``Contract.beacon`` column pairs — the two column
-    witnesses the loader admits, kept in step here so the surface graph cannot
-    route a path the score document does not hold, or miss one it does.
-    Deliberately NOT restricted to the
-    contracts that make this payload's list — the scorer isn't either, so a
-    score-document reach can route through an implementation or an orphaned
-    contract row this page never renders, and the surface graph must carry
-    those hops to route the path. Rows are ``(chain_tok, holder, subject,
-    relation, label)``; admin pairs carry ``relation=None`` (the column is the
-    witness — inventing a relation name for it would overclaim).
-
-    ``safe_owner`` and ``capability_principal`` witnesses never appear here:
-    the scorer excludes both from reach, and admitting them would draw routes
-    the score document does not vouch for. Zero-address ends are skipped —
-    a renounced owner holds nothing, and no host-seeded path routes through
-    the zero address.
+    Mirrors ``services.scoring.planes.load_control_closure`` exactly (``SCORER_REACH_RELATIONS`` reversed, plus
+    ``Contract.admin`` / ``Contract.beacon`` pairs) and isn't limited to this payload's contracts, so the surface graph
+    can route every hop the score document holds. Admin pairs have ``relation=None`` (the column is the witness).
+    ``safe_owner``/``capability_principal`` are excluded as the scorer excludes them; zero-address ends are skipped.
     """
     rows: list[tuple[str, str, str, str | None, str | None]] = []
     if not protocol_ids:
@@ -867,26 +666,11 @@ def _control_edge_witness(
     cge_by_cid: dict[int, list[ControlGraphEdge]],
     reach_edges: Iterable[tuple[str, str, str, str | None, str | None]] = (),
 ) -> dict[tuple[str, str, str], dict[str, Any]]:
-    """``(chain, flow_from, flow_to)`` → the witnessed claims on that control edge.
+    """``(chain, flow_from, flow_to)`` -> witnessed claims on that control edge.
 
-    A ``control_graph_edges`` row is written subject-first: ``from_node_id`` is
-    the contract the row was recorded against and ``to_node_id`` the related
-    address, and for the relations in ``CONTROL_EDGE_RELATIONS`` that reads
-    "the to-node has authority over the from-node" (see ``db.models``). A
-    fund-flow control edge runs the other way — authority holder → contract —
-    so rows are indexed reversed. Only those relations are indexed: reversing
-    an ``external_call_target`` would assert an authority nobody proved.
-
-    ``reach_edges`` (from :func:`_protocol_reach_edges`) contributes the same
-    claims for pairs whose carrying row lives on a contract outside this
-    payload — an edge admitted from that plane must be nameable too.
-
-    One pair can carry several distinct claims at once (a Teller both holds
-    ``roles 2,3`` on a vault and is its ``hook`` controller-value). Collapsing
-    them to one would publish an arbitrary pick, so the single-claim case gets
-    the scalar ``relation`` / ``label`` and the multi-claim case gets the whole
-    witnessed set as ``relations``. A pair with no control-graph row at all gets
-    neither, and the edge is published with its flow type alone.
+    Rows are written subject-first, so they're indexed reversed, and only ``CONTROL_EDGE_RELATIONS`` (reversing an
+    ``external_call_target`` would assert unproven authority). Single claims get scalar ``relation``/``label``; multiple
+    get ``relations`` rather than an arbitrary pick.
     """
     claims: dict[tuple[str, str, str], set[tuple[str, str | None]]] = {}
     for entry in contracts:
@@ -934,14 +718,10 @@ def _build_flows_and_principals(
     reach_edges: list[tuple[str, str, str, str | None, str | None]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
-    # Control relations are intra-chain, so every flow carries a single chain
-    # (from_chain == to_chain). Dedup is per-chain so a same-address twin on
-    # another chain keeps its own edge instead of colliding on the bare pair.
+    # Dedup per chain so a twin keeps its own edge.
     flow_seen: set[tuple[str, str, str]] = set()
     fund_flows: list[dict[str, Any]] = []
-    # Filled once the contract→Contract lookup exists (below), before the first
-    # add_flow call. Absent keys are the normal case: an edge the control graph
-    # never witnessed a relation for carries no relation/label at all.
+    # Absent keys are normal: most edges have no witnessed relation.
     edge_witness: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     def add_flow(from_addr: str, to_addr: str, flow_type: str, chain: str | None, lane: str = "control") -> None:
@@ -956,15 +736,9 @@ def _build_flows_and_principals(
                 "to": to_addr,
                 "type": flow_type,
                 "lane": lane,
-                # Additive, and present only where a control-graph row witnesses
-                # this exact pair (see _control_edge_witness) — the frontend's
-                # reach-path inspector names the hop's relation/role from it and
-                # shows the type alone when it is absent.
+                # Only where a control-graph row witnesses this exact pair.
                 **edge_witness.get(key, {}),
-                # Filled by build_governance_view once caller_detail exists:
-                # the SOURCE's witnessed rights on the target, never the
-                # target's own capability union — an edge is a claim about the
-                # relationship, and the frontend renders it as a per-edge chip.
+                # Filled later: the source's rights on the target, not the target's capability union.
                 "capabilities": [],
                 "from_chain": chain_tok,
                 "to_chain": chain_tok,
@@ -981,9 +755,7 @@ def _build_flows_and_principals(
             key_id = lookup_job_id
         return contracts_by_job_id.get(key_id)
 
-    # Keyed by composite ``<chain>::<address>`` entity, not bare address: two
-    # standalone twins share an address, so a bare key would resolve both to one
-    # chain's Contract row and collapse the other chain's principals.
+    # Composite keys: a bare address would merge twins onto one chain's row.
     lookup_contract_by_entity: dict[str, Contract | None] = {}
     for entry in contracts:
         if entry.get("address"):
@@ -997,10 +769,6 @@ def _build_flows_and_principals(
         target = c["address"].lower()
         chain = c.get("chain")
         lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
-        # In-protocol contract addresses that hold actual call authority
-        # on this target's EffectiveFunctions. Same authoritative signal
-        # (FunctionPrincipal) drives both the controller-flow gate and
-        # the principal-flow emit below.
         fp_principals: set[str] = fp_in_contract_by_cid.get(lookup_c.id, set()) if lookup_c else set()
 
         if c.get("owner") and c["owner"] in contract_addrs:
@@ -1011,29 +779,16 @@ def _build_flows_and_principals(
             )
             add_flow(c["owner"], target, flow_type, chain)
 
-        # The ``controllers`` dict at the contract entry is populated
-        # unfiltered from every tracked address-typed ControllerValue
-        # row, which includes integration/composability references
-        # (``weth``, ``oracle``, ``treasury``, ``swapRouter``, ``stEth``)
-        # alongside real authorizers. Emitting type=controller for the
-        # former asserts a control relationship that doesn't exist.
-        # Gate on FunctionPrincipal membership so only CV values that
-        # the capability resolver also identified as call-authority
-        # principals produce a controller flow.
+        # ``controllers`` includes composability references (weth, oracle, swapRouter); gate on FunctionPrincipal so
+        # only real call-authority emits a controller flow.
         for cid, val in c.get("controllers", {}).items():
             if isinstance(val, str) and val.startswith("0x"):
                 val_lower = val.lower()
                 if val_lower in contract_addrs and val_lower != (c.get("owner") or "") and val_lower in fp_principals:
                     add_flow(val_lower, target, "controller", chain)
 
-        # In-protocol contract principals come from FunctionPrincipal —
-        # the per-function access-control record produced by the
-        # capability resolver. A bare ControlGraphNode match used to
-        # drive this and over-reported transitive lineage (e.g. a token
-        # mid-chain like ``WithdrawalQueueERC721 -> WstETH -> Lido stETH``
-        # was flagged as a principal of every EtherFi contract whose
-        # graph traversed it). FP is the authoritative signal: an
-        # address only appears here if it can actually call a function.
+        # FunctionPrincipal, not bare CGN matches: CGN over-reported transitive lineage (tokens mid-chain flagged as
+        # principals).
         if lookup_c:
             for node_addr in fp_principals:
                 if not node_addr or node_addr == target:
@@ -1042,8 +797,7 @@ def _build_flows_and_principals(
                     continue
                 add_flow(node_addr, target, "principal", chain)
 
-    # Collect non-contract principals from control graph + function principals.
-    # First pass: find safe_owner edges so we can nest Safe owners later.
+    # First pass: safe_owner edges, so Safe owners nest.
     principal_map: dict[str, dict[str, Any]] = {}
     safe_owners_map: dict[str, list[str]] = {}
     owner_of_safe: set[str] = set()
@@ -1064,7 +818,6 @@ def _build_flows_and_principals(
                 safe_owners_map[safe_addr].append(owner_addr)
             owner_of_safe.add(owner_addr)
 
-    # Second pass: collect direct controllers (skip Safe owners — they're nested)
     for c in contracts:
         if not c["address"]:
             continue
@@ -1086,26 +839,14 @@ def _build_flows_and_principals(
                 continue
             if node_addr == "0x0000000000000000000000000000000000000000":
                 continue
-            # Gate on FunctionPrincipal authority: a safe/eoa/timelock/
-            # proxy_admin CGN node earns a principal + controls edge only if it
-            # can actually call a function on this contract. Without it, a
-            # zero-authority beneficiary stored in a state var (treasury /
-            # feeRecipient / _owner / payoutAddress) becomes a spurious
-            # principal claiming control it doesn't hold. Mirrors the
-            # controller-flow gate above and the FP third pass below;
-            # cgn_by_cid and fp_all_addrs_by_cid are both keyed by lookup_c.id.
+            # Only CGN nodes with FP authority become principals; otherwise beneficiary state vars (treasury,
+            # feeRecipient) claim control they don't hold.
             if node_addr not in fp_all_addrs_by_cid.get(lookup_c.id, set()):
                 continue
 
             if node_addr not in principal_map:
-                # Seed details with the CGN's own introspection result
-                # (getOwners/getThreshold for safes, getMinDelay for
-                # timelocks). This is the authoritative source for the
-                # principal's intrinsic config — ControllerValue rows
-                # describe the relationship FROM a consumer, not the
-                # Safe's own threshold, so prior code that only merged
-                # CV details missed the threshold and fell back to
-                # len(owners).
+                # The CGN's own introspection (getOwners/getThreshold, getMinDelay) is authoritative for the principal's
+                # config; CV rows describe the consumer side.
                 details: dict[str, Any] = dict(lookup_meta.get("details") or {})
                 if isinstance(cgn.details, dict):
                     details.update(cgn.details)
@@ -1135,14 +876,7 @@ def _build_flows_and_principals(
             principal_map[node_addr]["chains"].add(_coalesce_chain(chain))
             add_flow(node_addr, target, "principal", chain)
 
-    # Third pass: pull principals out of FunctionPrincipal rows. Some
-    # role-gated functions (e.g. EtherFiTimelock.cancel / .execute) have
-    # their controlling Safe/EOA stored *only* on the per-function
-    # principal row — the Safe never gets a top-level ControlGraphNode
-    # entry for that contract, so the prior CGN-only pass misses the
-    # Safe→Contract edge entirely. This pass backfills, reading from the
-    # narrow ``fp_governance_rows`` projection (already filtered to
-    # safe/timelock/eoa/proxy_admin) instead of walking full EF rows.
+    # Third pass: some Safes appear only on per-function FP rows (e.g. EtherFiTimelock.cancel) with no CGN entry.
     for c in contracts:
         if not c["address"]:
             continue
@@ -1190,28 +924,12 @@ def _build_flows_and_principals(
             principal_map[pa]["chains"].add(_coalesce_chain(chain))
             add_flow(pa, target, "principal", chain)
 
-    # The authority edges the scorer's control closure walks (see
-    # _protocol_reach_edges), carried verbatim: the score document publishes
-    # reach over exactly these pairs, and one this graph drops is a route the
-    # frontend can only report as "not carried". No holder gate — the closure
-    # routes through whatever the witnessed rows name, including a
-    # RolesAuthority that gates functions without ever being a
-    # FunctionPrincipal, an implementation row the page does not render, and
-    # contracts never enrolled in the inventory at all. The relations admitted
-    # here all carry established authority provenance (an unattributed value
-    # lands on controller_value_unattributed, which neither the scorer nor
-    # this pass walks), so a beneficiary state-var cannot ride in — and the
-    # FP-gated passes stay authoritative for which addresses become principal
-    # CARDS; this pass emits edges only. It runs LAST so add_flow's
-    # first-writer-wins dedup lets every pass above keep its richer type
-    # (``principal``, gate-derived ``controller``) — reach edges only fill
-    # pairs no other witness emitted.
+    # Scorer reach edges carried verbatim so every route the score document publishes is drawable. No holder gate (the
+    # admitted relations all carry authority provenance). Emits edges only, and runs last so first-writer-wins keeps
+    # richer types from earlier passes.
     for chain_tok, holder, subject, _relation, _label in reach_edges:
         add_flow(holder, subject, "controller", chain_tok)
 
-    # ``chains`` accumulates as a set during collection (a principal may govern
-    # on several chains); the payload carries a sorted list. It stays additive —
-    # a single-chain protocol reports ``["ethereum"]`` and nothing else moves.
     principals_out = list(principal_map.values())
     for pr in principals_out:
         pr["chains"] = sorted(pr["chains"])

@@ -1,5 +1,3 @@
-"""Job / contract resolution stages of the company overview."""
-
 from __future__ import annotations
 
 import time
@@ -20,13 +18,7 @@ from .entity_keys import _entity_key
 
 @contextmanager
 def _time_phase(timings_ms: dict[str, int], name: str) -> Iterator[None]:
-    """Record the elapsed ms of the wrapped block into ``timings_ms[name]``.
-
-    Mirrors the ``_phase`` helper in
-    ``services.static.contract_analysis_pipeline.core``; the bundled-timing
-    style (single log line per request with every stage as a field) keeps
-    log volume bounded and groups well in Loki.
-    """
+    """Bundled timings: one log line per request keeps volume bounded."""
     start = time.monotonic()
     try:
         yield
@@ -35,8 +27,6 @@ def _time_phase(timings_ms: dict[str, int], name: str) -> Iterator[None]:
 
 
 class CompanyNotFound(Exception):
-    """Raised when no jobs / protocol match the given company name."""
-
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.name = name
@@ -59,12 +49,7 @@ def _contract_chain_id(contract_chain: str | None) -> int:
 
 
 def _job_matches_contract_chain(job: Job, contract_chain: str | None) -> bool:
-    """Whether ``job`` and a Contract row (its ``chain`` name) are on the same
-    chain. Both sides resolve to a registry chain id — the job from its
-    first-class ``chain_id`` (else derived from ``request["chain"]``), the
-    contract from its name string — so aliases (``"mainnet"``≡``"ethereum"``) and
-    a NULL contract chain (legacy mainnet) fold to mainnet and agree, keeping
-    mainnet output identical."""
+    """Both sides resolve to a registry chain id, so aliases and NULL (legacy mainnet) agree."""
     job_cid = job.chain_id if isinstance(job.chain_id, int) else None
     if job_cid is None:
         request = job.request if isinstance(job.request, dict) else {}
@@ -107,13 +92,7 @@ def eligible_company_names(session: Session) -> dict[str, int]:
 
 
 def _job_chain_name(job: Job) -> str:
-    """Coalesced chain NAME for a job — the job side of
-    :func:`_job_matches_contract_chain` resolved to a registry name so it can
-    build a composite entity token (:func:`_entity_key`). First-class
-    ``chain_id``, else derived from ``request["chain"]``/address, else mainnet;
-    an unknown id folds to ``"ethereum"`` (the NULL≡mainnet legacy-read
-    convention). A proxy's impl resolves on this chain, so a same-address twin on
-    another chain no longer collapses last-wins."""
+    """Job chain as a registry name for composite keys; unknown ids fold to ``ethereum``."""
     job_cid = job.chain_id if isinstance(job.chain_id, int) else None
     if job_cid is None:
         request = job.request if isinstance(job.request, dict) else {}
@@ -125,55 +104,34 @@ def _job_chain_name(job: Job) -> str:
 
 
 def _job_recency(job: Job) -> datetime:
-    """Sort key for picking the surviving job of a duplicated entity."""
     return job.updated_at or job.created_at or datetime.min.replace(tzinfo=timezone.utc)
 
 
 def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, list[Job]]:
-    """Find the protocol row + jobs that belong to ``name``.
+    """Find the protocol row + jobs for ``name``.
 
-    Modern data: ``Protocol`` row exists, every job carries ``protocol_id``,
-    AND its subject ``Contract`` row carries the same id. We filter on
-    Contract.protocol_id (not Job.protocol_id) because the Contract row is
-    the authoritative membership signal — ``protocol_id`` is written only
-    by the membership gate (services/discovery/membership_gate) against
-    recorded witnesses. Jobs inherit protocol_id from their parent at
-    spawn time (selection / resolution / static), which means a
-    dependency-expansion job for WstETH spawned while analyzing an
-    etherfi contract carries Job.protocol_id=etherfi even though the
-    WstETH Contract row is correctly a non-member. Filtering by
-    Contract.protocol_id keeps the surface page consistent with the
-    gate's witnessed member set. No Protocol row means no company.
+    Filters on ``Contract.protocol_id``, not ``Job.protocol_id``: jobs inherit protocol_id from their parent at spawn,
+    so a dependency job (WstETH under etherfi) carries it though its Contract is a non-member. Only the membership gate
+    writes ``Contract.protocol_id``. No Protocol row means no company.
     """
     protocol_row = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
     if protocol_row is None:
         return None, []
 
     track(session, "protocol", [protocol_row.id])
-    # Join Jobs to Contracts on the natural key. The address column on
-    # contracts is already stored lowercased (see db/queue/discovery.py); jobs
-    # store the address as-provided, so lowercase the job side for the
-    # join. The SQL join stays address-only (a name-string ``Contract.chain``
-    # can't be compared to the int ``Job.chain_id`` in SQL without a mapping,
-    # and a raw string compare would drop legitimate rows on alias / NULL
-    # mismatch); chain agreement is enforced in Python below via the registry
-    # so a mainnet job never pairs with a same-address L2 contract.
-    # On mainnet-only data every pair agrees, so output is unchanged.
+    # Address-only SQL join (name vs int chain can't compare in SQL); chain agreement is enforced in Python so a
+    # mainnet job never pairs with an L2 contract.
     rows = session.execute(
         select(Job, Contract.chain)
         .join(Contract, Contract.address == func.lower(Job.address))
         .where(
             Contract.protocol_id == protocol_row.id,
             Job.status == JobStatus.completed,
-            # A collection retry has no full-analysis artifacts of its own.
             Job.request["effects_resume_work_id"].astext.is_(None),
             Job.address.isnot(None),
         )
     ).all()
-    # One job per (chain, address) entity — newest wins. Duplicate jobs at
-    # one entity are legal (an admin re-analysis, or a cascade child that
-    # raced the spawn dedup); every downstream pass renders per JOB, so
-    # collapsing here is what keeps the surface at one card per entity.
+    # Duplicate jobs per entity are legal (re-analysis, spawn races); collapse to the newest for one card per entity.
     best_by_entity: dict[str, Job] = {}
     for job, contract_chain in rows:
         if not _job_matches_contract_chain(job, contract_chain):
@@ -186,11 +144,7 @@ def resolve_company_jobs(session: Session, name: str) -> tuple[Protocol | None, 
 
 
 def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]:
-    """Return ``{job_id: Contract}``, with address/chain fallback.
-
-    Jobs whose Contract row was reassigned to a newer job by
-    ``copy_static_cache`` are matched by ``(address, chain)``.
-    """
+    """``{job_id: Contract}``, matching ``copy_static_cache``-reassigned rows by ``(address, chain)``."""
     track(session, "address", (job.address for job in jobs))
     company_job_ids = [j.id for j in jobs]
     contracts_by_job_id: dict[Any, Contract] = {}
@@ -219,8 +173,6 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
                 if addr_lc in addrs and (chain_key is None or c.chain == chain_key):
                     contracts_by_addr_chain[(addr_lc, chain_key)] = c
 
-    # Combine — fallback contracts get keyed by job_id too so the rest of
-    # the pipeline can pretend it always had a job_id match.
     out = dict(contracts_by_job_id)
     for j in jobs:
         if out.get(j.id) is not None or not j.address:
@@ -228,9 +180,7 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
         req = j.request if isinstance(j.request, dict) else {}
         fallback = contracts_by_addr_chain.get((j.address.lower(), req.get("chain")))
         if fallback is not None:
-            # Don't overwrite the source-of-truth dict when another job's row
-            # legitimately points at this Contract; key by the job_id we want
-            # the resolver to find under.
+            # Another job's row may legitimately point at this Contract.
             out[j.id] = fallback
     return out
 
@@ -238,17 +188,10 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
 def resolve_implementation_contracts(
     session: Session, jobs: list[Job], contracts_by_job_id: dict[Any, Contract]
 ) -> tuple[dict[str, Job], dict[Any, Contract]]:
-    """Return ``(impl_job_by_entity, contracts_by_job_id)`` with impls resolved.
+    """``(impl_job_by_entity, contracts_by_job_id)``.
 
-    ``impl_job_by_entity`` is keyed by the composite entity token
-    (:func:`_entity_key`, ``"<chain>::<addr>"``) of the impl job's OWN chain, so
-    a proxy resolves its implementation on the proxy's own chain. A
-    same-address impl twin on two of a protocol's chains no longer collapses
-    last-wins across chains — each chain keeps its own impl job.
-
-    Mutates the contracts_by_job_id dict to also include impl-contract rows
-    keyed by their own job_id, so downstream code can look up impl
-    contracts directly.
+    Keyed by the impl's own composite entity so twins don't collapse across chains. Mutates ``contracts_by_job_id`` to
+    add impl rows.
     """
     impl_addrs_needed: set[str] = set()
     proxy_addrs: set[str] = set()
@@ -258,9 +201,6 @@ def resolve_implementation_contracts(
             continue
         if cr.address:
             proxy_addrs.add(cr.address.lower())
-        # Primary EIP-1967 impl + any secondary logic contracts (the split-proxy
-        # admin-impl pattern, Contract.secondary_implementations). Both are
-        # resolved + attached so the proxy node absorbs every logic contract.
         for impl in [cr.implementation, *(cr.secondary_implementations or [])]:
             if impl:
                 impl_addrs_needed.add(impl.lower())
@@ -268,12 +208,8 @@ def resolve_implementation_contracts(
     impl_job_by_entity: dict[str, Job] = {}
     track(session, "address", impl_addrs_needed)
     if impl_addrs_needed:
-        # Deterministic pick: newest completed job per impl (chain, address),
-        # preferring the one linked to a proxy we're rendering
-        # (request.proxy_address points back at a proxy in this set). Grouping by
-        # the composite token keeps each chain's twin separate; without the
-        # ORDER BY a re-analysis that left >1 completed impl job for one token
-        # attached arbitrarily (1C).
+        # Newest completed per impl entity, preferring one linked to a rendered proxy; without ordering, re-analyses
+        # attached arbitrarily.
         candidates: dict[str, list[Job]] = {}
         for ij in session.execute(
             select(Job)
@@ -316,15 +252,7 @@ def _secondary_impl_contracts(
     impl_job_by_entity: dict[str, Job],
     contracts_by_job_id: dict[Any, Contract],
 ) -> list[Contract]:
-    """Resolved Contract rows for a proxy's secondary implementations (the
-    split-proxy admin-impl set, ``Contract.secondary_implementations``), in
-    declared order. Empty unless the row is a proxy carrying secondaries.
-
-    These logic contracts' EffectiveFunction / FunctionPrincipal rows attribute
-    to the proxy node alongside the EIP-1967 impl's, so the proxy surfaces every
-    function it routes — and the secondary never renders as a standalone
-    ownerless contract.
-    """
+    """Resolved rows for a proxy's secondary implementations, whose functions attribute to the proxy node."""
     if not (contract_row and contract_row.is_proxy and contract_row.secondary_implementations):
         return []
     out: list[Contract] = []
