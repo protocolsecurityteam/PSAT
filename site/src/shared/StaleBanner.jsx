@@ -1,4 +1,3 @@
-// One notice for all company sections on screen, dated by the oldest build shown.
 export default function StaleBanner({ metas, className }) {
   const shown = metas.filter(Boolean);
   if (!shown.some((meta) => meta.source === "prepared-stale")) return null;

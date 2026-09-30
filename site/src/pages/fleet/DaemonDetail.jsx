@@ -50,7 +50,6 @@ function alertContent(d, rate) {
       body: `${w.backlog} item${w.backlog === 1 ? "" : "s"} queued but the last pass processed none. The drainer is alive but not advancing — check for un-claimable rows or a stalled dependency.`,
     };
   }
-  // Remaining trigger: a growing backlog (falling behind).
   const w = d.work || {};
   return {
     head: `Backlog growing — ${fmtBacklogRate(rate?.backlogPerMin) || "rising"}`,
@@ -64,9 +63,8 @@ function detailSummary(detail) {
     .join(" · ");
 }
 
-// The docked detail for a fleet process. `daemonKey` is a daemon `process`
-// value or the synthetic "watchers". Reads the latest /api/fleet snapshot —
-// no extra fetch (the page polls fleet for everyone).
+// `daemonKey` is a daemon `process` or "watchers". Reads the page's fleet
+// snapshot; no extra fetch.
 export function DaemonDetail({ daemonKey, fleet, onClose, rates }) {
   if (daemonKey === "watchers") {
     return <WatcherDetail watchers={fleet?.watchers} rate={rates?.watchers} onClose={onClose} />;

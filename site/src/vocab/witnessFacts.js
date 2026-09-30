@@ -11,7 +11,6 @@ import {
   withSeedNote,
 } from "./claimQualifiers.js";
 
-// ── Inspector verbose facts ──────────────────────────────────────────────────
 
 const TARGET_KIND_WORD = {
   immutable: "immutable address",
@@ -34,17 +33,13 @@ const AMOUNT_KIND_WORD = {
   bounded_by_storage: "bounded by a storage value",
   fixed_constant: "a fixed constant",
   balance_delta: "a balance delta",
-  // A real ceiling, so it reads as one: the amount is the minimum of the
-  // contract's own balance and some other value.
+  // A real ceiling: min of the contract's balance and something else.
   capped_by_balance: "capped at the contract's own balance",
-  // Deliberately phrased as provenance, never as a ceiling: the external
-  // contract's rate is unseen state, so this is not a bound and not proof the
-  // caller sets the magnitude.
+  // Provenance, not a ceiling: the external rate is unseen state.
   param_derived: "an external conversion of a caller-supplied argument",
-  // Every branch of the amount is the caller's number — an ABI argument or the
-  // ETH attached to the call — so it carries no single ABI slot.
+  // ABI argument or msg.value, so no single ABI slot.
   caller_supplied: "a caller-supplied amount",
-  // Not a quantity at all: the slot names WHICH non-fungible token moves.
+  // Not a quantity: which NFT moves.
   token_identity: "a token id (one NFT)",
   several: "several amounts (each resolved)",
   indeterminate: "indeterminate",
@@ -62,17 +57,9 @@ function kindTierText(kt, wordMap) {
   return tier ? `${word} · ${tier}` : word;
 }
 
-// A flow whose contributing IR sites disagreed folds to "indeterminate", which
-// reads as "we don't know" even when every site WAS resolved (a payout to the
-// token's owner plus a sweep to a fixed address, say). The fact layer publishes
-// those sites as target_kinds/amount_kinds exactly when the fold lost that
-// information, so prefer them here and say how many there are — the count is
-// what makes "two destinations" legible rather than one hedged word.
-//
-// Rendering cap: at most 4 sites are spelled out, the rest counted. The backend
-// list is already deduplicated by meaning (bounded by the lattice, not the site
-// count), so the cap only ever drops distinct-but-rarer classifications from a
-// pathological function — and the leading count still states the true total.
+// A fold of disagreeing sites reads "indeterminate" even when every site
+// resolved; target_kinds/amount_kinds recover them. At most 4 spelled out; the
+// count states the true total.
 const SITE_RENDER_CAP = 4;
 
 function kindTierRowText(folded, sites, wordMap) {
@@ -90,7 +77,6 @@ function kindTierRowText(folded, sites, wordMap) {
   return kindTierText(folded, wordMap);
 }
 
-// Conservative UPPER-BOUND USD phrasing — never render as exact.
 function formatUsdUpperBound(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
     return null;
@@ -103,19 +89,14 @@ function formatUsdUpperBound(value) {
   return `up to ~${text}`;
 }
 
-// How the unvalued half of a partial reach floor is counted. A current payload
-// keys it per (holder, asset) — the key the USD arithmetic uses — and the phrase
-// says so; a pre-fix payload only has the asset-level set and cannot claim more
-// than "some holder could not value this asset".
+// Current payloads count per (holder, asset); pre-fix payloads only have the
+// asset set.
 function unvaluedText(count, keyed) {
   return keyed ? `${count} holder/asset pair(s) of unknown value` : `${count} asset(s) of unknown value`;
 }
 
-// What a mandatory revert gate proved about a caller-named destination. Reads
-// the flow claims' `target_constraint` and the exec claim's
-// `destination_constraint` — the same three-state verdict on two witnesses.
-// Only a PRESENT verdict produces a row: an absent one is the question being
-// unanswered, and the inspector says nothing rather than implying either proof.
+// The same three-state verdict from `target_constraint` (flows) and
+// `destination_constraint` (exec). Only a present verdict produces a row.
 const GUARD_WORD = {
   mapping_allowlist: "a storage allowlist the caller did not write",
   hash_commitment: "a hash commitment in storage",
@@ -138,11 +119,8 @@ function constraintText(verdict) {
     verdict.binding === "derived_from"
       ? " (bound through a computation's argument provenance)"
       : "";
-  // `pins` is three-state and the wording tracks it exactly: "gated by" is
-  // reserved for a guard PROVEN to pin; a proven non-pinning guard and a guard
-  // of undetermined set semantics both read "checked by", each with its own
-  // caveat. An absent `pins` (older payload) is the undetermined case — never
-  // the proof.
+  // "gated by" only for a proven pin; non-pinning and undetermined guards both
+  // read "checked by" with their own caveat. Absent `pins` is undetermined.
   const pins = constraintPins(verdict);
   if (pins === true) return `gated by ${word}${via}`;
   if (pins === false)
@@ -175,14 +153,9 @@ function destinationConstraintText(claims) {
   return seen.length ? seen.join(", ") : null;
 }
 
-// Verbose witness rows for the function inspector: [{label, value}]. Every row is
-// derived from a present, at-the-bar field — absent facts produce no row (the
-// same honesty rule as the chip; an unwitnessed destination shows nothing rather
-// than a reassuring default).
-// The fork-observed destination answer for an outflow claim, as prose, or null.
-// Reads `destination_shape` + `shape_proved_by` off the behavioral witness: the
-// fork proved `caller_arbitrary` on 35 rows and no consumer had ever seen it,
-// because the bridge did not forward either key.
+// Fork-observed destination answer for an outflow (`destination_shape` +
+// `shape_proved_by`), or null. Proven `caller_arbitrary` on 35 rows before the
+// bridge forwarded it.
 const OBSERVED_SHAPE_WORD = {
   caller_arbitrary: "caller-chosen (a sentinel address received the outflow)",
   immutable_fixed: "fixed — an immutable address static proved",
@@ -198,8 +171,8 @@ function observedDestinationShape(claims) {
     const provedBy = observed.shape_proved_by;
     if (typeof shape !== "string") continue;
     if (shape === "unknown" || provedBy === "none") {
-      // The honest sentence for these rows: nothing was established, and no attempt
-      // is hidden. NOT silence — silence beside a large reach figure reads as "fine".
+      // Nothing established and nothing hidden; silence beside a large reach
+      // reads as fine.
       return "not determined (no static classification, no sentinel landed)";
     }
     return OBSERVED_SHAPE_WORD[shape] || `${shape} (observed)`;
@@ -211,7 +184,6 @@ export function claimWitnessFacts(fn) {
   const claims = claimsOf(fn);
   const facts = [];
 
-  // flow.out — destination kind, amount kind (static lattice) + reach (fork).
   const destKinds = [];
   const amtKinds = [];
   let reachValue = null;
@@ -253,54 +225,40 @@ export function claimWitnessFacts(fn) {
     if (observed) {
       if (typeof observed.observed_reach_value_usd === "number")
         reachValue = observed.observed_reach_value_usd;
-      // The measured-reach discriminator, read HERE and not only in the branches
-      // below: it is the one key that separates a MEASURED reach from a
-      // never-attempted one, and a measured reach of exactly $0 is otherwise
-      // indistinguishable from silence (`formatUsdUpperBound(0)` is falsy).
-      // Absent on an older payload, which is
-      // its own third value — see the render branch.
+      // The one key separating a measured reach from a never-attempted one; a
+      // measured $0 is otherwise silent (`formatUsdUpperBound(0)` is falsy).
+      // Absent on older payloads.
       if (typeof observed.reach_determined === "boolean")
         reachDetermined = observed.reach_determined;
       if (observed.reach_indeterminate === true) reachIndeterminate = true;
-      // On a not-measured row the acting deployment's own balance is a FLOOR
-      // and now arrives under its own key. Rendered as a floor, never as the reach:
-      // the producer used to publish it AS observed_reach_value_usd, so a
-      // zero-balance router read "$0 reach" for a function that can move millions.
+      // The acting deployment's balance is a floor, never the reach: published
+      // as the reach, it showed "$0" for functions that move millions.
       if (typeof observed.observed_reach_floor_usd === "number")
         reachFloor = observed.observed_reach_floor_usd;
-      // Value WAS observed leaving a holder, in an asset whose USD we do not
-      // have for THAT holder (unpriced, or no balance row for the pair at all). Its
-      // own state: neither a reach figure nor a floor on the acting contract. Counted
-      // per (holder, asset) pair, which is how it is measured — the same asset can be
-      // priced for one holder and unknown for another, and reading the old
-      // asset-keyed key as if it covered every holder is what let this renderer show
-      // "1 asset of unknown value" beside a priced figure of $8.47M drawn from a
-      // holder it never named.
+      // Moved value in an asset unpriced for that holder, counted per (holder,
+      // asset). Reading the old asset-keyed field showed "1 asset of unknown
+      // value" beside $8.47M from an unnamed holder.
       if (Array.isArray(observed.observed_reach_unvalued_pairs)) {
         reachUnvalued = observed.observed_reach_unvalued_pairs.length;
         reachUnvaluedKeyed = true;
       } else if (Array.isArray(observed.observed_reach_unvalued_assets)) {
-        // Pre-fix payload: asset-keyed, so a priced part on it cannot be attributed
-        // to any holder and must not be shown as though it could.
+        // Pre-fix: asset-keyed, so a priced part can't be attributed.
         reachUnvalued = observed.observed_reach_unvalued_assets.length;
       }
       if (Array.isArray(observed.observed_reach_priced_holders))
         reachPricedHolders = observed.observed_reach_priced_holders.length;
       if (typeof observed.observed_reach_priced_usd === "number")
         reachPriced = observed.observed_reach_priced_usd;
-      // The corroborating ceiling refused this figure: it exceeded the protocol's own
-      // measured TVL. Shown as the contradiction it is, never as the number.
+      // Exceeded the protocol's own TVL; shown as a contradiction, never the
+      // number.
       if (observed.reach_tvl_check === "exceeds_protocol_tvl") reachRejected = true;
     }
   }
   if (destKinds.length)
     facts.push({ label: "Destination", value: destKinds.join(", ") });
   else {
-    // The static flows matcher produces nothing for an approve-then-pull outflow
-    // (the transfer sink lives in the callee), so the inspector used to show a
-    // half-billion-dollar reach with NO statement about the destination at all —
-    // indistinguishable from a destination examined and found unclassifiable. The
-    // fork's own three-valued answer is now forwarded and rendered.
+    // Approve-then-pull outflows have no static destination, so a huge reach
+    // showed no destination statement at all; the fork's answer fills it.
     const observedShape = observedDestinationShape(claims);
     if (observedShape) facts.push({ label: "Destination", value: observedShape });
   }
@@ -309,18 +267,12 @@ export function claimWitnessFacts(fn) {
     facts.push({ label: "Destination constraint", value: destConstraint });
   if (amtKinds.length)
     facts.push({ label: "Amount", value: amtKinds.join(", ") });
-  // Every reach branch below states what an exercise of this function can touch,
-  // and a seeded verdict is exactly the case where that figure is not a statement
-  // about live state. The branch builds its row, the clause is appended once, and
-  // an unseeded row is pushed byte-identical to before.
+  // A seeded reach isn't about live state; unseeded rows are byte-identical.
   const reachSeedClause = seedClauseForClaims(claims, isOutflowClaim);
   let reachFact = null;
   if (reachRejected) {
-    // The corroborating ceiling refused this row's USD. When the row is ALSO the
-    // partial-floor shape (assets moved whose value is unknown), that is an
-    // independent fact and the refusal must not swallow it — one early-returning
-    // sentence hiding a second disclosure is the same defect the balance table
-    // had. Compose both.
+    // The refusal must not swallow the independent partial-floor disclosure;
+    // compose both.
     reachFact = {
       label: "Reach",
       value:
@@ -329,11 +281,8 @@ export function claimWitnessFacts(fn) {
           : "not determined (measured figure exceeded protocol TVL and was refused)",
     };
   } else if (reachUnvalued > 0) {
-    // Witnessed, not valued. Naming the count keeps this apart from both the
-    // measured row (a number) and the not-witnessed row (a floor on own balance).
-    // The priced part is only ever shown WITH its subjects: it is a sum over the
-    // (holder, asset) pairs that were priced, and the pairs that were not are the
-    // clause beside it — the two must not read as statements about the same thing.
+    // The priced part is shown only with its subjects, beside the unpriced
+    // pairs.
     const priced = formatUsdUpperBound(reachPriced);
     const unvalued = unvaluedText(reachUnvalued, reachUnvaluedKeyed);
     let pricedClause = "";
@@ -341,18 +290,14 @@ export function claimWitnessFacts(fn) {
       pricedClause = reachPricedHolders
         ? `, priced part ${priced} across ${reachPricedHolders} holder(s)`
         : `, priced part ${priced}`;
-    // Pre-fix payload: the unvalued set is asset-keyed and nothing records which
-    // holder the figure came from, so the figure is shown as unattributed rather
-    // than as the priced part of the assets just named.
+    // Pre-fix: no holder recorded, so shown unattributed.
     else if (priced) pricedClause = `, priced part ${priced} (holder attribution not recorded)`;
     reachFact = {
       label: "Reach",
       value: `value not determined — ${unvalued}${pricedClause}`,
     };
   } else if (reachIndeterminate) {
-    // NOT measured. Name the floor for what it is and never as the reach: the
-    // acting contract's own balance is a lower bound on what an exercise of this
-    // function can touch, and a zero floor says nothing about the money it moves.
+    // Not measured: the floor is a lower bound, and zero says nothing.
     const floor = formatUsdUpperBound(reachFloor);
     reachFact = {
       label: "Reach",
@@ -361,22 +306,14 @@ export function claimWitnessFacts(fn) {
         : "not determined (no downstream holder observed)",
     };
   } else if (reachDetermined === true) {
-    // MEASURED. A zero here is a measurement — every asset that moved had a priced
-    // holding and the total came out at nothing — and it used to render as silence,
-    // which is what "nothing was attempted" renders as. The backend payload
-    // is already pinned correct by
-    // `test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor`; only this
-    // renderer was blind.
+    // Measured: zero is a measurement and used to render as silence.
     const reach = formatUsdUpperBound(reachValue);
     reachFact = reach
       ? { label: "Reach (upper bound)", value: reach }
       : { label: "Reach", value: "$0 — measured, no priced value reachable" };
   } else {
-    // `reach_determined` absent: an older payload, where a 0 may be the acting
-    // deployment's own (zero) balance published as the reach rather than a
-    // measurement. Left exactly as it was — asserting a measured zero here would
-    // re-mint the "$0 reach for a function that may move millions" sentence the
-    // floor key removed. A never-attempted reach stays silent, as before.
+    // `reach_determined` absent: an old 0 may be the own-balance floor, so stay
+    // as before rather than claim a measured zero.
     const reach = formatUsdUpperBound(reachValue);
     if (reach) reachFact = { label: "Reach (upper bound)", value: reach };
   }
@@ -386,7 +323,7 @@ export function claimWitnessFacts(fn) {
       value: withSeedNote(reachFact.value, reachSeedClause),
     });
 
-  // pause.set — freeze blast radius, auto-expiry + duration (fork-observed).
+  // pause.set: freeze blast radius, expiry and duration (fork-observed).
   const observed = pauseObserved(claims);
   if (observed) {
     const radius = observed.observed_blast_radius;
@@ -421,11 +358,8 @@ export function claimWitnessFacts(fn) {
       observed.auto_expiry === null &&
       observed.duration_bound_seconds === null
     ) {
-      // not_determined, or an absent source on an older verdict. The freeze window
-      // was NOT established — say so, rather than borrowing the proven-indefinite
-      // sentence (which is the most severe statement this inspector makes).
-      // Symmetrically it may not read as a MITIGATION: an unread window is not a
-      // short one, so this sentence carries no duration and no expiry either way.
+      // Window not established: neither the most-severe indefinite sentence nor
+      // a mitigation.
       facts.push({
         label: "Auto-expiry",
         value: "window not determined",
@@ -433,11 +367,10 @@ export function claimWitnessFacts(fn) {
     }
   }
 
-  // supply.mint — backing inflow (fork-observed).
+  // supply.mint: backing inflow (fork-observed).
   const backing = mintBacking(claims);
   if (backing) {
-    // The backing answer is read off the SAME seeded execution, so "backed" here
-    // is not a statement that the mint is backed in live state either.
+    // Same seeded execution, so "backed" isn't a live-state claim either.
     const mintSeedClause = seedClauseForClaims(claims, isMintClaim);
     if (backing.inflow_observed === true) {
       facts.push({

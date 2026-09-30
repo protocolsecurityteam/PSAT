@@ -1,6 +1,5 @@
-// Shared HTTP helper: injects X-PSAT-Admin-Key, prompts for a key on 401,
-// and parses JSON / text based on the response Content-Type. Kept in one
-// place so every new page gets the same admin-key flow as App.jsx.
+// Shared HTTP helper: admin-key header, 401 prompt, JSON/text parsing by
+// Content-Type.
 
 const ADMIN_KEY_STORAGE = "psat_admin_key";
 
@@ -16,12 +15,11 @@ export function setAdminKey(key) {
   try {
     if (key) window.localStorage.setItem(ADMIN_KEY_STORAGE, key);
     else window.localStorage.removeItem(ADMIN_KEY_STORAGE);
-    // Notify same-tab listeners (useIsAdmin) so gated UI re-renders on
-    // login/logout; the native 'storage' event only fires in other tabs.
+    // The native 'storage' event only fires in other tabs.
     window.dispatchEvent(new Event("psat:adminkey"));
   } catch {
-    // localStorage unavailable (private mode, etc.) — admin actions will
-    // require re-entering the key on every request.
+    // localStorage unavailable (private mode): admins re-enter the key per
+    // request.
   }
 }
 
@@ -34,10 +32,7 @@ function buildHeadersWithKey(options, key) {
 }
 
 async function request(path, options = {}) {
-  // `silent: true` skips the 401 prompt. Background polls (e.g. the open
-  // detail panel refreshing every 2.5s) use this so a missing/wrong admin
-  // key doesn't surface a modal prompt on every tick — the caller catches
-  // the thrown error and degrades the UI instead.
+  // `silent: true` skips the 401 prompt, for background polls.
   const { silent, ...fetchOptions } = options;
   let response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, getAdminKey()) });
   if (response.status === 401 && !silent) {
@@ -51,10 +46,8 @@ async function request(path, options = {}) {
     }
   }
   if (!response.ok) {
-    // Carry the status on the error. Callers that render an absence need to
-    // tell "the server says this does not exist" (404) from "the server could
-    // not find out" (503) — collapsing them into a message string is how a
-    // storage outage got drawn as an empty timeline.
+    // Callers must tell 404 (absent) from 503 (couldn't find out); a message
+    // string collapsed them and drew a storage outage as an empty timeline.
     const type = response.headers.get("content-type") || "";
     let message = response.status >= 500
       ? "The server is temporarily unavailable. Please try again."
@@ -100,9 +93,8 @@ function companyMeta(headers) {
 }
 
 
-// Preparation is shared by all readers. Retry only the server's explicit
-// preparing state, with a bounded wait and navigation cancellation. A prepared
-// payload in a schema this build cannot read is still preparing for us.
+// Retries only the server's explicit preparing state, bounded and cancellable.
+// A schema this build can't read counts as still preparing.
 export async function companyApi(path, options = {}) {
   const section = path.match(/\/(functions|summary)$/)?.[1] || "overview";
   for (let attempt = 0; ; attempt += 1) {

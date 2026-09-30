@@ -2,9 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
 
-// A link href is only safe to hand to the browser when it is http(s); a
-// `javascript:`/`data:` value would execute on click. Returns the URL when it
-// is safe to link, otherwise null so the caller renders it as inert text.
+// `javascript:`/`data:` hrefs execute on click; null means render inert text.
 export function safeHttpUrl(value) {
   if (typeof value !== "string" || value.length === 0) return null;
   try {
@@ -15,13 +13,8 @@ export function safeHttpUrl(value) {
   }
 }
 
-// Admin-only audits manager. Lists every AuditReport for a company,
-// shows extraction + scope state at a glance, and provides three
-// admin actions per row: re-extract scope, refresh coverage (protocol-
-// wide), delete. An add-audit form up top inserts a new row which the
-// standing workers will claim on their next poll (text → scope →
-// coverage pipeline). Read-only endpoints are safe for non-admin
-// viewers; mutating actions prompt for the admin key on 401.
+// Admin audits manager: add (workers pick it up), re-extract scope, refresh
+// coverage, delete. Mutations prompt for the key on 401.
 export default function AuditsAdminModal({ companyName, onClose }) {
   const isAdmin = useIsAdmin();
   const [audits, setAudits] = useState(null);

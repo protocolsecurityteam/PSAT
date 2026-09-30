@@ -1,22 +1,11 @@
-// Shared job-pipeline vocabulary for the /monitor page: stage ordering,
-// stage/status colors, and the per-stage metric humanization that drives the
-// drill-in's metric chips. Imported by both the runs-table StageProgress bar
-// (PipelineDashboard) and the docked stage timeline (JobDetailPanel) so the
-// two surfaces never drift.
+// Job-pipeline vocabulary shared by the runs-table bar and the stage timeline
+// so they can't drift.
 
-// The CORE contract path — the progress bar in the runs tables (segment count
-// auto-derives from CORE_STAGES.length; adding `effects` makes it 7) and the
-// synthesized PENDING rows in the timeline. dapp_crawl/defillama_scan are
-// company-discovery child stages (not on the per-contract path) and `done` is
-// terminal, so neither belongs here. `effects` is a flag-gated optional stage:
-// it lives in CORE for the bar/ordering, but the timeline renders it
-// presence-based (see JobDetailPanel) so a flag-off/historical job that never
-// entered it shows no eternal row.
+// The per-contract path. Company-discovery children and `done` aren't on it.
+// `effects` is flag-gated: in CORE for ordering, but rendered presence-based.
 export const CORE_STAGES = ["discovery", "selection", "static", "resolution", "policy", "effects", "coverage"];
 
-// Full pipeline order, including the company-discovery children and `done`.
-// The stage timeline iterates server timings in THIS order, not alphabetical
-// (the old panel's Object.entries().sort() bug).
+// Server timings iterate in this order, not alphabetically.
 export const JOB_STAGE_ORDER = [
   "discovery",
   "dapp_crawl",
@@ -55,8 +44,7 @@ export function formatStageLabel(stage) {
   return String(stage || "").replaceAll("_", " ").toUpperCase();
 }
 
-// CORE index for the progress bar. Non-core company stages clamp to discovery
-// (index 0); `done` returns CORE_STAGES.length so every segment reads filled.
+// Non-core stages clamp to 0; `done` fills every segment.
 export function coreIndexForStage(stage) {
   const i = CORE_STAGES.indexOf(stage);
   if (i !== -1) return i;
@@ -64,9 +52,7 @@ export function coreIndexForStage(stage) {
   return 0;
 }
 
-// Metric-key → chip label. Order here is also the chip render order (known
-// keys first, in this sequence; unknown keys fall to the end). Matches the
-// per-stage metrics catalog the workers emit via record_stage_metric.
+// Also the chip render order; unknown keys go last.
 const METRIC_LABELS = {
   // discovery
   contracts_discovered: "contracts",
@@ -92,8 +78,7 @@ const METRIC_LABELS = {
   effective_functions: "functions",
   principals_labeled: "principals",
   enrolled: "enrolled",
-  // effects (behavioral simulation) — keys match record_stage_metric in
-  // workers/effects_worker.py
+  // effects: keys match record_stage_metric in workers/effects_worker.py
   candidates_in: "candidates",
   candidates_after_cascade: "after cascade",
   cache_hits_kernel: "kernel hits",
@@ -113,7 +98,7 @@ export function humanizeMetricLabel(key) {
   return METRIC_LABELS[key] || String(key).replaceAll("_", " ");
 }
 
-// Compact block-number rendering, e.g. 19234567 → "19.23M".
+// 19234567 → "19.23M"
 export function formatBlockNumber(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value);
@@ -128,7 +113,6 @@ export function formatMetricValue(key, value) {
   return String(value);
 }
 
-// Stable, catalog-ordered [key, value] pairs for a stage's metrics blob.
 export function orderedMetricEntries(metrics) {
   if (!metrics || typeof metrics !== "object") return [];
   return Object.entries(metrics)

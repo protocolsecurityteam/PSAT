@@ -16,20 +16,14 @@ import { coalesceChain, entityKey } from "../surface/entityKey.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
-// Which label row an address-inventory contract row edits (invariant 12).
-// These are CONTRACT rows, so a genuine cross-chain deployment gets its own
-// chain-qualified override. Mainnet and legacy NULL-chain rows (the entire
-// current population) intentionally resolve to `null` = the GLOBAL row, so
-// today's single-chain behavior is preserved exactly; only non-mainnet
-// contracts start writing per-chain overrides.
+// Contract rows get per-chain overrides (invariant 12), but mainnet and legacy
+// NULL rows map to the global row so single-chain behaviour is unchanged.
 function rowLabelChain(row) {
   const c = row?.chain;
   if (!c || String(c).toLowerCase() === "ethereum") return null;
   return c;
 }
 
-// "Impl (via UUPSProxy)" for proxy rows, raw name otherwise — see
-// proxyDisplayName. Thin adapter from the address-inventory row shape.
 function prettyAddressName(row) {
   return proxyDisplayName({
     name: row?.name,
@@ -38,10 +32,7 @@ function prettyAddressName(row) {
   });
 }
 
-// Parse any blob of text (comma, newline, whitespace separated) into a
-// deduplicated list of lowercased 0x addresses. Anything that doesn't
-// match the 40-hex address shape is silently dropped — users routinely
-// paste labels + addresses from spreadsheets.
+// Pasted spreadsheet text: anything not a 40-hex address is dropped.
 function parseAddressList(raw) {
   const hits = String(raw || "").match(ADDRESS_RE) || [];
   const seen = new Set();
@@ -53,8 +44,7 @@ export default function AddressesModal({ companyName, onClose }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  // { global: Map<addr,name>, byChain: Map<chain, Map<addr,name>> } — chain-aware
-  // so a contract labeled per-network resolves to the right name (invariant 12).
+  // Chain-aware so per-network contract labels resolve (invariant 12).
   const [labels, setLabels] = useState(() => ({ global: new Map(), byChain: new Map() }));
   const [filter, setFilter] = useState("");
   const [sortBy, setSortBy] = useState("rank"); // rank | name | address
@@ -64,15 +54,14 @@ export default function AddressesModal({ companyName, onClose }) {
   const [newName, setNewName] = useState("");
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareInput, setCompareInput] = useState("");
-  const [busyAddr, setBusyAddr] = useState(null); // address currently being deleted/analyzed
+  const [busyAddr, setBusyAddr] = useState(null);
   const [showHistorical, setShowHistorical] = useState(false);
   const [showPruned, setShowPruned] = useState(false);
 
   const refresh = useCallback(() => {
     let cancelled = false;
-    // Pulls just the address inventory (~167 KB for ether.fi). The full
-    // /api/company response (1+ MB) is fetched by CompanyOverview already
-    // and most of it isn't needed here.
+    // Just the inventory (~167 KB); CompanyOverview already fetched the full
+    // payload.
     api(`/api/company/${encodeURIComponent(companyName)}/addresses`)
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
@@ -81,7 +70,7 @@ export default function AddressesModal({ companyName, onClose }) {
         if (cancelled) return;
         setLabels(buildLabelMaps(resp));
       })
-      .catch(() => { /* labels are optional; missing key just leaves the maps empty */ });
+      .catch(() => { /* labels are optional */ });
     return () => { cancelled = true; };
   }, [companyName]);
 
@@ -96,9 +85,8 @@ export default function AddressesModal({ companyName, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // (chain, address) → row lookup, keyed by entityKey (invariant 13): the
-  // all-chains payload can carry the same address on two chains, so a bare
-  // index would last-wins-collapse them into one entry.
+  // (chain, address) keys (invariant 13) so the same address on two chains
+  // isn't collapsed.
   const addrIndex = useMemo(() => {
     const m = new Map();
     for (const r of data?.all_addresses || []) {
@@ -107,11 +95,8 @@ export default function AddressesModal({ companyName, onClose }) {
     return m;
   }, [data]);
 
-  // Bare-address → winner row for the compare check. Pasted input is chainless,
-  // and the existence question is "is this address tracked on ANY chain", so it
-  // is keyed by bare address. When an address is held on multiple chains the
-  // winner is deterministic — the ethereum row if present, else the first in
-  // payload order — so the matched row's displayed label never last-wins-flips.
+  // Pasted input is chainless, so keyed by bare address with a deterministic
+  // winner (ethereum, else first) so labels don't flip.
   const compareWinner = useMemo(() => {
     const m = new Map();
     for (const r of addrIndex.values()) {
@@ -125,17 +110,14 @@ export default function AddressesModal({ companyName, onClose }) {
     return m;
   }, [addrIndex]);
 
-  // Compute the set of impl addresses currently behind a proxy in this
-  // payload — keeps live impls visible even when their only discovery
-  // source is the upgrade-history sweep.
+  // Keeps live impls visible even when their only source is the upgrade-history
+  // sweep.
   const currentImplAddrs = useMemo(
     () => computeCurrentImplAddrs(data?.all_addresses || []),
     [data],
   );
 
-  // Three-state partition from the payload's membership_state (never derived
-  // client-side): members in the main table, candidates in their own section,
-  // pruned collapsed behind a count.
+  // From the payload's membership_state, never derived client-side.
   const { members, candidates, pruned } = useMemo(
     () => splitMembership(data?.all_addresses || []),
     [data],
@@ -153,28 +135,22 @@ export default function AddressesModal({ companyName, onClose }) {
 
   const parsedCompare = useMemo(() => parseAddressList(compareInput), [compareInput]);
 
-  // In compare mode the row set is the pasted addresses (matched first,
-  // missing rows synthesized with minimal shape so the table renders them
-  // alongside). Out of compare mode, everything flows through filter+sort.
   const rows = useMemo(() => {
     if (compareOpen && parsedCompare.length > 0) {
       const matched = [];
       const missing = [];
       for (const a of parsedCompare) {
         const hit = compareWinner.get(a);
-        // A pruned row is tracked (so it is not "missing" and never gets
-        // re-queued by "Analyze all missing") but proven code-absent — it
-        // must not wear the green matched chip.
+        // Pruned rows are tracked (never re-queued) but proven code-absent, so
+        // not "matched".
         if (hit) matched.push({ ...hit, _compareStatus: membershipState(hit) === "pruned" ? "pruned" : "matched" });
         else missing.push({ address: a, _compareStatus: "missing", name: "", is_proxy: false, analyzed: false });
       }
       return [...matched, ...missing];
     }
 
-    // Compare mode always uses the full inventory — users paste lists that
-    // may legitimately include historical impls and need to see them flagged
-    // as matched/missing. Outside compare mode the main table shows members,
-    // defaulting to active-only (historical impls behind the toggle).
+    // Compare mode uses the full inventory; pasted lists may include historical
+    // impls.
     const all = showHistorical ? members : activeRows;
     const q = filter.trim().toLowerCase();
     const filtered = q
@@ -211,7 +187,6 @@ export default function AddressesModal({ companyName, onClose }) {
     return sorted;
   }, [filter, labels, sortBy, compareOpen, parsedCompare, compareWinner, showHistorical, members, activeRows]);
 
-  // Candidates honor the same text filter as the main table.
   const candidateRows = useMemo(() => {
     const q = filter.trim().toLowerCase();
     const list = q
@@ -259,9 +234,7 @@ export default function AddressesModal({ companyName, onClose }) {
     }
   };
 
-  // Queue analysis for a single missing address without leaving compare
-  // mode. The row stays in the "missing" group until refresh picks it up
-  // (the job has to write a Contract row first).
+  // The row stays "missing" until the job writes a Contract row.
   const onAnalyzeMissing = async (address) => {
     setBusyAddr(address);
     try {
@@ -287,8 +260,7 @@ export default function AddressesModal({ companyName, onClose }) {
     const missing = parsedCompare.filter((a) => !compareWinner.has(a));
     for (const addr of missing) {
       try {
-        // Serial loop — the /api/analyze endpoint is cheap (just writes a
-        // Job row), so no need to parallelize and risk hammering it.
+        // Serial: the endpoint just writes a Job row.
         // eslint-disable-next-line no-await-in-loop
         await api("/api/analyze", {
           method: "POST",

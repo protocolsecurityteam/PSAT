@@ -9,11 +9,8 @@ import { DaemonDetail } from "./fleet/DaemonDetail.jsx";
 import { computeFleetRates } from "./fleet/fleetHealth.js";
 import { CORE_STAGES, STAGE_COLORS, STATUS_COLORS, coreIndexForStage, formatStageLabel } from "./jobStages.js";
 
-// Time-window selector universe. Only truly live work (queued/processing) is
-// exempt from the window filter — those represent the current state of the
-// worker fleet and have no useful "stale" interpretation. failed and
-// failed_terminal flow through the window like completed jobs. "all" means no
-// upper bound; the cutoff is just 0.
+// Only queued/processing are exempt from the window; failed jobs age out like
+// completed ones. "all" has no bound.
 const TIME_WINDOWS = [
   { id: "1h", label: "1h", ms: 60 * 60 * 1000 },
   { id: "24h", label: "24h", ms: 24 * 60 * 60 * 1000 },
@@ -74,8 +71,7 @@ function sortByUpdatedAtDesc(a, b) {
 
 function monitorJobLabel(job) {
   const base = job.name || job.company || (job.address ? shortenAddress(job.address) : "Job");
-  // Impl jobs (spawned for a proxy) keep the proxy address in request — flag
-  // them so the (impl) row isn't confused with its proxy shell.
+  // Impl jobs keep the proxy address in the request.
   return job.request?.proxy_address ? `${base} (impl)` : base;
 }
 
@@ -88,8 +84,6 @@ function onActivate(fn) {
   };
 }
 
-// ── Shared CORE-stage progress bar (Active + History rows) ────────────────
-// Segment count auto-derives from CORE_STAGES.length (7 with `effects`).
 function StageProgress({ job }) {
   const status = job.status;
   const done = status === "completed" || job.stage === "done";
@@ -252,19 +246,17 @@ export default function PipelineDashboard() {
   const [allJobs, setAllJobs] = useState([]);
   const [stats, setStats] = useState(null);
   const [fleet, setFleet] = useState(null);
-  // Per-process progress rates, diffed across successive /api/fleet polls.
-  // Anchors (last-changed value + time per counter) persist in a ref so the
-  // rate survives re-renders; the derived map is state so it triggers one.
+  // Rates diffed across /api/fleet polls; anchors in a ref, the derived map in
+  // state so it renders.
   const fleetRatesAnchors = useRef({});
   const [fleetRates, setFleetRates] = useState({});
   const [now, setNow] = useState(Date.now());
-  // One selection drives the dock: null | {type:'job', id} | {type:'process', key}
+  // null | {type:'job', id} | {type:'process', key}
   const [selected, setSelected] = useState(null);
   const [timeWindow, setTimeWindow] = useState("24h");
   const [historyFilter, setHistoryFilter] = useState("all");
   const [search, setSearch] = useState("");
-  // Bumped each poll tick so the open job detail re-fetches its
-  // /errors + /stage_timings without running its own interval.
+  // The open detail refetches on this tick instead of its own interval.
   const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
@@ -280,14 +272,12 @@ export default function PipelineDashboard() {
           setAllJobs(Array.isArray(jobs) ? jobs : []);
           setStats(s);
           setFleet(f);
-          // Only re-derive rates from a real snapshot — a failed fleet poll
-          // (f null) keeps the last rates rather than wiping them to zero.
+          // A failed poll keeps the last rates rather than zeroing them.
           if (f) setFleetRates(computeFleetRates(fleetRatesAnchors.current, f));
           setRefreshTick((n) => n + 1);
         }
       } catch {
-        // Jobs fetch failed (backend down) — keep the last good state and
-        // retry on the next tick.
+        // Backend down: keep the last good state.
       }
     }
     fetchAll();
@@ -298,13 +288,11 @@ export default function PipelineDashboard() {
     };
   }, []);
 
-  // Tick every second so elapsed / "X ago" stay live.
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // ESC clears any selection (job or process), collapsing the dock.
   useEffect(() => {
     function onKey(ev) {
       if (ev.key === "Escape") setSelected(null);
@@ -313,11 +301,9 @@ export default function PipelineDashboard() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // ── Dedup: hide proxy + company shells once their real work has spawned.
+  // Hide proxy and company shells once their real work has spawned.
   const hasChildJobs = useMemo(() => allJobs.some((j) => !j.company && j.address), [allJobs]);
-  // /api/jobs is all-chains; an impl job's request.proxy_address is same-chain
-  // as the job. Key the impl-hide set on the composite (chain, proxy_address)
-  // so a proxy address on one chain never hides a standalone twin on another.
+  // Keyed by (chain, proxy_address) so a twin on another chain isn't hidden.
   const implProxyKeys = useMemo(
     () =>
       new Set(
@@ -337,12 +323,10 @@ export default function PipelineDashboard() {
       const isRunning = j.status === "queued" || j.status === "processing";
       if (j.is_proxy && !isRunning) return false;
       if (!j.is_proxy && j.address && implProxyKeys.has(entityKey(j.request?.chain, j.address.toLowerCase())) && !isRunning) return false;
-      // Hide the completed company-discovery *shell* (company set, no address)
-      // once its child contract jobs exist — but keep completed contract jobs
-      // (they have an address) so they show in History.
+      // Hide the completed company shell once children exist; completed
+      // contract jobs stay in History.
       if (j.company && !j.address && hasChildJobs && j.status === "completed") return false;
-      // Live work is always visible; everything else is window-scoped so old
-      // red dots don't persist forever.
+      // Otherwise old red dots persist forever.
       if (!isActive) {
         const t = new Date(j.updated_at || j.created_at).getTime();
         if (t < cutoff) return false;
@@ -395,9 +379,8 @@ export default function PipelineDashboard() {
     return list.slice(0, 100);
   }, [historyAll, historyFilter, search]);
 
-  // One source per number: header total ← /api/stats (all-time); active count
-  // + running/queued chips ← /api/fleet.jobs (live), falling back to the
-  // derived counts when fleet hasn't loaded.
+  // Header total from /api/stats (all-time); live counts from /api/fleet,
+  // falling back to derived counts.
   const fleetJobs = fleet?.jobs;
   const liveProcessing = fleetJobs?.processing ?? activeJobs.filter((j) => j.status === "processing").length;
   const liveQueued = fleetJobs?.queued ?? activeJobs.filter((j) => j.status === "queued").length;
