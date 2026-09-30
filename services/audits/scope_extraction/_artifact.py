@@ -28,15 +28,7 @@ def build_artifact_payload(
     scope_entries: list[dict] | None = None,
     classified_commits: list[dict] | None = None,
 ) -> dict[str, object]:
-    """Build the JSON body stored at ``scope_artifact_key``.
-
-    ``scope_section_text`` is what the LLM actually saw — the merged
-    header/content-pattern slice, or the winning chunk for chunk-scan.
-    Capped at 20k chars. ``scope_entries`` (Phase F) is the structured
-    per-entry (name, address, commit, chain) list when the PDF had a
-    scope table with addresses; empty otherwise. ``classified_commits``
-    (Phase C) is the LLM-labeled commit list with roles.
-    """
+    """JSON body stored at ``scope_artifact_key``. ``scope_section_text`` is what the LLM saw, capped at 20k chars."""
     sliced = scope_section_text[:20_000] if scope_section_text else None
     return {
         "contracts": list(contracts),
@@ -53,11 +45,7 @@ def build_artifact_payload(
 
 
 def _store_artifact(audit_id: int, payload: dict[str, object]) -> str | None:
-    """Write the payload to object storage, returning the key or ``None``.
-
-    Returns None when storage isn't configured — the contracts still reach
-    ``scope_contracts`` on the row; the blob is a debug nice-to-have.
-    """
+    """``None`` when storage isn't configured; the contracts still reach the row."""
     client = get_storage_client()
     if client is None:
         logger.warning(

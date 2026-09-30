@@ -1,23 +1,10 @@
-"""Extract the list of in-scope contracts from an audit report's PDF text.
+"""Extract in-scope contracts from audit PDF text. Helpers are importable without DB or S3.
 
-Runs after ``services.audits.text_extraction`` puts the parsed PDF body in
-object storage. The worker in ``workers.audit_scope_extraction`` drives
-``process_audit_scope``; every helper is importable without DB or S3.
-
-Pipeline for one audit:
-    1. ``locate_scope_section`` — regex for header / content-pattern
-       phrases, return 1-3 page slices.
-    2. ``extract_scope_with_llm`` — send slices to Gemini 2.0 Flash via
-       OpenRouter, get back a JSON array of contract names.
-    3. ``validate_contracts`` — drop names that never appear in the raw
-       body (hallucination guard).
-    4. ``extract_date_from_pdf_text`` — best-effort title-region date
-       pull for backfilling ``AuditReport.date`` when null.
-    5. On no-header bodies, ``extract_scope_via_chunk_scan`` walks the
-       first ~20 pages in N-page windows as a fallback.
-
-``process_audit_scope`` chains everything and returns a
-``ScopeExtractionOutcome`` that the worker persists atomically.
+1. ``locate_scope_section`` — header / content-pattern slices.
+2. ``extract_scope_with_llm`` — contract names (and structured entries).
+3. ``validate_contracts`` — drop names absent from the raw text (hallucination guard).
+4. ``extract_date_from_pdf_text`` — title-page date for backfill.
+5. ``extract_scope_via_chunk_scan`` — fallback when no header is found.
 """
 
 from __future__ import annotations
@@ -46,20 +33,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ScopeExtractionOutcome:
-    """Structured result of ``process_audit_scope``.
+    """Result of ``process_audit_scope``.
 
-    ``status`` mirrors ``AuditReport.scope_extraction_status`` values
-    (``success`` / ``failed`` / ``skipped``). ``method`` tells the worker
-    where the contracts came from (``llm`` / ``llm_chunk_scan`` /
-    ``regex_fallback`` / ``cache_copy``). ``reviewed_commits`` carries git
-    SHAs pulled from the PDF text so the source-equivalence matcher can
-    prove coverage by diffing reviewed code against Etherscan source.
-
-    ``scope_entries`` (Phase F) carries structured ``{name, address,
-    commit, chain}`` tuples for audits whose scope section has an explicit
-    address column. Empty tuple for prose-only scopes. The coverage
-    matcher treats non-empty ``scope_entries`` as authoritative over the
-    flat ``contracts`` name list.
+    ``status`` mirrors ``scope_extraction_status``. Non-empty ``scope_entries`` are authoritative over the flat
+    ``contracts`` list in coverage matching.
     """
 
     status: str
@@ -83,14 +60,9 @@ def process_audit_scope(
     audit_title: str,
     auditor: str,
 ) -> ScopeExtractionOutcome:
-    """Full scope-extraction pipeline for one audit.
+    """Full scope pipeline for one audit.
 
-    Fetches the PDF text from object storage, locates scope sections,
-    calls the LLM (falling back to regex / chunk-scan as needed),
-    validates results against the raw text, and writes a JSON artifact.
-
-    Never raises: any failure becomes ``status="failed"`` with ``error``
-    populated. Bodies with no scope section become ``status="skipped"``.
+    Never raises: failures are ``status="failed"``, no scope section is ``"skipped"``.
     """
     client = get_storage_client()
     if client is None:
@@ -119,11 +91,7 @@ def process_audit_scope(
 
     raw_text = _normalize_ligatures(raw_text)
     extracted_date = extract_date_from_pdf_text(raw_text)
-    # Commits pulled from the full text so ``source_equivalence`` can later
-    # cross-reference reviewed code against Etherscan-verified impl source.
-    # Referenced repos (Phase D) are fallback candidates for source-
-    # equivalence when ``source_repo`` misses — common when discovery
-    # recorded the auditor's publication repo instead of the protocol's.
+    # Referenced repos are fallbacks when discovery recorded the auditor's publication repo.
     from services.audits.source_equivalence import extract_referenced_repos, extract_reviewed_commits
 
     reviewed_commits = tuple(extract_reviewed_commits(raw_text))
@@ -137,8 +105,7 @@ def process_audit_scope(
     names: list[str] = []
     scope_entries: list[dict] = []
     classified_commits: list[dict] = []
-    # Text the LLM actually saw — persisted on the artifact so debugging
-    # can answer "why did the model extract what it extracted?".
+    # Persisted so debugging can see what the model saw.
     llm_input_text: str | None = None
 
     if sections:
@@ -157,10 +124,7 @@ def process_audit_scope(
                     "failure_kind": failure_kind,
                 },
             )
-            # Split the no-match cause: an ``api`` failure is the 402/outage
-            # signature, a ``parse`` failure is a model/parser bug — conflating
-            # them hid the 55→4 collapse. Degrade so the loss of structured
-            # extraction lands in /api/jobs/{id}/errors, not just a log line.
+            # ``api`` (402/outage) vs ``parse`` (model/parser bug); conflating them hid the 55→4 collapse.
             record_stage_metric("scope_llm_failure_kind", failure_kind)
             record_degraded(
                 phase="scope_llm",
@@ -179,10 +143,7 @@ def process_audit_scope(
 
     validated = validate_contracts(names, raw_text)
 
-    # Chunk-scan fallback: no structural header, or the located section
-    # yielded no valid names. Walks the first ~20 pages asking the LLM
-    # per chunk. Bounded to 4 chunks, gated by ``_has_scope_signal`` to
-    # keep findings-page extractions out.
+    # Bounded to 4 chunks and gated by ``_has_scope_signal`` to keep findings pages out.
     if not validated:
         try:
             (
@@ -238,17 +199,11 @@ def process_audit_scope(
                     len(cs_commits),
                 )
 
-    # Hallucination filter on scope_entries: the entry's name must survive
-    # the same raw-text-substring check we apply to plain names. Drops
-    # entries whose name is a model confabulation. The address + commit
-    # fields already passed format-level validation in ``_parse_scope_entry``.
+    # Entry names must pass the same raw-text check as plain names.
     validated_lower = {n.lower() for n in validated}
     scope_entries = [e for e in scope_entries if e["name"].lower() in validated_lower]
 
-    # Hallucination filter on classified_commits: the SHA (as prefix-match
-    # at 7 chars) must appear in the raw PDF text. The LLM sometimes emits
-    # SHAs it constructed from context rather than ones actually present;
-    # drop those to keep only real citations.
+    # The LLM sometimes constructs SHAs; keep only ones present in the text.
     raw_text_lower = raw_text.lower()
     classified_commits = [c for c in classified_commits if c["sha"][:7] in raw_text_lower]
 
@@ -296,33 +251,26 @@ def process_audit_scope(
 
 
 __all__ = [
-    # Versions + constants
     "PROMPT_VERSION",
     "SCOPE_ARTIFACT_CONTENT_TYPE",
-    # Errors
     "LLMUnavailableError",
     "ScopeExtractionError",
-    # Result types
     "ScopeExtractionOutcome",
     "ScopeSection",
-    # Utils
     "scope_artifact_key",
-    # Locating + extracting
     "locate_scope_section",
     "extract_scope_with_llm",
     "extract_scope_via_chunk_scan",
     "extract_contracts_regex_fallback",
     "validate_contracts",
     "extract_date_from_pdf_text",
-    # Artifact assembly
     "build_artifact_payload",
-    # Internal helpers re-exported so tests can monkeypatch them
+    # Re-exported so tests can monkeypatch them.
     "_build_prompt",
     "_call_llm",
     "_normalize_ligatures",
     "_page_offsets",
     "_page_of_offset",
     "_split_text_into_chunks",
-    # Orchestration
     "process_audit_scope",
 ]
