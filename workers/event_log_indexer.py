@@ -913,7 +913,7 @@ def index_event_group_steps(
 
     The caller commits each prefix before resuming. No transaction is open during any RPC: positions are read and
     released first, the reorg check and the target hash read follow, and each page is fetched before its rows are
-    locked. Every write re-locks the group and requires the positions it planned (A5); a mismatch raises
+    locked. Every write re-locks the group and requires the positions it planned; a mismatch raises
     :class:`CursorsMoved` with nothing written.
     """
     memo: MutableMapping[tuple[int, int], bytes | None] = block_hash_memo if block_hash_memo is not None else {}

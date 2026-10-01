@@ -180,7 +180,7 @@ def test_batched_warm_sweep_matches_per_address_and_legacy_sweeps(db_session, mo
 
 
 def test_warm_sweep_requests_at_most_one_getlogs_per_fifty_groups_per_chain(db_session, monkeypatch):
-    """G4, offline: with a moving head, each sweep is ceil(groups / 50) requests per chain."""
+    """With a moving head, each sweep is ceil(groups / 50) requests per chain."""
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     counts = {MAINNET: 120, BASE: 60}
     sim = SimChain(heads=dict(START))

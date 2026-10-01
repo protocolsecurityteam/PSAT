@@ -248,7 +248,7 @@ def test_shutdown_joins_both_scan_threads_before_returning(monkeypatch):
 
 @requires_postgres
 def test_warm_cursors_keep_up_with_a_moving_head_while_a_cold_fetch_blocks(db_session, sim, monkeypatch):
-    """A9/G5 offline, time-scaled: a 0.3 s interval stands for 60 s, and the cold fetch blocks for 10 intervals."""
+    """Time-scaled: a 0.3 s interval stands for 60 s, and the cold fetch blocks for 10 intervals."""
     interval = 0.3
     rates = {1: 40.0, 8453: 120.0}  # blocks per second
     t0 = time.monotonic()

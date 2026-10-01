@@ -1,4 +1,4 @@
-"""Offline proxy for the memory gate: the paged engine's peak is bounded by the page ceiling, the legacy engine's by the
+"""Offline memory proxy: the paged engine's peak is bounded by the page ceiling, the legacy engine's by the
 window. One dense address with 300,000 logs over its span is served through the stubbed wire to each engine under
 tracemalloc.
 

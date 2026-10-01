@@ -125,7 +125,7 @@ def _cursor(session, t: str = _T1, addr: str = _ADDR) -> IndexedEventCursor:
     ).scalar_one()
 
 
-# W4: no transaction during RPC, rewind order, target hash timing, shutdown, topic narrowing
+# Transactions around RPC, rewind order, target hash timing, shutdown, topic narrowing
 
 
 @pytest.mark.parametrize("engine", ["paged", "legacy"])
@@ -256,7 +256,7 @@ def test_sibling_topic_narrowing_skips_at_target_siblings(db_session, sim):
     ) == len(range(_SEED + 3, _TARGET + 1, 1_000))
 
 
-# W5: span, ceiling, timeout
+# Page sizing, the memory ceiling, the timeout
 
 
 def test_span_doubles_while_pages_come_back_sparse(db_session, sim):
