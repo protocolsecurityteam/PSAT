@@ -323,7 +323,8 @@ def resolve_role_holder_planes(
             )
         ).scalars()
     )
-    folded = fold_role_candidates(repo_rows)
+    undecodable = sum(1 for row in repo_rows if getattr(row, "data_hex", None) is not None)
+    folded = fold_role_candidates(row for row in repo_rows if getattr(row, "data_hex", None) is None)
     if not folded:
         return []
 
@@ -347,8 +348,15 @@ def resolve_role_holder_planes(
             )
         return out
 
-    # Either cursor cold withholds every lower bound: the candidate set is knowingly incomplete.
+    # Either cursor cold withholds every lower bound: the candidate set is knowingly incomplete. So does a row no ABI
+    # decodes, which may be a grant or revoke the fold can't read.
     if not bounds["both_warm"]:
+        return withhold_all()
+    if undecodable:
+        logger.warning(
+            "role registry has undecodable AccessControl rows; every holder set withheld",
+            extra={"chain_id": chain_id, "registry_address": registry_address, "undecodable_rows": undecodable},
+        )
         return withhold_all()
 
     if probe_block is None:

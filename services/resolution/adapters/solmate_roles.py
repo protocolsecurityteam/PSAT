@@ -21,7 +21,7 @@ from utils.evm import CANCALL_SIGNATURE
 
 from ..capabilities import CapabilityExpr, Condition, ExternalCheck
 from ..event_tail import tail_scanner_for
-from ..repos.event_logs_pg import _cursor_covers_block
+from ..repos.event_logs_pg import UNDECODABLE_EVENT_DATA, UndecodableEventRow, _cursor_covers_block
 from . import EvaluationContext
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,8 @@ class SolmateRolesAuthorityAdapter:
                 rows = [*durable, *scan.logs]
                 covered_through = scan.to_block
                 scan_window = scan.trace_fields()
+        except UndecodableEventRow:
+            return _check_only(authority, descriptor, [UNDECODABLE_EVENT_DATA])
         except Exception:
             return _check_only(authority, descriptor, ["event_log_backend_error"])
 

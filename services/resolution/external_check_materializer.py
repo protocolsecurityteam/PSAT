@@ -32,7 +32,8 @@ _MAX_CANDIDATES = int(os.getenv("PSAT_EXTERNAL_CHECK_MATERIALIZE_MAX_CANDIDATES"
 
 # Keyed (chain_id, checker_address); _MAX_CANDIDATES bounds each list, _CANDIDATE_CACHE_MAX the entry count (oldest 25%
 # evicted).
-_CANDIDATE_CACHE: dict[tuple[int, str], list[str]] = {}
+# Each entry also carries how many indexed rows were skipped as undecodable, for the published trace.
+_CANDIDATE_CACHE: dict[tuple[int, str], tuple[list[str], int]] = {}
 _CANDIDATE_CACHE_LOCK = threading.Lock()
 _CANDIDATE_CACHE_MAX = 1024
 _CANDIDATE_PRESSURE_NAME = "external_check_candidates"
@@ -123,10 +124,10 @@ def materialize_external_check_from_events(
 
     cache_key = (chain_id, checker_address.lower())
     with _CANDIDATE_CACHE_LOCK:
-        candidates = _CANDIDATE_CACHE.get(cache_key)
-    if candidates is None:
+        cached = _CANDIDATE_CACHE.get(cache_key)
+    if cached is None:
         # Outside the lock so misses for different checkers don't serialize.
-        candidates = _candidate_addresses_from_events(
+        candidates, undecodable_rows = _candidate_addresses_from_events(
             session=session,
             chain_id=chain_id,
             checker_address=checker_address,
@@ -136,11 +137,12 @@ def materialize_external_check_from_events(
             candidates = _candidate_addresses_from_hypersync(
                 checker_address=checker_address, limit=_MAX_CANDIDATES, chain_id=chain_id
             )
-        candidates = list(candidates)
+        cached = (list(candidates), undecodable_rows)
         with _CANDIDATE_CACHE_LOCK:
             _evict_candidates_if_needed()
-            _CANDIDATE_CACHE[cache_key] = candidates
+            _CANDIDATE_CACHE[cache_key] = cached
             _log_candidate_pressure()
+    candidates, undecodable_rows = cached
     if not candidates:
         return None
 
@@ -199,6 +201,7 @@ def materialize_external_check_from_events(
                 "candidate_count": len(candidates),
                 "allowed_count": len(allowed),
                 "source": "event_candidates_eth_call",
+                "undecodable_event_rows": undecodable_rows,
             }
         ],
     )
@@ -231,9 +234,11 @@ def _candidate_addresses_from_events(
     chain_id: int,
     checker_address: str,
     limit: int,
-) -> list[str]:
+) -> tuple[list[str], int]:
+    """Plausible addresses from the checker's indexed logs, and how many rows were skipped as undecodable. The caller
+    publishes at most a lower bound, so a skipped row narrows it and is reported, never hidden."""
     stmt = (
-        select(IndexedEventLog.topics, IndexedEventLog.data_words)
+        select(IndexedEventLog.topics, IndexedEventLog.data_words, IndexedEventLog.data_hex)
         .where(IndexedEventLog.chain_id == chain_id)
         .where(func.lower(IndexedEventLog.event_address) == checker_address.lower())
         .order_by(
@@ -244,7 +249,11 @@ def _candidate_addresses_from_events(
     )
     seen: set[str] = set()
     out: list[str] = []
-    for topics, data_words in session.execute(stmt):
+    undecodable = 0
+    for topics, data_words, data_hex in session.execute(stmt):
+        if data_hex is not None:
+            undecodable += 1
+            continue
         for word in list(topics or [])[1:] + list(data_words or []):
             addr = _word_to_address(word)
             if addr is None or not _is_plausible_candidate_address(addr):
@@ -254,8 +263,8 @@ def _candidate_addresses_from_events(
             seen.add(addr)
             out.append(addr)
             if len(out) >= limit:
-                return out
-    return out
+                return out, undecodable
+    return out, undecodable
 
 
 def _candidate_addresses_from_hypersync(*, checker_address: str, limit: int, chain_id: int) -> list[str]:

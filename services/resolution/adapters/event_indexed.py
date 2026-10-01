@@ -11,7 +11,7 @@ from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_KEY_SOU
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from ..event_tail import TailScanner, tail_scanner_for
-from ..repos.event_logs_pg import BEHIND_PARTIAL_REASONS
+from ..repos.event_logs_pg import BEHIND_PARTIAL_REASONS, UNDECODABLE_EVENT_DATA
 from . import EnumerationResult, EvaluationContext
 
 if TYPE_CHECKING:
@@ -25,7 +25,7 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 # ok: a resolved finite_set. cold: no backfill_complete cursor; caller defers. behind: warm but unproven past the
 # frontier; caller fails closed. absent: structural (no repo, no event address, repo error); caller falls through to
 # live replay.
-_FoldStatus = Literal["ok", "cold", "behind", "absent"]
+_FoldStatus = Literal["ok", "cold", "behind", "undecodable", "absent"]
 
 
 def _descriptor_is_caller_keyed(descriptor: dict) -> bool:
@@ -173,10 +173,13 @@ class EventIndexedAdapter:
                 "unresolved_event_key",
             }:
                 return self._external_check(descriptor, first_hint, ctx, [result.partial_reason])
-            if result.confidence == "partial" and result.partial_reason == "ambiguous_event_direction":
-                # An undecidable add/remove conflict has no member set at all; settle to a gated check (caller-keyed
-                # gates keep the caller-gate tag).
-                basis = ["ambiguous_event_direction"]
+            if result.confidence == "partial" and result.partial_reason in {
+                "ambiguous_event_direction",
+                UNDECODABLE_EVENT_DATA,
+            }:
+                # An undecidable add/remove conflict, or a row no ABI decodes, leaves no member set at all; settle to a
+                # gated check (caller-keyed gates keep the caller-gate tag).
+                basis = [result.partial_reason]
                 if _descriptor_is_caller_keyed(descriptor):
                     basis.append("caller_keyed_membership_allowlist")
                 return self._external_check(descriptor, first_hint, ctx, basis)
@@ -281,6 +284,9 @@ class EventIndexedAdapter:
         if status == "behind":
             # The durable rows are warm but unproven past their frontier; a full live re-scan is never the fallback.
             return CapabilityExpr.unsupported("event_fold_tail_unavailable")
+        if status == "undecodable":
+            # A live replay would read the same undecodable log; the value is not determined.
+            return CapabilityExpr.unsupported("event_data_undecodable")
         return self._live_value_fold(descriptor, set_hints, value_predicate, ctx, event_address, fold_key_position)
 
     def _deferred_value_check(
@@ -321,6 +327,7 @@ class EventIndexedAdapter:
         - ``("ok", finite_set)``: exact, the rows proven through the evaluated block (directly or by a complete tail);
         - ``("cold", None)``: backfill incomplete, caller defers;
         - ``("behind", None)``: warm but behind the evaluated block with no complete tail, caller fails closed;
+        - ``("undecodable", None)``: a row the fold needs carries undecodable data, caller fails closed;
         - ``("absent", None)``: structural (no repo, no nonzero event address, repo error), caller uses live replay.
         """
         repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
@@ -358,6 +365,8 @@ class EventIndexedAdapter:
                 return "cold", None
             if result.partial_reason in BEHIND_PARTIAL_REASONS:
                 return "behind", None
+            if result.partial_reason == UNDECODABLE_EVENT_DATA:
+                return "undecodable", None
             # Any other partial reason is structural and falls through to live replay.
             return "absent", None
 

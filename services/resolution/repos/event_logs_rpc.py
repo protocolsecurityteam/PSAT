@@ -96,6 +96,8 @@ class FetchedEventLog:
     data_words: list[str]
     # Emitting contract, lowercased, for multi-address callers; empty for single-address callers.
     address: str = ""
+    # The raw ``data`` when it isn't word-aligned (``data_words`` is then empty): stored losslessly, never decoded.
+    data_hex: str | None = None
     # The raw RPC dict for callers running ``services/monitoring/event_topics.parse_any_log``; excluded from equality.
     raw: dict[str, Any] | None = field(default=None, compare=False)
 
@@ -125,6 +127,16 @@ class LogPage:
 class RpcScanCancelled(RuntimeError): ...
 
 
+class MalformedLogPage(RuntimeError):
+    """A strict fetch found a log it can't trust whole; the page is rejected, never partly kept."""
+
+    def __init__(self, reason: str, from_block: int, to_block: int) -> None:
+        super().__init__(f"eth_getLogs page [{from_block}, {to_block}] rejected: {reason}")
+        self.reason = reason
+        self.from_block = from_block
+        self.to_block = to_block
+
+
 class RpcRangeTooLarge(RuntimeError): ...
 
 
@@ -140,6 +152,7 @@ class RpcEventLogFetcher:
         timeout: float | None = None,
         before_retry: Callable[[], None] | None = None,
         keep_raw: bool = True,
+        strict: bool = False,
     ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
@@ -155,6 +168,8 @@ class RpcEventLogFetcher:
         self.before_retry = before_retry
         # Only the live watcher reads ``FetchedEventLog.raw``; holding the dict more than doubles a page's memory.
         self.keep_raw = keep_raw
+        # Strict pages reject on any malformed, removed, out-of-range or out-of-filter log instead of dropping it.
+        self.strict = strict
 
     def fetch_logs(
         self,
@@ -285,9 +300,13 @@ class RpcEventLogFetcher:
             stat = FetchWindowStat(from_block=lo, to_block=hi, returned_log_count=count, cap=cap)
             if window_stats is not None:
                 window_stats.append(stat)
-            page = LogPage(
-                from_block=lo, to_block=hi, logs=self._decode_page(raw_logs), stats=(stat,), rejected=rejected
+            logs = (
+                _strict_page(raw_logs, lo, hi, address_filter, topic_filter, keep_raw=self.keep_raw)
+                if self.strict
+                else self._decode_page(raw_logs)
             )
+            page = LogPage(from_block=lo, to_block=hi, logs=logs, stats=(stat,), rejected=rejected)
+            logs = []
             raw_logs = None
             yield page
             # Drop this frame's reference so the consumer's release frees the page before the next request.
@@ -332,11 +351,20 @@ class RpcEventLogFetcher:
 
     def _decode_page(self, raw_logs: Any) -> list[FetchedEventLog]:
         out: list[FetchedEventLog] = []
+        dropped = 0
         if isinstance(raw_logs, list):
             for raw in raw_logs:
                 decoded = _decode_log(raw, keep_raw=self.keep_raw)
                 if decoded is not None:
                     out.append(decoded)
+                else:
+                    dropped += 1
+        unaligned = sum(1 for log in out if log.data_hex is not None)
+        if dropped or unaligned:
+            logger.debug(
+                "eth_getLogs page carried logs that don't decode whole",
+                extra={"dropped_logs": dropped, "unaligned_data_logs": unaligned},
+            )
         return out
 
     def visit_logs(
@@ -462,6 +490,64 @@ def _visit_page(
         consume(decoded)
 
 
+def _strict_page(
+    raw_logs: Any,
+    lo: int,
+    hi: int,
+    address_filter: str | list[str] | None,
+    filters: list[list[str] | None],
+    *,
+    keep_raw: bool,
+) -> list[FetchedEventLog]:
+    if not isinstance(raw_logs, list):
+        raise MalformedLogPage("the response is not a log list", lo, hi)
+    addresses = (
+        None
+        if address_filter is None
+        else {a.lower() for a in ([address_filter] if isinstance(address_filter, str) else address_filter)}
+    )
+    out: list[FetchedEventLog] = []
+    identities: dict[tuple[bytes, int], FetchedEventLog] = {}
+    positions: dict[tuple[int, int], tuple[bytes, int]] = {}
+    blocks: dict[int, bytes] = {}
+    for raw in raw_logs:
+        decoded = _decode_log(raw, keep_raw=keep_raw)
+        if decoded is None:
+            raise MalformedLogPage("a log is missing or has malformed required fields", lo, hi)
+        data = raw.get("data")
+        valid = (
+            lo <= decoded.block_number <= hi
+            and decoded.log_index >= 0
+            and decoded.transaction_index >= 0
+            and _hex_to_bytes(decoded.address, 20) is not None
+            and (addresses is None or decoded.address in addresses)
+            and raw.get("removed", False) is False
+            and len(decoded.topics) <= 4
+            and all(_hex_to_bytes(t, 32) is not None for t in decoded.topics)
+            and isinstance(data, str)
+            and re.fullmatch(r"0x(?:[0-9a-fA-F]{2})*", data) is not None
+            and all(
+                slot is None or (i < len(decoded.topics) and decoded.topics[i] in slot)
+                for i, slot in enumerate(filters)
+            )
+        )
+        if not valid:
+            raise MalformedLogPage("a log is removed, out of range, out of filter or malformed", lo, hi)
+        identity = (decoded.tx_hash, decoded.log_index)
+        position = (decoded.block_number, decoded.log_index)
+        if identity in identities and identities[identity] != decoded:
+            raise MalformedLogPage("conflicting duplicate log identities", lo, hi)
+        if position in positions and positions[position] != identity:
+            raise MalformedLogPage("conflicting log positions", lo, hi)
+        if decoded.block_number in blocks and blocks[decoded.block_number] != decoded.block_hash:
+            raise MalformedLogPage("one block with two hashes", lo, hi)
+        identities[identity] = decoded
+        positions[position] = identity
+        blocks[decoded.block_number] = decoded.block_hash
+        out.append(decoded)
+    return out
+
+
 def _validate_scan_log(
     raw: Any, lo: int, hi: int, addresses: set[str] | None, filters: list[list[str] | None]
 ) -> FetchedEventLog:
@@ -529,6 +615,7 @@ def _decode_log(raw: Any, *, keep_raw: bool = True) -> FetchedEventLog | None:
     except (TypeError, ValueError):
         return None
     emitter = raw.get("address")
+    data = raw.get("data")
     return FetchedEventLog(
         tx_hash=tx_hash,
         log_index=log_index,
@@ -536,9 +623,10 @@ def _decode_log(raw: Any, *, keep_raw: bool = True) -> FetchedEventLog | None:
         block_hash=block_hash,
         transaction_index=transaction_index,
         topics=[str(t).lower() for t in topics],
-        data_words=_split_data_words(raw.get("data")),
+        data_words=_split_data_words(data),
         address=emitter.lower() if isinstance(emitter, str) else "",
         raw=raw if keep_raw else None,
+        data_hex=_unaligned_data(data),
     )
 
 
@@ -558,6 +646,13 @@ def _hex_to_bytes(raw: Any, size: int) -> bytes | None:
         return bytes.fromhex(body)
     except ValueError:
         return None
+
+
+def _unaligned_data(raw: Any) -> str | None:
+    """Byte-valid ``data`` that isn't a whole number of words, lowercased; otherwise None."""
+    if not isinstance(raw, str) or re.fullmatch(r"0x(?:[0-9a-fA-F]{2})*", raw) is None:
+        return None
+    return raw.lower() if (len(raw) - 2) % 64 else None
 
 
 def _split_data_words(raw: Any) -> list[str]:

@@ -50,7 +50,7 @@ from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage
+from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, MalformedLogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
     ChainInfo,
@@ -259,6 +259,8 @@ class ScanSummary:
     failed_groups: int = 0
     # Per chain, the largest gap between a warm group's frontier and the confirmed target after the sweep.
     warm_max_lag_blocks: Mapping[int, int] = field(default_factory=dict)
+    # Cursors whose next page was rejected for a malformed log this pass; they can't advance past it.
+    stalled_cursors: int = 0
 
 
 def _heartbeat_status_for_pass(status: str, summary: ScanSummary) -> str:
@@ -1331,6 +1333,8 @@ def scan_enrolled_events(
                         break
         except Exception as exc:
             state.discard(session, exc, chain_id=chain_id, addresses=[event_address], topics=topics)
+        else:
+            state.cleared(chain_id, event_address)
         finally:
             if claims is not None:
                 claims.release(claim)
@@ -1441,6 +1445,7 @@ def scan_enrolled_events(
         budget_exhausted=pending_at_budget,
         failed_groups=state.failed_groups,
         warm_max_lag_blocks=warm_lag,
+        stalled_cursors=state.stalled_cursors,
     )
 
 
@@ -1470,6 +1475,7 @@ class _PassState:
     windows_scanned: int = 0
     caught_up_cursors: int = 0
     failed_groups: int = 0
+    stalled_cursors: int = 0
     stopped_short: bool = False
 
     def stopping(self) -> bool:
@@ -1501,9 +1507,19 @@ class _PassState:
         return group_complete, members_at_target
 
     def discard(
-        self, session: Session, exc: Exception, *, chain_id: int, addresses: Sequence[str], topics: Sequence[str]
+        self,
+        session: Session,
+        exc: Exception,
+        *,
+        chain_id: int,
+        addresses: Sequence[str],
+        topics: Sequence[str],
+        cursors: int | None = None,
     ) -> None:
         session.rollback()
+        if isinstance(exc, MalformedLogPage):
+            self._stall(exc, chain_id=chain_id, addresses=addresses, cursors=cursors or len(topics) or len(addresses))
+            return
         if isinstance(exc, CursorsMoved):
             # Another writer moved a member between plan and write; nothing was written and the next visit refetches.
             self.stopped_short = True
@@ -1527,6 +1543,34 @@ class _PassState:
                 "exc_msg": sanitize_string(str(exc))[:200],
             },
         )
+
+    def _stall(self, exc: MalformedLogPage, *, chain_id: int, addresses: Sequence[str], cursors: int) -> None:
+        self.failed_groups += len(addresses)
+        self.stalled_cursors += cursors
+        fields = {
+            "chain_id": chain_id,
+            "event_address": addresses[0] if len(addresses) == 1 else None,
+            "from_block": exc.from_block,
+            "to_block": exc.to_block,
+            "reason": exc.reason,
+            "stalled_cursors": cursors,
+        }
+        logger.warning("event-log page rejected for a malformed log; cursors not advanced", extra=fields)
+        key = (chain_id, tuple(sorted(addresses)))
+        with _STALL_LOCK:
+            first = key not in _STALLED_GROUPS
+            _STALLED_GROUPS.add(key)
+        if first:
+            logger.error("event-log cursors stalled on a malformed upstream log", extra=fields)
+
+    def cleared(self, chain_id: int, address: str) -> None:
+        with _STALL_LOCK:
+            _STALLED_GROUPS.discard((chain_id, (address,)))
+
+
+# Groups already reported at ERROR in this process, so a permanent stall alerts once rather than every pass.
+_STALLED_GROUPS: set[tuple[int, tuple[str, ...]]] = set()
+_STALL_LOCK = Lock()
 
 
 def _hash_reader(
@@ -1635,6 +1679,7 @@ def _sweep_batch(
     batch = [address for _chain, address in held]
     visit = _GroupVisit(chain_id=chain_id, event_address=f"batch:{len(batch)}")
     split: list[list[str]] = []
+    plan = GroupPlan(chain_id=chain_id, addresses=tuple(batch), members=(), rewinds={})
     try:
         plan = plan_group(
             session,
@@ -1673,7 +1718,7 @@ def _sweep_batch(
     except RuntimeError as exc:
         session.rollback()
         if len(batch) == 1:
-            state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+            state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[], cursors=len(plan.members))
         else:
             # The range is already at the bisect floor, so a rejection splits the address set.
             logger.debug(
@@ -2111,6 +2156,7 @@ def _bulk_insert_logs(
                 "transaction_index": log.transaction_index,
                 "topics": log.topics,
                 "data_words": log.data_words,
+                "data_hex": log.data_hex,
             }
             for log in logs[offset : offset + max(1, batch_size)]
         ]
@@ -2292,6 +2338,7 @@ def run_event_log_indexer_loop(
                     "deferred_reenqueued_last_pass": reenqueued,
                     "role_drift_reenqueued_last_pass": drift_reenqueued,
                     "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
+                    "stalled_cursors": cold.stalled_cursors + warm.stalled_cursors,
                 },
             )
 
@@ -2519,7 +2566,7 @@ def _build_indexer_fetchers(
             continue
         rpc_url = require_rpc_url(chain_id=info.chain_id)
         fetchers[info.chain_id] = RpcEventLogFetcher(
-            rpc_url, chain_id=info.chain_id, result_cap=result_cap, timeout=timeout, keep_raw=False
+            rpc_url, chain_id=info.chain_id, result_cap=result_cap, timeout=timeout, keep_raw=False, strict=True
         )
         head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url, chain_id=info.chain_id)
         block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url, chain_id=info.chain_id)

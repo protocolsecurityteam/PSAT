@@ -93,6 +93,8 @@ class SimChain:
         self.before_request: Callable[[str, list[Any]], None] | None = None
         # A moving head: when set, it answers the chain's head instead of ``heads``.
         self.head_fn: Callable[[int], int] | None = None
+        # Rewrites a log's wire form (e.g. drop a field) before it is served.
+        self.mutate_raw: Callable[[SimLog, dict[str, Any]], dict[str, Any]] | None = None
 
     def head(self, chain_id: int) -> int:
         return self.head_fn(chain_id) if self.head_fn is not None else self.heads[chain_id]
@@ -197,7 +199,10 @@ class SimChain:
             raise RuntimeError(f"{{'code': -32005, 'message': 'Limit exceeded: More than {limit} logs returned'}}")
         out.sort(key=SimLog.sort_key)
         record["served"] = len(out)
-        return [self.raw(chain_id, log) for log in out]
+        raws = [self.raw(chain_id, log) for log in out]
+        if self.mutate_raw is not None:
+            raws = [self.mutate_raw(log, raw) for log, raw in zip(out, raws)]
+        return raws
 
     def raw(self, chain_id: int, log: SimLog) -> dict[str, Any]:
         tx = hashlib.sha256(f"{chain_id}:{log.block}:{log.tx_index}:{log.tag}".encode()).hexdigest()
