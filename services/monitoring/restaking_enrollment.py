@@ -113,12 +113,22 @@ def node_addresses_from_fold(session: Session, *, chain_id: int, event_address: 
     ]
     if event_address is not None:
         filters.append(func.lower(IndexedEventLog.event_address) == event_address.lower())
-    rows = session.execute(select(IndexedEventLog.topics).where(*filters)).all()
+    rows = session.execute(select(IndexedEventLog.topics, IndexedEventLog.data_hex).where(*filters)).all()
     nodes: set[str] = set()
-    for (topics,) in rows:
+    undecodable = 0
+    for topics, data_hex in rows:
+        # A row whose data no ABI decodes isn't a PubkeyLinked as declared; its node is not taken on trust.
+        if data_hex is not None:
+            undecodable += 1
+            continue
         # A short topic list is skipped; the node can't be read from anywhere else.
         if isinstance(topics, list) and len(topics) >= 3 and isinstance(topics[2], str) and len(topics[2]) == 66:
             nodes.add("0x" + topics[2][-40:].lower())
+    if undecodable:
+        logger.warning(
+            "undecodable PubkeyLinked rows skipped; the node set stays a lower bound",
+            extra={"chain_id": chain_id, "event_address": event_address, "undecodable_rows": undecodable},
+        )
     return sorted(nodes)
 
 

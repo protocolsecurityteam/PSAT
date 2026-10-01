@@ -60,10 +60,21 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
         event_hints=event_hints,
         key_index=view_index,
     )
+    contract_address = getattr(outer_ctx, "contract_address", None) or ctx.contract_address
+    if role_words is None:
+        from services.resolution.repos.event_logs_pg import UNDECODABLE_EVENT_DATA
+
+        # A key the index holds but can't decode would be silently missing from the union below.
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=contract_address.lower() if isinstance(contract_address, str) else None,
+                target_call_selector=selector,
+                extra={"basis": ["view_key_membership_unresolved", UNDECODABLE_EVENT_DATA]},
+            )
+        )
     if not role_words:
         return None
 
-    contract_address = getattr(outer_ctx, "contract_address", None) or ctx.contract_address
     if not isinstance(contract_address, str) or not contract_address.startswith("0x"):
         return None
     admin_words = _call_unary_bytes32_view(
@@ -100,12 +111,13 @@ def _observed_event_key_words(
     descriptor: SetDescriptor,
     event_hints: list[dict[str, Any]],
     key_index: int,
-) -> list[str]:
+) -> list[str] | None:
+    """Key words observed in the indexed rows for ``event_hints``; None when a row carries undecodable data."""
     from sqlalchemy import func, select
 
     from db.models import IndexedEventLog
     from services.resolution.adapters.event_indexed import _resolve_event_address
-    from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word
+    from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word, row_is_undecodable
 
     scan_chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(scan_chain_id, int):
@@ -135,6 +147,8 @@ def _observed_event_key_words(
         if isinstance(block, int):
             stmt = stmt.where(IndexedEventLog.block_number <= block)
         for row in session.execute(stmt).scalars():
+            if row_is_undecodable(row):
+                return None
             keys = _event_keys(
                 row.topics or [],
                 row.data_words or [],

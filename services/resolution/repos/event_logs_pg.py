@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Partial fold outcomes by reason (bounded set), also folded into the stage timing artifact so spikes are chartable.
 _PARTIAL_REASON_COUNTS: "Counter[str]" = Counter()
-# Real upstream degradation (WARNING); others log at DEBUG.
-_DEGRADED_PARTIAL_REASONS = {"hypersync_timeout", "hypersync_max_pages"}
+# Real upstream degradation (WARNING), including an indexed log no ABI can decode; others log at DEBUG.
+_DEGRADED_PARTIAL_REASONS = {"hypersync_timeout", "hypersync_max_pages", "undecodable_event_data"}
 
 
 def _note_partial_reason(partial_reason: str | None, *, event_address: str, repo: str) -> int:
@@ -65,6 +65,19 @@ class ValueFoldResult:
 # A warm fold behind the evaluated block: ``cursor_behind_block`` without a tail scanner, ``tail_scan_failed`` when the
 # tail could not prove ``(frontier, block]``. Either way the durable rows are proven only through the frontier.
 BEHIND_PARTIAL_REASONS = frozenset({"cursor_behind_block", "tail_scan_failed"})
+
+
+# A row whose ``data`` isn't word-aligned (stored only in ``data_hex``) can't be decoded against any ABI, so no fold
+# that reads it is complete: the result is partial with this reason, never missing the row silently.
+UNDECODABLE_EVENT_DATA = "undecodable_event_data"
+
+
+class UndecodableEventRow(RuntimeError):
+    """An indexed row the reader would need carries undecodable data."""
+
+
+def row_is_undecodable(row: Any) -> bool:
+    return getattr(row, "data_hex", None) is not None
 
 
 def _row_topic0(row: Any) -> str:
@@ -163,8 +176,11 @@ class PostgresEventLogRepo:
 
         state: dict[str, bool] = {}
 
-        def _apply(rows: Iterable[Any]) -> None:
+        def _apply(rows: Iterable[Any]) -> bool:
+            """Fold rows into ``state``; False when a row can't be decoded."""
             for row in rows:
+                if row_is_undecodable(row):
+                    return False
                 event_keys = _event_keys(row.topics or [], row.data_words or [], topics_to_keys, data_to_keys)
                 if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
                     continue
@@ -172,8 +188,14 @@ class PostgresEventLogRepo:
                 if member is None:
                     continue
                 state[member] = True
+            return True
 
-        _apply(self.session.execute(q).scalars())
+        def _undecodable() -> EnumerationResult:
+            _note_partial_reason(UNDECODABLE_EVENT_DATA, event_address=event_address, repo="postgres")
+            return EnumerationResult(members=[], confidence="partial", partial_reason=UNDECODABLE_EVENT_DATA)
+
+        if not _apply(self.session.execute(q).scalars()):
+            return _undecodable()
 
         # Cursors are seeded at deploy, so trust only ``backfill_complete``, not a positive block.
         if cursor_block is None or not complete:
@@ -189,7 +211,8 @@ class PostgresEventLogRepo:
                 tail, event_address=event_address, topic0s=[topic0.lower()], frontier=cursor_block, block=block
             )
             if scan is not None and scan.complete:
-                _apply(scan.logs)
+                if not _apply(scan.logs):
+                    return _undecodable()
                 return EnumerationResult(
                     members=sorted(addr for addr, present in state.items() if present),
                     confidence="enumerable",
@@ -274,13 +297,19 @@ class PostgresEventLogRepo:
 
         state: dict[str, bool] = {}
 
+        undecodable = False
+
         def _apply(rows: Iterable[Any]) -> bool:
             """Fold rows into ``state``; False when a row is undecidable."""
+            nonlocal undecodable
             for row in rows:
                 topic0 = _row_topic0(row)
                 mode = fold_modes.get(topic0)
                 if mode is None:
                     continue
+                if row_is_undecodable(row):
+                    undecodable = True
+                    return False
                 mode_kind, value_hint = mode
                 topics = list(row.topics or [])
                 data_words = list(row.data_words or [])
@@ -309,8 +338,9 @@ class PostgresEventLogRepo:
             return True
 
         def _ambiguous() -> EnumerationResult:
-            _note_partial_reason("ambiguous_event_direction", event_address=event_address, repo="postgres")
-            return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
+            reason = UNDECODABLE_EVENT_DATA if undecodable else "ambiguous_event_direction"
+            _note_partial_reason(reason, event_address=event_address, repo="postgres")
+            return EnumerationResult(members=[], confidence="partial", partial_reason=reason)
 
         if not _apply(self.session.execute(q).scalars()):
             return _ambiguous()
@@ -414,6 +444,8 @@ class PostgresEventLogRepo:
         def _apply(rows: Iterable[Any]) -> None:
             for row in rows:
                 topic0 = _row_topic0(row)
+                if topic0 in hints_by_topic and row_is_undecodable(row):
+                    raise UndecodableEventRow(topic0)
                 topics = list(row.topics or [])
                 data_words = list(row.data_words or [])
                 for hint in hints_by_topic.get(topic0, []):
@@ -449,14 +481,26 @@ class PostgresEventLogRepo:
                 for member, (value_hex, last_block, _tx, _log) in state.items()
             ]
 
-        _apply(self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=row_ceiling))
+        def _undecodable() -> ValueFoldResult:
+            _note_partial_reason(UNDECODABLE_EVENT_DATA, event_address=event_address, repo="postgres")
+            return ValueFoldResult(entries=[], complete=False, partial_reason=UNDECODABLE_EVENT_DATA)
+
+        try:
+            _apply(
+                self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=row_ceiling)
+            )
+        except UndecodableEventRow:
+            return _undecodable()
 
         if behind:
             scan = _complete_with_tail(
                 tail, event_address=event_address, topic0s=topic0s, frontier=warm_block, block=block
             )
             if scan is not None and scan.complete:
-                _apply(scan.logs)
+                try:
+                    _apply(scan.logs)
+                except UndecodableEventRow:
+                    return _undecodable()
                 return ValueFoldResult(
                     entries=_entries(), complete=True, last_indexed_block=block, scan_window=scan.trace_fields()
                 )
@@ -477,6 +521,8 @@ class PostgresEventLogRepo:
     ) -> list[IndexedEventLog]:
         """Raw indexed logs for ``event_address`` matching ``topic0s``, in log order, for adapters that join several
         events (e.g. Solmate RolesAuthority).
+
+        Raises :class:`UndecodableEventRow` rather than hand back a row whose data can't be decoded.
         """
         lowered = [t.lower() for t in topic0s if isinstance(t, str)]
         if not lowered:
@@ -494,7 +540,10 @@ class PostgresEventLogRepo:
         )
         if block is not None:
             q = q.where(IndexedEventLog.block_number <= block)
-        return list(self.session.execute(q).scalars())
+        rows = list(self.session.execute(q).scalars())
+        if any(row_is_undecodable(row) for row in rows):
+            raise UndecodableEventRow(event_address)
+        return rows
 
     def min_indexed_block(self, *, chain_id: int, event_address: str, topic0s: list[str]) -> int | None:
         """Lowest cursor block across ``topic0s``, or ``None`` when any backfill is incomplete.

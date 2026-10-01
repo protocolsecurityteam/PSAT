@@ -13,7 +13,7 @@ def test_materialize_external_check_probes_event_candidates(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_candidate_addresses_from_events",
-        lambda **_kwargs: [member, non_member],
+        lambda **_kwargs: ([member, non_member], 0),
     )
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_kwargs: [])
 
@@ -67,7 +67,7 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
     TRUE = "0x" + "0" * 63 + "1"
     FALSE = "0x" + "0" * 64
 
-    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: [member, non_member])
+    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: ([member, non_member], 0))
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
 
     def fake_batch(_rpc_url, calls):
@@ -117,7 +117,7 @@ def test_materialize_external_check_multicall_falls_back_to_batch(monkeypatch):
     import services.resolution.external_check_materializer as mod
 
     member = "0x" + "aa" * 20
-    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: [member])
+    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: ([member], 0))
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
     monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no multicall")))
     monkeypatch.setattr(mod, "rpc_batch_request_with_status", lambda _u, _c: [("0x" + "0" * 63 + "1", False)])
@@ -186,7 +186,7 @@ def test_candidate_cache_caps_entry_count(monkeypatch):
     mod.clear_candidate_cache()
     monkeypatch.setattr(mod, "_EXTERNAL_CHECK_MULTICALL_ENABLED", False)
     monkeypatch.setattr(mod, "_CANDIDATE_CACHE_MAX", 8)
-    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: ["0x" + "aa" * 20])
+    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: (["0x" + "aa" * 20], 0))
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
     monkeypatch.setattr(mod, "rpc_batch_request_with_status", lambda _u, _c: [("0x" + "0" * 63 + "1", False)])
 

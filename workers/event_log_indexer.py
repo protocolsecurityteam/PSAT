@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import logging
 import os
@@ -9,12 +10,12 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Table, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -47,8 +48,9 @@ from db.models import (
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
+from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
+from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, MalformedLogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
     ChainInfo,
@@ -59,6 +61,7 @@ from utils.chains import (
     supported_chain_ids,
 )
 from utils.logging import bind_trace_context, configure_logging, log_timed_phase
+from utils.memory import current_rss_bytes
 from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
@@ -66,29 +69,17 @@ logger = logging.getLogger("workers.event_log_indexer")
 # Process identity for every line; the indexer isn't a BaseWorker, so it binds its own.
 WORKER_ID = f"EventLogIndexer-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
-DEFAULT_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
-DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
-
-# Scan in bounded windows: an unbounded step once built one huge insert that dropped the Neon connection and wedged the
-# cursor at 0. Windows are wide because each is one eth_getLogs and HyperRPC bills per request regardless of range;
-# dense bursts are bounded by the upstream's 50k cap and the fetcher's bisect.
-DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500000"))
-# Per-group and per-pass window caps: one busy address can't monopolize a pass, and each pass returns promptly so the
-# heartbeat refreshes and least-recently-run rotation reorders. Cold gaps drain over successive passes.
-DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
-DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
-DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
-# Commit in bounded batches, whole blocks at a time; the INSERT trigger's reconciliation row isn't released otherwise.
-DEFAULT_WRITE_MAX_ROWS = 5_000
-DEFAULT_WRITE_MAX_BYTES = 4 * 1024 * 1024
-# Monitored contracts still needing a cursor, worked per pass (each mints a cold backfill). Fully enrolled addresses
-# cost one lookup and don't count, so the fleet drains and settles at zero.
-DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_LIMIT", "50"))
-# A memory/latency bound on how many contracts a pass looks at, not a work budget; keep it above the fleet size or the
-# tail is unreachable.
-DEFAULT_TRACKED_TOPIC_SCAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_SCAN_LIMIT", "5000"))
-# Only cold history uses the short pause; warm groups use the normal interval.
-DEFAULT_BACKFILL_BUSY_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_BACKFILL_BUSY_INTERVAL_S", "2"))
+DEFAULT_INTERVAL_S = settings.INTERVAL_S
+DEFAULT_CONFIRMATION_DEPTH = settings.CONFIRMATION_DEPTH
+DEFAULT_MAX_BLOCK_SPAN = settings.MAX_BLOCK_SPAN
+DEFAULT_MAX_WINDOWS_PER_CURSOR = settings.MAX_WINDOWS_PER_CURSOR
+DEFAULT_MAX_WINDOWS_PER_PASS = settings.MAX_WINDOWS_PER_PASS
+DEFAULT_INSERT_BATCH = settings.INSERT_BATCH
+DEFAULT_WRITE_MAX_ROWS = settings.WRITE_MAX_ROWS
+DEFAULT_WRITE_MAX_BYTES = settings.WRITE_MAX_BYTES
+DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = settings.TRACKED_TOPIC_ENROLL_LIMIT
+DEFAULT_TRACKED_TOPIC_SCAN_LIMIT = settings.TRACKED_TOPIC_SCAN_LIMIT
+DEFAULT_BACKFILL_BUSY_INTERVAL_S = settings.BACKFILL_BUSY_INTERVAL_S
 
 # Solmate RolesAuthority role events, enrolled directly from the canCall descriptor so it works on trees materialized
 # before enumeration hints existed. Topics computed here to avoid importing the adapter.
@@ -245,6 +236,8 @@ class GroupStepResult:
     members_at_target: int  # cursors of this group at/past the confirmed head after the step
     group_complete: bool  # every member caught up — nothing left to scan this pass
     fetched: bool  # False for the no-fetch visit of an all-warm group
+    page_logs: int = 0  # logs the fetched page returned (first prefix of a page only)
+    rejected_pages: int = 0  # requests refused or discarded before the page was accepted
 
 
 @dataclass(frozen=True)
@@ -264,6 +257,10 @@ class ScanSummary:
     # Groups whose scan raised this pass, so a total outage degrades the heartbeat instead of producing a traceback
     # storm.
     failed_groups: int = 0
+    # Per chain, the largest gap between a warm group's frontier and the confirmed target after the sweep.
+    warm_max_lag_blocks: Mapping[int, int] = field(default_factory=dict)
+    # Cursors whose next page was rejected for a malformed log this pass; they can't advance past it.
+    stalled_cursors: int = 0
 
 
 def _heartbeat_status_for_pass(status: str, summary: ScanSummary) -> str:
@@ -437,7 +434,7 @@ _FETCHER_ACCEPTS_WINDOW_STATS: dict[type, bool] = {}
 def _fetch_window(
     fetcher: LogFetcher,
     *,
-    event_address: str,
+    event_address: str | Sequence[str],
     topics: list[str],
     from_block: int,
     to_block: int,
@@ -467,7 +464,7 @@ def _fetch_window(
     return fetcher.fetch_logs(event_address=event_address, topics=topics, from_block=from_block, to_block=to_block)
 
 
-def index_event_group_steps(
+def _legacy_group_steps(
     session: Session,
     *,
     chain_id: int,
@@ -483,7 +480,7 @@ def index_event_group_steps(
     write_max_rows: int = DEFAULT_WRITE_MAX_ROWS,
     write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
 ) -> Iterator[GroupStepResult]:
-    """Yield atomic write prefixes of one fetched (chain, address) window.
+    """The legacy engine: yield atomic write prefixes of one fetched (chain, address) window.
 
     The caller must commit each prefix before requesting the next (logs, cursor progress and trigger invalidation share
     the transaction), then re-lock and validate cursors; a concurrent advance or rewind discards the remainder.
@@ -637,12 +634,523 @@ def index_event_group_steps(
             members_at_target=members_at_target,
             group_complete=members_at_target == len(cursors),
             fetched=prefix_start == start,
+            page_logs=len(logs) if prefix_start == start else 0,
         )
         prefix_start = prefix_end + 1
 
 
 def _cursor_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, int, bytes | None]]:
     return [(c.topic0, int(c.last_indexed_block or 0), c.last_indexed_block_hash) for c in cursors]
+
+
+ENGINES = ("legacy", "paged")
+
+
+class GroupClaims:
+    """The (chain, address) groups a scan thread is working, so the other thread skips them.
+
+    Efficiency only: two threads writing one group stay correct through the per-page position check.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._held: set[tuple[int, str]] = set()
+
+    def claim(self, keys: Sequence[tuple[int, str]]) -> bool:
+        with self._lock:
+            if any(key in self._held for key in keys):
+                return False
+            self._held.update(keys)
+            return True
+
+    def release(self, keys: Sequence[tuple[int, str]]) -> None:
+        with self._lock:
+            self._held.difference_update(keys)
+
+
+def _resolve_engine(engine: str | None) -> str:
+    chosen = (engine or settings.ENGINE).strip().lower()
+    if chosen not in ENGINES:
+        raise ValueError(f"unknown event indexer engine {chosen!r}; expected one of {ENGINES}")
+    return chosen
+
+
+class CursorsMoved(RuntimeError):
+    """A member's position at write time differs from the plan; the page is discarded and refetched."""
+
+
+@dataclass(frozen=True)
+class _Member:
+    event_address: str
+    topic0: str
+    last: int
+    block_hash: bytes | None
+    logs_per_block: float | None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.event_address, self.topic0)
+
+
+@dataclass(frozen=True)
+class _Rewind:
+    to_block: int
+    block_hash: bytes | None
+
+
+@dataclass(frozen=True)
+class GroupPlan:
+    """Positions read in a short transaction, with any reorg rewind found by the hash check after it."""
+
+    chain_id: int
+    addresses: tuple[str, ...]
+    members: tuple[_Member, ...]
+    rewinds: Mapping[str, _Rewind]
+
+
+@dataclass(frozen=True)
+class PageLimits:
+    """How large and how many pages one visit may fetch."""
+
+    max_block_span: int = DEFAULT_MAX_BLOCK_SPAN
+    initial_span: int = settings.INITIAL_SPAN
+    target_page_logs: int = settings.TARGET_PAGE_LOGS
+    max_page_logs: int | None = settings.MAX_PAGE_LOGS
+    max_pages: int | None = None
+    deadline: float | None = None
+
+
+_monotonic = time.monotonic
+
+
+def _end_transaction(session: Session) -> None:
+    # Nothing may hold row locks (or the trigger's reconciliation row) while waiting on RPC.
+    if session.in_transaction():
+        session.commit()
+
+
+def _cursor_rows_query(chain_id: int, addresses: Sequence[str]):
+    return (
+        select(IndexedEventCursor)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address).in_(list(addresses)))
+        .order_by(func.lower(IndexedEventCursor.event_address), IndexedEventCursor.topic0)
+    )
+
+
+def plan_group(
+    session: Session,
+    *,
+    chain_id: int,
+    addresses: Sequence[str],
+    target: int,
+    hash_at: Callable[[int], bytes | None],
+    confirmation_depth: int,
+) -> GroupPlan:
+    """Read positions, release the transaction, then run the reorg check against the stored fringe stamps."""
+    wanted = tuple(sorted({a.lower() for a in addresses}))
+    rows = session.execute(
+        select(
+            IndexedEventCursor.event_address,
+            IndexedEventCursor.topic0,
+            IndexedEventCursor.last_indexed_block,
+            IndexedEventCursor.last_indexed_block_hash,
+            IndexedEventCursor.recent_logs_per_block,
+        )
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address).in_(list(wanted)))
+        .order_by(func.lower(IndexedEventCursor.event_address), IndexedEventCursor.topic0)
+    ).all()
+    _end_transaction(session)
+    members = tuple(
+        _Member(
+            event_address=str(address).lower(),
+            topic0=str(topic0).lower(),
+            last=int(last or 0),
+            block_hash=block_hash,
+            logs_per_block=density,
+        )
+        for address, topic0, last, block_hash, density in rows
+    )
+    rewinds: dict[str, _Rewind] = {}
+    for member in members:
+        if member.event_address in rewinds:
+            continue
+        if member.last <= 0 or member.block_hash is None or member.last >= target:
+            continue
+        observed = hash_at(member.last)
+        if observed is None or observed == member.block_hash:
+            continue
+        rewind_to = max(0, member.last - confirmation_depth)
+        logger.warning(
+            "event-log reorg detected; rewinding indexed logs before re-scan",
+            extra={
+                "chain_id": chain_id,
+                "event_address": member.event_address,
+                "rewind_to": rewind_to,
+                "rewind_from": member.last,
+                "depth": member.last - rewind_to,
+            },
+        )
+        rewinds[member.event_address] = _Rewind(rewind_to, hash_at(rewind_to) if rewind_to else None)
+    return GroupPlan(chain_id=chain_id, addresses=wanted, members=members, rewinds=rewinds)
+
+
+def _member_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, str, int, bytes | None]]:
+    return [
+        (c.event_address.lower(), c.topic0.lower(), int(c.last_indexed_block or 0), c.last_indexed_block_hash)
+        for c in cursors
+    ]
+
+
+def _lock_members(
+    session: Session, plan: GroupPlan, expected: list[tuple[str, str, int, bytes | None]]
+) -> list[IndexedEventCursor]:
+    """``FOR UPDATE`` every cursor at the plan's addresses in canonical order, and require the positions the plan (or
+    this visit's last commit) left. Anything else, including a newly enrolled sibling, discards the page."""
+    cursors = list(
+        session.execute(
+            _cursor_rows_query(plan.chain_id, plan.addresses)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        .scalars()
+        .all()
+    )
+    if _member_positions(cursors) != expected:
+        raise CursorsMoved("event cursors changed since the page was planned; refetch required")
+    return cursors
+
+
+def _page_density(page: LogPage) -> float | None:
+    count = page.returned_log_count
+    if count is None:
+        return None
+    return count / (page.to_block - page.from_block + 1)
+
+
+def _initial_span(densities: Sequence[float | None], limits: PageLimits) -> int:
+    max_span = max(1, limits.max_block_span)
+    known = [d for d in densities if d is not None and d > 0]
+    if known:
+        return max(1, min(max_span, int(limits.target_page_logs / max(known))))
+    return max(1, min(limits.initial_span, max_span))
+
+
+def _next_span(page: LogPage, limits: PageLimits) -> int:
+    """Double while pages come back under half the target; otherwise size the next page to the target at this
+    page's density."""
+    max_span = max(1, limits.max_block_span)
+    blocks = page.to_block - page.from_block + 1
+    count = page.returned_log_count
+    if count is None:
+        return max(1, min(max_span, blocks))
+    if count < limits.target_page_logs / 2:
+        return max(1, min(max_span, blocks * 2))
+    return max(1, min(max_span, int(limits.target_page_logs * blocks / count)))
+
+
+class _PageSource(Protocol):
+    def iter_pages(
+        self,
+        *,
+        event_address: str | Sequence[str],
+        topics: Sequence[str],
+        from_block: int,
+        to_block: int,
+        max_page_logs: int | None = None,
+    ) -> Iterator[LogPage]: ...
+
+
+def _pages(
+    fetcher: LogFetcher,
+    *,
+    event_address: str | Sequence[str],
+    topics: list[str],
+    from_block: int,
+    to_block: int,
+    max_page_logs: int | None,
+) -> Iterator[LogPage]:
+    """Pages from a streaming fetcher, or the whole range as one page from a fetcher with only ``fetch_logs``."""
+    if callable(getattr(fetcher, "iter_pages", None)):
+        yield from cast(_PageSource, fetcher).iter_pages(
+            event_address=event_address,
+            topics=topics,
+            from_block=from_block,
+            to_block=to_block,
+            max_page_logs=max_page_logs,
+        )
+        return
+    stats: list[FetchWindowStat] = []
+    logs = _fetch_window(
+        fetcher,
+        event_address=event_address,
+        topics=topics,
+        from_block=from_block,
+        to_block=to_block,
+        window_stats=stats,
+    )
+    yield LogPage(from_block=from_block, to_block=to_block, logs=logs, stats=tuple(stats))
+
+
+def index_event_group_steps(
+    session: Session,
+    *,
+    chain_id: int,
+    event_address: str,
+    fetcher: LogFetcher,
+    target: int,
+    block_hash_fetcher: BlockHashFetcher,
+    block_hash_memo: MutableMapping[tuple[int, int], bytes | None] | None = None,
+    confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
+    limits: PageLimits | None = None,
+    insert_batch_size: int = DEFAULT_INSERT_BATCH,
+    write_max_rows: int = DEFAULT_WRITE_MAX_ROWS,
+    write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
+    stop_event: Event | None = None,
+) -> Iterator[GroupStepResult]:
+    """Stream one (chain, address) group to ``target`` in bounded pages, yielding after each write prefix.
+
+    The caller commits each prefix before resuming. No transaction is open during any RPC: positions are read and
+    released first, the reorg check and the target hash read follow, and each page is fetched before its rows are
+    locked. Every write re-locks the group and requires the positions it planned; a mismatch raises
+    :class:`CursorsMoved` with nothing written.
+    """
+    memo: MutableMapping[tuple[int, int], bytes | None] = block_hash_memo if block_hash_memo is not None else {}
+
+    def hash_at(block: int) -> bytes | None:
+        key = (chain_id, block)
+        if key not in memo:
+            _end_transaction(session)
+            memo[key] = block_hash_fetcher.block_hash(block)
+        return memo[key]
+
+    plan = plan_group(
+        session,
+        chain_id=chain_id,
+        addresses=[event_address],
+        target=target,
+        hash_at=hash_at,
+        confirmation_depth=confirmation_depth,
+    )
+    yield from run_plan(
+        session,
+        plan,
+        fetcher=fetcher,
+        target=target,
+        hash_at=hash_at,
+        memo=memo,
+        limits=limits or PageLimits(),
+        insert_batch_size=insert_batch_size,
+        write_max_rows=write_max_rows,
+        write_max_bytes=write_max_bytes,
+        stop_event=stop_event,
+    )
+
+
+def run_plan(
+    session: Session,
+    plan: GroupPlan,
+    *,
+    fetcher: LogFetcher,
+    target: int,
+    hash_at: Callable[[int], bytes | None],
+    memo: Mapping[tuple[int, int], bytes | None],
+    limits: PageLimits,
+    insert_batch_size: int,
+    write_max_rows: int,
+    write_max_bytes: int,
+    stop_event: Event | None,
+) -> Iterator[GroupStepResult]:
+    chain_id = plan.chain_id
+    if not plan.members:
+        yield GroupStepResult(
+            scanned_from=0, scanned_to=0, inserted=0, members_at_target=0, group_complete=True, fetched=False
+        )
+        return
+    expected = [(m.event_address, m.topic0, m.last, m.block_hash) for m in plan.members]
+    position: dict[tuple[str, str], int] = {}
+    for member in plan.members:
+        rewind = plan.rewinds.get(member.event_address)
+        position[member.key] = min(member.last, rewind.to_block) if rewind is not None else member.last
+
+    def stamp(block: int) -> bytes | None:
+        if (chain_id, block) not in memo:
+            raise RuntimeError(f"fringe hash for block {block} was not read before the write")
+        return memo[(chain_id, block)]
+
+    if all(pos >= target for pos in position.values()):
+        cursors = _lock_members(session, plan, expected)
+        for cursor in cursors:
+            cursor.backfill_complete = True
+            cursor.last_run_at = func.now()
+        yield GroupStepResult(
+            scanned_from=target + 1,
+            scanned_to=target,
+            inserted=0,
+            members_at_target=len(cursors),
+            group_complete=True,
+            fetched=False,
+        )
+        return
+
+    # Fringe stamps for members already at or past the target, read now so no write waits on RPC.
+    for member in plan.members:
+        rewind = plan.rewinds.get(member.event_address)
+        stamped = member.block_hash if rewind is None or member.last <= rewind.to_block else rewind.block_hash
+        if position[member.key] >= target and stamped is None:
+            hash_at(position[member.key])
+    frontier = min(pos for pos in position.values() if pos < target)
+    span = _initial_span([m.logs_per_block for m in plan.members if position[m.key] < target], limits)
+    single_address = plan.addresses[0] if len(plan.addresses) == 1 else None
+    rewind_pending = bool(plan.rewinds)
+    pages = 0
+    while frontier < target:
+        if stop_event is not None and stop_event.is_set():
+            return
+        if pages and limits.max_pages is not None and pages >= limits.max_pages:
+            return
+        if pages and limits.deadline is not None and _monotonic() >= limits.deadline:
+            return
+        chunk_end = min(target, frontier + span)
+        topics = sorted({topic0 for (_address, topic0), pos in position.items() if pos < chunk_end})
+        if chunk_end >= target:
+            # The fringe hash is read before that block's logs, so a reorg in between is caught by the next check.
+            hash_at(target)
+        _end_transaction(session)
+        page_iter = _pages(
+            fetcher,
+            event_address=single_address if single_address is not None else list(plan.addresses),
+            topics=topics,
+            from_block=frontier + 1,
+            to_block=chunk_end,
+            max_page_logs=limits.max_page_logs,
+        )
+        expected_from = frontier + 1
+        while True:
+            _end_transaction(session)
+            page = next(page_iter, None)
+            if page is None:
+                break
+            # Advancing a cursor to a page's end is only sound over gap-free, in-range pages.
+            if page.from_block != expected_from or page.to_block > chunk_end or page.to_block < page.from_block:
+                raise RuntimeError("eth_getLogs pages are not contiguous over the requested range")
+            expected_from = page.to_block + 1
+            logs = sorted(page.logs, key=lambda log: log.block_number)
+            density = _page_density(page)
+            prefixes = _write_prefixes(logs, page.to_block, max_rows=write_max_rows, max_bytes=write_max_bytes)
+            logger.debug(
+                "event indexer page",
+                extra={
+                    "chain_id": chain_id,
+                    "event_address": single_address,
+                    "addresses": len(plan.addresses),
+                    "from_block": page.from_block,
+                    "to_block": page.to_block,
+                    "topics": len(topics),
+                    "returned_log_count": page.returned_log_count,
+                    "rejected": page.rejected,
+                    "prefixes": len(prefixes),
+                },
+            )
+            for index, (offset, end_offset, prefix_end) in enumerate(prefixes):
+                cursors = _lock_members(session, plan, expected)
+                if rewind_pending:
+                    _apply_rewinds(session, plan, cursors)
+                    rewind_pending = False
+                buckets = _bucket_logs(logs[offset:end_offset], single_address, plan.addresses)
+                inserted = 0
+                members_at_target = 0
+                for cursor in cursors:
+                    address = cursor.event_address.lower()
+                    topic0 = cursor.topic0.lower()
+                    last = int(cursor.last_indexed_block or 0)
+                    if prefix_end > last:
+                        if topic0 not in topics:
+                            raise RuntimeError("a cursor would advance over a range its topic was not requested for")
+                        member_logs = [log for log in buckets.get((address, topic0), []) if log.block_number > last]
+                        inserted += _bulk_insert_logs(
+                            session, chain_id, address, topic0, member_logs, batch_size=insert_batch_size
+                        )
+                        cursor.last_indexed_block = prefix_end
+                        cursor.last_indexed_block_hash = None
+                        _fold_window_stats(cursor, list(page.stats))
+                        cursor.last_advanced_at = func.now()
+                        if density is not None:
+                            cursor.recent_logs_per_block = density
+                    # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the
+                    # evaluated block is judged by position, and only a reorg rewind resets the flag.
+                    if int(cursor.last_indexed_block or 0) >= target:
+                        cursor.backfill_complete = True
+                        members_at_target += 1
+                        if cursor.last_indexed_block_hash is None:
+                            cursor.last_indexed_block_hash = stamp(int(cursor.last_indexed_block))
+                    cursor.last_run_at = func.now()
+                expected = _member_positions(cursors)
+                for address, topic0, last, _hash in expected:
+                    position[(address, topic0)] = last
+                yield GroupStepResult(
+                    scanned_from=page.from_block if index == 0 else prefixes[index - 1][2] + 1,
+                    scanned_to=prefix_end,
+                    inserted=inserted,
+                    members_at_target=members_at_target,
+                    group_complete=members_at_target == len(cursors),
+                    fetched=index == 0,
+                    page_logs=len(logs) if index == 0 else 0,
+                    rejected_pages=page.rejected if index == 0 else 0,
+                )
+            pages += 1
+            span = _next_span(page, limits)
+            # Release this page before the next request so at most one page is resident.
+            page = None
+            logs = []
+            buckets = {}
+            member_logs = []
+            if stop_event is not None and stop_event.is_set():
+                return
+            if limits.max_pages is not None and pages >= limits.max_pages:
+                return
+            if limits.deadline is not None and _monotonic() >= limits.deadline:
+                return
+        if expected_from != chunk_end + 1:
+            raise RuntimeError("eth_getLogs pages did not cover the requested range")
+        frontier = min((pos for pos in position.values() if pos < target), default=target)
+
+
+def _bucket_logs(
+    logs: Sequence[FetchedEventLog], single_address: str | None, addresses: Sequence[str]
+) -> dict[tuple[str, str], list[FetchedEventLog]]:
+    """Group a prefix's logs by (emitter, topic0); a multi-address page attributes by each log's emitter."""
+    buckets: dict[tuple[str, str], list[FetchedEventLog]] = {}
+    for log in logs:
+        if log.topics:
+            emitter = single_address if single_address is not None else log.address.lower()
+            if emitter not in addresses:
+                raise RuntimeError("eth_getLogs returned a log from an emitter outside the request")
+            buckets.setdefault((emitter, log.topics[0].lower()), []).append(log)
+    return buckets
+
+
+def _apply_rewinds(session: Session, plan: GroupPlan, cursors: Sequence[IndexedEventCursor]) -> None:
+    """Rewind the whole address, then delete its rows above the rewind point, in the page's first transaction.
+
+    The cursor decrease is flushed before the DELETE: the row trigger marks ``reorg`` on the decrease even when the
+    DELETE removes nothing.
+    """
+    for cursor in cursors:
+        rewind = plan.rewinds.get(cursor.event_address.lower())
+        if rewind is not None and int(cursor.last_indexed_block or 0) > rewind.to_block:
+            cursor.last_indexed_block = rewind.to_block
+            cursor.last_indexed_block_hash = rewind.block_hash
+            cursor.backfill_complete = False
+    session.flush()
+    for address, rewind in sorted(plan.rewinds.items()):
+        session.execute(
+            delete(IndexedEventLog)
+            .where(IndexedEventLog.chain_id == plan.chain_id)
+            .where(func.lower(IndexedEventLog.event_address) == address)
+            .where(IndexedEventLog.block_number > rewind.to_block)
+        )
 
 
 def _write_prefixes(
@@ -691,7 +1199,15 @@ def scan_enrolled_events(
     write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
     stop_event: Event | None = None,
     scan_mode: Literal["all", "warm", "cold"] = "all",
+    on_commit: Callable[[ScanSummary], None] | None = None,
+    engine: str | None = None,
+    page_limits: PageLimits | None = None,
+    group_budget_s: float = settings.GROUP_BUDGET_S,
+    pass_budget_s: float = settings.PASS_BUDGET_S,
+    claims: GroupClaims | None = None,
 ) -> ScanSummary:
+    engine = _resolve_engine(engine)
+    pass_started = _monotonic()
     # Group cursors by (chain, address) so one eth_getLogs serves every topic on an address. Rotation is
     # least-recently-run per group, so one busy address can't monopolize passes and new cursors warm within a rotation.
     all_rows = session.execute(
@@ -702,33 +1218,33 @@ def scan_enrolled_events(
             IndexedEventCursor.last_run_at,
             IndexedEventCursor.last_indexed_block,
             IndexedEventCursor.backfill_complete,
+            IndexedEventCursor.last_advanced_at,
+            IndexedEventCursor.enrollment_basis,
         )
     ).all()
     # Skip zero/invalid addresses from before the enroll-time guard; 0x0 never emits logs.
     rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
+    _end_transaction(session)
     groups: dict[tuple[int, str], dict[str, Any]] = {}
-    for chain_id, event_address, topic0, last_run_at, last_block, complete in rows:
+    for chain_id, event_address, topic0, last_run_at, last_block, complete, advanced_at, basis in rows:
         entry = groups.setdefault(
-            (chain_id, event_address.lower()), {"topics": set(), "runs": [], "last_blocks": [], "complete": True}
+            (chain_id, event_address.lower()),
+            {"topics": set(), "runs": [], "last_blocks": [], "complete": True, "never_advanced": False, "hint": False},
         )
         entry["topics"].add(topic0.lower())
         entry["runs"].append(last_run_at)
         entry["last_blocks"].append(int(last_block or 0))
         entry["complete"] &= bool(complete)
+        entry["never_advanced"] |= advanced_at is None
+        entry["hint"] |= basis in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES
 
-    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    def _rotation_key(item: tuple[tuple[int, str], dict[str, Any]]) -> tuple[int, int, datetime, str]:
+        # Never-advanced groups first (a new hint group isn't stuck behind an old dense backfill), then the bases the
+        # resolver can use, then least recently run.
+        (_chain_id, address), entry = item
+        return (0 if entry["never_advanced"] else 1, 0 if entry["hint"] else 1, min(entry["runs"]), address)
 
-    def _rotation_key(item: tuple[tuple[int, str], dict[str, Any]]) -> tuple[int, datetime, str]:
-        (chain_id, address), entry = item
-        runs = entry["runs"]
-        if any(run is None for run in runs):
-            return (0, _epoch, address)
-        return (1, min(runs), address)
-
-    inserted = 0
-    windows_scanned = 0
-    caught_up_cursors = 0
-    failed_groups = 0
+    state = _PassState(total_cursors=len(rows), on_commit=on_commit, stop_event=stop_event)
     pass_budget = max(1, max_windows_per_pass)
     # One confirmed-head target and hash memo per pass.
     targets: dict[int, int] = {}
@@ -739,11 +1255,7 @@ def scan_enrolled_events(
             if chain_id in targets or chain_id in head_failed_chains or chain_id not in head_fetchers:
                 continue
             try:
-                depth = chain_by_id(chain_id).confirmation_depth
-            except UnknownChainError:
-                depth = confirmation_depth
-            try:
-                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - depth)
+                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - _depth(chain_id, confirmation_depth))
             except Exception as exc:
                 head_failed_chains.add(chain_id)
                 logger.warning(
@@ -754,7 +1266,7 @@ def scan_enrolled_events(
                         "exc_msg": sanitize_string(str(exc))[:200],
                     },
                 )
-        failed_groups += sum(chain_id in head_failed_chains for chain_id, _address in groups)
+        state.failed_groups += sum(chain_id in head_failed_chains for chain_id, _address in groups)
         groups = {
             key: entry
             for key, entry in groups.items()
@@ -767,90 +1279,155 @@ def scan_enrolled_events(
         if scan_mode == "warm":
             # At least one window per warm address even when the fleet exceeds the cold budget.
             pass_budget = max(1, len(groups))
-            max_windows_per_cursor = 1
+            if engine == "legacy":
+                max_windows_per_cursor = 1
+    pass_deadline = None if scan_mode == "warm" else pass_started + pass_budget_s
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
-    # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
-    skipped_chains: set[int] = set()
-    for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
-        if stop_event is not None and stop_event.is_set():
-            break
-        # Stop at the per-pass budget; unserviced groups keep their older last_run_at and go first next pass. Without
-        # this a cold pass runs for tens of minutes and the heartbeat goes stale.
-        if windows_scanned >= pass_budget:
-            break
-        fetcher = fetchers.get(chain_id)
-        head_fetcher = head_fetchers.get(chain_id)
-        block_hash_fetcher = block_hash_fetchers.get(chain_id)
-        if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
-            if chain_id not in skipped_chains:
-                skipped_chains.add(chain_id)
-                logger.warning(
-                    "event indexer has no fetcher for chain; its enrolled cursors are not being "
-                    "advanced this pass (indexer disabled for this chain, or its hypersync_url is unset)",
-                    extra={"chain_id": chain_id},
-                )
-            continue
-        # Per-chain finality depth; mainnet is 12, and the passed-in depth is the fallback for unregistered
-        # chains.
+    base_limits = page_limits or PageLimits(max_block_span=max_block_span)
+    writes = _WriteSizes(insert_batch_size, write_max_rows, write_max_bytes)
+
+    def visit_group(chain_id: int, event_address: str, topics: list[str]) -> None:
+        """One group: the paged engine streams it under the time budgets; the legacy engine fetches whole windows."""
+        visit = _GroupVisit(chain_id=chain_id, event_address=event_address)
+        claim = [(chain_id, event_address)]
+        if claims is not None and not claims.claim(claim):
+            state.stopped_short = True
+            return
+        members_at_target = 0
         try:
-            chain_confirmation_depth = chain_by_id(chain_id).confirmation_depth
-        except UnknownChainError:
-            chain_confirmation_depth = confirmation_depth
-        # Several windows per group, capped per group and by the global budget; commit complete block prefixes so
-        # partial progress survives a later failure.
-        group_members_at_target = 0
-        try:
+            depth = _depth(chain_id, confirmation_depth)
             if chain_id not in targets:
-                targets[chain_id] = max(0, head_fetcher.head_block() - chain_confirmation_depth)
-            for _ in range(max(1, max_windows_per_cursor)):
-                if stop_event is not None and stop_event.is_set():
-                    break
-                if windows_scanned >= pass_budget:
-                    break
-                group_complete = False
-                for result in index_event_group_steps(
+                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - depth)
+            if engine == "paged":
+                deadline = _monotonic() + group_budget_s
+                if pass_deadline is not None:
+                    deadline = min(deadline, pass_deadline)
+                limits = dataclasses.replace(
+                    base_limits,
+                    max_pages=max(1, min(max_windows_per_cursor, pass_budget - state.windows_scanned)),
+                    deadline=deadline,
+                )
+                steps = index_event_group_steps(
                     session,
                     chain_id=chain_id,
                     event_address=event_address,
-                    topics=sorted(entry["topics"]),
-                    fetcher=fetcher,
+                    fetcher=fetchers[chain_id],
                     target=targets[chain_id],
-                    block_hash_fetcher=block_hash_fetcher,
+                    block_hash_fetcher=block_hash_fetchers[chain_id],
                     block_hash_memo=block_hash_memo,
-                    confirmation_depth=chain_confirmation_depth,
-                    max_block_span=max_block_span,
-                    insert_batch_size=insert_batch_size,
-                    write_max_rows=write_max_rows,
-                    write_max_bytes=write_max_bytes,
-                ):
-                    session.commit()
-                    inserted += result.inserted
-                    windows_scanned += int(result.fetched)
-                    group_members_at_target = result.members_at_target
-                    group_complete = result.group_complete
-                    if stop_event is not None and stop_event.is_set():
+                    confirmation_depth=depth,
+                    limits=limits,
+                    insert_batch_size=writes.insert_batch_size,
+                    write_max_rows=writes.max_rows,
+                    write_max_bytes=writes.max_bytes,
+                    stop_event=stop_event,
+                )
+                group_complete, members_at_target = state.drive(session, steps, visit)
+                state.stopped_short |= not group_complete
+            else:
+                for _ in range(max(1, max_windows_per_cursor)):
+                    if state.stopping() or state.windows_scanned >= pass_budget:
                         break
-                if group_complete:
-                    break
+                    steps = _legacy_group_steps(
+                        session,
+                        chain_id=chain_id,
+                        event_address=event_address,
+                        topics=topics,
+                        fetcher=fetchers[chain_id],
+                        target=targets[chain_id],
+                        block_hash_fetcher=block_hash_fetchers[chain_id],
+                        block_hash_memo=block_hash_memo,
+                        confirmation_depth=depth,
+                        max_block_span=max_block_span,
+                        insert_batch_size=writes.insert_batch_size,
+                        write_max_rows=writes.max_rows,
+                        write_max_bytes=writes.max_bytes,
+                    )
+                    group_complete, members_at_target = state.drive(session, steps, visit)
+                    if group_complete:
+                        break
         except Exception as exc:
-            session.rollback()
-            failed_groups += 1
-            # Swallowed and continued. WARNING with exc_type, not logger.exception (an outage once produced thousands of
-            # ERROR tracebacks); ``failed_groups`` carries the aggregate.
+            state.discard(session, exc, chain_id=chain_id, addresses=[event_address], topics=topics)
+        else:
+            state.cleared(chain_id, event_address)
+        finally:
+            if claims is not None:
+                claims.release(claim)
+        state.caught_up_cursors += members_at_target
+        if visit.pages and scan_mode != "warm":
+            visit.log(scan_mode)
+
+    # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
+    skipped_chains: set[int] = set()
+
+    def runnable(chain_id: int) -> bool:
+        if chain_id in fetchers and chain_id in head_fetchers and chain_id in block_hash_fetchers:
+            return True
+        if chain_id not in skipped_chains:
+            skipped_chains.add(chain_id)
             logger.warning(
-                "event indexer group scan failed; continuing to next group",
-                extra={
-                    "chain_id": chain_id,
-                    "event_address": event_address,
-                    "topics": sorted(entry["topics"]),
-                    "exc_type": type(exc).__name__,
-                    # Sanitized (URLs scrubbed) and truncated so the error stays attributable.
-                    "exc_msg": sanitize_string(str(exc))[:200],
-                },
+                "event indexer has no fetcher for chain; its enrolled cursors are not being "
+                "advanced this pass (indexer disabled for this chain, or its hypersync_url is unset)",
+                extra={"chain_id": chain_id},
             )
-        caught_up_cursors += group_members_at_target
+        return False
+
+    sweep_started = _monotonic()
+    if scan_mode == "warm" and engine == "paged":
+        by_chain: dict[int, list[str]] = {}
+        for chain_id, event_address in sorted(groups):
+            if runnable(chain_id):
+                by_chain.setdefault(chain_id, []).append(event_address)
+        for chain_id, addresses in by_chain.items():
+            if state.stopping():
+                break
+            _warm_sweep_chain(
+                session,
+                state,
+                chain_id=chain_id,
+                addresses=addresses,
+                target=targets[chain_id],
+                fetcher=fetchers[chain_id],
+                block_hash_fetcher=block_hash_fetchers[chain_id],
+                block_hash_memo=block_hash_memo,
+                confirmation_depth=_depth(chain_id, confirmation_depth),
+                limits=dataclasses.replace(base_limits, deadline=_monotonic() + group_budget_s),
+                writes=writes,
+                claims=claims,
+                visit_single=lambda address, chain_id=chain_id: visit_group(
+                    chain_id, address, sorted(groups[(chain_id, address)]["topics"])
+                ),
+            )
+    else:
+        for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
+            if state.stopping():
+                break
+            # Stop at the per-pass budget; unserviced groups keep their older last_run_at and go first next pass.
+            # Without this a cold pass runs for tens of minutes and the heartbeat goes stale.
+            if state.windows_scanned >= pass_budget:
+                break
+            if engine == "paged" and pass_deadline is not None and _monotonic() >= pass_deadline:
+                state.stopped_short = True
+                break
+            if runnable(chain_id):
+                visit_group(chain_id, event_address, sorted(entry["topics"]))
+    warm_lag: dict[int, int] = {}
+    if scan_mode == "warm":
+        warm_lag = _warm_lag(session, groups, targets)
+        logger.info(
+            "event indexer warm sweep",
+            extra={
+                "engine": engine,
+                "groups": len(groups),
+                "pages": state.windows_scanned,
+                "inserted": state.inserted,
+                "failed_groups": state.failed_groups,
+                "max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_lag.items())},
+                "duration_s": round(_monotonic() - sweep_started, 3),
+            },
+        )
     pending_at_budget = False
-    if windows_scanned >= pass_budget:
+    if state.windows_scanned >= pass_budget or (engine == "paged" and state.stopped_short):
         for chain_id, target in targets.items():
             addresses = [address for (cid, address) in groups if cid == chain_id]
             query = (
@@ -874,14 +1451,396 @@ def scan_enrolled_events(
             chain not in targets and chain in fetchers and chain in head_fetchers and chain in block_hash_fetchers
             for chain, _address in groups
         )
+    _end_transaction(session)
     return ScanSummary(
-        inserted=inserted,
-        windows_scanned=windows_scanned,
-        caught_up_cursors=caught_up_cursors,
+        inserted=state.inserted,
+        windows_scanned=state.windows_scanned,
+        caught_up_cursors=state.caught_up_cursors,
         total_cursors=len(rows),
         budget_exhausted=pending_at_budget,
-        failed_groups=failed_groups,
+        failed_groups=state.failed_groups,
+        warm_max_lag_blocks=warm_lag,
+        stalled_cursors=state.stalled_cursors,
     )
+
+
+def _depth(chain_id: int, fallback: int) -> int:
+    """Per-chain finality depth; mainnet is 12, and the passed-in depth is the fallback for unregistered chains."""
+    try:
+        return chain_by_id(chain_id).confirmation_depth
+    except UnknownChainError:
+        return fallback
+
+
+@dataclass(frozen=True)
+class _WriteSizes:
+    insert_batch_size: int
+    max_rows: int
+    max_bytes: int
+
+
+@dataclass
+class _PassState:
+    """Running totals for one scan pass, and how each visit's steps are committed and accounted."""
+
+    total_cursors: int
+    on_commit: Callable[[ScanSummary], None] | None
+    stop_event: Event | None
+    inserted: int = 0
+    windows_scanned: int = 0
+    caught_up_cursors: int = 0
+    failed_groups: int = 0
+    stalled_cursors: int = 0
+    stopped_short: bool = False
+
+    def stopping(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def drive(self, session: Session, steps: Iterator[GroupStepResult], visit: _GroupVisit) -> tuple[bool, int]:
+        """Commit each yielded prefix; return whether the group finished and how many members reached the target."""
+        group_complete = False
+        members_at_target = 0
+        for result in steps:
+            session.commit()
+            self.inserted += result.inserted
+            self.windows_scanned += int(result.fetched)
+            members_at_target = result.members_at_target
+            group_complete = result.group_complete
+            visit.record(result)
+            if self.on_commit is not None:
+                self.on_commit(
+                    ScanSummary(
+                        inserted=self.inserted,
+                        windows_scanned=self.windows_scanned,
+                        caught_up_cursors=self.caught_up_cursors + members_at_target,
+                        total_cursors=self.total_cursors,
+                        failed_groups=self.failed_groups,
+                        stalled_cursors=self.stalled_cursors,
+                    )
+                )
+            if self.stopping():
+                break
+        return group_complete, members_at_target
+
+    def discard(
+        self,
+        session: Session,
+        exc: Exception,
+        *,
+        chain_id: int,
+        addresses: Sequence[str],
+        topics: Sequence[str],
+        cursors: int | None = None,
+    ) -> None:
+        session.rollback()
+        if isinstance(exc, MalformedLogPage):
+            self._stall(exc, chain_id=chain_id, addresses=addresses, cursors=cursors or len(topics) or len(addresses))
+            return
+        if isinstance(exc, CursorsMoved):
+            # Another writer moved a member between plan and write; nothing was written and the next visit refetches.
+            self.stopped_short = True
+            logger.info(
+                "event indexer page discarded: cursor positions moved since planning",
+                extra={"chain_id": chain_id, "event_address": addresses[0] if len(addresses) == 1 else None},
+            )
+            return
+        self.failed_groups += len(addresses)
+        # Swallowed and continued. WARNING with exc_type, not logger.exception (an outage once produced thousands of
+        # ERROR tracebacks); ``failed_groups`` carries the aggregate.
+        logger.warning(
+            "event indexer group scan failed; continuing to next group",
+            extra={
+                "chain_id": chain_id,
+                "event_address": addresses[0] if len(addresses) == 1 else None,
+                "addresses": len(addresses),
+                "topics": list(topics),
+                "exc_type": type(exc).__name__,
+                # Sanitized (URLs scrubbed) and truncated so the error stays attributable.
+                "exc_msg": sanitize_string(str(exc))[:200],
+            },
+        )
+
+    def _stall(self, exc: MalformedLogPage, *, chain_id: int, addresses: Sequence[str], cursors: int) -> None:
+        self.failed_groups += len(addresses)
+        self.stalled_cursors += cursors
+        fields = {
+            "chain_id": chain_id,
+            "event_address": addresses[0] if len(addresses) == 1 else None,
+            "from_block": exc.from_block,
+            "to_block": exc.to_block,
+            "reason": exc.reason,
+            "stalled_cursors": cursors,
+        }
+        logger.warning("event-log page rejected for a malformed log; cursors not advanced", extra=fields)
+        key = (chain_id, tuple(sorted(addresses)))
+        with _STALL_LOCK:
+            first = key not in _STALLED_GROUPS
+            _STALLED_GROUPS.add(key)
+        if first:
+            logger.error("event-log cursors stalled on a malformed upstream log", extra=fields)
+
+    def cleared(self, chain_id: int, address: str) -> None:
+        with _STALL_LOCK:
+            _STALLED_GROUPS.discard((chain_id, (address,)))
+
+
+# Groups already reported at ERROR in this process, so a permanent stall alerts once rather than every pass.
+_STALLED_GROUPS: set[tuple[int, tuple[str, ...]]] = set()
+_STALL_LOCK = Lock()
+
+
+def _hash_reader(
+    session: Session,
+    chain_id: int,
+    block_hash_fetcher: BlockHashFetcher,
+    memo: MutableMapping[tuple[int, int], bytes | None],
+) -> Callable[[int], bytes | None]:
+    def hash_at(block: int) -> bytes | None:
+        key = (chain_id, block)
+        if key not in memo:
+            _end_transaction(session)
+            memo[key] = block_hash_fetcher.block_hash(block)
+        return memo[key]
+
+    return hash_at
+
+
+def _warm_sweep_chain(
+    session: Session,
+    state: _PassState,
+    *,
+    chain_id: int,
+    addresses: Sequence[str],
+    target: int,
+    fetcher: LogFetcher,
+    block_hash_fetcher: BlockHashFetcher,
+    block_hash_memo: MutableMapping[tuple[int, int], bytes | None],
+    confirmation_depth: int,
+    limits: PageLimits,
+    writes: _WriteSizes,
+    claims: GroupClaims | None,
+    visit_single: Callable[[str], None],
+    batch_addresses: int | None = None,
+    batch_max_lag: int | None = None,
+) -> None:
+    """Advance one chain's warm groups, up to ``WARM_BATCH_ADDRESSES`` per ``eth_getLogs``.
+
+    A group with a pending rewind, or lagging past ``WARM_BATCH_MAX_LAG``, takes the single-group path first: a batch
+    planned across a rewind could advance a cursor over rows just deleted.
+    """
+    batch_size = max(1, batch_addresses if batch_addresses is not None else settings.WARM_BATCH_ADDRESSES)
+    max_lag = batch_max_lag if batch_max_lag is not None else settings.WARM_BATCH_MAX_LAG
+    hash_at = _hash_reader(session, chain_id, block_hash_fetcher, block_hash_memo)
+    try:
+        plan = plan_group(
+            session,
+            chain_id=chain_id,
+            addresses=addresses,
+            target=target,
+            hash_at=hash_at,
+            confirmation_depth=confirmation_depth,
+        )
+    except Exception as exc:
+        state.discard(session, exc, chain_id=chain_id, addresses=addresses, topics=[])
+        return
+    frontier: dict[str, int] = {}
+    for member in plan.members:
+        frontier[member.event_address] = min(frontier.get(member.event_address, member.last), member.last)
+    singles = [a for a in plan.addresses if a in plan.rewinds or target - frontier.get(a, target) > max_lag]
+    for address in singles:
+        if state.stopping():
+            return
+        visit_single(address)
+    batchable = [a for a in plan.addresses if a not in singles and a in frontier]
+    for offset in range(0, len(batchable), batch_size):
+        if state.stopping():
+            return
+        _sweep_batch(
+            session,
+            state,
+            chain_id=chain_id,
+            addresses=batchable[offset : offset + batch_size],
+            target=target,
+            fetcher=fetcher,
+            hash_at=hash_at,
+            memo=block_hash_memo,
+            confirmation_depth=confirmation_depth,
+            limits=limits,
+            writes=writes,
+            claims=claims,
+            visit_single=visit_single,
+            max_lag=max_lag,
+        )
+
+
+def _sweep_batch(
+    session: Session,
+    state: _PassState,
+    *,
+    chain_id: int,
+    addresses: Sequence[str],
+    target: int,
+    fetcher: LogFetcher,
+    hash_at: Callable[[int], bytes | None],
+    memo: Mapping[tuple[int, int], bytes | None],
+    confirmation_depth: int,
+    limits: PageLimits,
+    writes: _WriteSizes,
+    claims: GroupClaims | None,
+    visit_single: Callable[[str], None],
+    max_lag: int,
+) -> None:
+    keys = [(chain_id, a) for a in addresses]
+    held = [key for key in keys if claims is None or claims.claim([key])]
+    if not held:
+        return
+    batch = [address for _chain, address in held]
+    visit = _GroupVisit(chain_id=chain_id, event_address=f"batch:{len(batch)}")
+    split: list[list[str]] = []
+    plan = GroupPlan(chain_id=chain_id, addresses=tuple(batch), members=(), rewinds={})
+    try:
+        plan = plan_group(
+            session,
+            chain_id=chain_id,
+            addresses=batch,
+            target=target,
+            hash_at=hash_at,
+            confirmation_depth=confirmation_depth,
+        )
+        frontier: dict[str, int] = {}
+        for member in plan.members:
+            frontier[member.event_address] = min(frontier.get(member.event_address, member.last), member.last)
+        # Re-checked at this plan: a rewind, or a sibling enrolled far back since the chain was planned, goes alone.
+        leaving = sorted(a for a in batch if a in plan.rewinds or target - frontier.get(a, target) > max_lag)
+        if leaving:
+            departing = [(chain_id, address) for address in leaving]
+            if claims is not None:
+                claims.release(departing)
+            held = [key for key in held if key not in departing]
+            for address in leaving:
+                visit_single(address)
+            split = [[a for a in batch if a not in leaving]]
+        else:
+            steps = run_plan(
+                session,
+                plan,
+                fetcher=fetcher,
+                target=target,
+                hash_at=hash_at,
+                memo=memo,
+                limits=limits,
+                insert_batch_size=writes.insert_batch_size,
+                write_max_rows=writes.max_rows,
+                write_max_bytes=writes.max_bytes,
+                stop_event=state.stop_event,
+            )
+            _complete, members_at_target = state.drive(session, steps, visit)
+            state.caught_up_cursors += members_at_target
+            for address in batch:
+                state.cleared(chain_id, address)
+    except CursorsMoved as exc:
+        if len(batch) == 1:
+            state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+        else:
+            # A group that moved since planning mustn't hold back the rest; the halves re-plan.
+            session.rollback()
+            half = len(batch) // 2
+            split = [batch[:half], batch[half:]]
+    except RuntimeError as exc:
+        session.rollback()
+        if len(batch) == 1:
+            state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[], cursors=len(plan.members))
+        else:
+            # The range is already at the bisect floor, so a rejection splits the address set.
+            logger.debug(
+                "warm batch rejected; splitting the address set",
+                extra={"chain_id": chain_id, "addresses": len(batch), "exc_type": type(exc).__name__},
+            )
+            half = len(batch) // 2
+            split = [batch[:half], batch[half:]]
+    except Exception as exc:
+        state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+    finally:
+        if claims is not None:
+            claims.release(held)
+    for part in split:
+        if part and not state.stopping():
+            _sweep_batch(
+                session,
+                state,
+                chain_id=chain_id,
+                addresses=part,
+                target=target,
+                fetcher=fetcher,
+                hash_at=hash_at,
+                memo=memo,
+                confirmation_depth=confirmation_depth,
+                limits=limits,
+                writes=writes,
+                claims=claims,
+                visit_single=visit_single,
+                max_lag=max_lag,
+            )
+
+
+def _warm_lag(session: Session, groups: Mapping[tuple[int, str], Any], targets: Mapping[int, int]) -> dict[int, int]:
+    """Per chain, the largest gap between a warm group's lowest cursor and the target, read after the sweep."""
+    lag: dict[int, int] = {}
+    for chain_id in sorted({chain for chain, _address in groups if chain in targets}):
+        addresses = [address for chain, address in groups if chain == chain_id]
+        frontier = session.scalar(
+            select(func.min(IndexedEventCursor.last_indexed_block)).where(
+                IndexedEventCursor.chain_id == chain_id,
+                func.lower(IndexedEventCursor.event_address).in_(addresses),
+            )
+        )
+        lag[chain_id] = max(0, targets[chain_id] - int(frontier if frontier is not None else targets[chain_id]))
+    _end_transaction(session)
+    return lag
+
+
+@dataclass
+class _GroupVisit:
+    """What one group visit fetched and wrote, for its INFO line."""
+
+    chain_id: int
+    event_address: str
+    started: float = field(default_factory=time.monotonic)
+    scanned_from: int | None = None
+    scanned_to: int | None = None
+    pages: int = 0
+    rejected_pages: int = 0
+    logs: int = 0
+    inserted: int = 0
+
+    def record(self, result: GroupStepResult) -> None:
+        if result.fetched:
+            self.pages += 1
+            self.logs += result.page_logs
+            self.rejected_pages += result.rejected_pages
+            if self.scanned_from is None:
+                self.scanned_from = result.scanned_from
+        if result.fetched or self.pages:
+            self.scanned_to = result.scanned_to
+        self.inserted += result.inserted
+
+    def log(self, scan_mode: str) -> None:
+        logger.info(
+            "event indexer group visit",
+            extra={
+                "chain_id": self.chain_id,
+                "event_address": self.event_address,
+                "scan_mode": scan_mode,
+                "scanned_from": self.scanned_from,
+                "scanned_to": self.scanned_to,
+                "pages": self.pages,
+                "rejected_pages": self.rejected_pages,
+                "logs": self.logs,
+                "inserted": self.inserted,
+                "duration_s": round(time.monotonic() - self.started, 3),
+                "process_rss_bytes": current_rss_bytes(),
+            },
+        )
 
 
 _ZERO_ADDRESS = "0x" + "0" * 40
@@ -1204,6 +2163,9 @@ def _fold_window_stats(cursor: IndexedEventCursor, stats: list[FetchWindowStat])
     cursor.window_stats_cap = observed_cap
 
 
+_LOGS_TABLE = cast(Table, IndexedEventLog.__table__)
+
+
 def _bulk_insert_logs(
     session: Session,
     chain_id: int,
@@ -1215,6 +2177,13 @@ def _bulk_insert_logs(
 ) -> int:
     if not logs:
         return 0
+    # One compiled statement executed many, rather than a fresh multi-row VALUES per batch (compiling that dominated
+    # the write cost). Each batch is still one INSERT for the statement trigger; RETURNING counts only rows inserted.
+    stmt = (
+        pg_insert(_LOGS_TABLE)
+        .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0", "tx_hash", "log_index"])
+        .returning(_LOGS_TABLE.c.log_index)
+    )
     total = 0
     for offset in range(0, len(logs), max(1, batch_size)):
         rows = [
@@ -1229,16 +2198,11 @@ def _bulk_insert_logs(
                 "transaction_index": log.transaction_index,
                 "topics": log.topics,
                 "data_words": log.data_words,
+                "data_hex": log.data_hex,
             }
             for log in logs[offset : offset + max(1, batch_size)]
         ]
-        stmt = (
-            pg_insert(IndexedEventLog)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0", "tx_hash", "log_index"])
-        )
-        result = session.execute(stmt)
-        total += int(getattr(result, "rowcount", 0) or 0)
+        total += len(session.execute(stmt, rows).all())
     return total
 
 
@@ -1331,6 +2295,9 @@ def _cursor_progress(session: Session) -> tuple[int, int]:
     return int(caught_up or 0), int(total or 0)
 
 
+_HEARTBEAT_MIN_GAP_S = 5.0
+
+
 def run_event_log_indexer_loop(
     *,
     fetchers: Mapping[int, LogFetcher],
@@ -1338,26 +2305,184 @@ def run_event_log_indexer_loop(
     block_hash_fetchers: Mapping[int, BlockHashFetcher],
     interval: float = DEFAULT_INTERVAL_S,
     stop_event: Event | None = None,
+    engine: str | None = None,
 ) -> None:
-    """Run the durable event-log indexer as two decoupled jobs.
+    """Run the durable event-log indexer.
 
-    * Backfill (enroll + scan) on its own thread, each pass bounded by a window budget so busy authorities backfill
-    across passes.
-    * Reconcile + heartbeat every ``interval`` on this loop, so deferred capabilities self-heal promptly and the fleet
-    view stays live regardless of scan duration.
+    * With the paged engine, two scan threads: a cold thread (enrolment, then cold groups within a pass budget) and a
+    warm thread sweeping every ``interval`` regardless of cold load. Each has its own session; a shared claim set keeps
+    them off the same group, and correctness rests on the per-page position check, not on that set.
+    * With the legacy engine, one backfill thread runs both, as before.
+    * This loop reconciles and beats every ``interval``; scan threads also refresh the heartbeat as pages commit.
 
-    The thread publishes its last scan summary for the heartbeat.
+    Both scan threads are joined before returning, so the caller's process singleton outlives every commit.
     """
-    # New threads start with an empty context, so bind here and again in the thread.
+    engine = _resolve_engine(engine)
+    # New threads start with an empty context, so bind here and again in each thread.
     with bind_trace_context(worker_id=WORKER_ID):
-        logger.info("starting event log indexer loop interval=%ss", interval)
+        logger.info("starting event log indexer loop interval=%ss engine=%s", interval, engine)
         stop_event = stop_event or Event()
+        claims = GroupClaims()
 
         state_lock = Lock()
-        published: dict[str, Any] = {"summary": ScanSummary(), "enrolled": 0, "status": "running"}
+        published: dict[str, Any] = {
+            "cold": ScanSummary(),
+            "warm": ScanSummary(),
+            "enrolled": 0,
+            "status": {"cold": "running", "warm": "running"},
+            "warm_max_lag_blocks": {},
+            # The last completed pass's stalls per lane, so a pass in progress doesn't read as healthy.
+            "stalled": {"cold": 0, "warm": 0},
+            "triad": (0, 0),
+            "reconcile": (0, 0),
+            "last_beat": 0.0,
+        }
+        threads: list[Thread] = []
 
-        def backfill_loop() -> None:
+        def beat() -> None:
+            with state_lock:
+                cold: ScanSummary = published["cold"]
+                warm: ScanSummary = published["warm"]
+                enrolled = published["enrolled"]
+                statuses = dict(published["status"])
+                warm_max_lag_blocks = dict(published["warm_max_lag_blocks"])
+                stalled_cursors = sum(
+                    max(published["stalled"][lane], published[lane].stalled_cursors) for lane in ("cold", "warm")
+                )
+                caught_up_cursors, total_cursors = published["triad"]
+                reenqueued, drift_reenqueued = published["reconcile"]
+                published["last_beat"] = time.monotonic()
+            status = (
+                "error"
+                if "error" in statuses.values()
+                else "degraded"
+                if "degraded" in statuses.values()
+                else "running"
+            )
+            # The threads catch per-pass errors, so a dead one is a fatal stall.
+            dead = [t.name for t in threads if not t.is_alive()]
+            if dead and not stop_event.is_set():
+                status = "error"
+                logger.error(
+                    "event log indexer scan thread is not alive; indexing has stalled", extra={"threads": dead}
+                )
+            record_heartbeat(
+                HEARTBEAT_EVENT_INDEXER,
+                status=status,
+                detail={
+                    "enrolled_last_pass": enrolled,
+                    "inserted_last_pass": cold.inserted + warm.inserted,
+                    "windows_scanned": cold.windows_scanned + warm.windows_scanned,
+                    "caught_up_cursors": caught_up_cursors,
+                    "total_cursors": total_cursors,
+                    "pending_cursors": max(0, total_cursors - caught_up_cursors),
+                    "deferred_reenqueued_last_pass": reenqueued,
+                    "role_drift_reenqueued_last_pass": drift_reenqueued,
+                    "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
+                    "stalled_cursors": stalled_cursors,
+                },
+            )
+
+        def progress(lane: str) -> Callable[[ScanSummary], None]:
+            def publish(summary: ScanSummary) -> None:
+                with state_lock:
+                    published[lane] = summary
+                    due = time.monotonic() - published["last_beat"] >= _HEARTBEAT_MIN_GAP_S
+                if due:
+                    beat()
+
+            return publish
+
+        def publish_pass(lane: str, summary: ScanSummary, status: str, enrolled: int | None = None) -> None:
+            with state_lock:
+                published[lane] = summary
+                published["stalled"][lane] = summary.stalled_cursors
+                published["status"][lane] = status
+                if enrolled is not None:
+                    published["enrolled"] = enrolled
+                if lane == "warm":
+                    published["warm_max_lag_blocks"] = dict(summary.warm_max_lag_blocks)
+
+        def enroll(session: Session) -> int:
+            with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
+                from services.resolution.indexer_scheduler import drain_enrollment
+
+                enrolled = drain_enrollment(
+                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
+                )
+                ph["enrolled"] = enrolled
+            return enrolled
+
+        def scan(session: Session, mode: Literal["warm", "cold"]) -> ScanSummary:
+            return scan_enrolled_events(
+                session,
+                fetchers=fetchers,
+                head_fetchers=head_fetchers,
+                block_hash_fetchers=block_hash_fetchers,
+                stop_event=stop_event,
+                scan_mode=mode,
+                on_commit=progress(mode),
+                engine=engine,
+                claims=claims,
+            )
+
+        def log_pass(summary: ScanSummary, status: str, enrolled: int, scan_mode: str) -> None:
+            # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is visible.
+            logger.info(
+                "event log indexer pass complete",
+                extra={
+                    "scan_mode": scan_mode,
+                    "enrolled": enrolled,
+                    "inserted": summary.inserted,
+                    "windows_scanned": summary.windows_scanned,
+                    "caught_up_cursors": summary.caught_up_cursors,
+                    "total_cursors": summary.total_cursors,
+                    "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
+                    "budget_exhausted": summary.budget_exhausted,
+                    "failed_groups": summary.failed_groups,
+                    "status": status,
+                },
+            )
+
+        def cold_loop() -> None:
             # ``threading.Thread`` doesn't inherit context.
+            with bind_trace_context(worker_id=WORKER_ID):
+                while not stop_event.is_set():
+                    enrolled = 0
+                    summary = ScanSummary()
+                    status = "running"
+                    try:
+                        with SessionLocal() as session:
+                            enrolled = enroll(session)
+                            with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
+                                summary = scan(session, "cold")
+                                ph["windows_scanned"] = summary.windows_scanned
+                                ph["inserted"] = summary.inserted
+                    except Exception:
+                        logger.exception("event log indexer backfill pass failed")
+                        status = "error"
+                    status = _heartbeat_status_for_pass(status, summary)
+                    log_pass(summary, status, enrolled, "cold")
+                    publish_pass("cold", summary, status, enrolled)
+                    # Only unfinished history uses the short pause.
+                    stop_event.wait(DEFAULT_BACKFILL_BUSY_INTERVAL_S if summary.budget_exhausted else interval)
+
+        def warm_loop() -> None:
+            with bind_trace_context(worker_id=WORKER_ID):
+                while not stop_event.is_set():
+                    started = time.monotonic()
+                    summary = ScanSummary()
+                    status = "running"
+                    try:
+                        with SessionLocal() as session:
+                            summary = scan(session, "warm")
+                    except Exception:
+                        logger.exception("event log indexer warm sweep failed")
+                        status = "error"
+                    publish_pass("warm", summary, _heartbeat_status_for_pass(status, summary))
+                    stop_event.wait(max(0.0, interval - (time.monotonic() - started)))
+
+        def legacy_loop() -> None:
             with bind_trace_context(worker_id=WORKER_ID):
                 next_warm_at = 0.0
                 cold_pending = True
@@ -1367,36 +2492,17 @@ def run_event_log_indexer_loop(
                     status = "running"
                     try:
                         with SessionLocal() as session:
-                            with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                                from services.resolution.indexer_scheduler import drain_enrollment
-
-                                enrolled = drain_enrollment(
-                                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
-                                )
-                                ph["enrolled"] = enrolled
+                            enrolled = enroll(session)
                             with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                                 warm_due = time.monotonic() >= next_warm_at
                                 warm_summary = ScanSummary()
                                 if warm_due:
-                                    warm_summary = scan_enrolled_events(
-                                        session,
-                                        fetchers=fetchers,
-                                        head_fetchers=head_fetchers,
-                                        block_hash_fetchers=block_hash_fetchers,
-                                        stop_event=stop_event,
-                                        scan_mode="warm",
-                                    )
+                                    warm_summary = scan(session, "warm")
+                                    publish_pass("warm", warm_summary, "running")
                                     next_warm_at = time.monotonic() + interval
                                 cold_summary = ScanSummary()
                                 if cold_pending or warm_due or enrolled:
-                                    cold_summary = scan_enrolled_events(
-                                        session,
-                                        fetchers=fetchers,
-                                        head_fetchers=head_fetchers,
-                                        block_hash_fetchers=block_hash_fetchers,
-                                        stop_event=stop_event,
-                                        scan_mode="cold",
-                                    )
+                                    cold_summary = scan(session, "cold")
                                     cold_pending = cold_summary.budget_exhausted
                                 summary = ScanSummary(
                                     inserted=warm_summary.inserted + cold_summary.inserted,
@@ -1405,34 +2511,16 @@ def run_event_log_indexer_loop(
                                     total_cursors=max(warm_summary.total_cursors, cold_summary.total_cursors),
                                     budget_exhausted=cold_pending,
                                     failed_groups=warm_summary.failed_groups + cold_summary.failed_groups,
+                                    stalled_cursors=warm_summary.stalled_cursors + cold_summary.stalled_cursors,
                                 )
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
-                    # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is
-                    # visible.
                     status = _heartbeat_status_for_pass(status, summary)
-                    logger.info(
-                        "event log indexer pass complete",
-                        extra={
-                            "enrolled": enrolled,
-                            "inserted": summary.inserted,
-                            "windows_scanned": summary.windows_scanned,
-                            "caught_up_cursors": summary.caught_up_cursors,
-                            "total_cursors": summary.total_cursors,
-                            "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
-                            "budget_exhausted": summary.budget_exhausted,
-                            "failed_groups": summary.failed_groups,
-                            "status": status,
-                        },
-                    )
-                    with state_lock:
-                        published["summary"] = summary
-                        published["enrolled"] = enrolled
-                        published["status"] = status
-                    # Only unfinished history uses the short pause.
+                    log_pass(summary, status, enrolled, "all")
+                    publish_pass("cold", summary, status, enrolled)
                     backfill_wait = (
                         min(DEFAULT_BACKFILL_BUSY_INTERVAL_S, max(0.0, next_warm_at - time.monotonic()))
                         if cold_pending
@@ -1440,8 +2528,13 @@ def run_event_log_indexer_loop(
                     )
                     stop_event.wait(backfill_wait)
 
-        backfill = Thread(target=backfill_loop, name="event-indexer-backfill", daemon=True)
-        backfill.start()
+        if engine == "paged":
+            threads.append(Thread(target=cold_loop, name="event-indexer-backfill", daemon=True))
+            threads.append(Thread(target=warm_loop, name="event-indexer-warm", daemon=True))
+        else:
+            threads.append(Thread(target=legacy_loop, name="event-indexer-backfill", daemon=True))
+        for thread in threads:
+            thread.start()
 
         try:
             while not stop_event.is_set():
@@ -1464,47 +2557,30 @@ def run_event_log_indexer_loop(
                         )
                 except Exception:
                     logger.exception("deferred-resolution reconcile pass failed")
-                # Read the triad from the table independently of the backfill thread, in its own session so a failure
+                # Read the triad from the table independently of the scan threads, in its own session so a failure
                 # doesn't blank the heartbeat.
-                caught_up_cursors = 0
-                total_cursors = 0
+                triad = (0, 0)
                 try:
                     with SessionLocal() as session:
-                        caught_up_cursors, total_cursors = _cursor_progress(session)
+                        triad = _cursor_progress(session)
                 except Exception:
                     logger.exception("event log indexer cursor-progress count failed")
                 with state_lock:
-                    summary = published["summary"]
-                    enrolled = published["enrolled"]
-                    status = published["status"]
-                # The thread catches per-pass errors, so a dead thread is a fatal stall.
-                if not backfill.is_alive() and not stop_event.is_set():
-                    status = "error"
-                    logger.error("event log indexer backfill thread is not alive; indexing has stalled")
-                # Triad from the live table; windows_scanned/inserted from the last summary.
-                record_heartbeat(
-                    HEARTBEAT_EVENT_INDEXER,
-                    status=status,
-                    detail={
-                        "enrolled_last_pass": enrolled,
-                        "inserted_last_pass": summary.inserted,
-                        "windows_scanned": summary.windows_scanned,
-                        "caught_up_cursors": caught_up_cursors,
-                        "total_cursors": total_cursors,
-                        "pending_cursors": max(0, total_cursors - caught_up_cursors),
-                        "deferred_reenqueued_last_pass": reenqueued,
-                        "role_drift_reenqueued_last_pass": drift_reenqueued,
-                    },
-                )
+                    published["triad"] = triad
+                    published["reconcile"] = (reenqueued, drift_reenqueued)
+                beat()
                 stop_event.wait(interval)
         finally:
             stop_event.set()
             # Don't release the singleton while a scan can commit.
-            backfill.join()
+            for thread in threads:
+                thread.join()
 
 
 def _build_indexer_fetchers(
     chains: Sequence[ChainInfo] | None = None,
+    *,
+    engine: str | None = None,
 ) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
     """Per-chain fetchers for the scan loop.
 
@@ -1523,6 +2599,8 @@ def _build_indexer_fetchers(
     registry_chains = all_chains() if chains is None else chains
     # Only the indexer persists per-window counts, so only it applies the result cap.
     result_cap = default_result_cap()
+    # The long timeout lets a wide window return whole, so it is only safe with the paged engine's page ceiling.
+    timeout = settings.GETLOGS_TIMEOUT_S if _resolve_engine(engine) == "paged" else None
     fetchers: dict[int, LogFetcher] = {}
     head_fetchers: dict[int, HeadBlockFetcher] = {}
     block_hash_fetchers: dict[int, BlockHashFetcher] = {}
@@ -1530,7 +2608,9 @@ def _build_indexer_fetchers(
         if info.hypersync_url is None:
             continue
         rpc_url = require_rpc_url(chain_id=info.chain_id)
-        fetchers[info.chain_id] = RpcEventLogFetcher(rpc_url, chain_id=info.chain_id, result_cap=result_cap)
+        fetchers[info.chain_id] = RpcEventLogFetcher(
+            rpc_url, chain_id=info.chain_id, result_cap=result_cap, timeout=timeout, keep_raw=False, strict=True
+        )
         head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url, chain_id=info.chain_id)
         block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url, chain_id=info.chain_id)
     return fetchers, head_fetchers, block_hash_fetchers
@@ -1555,8 +2635,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
+    engine = _resolve_engine(None)
+    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(engine=engine)
     run_event_log_indexer_loop(
+        engine=engine,
         fetchers=fetchers,
         head_fetchers=head_fetchers,
         block_hash_fetchers=block_hash_fetchers,

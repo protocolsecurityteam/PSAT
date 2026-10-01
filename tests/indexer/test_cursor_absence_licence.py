@@ -42,6 +42,7 @@ from services.resolution.repos.event_logs_rpc import (
 from tests.conftest import requires_postgres
 from workers.event_log_indexer import (
     _ALL_ROLE_STORE_TOPIC0S,
+    PageLimits,
     _authority_has_role_store_cursor,
     _witness_seed_block,
     enroll_event_cursor,
@@ -656,11 +657,10 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
         db_session,
         chain_id=1,
         event_address=_ADDR,
-        topics=[_TOPIC_DENY_TO],
         fetcher=_BadFetcher(),
         target=_SEED + 5_000,
         block_hash_fetcher=_NoHash(),
-        max_block_span=1_000,
+        limits=PageLimits(max_block_span=1_000),
     ):
         db_session.commit()
     cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
@@ -671,7 +671,7 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
 
 
 def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
-    """R8. ``_fetch_range`` is shared with the monitoring watcher, which must keep returning pages, not
+    """R8. ``iter_pages`` is shared with the monitoring watcher, which must keep returning pages, not
     bisect-and-raise."""
     monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "50000")
     assert default_result_cap() == 50_000
@@ -806,11 +806,10 @@ def test_advancing_records_page_stats_or_downgrades(db_session, fetcher, expecte
         db_session,
         chain_id=1,
         event_address=_ADDR,
-        topics=[_TOPIC_DENY_TO],
         fetcher=fetcher,
         target=_SEED + 5_000,
         block_hash_fetcher=_NoHash(),
-        max_block_span=1_000,
+        limits=PageLimits(max_block_span=1_000),
     ):
         db_session.commit()
     cursor = _row(db_session, topic0=_TOPIC_DENY_TO)

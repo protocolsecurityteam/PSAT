@@ -28,7 +28,7 @@ from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from ..event_tail import scan_event_tail
-from ..repos.event_logs_pg import _cursor_covers_block
+from ..repos.event_logs_pg import UNDECODABLE_EVENT_DATA, UndecodableEventRow, _cursor_covers_block
 from ..role_store_standards import (
     GetterSpec,
     RoleStoreStandard,
@@ -160,6 +160,8 @@ class EnumerableRoleStoreAdapter:
                 durable = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s, block=cursor_block)
                 rows = [*durable, *scan.logs]
                 scan_window = scan.trace_fields()
+        except UndecodableEventRow:
+            return _check_only(authority, callee_selector, [UNDECODABLE_EVENT_DATA])
         except Exception:
             return _check_only(authority, callee_selector, ["event_log_backend_error"])
         if not rows:
