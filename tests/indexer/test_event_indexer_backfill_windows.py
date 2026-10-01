@@ -423,7 +423,8 @@ def test_warm_sweep_covers_more_than_backfill_budget_without_busy_repeats(sessio
         scan_mode="warm",
         max_windows_per_pass=100,
     )
-    assert warm.windows_scanned == 182
+    # Batched: ceil(182 / 50) requests cover every warm group.
+    assert warm.windows_scanned == 4
     assert not warm.budget_exhausted
     assert all(_cursor_block(session, address) == _TARGET for address in addresses)
     assert _cursor_block(session, cold_address) == 0
@@ -441,7 +442,7 @@ def test_warm_sweep_covers_more_than_backfill_budget_without_busy_repeats(sessio
     assert cold.windows_scanned == 2
     assert cold.budget_exhausted
     assert _cursor_block(session, cold_address) == 2 * _MAX_SAFE_SPAN
-    assert len(fetcher.requested_spans) == 184
+    assert len(fetcher.requested_spans) == 6
 
 
 @requires_postgres

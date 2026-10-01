@@ -236,7 +236,6 @@ class GroupStepResult:
     members_at_target: int  # cursors of this group at/past the confirmed head after the step
     group_complete: bool  # every member caught up — nothing left to scan this pass
     fetched: bool  # False for the no-fetch visit of an all-warm group
-    frontier: int | None = None  # lowest member position after the step
     page_logs: int = 0  # logs the fetched page returned (first prefix of a page only)
     rejected_pages: int = 0  # requests refused or discarded before the page was accepted
 
@@ -556,7 +555,6 @@ def _legacy_group_steps(
             members_at_target=len(cursors),
             group_complete=True,
             fetched=False,
-            frontier=min(int(c.last_indexed_block or 0) for c in cursors),
         )
         return
 
@@ -634,7 +632,6 @@ def _legacy_group_steps(
             members_at_target=members_at_target,
             group_complete=members_at_target == len(cursors),
             fetched=prefix_start == start,
-            frontier=min(int(c.last_indexed_block or 0) for c in cursors),
             page_logs=len(logs) if prefix_start == start else 0,
         )
         prefix_start = prefix_end + 1
@@ -992,7 +989,6 @@ def run_plan(
             members_at_target=len(cursors),
             group_complete=True,
             fetched=False,
-            frontier=min(int(c.last_indexed_block or 0) for c in cursors),
         )
         return
 
@@ -1099,7 +1095,6 @@ def run_plan(
                     members_at_target=members_at_target,
                     group_complete=members_at_target == len(cursors),
                     fetched=index == 0,
-                    frontier=min(last for _a, _t, last, _h in expected),
                     page_logs=len(logs) if index == 0 else 0,
                     rejected_pages=page.rejected if index == 0 else 0,
                 )
@@ -1232,10 +1227,7 @@ def scan_enrolled_events(
         (_chain_id, address), entry = item
         return (0 if entry["never_advanced"] else 1, 0 if entry["hint"] else 1, min(entry["runs"]), address)
 
-    inserted = 0
-    windows_scanned = 0
-    caught_up_cursors = 0
-    failed_groups = 0
+    state = _PassState(total_cursors=len(rows), on_commit=on_commit, stop_event=stop_event)
     pass_budget = max(1, max_windows_per_pass)
     # One confirmed-head target and hash memo per pass.
     targets: dict[int, int] = {}
@@ -1246,11 +1238,7 @@ def scan_enrolled_events(
             if chain_id in targets or chain_id in head_failed_chains or chain_id not in head_fetchers:
                 continue
             try:
-                depth = chain_by_id(chain_id).confirmation_depth
-            except UnknownChainError:
-                depth = confirmation_depth
-            try:
-                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - depth)
+                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - _depth(chain_id, confirmation_depth))
             except Exception as exc:
                 head_failed_chains.add(chain_id)
                 logger.warning(
@@ -1261,7 +1249,7 @@ def scan_enrolled_events(
                         "exc_msg": sanitize_string(str(exc))[:200],
                     },
                 )
-        failed_groups += sum(chain_id in head_failed_chains for chain_id, _address in groups)
+        state.failed_groups += sum(chain_id in head_failed_chains for chain_id, _address in groups)
         groups = {
             key: entry
             for key, entry in groups.items()
@@ -1277,171 +1265,150 @@ def scan_enrolled_events(
             if engine == "legacy":
                 max_windows_per_cursor = 1
     pass_deadline = None if scan_mode == "warm" else pass_started + pass_budget_s
-    stopped_short = False
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
-    warm_lag: dict[int, int] = {}
-    # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
-    skipped_chains: set[int] = set()
-    for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
-        if stop_event is not None and stop_event.is_set():
-            break
-        # Stop at the per-pass budget; unserviced groups keep their older last_run_at and go first next pass. Without
-        # this a cold pass runs for tens of minutes and the heartbeat goes stale.
-        if windows_scanned >= pass_budget:
-            break
-        if engine == "paged" and pass_deadline is not None and _monotonic() >= pass_deadline:
-            stopped_short = True
-            break
-        fetcher = fetchers.get(chain_id)
-        head_fetcher = head_fetchers.get(chain_id)
-        block_hash_fetcher = block_hash_fetchers.get(chain_id)
-        if fetcher is None or head_fetcher is None or block_hash_fetcher is None:
-            if chain_id not in skipped_chains:
-                skipped_chains.add(chain_id)
-                logger.warning(
-                    "event indexer has no fetcher for chain; its enrolled cursors are not being "
-                    "advanced this pass (indexer disabled for this chain, or its hypersync_url is unset)",
-                    extra={"chain_id": chain_id},
-                )
-            continue
-        # Per-chain finality depth; mainnet is 12, and the passed-in depth is the fallback for unregistered
-        # chains.
-        try:
-            chain_confirmation_depth = chain_by_id(chain_id).confirmation_depth
-        except UnknownChainError:
-            chain_confirmation_depth = confirmation_depth
-        # Several windows per group, capped per group and by the global budget; commit complete block prefixes so
-        # partial progress survives a later failure.
-        group_members_at_target = 0
+    base_limits = page_limits or PageLimits(max_block_span=max_block_span)
+    writes = _WriteSizes(insert_batch_size, write_max_rows, write_max_bytes)
+
+    def visit_group(chain_id: int, event_address: str, topics: list[str]) -> None:
+        """One group: the paged engine streams it under the time budgets; the legacy engine fetches whole windows."""
         visit = _GroupVisit(chain_id=chain_id, event_address=event_address)
         claim = [(chain_id, event_address)]
         if claims is not None and not claims.claim(claim):
-            stopped_short = True
-            continue
+            state.stopped_short = True
+            return
+        members_at_target = 0
         try:
+            depth = _depth(chain_id, confirmation_depth)
             if chain_id not in targets:
-                targets[chain_id] = max(0, head_fetcher.head_block() - chain_confirmation_depth)
+                targets[chain_id] = max(0, head_fetchers[chain_id].head_block() - depth)
             if engine == "paged":
                 deadline = _monotonic() + group_budget_s
                 if pass_deadline is not None:
                     deadline = min(deadline, pass_deadline)
                 limits = dataclasses.replace(
-                    page_limits or PageLimits(max_block_span=max_block_span),
-                    max_pages=max(1, min(max_windows_per_cursor, pass_budget - windows_scanned)),
+                    base_limits,
+                    max_pages=max(1, min(max_windows_per_cursor, pass_budget - state.windows_scanned)),
                     deadline=deadline,
                 )
-                group_complete = False
-                for result in index_event_group_steps(
+                steps = index_event_group_steps(
                     session,
                     chain_id=chain_id,
                     event_address=event_address,
-                    fetcher=fetcher,
+                    fetcher=fetchers[chain_id],
                     target=targets[chain_id],
-                    block_hash_fetcher=block_hash_fetcher,
+                    block_hash_fetcher=block_hash_fetchers[chain_id],
                     block_hash_memo=block_hash_memo,
-                    confirmation_depth=chain_confirmation_depth,
+                    confirmation_depth=depth,
                     limits=limits,
-                    insert_batch_size=insert_batch_size,
-                    write_max_rows=write_max_rows,
-                    write_max_bytes=write_max_bytes,
+                    insert_batch_size=writes.insert_batch_size,
+                    write_max_rows=writes.max_rows,
+                    write_max_bytes=writes.max_bytes,
                     stop_event=stop_event,
-                ):
-                    session.commit()
-                    inserted += result.inserted
-                    windows_scanned += int(result.fetched)
-                    group_members_at_target = result.members_at_target
-                    group_complete = result.group_complete
-                    visit.record(result)
-                    if on_commit is not None:
-                        on_commit(
-                            ScanSummary(
-                                inserted=inserted,
-                                windows_scanned=windows_scanned,
-                                caught_up_cursors=caught_up_cursors + group_members_at_target,
-                                total_cursors=len(rows),
-                                failed_groups=failed_groups,
-                            )
-                        )
-                    if stop_event is not None and stop_event.is_set():
-                        break
-                stopped_short |= not group_complete
-            if engine == "legacy":
+                )
+                group_complete, members_at_target = state.drive(session, steps, visit)
+                state.stopped_short |= not group_complete
+            else:
                 for _ in range(max(1, max_windows_per_cursor)):
-                    if stop_event is not None and stop_event.is_set():
+                    if state.stopping() or state.windows_scanned >= pass_budget:
                         break
-                    if windows_scanned >= pass_budget:
-                        break
-                    group_complete = False
-                    for result in _legacy_group_steps(
+                    steps = _legacy_group_steps(
                         session,
                         chain_id=chain_id,
                         event_address=event_address,
-                        topics=sorted(entry["topics"]),
-                        fetcher=fetcher,
+                        topics=topics,
+                        fetcher=fetchers[chain_id],
                         target=targets[chain_id],
-                        block_hash_fetcher=block_hash_fetcher,
+                        block_hash_fetcher=block_hash_fetchers[chain_id],
                         block_hash_memo=block_hash_memo,
-                        confirmation_depth=chain_confirmation_depth,
+                        confirmation_depth=depth,
                         max_block_span=max_block_span,
-                        insert_batch_size=insert_batch_size,
-                        write_max_rows=write_max_rows,
-                        write_max_bytes=write_max_bytes,
-                    ):
-                        session.commit()
-                        inserted += result.inserted
-                        windows_scanned += int(result.fetched)
-                        group_members_at_target = result.members_at_target
-                        group_complete = result.group_complete
-                        visit.record(result)
-                        if on_commit is not None:
-                            on_commit(
-                                ScanSummary(
-                                    inserted=inserted,
-                                    windows_scanned=windows_scanned,
-                                    caught_up_cursors=caught_up_cursors + group_members_at_target,
-                                    total_cursors=len(rows),
-                                    failed_groups=failed_groups,
-                                )
-                            )
-                        if stop_event is not None and stop_event.is_set():
-                            break
+                        insert_batch_size=writes.insert_batch_size,
+                        write_max_rows=writes.max_rows,
+                        write_max_bytes=writes.max_bytes,
+                    )
+                    group_complete, members_at_target = state.drive(session, steps, visit)
                     if group_complete:
                         break
-        except CursorsMoved:
-            # Another writer moved a member between plan and write; nothing was written and the next visit refetches.
-            session.rollback()
-            stopped_short = True
-            logger.info(
-                "event indexer page discarded: cursor positions moved since planning",
-                extra={"chain_id": chain_id, "event_address": event_address},
-            )
         except Exception as exc:
-            session.rollback()
-            failed_groups += 1
-            # Swallowed and continued. WARNING with exc_type, not logger.exception (an outage once produced thousands of
-            # ERROR tracebacks); ``failed_groups`` carries the aggregate.
-            logger.warning(
-                "event indexer group scan failed; continuing to next group",
-                extra={
-                    "chain_id": chain_id,
-                    "event_address": event_address,
-                    "topics": sorted(entry["topics"]),
-                    "exc_type": type(exc).__name__,
-                    # Sanitized (URLs scrubbed) and truncated so the error stays attributable.
-                    "exc_msg": sanitize_string(str(exc))[:200],
-                },
-            )
+            state.discard(session, exc, chain_id=chain_id, addresses=[event_address], topics=topics)
         finally:
             if claims is not None:
                 claims.release(claim)
-        caught_up_cursors += group_members_at_target
-        if scan_mode == "warm" and chain_id in targets:
-            frontier = visit.frontier if visit.frontier is not None else min(entry["last_blocks"])
-            warm_lag[chain_id] = max(warm_lag.get(chain_id, 0), max(0, targets[chain_id] - frontier))
-        elif visit.pages:
+        state.caught_up_cursors += members_at_target
+        if visit.pages and scan_mode != "warm":
             visit.log(scan_mode)
+
+    # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
+    skipped_chains: set[int] = set()
+
+    def runnable(chain_id: int) -> bool:
+        if chain_id in fetchers and chain_id in head_fetchers and chain_id in block_hash_fetchers:
+            return True
+        if chain_id not in skipped_chains:
+            skipped_chains.add(chain_id)
+            logger.warning(
+                "event indexer has no fetcher for chain; its enrolled cursors are not being "
+                "advanced this pass (indexer disabled for this chain, or its hypersync_url is unset)",
+                extra={"chain_id": chain_id},
+            )
+        return False
+
+    sweep_started = _monotonic()
+    if scan_mode == "warm" and engine == "paged":
+        by_chain: dict[int, list[str]] = {}
+        for chain_id, event_address in sorted(groups):
+            if runnable(chain_id):
+                by_chain.setdefault(chain_id, []).append(event_address)
+        for chain_id, addresses in by_chain.items():
+            if state.stopping():
+                break
+            _warm_sweep_chain(
+                session,
+                state,
+                chain_id=chain_id,
+                addresses=addresses,
+                target=targets[chain_id],
+                fetcher=fetchers[chain_id],
+                block_hash_fetcher=block_hash_fetchers[chain_id],
+                block_hash_memo=block_hash_memo,
+                confirmation_depth=_depth(chain_id, confirmation_depth),
+                limits=dataclasses.replace(base_limits, deadline=_monotonic() + group_budget_s),
+                writes=writes,
+                claims=claims,
+                visit_single=lambda address, chain_id=chain_id: visit_group(
+                    chain_id, address, sorted(groups[(chain_id, address)]["topics"])
+                ),
+            )
+    else:
+        for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
+            if state.stopping():
+                break
+            # Stop at the per-pass budget; unserviced groups keep their older last_run_at and go first next pass.
+            # Without this a cold pass runs for tens of minutes and the heartbeat goes stale.
+            if state.windows_scanned >= pass_budget:
+                break
+            if engine == "paged" and pass_deadline is not None and _monotonic() >= pass_deadline:
+                state.stopped_short = True
+                break
+            if runnable(chain_id):
+                visit_group(chain_id, event_address, sorted(entry["topics"]))
+    warm_lag: dict[int, int] = {}
+    if scan_mode == "warm":
+        warm_lag = _warm_lag(session, groups, targets)
+        logger.info(
+            "event indexer warm sweep",
+            extra={
+                "engine": engine,
+                "groups": len(groups),
+                "pages": state.windows_scanned,
+                "inserted": state.inserted,
+                "failed_groups": state.failed_groups,
+                "max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_lag.items())},
+                "duration_s": round(_monotonic() - sweep_started, 3),
+            },
+        )
     pending_at_budget = False
-    if windows_scanned >= pass_budget or (engine == "paged" and stopped_short):
+    if state.windows_scanned >= pass_budget or (engine == "paged" and state.stopped_short):
         for chain_id, target in targets.items():
             addresses = [address for (cid, address) in groups if cid == chain_id]
             query = (
@@ -1465,15 +1432,294 @@ def scan_enrolled_events(
             chain not in targets and chain in fetchers and chain in head_fetchers and chain in block_hash_fetchers
             for chain, _address in groups
         )
+    _end_transaction(session)
     return ScanSummary(
-        inserted=inserted,
-        windows_scanned=windows_scanned,
-        caught_up_cursors=caught_up_cursors,
+        inserted=state.inserted,
+        windows_scanned=state.windows_scanned,
+        caught_up_cursors=state.caught_up_cursors,
         total_cursors=len(rows),
         budget_exhausted=pending_at_budget,
-        failed_groups=failed_groups,
+        failed_groups=state.failed_groups,
         warm_max_lag_blocks=warm_lag,
     )
+
+
+def _depth(chain_id: int, fallback: int) -> int:
+    """Per-chain finality depth; mainnet is 12, and the passed-in depth is the fallback for unregistered chains."""
+    try:
+        return chain_by_id(chain_id).confirmation_depth
+    except UnknownChainError:
+        return fallback
+
+
+@dataclass(frozen=True)
+class _WriteSizes:
+    insert_batch_size: int
+    max_rows: int
+    max_bytes: int
+
+
+@dataclass
+class _PassState:
+    """Running totals for one scan pass, and how each visit's steps are committed and accounted."""
+
+    total_cursors: int
+    on_commit: Callable[[ScanSummary], None] | None
+    stop_event: Event | None
+    inserted: int = 0
+    windows_scanned: int = 0
+    caught_up_cursors: int = 0
+    failed_groups: int = 0
+    stopped_short: bool = False
+
+    def stopping(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def drive(self, session: Session, steps: Iterator[GroupStepResult], visit: _GroupVisit) -> tuple[bool, int]:
+        """Commit each yielded prefix; return whether the group finished and how many members reached the target."""
+        group_complete = False
+        members_at_target = 0
+        for result in steps:
+            session.commit()
+            self.inserted += result.inserted
+            self.windows_scanned += int(result.fetched)
+            members_at_target = result.members_at_target
+            group_complete = result.group_complete
+            visit.record(result)
+            if self.on_commit is not None:
+                self.on_commit(
+                    ScanSummary(
+                        inserted=self.inserted,
+                        windows_scanned=self.windows_scanned,
+                        caught_up_cursors=self.caught_up_cursors + members_at_target,
+                        total_cursors=self.total_cursors,
+                        failed_groups=self.failed_groups,
+                    )
+                )
+            if self.stopping():
+                break
+        return group_complete, members_at_target
+
+    def discard(
+        self, session: Session, exc: Exception, *, chain_id: int, addresses: Sequence[str], topics: Sequence[str]
+    ) -> None:
+        session.rollback()
+        if isinstance(exc, CursorsMoved):
+            # Another writer moved a member between plan and write; nothing was written and the next visit refetches.
+            self.stopped_short = True
+            logger.info(
+                "event indexer page discarded: cursor positions moved since planning",
+                extra={"chain_id": chain_id, "event_address": addresses[0] if len(addresses) == 1 else None},
+            )
+            return
+        self.failed_groups += len(addresses)
+        # Swallowed and continued. WARNING with exc_type, not logger.exception (an outage once produced thousands of
+        # ERROR tracebacks); ``failed_groups`` carries the aggregate.
+        logger.warning(
+            "event indexer group scan failed; continuing to next group",
+            extra={
+                "chain_id": chain_id,
+                "event_address": addresses[0] if len(addresses) == 1 else None,
+                "addresses": len(addresses),
+                "topics": list(topics),
+                "exc_type": type(exc).__name__,
+                # Sanitized (URLs scrubbed) and truncated so the error stays attributable.
+                "exc_msg": sanitize_string(str(exc))[:200],
+            },
+        )
+
+
+def _hash_reader(
+    session: Session,
+    chain_id: int,
+    block_hash_fetcher: BlockHashFetcher,
+    memo: MutableMapping[tuple[int, int], bytes | None],
+) -> Callable[[int], bytes | None]:
+    def hash_at(block: int) -> bytes | None:
+        key = (chain_id, block)
+        if key not in memo:
+            _end_transaction(session)
+            memo[key] = block_hash_fetcher.block_hash(block)
+        return memo[key]
+
+    return hash_at
+
+
+def _warm_sweep_chain(
+    session: Session,
+    state: _PassState,
+    *,
+    chain_id: int,
+    addresses: Sequence[str],
+    target: int,
+    fetcher: LogFetcher,
+    block_hash_fetcher: BlockHashFetcher,
+    block_hash_memo: MutableMapping[tuple[int, int], bytes | None],
+    confirmation_depth: int,
+    limits: PageLimits,
+    writes: _WriteSizes,
+    claims: GroupClaims | None,
+    visit_single: Callable[[str], None],
+    batch_addresses: int | None = None,
+    batch_max_lag: int | None = None,
+) -> None:
+    """Advance one chain's warm groups, up to ``WARM_BATCH_ADDRESSES`` per ``eth_getLogs``.
+
+    A group with a pending rewind, or lagging past ``WARM_BATCH_MAX_LAG``, takes the single-group path first: a batch
+    planned across a rewind could advance a cursor over rows just deleted.
+    """
+    batch_size = max(1, batch_addresses if batch_addresses is not None else settings.WARM_BATCH_ADDRESSES)
+    max_lag = batch_max_lag if batch_max_lag is not None else settings.WARM_BATCH_MAX_LAG
+    hash_at = _hash_reader(session, chain_id, block_hash_fetcher, block_hash_memo)
+    try:
+        plan = plan_group(
+            session,
+            chain_id=chain_id,
+            addresses=addresses,
+            target=target,
+            hash_at=hash_at,
+            confirmation_depth=confirmation_depth,
+        )
+    except Exception as exc:
+        state.discard(session, exc, chain_id=chain_id, addresses=addresses, topics=[])
+        return
+    frontier: dict[str, int] = {}
+    for member in plan.members:
+        frontier[member.event_address] = min(frontier.get(member.event_address, member.last), member.last)
+    singles = [a for a in plan.addresses if a in plan.rewinds or target - frontier.get(a, target) > max_lag]
+    for address in singles:
+        if state.stopping():
+            return
+        visit_single(address)
+    batchable = [a for a in plan.addresses if a not in singles and a in frontier]
+    for offset in range(0, len(batchable), batch_size):
+        if state.stopping():
+            return
+        _sweep_batch(
+            session,
+            state,
+            chain_id=chain_id,
+            addresses=batchable[offset : offset + batch_size],
+            target=target,
+            fetcher=fetcher,
+            hash_at=hash_at,
+            memo=block_hash_memo,
+            confirmation_depth=confirmation_depth,
+            limits=limits,
+            writes=writes,
+            claims=claims,
+            visit_single=visit_single,
+        )
+
+
+def _sweep_batch(
+    session: Session,
+    state: _PassState,
+    *,
+    chain_id: int,
+    addresses: Sequence[str],
+    target: int,
+    fetcher: LogFetcher,
+    hash_at: Callable[[int], bytes | None],
+    memo: Mapping[tuple[int, int], bytes | None],
+    confirmation_depth: int,
+    limits: PageLimits,
+    writes: _WriteSizes,
+    claims: GroupClaims | None,
+    visit_single: Callable[[str], None],
+) -> None:
+    keys = [(chain_id, a) for a in addresses]
+    held = [key for key in keys if claims is None or claims.claim([key])]
+    if not held:
+        return
+    batch = [address for _chain, address in held]
+    visit = _GroupVisit(chain_id=chain_id, event_address=f"batch:{len(batch)}")
+    split: list[list[str]] = []
+    try:
+        plan = plan_group(
+            session,
+            chain_id=chain_id,
+            addresses=batch,
+            target=target,
+            hash_at=hash_at,
+            confirmation_depth=confirmation_depth,
+        )
+        if plan.rewinds:
+            rewinding = [(chain_id, address) for address in sorted(plan.rewinds)]
+            if claims is not None:
+                claims.release(rewinding)
+            held = [key for key in held if key not in rewinding]
+            for _chain, address in rewinding:
+                visit_single(address)
+            split = [[a for a in batch if a not in plan.rewinds]]
+        else:
+            steps = run_plan(
+                session,
+                plan,
+                fetcher=fetcher,
+                target=target,
+                hash_at=hash_at,
+                memo=memo,
+                limits=limits,
+                insert_batch_size=writes.insert_batch_size,
+                write_max_rows=writes.max_rows,
+                write_max_bytes=writes.max_bytes,
+                stop_event=state.stop_event,
+            )
+            _complete, members_at_target = state.drive(session, steps, visit)
+            state.caught_up_cursors += members_at_target
+    except CursorsMoved as exc:
+        state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+    except RuntimeError as exc:
+        session.rollback()
+        if len(batch) == 1:
+            state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+        else:
+            # The range is already at the bisect floor, so a rejection splits the address set.
+            logger.debug(
+                "warm batch rejected; splitting the address set",
+                extra={"chain_id": chain_id, "addresses": len(batch), "exc_type": type(exc).__name__},
+            )
+            half = len(batch) // 2
+            split = [batch[:half], batch[half:]]
+    except Exception as exc:
+        state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+    finally:
+        if claims is not None:
+            claims.release(held)
+    for part in split:
+        if part and not state.stopping():
+            _sweep_batch(
+                session,
+                state,
+                chain_id=chain_id,
+                addresses=part,
+                target=target,
+                fetcher=fetcher,
+                hash_at=hash_at,
+                memo=memo,
+                confirmation_depth=confirmation_depth,
+                limits=limits,
+                writes=writes,
+                claims=claims,
+                visit_single=visit_single,
+            )
+
+
+def _warm_lag(session: Session, groups: Mapping[tuple[int, str], Any], targets: Mapping[int, int]) -> dict[int, int]:
+    """Per chain, the largest gap between a warm group's lowest cursor and the target, read after the sweep."""
+    lag: dict[int, int] = {}
+    for chain_id in sorted({chain for chain, _address in groups if chain in targets}):
+        addresses = [address for chain, address in groups if chain == chain_id]
+        frontier = session.scalar(
+            select(func.min(IndexedEventCursor.last_indexed_block)).where(
+                IndexedEventCursor.chain_id == chain_id,
+                func.lower(IndexedEventCursor.event_address).in_(addresses),
+            )
+        )
+        lag[chain_id] = max(0, targets[chain_id] - int(frontier if frontier is not None else targets[chain_id]))
+    _end_transaction(session)
+    return lag
 
 
 @dataclass
@@ -1489,7 +1735,6 @@ class _GroupVisit:
     rejected_pages: int = 0
     logs: int = 0
     inserted: int = 0
-    frontier: int | None = None
 
     def record(self, result: GroupStepResult) -> None:
         if result.fetched:
@@ -1501,8 +1746,6 @@ class _GroupVisit:
         if result.fetched or self.pages:
             self.scanned_to = result.scanned_to
         self.inserted += result.inserted
-        if result.frontier is not None:
-            self.frontier = result.frontier
 
     def log(self, scan_mode: str) -> None:
         logger.info(

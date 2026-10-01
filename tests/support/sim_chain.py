@@ -76,9 +76,11 @@ def word(n: int) -> str:
 
 
 class SimChain:
-    def __init__(self, *, heads: dict[int, int], reject_over: int = 50_000) -> None:
+    def __init__(self, *, heads: dict[int, int], reject_over: int = 50_000, max_addresses: int | None = None) -> None:
         self.heads = dict(heads)
         self.reject_over = reject_over
+        # An upstream address-array limit; larger filters are refused.
+        self.max_addresses = max_addresses
         self.merges: list[MergeRange] = []
         self.lanes: dict[tuple[int, str], _Lane] = {}
         # Per chain: (from_block, epoch) entries; a block's hash changes with the latest entry at or below it.
@@ -173,6 +175,8 @@ class SimChain:
             "served": None,
         }
         self.getlogs.append(record)
+        if self.max_addresses is not None and len(addresses) > self.max_addresses:
+            raise RuntimeError("{'code': -32602, 'message': 'too many addresses in filter'}")
         for index, (timeout_chain, timeout_address) in enumerate(self.pending_timeouts):
             if timeout_chain == chain_id and (timeout_address is None or timeout_address in addresses):
                 del self.pending_timeouts[index]
