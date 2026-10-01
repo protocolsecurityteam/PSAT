@@ -107,7 +107,8 @@ class LogPage:
     """One accepted response over a contiguous block range.
 
     ``stats`` holds one record per accepted request behind the page (one for ``iter_pages``). ``rejected`` counts the
-    requests refused or discarded since the previous page.
+    requests refused or discarded since the previous page; ``rejected_span`` is the narrowest range the upstream itself
+    refused among them (a size limit, a query timeout), ``None`` when it refused none.
     """
 
     from_block: int
@@ -115,6 +116,7 @@ class LogPage:
     logs: list[FetchedEventLog]
     stats: tuple[FetchWindowStat, ...]
     rejected: int = 0
+    rejected_span: int | None = None
 
     @property
     def returned_log_count(self) -> int | None:
@@ -235,12 +237,14 @@ class RpcEventLogFetcher:
             start = end + 1
         pending = windows[::-1]
         rejected = 0
+        rejected_span: int | None = None
         while pending:
             lo, hi = pending.pop()
             raw_logs = self._request_range(address_filter, topic_filter, lo, hi)
             span = hi - lo + 1
             if raw_logs is _REJECTED:
                 rejected += 1
+                rejected_span = span if rejected_span is None else min(rejected_span, span)
                 pending.extend(_halves(lo, hi)[::-1])
                 continue
             # A page at the cap is indistinguishable from a truncated one, so bisect it like an error. The ``is not
@@ -305,13 +309,16 @@ class RpcEventLogFetcher:
                 if self.strict
                 else self._decode_page(raw_logs)
             )
-            page = LogPage(from_block=lo, to_block=hi, logs=logs, stats=(stat,), rejected=rejected)
+            page = LogPage(
+                from_block=lo, to_block=hi, logs=logs, stats=(stat,), rejected=rejected, rejected_span=rejected_span
+            )
             logs = []
             raw_logs = None
             yield page
             # Drop this frame's reference so the consumer's release frees the page before the next request.
             page = None
             rejected = 0
+            rejected_span = None
 
     def _request_range(
         self, address_filter: str | list[str] | None, topic_filter: list[list[str] | None], lo: int, hi: int

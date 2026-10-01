@@ -716,6 +716,8 @@ class _Member:
     last: int
     block_hash: bytes | None
     logs_per_block: float | None
+    advanced: bool = True
+    span_limit: int | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -786,6 +788,8 @@ def plan_group(
             IndexedEventCursor.last_indexed_block,
             IndexedEventCursor.last_indexed_block_hash,
             IndexedEventCursor.recent_logs_per_block,
+            IndexedEventCursor.last_advanced_at,
+            IndexedEventCursor.request_span_limit,
         )
         .where(IndexedEventCursor.chain_id == chain_id)
         .where(func.lower(IndexedEventCursor.event_address).in_(list(wanted)))
@@ -799,8 +803,10 @@ def plan_group(
             last=int(last or 0),
             block_hash=block_hash,
             logs_per_block=density,
+            advanced=advanced_at is not None,
+            span_limit=int(span_limit) if span_limit else None,
         )
-        for address, topic0, last, block_hash, density in rows
+        for address, topic0, last, block_hash, density, advanced_at, span_limit in rows
     )
     rewinds: dict[str, _Rewind] = {}
     for member in members:
@@ -859,12 +865,23 @@ def _page_density(page: LogPage) -> float | None:
     return count / (page.to_block - page.from_block + 1)
 
 
-def _initial_span(densities: Sequence[float | None], limits: PageLimits) -> int:
+def _initial_span(densities: Sequence[float | None], limits: PageLimits, *, never_advanced: bool = False) -> int:
+    """Size the first page from the densest member. A group that never advanced starts at the widest span: the page
+    ceiling and the upstream bisect protect a dense start, while a sparse history then costs one page per span."""
     max_span = max(1, limits.max_block_span)
     known = [d for d in densities if d is not None and d > 0]
     if known:
         return max(1, min(max_span, int(limits.target_page_logs / max(known))))
+    if never_advanced:
+        return max_span
     return max(1, min(limits.initial_span, max_span))
+
+
+def _refused_span_limit(page: LogPage) -> int | None:
+    """Half the narrowest range the upstream refused on the way to ``page``: the size bisection then had served."""
+    if page.rejected_span is None:
+        return None
+    return max(1, page.rejected_span // 2)
 
 
 def _next_span(page: LogPage, limits: PageLimits) -> int:
@@ -1031,7 +1048,11 @@ def run_plan(
         if position[member.key] >= target and stamped is None:
             hash_at(position[member.key])
     frontier = min(pos for pos in position.values() if pos < target)
-    span = _initial_span([m.logs_per_block for m in plan.members if position[m.key] < target], limits)
+    active = [m for m in plan.members if position[m.key] < target]
+    span_limit = min((m.span_limit for m in active if m.span_limit is not None), default=None)
+    span = _initial_span([m.logs_per_block for m in active], limits, never_advanced=not any(m.advanced for m in active))
+    if span_limit is not None:
+        span = min(span, span_limit)
     single_address = plan.addresses[0] if len(plan.addresses) == 1 else None
     rewind_pending = bool(plan.rewinds)
     pages = 0
@@ -1068,6 +1089,9 @@ def run_plan(
             expected_from = page.to_block + 1
             logs = sorted(page.logs, key=lambda log: log.block_number)
             density = _page_density(page)
+            refused_limit = _refused_span_limit(page)
+            if refused_limit is not None:
+                span_limit = refused_limit if span_limit is None else min(span_limit, refused_limit)
             prefixes = _write_prefixes(logs, page.to_block, max_rows=write_max_rows, max_bytes=write_max_bytes)
             logger.debug(
                 "event indexer page",
@@ -1080,6 +1104,7 @@ def run_plan(
                     "topics": len(topics),
                     "returned_log_count": page.returned_log_count,
                     "rejected": page.rejected,
+                    "rejected_span": page.rejected_span,
                     "prefixes": len(prefixes),
                 },
             )
@@ -1108,6 +1133,11 @@ def run_plan(
                         cursor.last_advanced_at = func.now()
                         if density is not None:
                             cursor.recent_logs_per_block = density
+                        if refused_limit is not None:
+                            stored = cursor.request_span_limit
+                            cursor.request_span_limit = (
+                                refused_limit if stored is None else min(int(stored), refused_limit)
+                            )
                     # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the
                     # evaluated block is judged by position, and only a reorg rewind resets the flag.
                     if int(cursor.last_indexed_block or 0) >= target:
@@ -1131,6 +1161,8 @@ def run_plan(
                 )
             pages += 1
             span = _next_span(page, limits)
+            if span_limit is not None:
+                span = min(span, span_limit)
             # Release this page before the next request so at most one page is resident.
             page = None
             logs = []

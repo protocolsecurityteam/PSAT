@@ -94,6 +94,8 @@ class SimChain:
         self.head_fn: Callable[[int], int] | None = None
         # Rewrites a log's wire form (e.g. drop a field) before it is served.
         self.mutate_raw: Callable[[SimLog, dict[str, Any]], dict[str, Any]] | None = None
+        # Refuses a request outright: ``(chain_id, from_block, to_block)`` -> the upstream's error, or None to serve.
+        self.refuse: Callable[[int, int, int], str | None] | None = None
 
     def head(self, chain_id: int) -> int:
         return self.head_fn(chain_id) if self.head_fn is not None else self.heads[chain_id]
@@ -176,6 +178,10 @@ class SimChain:
             "served": None,
         }
         self.getlogs.append(record)
+        if self.refuse is not None:
+            refusal = self.refuse(chain_id, lo, hi)
+            if refusal is not None:
+                raise RuntimeError(refusal)
         if self.max_addresses is not None and len(addresses) > self.max_addresses:
             raise RuntimeError("{'code': -32602, 'message': 'too many addresses in filter'}")
         for index, (timeout_chain, timeout_address) in enumerate(self.pending_timeouts):

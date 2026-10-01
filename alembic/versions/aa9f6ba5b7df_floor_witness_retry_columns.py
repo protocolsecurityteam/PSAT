@@ -1,4 +1,4 @@
-"""floor witness retry state, and the seed each cursor was enrolled at
+"""floor witness retry state, the seed each cursor was enrolled at, and a per-cursor request span limit
 
 Revision ID: aa9f6ba5b7df
 Revises: ea1a393444b5
@@ -53,9 +53,11 @@ def upgrade() -> None:
         "(outcome IN ('failed', 'cursor_conflict')) = (next_attempt_at IS NOT NULL)",
     )
     op.add_column("indexed_event_cursors", sa.Column("enrolled_seed_block", sa.BigInteger(), nullable=True))
+    op.add_column("indexed_event_cursors", sa.Column("request_span_limit", sa.BigInteger(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("indexed_event_cursors", "request_span_limit")
     op.drop_column("indexed_event_cursors", "enrolled_seed_block")
     op.drop_constraint("ck_address_floor_witnesses_retry_iff_undecided", _TABLE, type_="check")
     op.drop_constraint("ck_address_floor_witnesses_proven_iff_creation", _TABLE, type_="check")

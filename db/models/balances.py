@@ -540,6 +540,9 @@ class IndexedEventCursor(Base):
     # The block the cursor was seeded at, whatever its witness said. A later witness proving this same seed is the only
     # evidence that may set ``first_indexed_block`` after enrolment. NULL on cursors enrolled before the column.
     enrolled_seed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Operational only, never evidence: the widest range the next page may request, lowered when the upstream refuses
+    # one (a size limit or a query timeout) so later visits don't start at a span it already refused.
+    request_span_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 def exactness_eligible_cursor_clause():

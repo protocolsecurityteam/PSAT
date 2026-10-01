@@ -355,7 +355,7 @@ def test_retry_migration_classifies_existing_rows_and_round_trips(db_session):
             text("SELECT next_attempt_at <= now() FROM address_floor_witnesses WHERE address = :a"), {"a": _OTHER}
         ).scalar_one()
         assert due
-        assert "enrolled_seed_block" in _columns(connection, "indexed_event_cursors")
+        assert {"enrolled_seed_block", "request_span_limit"} <= _columns(connection, "indexed_event_cursors")
     db_session.rollback()
 
 
