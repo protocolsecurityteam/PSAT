@@ -15,7 +15,7 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import Table, delete, func, select, update
+from sqlalchemy import Table, delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -437,6 +437,22 @@ def _upgrade_to_predicate_hint(session: Session, *, chain_id: int, address: str,
             "cursor enrollment basis upgraded to predicate_tree_hint",
             extra={"chain_id": chain_id, "event_address": address.lower(), "topic0": topic0.lower()},
         )
+    return upgraded
+
+
+def _upgrade_alone(
+    session: Session, *, chain_id: int, address: str, topic0: str, commit: Callable[[], None] | None = None
+) -> bool:
+    """Run one basis upgrade in a transaction of its own.
+
+    The upgrade locks the cursor row and its trigger then takes the chain's reconciliation row, the order an indexer
+    page write takes them in. Holding anything from earlier enrolment work (a cursor insert's or another upgrade's
+    reconciliation row) while waiting on a cursor the indexer has locked would deadlock with that write.
+    """
+    finish = commit if commit is not None else session.commit
+    finish()
+    upgraded = _upgrade_to_predicate_hint(session, chain_id=chain_id, address=address, topic0=topic0)
+    finish()
     return upgraded
 
 
@@ -1906,15 +1922,18 @@ def _enroll_witnessed(
     enrollment_basis: str,
     pending: set[tuple[int, str]] | None = None,
     progress: Callable[[], None] | None = None,
+    upgrade_existing: bool = True,
 ) -> bool:
     """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing.
 
     A predicate-hint enrolment that finds the cursor already present upgrades its basis (see
-    ``_upgrade_to_predicate_hint``), so the enrolment order never decides eligibility.
+    ``_upgrade_to_predicate_hint``), so the enrolment order never decides eligibility. The upgrade commits the
+    session's open work first (through ``progress`` when given); a caller keeping inserts atomic upgrades beforehand and
+    passes ``upgrade_existing=False``.
     """
     if _cursor_exists(session, chain_id, address, topic0):
-        if enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT:
-            _upgrade_to_predicate_hint(session, chain_id=chain_id, address=address, topic0=topic0)
+        if enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT and upgrade_existing:
+            _upgrade_alone(session, chain_id=chain_id, address=address, topic0=topic0, commit=progress)
         return False
     if progress is not None:
         progress()
@@ -2004,11 +2023,28 @@ def apply_proven_floors(session: Session) -> int:
         .where(AddressFloorWitness.first_indexed_block == AddressFloorWitness.seed_block)
         .exists()
     )
+    eligible = (
+        (IndexedEventCursor.first_indexed_block_basis == CURSOR_BASIS_NOT_DETERMINED)
+        & IndexedEventCursor.enrolled_seed_block.is_not(None)
+        & proven
+    )
+    # Row locks in the indexer's canonical order before any update, so this never waits on a group it partly holds.
+    locked = session.execute(
+        select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
+        .where(eligible)
+        .order_by(IndexedEventCursor.chain_id, func.lower(IndexedEventCursor.event_address), IndexedEventCursor.topic0)
+        .with_for_update()
+    ).all()
+    if not locked:
+        return 0
     upgraded = session.execute(
         update(IndexedEventCursor)
-        .where(IndexedEventCursor.first_indexed_block_basis == CURSOR_BASIS_NOT_DETERMINED)
-        .where(IndexedEventCursor.enrolled_seed_block.is_not(None))
-        .where(proven)
+        .where(
+            tuple_(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0).in_(
+                [tuple(row) for row in locked]
+            )
+        )
+        .where(eligible)
         .values(
             first_indexed_block=IndexedEventCursor.enrolled_seed_block,
             first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
@@ -2153,10 +2189,16 @@ def enroll_from_completed_jobs(
                 if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
                     session, job_chain_id, authority
                 ):
+                    role_topics = _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache)
+                    for topic0 in role_topics:
+                        if _cursor_exists(session, job_chain_id, authority, topic0):
+                            _upgrade_alone(
+                                session, chain_id=job_chain_id, address=authority, topic0=topic0, commit=progress
+                            )
                     # Commit all topics atomically; caches keep external reads before the first insert.
                     if progress is not None:
                         progress()
-                    for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
+                    for topic0 in role_topics:
                         if _enroll_witnessed(
                             session,
                             chain_id=job_chain_id,
@@ -2166,6 +2208,7 @@ def enroll_from_completed_jobs(
                             witness_cache=witness_cache,
                             enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
                             pending=pending,
+                            upgrade_existing=False,
                         ):
                             inserted += 1
                     if progress is not None:
