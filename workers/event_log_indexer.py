@@ -15,7 +15,7 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Table, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -2155,6 +2155,9 @@ def _fold_window_stats(cursor: IndexedEventCursor, stats: list[FetchWindowStat])
     cursor.window_stats_cap = observed_cap
 
 
+_LOGS_TABLE = cast(Table, IndexedEventLog.__table__)
+
+
 def _bulk_insert_logs(
     session: Session,
     chain_id: int,
@@ -2166,6 +2169,13 @@ def _bulk_insert_logs(
 ) -> int:
     if not logs:
         return 0
+    # One compiled statement executed many, rather than a fresh multi-row VALUES per batch (compiling that dominated
+    # the write cost). Each batch is still one INSERT for the statement trigger; RETURNING counts only rows inserted.
+    stmt = (
+        pg_insert(_LOGS_TABLE)
+        .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0", "tx_hash", "log_index"])
+        .returning(_LOGS_TABLE.c.log_index)
+    )
     total = 0
     for offset in range(0, len(logs), max(1, batch_size)):
         rows = [
@@ -2184,13 +2194,7 @@ def _bulk_insert_logs(
             }
             for log in logs[offset : offset + max(1, batch_size)]
         ]
-        stmt = (
-            pg_insert(IndexedEventLog)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["chain_id", "event_address", "topic0", "tx_hash", "log_index"])
-        )
-        result = session.execute(stmt)
-        total += int(getattr(result, "rowcount", 0) or 0)
+        total += len(session.execute(stmt, rows).all())
     return total
 
 

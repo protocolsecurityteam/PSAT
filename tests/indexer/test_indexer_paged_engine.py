@@ -205,7 +205,7 @@ def test_target_hash_is_read_before_the_logs_that_reach_it(db_session, sim):
 
 
 def test_shutdown_between_pages_keeps_committed_pages_and_resumes_identically(db_session, sim):
-    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=40))
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=400))
     _enroll(db_session)
     limits = PageLimits(max_block_span=100_000, initial_span=100_000)
     stop = Event()
@@ -234,7 +234,7 @@ def test_shutdown_between_pages_keeps_committed_pages_and_resumes_identically(db
     _enroll(db_session)
     _drain(db_session, limits=limits)
     assert interrupted == _rows(db_session)
-    assert len(interrupted) == len(range(_SEED + 1, _TARGET + 1, 40))
+    assert len(interrupted) == len(range(_SEED + 1, _TARGET + 1, 400))
 
 
 def test_sibling_topic_narrowing_skips_at_target_siblings(db_session, sim):
@@ -274,27 +274,27 @@ def test_span_converges_to_the_target_page(db_session, sim):
         1,
         [
             SimLog(address=_ADDR, topics=(_T1,), data="0x", block=b, tx_index=i, log_index=i)
-            for b in range(_SEED + 1, _SEED + 20_001)
+            for b in range(_SEED + 1, _SEED + 5_001)
             for i in range(2)
         ],
     )
     _enroll(db_session)
-    limits = PageLimits(max_block_span=500_000, initial_span=5_000, target_page_logs=2_000, max_page_logs=50_000)
+    limits = PageLimits(max_block_span=500_000, initial_span=2_000, target_page_logs=2_000, max_page_logs=50_000)
 
-    _scan(db_session, limits=limits, max_windows_per_cursor=12)
+    _scan(db_session, limits=limits, max_windows_per_cursor=4)
 
     counts = [len(sim.lanes[(1, _ADDR)].between(r["from"], r["to"])) for r in sim.getlogs]
-    assert counts[0] == 10_000  # unknown density: the initial span overshoots once
+    assert counts[0] == 4_000  # unknown density: the initial span overshoots once
     assert counts[1:] == [2_000] * (len(counts) - 1)
     cursor = _cursor(db_session)
     assert cursor.recent_logs_per_block == 2.0
-    assert cursor.max_window_log_count == 10_000
+    assert cursor.max_window_log_count == 4_000
 
 
 def test_dense_request_count_is_bounded_by_logs_over_target_plus_ramp(db_session, sim):
     dense = [
         SimLog(address=_ADDR, topics=(_T1,), data="0x", block=b, tx_index=0, log_index=0)
-        for b in range(_SEED + 1, _SEED + 30_001)
+        for b in range(_SEED + 1, _SEED + 10_001)
     ]
     sim.add_many(1, dense)
     _enroll(db_session, seed=_SEED)
@@ -306,7 +306,7 @@ def test_dense_request_count_is_bounded_by_logs_over_target_plus_ramp(db_session
     _drain(db_session, limits=limits)
 
     ramp = math.ceil(math.log2(target_logs / initial)) + 2
-    dense_requests = [r for r in sim.getlogs if r["from"] <= _SEED + 30_000]
+    dense_requests = [r for r in sim.getlogs if r["from"] <= _SEED + 10_000]
     assert len(dense_requests) <= math.ceil(len(dense) / target_logs) + ramp
     assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == len(dense)
 

@@ -17,9 +17,9 @@ from coverage.exceptions import CoverageException
 # Measured directory groups; keep module/class fixtures on the same runner.
 SHARDS = {
     1: ("static", "audits", "meta", "deploy"),
-    2: ("monitoring", "workers", "api", "rpc", "policy"),
+    2: ("monitoring", "workers", "api", "rpc", "policy", "crawlers"),
     3: ("storage", "resolution", "scoring", "aggregations"),
-    4: ("discovery", "crawlers", "indexer", "effects", "chains", "observability"),
+    4: ("discovery", "indexer", "effects", "chains", "observability"),
 }
 MAPPING_HASH = hashlib.sha256(json.dumps(SHARDS, sort_keys=True).encode()).hexdigest()
 

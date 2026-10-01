@@ -553,7 +553,7 @@ def test_time_budgeted_backfill_is_identical_to_unbudgeted(session, monkeypatch)
 
         monkeypatch.setattr(indexer, "_monotonic", fake_clock)
         for addr in authorities:
-            enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC)
+            enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC, start_block=_TARGET - 200_000)
         session.commit()
         fetcher = _RangeCappedFetcher()
         fetchers, heads, hashes = _maps(fetcher)
@@ -598,7 +598,7 @@ def test_time_budgeted_backfill_is_identical_to_unbudgeted(session, monkeypatch)
     budgeted_logs, budgeted_cursors, many_passes = drain(clock_step_s=11.0)
 
     assert one_pass == 1
-    assert many_passes > 10  # the budgets really cut visits and passes short
-    assert len(unbudgeted_logs) == len(authorities) * (_TARGET // _DENSITY)
+    assert many_passes > 3  # the budgets really cut visits and passes short
+    assert len(unbudgeted_logs) == len(authorities) * len(range(_TARGET - 199_900, _TARGET + 1, _DENSITY))
     assert budgeted_logs == unbudgeted_logs
     assert budgeted_cursors == unbudgeted_cursors

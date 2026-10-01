@@ -303,11 +303,12 @@ def test_incident_sized_backfill_allows_repeated_concurrent_submissions(db_sessi
         with ThreadPoolExecutor(max_workers=2) as pool:
             submissions = [pool.submit(submit_repeatedly) for _ in range(2)]
             try:
+                # One fetched page, as the incident had: the lock bound under test is the write prefix, not the page.
                 result = scan(
                     db_session,
                     fetcher,
                     target=200_000,
-                    max_windows_per_cursor=1_000,
+                    page_limits=indexer.PageLimits(initial_span=200_000, target_page_logs=10**9, max_page_logs=None),
                     group_budget_s=600,
                     pass_budget_s=600,
                 )
@@ -322,9 +323,7 @@ def test_incident_sized_backfill_allows_repeated_concurrent_submissions(db_sessi
         event.remove(db_session, "after_commit", after_commit)
     assert result.failed_groups == 0
     assert result.inserted == sum(counts)
-    # Pages are ascending and gap-free over the whole range.
-    assert fetcher.calls[0][0] == 1 and fetcher.calls[-1][1] == 200_000
-    assert all(nxt[0] == prev[1] + 1 for prev, nxt in zip(fetcher.calls, fetcher.calls[1:]))
+    assert fetcher.calls == [(1, 200_000)]
     assert count_logs(db_session) == sum(counts)
     assert len({job_id for job_id, _, _, _ in outcomes}) == 48
     assert db_session.scalar(select(func.count()).select_from(Job)) == 48

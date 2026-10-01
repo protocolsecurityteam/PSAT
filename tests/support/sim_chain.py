@@ -8,7 +8,6 @@ size, one-shot client timeouts, a moving head, and fringe reorgs that change blo
 from __future__ import annotations
 
 import bisect
-import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -129,8 +128,8 @@ class SimChain:
         for start, value in self.epochs.get(chain_id, []):
             if block >= start:
                 epoch = value
-        digest = hashlib.sha256(f"{chain_id}:{block}:{epoch}".encode()).hexdigest()
-        return "0x" + digest
+        # Structured rather than hashed: unique per (chain, epoch, block) and cheap at hundreds of thousands of logs.
+        return f"0x{chain_id:08x}{epoch:08x}{block:048x}"
 
     # -- the wire --
 
@@ -205,7 +204,7 @@ class SimChain:
         return raws
 
     def raw(self, chain_id: int, log: SimLog) -> dict[str, Any]:
-        tx = hashlib.sha256(f"{chain_id}:{log.block}:{log.tx_index}:{log.tag}".encode()).hexdigest()
+        tx = f"{chain_id:08x}{log.tag:08x}{log.block:032x}{log.tx_index:016x}"
         return {
             "address": log.address,
             "topics": list(log.topics),

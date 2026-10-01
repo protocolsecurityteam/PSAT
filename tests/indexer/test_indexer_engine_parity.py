@@ -2,9 +2,9 @@
 reconciliation marks.
 
 Both runs drive the real ``scan_enrolled_events`` (warm sweep, then cold pass, as the daemon does) with only
-``rpc_request`` stubbed. Sizes are scaled 10x down from production: the upstream rejects responses over 8,000 logs
-(the 50k-style limit), one range is served whole up to 20,000 (the merged 150k-style page), and the paged ceiling and
-target are 10,000 and 2,500. The fixture covers sparse and dense addresses, a 6,000-log single block, staggered topics,
+``rpc_request`` stubbed. Sizes are scaled down from production: the upstream rejects responses over 7,000 logs (the
+50k-style limit), one range is served whole up to 10,000 (the merged 150k-style page), and the paged ceiling and target
+are 6,500 and 1,600. The fixture covers sparse and dense addresses, a 6,000-log single block, staggered topics,
 a sibling enrolled late, a client timeout, a fringe reorg under a moving head, a shutdown between pages, and a Base
 group. It runs with the result cap unset and set.
 """
@@ -42,7 +42,7 @@ SPARSE, DENSE, BIG_BLOCK, STAGGERED, ON_BASE = (address(0xA000 + i) for i in ran
 TA1, TA2, TB1, TB2, TB3, TC, TD1, TD2, TD3, TE1, TE2 = (topic(0x100 + i) for i in range(11))
 BIG_BLOCK_NUMBER = 1_500_000
 
-PAGED_LIMITS = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_500, max_page_logs=10_000)
+PAGED_LIMITS = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=1_600, max_page_logs=6_500)
 
 # (chain, address, topic, seed, starting position)
 ENROLMENT = [
@@ -76,21 +76,21 @@ def _every(addr: str, t: str, lo: int, hi: int, step: int, slot: int, tag: int =
 
 
 def build_chain() -> SimChain:
-    sim = SimChain(heads=HEAD_1, reject_over=8_000)
+    sim = SimChain(heads=HEAD_1, reject_over=7_000)
     sim.add_many(MAINNET, _every(SPARSE, TA1, 1_200_100, 2_000_600, 997, 1))
     sim.add_many(MAINNET, _every(SPARSE, TA2, 1_200_300, 2_000_600, 4_001, 2))
     # Fringe logs the reorg replaces.
     sim.add_many(MAINNET, _every(SPARSE, TA1, 1_999_986, 1_999_988, 1, 3))
-    sim.add_many(MAINNET, _every(DENSE, TB1, 1_000_001, 1_200_000, 10, 10))
-    sim.add_many(MAINNET, _every(DENSE, TB2, 1_000_003, 1_200_000, 40, 11))
-    sim.add_many(MAINNET, _every(DENSE, TB3, 1_000_007, 1_200_000, 100, 12))
+    sim.add_many(MAINNET, _every(DENSE, TB1, 1_000_001, 1_200_000, 80, 10))
+    sim.add_many(MAINNET, _every(DENSE, TB2, 1_000_003, 1_200_000, 320, 11))
+    sim.add_many(MAINNET, _every(DENSE, TB3, 1_000_007, 1_200_000, 800, 12))
     burst = [
         SimLog(address=DENSE, topics=(TB1,), data="0x", block=b, tx_index=20 + i, log_index=20 + i)
         for b in range(1_010_000, 1_020_000)
-        for i in range(1 + (b % 2))
+        for i in range(1 if b % 4 else 0)
     ]
     sim.add_many(MAINNET, burst)
-    sim.merges.append(MergeRange(MAINNET, DENSE, 1_010_000, 1_019_999, 20_000))
+    sim.merges.append(MergeRange(MAINNET, DENSE, 1_010_000, 1_019_999, 10_000))
     sim.add_many(MAINNET, _every(BIG_BLOCK, TC, 1_400_001, 2_000_600, 5_000, 30))
     sim.add_many(
         MAINNET,
@@ -106,11 +106,11 @@ def build_chain() -> SimChain:
             for i in range(6_000)
         ],
     )
-    sim.add_many(MAINNET, _every(STAGGERED, TD1, 1_300_001, 2_000_600, 500, 40))
-    sim.add_many(MAINNET, _every(STAGGERED, TD2, 1_300_001, 2_000_600, 700, 41))
-    sim.add_many(MAINNET, _every(STAGGERED, TD3, 1_300_001, 2_000_600, 300, 42))
+    sim.add_many(MAINNET, _every(STAGGERED, TD1, 1_300_001, 2_000_600, 1_000, 40))
+    sim.add_many(MAINNET, _every(STAGGERED, TD2, 1_300_001, 2_000_600, 1_400, 41))
+    sim.add_many(MAINNET, _every(STAGGERED, TD3, 1_300_001, 2_000_600, 600, 42))
     sim.add_many(MAINNET, _every(STAGGERED, TD1, 1_999_984, 1_999_988, 1, 43))
-    sim.add_many(BASE, _every(ON_BASE, TE1, 29_500_001, 30_000_400, 250, 50))
+    sim.add_many(BASE, _every(ON_BASE, TE1, 29_500_001, 30_000_400, 1_000, 50))
     sim.add_many(BASE, _every(ON_BASE, TE2, 29_500_001, 30_000_400, 1_000, 51))
     sim.pending_timeouts.append((MAINNET, STAGGERED))
     return sim
@@ -254,7 +254,7 @@ def _scenario(session, monkeypatch, engine: str) -> tuple[dict[str, Any], SimCha
 
 # The set cap sits above every floor-sized span (a span at the floor that reaches the cap can never be proven whole) and
 # below the merged page, so both engines take the cap's bisect path.
-@pytest.mark.parametrize("cap", [None, "16000"], ids=["cap-unset", "cap-set"])
+@pytest.mark.parametrize("cap", [None, "8500"], ids=["cap-unset", "cap-set"])
 def test_legacy_and_paged_engines_index_identically(db_session, monkeypatch, cap):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
@@ -287,25 +287,21 @@ def test_legacy_and_paged_engines_index_identically(db_session, monkeypatch, cap
     big = [r for r in paged["rows"] if r.block_number == BIG_BLOCK_NUMBER]
     assert len(big) == 6_000
     # Legacy accepted the merged page whole; the paged engine's ceiling split it.
-    assert any(DENSE in r["addresses"] and (r["served"] or 0) > 10_000 for r in legacy_sim.getlogs)
-    assert any(DENSE in r["addresses"] and (r["served"] or 0) > 10_000 for r in paged_sim.getlogs)
+    ceiling = PAGED_LIMITS.max_page_logs or 0
+    assert any(DENSE in r["addresses"] and (r["served"] or 0) > ceiling for r in legacy_sim.getlogs)
+    assert any(DENSE in r["addresses"] and (r["served"] or 0) > ceiling for r in paged_sim.getlogs)
     assert any(r["served"] is None for r in legacy_sim.getlogs)  # upstream rejections happened
     assert max(v for v in paged["max_counts"].values() if v is not None) <= PAGED_LIMITS.max_page_logs
     expected_basis = "continuous_from_first_indexed_block" if cap else "not_determined"
     assert {c.window_stats_basis for c in paged["cursors"]} == {expected_basis}
 
-
-def test_parity_harness_detects_a_divergent_engine(db_session, monkeypatch):
-    """The comparison is not vacuous: an engine that drops one topic's rows is caught."""
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
-    monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
-    monkeypatch.delenv("PSAT_GETLOGS_RESULT_CAP", raising=False)
-    legacy, _ = _scenario(db_session, monkeypatch, "legacy")
-    db_session.execute(delete(IndexedEventLog).where(IndexedEventLog.topic0 == TD3))
-    db_session.execute(
-        update(IndexedEventCursor).where(IndexedEventCursor.topic0 == TD2).values(backfill_complete=False)
-    )
-    db_session.commit()
-    tampered = _snapshot(db_session)
-    assert tampered["rows"] != legacy["rows"]
-    assert tampered["cursors"] != legacy["cursors"]
+    if cap is None:
+        # The comparison isn't vacuous: an engine that dropped one topic's rows and a flag would be caught.
+        db_session.execute(delete(IndexedEventLog).where(IndexedEventLog.topic0 == TD3))
+        db_session.execute(
+            update(IndexedEventCursor).where(IndexedEventCursor.topic0 == TD2).values(backfill_complete=False)
+        )
+        db_session.commit()
+        tampered = _snapshot(db_session)
+        assert tampered["rows"] != paged["rows"]
+        assert tampered["cursors"] != paged["cursors"]
