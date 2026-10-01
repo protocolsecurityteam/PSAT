@@ -117,6 +117,7 @@ class RpcEventLogFetcher:
         result_cap: int | None = None,
         timeout: float | None = None,
         before_retry: Callable[[], None] | None = None,
+        keep_raw: bool = True,
     ) -> None:
         self.rpc_url = rpc_url
         self.max_block_range = max(1, max_block_range)
@@ -130,6 +131,8 @@ class RpcEventLogFetcher:
         # before being treated as a reject.
         self.timeout = timeout
         self.before_retry = before_retry
+        # Only the live watcher reads ``FetchedEventLog.raw``; holding the dict more than doubles a page's memory.
+        self.keep_raw = keep_raw
 
     def fetch_logs(
         self,
@@ -301,7 +304,7 @@ class RpcEventLogFetcher:
         out: list[FetchedEventLog] = []
         if isinstance(raw_logs, list):
             for raw in raw_logs:
-                decoded = _decode_log(raw)
+                decoded = _decode_log(raw, keep_raw=self.keep_raw)
                 if decoded is not None:
                     out.append(decoded)
         return out
@@ -441,7 +444,7 @@ class RpcBlockHashFetcher:
         return _hex_to_bytes(raw.get("hash"), 32)
 
 
-def _decode_log(raw: Any) -> FetchedEventLog | None:
+def _decode_log(raw: Any, *, keep_raw: bool = True) -> FetchedEventLog | None:
     if not isinstance(raw, dict):
         return None
     topics = raw.get("topics")
@@ -467,7 +470,7 @@ def _decode_log(raw: Any) -> FetchedEventLog | None:
         topics=[str(t).lower() for t in topics],
         data_words=_split_data_words(raw.get("data")),
         address=emitter.lower() if isinstance(emitter, str) else "",
-        raw=raw,
+        raw=raw if keep_raw else None,
     )
 
 

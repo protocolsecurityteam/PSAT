@@ -29,6 +29,7 @@ from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rp
 from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import record_degraded, record_stage_metric
 
+from . import indexer_settings
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
 from .adapters.event_indexed import EventIndexedAdapter
@@ -58,8 +59,7 @@ logger = logging.getLogger(__name__)
 # the chain's depth plus two indexer poll intervals of blocks, so a keeping-up cursor covers the pin and a stalled one
 # falls behind it. A larger value only delays stall detection.
 RESOLVER_FINALITY_MARGIN = int(os.getenv("PSAT_RESOLVER_FINALITY_MARGIN", "64"))
-# The event indexer's poll interval (same env and default as the indexer loop).
-INDEXER_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
+INDEXER_INTERVAL_S = indexer_settings.INTERVAL_S
 
 
 def resolver_pin_margin(chain_id: int | None) -> int:
