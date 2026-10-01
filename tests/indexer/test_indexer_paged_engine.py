@@ -384,3 +384,30 @@ def test_getlogs_timeout_is_set_only_on_the_paged_indexer_fetcher(sim):
 def test_unknown_engine_is_refused(db_session, sim):
     with pytest.raises(ValueError, match="unknown event indexer engine"):
         _scan(db_session, engine="turbo")
+
+
+def test_each_page_folds_its_count_only_into_the_cursors_it_advanced(db_session, sim):
+    # T1's dense stretch lies wholly below T2's position: T2 never crosses that page, so its count isn't T2's.
+    sim.add_many(
+        1,
+        [
+            SimLog(address=_ADDR, topics=(_T1,), data="0x", block=b, tx_index=i, log_index=i)
+            for b in range(_SEED + 1, _SEED + 5_001)
+            for i in range(2)
+        ],
+    )
+    sim.add_many(1, _uniform(_ADDR, _T2, lo=_SEED + 5_001, hi=_SEED + 60_000, every=1_000, tx_base=9))
+    _enroll(db_session, topics=(_T1, _T2))
+    db_session.execute(
+        update(IndexedEventCursor).where(IndexedEventCursor.topic0 == _T2).values(last_indexed_block=_SEED + 5_000)
+    )
+    db_session.commit()
+    limits = PageLimits(max_block_span=500_000, initial_span=5_000, target_page_logs=50_000, max_page_logs=50_000)
+
+    _scan(db_session, limits=limits, max_windows_per_cursor=2)
+
+    assert [r["topics"] for r in sim.getlogs] == [{_T1}, {_T1, _T2}]
+    assert _cursor(db_session, _T1).max_window_log_count == 10_000
+    t2 = _cursor(db_session, _T2)
+    assert t2.last_indexed_block > _SEED + 5_000
+    assert t2.max_window_log_count == sim.getlogs[1]["served"] < 10_000

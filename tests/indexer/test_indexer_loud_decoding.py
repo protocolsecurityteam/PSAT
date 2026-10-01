@@ -341,12 +341,26 @@ def test_restaking_fold_skips_and_reports_an_undecodable_row(db_session, caplog)
     assert any(r.getMessage().startswith("undecodable PubkeyLinked rows skipped") for r in caplog.records)
 
 
-def test_role_plane_withholds_every_holder_set_on_an_undecodable_row(db_session, monkeypatch):
+@pytest.mark.parametrize("undecodable", [False, True], ids=["control", "undecodable"])
+def test_role_plane_withholds_every_holder_set_on_an_undecodable_row(db_session, monkeypatch, undecodable):
     logs = role_plane._corpus_logs()
-    logs[0].data_hex = _UNALIGNED
+    if undecodable:
+        logs[-1].data_hex = _UNALIGNED
     role_plane._seed(db_session, logs=logs)
+    every_candidate_holds = {
+        (role, account): role_plane.TRUE_WORD
+        for role in (role_plane.ZERO_ROLE, role_plane.PAUSER, role_plane.OPERATING_ADMIN)
+        for account in (
+            role_plane.ADMIN_HOLDER,
+            role_plane.REVOKED_A,
+            role_plane.REVOKED_B,
+            role_plane.PAUSER_EXTRA,
+            role_plane.OPS_HOLDER,
+        )
+    }
 
-    rows = role_plane._run(db_session, monkeypatch, {})
+    rows = role_plane._run(db_session, monkeypatch, every_candidate_holds)
 
     assert rows
-    assert {row["holders"] for row in rows} == {None}
+    published = [row["holders"] for row in rows if row["holders"] is not None]
+    assert (published == []) is undecodable

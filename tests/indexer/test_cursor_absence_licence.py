@@ -42,11 +42,11 @@ from services.resolution.repos.event_logs_rpc import (
 from tests.conftest import requires_postgres
 from workers.event_log_indexer import (
     _ALL_ROLE_STORE_TOPIC0S,
+    PageLimits,
     _authority_has_role_store_cursor,
     _witness_seed_block,
     enroll_event_cursor,
     enroll_from_tracked_topics,
-    PageLimits,
     index_event_group_steps,
 )
 
