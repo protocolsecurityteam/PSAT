@@ -296,6 +296,7 @@ def enroll_event_cursor(
             event_address=event_address.lower(),
             topic0=topic0.lower(),
             last_indexed_block=start_block,
+            enrolled_seed_block=start_block,
             first_indexed_block=first_indexed_block,
             first_indexed_block_basis=first_indexed_block_basis or BASIS_NOT_DETERMINED,
             enrollment_basis=enrollment_basis or BASIS_NOT_DETERMINED,
@@ -384,7 +385,14 @@ def _witness_seed_block(
         )
     cache[key] = graded
     if session is not None:
-        record_floor_witness(session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0])
+        failures = record_floor_witness(
+            session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0], seed_block=seed
+        )
+        if failures is not None and failures >= settings.FLOOR_WITNESS_FAILURE_ALERT:
+            logger.warning(
+                "floor witness keeps failing; live scans at this address defer and its cursors stay ineligible",
+                extra={"address": addr, "chain_id": chain_id, "seed": seed, "attempts": failures},
+            )
     return graded
 
 

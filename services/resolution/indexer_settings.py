@@ -46,3 +46,6 @@ WARM_BATCH_MAX_LAG = int(os.getenv("PSAT_EVENT_INDEXER_WARM_BATCH_MAX_LAG", "100
 
 GROUP_BUDGET_S = float(os.getenv("PSAT_EVENT_INDEXER_GROUP_BUDGET_S", "30"))
 PASS_BUDGET_S = float(os.getenv("PSAT_EVENT_INDEXER_PASS_BUDGET_S", "120"))
+
+# Consecutive floor-witness failures after which each retry logs a WARNING; the retry backoff bounds how often.
+FLOOR_WITNESS_FAILURE_ALERT = 5
