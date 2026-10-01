@@ -6,6 +6,7 @@ import logging
 import uuid
 from functools import partial
 from threading import Event
+from typing import Callable
 
 from sqlalchemy.orm import Session
 
@@ -32,9 +33,21 @@ logger = logging.getLogger(__name__)
 
 
 def drain_enrollment(
-    session: Session, *, limit: int = 50, tracked_limit: int = 50, stop_event: Event | None = None
+    session: Session,
+    *,
+    limit: int = 50,
+    tracked_limit: int = 50,
+    stop_event: Event | None = None,
+    witness_budget: int | None = None,
+    on_rewitness: Callable[[int], None] | None = None,
 ) -> int:
-    from workers.event_log_indexer import EnrollmentCaches, enroll_from_completed_jobs, enroll_from_tracked_topics
+    from services.resolution import indexer_settings
+    from workers.event_log_indexer import (
+        EnrollmentCaches,
+        enroll_from_completed_jobs,
+        enroll_from_tracked_topics,
+        rewitness_due_floors,
+    )
 
     kinds = ("job", "monitored") if tracked_limit > 0 else ("job",)
     repaired = repair_due(session, kinds, limit=limit)
@@ -92,6 +105,20 @@ def drain_enrollment(
                     "exc_type": type(exc).__name__,
                 },
             )
+    rewitnessed = 0
+    if stop_event is None or not stop_event.is_set():
+        try:
+            rewitnessed = rewitness_due_floors(
+                session,
+                budget=indexer_settings.FLOOR_WITNESS_RETRY_BUDGET if witness_budget is None else witness_budget,
+                caches=caches,
+                stop_event=stop_event,
+            )
+        except Exception as exc:
+            session.rollback()
+            logger.warning("floor witness retry pass failed", extra={"exc_type": type(exc).__name__})
+    if on_rewitness is not None:
+        on_rewitness(rewitnessed)
     logger.info(
         "indexer enrollment queue pass",
         extra={
@@ -99,6 +126,7 @@ def drain_enrollment(
             "deferred": deferred,
             "repair_enqueued": repaired,
             "enrolled": enrolled,
+            "floor_witnesses_retried": rewitnessed,
         },
     )
     return enrolled

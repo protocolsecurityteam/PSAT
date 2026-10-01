@@ -584,7 +584,8 @@ def test_enrollment_commits_before_next_external_read(session, monkeypatch):
 
     monkeypatch.setattr(indexer, "_seed_block", seed)
     monkeypatch.setattr(indexer, "_witness_seed_block", lambda *_a, **_kw: (100, "creation_block_minus_one"))
-    assert scheduler.drain_enrollment(session) == 2
+    # The stubbed witness records no row, so the retry step would look the seeds up again.
+    assert scheduler.drain_enrollment(session, witness_budget=0) == 2
     assert observed == [1]
     assert not work(session, "job", row.id).dirty
 

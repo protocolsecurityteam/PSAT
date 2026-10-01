@@ -32,8 +32,11 @@ from db.models import (
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
+    FLOOR_WITNESS_PROVEN,
+    FLOOR_WITNESS_RETRYABLE,
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_NOT_DETERMINED,
+    AddressFloorWitness,
     Contract,
     ControllerValue,
     IndexedEventCursor,
@@ -50,6 +53,7 @@ from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
+from services.resolution.indexer_work import mark_dirty
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, MalformedLogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
@@ -1944,6 +1948,126 @@ class EnrollmentCaches:
     role_topics: dict[tuple[int, str], list[str]] = field(default_factory=dict)
 
 
+def _floor_witness_candidates(session: Session, *, limit: int | None) -> list[tuple[int, str]]:
+    """``(chain_id, address)`` pairs whose floor witness is due: cursored addresses never witnessed, then undecided
+    rows whose backoff has elapsed, oldest due first. Prior-incarnation verdicts are evidence and never come back.
+    """
+    chains = sorted(supported_chain_ids())
+    if not chains or (limit is not None and limit <= 0):
+        return []
+    cursor_address = func.lower(IndexedEventCursor.event_address)
+    never = (
+        select(IndexedEventCursor.chain_id, cursor_address)
+        .outerjoin(
+            AddressFloorWitness,
+            (AddressFloorWitness.chain_id == IndexedEventCursor.chain_id)
+            & (AddressFloorWitness.address == cursor_address),
+        )
+        .where(AddressFloorWitness.address.is_(None))
+        .where(IndexedEventCursor.chain_id.in_(chains))
+        .where(cursor_address != _ZERO_ADDRESS)
+        .group_by(IndexedEventCursor.chain_id, cursor_address)
+        .order_by(IndexedEventCursor.chain_id, cursor_address)
+    )
+    if limit is not None:
+        never = never.limit(limit)
+    out = [(int(chain_id), str(address)) for chain_id, address in session.execute(never)]
+    if limit is not None and len(out) >= limit:
+        return out
+    retry = (
+        select(AddressFloorWitness.chain_id, AddressFloorWitness.address)
+        .where(AddressFloorWitness.outcome.in_(FLOOR_WITNESS_RETRYABLE))
+        .where(AddressFloorWitness.next_attempt_at <= func.now())
+        .where(AddressFloorWitness.chain_id.in_(chains))
+        .order_by(AddressFloorWitness.next_attempt_at, AddressFloorWitness.chain_id, AddressFloorWitness.address)
+    )
+    if limit is not None:
+        retry = retry.limit(limit - len(out))
+    out.extend((int(chain_id), str(address)) for chain_id, address in session.execute(retry))
+    return out
+
+
+def apply_proven_floors(session: Session) -> int:
+    """Give unwitnessed cursors the proven floor of their address, only where the cursor was enrolled at exactly the
+    proven seed; returns cursors upgraded.
+
+    A cursor seeded elsewhere, or before seeds were recorded, can't show it covers the floor and is left alone. The
+    upgraded columns aren't watched by the change trigger, so the chain is marked for reconciliation here, after the
+    cursor row locks (the indexer's page writes take the same two locks in that order).
+    """
+    proven = (
+        select(AddressFloorWitness.seed_block)
+        .where(AddressFloorWitness.chain_id == IndexedEventCursor.chain_id)
+        .where(AddressFloorWitness.address == func.lower(IndexedEventCursor.event_address))
+        .where(AddressFloorWitness.outcome == FLOOR_WITNESS_PROVEN)
+        .where(AddressFloorWitness.seed_block == IndexedEventCursor.enrolled_seed_block)
+        .where(AddressFloorWitness.first_indexed_block == AddressFloorWitness.seed_block)
+        .exists()
+    )
+    upgraded = session.execute(
+        update(IndexedEventCursor)
+        .where(IndexedEventCursor.first_indexed_block_basis == CURSOR_BASIS_NOT_DETERMINED)
+        .where(IndexedEventCursor.enrolled_seed_block.is_not(None))
+        .where(proven)
+        .values(
+            first_indexed_block=IndexedEventCursor.enrolled_seed_block,
+            first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
+        )
+        .returning(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
+        .execution_options(synchronize_session=False)
+    ).all()
+    for chain_id in sorted({int(row[0]) for row in upgraded}):
+        mark_dirty(session, "reconcile", str(chain_id))
+    for chain_id, address, topic0 in upgraded:
+        logger.info(
+            "cursor lower bound proven by a later floor witness of its enrolled seed",
+            extra={"chain_id": chain_id, "event_address": address, "topic0": topic0},
+        )
+    return len(upgraded)
+
+
+def rewitness_due_floors(
+    session: Session,
+    *,
+    budget: int = settings.FLOOR_WITNESS_RETRY_BUDGET,
+    caches: EnrollmentCaches | None = None,
+    stop_event: Event | None = None,
+) -> int:
+    """Re-attempt up to ``budget`` due floor witnesses, then hand newly proven floors to the cursors enrolled at them;
+    returns addresses attempted. Nothing is due once every witness is proven or a prior incarnation, so steady state
+    makes no external call.
+    """
+    caches = caches if caches is not None else EnrollmentCaches()
+    attempted = 0
+    candidates = _floor_witness_candidates(session, limit=budget)
+    _end_transaction(session)
+    for chain_id, address in candidates:
+        if stop_event is not None and stop_event.is_set():
+            break
+        attempted += 1
+        seed = _seed_block(address, caches.seeds, chain_id=chain_id)
+        if seed is None:
+            record_floor_witness(session, chain_id=chain_id, address=address, outcome=WITNESS_FAILED)
+        else:
+            caches.witnesses.pop((chain_id, address), None)
+            _witness_seed_block(address, seed, caches.witnesses, chain_id=chain_id, session=session)
+        session.commit()
+    apply_proven_floors(session)
+    session.commit()
+    return attempted
+
+
+def floor_witness_summary(session: Session) -> dict[str, Any]:
+    """Heartbeat counts: witnesses due now, and rows by outcome."""
+    by_outcome = {
+        str(outcome): int(count)
+        for outcome, count in session.execute(
+            select(AddressFloorWitness.outcome, func.count()).group_by(AddressFloorWitness.outcome)
+        )
+    }
+    return {"due": len(_floor_witness_candidates(session, limit=None)), "by_outcome": by_outcome}
+
+
 def enroll_from_completed_jobs(
     session: Session,
     *,
@@ -2342,6 +2466,8 @@ def run_event_log_indexer_loop(
             # The last completed pass's stalls per lane, so a pass in progress doesn't read as healthy.
             "stalled": {"cold": 0, "warm": 0},
             "triad": (0, 0),
+            "floor_witnesses": {"due": 0, "by_outcome": {}},
+            "floor_witnesses_retried": 0,
             "reconcile": (0, 0),
             "last_beat": 0.0,
         }
@@ -2358,6 +2484,8 @@ def run_event_log_indexer_loop(
                     max(published["stalled"][lane], published[lane].stalled_cursors) for lane in ("cold", "warm")
                 )
                 caught_up_cursors, total_cursors = published["triad"]
+                floor_witnesses = dict(published["floor_witnesses"])
+                floor_witnesses_retried = published["floor_witnesses_retried"]
                 reenqueued, drift_reenqueued = published["reconcile"]
                 published["last_beat"] = time.monotonic()
             status = (
@@ -2388,6 +2516,9 @@ def run_event_log_indexer_loop(
                     "role_drift_reenqueued_last_pass": drift_reenqueued,
                     "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
                     "stalled_cursors": stalled_cursors,
+                    "floor_witnesses_due": floor_witnesses.get("due", 0),
+                    "floor_witnesses_retried_last_pass": floor_witnesses_retried,
+                    "floor_witnesses_by_outcome": floor_witnesses.get("by_outcome", {}),
                 },
             )
 
@@ -2415,8 +2546,15 @@ def run_event_log_indexer_loop(
             with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
                 from services.resolution.indexer_scheduler import drain_enrollment
 
+                def rewitnessed(count: int) -> None:
+                    with state_lock:
+                        published["floor_witnesses_retried"] = count
+
                 enrolled = drain_enrollment(
-                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
+                    session,
+                    tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT,
+                    stop_event=stop_event,
+                    on_rewitness=rewitnessed,
                 )
                 ph["enrolled"] = enrolled
             return enrolled
@@ -2568,13 +2706,17 @@ def run_event_log_indexer_loop(
                 # Read the triad from the table independently of the scan threads, in its own session so a failure
                 # doesn't blank the heartbeat.
                 triad = (0, 0)
+                witnesses: dict[str, Any] | None = None
                 try:
                     with SessionLocal() as session:
                         triad = _cursor_progress(session)
+                        witnesses = floor_witness_summary(session)
                 except Exception:
                     logger.exception("event log indexer cursor-progress count failed")
                 with state_lock:
                     published["triad"] = triad
+                    if witnesses is not None:
+                        published["floor_witnesses"] = witnesses
                     published["reconcile"] = (reenqueued, drift_reenqueued)
                 beat()
                 stop_event.wait(interval)

@@ -47,5 +47,8 @@ WARM_BATCH_MAX_LAG = int(os.getenv("PSAT_EVENT_INDEXER_WARM_BATCH_MAX_LAG", "100
 GROUP_BUDGET_S = float(os.getenv("PSAT_EVENT_INDEXER_GROUP_BUDGET_S", "30"))
 PASS_BUDGET_S = float(os.getenv("PSAT_EVENT_INDEXER_PASS_BUDGET_S", "120"))
 
+# Addresses whose floor witness is re-attempted per enrolment pass (each costs one Etherscan lookup and three RPC
+# reads). Steady state, with every witness decided, costs nothing.
+FLOOR_WITNESS_RETRY_BUDGET = int(os.getenv("PSAT_FLOOR_WITNESS_RETRY_BUDGET", "10"))
 # Consecutive floor-witness failures after which each retry logs a WARNING; the retry backoff bounds how often.
 FLOOR_WITNESS_FAILURE_ALERT = 5
