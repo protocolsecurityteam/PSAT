@@ -34,6 +34,8 @@ from tests.support.anvil import (
     ACCOUNT0,
     OWNABLE_SOURCE,
     PRIVATE_KEY,
+    SAFE_SOURCE,
+    SOLMATE_OWNED_SOURCE,
     _cast_send,
     _compile_and_deploy,
     anvil_env,  # noqa: F401
@@ -63,73 +65,6 @@ PROTO_NAME = "__test_enrollment_anvil__"
 
 
 # Selectors and event signatures match the real Safe / Ownable.
-
-
-SAFE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestSafe {
-    address[] internal _owners;
-    uint256 internal _threshold;
-    event AddedOwner(address owner);
-    event RemovedOwner(address owner);
-    event ChangedThreshold(uint256 threshold);
-
-    constructor() {
-        _owners.push(msg.sender);
-        _threshold = 1;
-    }
-
-    function getOwners() external view returns (address[] memory) { return _owners; }
-    function getThreshold() external view returns (uint256) { return _threshold; }
-
-    function addOwner(address _owner) external {
-        _owners.push(_owner);
-        emit AddedOwner(_owner);
-    }
-
-    function removeOwner(address _owner) external {
-        for (uint i = 0; i < _owners.length; i++) {
-            if (_owners[i] == _owner) {
-                _owners[i] = _owners[_owners.length - 1];
-                _owners.pop();
-                break;
-            }
-        }
-        emit RemovedOwner(_owner);
-    }
-
-    function changeThreshold(uint256 t) external {
-        _threshold = t;
-        emit ChangedThreshold(t);
-    }
-}
-"""
-
-
-SOLMATE_OWNED_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-// Solmate Owned shape: OwnerUpdated(user, newOwner) — distinct topic0
-// from OZ OwnershipTransferred. Used to exercise the full enrollment
-// pipeline that consumes a tracking_plan instead of relying on the
-// hand-rolled global registry.
-contract TestSolmateOwned {
-    address public owner;
-    event OwnerUpdated(address indexed user, address indexed newOwner);
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnerUpdated(address(0), msg.sender);
-    }
-
-    function setOwner(address newOwner) external {
-        require(msg.sender == owner, "UNAUTHORIZED");
-        owner = newOwner;
-        emit OwnerUpdated(msg.sender, newOwner);
-    }
-}
-"""
 
 
 @pytest.fixture()

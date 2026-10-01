@@ -34,6 +34,7 @@ from tests.support.anvil import (
     IMPL_V1_SOURCE,
     IMPL_V2_SOURCE,
     OWNABLE_SOURCE,
+    PAUSABLE_SOURCE,
     PRIVATE_KEY,
     PROXY_SOURCE,
     _cast,
@@ -72,30 +73,6 @@ requires_anvil = pytest.mark.skipif(
 
 pytestmark = [requires_postgres, pytest.mark.anvil, pytest.mark.compile]
 
-
-PAUSABLE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestPausable {
-    bool public paused;
-    address public owner;
-    event Paused(address account);
-    event Unpaused(address account);
-
-    constructor() { owner = msg.sender; }
-
-    function pause() external {
-        require(msg.sender == owner, "not owner");
-        paused = true;
-        emit Paused(msg.sender);
-    }
-    function unpause() external {
-        require(msg.sender == owner, "not owner");
-        paused = false;
-        emit Unpaused(msg.sender);
-    }
-}
-"""
 
 ADMIN_PROXY_SOURCE = """
 // SPDX-License-Identifier: MIT

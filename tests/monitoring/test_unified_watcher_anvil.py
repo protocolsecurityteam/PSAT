@@ -26,8 +26,11 @@ from tests.support.anvil import (
     IMPL_V1_SOURCE,
     IMPL_V2_SOURCE,
     OWNABLE_SOURCE,
+    PAUSABLE_SOURCE,
     PRIVATE_KEY,
     PROXY_SOURCE,
+    SAFE_SOURCE,
+    SOLMATE_OWNED_SOURCE,
     _cast,
     _cast_send,
     _compile_and_deploy,
@@ -52,26 +55,6 @@ pytestmark = [
     pytest.mark.compile,
 ]
 
-
-SOLMATE_OWNED_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestSolmateOwned {
-    address public owner;
-    event OwnerUpdated(address indexed user, address indexed newOwner);
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnerUpdated(address(0), msg.sender);
-    }
-
-    function setOwner(address newOwner) external {
-        require(msg.sender == owner, "UNAUTHORIZED");
-        owner = newOwner;
-        emit OwnerUpdated(msg.sender, newOwner);
-    }
-}
-"""
 
 DSAUTH_SOURCE = """
 // SPDX-License-Identifier: MIT
@@ -177,74 +160,6 @@ contract TestSolmateAuth {
 }
 """
 
-PAUSABLE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestPausable {
-    bool public paused;
-    address public owner;
-    event Paused(address account);
-    event Unpaused(address account);
-
-    constructor() {
-        owner = msg.sender;
-    }
-
-    function pause() external {
-        require(msg.sender == owner, "not owner");
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    function unpause() external {
-        require(msg.sender == owner, "not owner");
-        paused = false;
-        emit Unpaused(msg.sender);
-    }
-}
-"""
-
-SAFE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestSafe {
-    address[] internal _owners;
-    uint256 internal _threshold;
-    event AddedOwner(address owner);
-    event RemovedOwner(address owner);
-    event ChangedThreshold(uint256 threshold);
-
-    constructor() {
-        _owners.push(msg.sender);
-        _threshold = 1;
-    }
-
-    // Match real Gnosis Safe selectors
-    function getOwners() external view returns (address[] memory) { return _owners; }
-    function getThreshold() external view returns (uint256) { return _threshold; }
-
-    function addOwner(address _owner) external {
-        _owners.push(_owner);
-        emit AddedOwner(_owner);
-    }
-
-    function removeOwner(address _owner) external {
-        for (uint i = 0; i < _owners.length; i++) {
-            if (_owners[i] == _owner) {
-                _owners[i] = _owners[_owners.length - 1];
-                _owners.pop();
-                break;
-            }
-        }
-        emit RemovedOwner(_owner);
-    }
-
-    function changeThreshold(uint256 t) external {
-        _threshold = t;
-        emit ChangedThreshold(t);
-    }
-}
-"""
 
 TIMELOCK_SOURCE = """
 // SPDX-License-Identifier: MIT
