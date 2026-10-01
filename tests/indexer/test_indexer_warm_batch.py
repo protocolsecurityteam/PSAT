@@ -6,8 +6,9 @@ from __future__ import annotations
 import dataclasses
 import math
 import threading
+from typing import Literal
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, select, update
 from sqlalchemy.orm import Session
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
@@ -95,14 +96,14 @@ def _fetchers(engine: str):
     return _build_indexer_fetchers(chains=(chain_by_id(MAINNET), base), engine=engine)
 
 
-def _scan(session, fetchers, engine: str, mode: str):
+def _scan(session, fetchers, engine: str, mode: Literal["all", "warm", "cold"]):
     return scan_enrolled_events(
         session,
         fetchers=fetchers[0],
         head_fetchers=fetchers[1],
         block_hash_fetchers=fetchers[2],
         engine=engine,
-        scan_mode=mode,  # type: ignore[arg-type]
+        scan_mode=mode,
     )
 
 
@@ -191,7 +192,7 @@ def test_warm_sweep_requests_at_most_one_getlogs_per_fifty_groups_per_chain(db_s
             addr = address(0x1000 * chain + i)
             sim.add_many(chain, [SimLog(addr, (topic(1),), "0x", b, 0, i) for b in range(seed, seed + 5_000, 97)])
             enroll_event_cursor(db_session, chain_id=chain, event_address=addr, topic0=topic(1), start_block=seed)
-    db_session.execute(IndexedEventCursor.__table__.update().values(backfill_complete=True))
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
     fetchers = _fetchers("paged")
 
@@ -215,7 +216,7 @@ def test_an_address_array_rejection_splits_the_batch(db_session, monkeypatch):
     for i, addr in enumerate(addrs):
         sim.add_many(MAINNET, [SimLog(addr, (topic(2),), "0x", b, 0, i) for b in range(seed + 1, seed + 200, 3)])
         enroll_event_cursor(db_session, chain_id=MAINNET, event_address=addr, topic0=topic(2), start_block=seed)
-    db_session.execute(IndexedEventCursor.__table__.update().values(backfill_complete=True))
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
 
     summary = _scan(db_session, _fetchers("paged"), "paged", "warm")
@@ -239,7 +240,7 @@ def test_concurrent_sweeps_lock_in_canonical_order_without_deadlock(db_session, 
         sim.add_many(MAINNET, [SimLog(addr, (topic(3),), "0x", b, 0, i) for b in range(seed + 1, seed + 100, 2)])
         for t in (topic(3), topic(4)):
             enroll_event_cursor(db_session, chain_id=MAINNET, event_address=addr, topic0=t, start_block=seed)
-    db_session.execute(IndexedEventCursor.__table__.update().values(backfill_complete=True))
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
     gate = threading.Barrier(2, timeout=10)
     entered = {"n": 0}
@@ -301,7 +302,7 @@ def test_a_group_lagging_past_the_batch_limit_is_swept_alone(db_session, monkeyp
         db_session, chain_id=MAINNET, event_address=address(0x703), topic0=topic(5), start_block=target - 10
     )
     enroll_event_cursor(db_session, chain_id=MAINNET, event_address=far, topic0=topic(5), start_block=target - lag)
-    db_session.execute(IndexedEventCursor.__table__.update().values(backfill_complete=True))
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
 
     _scan(db_session, _fetchers("paged"), "paged", "warm")

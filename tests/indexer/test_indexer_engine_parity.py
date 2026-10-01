@@ -16,7 +16,7 @@ from threading import Event
 from typing import Any
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
 from db.models import (
@@ -301,7 +301,7 @@ def test_parity_harness_detects_a_divergent_engine(db_session, monkeypatch):
     monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
     monkeypatch.delenv("PSAT_GETLOGS_RESULT_CAP", raising=False)
     legacy, _ = _scenario(db_session, monkeypatch, "legacy")
-    db_session.execute(IndexedEventLog.__table__.delete().where(IndexedEventLog.topic0 == TD3))
+    db_session.execute(delete(IndexedEventLog).where(IndexedEventLog.topic0 == TD3))
     db_session.execute(
         update(IndexedEventCursor).where(IndexedEventCursor.topic0 == TD2).values(backfill_complete=False)
     )

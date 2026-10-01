@@ -305,6 +305,7 @@ def test_warm_cursors_keep_up_with_a_moving_head_while_a_cold_fetch_blocks(db_se
                             IndexedEventCursor.chain_id == chain, IndexedEventCursor.event_address.in_(addrs)
                         )
                     )
+                    assert frontier is not None
                     lag_blocks = sim.head(chain) - depth[chain] - int(frontier)
                     max_lag_s[chain] = max(max_lag_s[chain], lag_blocks / rates[chain])
             time.sleep(interval / 6)

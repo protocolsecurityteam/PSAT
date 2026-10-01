@@ -11,7 +11,7 @@ import math
 from threading import Event
 
 import pytest
-from sqlalchemy import event, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
 from db.models import (
@@ -228,8 +228,8 @@ def test_shutdown_between_pages_keeps_committed_pages_and_resumes_identically(db
     _drain(db_session, limits=limits)
     interrupted = _rows(db_session)
 
-    db_session.execute(IndexedEventLog.__table__.delete())
-    db_session.execute(IndexedEventCursor.__table__.delete())
+    db_session.execute(delete(IndexedEventLog))
+    db_session.execute(delete(IndexedEventCursor))
     db_session.commit()
     _enroll(db_session)
     _drain(db_session, limits=limits)

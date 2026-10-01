@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
@@ -306,7 +307,7 @@ def test_membership_key_words_refuse_an_undecodable_row(db_session):
     words = _observed_event_key_words(
         session=db_session,
         outer_ctx=_Ctx(),
-        descriptor={"kind": "mapping_membership"},  # type: ignore[arg-type]
+        descriptor=cast(Any, {"kind": "mapping_membership"}),
         event_hints=[{"topic0": _T1, "topics_to_keys": {1: 0}, "event_address": _ADDR}],
         key_index=0,
     )
