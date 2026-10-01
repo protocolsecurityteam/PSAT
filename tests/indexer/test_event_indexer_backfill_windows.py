@@ -458,7 +458,7 @@ def test_exact_budget_finishing_last_cold_group_is_not_busy(session):
 
 
 @requires_postgres
-def test_shutdown_stops_after_current_window_and_preserves_committed_progress(session):
+def test_shutdown_stops_after_current_page_and_preserves_committed_progress(session):
     from threading import Event
 
     stop = Event()

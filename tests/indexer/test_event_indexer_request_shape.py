@@ -164,10 +164,10 @@ def test_multi_topic_address_scans_once_per_window_and_demuxes(session):
         max_windows_per_pass=100,
     )
 
-    # The economy claim: 4 windows of 2_500 cover the 10_000-block gap in 4
-    # requests TOTAL — not 4 per topic — and every request carried both topics.
+    # The economy claim: 4 windows of 2_500 cover the 10_000-block gap in 4 requests TOTAL — not 4 per topic. Pages
+    # below the drifted cursor don't ask for its topic; the rest carry both.
     assert len(fetcher.calls) == target // span
-    assert all(topics == (_TOPIC_A, _TOPIC_B) for topics, _f, _t in fetcher.calls)
+    assert [topics for topics, _f, _t in fetcher.calls] == [(_TOPIC_A,)] * 2 + [(_TOPIC_A, _TOPIC_B)] * 2
     assert summary.windows_scanned == target // span
 
     # Demux: each topic's rows land under its own topic0; the drifted cursor

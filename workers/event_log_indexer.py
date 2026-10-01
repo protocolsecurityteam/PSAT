@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import logging
 import os
@@ -49,7 +50,7 @@ from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
-from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
+from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
     ChainInfo,
@@ -237,6 +238,7 @@ class GroupStepResult:
     fetched: bool  # False for the no-fetch visit of an all-warm group
     frontier: int | None = None  # lowest member position after the step
     page_logs: int = 0  # logs the fetched page returned (first prefix of a page only)
+    rejected_pages: int = 0  # requests refused or discarded before the page was accepted
 
 
 @dataclass(frozen=True)
@@ -431,7 +433,7 @@ _FETCHER_ACCEPTS_WINDOW_STATS: dict[type, bool] = {}
 def _fetch_window(
     fetcher: LogFetcher,
     *,
-    event_address: str,
+    event_address: str | Sequence[str],
     topics: list[str],
     from_block: int,
     to_block: int,
@@ -461,7 +463,7 @@ def _fetch_window(
     return fetcher.fetch_logs(event_address=event_address, topics=topics, from_block=from_block, to_block=to_block)
 
 
-def index_event_group_steps(
+def _legacy_group_steps(
     session: Session,
     *,
     chain_id: int,
@@ -477,7 +479,7 @@ def index_event_group_steps(
     write_max_rows: int = DEFAULT_WRITE_MAX_ROWS,
     write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
 ) -> Iterator[GroupStepResult]:
-    """Yield atomic write prefixes of one fetched (chain, address) window.
+    """The legacy engine: yield atomic write prefixes of one fetched (chain, address) window.
 
     The caller must commit each prefix before requesting the next (logs, cursor progress and trigger invalidation share
     the transaction), then re-lock and validate cursors; a concurrent advance or rewind discards the remainder.
@@ -642,6 +644,481 @@ def _cursor_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, 
     return [(c.topic0, int(c.last_indexed_block or 0), c.last_indexed_block_hash) for c in cursors]
 
 
+ENGINES = ("legacy", "paged")
+
+
+def _resolve_engine(engine: str | None) -> str:
+    chosen = (engine or settings.ENGINE).strip().lower()
+    if chosen not in ENGINES:
+        raise ValueError(f"unknown event indexer engine {chosen!r}; expected one of {ENGINES}")
+    return chosen
+
+
+class CursorsMoved(RuntimeError):
+    """A member's position at write time differs from the plan; the page is discarded and refetched."""
+
+
+@dataclass(frozen=True)
+class _Member:
+    event_address: str
+    topic0: str
+    last: int
+    block_hash: bytes | None
+    logs_per_block: float | None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.event_address, self.topic0)
+
+
+@dataclass(frozen=True)
+class _Rewind:
+    to_block: int
+    block_hash: bytes | None
+
+
+@dataclass(frozen=True)
+class GroupPlan:
+    """Positions read in a short transaction, with any reorg rewind found by the hash check after it."""
+
+    chain_id: int
+    addresses: tuple[str, ...]
+    members: tuple[_Member, ...]
+    rewinds: Mapping[str, _Rewind]
+
+
+@dataclass(frozen=True)
+class PageLimits:
+    """How large and how many pages one visit may fetch."""
+
+    max_block_span: int = DEFAULT_MAX_BLOCK_SPAN
+    initial_span: int = settings.INITIAL_SPAN
+    target_page_logs: int = settings.TARGET_PAGE_LOGS
+    max_page_logs: int | None = settings.MAX_PAGE_LOGS
+    max_pages: int | None = None
+    deadline: float | None = None
+
+
+_monotonic = time.monotonic
+
+
+def _end_transaction(session: Session) -> None:
+    # Nothing may hold row locks (or the trigger's reconciliation row) while waiting on RPC.
+    if session.in_transaction():
+        session.commit()
+
+
+def _cursor_rows_query(chain_id: int, addresses: Sequence[str]):
+    return (
+        select(IndexedEventCursor)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address).in_(list(addresses)))
+        .order_by(func.lower(IndexedEventCursor.event_address), IndexedEventCursor.topic0)
+    )
+
+
+def plan_group(
+    session: Session,
+    *,
+    chain_id: int,
+    addresses: Sequence[str],
+    target: int,
+    hash_at: Callable[[int], bytes | None],
+    confirmation_depth: int,
+) -> GroupPlan:
+    """Read positions, release the transaction, then run the reorg check against the stored fringe stamps."""
+    wanted = tuple(sorted({a.lower() for a in addresses}))
+    rows = session.execute(
+        select(
+            IndexedEventCursor.event_address,
+            IndexedEventCursor.topic0,
+            IndexedEventCursor.last_indexed_block,
+            IndexedEventCursor.last_indexed_block_hash,
+            IndexedEventCursor.recent_logs_per_block,
+        )
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address).in_(list(wanted)))
+        .order_by(func.lower(IndexedEventCursor.event_address), IndexedEventCursor.topic0)
+    ).all()
+    _end_transaction(session)
+    members = tuple(
+        _Member(
+            event_address=str(address).lower(),
+            topic0=str(topic0).lower(),
+            last=int(last or 0),
+            block_hash=block_hash,
+            logs_per_block=density,
+        )
+        for address, topic0, last, block_hash, density in rows
+    )
+    rewinds: dict[str, _Rewind] = {}
+    for member in members:
+        if member.event_address in rewinds:
+            continue
+        if member.last <= 0 or member.block_hash is None or member.last >= target:
+            continue
+        observed = hash_at(member.last)
+        if observed is None or observed == member.block_hash:
+            continue
+        rewind_to = max(0, member.last - confirmation_depth)
+        logger.warning(
+            "event-log reorg detected; rewinding indexed logs before re-scan",
+            extra={
+                "chain_id": chain_id,
+                "event_address": member.event_address,
+                "rewind_to": rewind_to,
+                "rewind_from": member.last,
+                "depth": member.last - rewind_to,
+            },
+        )
+        rewinds[member.event_address] = _Rewind(rewind_to, hash_at(rewind_to) if rewind_to else None)
+    return GroupPlan(chain_id=chain_id, addresses=wanted, members=members, rewinds=rewinds)
+
+
+def _member_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, str, int, bytes | None]]:
+    return [
+        (c.event_address.lower(), c.topic0.lower(), int(c.last_indexed_block or 0), c.last_indexed_block_hash)
+        for c in cursors
+    ]
+
+
+def _lock_members(
+    session: Session, plan: GroupPlan, expected: list[tuple[str, str, int, bytes | None]]
+) -> list[IndexedEventCursor]:
+    """``FOR UPDATE`` every cursor at the plan's addresses in canonical order, and require the positions the plan (or
+    this visit's last commit) left. Anything else, including a newly enrolled sibling, discards the page."""
+    cursors = list(
+        session.execute(
+            _cursor_rows_query(plan.chain_id, plan.addresses)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        .scalars()
+        .all()
+    )
+    if _member_positions(cursors) != expected:
+        raise CursorsMoved("event cursors changed since the page was planned; refetch required")
+    return cursors
+
+
+def _page_density(page: LogPage) -> float | None:
+    count = page.returned_log_count
+    if count is None:
+        return None
+    return count / (page.to_block - page.from_block + 1)
+
+
+def _initial_span(densities: Sequence[float | None], limits: PageLimits) -> int:
+    max_span = max(1, limits.max_block_span)
+    known = [d for d in densities if d is not None and d > 0]
+    if known:
+        return max(1, min(max_span, int(limits.target_page_logs / max(known))))
+    return max(1, min(limits.initial_span, max_span))
+
+
+def _next_span(page: LogPage, limits: PageLimits) -> int:
+    """Double while pages come back under half the target; otherwise size the next page to the target at this
+    page's density."""
+    max_span = max(1, limits.max_block_span)
+    blocks = page.to_block - page.from_block + 1
+    count = page.returned_log_count
+    if count is None:
+        return max(1, min(max_span, blocks))
+    if count < limits.target_page_logs / 2:
+        return max(1, min(max_span, blocks * 2))
+    return max(1, min(max_span, int(limits.target_page_logs * blocks / count)))
+
+
+class _PageSource(Protocol):
+    def iter_pages(
+        self,
+        *,
+        event_address: str | Sequence[str],
+        topics: Sequence[str],
+        from_block: int,
+        to_block: int,
+        max_page_logs: int | None = None,
+    ) -> Iterator[LogPage]: ...
+
+
+def _pages(
+    fetcher: LogFetcher,
+    *,
+    event_address: str | Sequence[str],
+    topics: list[str],
+    from_block: int,
+    to_block: int,
+    max_page_logs: int | None,
+) -> Iterator[LogPage]:
+    """Pages from a streaming fetcher, or the whole range as one page from a fetcher with only ``fetch_logs``."""
+    if callable(getattr(fetcher, "iter_pages", None)):
+        yield from cast(_PageSource, fetcher).iter_pages(
+            event_address=event_address,
+            topics=topics,
+            from_block=from_block,
+            to_block=to_block,
+            max_page_logs=max_page_logs,
+        )
+        return
+    stats: list[FetchWindowStat] = []
+    logs = _fetch_window(
+        fetcher,
+        event_address=event_address,
+        topics=topics,
+        from_block=from_block,
+        to_block=to_block,
+        window_stats=stats,
+    )
+    yield LogPage(from_block=from_block, to_block=to_block, logs=logs, stats=tuple(stats))
+
+
+def index_event_group_steps(
+    session: Session,
+    *,
+    chain_id: int,
+    event_address: str,
+    fetcher: LogFetcher,
+    target: int,
+    block_hash_fetcher: BlockHashFetcher,
+    block_hash_memo: MutableMapping[tuple[int, int], bytes | None] | None = None,
+    confirmation_depth: int = DEFAULT_CONFIRMATION_DEPTH,
+    limits: PageLimits | None = None,
+    insert_batch_size: int = DEFAULT_INSERT_BATCH,
+    write_max_rows: int = DEFAULT_WRITE_MAX_ROWS,
+    write_max_bytes: int = DEFAULT_WRITE_MAX_BYTES,
+    stop_event: Event | None = None,
+) -> Iterator[GroupStepResult]:
+    """Stream one (chain, address) group to ``target`` in bounded pages, yielding after each write prefix.
+
+    The caller commits each prefix before resuming. No transaction is open during any RPC: positions are read and
+    released first, the reorg check and the target hash read follow, and each page is fetched before its rows are
+    locked. Every write re-locks the group and requires the positions it planned (A5); a mismatch raises
+    :class:`CursorsMoved` with nothing written.
+    """
+    memo: MutableMapping[tuple[int, int], bytes | None] = block_hash_memo if block_hash_memo is not None else {}
+
+    def hash_at(block: int) -> bytes | None:
+        key = (chain_id, block)
+        if key not in memo:
+            _end_transaction(session)
+            memo[key] = block_hash_fetcher.block_hash(block)
+        return memo[key]
+
+    plan = plan_group(
+        session,
+        chain_id=chain_id,
+        addresses=[event_address],
+        target=target,
+        hash_at=hash_at,
+        confirmation_depth=confirmation_depth,
+    )
+    yield from run_plan(
+        session,
+        plan,
+        fetcher=fetcher,
+        target=target,
+        hash_at=hash_at,
+        memo=memo,
+        limits=limits or PageLimits(),
+        insert_batch_size=insert_batch_size,
+        write_max_rows=write_max_rows,
+        write_max_bytes=write_max_bytes,
+        stop_event=stop_event,
+    )
+
+
+def run_plan(
+    session: Session,
+    plan: GroupPlan,
+    *,
+    fetcher: LogFetcher,
+    target: int,
+    hash_at: Callable[[int], bytes | None],
+    memo: Mapping[tuple[int, int], bytes | None],
+    limits: PageLimits,
+    insert_batch_size: int,
+    write_max_rows: int,
+    write_max_bytes: int,
+    stop_event: Event | None,
+) -> Iterator[GroupStepResult]:
+    chain_id = plan.chain_id
+    if not plan.members:
+        yield GroupStepResult(
+            scanned_from=0, scanned_to=0, inserted=0, members_at_target=0, group_complete=True, fetched=False
+        )
+        return
+    expected = [(m.event_address, m.topic0, m.last, m.block_hash) for m in plan.members]
+    position: dict[tuple[str, str], int] = {}
+    for member in plan.members:
+        rewind = plan.rewinds.get(member.event_address)
+        position[member.key] = min(member.last, rewind.to_block) if rewind is not None else member.last
+
+    def stamp(block: int) -> bytes | None:
+        if (chain_id, block) not in memo:
+            raise RuntimeError(f"fringe hash for block {block} was not read before the write")
+        return memo[(chain_id, block)]
+
+    if all(pos >= target for pos in position.values()):
+        cursors = _lock_members(session, plan, expected)
+        for cursor in cursors:
+            cursor.backfill_complete = True
+            cursor.last_run_at = func.now()
+        yield GroupStepResult(
+            scanned_from=target + 1,
+            scanned_to=target,
+            inserted=0,
+            members_at_target=len(cursors),
+            group_complete=True,
+            fetched=False,
+            frontier=min(int(c.last_indexed_block or 0) for c in cursors),
+        )
+        return
+
+    # Fringe stamps for members already at or past the target, read now so no write waits on RPC.
+    for member in plan.members:
+        rewind = plan.rewinds.get(member.event_address)
+        stamped = member.block_hash if rewind is None or member.last <= rewind.to_block else rewind.block_hash
+        if position[member.key] >= target and stamped is None:
+            hash_at(position[member.key])
+    frontier = min(pos for pos in position.values() if pos < target)
+    span = _initial_span([m.logs_per_block for m in plan.members if position[m.key] < target], limits)
+    single_address = plan.addresses[0] if len(plan.addresses) == 1 else None
+    rewind_pending = bool(plan.rewinds)
+    pages = 0
+    while frontier < target:
+        if stop_event is not None and stop_event.is_set():
+            return
+        if pages and limits.max_pages is not None and pages >= limits.max_pages:
+            return
+        if pages and limits.deadline is not None and _monotonic() >= limits.deadline:
+            return
+        chunk_end = min(target, frontier + span)
+        topics = sorted({topic0 for (_address, topic0), pos in position.items() if pos < chunk_end})
+        if chunk_end >= target:
+            # The fringe hash is read before that block's logs, so a reorg in between is caught by the next check.
+            hash_at(target)
+        _end_transaction(session)
+        page_iter = _pages(
+            fetcher,
+            event_address=single_address if single_address is not None else list(plan.addresses),
+            topics=topics,
+            from_block=frontier + 1,
+            to_block=chunk_end,
+            max_page_logs=limits.max_page_logs,
+        )
+        while True:
+            _end_transaction(session)
+            page = next(page_iter, None)
+            if page is None:
+                break
+            logs = sorted(page.logs, key=lambda log: log.block_number)
+            density = _page_density(page)
+            prefixes = _write_prefixes(logs, page.to_block, max_rows=write_max_rows, max_bytes=write_max_bytes)
+            logger.debug(
+                "event indexer page",
+                extra={
+                    "chain_id": chain_id,
+                    "event_address": single_address,
+                    "addresses": len(plan.addresses),
+                    "from_block": page.from_block,
+                    "to_block": page.to_block,
+                    "topics": len(topics),
+                    "returned_log_count": page.returned_log_count,
+                    "rejected": page.rejected,
+                    "prefixes": len(prefixes),
+                },
+            )
+            for index, (offset, end_offset, prefix_end) in enumerate(prefixes):
+                cursors = _lock_members(session, plan, expected)
+                if rewind_pending:
+                    _apply_rewinds(session, plan, cursors)
+                    rewind_pending = False
+                buckets: dict[tuple[str, str], list[FetchedEventLog]] = {}
+                for log in logs[offset:end_offset]:
+                    if log.topics:
+                        emitter = single_address if single_address is not None else log.address.lower()
+                        if emitter not in plan.addresses:
+                            raise RuntimeError("eth_getLogs returned a log from an emitter outside the request")
+                        buckets.setdefault((emitter, log.topics[0].lower()), []).append(log)
+                inserted = 0
+                members_at_target = 0
+                for cursor in cursors:
+                    address = cursor.event_address.lower()
+                    topic0 = cursor.topic0.lower()
+                    last = int(cursor.last_indexed_block or 0)
+                    if prefix_end > last:
+                        if topic0 not in topics:
+                            raise RuntimeError("a cursor would advance over a range its topic was not requested for")
+                        member_logs = [log for log in buckets.get((address, topic0), []) if log.block_number > last]
+                        inserted += _bulk_insert_logs(
+                            session, chain_id, address, topic0, member_logs, batch_size=insert_batch_size
+                        )
+                        cursor.last_indexed_block = prefix_end
+                        cursor.last_indexed_block_hash = None
+                        _fold_window_stats(cursor, list(page.stats))
+                        cursor.last_advanced_at = func.now()
+                        if density is not None:
+                            cursor.recent_logs_per_block = density
+                    # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the
+                    # evaluated block is judged by position, and only a reorg rewind resets the flag.
+                    if int(cursor.last_indexed_block or 0) >= target:
+                        cursor.backfill_complete = True
+                        members_at_target += 1
+                        if cursor.last_indexed_block_hash is None:
+                            cursor.last_indexed_block_hash = stamp(int(cursor.last_indexed_block))
+                    cursor.last_run_at = func.now()
+                expected = _member_positions(cursors)
+                for address, topic0, last, _hash in expected:
+                    position[(address, topic0)] = last
+                yield GroupStepResult(
+                    scanned_from=page.from_block if index == 0 else prefixes[index - 1][2] + 1,
+                    scanned_to=prefix_end,
+                    inserted=inserted,
+                    members_at_target=members_at_target,
+                    group_complete=members_at_target == len(cursors),
+                    fetched=index == 0,
+                    frontier=min(last for _a, _t, last, _h in expected),
+                    page_logs=len(logs) if index == 0 else 0,
+                    rejected_pages=page.rejected if index == 0 else 0,
+                )
+            pages += 1
+            span = _next_span(page, limits)
+            # Release this page before the next request so at most one page is resident.
+            page = None
+            logs = []
+            buckets = {}
+            member_logs = []
+            if stop_event is not None and stop_event.is_set():
+                return
+            if limits.max_pages is not None and pages >= limits.max_pages:
+                return
+            if limits.deadline is not None and _monotonic() >= limits.deadline:
+                return
+        frontier = min((pos for pos in position.values() if pos < target), default=target)
+
+
+def _apply_rewinds(session: Session, plan: GroupPlan, cursors: Sequence[IndexedEventCursor]) -> None:
+    """Rewind the whole address, then delete its rows above the rewind point, in the page's first transaction.
+
+    The cursor decrease is flushed before the DELETE: the row trigger marks ``reorg`` on the decrease even when the
+    DELETE removes nothing.
+    """
+    for cursor in cursors:
+        rewind = plan.rewinds.get(cursor.event_address.lower())
+        if rewind is not None and int(cursor.last_indexed_block or 0) > rewind.to_block:
+            cursor.last_indexed_block = rewind.to_block
+            cursor.last_indexed_block_hash = rewind.block_hash
+            cursor.backfill_complete = False
+    session.flush()
+    for address, rewind in sorted(plan.rewinds.items()):
+        session.execute(
+            delete(IndexedEventLog)
+            .where(IndexedEventLog.chain_id == plan.chain_id)
+            .where(func.lower(IndexedEventLog.event_address) == address)
+            .where(IndexedEventLog.block_number > rewind.to_block)
+        )
+
+
 def _write_prefixes(
     logs: list[FetchedEventLog], window_end: int, *, max_rows: int, max_bytes: int
 ) -> list[tuple[int, int, int]]:
@@ -689,7 +1166,13 @@ def scan_enrolled_events(
     stop_event: Event | None = None,
     scan_mode: Literal["all", "warm", "cold"] = "all",
     on_commit: Callable[[ScanSummary], None] | None = None,
+    engine: str | None = None,
+    page_limits: PageLimits | None = None,
+    group_budget_s: float = settings.GROUP_BUDGET_S,
+    pass_budget_s: float = settings.PASS_BUDGET_S,
 ) -> ScanSummary:
+    engine = _resolve_engine(engine)
+    pass_started = _monotonic()
     # Group cursors by (chain, address) so one eth_getLogs serves every topic on an address. Rotation is
     # least-recently-run per group, so one busy address can't monopolize passes and new cursors warm within a rotation.
     all_rows = session.execute(
@@ -704,6 +1187,7 @@ def scan_enrolled_events(
     ).all()
     # Skip zero/invalid addresses from before the enroll-time guard; 0x0 never emits logs.
     rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
+    _end_transaction(session)
     groups: dict[tuple[int, str], dict[str, Any]] = {}
     for chain_id, event_address, topic0, last_run_at, last_block, complete in rows:
         entry = groups.setdefault(
@@ -765,7 +1249,10 @@ def scan_enrolled_events(
         if scan_mode == "warm":
             # At least one window per warm address even when the fleet exceeds the cold budget.
             pass_budget = max(1, len(groups))
-            max_windows_per_cursor = 1
+            if engine == "legacy":
+                max_windows_per_cursor = 1
+    pass_deadline = None if scan_mode == "warm" else pass_started + pass_budget_s
+    stopped_short = False
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
     warm_lag: dict[int, int] = {}
     # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
@@ -776,6 +1263,9 @@ def scan_enrolled_events(
         # Stop at the per-pass budget; unserviced groups keep their older last_run_at and go first next pass. Without
         # this a cold pass runs for tens of minutes and the heartbeat goes stale.
         if windows_scanned >= pass_budget:
+            break
+        if engine == "paged" and pass_deadline is not None and _monotonic() >= pass_deadline:
+            stopped_short = True
             break
         fetcher = fetchers.get(chain_id)
         head_fetcher = head_fetchers.get(chain_id)
@@ -802,26 +1292,30 @@ def scan_enrolled_events(
         try:
             if chain_id not in targets:
                 targets[chain_id] = max(0, head_fetcher.head_block() - chain_confirmation_depth)
-            for _ in range(max(1, max_windows_per_cursor)):
-                if stop_event is not None and stop_event.is_set():
-                    break
-                if windows_scanned >= pass_budget:
-                    break
+            if engine == "paged":
+                deadline = _monotonic() + group_budget_s
+                if pass_deadline is not None:
+                    deadline = min(deadline, pass_deadline)
+                limits = dataclasses.replace(
+                    page_limits or PageLimits(max_block_span=max_block_span),
+                    max_pages=max(1, min(max_windows_per_cursor, pass_budget - windows_scanned)),
+                    deadline=deadline,
+                )
                 group_complete = False
                 for result in index_event_group_steps(
                     session,
                     chain_id=chain_id,
                     event_address=event_address,
-                    topics=sorted(entry["topics"]),
                     fetcher=fetcher,
                     target=targets[chain_id],
                     block_hash_fetcher=block_hash_fetcher,
                     block_hash_memo=block_hash_memo,
                     confirmation_depth=chain_confirmation_depth,
-                    max_block_span=max_block_span,
+                    limits=limits,
                     insert_batch_size=insert_batch_size,
                     write_max_rows=write_max_rows,
                     write_max_bytes=write_max_bytes,
+                    stop_event=stop_event,
                 ):
                     session.commit()
                     inserted += result.inserted
@@ -841,8 +1335,57 @@ def scan_enrolled_events(
                         )
                     if stop_event is not None and stop_event.is_set():
                         break
-                if group_complete:
-                    break
+                stopped_short |= not group_complete
+            if engine == "legacy":
+                for _ in range(max(1, max_windows_per_cursor)):
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    if windows_scanned >= pass_budget:
+                        break
+                    group_complete = False
+                    for result in _legacy_group_steps(
+                        session,
+                        chain_id=chain_id,
+                        event_address=event_address,
+                        topics=sorted(entry["topics"]),
+                        fetcher=fetcher,
+                        target=targets[chain_id],
+                        block_hash_fetcher=block_hash_fetcher,
+                        block_hash_memo=block_hash_memo,
+                        confirmation_depth=chain_confirmation_depth,
+                        max_block_span=max_block_span,
+                        insert_batch_size=insert_batch_size,
+                        write_max_rows=write_max_rows,
+                        write_max_bytes=write_max_bytes,
+                    ):
+                        session.commit()
+                        inserted += result.inserted
+                        windows_scanned += int(result.fetched)
+                        group_members_at_target = result.members_at_target
+                        group_complete = result.group_complete
+                        visit.record(result)
+                        if on_commit is not None:
+                            on_commit(
+                                ScanSummary(
+                                    inserted=inserted,
+                                    windows_scanned=windows_scanned,
+                                    caught_up_cursors=caught_up_cursors + group_members_at_target,
+                                    total_cursors=len(rows),
+                                    failed_groups=failed_groups,
+                                )
+                            )
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                    if group_complete:
+                        break
+        except CursorsMoved:
+            # Another writer moved a member between plan and write; nothing was written and the next visit refetches.
+            session.rollback()
+            stopped_short = True
+            logger.info(
+                "event indexer page discarded: cursor positions moved since planning",
+                extra={"chain_id": chain_id, "event_address": event_address},
+            )
         except Exception as exc:
             session.rollback()
             failed_groups += 1
@@ -866,7 +1409,7 @@ def scan_enrolled_events(
         elif visit.pages:
             visit.log(scan_mode)
     pending_at_budget = False
-    if windows_scanned >= pass_budget:
+    if windows_scanned >= pass_budget or (engine == "paged" and stopped_short):
         for chain_id, target in targets.items():
             addresses = [address for (cid, address) in groups if cid == chain_id]
             query = (
@@ -920,6 +1463,7 @@ class _GroupVisit:
         if result.fetched:
             self.pages += 1
             self.logs += result.page_logs
+            self.rejected_pages += result.rejected_pages
             if self.scanned_from is None:
                 self.scanned_from = result.scanned_from
         if result.fetched or self.pages:
@@ -1583,6 +2127,8 @@ def run_event_log_indexer_loop(
 
 def _build_indexer_fetchers(
     chains: Sequence[ChainInfo] | None = None,
+    *,
+    engine: str | None = None,
 ) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
     """Per-chain fetchers for the scan loop.
 
@@ -1601,6 +2147,8 @@ def _build_indexer_fetchers(
     registry_chains = all_chains() if chains is None else chains
     # Only the indexer persists per-window counts, so only it applies the result cap.
     result_cap = default_result_cap()
+    # The long timeout lets a wide window return whole, so it is only safe with the paged engine's page ceiling.
+    timeout = settings.GETLOGS_TIMEOUT_S if _resolve_engine(engine) == "paged" else None
     fetchers: dict[int, LogFetcher] = {}
     head_fetchers: dict[int, HeadBlockFetcher] = {}
     block_hash_fetchers: dict[int, BlockHashFetcher] = {}
@@ -1609,7 +2157,7 @@ def _build_indexer_fetchers(
             continue
         rpc_url = require_rpc_url(chain_id=info.chain_id)
         fetchers[info.chain_id] = RpcEventLogFetcher(
-            rpc_url, chain_id=info.chain_id, result_cap=result_cap, keep_raw=False
+            rpc_url, chain_id=info.chain_id, result_cap=result_cap, timeout=timeout, keep_raw=False
         )
         head_fetchers[info.chain_id] = RpcHeadBlockFetcher(rpc_url, chain_id=info.chain_id)
         block_hash_fetchers[info.chain_id] = RpcBlockHashFetcher(rpc_url, chain_id=info.chain_id)

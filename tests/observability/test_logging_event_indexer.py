@@ -54,6 +54,9 @@ class _FakeSession:
     def commit(self):
         self.commits += 1
 
+    def in_transaction(self):
+        return False
+
 
 class _BoomHead:
     def head_block(self) -> int:

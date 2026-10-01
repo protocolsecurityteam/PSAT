@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -448,6 +449,8 @@ class IndexedEventLog(Base):
     transaction_index: Mapped[int] = mapped_column(Integer, nullable=False)
     topics: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     data_words: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    # Set only when ``data`` isn't word-aligned (``data_words`` is then empty); such a row's data isn't decodable.
+    data_hex: Mapped[str | None] = mapped_column(Text, nullable=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
@@ -530,6 +533,10 @@ class IndexedEventCursor(Base):
     max_window_log_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     window_stats_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     window_stats_basis: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Operational only, never evidence: when a page commit last moved this cursor, and the logs per block of that page
+    # (sizes the next page).
+    last_advanced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recent_logs_per_block: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 def exactness_eligible_cursor_clause():

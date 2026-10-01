@@ -8,7 +8,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence, cast
 
 from services.clients.rpc import RpcClientTimeout, rpc_request
 
@@ -100,6 +100,28 @@ class FetchedEventLog:
     raw: dict[str, Any] | None = field(default=None, compare=False)
 
 
+@dataclass(frozen=True)
+class LogPage:
+    """One accepted response over a contiguous block range.
+
+    ``stats`` holds one record per accepted request behind the page (one for ``iter_pages``). ``rejected`` counts the
+    requests refused or discarded since the previous page.
+    """
+
+    from_block: int
+    to_block: int
+    logs: list[FetchedEventLog]
+    stats: tuple[FetchWindowStat, ...]
+    rejected: int = 0
+
+    @property
+    def returned_log_count(self) -> int | None:
+        counts = [stat.returned_log_count for stat in self.stats]
+        if not counts or any(count is None for count in counts):
+            return None
+        return sum(cast(int, count) for count in counts)
+
+
 class RpcScanCancelled(RuntimeError): ...
 
 
@@ -143,7 +165,8 @@ class RpcEventLogFetcher:
         to_block: int,
         window_stats: list[FetchWindowStat] | None = None,
     ) -> list[FetchedEventLog]:
-        """Fetch logs matching ``topics``, optionally restricted to ``event_address``.
+        """Fetch logs matching ``topics``, optionally restricted to ``event_address``: every page of
+        :meth:`iter_pages`, flattened in block order.
 
         ``topics`` is either a flat OR-set over topic0 (the historical shape; one request serves several cursors) or a
         full positional array (element *i* constrains position *i*), per :func:`normalize_topic_filter`.
@@ -154,6 +177,33 @@ class RpcEventLogFetcher:
         ``window_stats`` collects one :class:`FetchWindowStat` per accepted page (bisected leaves, not rejected
         parents).
         """
+        out: list[FetchedEventLog] = []
+        for page in self.iter_pages(
+            event_address=event_address,
+            topics=topics,
+            from_block=from_block,
+            to_block=to_block,
+            window_stats=window_stats,
+        ):
+            out.extend(page.logs)
+        return out
+
+    def iter_pages(
+        self,
+        *,
+        event_address: str | Sequence[str] | None = None,
+        topics: Sequence[Any],
+        from_block: int,
+        to_block: int,
+        window_stats: list[FetchWindowStat] | None = None,
+        max_page_logs: int | None = None,
+    ) -> Iterator[LogPage]:
+        """Yield accepted pages over ``[from_block, to_block]``, ascending and gap-free.
+
+        A rejected request is bisected; at ``min_bisect_span`` the rejection propagates, as does a page at the result
+        cap. A page over ``max_page_logs`` is discarded and bisected below the floor, down to one block; a single block
+        over it is accepted whole. Each request happens on demand, so the caller can commit a page before the next.
+        """
         address_filter: str | list[str] | None
         if event_address is None or isinstance(event_address, str):
             address_filter = event_address
@@ -162,12 +212,131 @@ class RpcEventLogFetcher:
         topic_filter = normalize_topic_filter(topics)
         if address_filter is None and not any(slot for slot in topic_filter):
             raise ValueError("eth_getLogs filter constrains neither address nor any topic position")
-        out: list[FetchedEventLog] = []
+        windows: list[tuple[int, int]] = []
         start = from_block
         while start <= to_block:
             end = min(to_block, start + self.max_block_range - 1)
-            out.extend(self._fetch_range(address_filter, topic_filter, start, end, window_stats))
+            windows.append((start, end))
             start = end + 1
+        pending = windows[::-1]
+        rejected = 0
+        while pending:
+            lo, hi = pending.pop()
+            raw_logs = self._request_range(address_filter, topic_filter, lo, hi)
+            span = hi - lo + 1
+            if raw_logs is _REJECTED:
+                rejected += 1
+                pending.extend(_halves(lo, hi)[::-1])
+                continue
+            # A page at the cap is indistinguishable from a truncated one, so bisect it like an error. The ``is not
+            # None`` guard matters: ``>=`` against None raises TypeError, which would escape the bisect.
+            cap = self.result_cap
+            # A non-list response is unreadable, not zero logs.
+            count = len(raw_logs) if isinstance(raw_logs, list) else None
+            if cap is not None and count is not None and count >= cap:
+                if span <= self.min_bisect_span:
+                    raise RuntimeError(
+                        f"eth_getLogs returned {count} logs at the {cap} result cap for "
+                        f"[{lo}, {hi}] and the span is at the bisect floor: "
+                        "the page cannot be proven whole"
+                    )
+                logger.debug(
+                    "eth_getLogs window returned a page at the result cap; bisecting",
+                    extra={
+                        "event_address": address_filter,
+                        "from_block": lo,
+                        "to_block": hi,
+                        "span": span,
+                        "returned_log_count": count,
+                        "result_cap": cap,
+                    },
+                )
+                raw_logs = None
+                rejected += 1
+                pending.extend(_halves(lo, hi)[::-1])
+                continue
+            if max_page_logs is not None and count is not None and count > max_page_logs:
+                if span > 1:
+                    logger.debug(
+                        "eth_getLogs page over the memory ceiling; discarded and bisecting",
+                        extra={
+                            "event_address": address_filter,
+                            "from_block": lo,
+                            "to_block": hi,
+                            "span": span,
+                            "returned_log_count": count,
+                            "max_page_logs": max_page_logs,
+                        },
+                    )
+                    raw_logs = None
+                    rejected += 1
+                    pending.extend(_halves(lo, hi)[::-1])
+                    continue
+                # Blocks are atomic, so one block over the ceiling is taken whole; memory is bounded by it instead.
+                logger.warning(
+                    "single block exceeds the page ceiling; accepted whole",
+                    extra={
+                        "event_address": address_filter,
+                        "block_number": lo,
+                        "returned_log_count": count,
+                        "max_page_logs": max_page_logs,
+                    },
+                )
+            stat = FetchWindowStat(from_block=lo, to_block=hi, returned_log_count=count, cap=cap)
+            if window_stats is not None:
+                window_stats.append(stat)
+            page = LogPage(
+                from_block=lo, to_block=hi, logs=self._decode_page(raw_logs), stats=(stat,), rejected=rejected
+            )
+            raw_logs = None
+            yield page
+            # Drop this frame's reference so the consumer's release frees the page before the next request.
+            page = None
+            rejected = 0
+
+    def _request_range(
+        self, address_filter: str | list[str] | None, topic_filter: list[list[str] | None], lo: int, hi: int
+    ) -> Any:
+        """The response for one range, or ``_REJECTED`` when the range must be bisected."""
+        log_filter: dict[str, Any] = {"topics": topic_filter, "fromBlock": hex(lo), "toBlock": hex(hi)}
+        # Omit the key rather than send null: absence is the spec's "any emitter", explicit null isn't.
+        if address_filter is not None:
+            log_filter["address"] = address_filter
+        params = [log_filter]
+        try:
+            try:
+                return self._request_logs(params)
+            except RpcClientTimeout:
+                # A client timeout means we stopped waiting, not a reject. Bisecting a slow window fans it into
+                # hundreds of slow leaves, so retry once first.
+                time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
+                return self._request_logs(params)
+        except RpcScanCancelled:
+            raise
+        except RuntimeError as exc:
+            # Upstream cap or timeout: halve; at the floor it's a real error.
+            span = hi - lo + 1
+            if span <= self.min_bisect_span:
+                raise
+            logger.debug(
+                "eth_getLogs window rejected; bisecting",
+                extra={
+                    "event_address": address_filter,
+                    "from_block": lo,
+                    "to_block": hi,
+                    "span": span,
+                    "exc_type": type(exc).__name__,
+                },
+            )
+            return _REJECTED
+
+    def _decode_page(self, raw_logs: Any) -> list[FetchedEventLog]:
+        out: list[FetchedEventLog] = []
+        if isinstance(raw_logs, list):
+            for raw in raw_logs:
+                decoded = _decode_log(raw, keep_raw=self.keep_raw)
+                if decoded is not None:
+                    out.append(decoded)
         return out
 
     def visit_logs(
@@ -239,76 +408,6 @@ class RpcEventLogFetcher:
                 page = None
             start = end + 1
 
-    def _fetch_range(
-        self,
-        event_address: str | list[str] | None,
-        topics: list[list[str] | None],
-        from_block: int,
-        to_block: int,
-        window_stats: list[FetchWindowStat] | None = None,
-    ) -> list[FetchedEventLog]:
-        log_filter: dict[str, Any] = {
-            "topics": topics,
-            "fromBlock": hex(from_block),
-            "toBlock": hex(to_block),
-        }
-        # Omit the key rather than send null: absence is the spec's "any emitter", explicit null isn't.
-        if event_address is not None:
-            log_filter["address"] = event_address
-        params = [log_filter]
-        try:
-            raw_logs = self._request_logs(params)
-        except RpcClientTimeout:
-            # A client timeout means we stopped waiting, not a reject. Bisecting a slow window fans it into hundreds of
-            # slow leaves, so retry once first.
-            time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
-            try:
-                raw_logs = self._request_logs(params)
-            except RpcScanCancelled:
-                raise
-            except RuntimeError as exc:
-                return self._reject_window(event_address, topics, from_block, to_block, exc, window_stats)
-        except RpcScanCancelled:
-            raise
-        except RuntimeError as exc:
-            return self._reject_window(event_address, topics, from_block, to_block, exc, window_stats)
-        # A page at the cap is indistinguishable from a truncated one, so bisect it like an error. The ``is not None``
-        # guard matters: ``>=`` against None raises TypeError, which would escape the bisect.
-        cap = self.result_cap
-        # A non-list response is unreadable, not zero logs.
-        count = len(raw_logs) if isinstance(raw_logs, list) else None
-        if cap is not None and count is not None and count >= cap:
-            span = to_block - from_block + 1
-            if span <= self.min_bisect_span:
-                raise RuntimeError(
-                    f"eth_getLogs returned {count} logs at the {cap} result cap for "
-                    f"[{from_block}, {to_block}] and the span is at the bisect floor: "
-                    "the page cannot be proven whole"
-                )
-            logger.debug(
-                "eth_getLogs window returned a page at the result cap; bisecting",
-                extra={
-                    "event_address": event_address,
-                    "from_block": from_block,
-                    "to_block": to_block,
-                    "span": span,
-                    "returned_log_count": count,
-                    "result_cap": cap,
-                },
-            )
-            return self._bisect_halves(event_address, topics, from_block, to_block, span, window_stats)
-        if window_stats is not None:
-            window_stats.append(
-                FetchWindowStat(from_block=from_block, to_block=to_block, returned_log_count=count, cap=cap)
-            )
-        out: list[FetchedEventLog] = []
-        if isinstance(raw_logs, list):
-            for raw in raw_logs:
-                decoded = _decode_log(raw, keep_raw=self.keep_raw)
-                if decoded is not None:
-                    out.append(decoded)
-        return out
-
     def _request_logs(self, params: list[Any]) -> Any:
         # Two calls rather than passing ``timeout=None``, so callers without a ceiling issue exactly the old call.
         if self.before_retry is not None:
@@ -324,44 +423,13 @@ class RpcEventLogFetcher:
             return rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id)
         return rpc_request(self.rpc_url, "eth_getLogs", params, chain_id=self.chain_id, timeout=self.timeout)
 
-    def _reject_window(
-        self,
-        event_address: str | list[str] | None,
-        topics: list[list[str] | None],
-        from_block: int,
-        to_block: int,
-        exc: RuntimeError,
-        window_stats: list[FetchWindowStat] | None,
-    ) -> list[FetchedEventLog]:
-        # Upstream cap or timeout: halve and recurse; at the floor it's a real error.
-        span = to_block - from_block + 1
-        if span <= self.min_bisect_span:
-            raise exc
-        logger.debug(
-            "eth_getLogs window rejected; bisecting",
-            extra={
-                "event_address": event_address,
-                "from_block": from_block,
-                "to_block": to_block,
-                "span": span,
-                "exc_type": type(exc).__name__,
-            },
-        )
-        return self._bisect_halves(event_address, topics, from_block, to_block, span, window_stats)
 
-    def _bisect_halves(
-        self,
-        event_address: str | list[str] | None,
-        topics: list[list[str] | None],
-        from_block: int,
-        to_block: int,
-        span: int,
-        window_stats: list[FetchWindowStat] | None,
-    ) -> list[FetchedEventLog]:
-        mid = from_block + span // 2 - 1
-        return self._fetch_range(event_address, topics, from_block, mid, window_stats) + self._fetch_range(
-            event_address, topics, mid + 1, to_block, window_stats
-        )
+_REJECTED: Any = object()
+
+
+def _halves(lo: int, hi: int) -> list[tuple[int, int]]:
+    mid = lo + (hi - lo + 1) // 2 - 1
+    return [(lo, mid), (mid + 1, hi)]
 
 
 def _visit_page(

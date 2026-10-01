@@ -62,12 +62,12 @@ def seed(session, topics=TOPICS):
 
 
 def scan(session, fetcher, target=6, **kwargs):
+    kwargs.setdefault("max_windows_per_cursor", 1)
     return indexer.scan_enrolled_events(
         session,
         fetchers={1: fetcher},
         head_fetchers={1: Head(target)},
         block_hash_fetchers={1: Head(target)},
-        max_windows_per_cursor=1,
         **kwargs,
     )
 
@@ -77,7 +77,6 @@ def steps(session, fetcher, target=6, **kwargs):
         session,
         chain_id=1,
         event_address=ADDRESS,
-        topics=TOPICS,
         fetcher=fetcher,
         target=target,
         block_hash_fetcher=Head(target),
@@ -177,15 +176,25 @@ def test_concurrent_rewind_or_advance_discards_retained_window(db_session, chang
 def test_shutdown_keeps_only_committed_prefix(db_session):
     seed(db_session)
     stop = Event()
+    wrote = Event()
+    engine = db_session.get_bind()
 
+    def after_insert(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO indexed_event_logs"):
+            wrote.set()
+
+    # Shutdown arrives right after the first commit that wrote rows; the plan's read-only commit doesn't count.
     def after_commit(session):
-        stop.set()
+        if wrote.is_set():
+            stop.set()
 
+    event.listen(engine, "after_cursor_execute", after_insert)
     event.listen(db_session, "after_commit", after_commit)
     try:
         result = scan(db_session, Fetcher([make_log(b) for b in range(1, 7)]), write_max_rows=2, stop_event=stop)
     finally:
         event.remove(db_session, "after_commit", after_commit)
+        event.remove(engine, "after_cursor_execute", after_insert)
     assert result.inserted == 2
     assert count_logs(db_session) == 2
     assert all(c.last_indexed_block == 2 and not c.backfill_complete for c in positions(db_session))
@@ -218,7 +227,6 @@ def test_reorg_and_final_hash_reads_do_not_hold_reconciliation_lock(db_session):
         db_session,
         chain_id=1,
         event_address=ADDRESS,
-        topics=TOPICS,
         fetcher=fetcher,
         target=8,
         block_hash_fetcher=ReorgHashes(),
@@ -295,7 +303,14 @@ def test_incident_sized_backfill_allows_repeated_concurrent_submissions(db_sessi
         with ThreadPoolExecutor(max_workers=2) as pool:
             submissions = [pool.submit(submit_repeatedly) for _ in range(2)]
             try:
-                result = scan(db_session, fetcher, target=200_000)
+                result = scan(
+                    db_session,
+                    fetcher,
+                    target=200_000,
+                    max_windows_per_cursor=1_000,
+                    group_budget_s=600,
+                    pass_budget_s=600,
+                )
             finally:
                 done.set()
                 first_insert.set()
@@ -307,7 +322,9 @@ def test_incident_sized_backfill_allows_repeated_concurrent_submissions(db_sessi
         event.remove(db_session, "after_commit", after_commit)
     assert result.failed_groups == 0
     assert result.inserted == sum(counts)
-    assert len(fetcher.calls) == 1
+    # Pages are ascending and gap-free over the whole range.
+    assert fetcher.calls[0][0] == 1 and fetcher.calls[-1][1] == 200_000
+    assert all(nxt[0] == prev[1] + 1 for prev, nxt in zip(fetcher.calls, fetcher.calls[1:]))
     assert count_logs(db_session) == sum(counts)
     assert len({job_id for job_id, _, _, _ in outcomes}) == 48
     assert db_session.scalar(select(func.count()).select_from(Job)) == 48

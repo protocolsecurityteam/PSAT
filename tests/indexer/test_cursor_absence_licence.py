@@ -46,6 +46,7 @@ from workers.event_log_indexer import (
     _witness_seed_block,
     enroll_event_cursor,
     enroll_from_tracked_topics,
+    PageLimits,
     index_event_group_steps,
 )
 
@@ -656,11 +657,10 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
         db_session,
         chain_id=1,
         event_address=_ADDR,
-        topics=[_TOPIC_DENY_TO],
         fetcher=_BadFetcher(),
         target=_SEED + 5_000,
         block_hash_fetcher=_NoHash(),
-        max_block_span=1_000,
+        limits=PageLimits(max_block_span=1_000),
     ):
         db_session.commit()
     cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
@@ -806,11 +806,10 @@ def test_advancing_records_page_stats_or_downgrades(db_session, fetcher, expecte
         db_session,
         chain_id=1,
         event_address=_ADDR,
-        topics=[_TOPIC_DENY_TO],
         fetcher=fetcher,
         target=_SEED + 5_000,
         block_hash_fetcher=_NoHash(),
-        max_block_span=1_000,
+        limits=PageLimits(max_block_span=1_000),
     ):
         db_session.commit()
     cursor = _row(db_session, topic0=_TOPIC_DENY_TO)

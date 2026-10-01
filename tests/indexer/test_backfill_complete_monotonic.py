@@ -12,7 +12,7 @@ from db.models import ENROLLMENT_BASIS_PREDICATE_HINT, FIRST_INDEXED_BASIS_CREAT
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import requires_postgres
-from workers.event_log_indexer import index_event_group_steps
+from workers.event_log_indexer import PageLimits, index_event_group_steps
 
 pytestmark = requires_postgres
 
@@ -52,16 +52,15 @@ def _cursor(topic0: str, last: int, *, complete: bool) -> IndexedEventCursor:
     )
 
 
-def _step(session, hashes: _Hashes, topics: list[str]) -> None:
+def _step(session, hashes: _Hashes) -> None:
     for _prefix in index_event_group_steps(
         session,
         chain_id=1,
         event_address=_ADDR,
-        topics=topics,
         fetcher=_EmptyFetcher(),
         target=_TARGET,
         block_hash_fetcher=hashes,
-        max_block_span=500,
+        limits=PageLimits(max_block_span=500, max_pages=1),
     ):
         session.commit()
 
@@ -89,7 +88,7 @@ def test_sibling_backfill_leaves_the_warm_cursor_complete_and_exact(db_session):
     db_session.add_all([_cursor(_WARM, _WARM_AT, complete=True), _cursor(_COLD, 100, complete=False)])
     db_session.commit()
 
-    _step(db_session, _Hashes(), [_WARM, _COLD])
+    _step(db_session, _Hashes())
 
     warm, cold = _get(db_session, _WARM), _get(db_session, _COLD)
     # The shared window [101, 600] stays below the warm cursor, which neither moves nor loses completeness.
@@ -105,7 +104,7 @@ def test_reorg_rewind_still_resets_the_flag(db_session):
     db_session.add(_cursor(_WARM, _WARM_AT, complete=True))
     db_session.commit()
 
-    _step(db_session, _Hashes(reorged={_WARM_AT}), [_WARM])
+    _step(db_session, _Hashes(reorged={_WARM_AT}))
 
     warm = _get(db_session, _WARM)
     assert warm.backfill_complete is False
@@ -116,7 +115,7 @@ def test_reaching_the_target_marks_complete(db_session):
     db_session.add(_cursor(_COLD, _TARGET - 300, complete=False))
     db_session.commit()
 
-    _step(db_session, _Hashes(), [_COLD])
+    _step(db_session, _Hashes())
 
     cold = _get(db_session, _COLD)
     assert (cold.last_indexed_block, cold.backfill_complete) == (_TARGET, True)
