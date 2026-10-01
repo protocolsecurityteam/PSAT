@@ -24,6 +24,7 @@ from db.floor_witnesses import (
     WITNESS_PRIOR_INCARNATION,
     WITNESS_PROVEN,
     WitnessOutcome,
+    read_floor_witness,
     record_floor_witness,
 )
 from db.models import (
@@ -51,6 +52,7 @@ from db.models import (
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
+from services.monitoring.event_topics import WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.indexer_work import mark_dirty
@@ -2218,6 +2220,43 @@ def enroll_from_completed_jobs(
     return inserted
 
 
+# Tracked-topic tiers whose rows no reader turns into output: nothing folds them, no fixed-topic reader names them, and
+# the watcher publishes nothing for them. Their monitoring is unaffected.
+_TRACKED_TIERS_NOT_INDEXED = frozenset({WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT})
+
+
+def tracked_spec_enrols(spec: Mapping[str, Any]) -> bool:
+    """Whether a ``tracked_topics`` spec is indexed: everything but an ``activity`` or ``hint`` stamp, so an unstamped
+    or unknown tier keeps its cursor."""
+    return spec.get("witness_tier") not in _TRACKED_TIERS_NOT_INDEXED
+
+
+def _witness_unenrolled_address(
+    session: Session,
+    *,
+    chain_id: int,
+    address: str,
+    seed_cache: dict[tuple[int, str], int | None],
+    witness_cache: dict[tuple[int, str], tuple[int | None, str]],
+    pending: set[tuple[int, str]] | None,
+    progress: Callable[[], None] | None,
+) -> None:
+    """Record the deploy-floor witness for an address whose tracked topics are all skipped, once: an address with a
+    witness row costs one lookup and no external call."""
+    if read_floor_witness(session, chain_id=chain_id, address=address) is not None:
+        return
+    if progress is not None:
+        progress()
+    seed = _seed_block(address, seed_cache, chain_id=chain_id)
+    if seed is None:
+        if pending is not None:
+            pending.add((chain_id, address.lower()))
+        return
+    _witness_seed_block(address, seed, witness_cache, chain_id=chain_id, session=session)
+    if progress is not None:
+        progress()
+
+
 def enroll_from_tracked_topics(
     session: Session,
     *,
@@ -2238,6 +2277,9 @@ def enroll_from_tracked_topics(
     Only ``topic0`` is read, not ``effect_tags.writes[]`` (a union over emitters that misattributes writes). These
     cursors therefore carry no variable attribution (``enrollment_basis = tracked_topics_asserted``), which the
     resolution gate keys on: they gather evidence but license nothing.
+
+    ``activity`` and ``hint`` specs are not enrolled (:func:`tracked_spec_enrols`); an address left with only those
+    still gets its floor witness recorded.
     """
     query = (
         select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
@@ -2278,9 +2320,15 @@ def enroll_from_tracked_topics(
             continue
         seen: set[str] = set()
         wanted: list[str] = []
+        skipped_tier = False
         for spec in specs:
             topic0 = spec.get("topic0") if isinstance(spec, dict) else None
             if not isinstance(topic0, str) or not topic0.lower().startswith("0x") or len(topic0) != 66:
+                continue
+            # Skipped before the dedupe and the budget, so a skipped topic neither shadows a self-describing spec for
+            # the same topic0 nor spends a pass's enrolment budget.
+            if not tracked_spec_enrols(spec):
+                skipped_tier = True
                 continue
             if topic0.lower() in seen:
                 continue
@@ -2289,6 +2337,16 @@ def enroll_from_tracked_topics(
         # Fully enrolled addresses cost no budget or RPC, so passes advance through the fleet.
         pending_topics = [t for t in wanted if not _cursor_exists(session, chain_id, address, t)]
         if not pending_topics:
+            if skipped_tier:
+                _witness_unenrolled_address(
+                    session,
+                    chain_id=chain_id,
+                    address=address,
+                    seed_cache=seed_cache,
+                    witness_cache=witness_cache,
+                    pending=pending,
+                    progress=progress,
+                )
             continue
         worked += 1
         for topic0 in pending_topics:
