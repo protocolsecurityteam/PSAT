@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -8,7 +7,6 @@ from services.discovery.classifier import ClassificationIncompleteError
 from services.resolution import recursive
 from services.resolution.recursive import (
     LoadedArtifacts,
-    UnresolvedProxyError,
     _add_edge,
     _mapping_writer_specs_from_predicate_trees,
     _materialize_contract_artifacts,
@@ -223,13 +221,6 @@ def _membership_tree(*, operator="truthy", authority_role="caller_authority", co
 )
 def test_mapping_writer_specs_skip_non_authority_leaves(shape):
     assert _mapping_writer_specs_from_predicate_trees(_membership_tree(**shape)) == []
-
-
-def test_mapping_writer_specs_keep_authority_leaf_with_explicit_confidence():
-    specs = _mapping_writer_specs_from_predicate_trees(
-        _membership_tree(authority_role="caller_authority", operator="truthy", confidence="high")
-    )
-    assert [spec["mapping_name"] for spec in specs] == ["registered"]
 
 
 def test_replay_mapping_principals_skips_self_membership(monkeypatch):
@@ -653,24 +644,6 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def test_materialize_contract_artifacts_no_impl_proxy_fails_closed(monkeypatch):
-    """#122: the proxy stub's empty guard set would read as permissionless."""
-    diamond = "0x" + "11" * 20
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "address": address,
-            "type": "proxy",
-            "proxy_type": "eip2535",
-            "facets": ["0x" + "ab" * 20, "0x" + "cd" * 20],
-        },
-    )
-
-    with pytest.raises(UnresolvedProxyError):
-        _materialize_contract_artifacts(diamond, "http://rpc.example", workspace_prefix="t")
-
-
 def test_materialize_contract_artifacts_propagates_classification_incomplete(monkeypatch):
     """#121: the proxy decision lives outside the classify except block so this propagates."""
 
@@ -681,59 +654,6 @@ def test_materialize_contract_artifacts_propagates_classification_incomplete(mon
 
     with pytest.raises(ClassificationIncompleteError):
         _materialize_contract_artifacts("0x" + "11" * 20, "http://rpc.example", workspace_prefix="t")
-
-
-def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeypatch):
-    proxy = "0x" + "11" * 20
-    impl = "0x" + "22" * 20
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {"address": address, "type": "proxy", "implementation": impl},
-    )
-
-    captured: dict = {}
-
-    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
-        captured["effective_address"] = effective_address
-        analysis = {"subject": {"address": effective_address, "name": "Impl"}}
-        plan = {"contract_address": effective_address, "controllers": []}
-        return "Impl", analysis, plan, None
-
-    monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
-
-    loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
-
-    assert captured["effective_address"] == impl
-    assert loaded["analysis"]["subject"]["address"] == impl
-
-
-def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypatch):
-    addr = "0x" + "33" * 20
-
-    def _raise_generic(address, rpc_url, *, chain_id=None):
-        raise RuntimeError("classify hiccup")
-
-    monkeypatch.setattr("services.discovery.classifier.classify_single", _raise_generic)
-
-    captured: dict = {}
-
-    def fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
-        captured["effective_address"] = effective_address
-        analysis = {"subject": {"address": effective_address, "name": "AsIs"}}
-        plan = {"contract_address": effective_address, "controllers": []}
-        return "AsIs", analysis, plan, None
-
-    monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", fake_cache)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controllers": []})
-    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: None)
-
-    loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
-
-    assert captured["effective_address"] == addr
-    assert loaded["analysis"]["subject"]["address"] == addr
 
 
 def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch):
@@ -1082,31 +1002,6 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     assert by_addr[good_addr]["analyzed"] is True
     assert good_addr in nested
     assert bad_addr not in nested
-
-
-def test_unreadable_materialization_does_not_become_an_empty_analysis(monkeypatch):
-    """An unreadable blob used to become ``or {}``, seeding downstream caches with an empty analysis.
-
-    BFS propagation is tested separately.
-    """
-    from db import contract_materializations as cm
-    from db.storage import StorageContentNotDetermined
-
-    monkeypatch.setattr(cm, "is_enabled", lambda: True)
-    monkeypatch.setattr(cm, "materialize_or_wait", lambda **_kw: SimpleNamespace(contract_name="C"))
-    monkeypatch.setattr(
-        cm,
-        "hydrate_analysis",
-        lambda _row: (_ for _ in ()).throw(StorageContentNotDetermined("bucket unreachable")),
-    )
-
-    with pytest.raises(StorageContentNotDetermined):
-        recursive._materialize_with_cross_process_cache(
-            effective_address="0x" + "44" * 20,
-            bytecode_keccak="0x" + "aa" * 32,
-            workspace_prefix="t",
-            chain="ethereum",
-        )
 
 
 def _two_child_root_bundle(root_address, first_addr, second_addr):

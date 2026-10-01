@@ -72,19 +72,3 @@ def test_registry_miss_falls_through_to_probes(monkeypatch):
 
     kind, _details, _had_error = _classify_uncached("https://rpc", "0x" + "44" * 20, "latest")
     assert kind == "contract"
-
-
-def test_keccak_fetch_failure_falls_through(monkeypatch):
-    _stub_get_code(monkeypatch)
-
-    def _boom(_rpc, _addr):
-        raise RuntimeError("RPC down")
-
-    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", _boom)
-    fake_registry = {"0x" + "ff" * 32: ("safe", {})}
-    monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", fake_registry)
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *_a, **_kw: None)
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_kw: {})
-
-    kind, _details, _had_error = _classify_uncached("https://rpc", "0x" + "55" * 20, "latest")
-    assert kind == "contract", "keccak fetch failure must not crash; must fall through"

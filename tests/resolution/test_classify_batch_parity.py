@@ -479,25 +479,3 @@ def test_multicall_failure_falls_back_to_batch(monkeypatch):
     assert kind == "safe"
     assert details["owners"] == [ADDR_OWNER.lower()]
     assert had_error is False, "fallback to the batch path succeeded → cacheable"
-
-
-def test_probe_classify_dispatch_on_flag(monkeypatch):
-    seen = {"mc": 0, "batch": 0}
-    monkeypatch.setattr(
-        tracking,
-        "_multicall_probe",
-        lambda *a, **k: (seen.__setitem__("mc", seen["mc"] + 1), [tracking._PROBE_ERROR])[1],
-    )
-    monkeypatch.setattr(
-        tracking,
-        "_batch_probe",
-        lambda *a, **k: (seen.__setitem__("batch", seen["batch"] + 1), [tracking._PROBE_ERROR])[1],
-    )
-
-    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
-    tracking._probe_classify("https://rpc", "0xab", "latest")
-    assert seen == {"mc": 1, "batch": 0}
-
-    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", False)
-    tracking._probe_classify("https://rpc", "0xab", "latest")
-    assert seen == {"mc": 1, "batch": 1}

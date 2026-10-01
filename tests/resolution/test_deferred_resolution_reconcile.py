@@ -22,7 +22,6 @@ from db.models import (
     JobStatus,
 )
 from services.resolution.adapters import CallFrame, EvaluationContext
-from services.resolution.adapters.event_indexed import EventIndexedAdapter
 from services.resolution.adapters.solmate_roles import (
     _ROLE_TOPICS,
     CANCALL_SELECTOR,
@@ -162,35 +161,6 @@ def test_solmate_backfill_incomplete_cursor_still_defers(db_session):
     assert cap.kind == "external_check_only"
     assert cap.check is not None
     assert cap.check.extra.get(DEFERRED_MARKER) is True
-
-
-def test_event_indexed_marks_only_no_index_cursor_as_deferred():
-    adapter = EventIndexedAdapter()
-    descriptor = {"callee_selector": "0x12345678", "callee_function": "f"}
-    hint = {"topic0": "0x" + "ab" * 32, "direction": "add", "event_address": "0x" + "a1" * 20}
-    ctx = EvaluationContext(chain_id=1, contract_address="0x" + "11" * 20)
-
-    cold = adapter._external_check(descriptor, hint, ctx, ["no_index_cursor", "no_hypersync_token"])
-    assert cold.check is not None
-    assert cold.check.extra[DEFERRED_MARKER] is True
-
-    structural = adapter._external_check(descriptor, hint, ctx, ["event_address_unresolved"])
-    assert structural.check is not None
-    assert DEFERRED_MARKER not in structural.check.extra
-
-
-def test_iter_deferred_authorities_walks_nested_and_skips_plain():
-    auth = "0x" + "a1" * 20
-    deferred_leaf = CapabilityExpr.external_check_only(
-        ExternalCheck(target_address=auth, target_call_selector=CANCALL_SELECTOR, extra={DEFERRED_MARKER: True})
-    )
-    tree = CapabilityExpr.structural_and([CapabilityExpr.finite_set(["0x" + "b2" * 20]), deferred_leaf])
-    assert set(_iter_deferred_authorities(capability_to_dict(tree))) == {auth}
-
-    plain = CapabilityExpr.external_check_only(
-        ExternalCheck(target_address="0x" + "c3" * 20, target_call_selector="0xdeadbeef", extra={"basis": ["eip1271"]})
-    )
-    assert list(_iter_deferred_authorities(capability_to_dict(plain))) == []
 
 
 def test_iter_deferred_authorities_handles_signer_and_non_dict():

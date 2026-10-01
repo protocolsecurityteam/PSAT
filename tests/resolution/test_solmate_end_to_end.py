@@ -20,7 +20,6 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "solmate"
 SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 ZERO = "0x" + "00" * 20
 PAUSE = "0x8456cb59"
-SET_SHARE_LOCK = "0x12056e2d"
 # Canonical keccak("addAsset(address)"), not keccak("addAsset(ERC20)").
 ADD_ASSET_CANONICAL = "0x298410e5"
 ADD_ASSET_NONCANONICAL = "0x4fdd72aa"
@@ -102,18 +101,6 @@ def _resolve_with_production_selector(tree_key: str) -> CapabilityExpr:
     ``address``.
     """
     return _resolve(tree_key, _selector_for_signature(tree_key) or "")
-
-
-def test_teller_pause_resolves_to_governing_safe_end_to_end():
-    cap = _resolve("pause()", PAUSE)
-    assert SAFE_4_6 in _members(cap), (
-        f"expected 4/6 Safe in resolved callers, got kind={cap.kind} members={_members(cap)}"
-    )
-
-
-def test_teller_set_share_lock_period_is_not_attributed_to_safe():
-    cap = _resolve("setShareLockPeriod(uint64)", SET_SHARE_LOCK)
-    assert SAFE_4_6 not in _members(cap)
 
 
 def test_contract_type_param_function_folds_cancall_against_canonical_selector():

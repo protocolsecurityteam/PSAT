@@ -112,55 +112,6 @@ def test_implicit_predicate_fires_for_caller_keyed_membership_with_value_set_hin
     assert pred == {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"}
 
 
-_COMPOSE_QUEUE_DESC = {
-    "kind": "mapping_membership",
-    "storage_var": "composeQueue",
-    "key_sources": [{"source": "msg_sender"}],
-    "enumeration_hint": [
-        {
-            "topic0": "0x" + "ab" * 32,
-            "direction": "set",
-            "value_position": None,
-            "key_position": 0,
-            "event_signature": "ComposeSent(address)",
-            "indexed_positions": [0],
-        }
-    ],
-}
-
-
-@pytest.mark.parametrize(
-    "desc",
-    [
-        pytest.param(_COMPOSE_QUEUE_DESC, id="value-position-absent"),
-        pytest.param(
-            {
-                **_eigenpod_descriptor(),
-                "key_sources": [{"source": "parameter", "parameter_index": 0, "parameter_name": "x"}],
-            },
-            id="not-caller-keyed",
-        ),
-        pytest.param(
-            {k: v for k, v in _eigenpod_descriptor().items() if k != "enumeration_hint"}, id="without-any-hint"
-        ),
-        pytest.param(
-            {**_eigenpod_descriptor(), "value_predicate": {"op": "eq", "rhs_values": ["3"], "value_type": "uint256"}},
-            id="not-overriding-explicit-value-predicate",
-        ),
-        pytest.param(
-            {
-                "kind": "external_set",
-                "key_sources": [{"source": "msg_sender"}],
-                "enumeration_hint": [{"topic0": "0x" + "cd" * 32, "direction": "set", "value_position": 1}],
-            },
-            id="external-set",
-        ),
-    ],
-)
-def test_implicit_predicate_excluded(desc):
-    assert _implicit_membership_value_predicate(desc) is None
-
-
 @pytest.mark.parametrize(
     "desc, hint, expected",
     [

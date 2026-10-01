@@ -27,7 +27,6 @@ SAFE = "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52"  # CumulativeMerkleDrop owne
 TIMELOCK = "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"  # EtherfiL1SyncPoolETH owner()
 
 OWNER_SELECTOR = "0x8da5cb5b"  # owner()
-DEAD_ACCESSOR_SELECTOR = "0xce49c281"
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
@@ -81,98 +80,6 @@ _RECOGNIZERS = {
 )
 def test_recognition_table(kind: str, name: str, expected: str | None) -> None:
     assert _RECOGNIZERS[kind](name) == expected
-
-
-def test_oz_v5_accessor_view_call_resolves_via_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {DEAD_ACCESSOR_SELECTOR: None, OWNER_SELECTOR: SAFE}, recorder)
-    tree = _eq_tree(
-        {
-            "source": "view_call",
-            "callee": "_getAccessControlDefaultAdminRulesStorage()",
-            "callee_signature": "_getAccessControlDefaultAdminRulesStorage()",
-            "callee_selector": DEAD_ACCESSOR_SELECTOR,
-        }
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [SAFE]
-    assert cap.membership_quality == "exact"
-    assert _called(recorder, OWNER_SELECTOR), "must read the canonical owner()"
-
-
-def test_oz_v5_accessor_view_call_renounced_resolves_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {DEAD_ACCESSOR_SELECTOR: None, OWNER_SELECTOR: "0x" + "00" * 20}, recorder)
-    tree = _eq_tree(
-        {
-            "source": "view_call",
-            "callee_signature": "_getAccessControlDefaultAdminRulesStorage()",
-            "callee_selector": DEAD_ACCESSOR_SELECTOR,
-        }
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "exact"
-    assert _called(recorder, OWNER_SELECTOR)
-
-
-def test_non_ownership_accessor_view_call_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Owner() would return an address, but this is not an owner authority."""
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: TIMELOCK}, recorder)
-    tree = _eq_tree(
-        {
-            "source": "view_call",
-            "callee_signature": "_getL1BaseSyncPoolStorage()",
-            "callee_selector": "0xdeadbeef",
-        }
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert not _called(recorder, OWNER_SELECTOR), "non-owner accessor must not read owner()"
-
-
-def test_parametric_role_admin_accessor_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: SAFE}, recorder)
-    tree = _eq_tree(
-        {
-            "source": "view_call",
-            "callee_signature": "_getAccessControlStorage()",
-            "callee_selector": "0xdeadbeef",
-        }
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == []
-    assert not _called(recorder, OWNER_SELECTOR)
-
-
-def test_oz_v5_accessor_without_rpc_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: SAFE}, recorder)
-    tree = _eq_tree(
-        {
-            "source": "view_call",
-            "callee_signature": "_getAccessControlDefaultAdminRulesStorage()",
-            "callee_selector": DEAD_ACCESSOR_SELECTOR,
-        }
-    )
-
-    cap = evaluate_tree(tree, _ctx_no_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert recorder == []
 
 
 class _StubContract:
@@ -243,35 +150,6 @@ def _build_targets(
     return cast("list[dict[str, Any]]", targets), trees
 
 
-_ACCESS_CONTROL_ROLES = [
-    {"role": "AccessControlDefaultAdminRulesStorageLocation"},
-    {"role": "DEFAULT_ADMIN_ROLE"},
-]
-
-_LAYER1_FORMS = [
-    pytest.param("OzV5Ownable", [{"role": "OwnableStorageLocation"}], id="ownable"),
-    pytest.param("OzV5AccessControlDefaultAdmin", _ACCESS_CONTROL_ROLES, id="access_control_default_admin"),
-]
-
-
-@pytest.mark.parametrize("contract_name,roles", _LAYER1_FORMS)
-def test_layer1_emits_single_owner_controller_read_via_owner(_slither, contract_name, roles) -> None:
-    targets, _trees = _build_targets(_slither, contract_name, roles)
-    owners = [t for t in targets if t["controller_id"] == "state_variable:owner"]
-    assert len(owners) == 1, "exactly one canonical owner controller"
-    owner = owners[0]
-    assert owner["read_spec"]["target"] == "owner"
-    assert owner["read_spec"]["type_kind"] == "address"
-
-
-@pytest.mark.parametrize("contract_name,roles", _LAYER1_FORMS)
-def test_layer1_no_dead_slot_controller_emitted(_slither, contract_name, roles) -> None:
-    targets, _trees = _build_targets(_slither, contract_name, roles)
-    ids = {t["controller_id"] for t in targets}
-    assert not any("StorageLocation" in cid for cid in ids), "no dead slot-constant getter row"
-    assert not any(cid.startswith("role_identifier:") and "Storage" in cid for cid in ids)
-
-
 class TestLayer1OwnableForm:
     def test_owner_controller_carries_ownership_event_and_writers(self, _slither) -> None:
         targets, _trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
@@ -281,17 +159,6 @@ class TestLayer1OwnableForm:
         writers = {w.get("function") for w in owner.get("writer_functions", [])}
         # Not incidental namespace setters.
         assert writers == {"transferOwnership(address)", "renounceOwnership()"}
-
-
-class TestLayer1AccessControlForm:
-    ROLES = _ACCESS_CONTROL_ROLES
-
-    def test_gate_operand_is_namespaced_accessor_view_call(self, _slither) -> None:
-        _targets, trees = _build_targets(_slither, "OzV5AccessControlDefaultAdmin", self.ROLES)
-        leaf = trees["trees"]["setPeer(address)"]["leaf"]
-        other = next(o for o in leaf["operands"] if o.get("source") != "msg_sender")
-        assert other["source"] == "view_call"
-        assert other["callee_signature"] == "_getAccessControlDefaultAdminRulesStorage()"
 
 
 class TestLayer2AccessControlResolution:

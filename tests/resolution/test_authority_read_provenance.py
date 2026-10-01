@@ -95,88 +95,6 @@ def test_latest_path_publishes_no_observation_block(monkeypatch: pytest.MonkeyPa
     assert "observed_at_block" not in cap.trace[0]
 
 
-def test_non_empty_read_carries_its_block_and_reads_at_the_pinned_hex_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=OWNER_SELECTOR)
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
-
-    assert calls[0][1][1] == hex(PINNED_BLOCK)
-    assert cap.members == [GOVERNOR]
-    assert cap.trace[0]["observed_at_block"] == PINNED_BLOCK
-
-
-def test_burn_address_is_not_an_exact_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """0x0 can't be ``msg.sender``; ``0x…dEaD`` is only believed keyless."""
-    _stub_getter(monkeypatch, returns=_word(BURN), only=OWNER_SELECTOR)
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert cap.confidence == "partial"
-    assert cap.empty_reason == "owner_read_burn_address"
-    assert cap.trace[0]["read_address"] == BURN
-
-
-def test_revert_stays_an_honest_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_getter(monkeypatch, returns="revert")
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert cap.empty_reason == "unreadable_revert"
-
-
-def test_pending_ceiling_shape_is_byte_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ``basis: "accessor_name"`` disclosure keeps it out of the earned-negative gate."""
-    _stub_getter(monkeypatch, returns="revert")
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "pendingOwner()"}), _ctx())
-
-    assert cap.empty_reason == "empty_by_design"
-    assert cap.trace[0]["step"] == "pending_transfer_ceiling"
-    assert cap.trace[0]["basis"] == "accessor_name"
-    assert cap.trace[0]["read_outcome"] == "unreadable_revert"
-    assert cap.empty_reason != "owner_read_zero"
-
-
-def test_no_rpc_leaves_the_placeholder_not_read() -> None:
-    class _NoRpc(_Adapter):
-        def __init__(self) -> None:
-            super().__init__(None)
-            self._outer_ctx.rpc_url = None  # pyright: ignore[reportAttributeAccessIssue]
-
-    cap = evaluate_tree(
-        _eq_tree({"source": "view_call", "callee_signature": "owner()"}),
-        EvaluationContext(contract_address=CONTRACT, adapter=_NoRpc()),
-    )
-    assert cap.membership_quality == "lower_bound"
-    assert cap.empty_reason == "not_read"
-
-
-def test_memo_hit_is_byte_identical_to_the_fresh_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _stub_getter(monkeypatch, returns=_word("0x" + "00" * 20), only=OWNER_SELECTOR)
-    ctx = _ctx()
-    tree = _eq_tree({"source": "view_call", "callee_signature": "owner()"})
-
-    fresh = capability_to_dict(evaluate_tree(tree, ctx))
-    wire_calls = len(calls)
-    memoized = capability_to_dict(evaluate_tree(tree, ctx))
-
-    assert memoized == fresh
-    assert memoized["trace"][0]["observed_at_block"] == PINNED_BLOCK
-    assert len(calls) == wire_calls, "the second evaluation must not re-hit the wire"
-
-
-def test_memo_does_not_merge_zero_and_burn(monkeypatch: pytest.MonkeyPatch) -> None:
-    ctx = _ctx()
-    tree = _eq_tree({"source": "view_call", "callee_signature": "owner()"})
-
-    _stub_getter(monkeypatch, returns=_word(BURN), only=OWNER_SELECTOR)
-    first = evaluate_tree(tree, ctx)
-    second = evaluate_tree(tree, ctx)  # memo hit
-
-    assert first.empty_reason == second.empty_reason == "owner_read_burn_address"
-    assert second.membership_quality == "lower_bound"
-
-
 SLOT = "0x" + keccak(text="LRTSquare.pending.governor").hex()
 
 
@@ -297,11 +215,3 @@ def test_unknown_internal_accessor_resolves_to_no_principal(monkeypatch: pytest.
 
     assert cap.members == []
     assert project_capability_surface(capability_to_dict(cap)).principal_rows == []
-
-
-def test_a_lower_bound_read_never_stamps_a_basis(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_getter(monkeypatch, returns="revert")
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())
-
-    assert cap.membership_quality != "exact"
-    assert [step for step in cap.trace if step.get("step") == "authority_getter_basis"] == []

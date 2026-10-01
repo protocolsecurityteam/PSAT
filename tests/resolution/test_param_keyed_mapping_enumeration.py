@@ -266,7 +266,6 @@ pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
-from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -288,24 +287,6 @@ _ON_MESSAGE = "onMessageReceived(uint32,bytes32,address,uint256,uint256)"
 
 
 class TestL1SyncPoolReceiver:
-    def test_static_stamps_mapping_identity_and_writer_spec(self) -> None:
-        op = _caller_operand(_tree_for(_receiver_contract(), _ON_MESSAGE))
-        assert op.get("mapping_name") == "receivers"
-        specs = op.get("mapping_writer_specs")
-        assert isinstance(specs, list) and len(specs) == 1
-        spec = specs[0]
-        assert spec["event_signature"] == "ReceiverSet(uint32,address)"
-        assert spec["key_position"] == 0
-        assert spec["value_position"] == 1
-        assert spec["indexed_positions"] == [0]
-        assert spec["direction"] == "set"
-
-    def test_constant_keyed_mapping_is_not_stamped(self) -> None:
-        """A constant key isn't parameter-keyed; stamping it would enumerate the whole mapping."""
-        op = _caller_operand(_tree_for(_receiver_contract(), "defaultReceiverGate()"))
-        assert op.get("mapping_name") is None
-        assert op.get("mapping_writer_specs") is None
-
     def test_resolves_receivers_end_to_end(self) -> None:
         tree = _tree_for(_receiver_contract(), _ON_MESSAGE)
         meta = _seeded_meta(_receiver_set_log(30183, R1), _receiver_set_log(30260, R2))

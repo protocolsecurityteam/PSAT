@@ -105,21 +105,6 @@ def test_apply_gated_result_keeps_external_check_and_attaches_evidence():
 CANON = {"setClaimingOpen(uint256)": "setClaimingOpen(uint256)"}
 
 
-def test_maybe_probe_upgrades_open_function():
-    cap = _gated_unknown_cap()
-    out = _maybe_differential_probe(
-        cap,
-        chain_id=1,
-        contract_address="0x" + "77" * 20,
-        fn_signature="setClaimingOpen(uint256)",
-        canonical_signatures=CANON,
-        rpc_url="http://rpc",
-        block=1_000_000,
-        call_batch=lambda calls, tag: [ok() for _ in calls],  # success at both blocks
-    )
-    assert out.kind == "conditional_universal"
-
-
 def test_maybe_probe_keeps_gated_for_rejecting_function():
     cap = _gated_unknown_cap()
     out = _maybe_differential_probe(

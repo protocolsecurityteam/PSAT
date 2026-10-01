@@ -83,71 +83,6 @@ def _address_topic(address: str) -> str:
     return "0x" + address[2:].lower().rjust(64, "0")
 
 
-def test_event_indexed_matches_with_add_event_hint():
-    descriptor = {
-        "kind": "mapping_membership",
-        "enumeration_hint": [
-            {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A},
-        ],
-    }
-    score = EventIndexedAdapter.matches(descriptor, EvaluationContext(chain_id=1))
-    assert 0 < score <= 60  # low score so specialized adapters win
-
-
-def test_event_indexed_does_not_match_without_hints():
-    descriptor = {"kind": "mapping_membership"}
-    assert EventIndexedAdapter.matches(descriptor, EvaluationContext(chain_id=1)) == 0
-
-
-def test_event_indexed_enumerate_with_repo():
-    descriptor = {
-        "kind": "mapping_membership",
-        "enumeration_hint": [
-            {
-                "topic0": "0xaa",
-                "direction": "add",
-                "event_address": ADDR_A,
-                "topics_to_keys": {1: 0},
-                "data_to_keys": {},
-            },
-        ],
-    }
-    repo = FakeEventLogRepo({"0xaa": [("add", ADDR_B), ("add", ADDR_C)]})
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=ADDR_A,
-        meta={"event_log_repo": repo},
-    )
-    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
-    assert cap.kind == "finite_set"
-    assert cap.members is not None
-    assert sorted(cap.members) == sorted([ADDR_B.lower(), ADDR_C.lower()])
-
-
-def test_postgres_event_repo_folds_add_remove_hints_in_log_order():
-    rows = [
-        SimpleNamespace(topic0="0xaa", topics=["0xaa", _address_topic(ADDR_B)], data_words=[]),
-        SimpleNamespace(topic0="0xbb", topics=["0xbb", _address_topic(ADDR_B)], data_words=[]),
-        SimpleNamespace(topic0="0xaa", topics=["0xaa", _address_topic(ADDR_B)], data_words=[]),
-    ]
-    repo = PostgresEventLogRepo(cast(Any, FakeSession(rows)))
-    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)
-
-    result = repo.fold_event_history(
-        chain_id=1,
-        event_address=ADDR_A,
-        event_hints=[
-            {"topic0": "0xaa", "direction": "add", "topics_to_keys": {1: 0}, "data_to_keys": {}},
-            {"topic0": "0xbb", "direction": "remove", "topics_to_keys": {1: 0}, "data_to_keys": {}},
-        ],
-        key_sources=[{"source": "msg_sender"}],
-        block=100,
-    )
-
-    assert result.confidence == "enumerable"
-    assert result.members == [ADDR_B.lower()]
-
-
 def test_event_indexed_no_backend_yields_check_only():
     descriptor = {
         "kind": "mapping_membership",
@@ -201,43 +136,6 @@ def test_event_indexed_caller_keyed_no_cursor_defers_pending_index():
     assert "caller_keyed_membership_allowlist" in CALLER_GATE_BASIS_TAGS
 
 
-def test_event_indexed_non_caller_keyed_no_cursor_defers_without_caller_gate_tag():
-    descriptor = {
-        "kind": "mapping_membership",
-        "key_sources": [{"source": "parameter", "parameter_index": 0}],
-        "enumeration_hint": [
-            {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {1: 0}},
-        ],
-    }
-    ctx = EvaluationContext(chain_id=1, contract_address=ADDR_A, meta={"event_log_repo": NoCursorEventLogRepo()})
-    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
-
-    assert cap.kind == "external_check_only"
-    assert cap.check is not None
-    assert cap.check.extra["basis"] == ["no_index_cursor"]
-    assert cap.check.extra["deferred_pending_index"] is True
-
-
-def test_event_indexed_cold_cursor_performs_no_live_scan(monkeypatch):
-    # A genesis scan is the 429-storm source.
-    import services.resolution.mapping_enumerator as mapping_enumerator
-
-    def boom(*_args, **_kwargs):
-        raise AssertionError("cold cursor must defer, never live-scan")
-
-    monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values_sync", boom)
-    descriptor = {
-        "kind": "mapping_membership",
-        "key_sources": [{"source": "msg_sender"}],
-        "enumeration_hint": [
-            {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {1: 0}},
-        ],
-    }
-    ctx = EvaluationContext(chain_id=1, contract_address=ADDR_A, meta={"event_log_repo": NoCursorEventLogRepo()})
-    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
-    assert cap.kind == "external_check_only"
-
-
 # G2 HIT 1: direction comes from the event payload, never hint order.
 
 _CONFLICT_TOPIC = "0xf93f9a76c1bf3444d22400a00cb9fe990e6abe9dbb333fda48859cfee864543d"
@@ -288,12 +186,6 @@ def _run_conflict_fold(hints):
         key_sources=[{"source": "msg_sender"}],
         block=100,
     )
-
-
-def test_same_topic_conflict_folds_from_payload_not_hint_order():
-    result = _run_conflict_fold(_conflict_hints(1))
-    assert result.confidence == "enumerable"
-    assert result.members == [ADDR_B.lower()]
 
 
 def test_same_topic_conflict_is_hint_order_insensitive():

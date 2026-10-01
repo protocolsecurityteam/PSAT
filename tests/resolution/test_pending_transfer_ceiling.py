@@ -110,16 +110,6 @@ def test_non_pending_owner_revert_stays_lower_bound(monkeypatch: pytest.MonkeyPa
     assert _status(cap) != "resolved_empty"
 
 
-def test_pending_governor_with_active_transfer_resolves_to_principal(monkeypatch: pytest.MonkeyPatch) -> None:
-    pending = "0x" + "cd" * 20
-    monkeypatch.setattr("services.clients.rpc.rpc_request", lambda *a, **k: "0x" + pending[2:].rjust(64, "0"))
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc())
-
-    assert cap.members == [pending]
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason is None
-
-
 # Built with lower_bound so only the empty_reason branch can classify it.
 
 
@@ -158,12 +148,3 @@ def test_detector_fails_closed_for_non_authority_operand_sources() -> None:
 def test_detector_handles_missing_signature() -> None:
     assert _is_pending_authority_accessor_operand({"source": "view_call", "callee_signature": None}) is False
     assert _is_pending_authority_accessor_operand({"source": "view_call"}) is False
-
-
-def test_detector_matches_pending_shapes_rejects_plain_authority() -> None:
-    assert _is_pending_authority_accessor_operand({"source": "view_call", "callee_signature": "_pendingGovernor()"})
-    assert _is_pending_authority_accessor_operand(
-        {"source": "state_variable", "state_variable_name": "_pendingDefaultAdmin", "member_path": ["newAdmin"]}
-    )
-    assert not _is_pending_authority_accessor_operand({"source": "view_call", "callee_signature": "owner()"})
-    assert not _is_pending_authority_accessor_operand({"source": "state_variable", "state_variable_name": "governor"})

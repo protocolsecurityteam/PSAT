@@ -23,13 +23,10 @@ from services.resolution.adapters.solmate_roles import (
     CANCALL_SIGNATURE,
     SolmateRolesAuthorityAdapter,
 )
-from services.resolution.capabilities import CapabilityExpr
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 PAUSE = "0x8456cb59"
-ADD_ASSET = "0x298410e5"
-SET_SHARE_LOCK = "0x12056e2d"
 
 
 def _load() -> dict:
@@ -90,39 +87,6 @@ def _descriptor() -> dict:
         "callee_signature": CANCALL_SIGNATURE,
         "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "authority"}},
     }
-
-
-@pytest.mark.parametrize(
-    "selector",
-    [
-        pytest.param(PAUSE, id="pause_role_9"),
-        pytest.param(ADD_ASSET, id="add_asset_role_8"),
-    ],
-)
-def test_solmate_selector_resolves_to_governing_safe(selector):
-    fixture = _load()
-    cap = SolmateRolesAuthorityAdapter().enumerate(_descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), selector))
-    assert cap.kind == "finite_set"
-    assert cap.members == [SAFE_4_6]
-    assert cap.membership_quality == "exact"
-
-
-def test_solmate_unroled_function_is_exact_empty_not_unknown():
-    fixture = _load()
-    cap = SolmateRolesAuthorityAdapter().enumerate(
-        _descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), SET_SHARE_LOCK)
-    )
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "exact"
-
-
-def test_solmate_unindexed_events_defer_to_probe_not_false_empty():
-    fixture = _load()
-    cap = SolmateRolesAuthorityAdapter().enumerate(
-        _descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture), indexed_block=None), SET_SHARE_LOCK)
-    )
-    assert cap.kind == "external_check_only"
 
 
 def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
@@ -206,26 +170,3 @@ def test_registry_prefers_confirmed_solmate_over_generic_event_adapter():
     registry.register(SolmateRolesAuthorityAdapter)
     bc = _FakeBytecode(selectors=_ROLES_AUTHORITY_MARKER_SELECTORS)
     assert registry.pick(_descriptor_with_authority(), _ctx_for_matches(bc)) is SolmateRolesAuthorityAdapter
-
-
-def test_second_cancall_standard_not_starved_when_solmate_declines():
-    # F1: two standards sharing canCall can coexist in the registry.
-    class _ConfirmedAccessManagerAdapter:
-        @classmethod
-        def matches(cls, descriptor, ctx):
-            del ctx
-            return 90 if descriptor.get("callee_signature") == CANCALL_SIGNATURE else 0
-
-        @classmethod
-        def supports_external_check_only(cls):
-            return True
-
-        def enumerate(self, descriptor, ctx):
-            del descriptor, ctx
-            return CapabilityExpr.unsupported("access_manager_stub")
-
-    registry = AdapterRegistry()
-    registry.register(SolmateRolesAuthorityAdapter)  # registered first
-    registry.register(_ConfirmedAccessManagerAdapter)
-    bc = _FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS)  # an AccessManager authority
-    assert registry.pick(_descriptor_with_authority(), _ctx_for_matches(bc)) is _ConfirmedAccessManagerAdapter

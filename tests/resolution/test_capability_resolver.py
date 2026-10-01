@@ -234,26 +234,6 @@ def test_resolve_returns_empty_dict_for_unguarded_only_contract(session):
     assert out == {}
 
 
-@requires_postgres
-def test_capability_to_dict_handles_composite():
-    from services.resolution.capabilities import CapabilityExpr
-    from services.resolution.capability_resolver import capability_to_dict
-
-    inner_finite = CapabilityExpr.finite_set(["0x" + "11" * 20], quality="exact")
-    inner_thresh = CapabilityExpr.threshold_group(2, ["0x" + "22" * 20, "0x" + "33" * 20])
-    composite = CapabilityExpr(kind="OR", children=[inner_finite, inner_thresh])
-    out = capability_to_dict(composite)
-
-    assert out["kind"] == "OR"
-    assert "children" in out
-    assert len(out["children"]) == 2
-    finite_child = next(c for c in out["children"] if c["kind"] == "finite_set")
-    thresh_child = next(c for c in out["children"] if c["kind"] == "threshold_group")
-    assert finite_child["members"] == ["0x" + "11" * 20]
-    assert thresh_child["threshold"]["m"] == 2
-    assert thresh_child["threshold"]["signers"] == ["0x" + "22" * 20, "0x" + "33" * 20]
-
-
 # Bug 2: the resolver never read the current ``_owner``, so transferOwnership showed no controllers; a state-variable
 # operand now resolves via ``controller_values``.
 

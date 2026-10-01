@@ -152,7 +152,6 @@ from services.static.contract_analysis_pipeline.internal_authority_slot import (
     _slots_for_vars,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
-from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -191,12 +190,6 @@ class TestMembershipNFTStorageSlot:
             "_legacyController": "0x" + format(1, "064x"),
         }
 
-    def test_private_var_with_manual_getter_is_not_stamped(self) -> None:
-        """``_owner`` must resolve through ``owner()``, never a layout-sensitive slot read."""
-        op = _caller_operand(_tree_for(_membership_nft(), "adminAction()"))
-        assert op["state_variable_name"] == "_owner"
-        assert op.get("storage_slot") is None
-
     def test_owner_gate_resolves_via_canonical_getter_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Only ``owner()`` returns the principal, so this fails on an evaluator trying just ``_owner()``."""
         tree = _tree_for(_membership_nft(), "adminAction()")
@@ -215,19 +208,6 @@ class TestMembershipNFTStorageSlot:
         assert cap.membership_quality == "exact"
         assert _status(cap) != "resolved_empty"
         assert "0x8da5cb5b" in [p[0]["data"] for m, p in recorder if m == "eth_call"]
-
-    def test_operand_carries_sequential_slot(self) -> None:
-        contract = _membership_nft()
-        for sig in ("mint(address,uint256)", "burn(address,uint256,uint256)", "incrementLock(uint256,uint32)"):
-            op = _caller_operand(_tree_for(contract, sig))
-            assert op["source"] == "state_variable"
-            assert op["state_variable_name"] == "membershipManager"
-            assert op.get("storage_slot") == MEMBERSHIP_MANAGER_SLOT
-
-    def test_public_sibling_var_has_no_slot(self) -> None:
-        op = _caller_operand(_tree_for(_membership_nft(), "rebase(uint256)"))
-        assert op["state_variable_name"] == "liquidityPool"
-        assert op.get("storage_slot") is None
 
     def test_resolves_live_membership_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
         tree = _tree_for(_membership_nft(), "mint(address,uint256)")

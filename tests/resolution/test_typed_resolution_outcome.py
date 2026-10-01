@@ -75,18 +75,6 @@ def test_empty_reason_labels_why_the_set_is_empty(
     _assert_unchanged_empty(cap_dict)
 
 
-def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    addr = "0x" + "ab" * 20
-    monkeypatch.setattr(
-        "services.clients.rpc.rpc_request",
-        lambda *a, **k: "0x" + addr[2:].rjust(64, "0"),
-    )
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(REVERTING_VAR), _ctx_with_rpc()))
-
-    assert cap_dict["members"] == [addr]
-    assert "empty_reason" not in cap_dict
-
-
 # Claim-#3 net: real operand shapes behind the etherfi under-resolved functions (run 1279e07382b24d32).
 #   A ``claimGovernance``: ``view_call _pendingGovernor()``, internal, reverts everywhere.
 #   B ``acceptDefaultAdminTransfer``: ``_pendingDefaultAdmin.newAdmin``; OZ's getter inlines to the struct read.

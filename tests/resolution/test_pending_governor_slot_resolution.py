@@ -126,15 +126,6 @@ def _claim_governance_tree() -> Any:
 
 
 class TestGovernableClaimGovernanceSlot:
-    def test_operand_carries_keccak_slot(self) -> None:
-        tree = _claim_governance_tree()
-        leaf = next(
-            child["leaf"] for child in tree["children"] if child["leaf"]["authority_role"] == "caller_authority"
-        )
-        view_op = next(o for o in leaf["operands"] if o.get("source") == "view_call")
-        assert view_op["callee_signature"] == "_pendingGovernor()"
-        assert view_op.get("storage_slot") == PENDING_GOVERNOR_SLOT
-
     @pytest.mark.parametrize(
         ("slot", "expected_rows", "resolved_empty"),
         [

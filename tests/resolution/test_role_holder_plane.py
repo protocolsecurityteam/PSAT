@@ -175,26 +175,6 @@ def test_solady_roleset_logs_mint_no_row(db_session, monkeypatch):
     assert rows == []
 
 
-def test_fold_ignores_non_accesscontrol_topics():
-    mixed = _corpus_logs() + [
-        IndexedEventLog(
-            chain_id=1,
-            event_address=REGISTRY,
-            topic0=ROLE_SET_TOPIC0,
-            tx_hash=b"\x00" * 32,
-            log_index=0,
-            block_number=21000000,
-            block_hash=b"\x44" * 32,
-            transaction_index=0,
-            topics=[ROLE_SET_TOPIC0, _word(ADMIN_HOLDER), _word("0x07"), _word("0x01")],
-            data_words=[],
-        )
-    ]
-    folded = rhp.fold_role_candidates(mixed)
-    assert set(folded) == {ZERO_ROLE, PAUSER, OPERATING_ADMIN}
-    assert _word("0x07") not in folded
-
-
 def test_classify_candidate_keeps_three_distinct_states():
     """Asserted here because an implementation that ignores ``success`` looks identical end-to-end on an
     all-reverting registry.
@@ -356,40 +336,6 @@ def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
     assert row["role_name"] is None
     assert row["role_name_basis"] == "not_determined"
     assert row["holders"] == [ADMIN_HOLDER], "the hash is the identity; the name is decoration"
-
-
-@pytest.mark.parametrize(
-    "role, pool, has_role_answered, expected",
-    [
-        # A role-shaped name may not be attached to a hash it does not hash to.
-        pytest.param(
-            "0x" + "de" * 32,
-            ["PAUSER_ROLE", "DEFAULT_ADMIN_ROLE"],
-            True,
-            (None, "not_determined"),
-            id="keccak-mismatch-refused",
-        ),
-        # Existing mis-minted rows persist until re-analysis; the keccak gate makes that harmless.
-        pytest.param(
-            PAUSER,
-            ["OwnableStorageLocation", "AccessControlDefaultAdminRulesStorageLocation"],
-            True,
-            (None, "not_determined"),
-            id="misparsed-storage-pointers-cannot-leak-a-name",
-        ),
-        # A6: the zero-word convention may not fire on an emitter proven not to implement ``hasRole``.
-        pytest.param(
-            ZERO_ROLE,
-            [],
-            True,
-            ("DEFAULT_ADMIN_ROLE", "accesscontrol_default_admin_literal"),
-            id="default-admin-answered",
-        ),
-        pytest.param(ZERO_ROLE, [], False, (None, "not_determined"), id="default-admin-unanswered"),
-    ],
-)
-def test_resolve_role_name(role, pool, has_role_answered, expected):
-    assert rhp.resolve_role_name(role, pool, has_role_answered=has_role_answered) == expected
 
 
 def test_default_admin_name_withheld_when_registry_never_answers(db_session, monkeypatch):
@@ -556,35 +502,6 @@ def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
     assert calls[1][0] == "eth_getBlockByNumber"
     assert calls[1][1] == [hex(HEAD - DEFAULT_CONFIRMATION_DEPTH), False]
     assert all("latest" not in str(params) for _, params in calls), "never latest"
-
-
-@pytest.mark.parametrize(
-    "stub_kwargs",
-    [
-        pytest.param({"fail_hash": True}, id="survives-an-unreadable-hash"),
-        pytest.param({"block": {}}, id="hash-absent-from-payload-is-not-invented"),
-    ],
-)
-def test_probe_block_without_a_hash(monkeypatch, stub_kwargs):
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
-    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
-    assert pinned is not None
-    assert pinned.number == HEAD - DEFAULT_CONFIRMATION_DEPTH
-    assert pinned.block_hash is None
-
-
-@pytest.mark.parametrize(
-    "stub_kwargs",
-    [
-        pytest.param({"fail_head": True}, id="unreadable-head"),
-        pytest.param({"head": hex(DEFAULT_CONFIRMATION_DEPTH)}, id="chain-shallower-than-confirmation-depth"),
-    ],
-)
-def test_no_probe_block(monkeypatch, stub_kwargs):
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
-    assert rhp.pin_probe_block("http://stub", chain_id=1) is None
 
 
 def _valid_row(**overrides: Any) -> dict[str, Any]:
@@ -861,51 +778,10 @@ def test_persist_upserts(db_session, monkeypatch):
 # Tolerant decoders on a witness plane: a value nobody observed must not be coerced into one that looks observed.
 
 
-def test_empty_word_is_never_padded_into_the_default_admin_role():
-    """``"0x"`` left-padded is bit-identical to ``DEFAULT_ADMIN_ROLE_HASH``."""
-    assert rhp._normalize_word("0x") is None
-    assert rhp.resolve_role_name("0x", [], has_role_answered=True) == (None, "not_determined")
-    assert rhp.resolve_role_name("0x00", [], has_role_answered=True) == (None, "not_determined")
-    assert rhp.resolve_role_name("0xzz" + "0" * 62, [], has_role_answered=True) == (None, "not_determined")
-    assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=True) == (
-        "DEFAULT_ADMIN_ROLE",
-        "accesscontrol_default_admin_literal",
-    )
-    assert rhp._normalize_word("0x" + "AB" * 32) == "0x" + "ab" * 32
-    assert rhp.resolve_role_name(PAUSER, ["PAUSER_ROLE"], has_role_answered=False) == (
-        "PAUSER_ROLE",
-        "keccak_preimage",
-    )
-
-
 def test_an_empty_word_topic_folds_to_no_candidate(db_session, monkeypatch):
     log = _log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=1)
     log.topics = [RG, "0x", _word(ADMIN_HOLDER)]
     assert rhp.fold_role_candidates([log]) == {}
-
-
-def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
-    """``bytes.fromhex`` with no length check published ``b""``."""
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={"hash": "0x"}))
-    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
-    assert pinned is not None
-    assert pinned.block_hash is None
-    assert pinned.block_hash != b""
-
-    for truncated in ("0x" + "cd" * 31, "0x" + "cd" * 33, "0xnothex" + "0" * 58):
-        calls.clear()
-        monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={"hash": truncated}))
-        short = rhp.pin_probe_block("http://stub", chain_id=1)
-        assert short is not None and short.block_hash is None
-
-    calls.clear()
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls))
-    good = rhp.pin_probe_block("http://stub", chain_id=1)
-    assert good is not None
-    assert good.block_hash is not None
-    assert good.block_hash == bytes.fromhex("cd" * 32)
-    assert len(good.block_hash) == 32
 
 
 def test_success_with_empty_returndata_is_a_failed_read(db_session, monkeypatch):

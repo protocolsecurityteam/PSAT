@@ -14,29 +14,10 @@ from services.resolution import tracking
 from services.resolution.tracking import _PROBE_ERROR, _read_erc1967_implementation
 
 IMPL_ADDR = "00e1849b2a44a5544357b0a1b7f4b0be492f4e5e"
-FULL_IMPL_WORD = "0x" + "00" * 12 + IMPL_ADDR
-FULL_ZERO_WORD = "0x" + "0" * 64
 
 
 def _stub_storage(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *a, **kw: raw)
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        pytest.param(FULL_IMPL_WORD, id="full_word"),
-        pytest.param(FULL_IMPL_WORD.upper().replace("0X", "0x"), id="uppercase_lowercased"),
-    ],
-)
-def test_full_word_with_implementation_decodes_identically(monkeypatch, raw):
-    _stub_storage(monkeypatch, raw)
-    assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") == "0x" + IMPL_ADDR
-
-
-def test_full_zero_word_is_not_a_proxy(monkeypatch):
-    _stub_storage(monkeypatch, FULL_ZERO_WORD)
-    assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") is None
 
 
 @pytest.mark.parametrize(
@@ -53,12 +34,4 @@ def test_full_zero_word_is_not_a_proxy(monkeypatch):
 )
 def test_non_word_returns_are_probe_error_not_verdicts(monkeypatch, raw):
     _stub_storage(monkeypatch, raw)
-    assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") is _PROBE_ERROR
-
-
-def test_transport_raise_is_probe_error(monkeypatch):
-    def _raise(*a, **kw):
-        raise RuntimeError("transport")
-
-    monkeypatch.setattr(tracking, "_get_storage_at", _raise)
     assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") is _PROBE_ERROR

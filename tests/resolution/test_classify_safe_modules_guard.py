@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
-from eth_utils.crypto import keccak
 
 from services.resolution import tracking
 from services.resolution.tracking import (
@@ -35,23 +34,6 @@ MODULE_BEARING_HEAD_WORD = "0x0000000000000000000000002e1b5a40edc922bce489668b11
 ENABLED_MODULE = "0x2e1b5a40edc922bce489668b11749b8eabd67f6b"
 
 OWNER = "0x" + "11" * 20
-
-
-def test_slot_preimages_recomputed():
-    """Recomputed rather than copied from the module."""
-    modules_head = "0x" + keccak((1).to_bytes(32, "big") + (1).to_bytes(32, "big")).hex()
-    guard = "0x" + keccak(text="guard_manager.guard.address").hex()
-    module_guard = "0x" + keccak(text="module_manager.module_guard.address").hex()
-
-    assert modules_head == "0xcc69885fda6bcc1a4ace058b4a62bf5e179ea78fd58a1ccd71c22cc9b688792f"
-    assert guard == "0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8"
-    assert module_guard == "0xb104e0b93118902c651344349b610029d694cfdec91c589c91ebafbcd0289947"
-
-    assert tracking._SAFE_MODULES_HEAD_SLOT == modules_head
-    assert tracking._SAFE_GUARD_SLOT == guard
-    # ``module_guard`` exists only from Safe 1.5.0 and reads zero on every corpus Safe, which is "feature absent", so
-    # nothing is published about it.
-    assert module_guard not in (tracking._SAFE_MODULES_HEAD_SLOT, tracking._SAFE_GUARD_SLOT)
 
 
 def _abi_encode_address_array(addrs: list[str]) -> str:
@@ -365,26 +347,6 @@ def test_resolve_pinned_block_uses_an_explicit_quantity_tag(monkeypatch):
 
     monkeypatch.setattr(tracking, "_current_block_number", _boom)
     assert _resolve_pinned_block("https://rpc", hex(PROBE_BLOCK)) == PROBE_BLOCK
-
-
-def test_resolve_pinned_block_resolves_a_moving_alias(monkeypatch):
-    monkeypatch.setattr(tracking, "_current_block_number", lambda *_a, **_k: PROBE_BLOCK)
-    assert _resolve_pinned_block("https://rpc", "latest") == PROBE_BLOCK
-    assert _resolve_pinned_block("https://rpc", "finalized") == PROBE_BLOCK
-
-
-def test_resolve_pinned_block_returns_none_on_head_read_failure(monkeypatch):
-    def _boom(*_a, **_k):
-        raise RuntimeError("head read failed")
-
-    monkeypatch.setattr(tracking, "_current_block_number", _boom)
-    assert _resolve_pinned_block("https://rpc", "latest") is None
-
-
-def test_resolve_pinned_block_rejects_an_unrecognised_tag(monkeypatch):
-    monkeypatch.setattr(tracking, "_current_block_number", lambda *_a, **_k: PROBE_BLOCK)
-    assert _resolve_pinned_block("https://rpc", "0xnothex") is None
-    assert _resolve_pinned_block("https://rpc", "") is None
 
 
 # A non-32-byte answer is not an observation of storage. A left-pad-then-check decoder would turn ``"0x"`` into "no

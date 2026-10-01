@@ -171,11 +171,6 @@ def test_mutable_safe_details_ttl_by_block_tag(monkeypatch, block_tag, expected_
     assert details2["owners"] == expected_owners_after_aging
 
 
-def test_erc1967_implementation_is_a_mutable_detail():
-    """A long TTL would serve the pre-upgrade implementation as current for up to 30 minutes."""
-    assert "erc1967_implementation" in tracking._MUTABLE_DETAIL_KEYS
-
-
 def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed

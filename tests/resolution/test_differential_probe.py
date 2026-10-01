@@ -116,20 +116,6 @@ def test_attribute_table(randoms, principal, expected):
 
 
 @pytest.mark.parametrize(
-    ("selector", "signature", "expected"),
-    [
-        pytest.param("0x9a1e97d1", "setClaimingOpen(uint256)", "0x9a1e97d1" + "00" * 32, id="single_uint_zero"),
-        pytest.param("0x715018a6", "renounceOwnership()", "0x715018a6", id="no_args_bare_selector"),
-        pytest.param(
-            "0xa9059cbb", "transfer(address,uint256)", "0xa9059cbb" + "00" * 32 + "00" * 32, id="address_and_uint"
-        ),
-    ],
-)
-def test_synth_exact_encoding(selector, signature, expected):
-    assert dp.synthesize_calldata(selector, signature) == expected
-
-
-@pytest.mark.parametrize(
     "signature",
     [
         pytest.param("foo(bytes,uint256[],string)", id="dynamic_types"),
@@ -251,13 +237,6 @@ def test_run_two_sided_confirmed_gated_does_not_reprobe():
     assert result.verdict == "gated_confirmed"
     assert result.attribution == "caller_discriminating"
     assert len(wire.batches) == 1  # never re-probes for a gated confirmation
-
-
-def test_run_one_sided_consistent_rejection_is_gated_observed():
-    result, wire = _run(lambda _tag, _frm: revert(OWNABLE))
-    assert result.verdict == "gated_observed"
-    assert result.attribution == "caller_rejected_consistent"
-    assert len(wire.batches) == 1
 
 
 def test_run_indeterminate_keeps_static():

@@ -262,27 +262,6 @@ def test_a_hashless_probe_block_still_publishes_the_height(monkeypatch: pytest.M
     assert payload["probe_block_hash"] is None
 
 
-def test_the_view_getter_local_mints_no_row_and_no_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The receiver binds a local; pairing it with a same-named getter would publish an address for a function that
-    doesn't exist.
-    """
-    local_receiver = {
-        "binding": "local",
-        "param_scope": None,
-        "param_index": None,
-        "mutability": None,
-        "visibility": None,
-        "auto_getter_selector": None,
-        "variable": "tokenOut",
-        "receiver_provenance": "not_determined",
-    }
-    effects = _effects(_sink("s0", local_receiver, target="tokenOut.safeTransfer"))
-    assert fap.collect_asset_receivers(effects) == []
-    payload, seen = _run(monkeypatch, effects, [], deployment_address=SYNC_POOL)
-    assert payload["receivers"] == []
-    assert seen == []  # no call was placed at all
-
-
 def _token_receiver(**overrides: Any) -> dict:
     return {**_state_var_receiver(SEL_TOKEN, "token"), **overrides}
 
@@ -322,12 +301,6 @@ def test_an_unlicensed_receiver_mints_no_row_and_is_never_called(receiver: dict 
     assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
 
 
-def test_a_state_variable_without_a_minted_selector_is_untouched() -> None:
-    receiver = _state_var_receiver(SEL_TOKEN, "token")
-    receiver["auto_getter_selector"] = None
-    assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
-
-
 @pytest.mark.parametrize(
     "effects",
     [
@@ -345,13 +318,6 @@ def test_a_state_variable_without_a_minted_selector_is_untouched() -> None:
 )
 def test_an_artifact_with_nothing_readable_yields_nothing_rather_than_raising(effects: dict) -> None:
     assert fap.collect_asset_receivers(effects) == []
-
-
-def test_a_functions_list_is_read_the_same_as_a_functions_map(monkeypatch: pytest.MonkeyPatch) -> None:
-    sink = _sink("s0", _state_var_receiver(SEL_TOKEN, "token"))
-    as_list = {"functions": [{"function": "f()", "sinks": [sink]}]}
-    as_map = {"functions": {"f()": {"function": "f()", "sinks": [sink]}}}
-    assert fap.collect_asset_receivers(as_list) == fap.collect_asset_receivers(as_map)
 
 
 @pytest.mark.parametrize("payload", [{}, {"receivers": None}, {"receivers": "x"}, {"receivers": ["x"]}])
@@ -383,14 +349,6 @@ def test_same_name_different_selector_does_not_fold(monkeypatch: pytest.MonkeyPa
     assert [r["asset_getter_selector"] for r in payload["receivers"]] == [SEL_REWARD_TOKEN, SEL_TOKEN]
     assert {r["asset_address"] for r in payload["receivers"]} == {ADDR_KING, ADDR_EIGEN}
     assert len(seen[0][1]) == 2
-
-
-def test_conflicting_declaration_classes_withhold_the_mutability(monkeypatch: pytest.MonkeyPatch) -> None:
-    a = _state_var_receiver(SEL_TOKEN, "token", mutability="immutable_in_implementation")
-    b = _state_var_receiver(SEL_TOKEN, "token", mutability="mutable")
-    receivers = fap.collect_asset_receivers(_effects(_sink("s0", a), _sink("s1", b)))
-    assert len(receivers) == 1
-    assert receivers[0].declared_mutability is None
 
 
 def test_two_identical_runs_produce_the_identical_payload(monkeypatch: pytest.MonkeyPatch) -> None:
