@@ -96,6 +96,8 @@ def _authority_cap_dict(selector: str) -> dict:
     ctx = EvaluationContext(
         chain_id=1,
         contract_address=TELLER_TARGET,
+        # Covered by FixtureRepo's cursor (21_000_000).
+        block=20_999_000,
         meta={"event_log_repo": FixtureRepo(_event_rows())},
         state_var_values={"authority": fixture["authority"]},
         call_frame=CallFrame.root(contract_address=TELLER_TARGET, function_signature=None, function_selector=selector),

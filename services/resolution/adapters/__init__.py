@@ -35,6 +35,8 @@ class EnumerationResult:
     confidence: CapabilityConfidence = "enumerable"
     partial_reason: str | None = None
     last_indexed_block: int | None = None
+    # Trace fields of the live tail that completed a lagging fold.
+    scan_window: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -142,6 +142,8 @@ def _seed_cursor(session, topic0: str, *, complete: bool = True, block: int = _C
             topic0=topic0.lower(),
             last_indexed_block=block,
             backfill_complete=complete,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
 
@@ -704,3 +706,86 @@ def test_registry_controller_context_is_chain_scoped(session, monkeypatch, both_
     controller_addrs, _labels = context
     assert mainnet_owner in controller_addrs
     assert twin_owner not in controller_addrs
+
+
+# ---------------------------------------------------------------------------
+# Coverage gate: a cursor behind the pinned block is completed by a tail or defers
+# ---------------------------------------------------------------------------
+
+_TAIL_PIN = _CURSOR_BLOCK + 100
+
+
+def _raw_roleset(holder: str, active: bool, block: int) -> dict[str, Any]:
+    from tests.support.tail_wire import raw_log
+
+    return raw_log(_PROXY, _roleset_topics(holder, _ROLE_1, active), block)
+
+
+@requires_postgres
+def test_grant_past_the_cursor_reaches_the_probe_through_the_tail(session, monkeypatch):
+    from tests.support.tail_wire import install_tail_wire
+
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    wire = install_tail_wire(monkeypatch, [_raw_roleset(_TIMELOCK, True, _CURSOR_BLOCK + 50)])
+    _install_probe_stub(monkeypatch, members={_MULTISIG, _TIMELOCK})
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session, block=_TAIL_PIN))
+
+    assert wire.calls == [(_CURSOR_BLOCK + 1, _TAIL_PIN)]
+    assert (cap.kind, cap.membership_quality) == ("finite_set", "exact")
+    assert cap.members == sorted([_MULTISIG.lower(), _TIMELOCK.lower()])
+    step = cap.trace[0]
+    assert step["candidates_from_events"] == sorted([_MULTISIG.lower(), _TIMELOCK.lower()])
+    assert step["fold_frontier"] == _TAIL_PIN
+    assert (step["scan_from_block"], step["scan_to_block"], step["floor_basis"]) == (
+        _CURSOR_BLOCK + 1,
+        _TAIL_PIN,
+        "durable_frontier_tail",
+    )
+
+
+@requires_postgres
+@pytest.mark.parametrize("tail_fails", [True, False], ids=["tail_failed", "tail_ok"])
+def test_behind_cursor_is_never_exact_without_a_complete_tail(session, monkeypatch, tail_fails):
+    from tests.support.tail_wire import install_tail_wire
+
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    install_tail_wire(monkeypatch, [_raw_roleset(_TIMELOCK, True, _CURSOR_BLOCK + 50)], fail=tail_fails)
+    _install_probe_stub(monkeypatch, members={_MULTISIG, _TIMELOCK})
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session, block=_TAIL_PIN))
+
+    if tail_fails:
+        assert cap.kind == "external_check_only"
+        assert _extra(cap)["basis"] == ["cursor_behind_block"]
+        assert _extra(cap)["deferred_pending_index"] is True
+    else:
+        assert _TIMELOCK.lower() in (cap.members or [])
+
+
+@requires_postgres
+def test_unpinned_pass_behind_the_head_defers_instead_of_tailing_to_head(session, monkeypatch):
+    from tests.support.tail_wire import install_tail_wire
+
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    _seed_proxy_impl(session)
+    _seed_cursor(session, _ROLE_SET)
+    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
+    session.commit()
+    wire = install_tail_wire(monkeypatch, [_raw_roleset(_TIMELOCK, True, _CURSOR_BLOCK + 50)])
+    _install_probe_stub(monkeypatch, members={_MULTISIG, _TIMELOCK}, head_block=_TAIL_PIN)
+
+    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session, block=None))
+
+    assert wire.calls == []
+    assert cap.kind == "external_check_only"
+    assert _extra(cap)["basis"] == ["cursor_behind_block"]
+    assert _extra(cap)["deferred_pending_index"] is True

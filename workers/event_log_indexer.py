@@ -14,14 +14,22 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.floor_witnesses import (
+    WITNESS_FAILED,
+    WITNESS_PRIOR_INCARNATION,
+    WITNESS_PROVEN,
+    WitnessOutcome,
+    record_floor_witness,
+)
 from db.models import (
     CURSOR_BASIS_NOT_DETERMINED,
     ENROLLMENT_BASIS_PREDICATE_HINT,
     ENROLLMENT_BASIS_TRACKED_TOPICS,
+    EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_NOT_DETERMINED,
@@ -326,6 +334,7 @@ def _witness_seed_block(
     cache: dict[tuple[int, str], tuple[int | None, str]],
     *,
     chain_id: int,
+    session: Session | None = None,
 ) -> tuple[int | None, str]:
     """Grade ``seed`` as a proven lower bound with three pinned reads; returns ``(first_indexed_block, basis)``.
 
@@ -336,13 +345,15 @@ def _witness_seed_block(
     ever stops being allowed it raises and lands on ``not_determined``.
 
     Every failure (either code read, the log read, errors, timeouts, non-list responses, a 7702 stub) returns ``(None,
-    not_determined)``: the block is dropped with the basis.
+    not_determined)``: the block is dropped with the basis. With a ``session``, the outcome is also upserted into
+    ``address_floor_witnesses`` (once per cached address).
     """
     addr = address.lower()
     key = (chain_id, addr)
     if key in cache:
         return cache[key]
     graded: tuple[int | None, str] = (None, BASIS_NOT_DETERMINED)
+    outcome: WitnessOutcome = WITNESS_FAILED
     try:
         rpc_url = require_rpc_url(chain_id=chain_id)
         code_before = rpc_request(rpc_url, "eth_getCode", [addr, hex(seed)], chain_id=chain_id)
@@ -356,7 +367,9 @@ def _witness_seed_block(
             )
             if isinstance(prior_logs, list) and not prior_logs:
                 graded = (seed, FIRST_INDEXED_BASIS_CREATION)
+                outcome = WITNESS_PROVEN
             elif isinstance(prior_logs, list):
+                outcome = WITNESS_PRIOR_INCARNATION
                 logger.info(
                     "logs observed below the creation seed; lower bound not determined",
                     extra={
@@ -373,6 +386,8 @@ def _witness_seed_block(
             extra={"address": addr, "chain_id": chain_id, "seed": seed, "exc_type": type(exc).__name__},
         )
     cache[key] = graded
+    if session is not None:
+        record_floor_witness(session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0])
     return graded
 
 
@@ -389,6 +404,31 @@ def _cursor_exists(session: Session, chain_id: int, event_address: str, topic0: 
         ).first()
         is not None
     )
+
+
+def _upgrade_to_predicate_hint(session: Session, *, chain_id: int, address: str, topic0: str) -> bool:
+    """Upgrade an existing, witnessed cursor whose basis isn't already eligible to ``predicate_tree_hint``; no other
+    column changes. A cursor without a ``creation_block_minus_one`` lower bound is never upgraded.
+    """
+    eligible = [b for b in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES if b is not None]
+    result = session.execute(
+        update(IndexedEventCursor)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == address.lower())
+        .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
+        .where(IndexedEventCursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION)
+        .where(IndexedEventCursor.enrollment_basis.is_not(None))
+        .where(IndexedEventCursor.enrollment_basis.not_in(eligible))
+        .values(enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT)
+        .execution_options(synchronize_session=False)
+    )
+    upgraded = bool(getattr(result, "rowcount", 0))
+    if upgraded:
+        logger.info(
+            "cursor enrollment basis upgraded to predicate_tree_hint",
+            extra={"chain_id": chain_id, "event_address": address.lower(), "topic0": topic0.lower()},
+        )
+    return upgraded
 
 
 _FETCHER_ACCEPTS_WINDOW_STATS: dict[type, bool] = {}
@@ -581,8 +621,10 @@ def index_event_group_steps(
                 cursor.last_indexed_block_hash = None
                 # Keep the RPC page's count and cap even if only a prefix was committed.
                 _fold_window_stats(cursor, window_stats)
-            cursor.backfill_complete = int(cursor.last_indexed_block or 0) >= target
-            if cursor.backfill_complete:
+            # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the evaluated
+            # block is judged by position, and only the reorg rewind above resets the flag.
+            if int(cursor.last_indexed_block or 0) >= target:
+                cursor.backfill_complete = True
                 members_at_target += 1
                 if cursor.last_indexed_block_hash is None:
                     cursor.last_indexed_block_hash = memo[(chain_id, int(cursor.last_indexed_block))]
@@ -894,8 +936,14 @@ def _enroll_witnessed(
     pending: set[tuple[int, str]] | None = None,
     progress: Callable[[], None] | None = None,
 ) -> bool:
-    """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing."""
+    """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing.
+
+    A predicate-hint enrolment that finds the cursor already present upgrades its basis (see
+    ``_upgrade_to_predicate_hint``), so the enrolment order never decides eligibility.
+    """
     if _cursor_exists(session, chain_id, address, topic0):
+        if enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT:
+            _upgrade_to_predicate_hint(session, chain_id=chain_id, address=address, topic0=topic0)
         return False
     if progress is not None:
         progress()
@@ -904,7 +952,7 @@ def _enroll_witnessed(
         if pending is not None:
             pending.add((chain_id, address.lower()))
         return False
-    first_indexed_block, basis = _witness_seed_block(address, seed, witness_cache, chain_id=chain_id)
+    first_indexed_block, basis = _witness_seed_block(address, seed, witness_cache, chain_id=chain_id, session=session)
     inserted = enroll_event_cursor(
         session,
         chain_id=chain_id,

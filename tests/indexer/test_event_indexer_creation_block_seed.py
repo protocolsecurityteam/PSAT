@@ -380,7 +380,13 @@ def test_pg_repo_not_backfill_complete_is_not_trusted(session):
     member = "0x" + "77" * 20
     session.add(
         IndexedEventCursor(
-            chain_id=1, event_address=addr, topic0=topic, last_indexed_block=19_000_000, backfill_complete=False
+            chain_id=1,
+            event_address=addr,
+            topic0=topic,
+            last_indexed_block=19_000_000,
+            backfill_complete=False,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     session.add(

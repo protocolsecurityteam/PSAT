@@ -357,6 +357,8 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
             last_indexed_block=18_500_000,
             last_indexed_block_hash=b"\xcc" * 32,
             backfill_complete=True,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     db_session.flush()

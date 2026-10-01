@@ -167,9 +167,11 @@ def _seed_role_events(session, *, authority: str, events: list[dict]):
                 chain_id=1,
                 event_address=authority,
                 topic0=topic0,
-                last_indexed_block=max_block,
+                last_indexed_block=max(max_block, _ROLE_FRONTIER),
                 backfill_complete=True,
                 last_run_at=datetime.now(timezone.utc),
+                first_indexed_block=0,
+                first_indexed_block_basis="creation_block_minus_one",
             )
         )
     session.commit()
@@ -178,6 +180,8 @@ def _seed_role_events(session, *, authority: str, events: list[dict]):
 # Selector the inlined vault.exit canCall folds against (the teller's non-canonical exit-leaf
 # signature). Granting a role for (vault, this selector) makes the inner downstream auth NON-EMPTY.
 _INNER_EXIT_SELECTOR = "0x61a3bcc8"
+# Cursor frontier for the seeded role events, and the pass pin the resolver evaluates at.
+_ROLE_FRONTIER = 30_000_000
 _INNER_GRANTEE = "0xdddddddddddddddddddddddddddddddddddddddd"
 
 
@@ -254,7 +258,8 @@ def _resolve(
     if seed_role_events:
         _seed_role_events(session, authority=authority, events=fixture["role_events"] + list(extra_events or []))
 
-    out = resolve_contract_capabilities(session, address=teller, chain_id=1, job_id=teller_job.id)
+    # Pinned at the seeded cursors' frontier so a warm index covers the evaluated block.
+    out = resolve_contract_capabilities(session, address=teller, chain_id=1, job_id=teller_job.id, block=_ROLE_FRONTIER)
     assert out is not None, "resolver returned None — predicate_trees artifact not found"
     return out
 

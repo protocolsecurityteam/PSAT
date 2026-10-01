@@ -75,6 +75,8 @@ def _ctx(repo: PostgresEventLogRepo, teller: str, authority: str, selector: str)
     return EvaluationContext(
         chain_id=1,
         contract_address=teller,
+        # Covered by the seeded cursors' default frontier (10_000).
+        block=10_000,
         event_log_repo=repo,
         state_var_values={"authority": authority},
         call_frame=CallFrame.root(contract_address=teller, function_signature=None, function_selector=selector),
@@ -118,6 +120,8 @@ def _seed_role_cursors(
                 topic0=topic0.lower(),
                 last_indexed_block=last_block,
                 backfill_complete=backfill_complete,
+                first_indexed_block=0,
+                first_indexed_block_basis="creation_block_minus_one",
             )
         )
 
@@ -662,6 +666,8 @@ def _seed_role_store_cursor(
             topic0=_ROLE_SET_TOPIC0.lower(),
             last_indexed_block=last_block,
             backfill_complete=backfill_complete,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
 

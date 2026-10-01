@@ -39,6 +39,7 @@ _STORAGE_ENV_KEYS = (
 )
 
 from db.models import (  # noqa: E402
+    AddressFloorWitness,
     AuditContractCoverage,
     BalanceCollectionState,
     CompanyPagePurge,
@@ -518,6 +519,37 @@ def _stub_role_store_wire(monkeypatch):
     monkeypatch.setattr("services.resolution.creation_block_floor.get_contract_creation_block", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _stub_event_tail_wire(monkeypatch):
+    """Keep the offline suite hermetic against the event-fold tail scan.
+
+    A warm cursor behind a pinned resolution block is completed by a live
+    ``eth_getLogs`` over ``(cursor, pin]`` whenever the pass has an ``rpc_url``.
+    Raising here reproduces the tail-failure path (fail closed), so no resolver
+    test dials the wire. Dedicated tail tests monkeypatch this binding in the
+    test body (which runs after this fixture) to feed canned logs."""
+
+    def _no_wire(*a, **k):
+        raise RuntimeError("offline: event tail wire read stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("services.resolution.event_tail.rpc_request", _no_wire)
+
+
+@pytest.fixture(autouse=True)
+def _stub_seed_witness_wire(monkeypatch):
+    """Keep the offline suite hermetic against the indexer's floor witness.
+
+    Every enrolment source, restaking included, grades its seed with three
+    pinned reads (two ``eth_getCode``, one ``eth_getLogs``). Raising here
+    reproduces the witness-failure path (``not_determined``). Witness tests
+    patch this binding in the test body (``tests/support/witness_wire.py``)."""
+
+    def _no_wire(*a, **k):
+        raise RuntimeError("offline: seed witness wire read stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("workers.event_log_indexer.rpc_request", _no_wire)
+
+
 class SessionFactory:
     """Stand-in for sessionmaker that yields a single shared Session.
 
@@ -686,6 +718,7 @@ def db_session():
             WatchedProxy,
             IndexedEventLog,
             IndexedEventCursor,
+            AddressFloorWitness,
             # A poll/scan value-change queues a re-analysis Job (discovery
             # stage, queued). Left behind, it's claimable by an unrelated
             # claim_job in another test on the same xdist worker. FK children

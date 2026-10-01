@@ -121,7 +121,8 @@ def _ctx(repo, fixture: dict) -> EvaluationContext:
     return EvaluationContext(
         chain_id=1,
         contract_address=fixture["teller_address"],
-        block=None,
+        # The warm repo's cursor (1000) covers this pin; cold repos defer regardless.
+        block=1000,
         event_log_repo=repo,
         bytecode=_BytecodeStub(),
         state_var_values={"authority": fixture["authority_address"], "owner": _ZERO},

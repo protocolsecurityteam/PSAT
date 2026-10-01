@@ -7,11 +7,12 @@ creation block from Etherscan (paid, memoized per address), or DEFER. It never
 fails open to block 0 — a scan that started at 0 because the floor was unknown
 would read downstream as a scan that covered everything.
 
-Pure unit tests: the module's two collaborators are monkeypatched, so nothing
-here touches a cursor table or the Etherscan wire.
+The module's collaborators are monkeypatched or seeded, so nothing here touches the Etherscan wire.
 """
 
 from __future__ import annotations
+
+from tests.conftest import requires_postgres
 
 
 def test_resolve_scan_floor_caches_per_address(monkeypatch):
@@ -34,18 +35,44 @@ def test_resolve_scan_floor_caches_per_address(monkeypatch):
     assert calls == [addr]  # second call served from cache
 
 
-def test_resolve_scan_floor_prefers_durable_cursor(monkeypatch):
-    # A durable cursor floor is preferred over an Etherscan call (no rate limit).
+@requires_postgres
+def test_resolve_scan_floor_prefers_durable_cursor(db_session, monkeypatch):
+    # A witnessed cursor floor (its first_indexed_block, not its frontier) is preferred over an Etherscan call.
+    import services.resolution.creation_block_floor as floor_mod
+    from db.models import FIRST_INDEXED_BASIS_CREATION, IndexedEventCursor
+
+    addr = "0x" + "cd" * 20
+    db_session.add(
+        IndexedEventCursor(
+            chain_id=1,
+            event_address=addr,
+            topic0="0x" + "12" * 32,
+            last_indexed_block=9_000_000,
+            backfill_complete=True,
+            first_indexed_block=5_000_000,
+            first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
+        )
+    )
+    db_session.commit()
+    floor_mod.clear_scan_floor_cache()
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 7_000_000)
+    assert floor_mod.resolve_scan_floor(addr, 1, session=db_session) == 5_000_000
+
+
+def test_resolve_scan_floor_defers_on_a_failed_witness(monkeypatch):
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: 5_000_000)
-    monkeypatch.setattr(
-        floor_mod,
-        "get_contract_creation_block",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cursor floor must win, no Etherscan call")),
-    )
-    assert floor_mod.resolve_scan_floor("0x" + "cd" * 20, 1) == 5_000_000
+    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: "defer")
+    calls: list[str] = []
+
+    def lookup(addr, **_k):
+        calls.append(addr)
+        return 6_000_000
+
+    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lookup)
+    assert floor_mod.resolve_scan_floor("0x" + "ce" * 20, 1) is None
+    assert calls == []
 
 
 def test_resolve_scan_floor_defers_on_unknown(monkeypatch):

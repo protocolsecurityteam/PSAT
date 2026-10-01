@@ -16,6 +16,7 @@ from .balances import (
     EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
     FIRST_INDEXED_BASIS_EXPLICIT,
+    FLOOR_WITNESS_BASES,
     HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED,
     HOLDERS_BASIS_PINNED_HAS_ROLE,
     HOLDERS_WITHHELD_SQL,
@@ -29,6 +30,7 @@ from .balances import (
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_NOT_DETERMINED,
     WINDOW_STATS_UNMEASURED_LEGACY,
+    AddressFloorWitness,
     ContractBalance,
     ContractBalanceFetch,
     ContractBalanceLatest,
@@ -38,6 +40,7 @@ from .balances import (
     RestakingPosition,
     RestakingPositionLatest,
     TvlSnapshot,
+    cursor_permits_exactness,
     enrollment_basis_permits_exactness,
     exactness_eligible_cursor_clause,
 )
@@ -155,6 +158,7 @@ from .tokens import (
 )
 
 __all__ = [
+    "AddressFloorWitness",
     "BalanceCollectionState",
     "PendingEffectsWork",
     "ADMITTING_WITNESS_RULES",
@@ -211,6 +215,7 @@ __all__ = [
     "EtherscanCache",
     "FIRST_INDEXED_BASIS_CREATION",
     "FIRST_INDEXED_BASIS_EXPLICIT",
+    "FLOOR_WITNESS_BASES",
     "FunctionPrincipal",
     "FunctionScoreSignal",
     "HOLDERS_BASIS_PINNED_HAS_ROLE",
@@ -276,6 +281,7 @@ __all__ = [
     "WorkerHeartbeat",
     "WorkerLifecycle",
     "derive_job_chain_id",
+    "cursor_permits_exactness",
     "engine",
     "enrollment_basis_permits_exactness",
     "exactness_eligible_cursor_clause",

@@ -27,6 +27,8 @@ from utils.logging import record_stage_metric
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
 
 from ..capabilities import CapabilityExpr, ExternalCheck
+from ..event_tail import scan_event_tail
+from ..repos.event_logs_pg import _cursor_covers_block
 from ..role_store_standards import (
     GetterSpec,
     RoleStoreStandard,
@@ -44,6 +46,9 @@ _NEGATIVE_CONTROL_ADDR = "0x" + "de1e7e" + "00" * 17
 
 
 _MATCH_SCORE = 90
+
+# Cold, or warm but behind the pinned block with no complete tail.
+_INDEX_WAIT_BASES = frozenset({"no_index_cursor", "cursor_behind_block"})
 
 
 # Settled declines are only observable here (the persisted basis is superseded downstream), so count them per reason.
@@ -125,8 +130,36 @@ class EnumerableRoleStoreAdapter:
         if pinned_block is None:
             return _check_only(authority, callee_selector, ["probe_unavailable"])
 
+        scan_window: dict[str, Any] | None = None
         try:
-            rows = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s, block=pinned_block)
+            if _cursor_covers_block(cursor_block, pinned_block):
+                rows = list(
+                    iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s, block=pinned_block)
+                )
+            else:
+                # A grant in (cursor, pin] would leave its holder out of the candidate universe the probe tests. An
+                # unpinned pass's head read is not a confirmed height to complete a fold to.
+                if not isinstance(ctx.block, int):
+                    return _check_only(authority, callee_selector, ["cursor_behind_block"])
+                memo = _pass_memo(ctx)
+                tail_key = ("role_store_tail", ctx.chain_id, authority, tuple(topic0s), cursor_block, pinned_block)
+                scan = memo.get(tail_key)
+                if scan is None:
+                    scan = scan_event_tail(
+                        rpc_url=rpc_url,
+                        chain_id=ctx.chain_id,
+                        event_address=authority,
+                        topic0s=topic0s,
+                        frontier=cursor_block,
+                        block=pinned_block,
+                    )
+                    if scan.complete:
+                        memo[tail_key] = scan
+                if not scan.complete:
+                    return _check_only(authority, callee_selector, ["cursor_behind_block"])
+                durable = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s, block=cursor_block)
+                rows = [*durable, *scan.logs]
+                scan_window = scan.trace_fields()
         except Exception:
             return _check_only(authority, callee_selector, ["event_log_backend_error"])
         if not rows:
@@ -183,13 +216,14 @@ class EnumerableRoleStoreAdapter:
                 "standard": standard.name,
                 "callee_selector": callee_selector,
                 "probe_block": pinned_block,
-                # The fold's coverage height (least-advanced cursor), for re-resolving when a later grant/revoke is
-                # indexed. Not probe_block, which could miss grants between the two.
-                "fold_frontier": cursor_block,
+                # The fold's coverage height, for re-resolving when a later grant/revoke is indexed: the least-advanced
+                # cursor, or the pin when a tail completed the fold past it.
+                "fold_frontier": max(cursor_block, pinned_block),
                 "candidate_count": len(candidates),
                 "candidates_from_events": sorted(active_holders),
                 "candidates_from_controllers": sorted(controller_addrs),
                 "role_labels": role_labels,
+                **(scan_window or {}),
             }
         ]
         logger.debug(
@@ -207,7 +241,7 @@ class EnumerableRoleStoreAdapter:
             members,
             quality="exact",
             confidence="enumerable",
-            last_indexed_block=cursor_block,
+            last_indexed_block=max(cursor_block, pinned_block) if scan_window else cursor_block,
             trace=trace,
         )
 
@@ -391,8 +425,9 @@ def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tupl
 
 def _check_only(authority: str | None, callee_selector: str | None, basis: list[str]) -> CapabilityExpr:
     extra: dict[str, Any] = {"basis": basis, "adapter": TRACE_STEP_ENUMERABLE_ROLE_STORE}
-    # Only the cold-index basis waits on the index; marking settled answers would spin the reconciler forever.
-    if "no_index_cursor" in basis:
+    # Only the index-wait bases defer; marking settled answers would spin the reconciler forever.
+    waits_on_index = bool(_INDEX_WAIT_BASES.intersection(basis))
+    if waits_on_index:
         extra["deferred_pending_index"] = True
     for reason in basis:
         if reason in _ADAPTER_DECLINE_REASONS:
@@ -403,7 +438,7 @@ def _check_only(authority: str | None, callee_selector: str | None, basis: list[
         extra={
             "adapter": TRACE_STEP_ENUMERABLE_ROLE_STORE,
             "address": authority,
-            "decision": "deferred" if "no_index_cursor" in basis else "external_check",
+            "decision": "deferred" if waits_on_index else "external_check",
             "reason": ",".join(basis),
         },
     )

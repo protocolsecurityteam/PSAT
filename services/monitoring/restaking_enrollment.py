@@ -20,8 +20,7 @@ from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
 
 from db.models import ENROLLMENT_BASIS_TRACKED_TOPICS, Contract, IndexedEventLog
-from services.clients.etherscan import get_contract_creation_block
-from workers.event_log_indexer import enroll_event_cursor
+from workers.event_log_indexer import EnrollmentCaches, _enroll_witnessed
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +75,9 @@ def enroll_restaking_fold(
     *,
     chain_id: int,
     emitters: Sequence[str],
+    caches: EnrollmentCaches | None = None,
 ) -> int:
-    """Enroll one cursor per proven emitter at ``creation - 1``; returns cursors created.
+    """Enroll one cursor per proven emitter through the indexer's seed and witness; returns cursors created.
 
     An unresolvable creation block skips enrollment for a later retry rather than seeding at genesis.
 
@@ -85,25 +85,16 @@ def enroll_restaking_fold(
     back ~8.5M blocks (about one pass of windows). They don't regress, but stop advancing meanwhile while reporting
     complete. Accepted as bounded.
     """
+    caches = caches if caches is not None else EnrollmentCaches()
     created = 0
     for emitter in emitters:
-        address = emitter.lower()
-        try:
-            creation = get_contract_creation_block(address, chain_id=chain_id)
-        except Exception as exc:
-            logger.warning(
-                "restaking fold: creation-block lookup failed; deferring enrollment",
-                extra={"address": address, "chain_id": chain_id, "exc_type": type(exc).__name__},
-            )
-            continue
-        if not isinstance(creation, int) or creation <= 0:
-            continue
-        if enroll_event_cursor(
+        if _enroll_witnessed(
             session,
             chain_id=chain_id,
-            event_address=address,
+            address=emitter.lower(),
             topic0=PUBKEY_LINKED_TOPIC0,
-            start_block=creation - 1,
+            seed_cache=caches.seeds,
+            witness_cache=caches.witnesses,
             enrollment_basis=RESTAKING_FOLD_ENROLLMENT_BASIS,
         ):
             created += 1

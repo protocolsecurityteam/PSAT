@@ -200,7 +200,7 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 0)
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor_with_basis", lambda *_a, **_k: (0, "creation_block_lookup"))
 
     ME.clear_enumeration_cache()
     yield
@@ -231,7 +231,9 @@ def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> No
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 12_345_678 - 1)
+    monkeypatch.setattr(
+        floor_mod, "resolve_scan_floor_with_basis", lambda *_a, **_k: (12_345_678 - 1, "creation_block_lookup")
+    )
 
     captured: dict[str, Any] = {}
     orig = ME.enumerate_mapping_values_sync
@@ -243,9 +245,12 @@ def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> No
     monkeypatch.setattr(ME, "enumerate_mapping_values_sync", spy)
 
     meta = _seeded_meta(_receiver_set_log(30183, R1))
-    evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
+    cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
 
     assert captured.get("from_block") == 12_345_678 - 1
+    step = next(s for s in cap.trace if s.get("step") == "param_keyed_mapping_enumeration")
+    assert (step["scan_from_block"], step["floor_basis"]) == (12_345_678 - 1, "creation_block_lookup")
+    assert "scan_to_block" in step
 
 
 def test_latest_value_per_key_is_folded() -> None:

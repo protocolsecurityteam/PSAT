@@ -80,6 +80,8 @@ def _ctx(fixture: dict, repo, selector: str) -> EvaluationContext:
     return EvaluationContext(
         chain_id=1,
         contract_address=fixture["teller"],
+        # Covered by FixtureRepo's cursor (21_000_000).
+        block=20_999_000,
         meta={"event_log_repo": repo},
         state_var_values={"authority": fixture["authority"]},
         call_frame=CallFrame.root(
