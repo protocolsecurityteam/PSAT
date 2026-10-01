@@ -8,6 +8,7 @@ import logging
 from typing import Any, cast
 
 import pytest
+from eth_utils.crypto import keccak
 from sqlalchemy import select, update
 
 import services.resolution.mapping_enumerator as mapping_enumerator
@@ -384,6 +385,35 @@ def test_role_plane_withholds_every_holder_set_on_an_undecodable_row(db_session,
     assert rows
     published = [row["holders"] for row in rows if row["holders"] is not None]
     assert (published == []) is undecodable
+
+
+_MINTER = "0x" + keccak(text="MINTER_ROLE").hex()
+
+
+def test_role_plane_withholds_a_role_seen_only_in_an_undecodable_row(db_session, monkeypatch):
+    logs = role_plane._corpus_logs()
+    only_undecodable = role_plane._log(role_plane.RG, _MINTER, role_plane.OPS_HOLDER, block=22_800_000, log_index=7)
+    only_undecodable.data_hex = _UNALIGNED
+    role_plane._seed(db_session, logs=[*logs, only_undecodable])
+
+    rows = role_plane._run(db_session, monkeypatch, {})
+
+    by_role = {row["role_hash"]: row for row in rows}
+    assert set(by_role) == {role_plane.ZERO_ROLE, role_plane.PAUSER, role_plane.OPERATING_ADMIN, _MINTER}
+    minter = by_role[_MINTER]
+    assert minter["holders"] is None and minter["holders_basis"] == "not_determined"
+    # Its account is never taken as a candidate from a row whose data no ABI decodes.
+    assert minter["candidate_count"] is None
+
+
+def test_role_plane_lists_roles_when_every_row_is_undecodable(db_session, monkeypatch):
+    only_undecodable = role_plane._log(role_plane.RG, _MINTER, role_plane.OPS_HOLDER, block=22_800_000, log_index=7)
+    only_undecodable.data_hex = _UNALIGNED
+    role_plane._seed(db_session, logs=[only_undecodable])
+
+    rows = role_plane._run(db_session, monkeypatch, {})
+
+    assert [(row["role_hash"], row["holders"]) for row in rows] == [(_MINTER, None)]
 
 
 def test_a_stall_stays_visible_in_progress_published_mid_pass(db_session, sim):
