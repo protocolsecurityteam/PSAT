@@ -2106,6 +2106,66 @@ def floor_witness_summary(session: Session) -> dict[str, Any]:
     return {"due": len(_floor_witness_candidates(session, limit=None)), "by_outcome": by_outcome}
 
 
+@dataclass(frozen=True)
+class HintTarget:
+    """One enrolment a predicate tree asks for: ``topics`` at ``address``, or, for a delegated role gate
+    (``kind == "role_store"``), the role-store topics detected at ``address`` (``topics`` is then ``None``)."""
+
+    kind: Literal["hint", "solmate", "role_store"]
+    chain_id: int
+    address: str
+    topics: tuple[str, ...] | None
+
+
+def job_chain(job: Job) -> int | None:
+    """The job's own chain (``Job.chain_id``, else derived from its request), never a default."""
+    if isinstance(job.chain_id, int):
+        return job.chain_id
+    return derive_job_chain_id(job.request.get("chain") if isinstance(job.request, dict) else None, job.address)
+
+
+def completed_jobs_query(limit: int | None = None):
+    query = (
+        select(Job)
+        .where(Job.status == JobStatus.completed)
+        .where(Job.request["effects_resume_work_id"].astext.is_(None))
+        .where(Job.address.isnot(None))
+        .order_by(Job.updated_at.desc())
+    )
+    return query if limit is None else query.limit(limit)
+
+
+def hint_targets_for_job(session: Session, job: Job) -> Iterator[HintTarget]:
+    """Every (chain, address, topics) the job's predicate trees enrol, resolved exactly as enrolment resolves them."""
+    artifact = get_artifact(session, job.id, "predicate_trees")
+    if not isinstance(artifact, dict):
+        return
+    job_chain_id = job_chain(job)
+    if job_chain_id is None:
+        # Defensive; the query filter guarantees an id.
+        return
+    values = _state_var_values_for_job(session, job)
+    for descriptor in _descriptors_from_artifact(artifact):
+        for hint in descriptor.get("enumeration_hint") or []:
+            topic0 = hint.get("topic0")
+            if not isinstance(topic0, str) or not topic0.startswith("0x"):
+                continue
+            address = _event_address_for_descriptor(descriptor, hint, job, values)
+            if _is_enrollable_event_address(address):
+                yield HintTarget("hint", job_chain_id, address, (topic0,))
+        if _is_solmate_cancall_descriptor(descriptor):
+            # The authority from ``authority_contract`` only, never job.address (it doesn't emit these events). Skip
+            # until resolved.
+            authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
+            if _is_enrollable_event_address(authority):
+                yield HintTarget("solmate", job_chain_id, authority, tuple(_SOLMATE_ROLE_TOPICS))
+        elif _is_delegated_role_gate_descriptor(descriptor):
+            # Enrol at the authority proxy, where delegatecall emits RoleSet. Skip until resolved.
+            authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
+            if _is_enrollable_event_address(authority):
+                yield HintTarget("role_store", job_chain_id, authority, None)
+
+
 def enroll_from_completed_jobs(
     session: Session,
     *,
@@ -2116,14 +2176,7 @@ def enroll_from_completed_jobs(
     commit: bool = True,
     caches: EnrollmentCaches | None = None,
 ) -> int:
-    query = (
-        select(Job)
-        .where(Job.status == JobStatus.completed)
-        .where(Job.request["effects_resume_work_id"].astext.is_(None))
-        .where(Job.address.isnot(None))
-        .order_by(Job.updated_at.desc())
-        .limit(limit)
-    )
+    query = completed_jobs_query(limit)
     if job_id is not None:
         query = query.where(Job.id == job_id)
     jobs = session.execute(query).scalars()
@@ -2133,88 +2186,48 @@ def enroll_from_completed_jobs(
     witness_cache = caches.witnesses
     role_store_topic_cache = caches.role_topics
     for job in jobs:
-        artifact = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(artifact, dict):
-            continue
-        # Stamp the job's own chain (``Job.chain_id``, else derived from its request), never a default.
-        job_chain_id = (
-            job.chain_id
-            if isinstance(job.chain_id, int)
-            else derive_job_chain_id(job.request.get("chain") if isinstance(job.request, dict) else None, job.address)
-        )
-        if job_chain_id is None:
-            # Defensive; the query filter guarantees an id.
-            continue
-        values = _state_var_values_for_job(session, job)
-        for descriptor in _descriptors_from_artifact(artifact):
-            for hint in descriptor.get("enumeration_hint") or []:
-                topic0 = hint.get("topic0")
-                if not isinstance(topic0, str) or not topic0.startswith("0x"):
-                    continue
-                address = _event_address_for_descriptor(descriptor, hint, job, values)
-                if not _is_enrollable_event_address(address):
-                    continue
+        for target in hint_targets_for_job(session, job):
+            chain_id, address = target.chain_id, target.address
+            if target.topics is not None:
                 # Unknown creation block: enrol on a later pass.
+                for topic0 in target.topics:
+                    if _enroll_witnessed(
+                        session,
+                        chain_id=chain_id,
+                        address=address,
+                        topic0=topic0,
+                        seed_cache=seed_cache,
+                        witness_cache=witness_cache,
+                        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                        pending=pending,
+                        progress=progress,
+                    ):
+                        inserted += 1
+                continue
+            if _authority_has_role_store_cursor(session, chain_id, address):
+                continue
+            role_topics = _role_store_topic0s(session, address, chain_id, role_store_topic_cache)
+            for topic0 in role_topics:
+                if _cursor_exists(session, chain_id, address, topic0):
+                    _upgrade_alone(session, chain_id=chain_id, address=address, topic0=topic0, commit=progress)
+            # Commit all topics atomically; caches keep external reads before the first insert.
+            if progress is not None:
+                progress()
+            for topic0 in role_topics:
                 if _enroll_witnessed(
                     session,
-                    chain_id=job_chain_id,
+                    chain_id=chain_id,
                     address=address,
                     topic0=topic0,
                     seed_cache=seed_cache,
                     witness_cache=witness_cache,
                     enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
                     pending=pending,
-                    progress=progress,
+                    upgrade_existing=False,
                 ):
                     inserted += 1
-            if _is_solmate_cancall_descriptor(descriptor):
-                # The authority from ``authority_contract`` only, never job.address (it doesn't emit these events). Skip
-                # until resolved.
-                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                if _is_enrollable_event_address(authority):
-                    for topic0 in _SOLMATE_ROLE_TOPICS:
-                        if _enroll_witnessed(
-                            session,
-                            chain_id=job_chain_id,
-                            address=authority,
-                            topic0=topic0,
-                            seed_cache=seed_cache,
-                            witness_cache=witness_cache,
-                            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
-                            pending=pending,
-                            progress=progress,
-                        ):
-                            inserted += 1
-            elif _is_delegated_role_gate_descriptor(descriptor):
-                # Enrol at the authority proxy, where delegatecall emits RoleSet. Skip until resolved.
-                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
-                    session, job_chain_id, authority
-                ):
-                    role_topics = _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache)
-                    for topic0 in role_topics:
-                        if _cursor_exists(session, job_chain_id, authority, topic0):
-                            _upgrade_alone(
-                                session, chain_id=job_chain_id, address=authority, topic0=topic0, commit=progress
-                            )
-                    # Commit all topics atomically; caches keep external reads before the first insert.
-                    if progress is not None:
-                        progress()
-                    for topic0 in role_topics:
-                        if _enroll_witnessed(
-                            session,
-                            chain_id=job_chain_id,
-                            address=authority,
-                            topic0=topic0,
-                            seed_cache=seed_cache,
-                            witness_cache=witness_cache,
-                            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
-                            pending=pending,
-                            upgrade_existing=False,
-                        ):
-                            inserted += 1
-                    if progress is not None:
-                        progress()
+            if progress is not None:
+                progress()
     if commit:
         session.commit()
     return inserted
