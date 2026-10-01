@@ -1058,13 +1058,7 @@ def run_plan(
                 if rewind_pending:
                     _apply_rewinds(session, plan, cursors)
                     rewind_pending = False
-                buckets: dict[tuple[str, str], list[FetchedEventLog]] = {}
-                for log in logs[offset:end_offset]:
-                    if log.topics:
-                        emitter = single_address if single_address is not None else log.address.lower()
-                        if emitter not in plan.addresses:
-                            raise RuntimeError("eth_getLogs returned a log from an emitter outside the request")
-                        buckets.setdefault((emitter, log.topics[0].lower()), []).append(log)
+                buckets = _bucket_logs(logs[offset:end_offset], single_address, plan.addresses)
                 inserted = 0
                 members_at_target = 0
                 for cursor in cursors:
@@ -1121,6 +1115,20 @@ def run_plan(
         if expected_from != chunk_end + 1:
             raise RuntimeError("eth_getLogs pages did not cover the requested range")
         frontier = min((pos for pos in position.values() if pos < target), default=target)
+
+
+def _bucket_logs(
+    logs: Sequence[FetchedEventLog], single_address: str | None, addresses: Sequence[str]
+) -> dict[tuple[str, str], list[FetchedEventLog]]:
+    """Group a prefix's logs by (emitter, topic0); a multi-address page attributes by each log's emitter."""
+    buckets: dict[tuple[str, str], list[FetchedEventLog]] = {}
+    for log in logs:
+        if log.topics:
+            emitter = single_address if single_address is not None else log.address.lower()
+            if emitter not in addresses:
+                raise RuntimeError("eth_getLogs returned a log from an emitter outside the request")
+            buckets.setdefault((emitter, log.topics[0].lower()), []).append(log)
+    return buckets
 
 
 def _apply_rewinds(session: Session, plan: GroupPlan, cursors: Sequence[IndexedEventCursor]) -> None:

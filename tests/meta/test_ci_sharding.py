@@ -122,7 +122,7 @@ def test_unusable_coverage_is_rejected(artifacts, kind):
 def mini_suite(pytester, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     pytester.makeini("[pytest]\nmarkers = live\n")
-    for area in ("static", "monitoring", "storage", "indexer", "live"):
+    for area in ("static", "monitoring", "storage", "crawlers", "live"):
         directory = pytester.path / "tests" / area
         directory.mkdir(parents=True)
         (directory / f"test_{area}.py").write_text(

@@ -6,8 +6,10 @@ Only ``rpc_request`` is stubbed (``tests/support/sim_chain.py``); fetchers, scan
 from __future__ import annotations
 
 import dataclasses
+import gc
 import logging
 import math
+import weakref
 from threading import Event
 
 import pytest
@@ -21,7 +23,7 @@ from db.models import (
     IndexedEventLog,
     IndexerWork,
 )
-from services.resolution.repos.event_logs_rpc import FetchWindowStat, LogPage, RpcEventLogFetcher
+from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, RpcEventLogFetcher
 from tests.conftest import requires_postgres
 from tests.support.sim_chain import SimChain, SimLog, address, topic, word
 from utils.chains import chain_by_id
@@ -523,3 +525,82 @@ def test_a_sibling_enrolled_far_back_mid_sweep_leaves_the_batch(db_session, sim)
     multi = [r for r in sim.getlogs if len(r["addresses"]) > 1]
     assert multi and all(r["to"] - r["from"] < 1_000 for r in multi)
     assert batched[0] not in {a for r in multi for a in r["addresses"]}
+
+
+# Memory: at most one page of logs is resident
+
+
+class _TrackedPages:
+    """Streams small pages and records, at each request, how many logs from earlier pages are still reachable."""
+
+    def __init__(self, span: int, every: int) -> None:
+        self.span = span
+        self.every = every
+        self.refs: list[weakref.ref] = []
+        self.alive_at_request: list[int] = []
+
+    def fetch_logs(self, *, event_address, topics, from_block, to_block):
+        raise AssertionError("the paged engine streams pages")
+
+    def iter_pages(self, *, event_address, topics, from_block, to_block, max_page_logs=None):
+        lo = from_block
+        while lo <= to_block:
+            gc.collect()
+            self.alive_at_request.append(sum(ref() is not None for ref in self.refs))
+            hi = min(to_block, lo + self.span - 1)
+            logs = [
+                FetchedEventLog(
+                    tx_hash=b.to_bytes(32, "big"),
+                    log_index=0,
+                    block_number=b,
+                    block_hash=b.to_bytes(32, "big"),
+                    transaction_index=0,
+                    topics=[topics[0]],
+                    data_words=[],
+                )
+                for b in range(lo + (-lo % self.every), hi + 1, self.every)
+            ]
+            self.refs.extend(weakref.ref(log) for log in logs)
+            stat = FetchWindowStat(from_block=lo, to_block=hi, returned_log_count=len(logs), cap=None)
+            yield LogPage(from_block=lo, to_block=hi, logs=logs, stats=(stat,))
+            logs = []
+            lo = hi + 1
+
+
+def test_the_engine_releases_each_page_before_requesting_the_next(db_session, sim):
+    _enroll(db_session, seed=_TARGET - 2_000)
+    pages = _TrackedPages(span=100, every=10)
+    fetchers = _fetchers()
+
+    scan_enrolled_events(
+        db_session,
+        fetchers={1: pages},
+        head_fetchers=fetchers[1],
+        block_hash_fetchers=fetchers[2],
+        engine="paged",
+        page_limits=PageLimits(max_block_span=500_000, initial_span=500_000),
+    )
+
+    assert len(pages.alive_at_request) == 20
+    assert pages.alive_at_request == [0] * 20
+    assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == 200
+
+
+def test_iter_pages_keeps_no_reference_to_a_yielded_page(sim):
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_SEED + 5_000, every=5))
+    refs: list[weakref.ref] = []
+    alive: list[int] = []
+
+    def count_reachable(method, _params):
+        if method == "eth_getLogs":
+            gc.collect()
+            alive.append(sum(ref() is not None for ref in refs))
+
+    sim.before_request = count_reachable
+    fetcher = RpcEventLogFetcher("http://unit.test", chain_id=1, max_block_range=1_000, keep_raw=False, strict=True)
+    for page in fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=_SEED + 1, to_block=_SEED + 5_000):
+        refs.extend(weakref.ref(log) for log in page.logs)
+        del page
+
+    assert len(refs) == 1_000
+    assert alive == [0] * 5
