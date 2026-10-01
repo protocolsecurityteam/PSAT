@@ -425,6 +425,10 @@ class _GappyFetcher:
     def iter_pages(self, *, event_address, topics, from_block, to_block, max_page_logs=None):
         if self.mode == "empty":
             return
+        if self.mode == "overrun":
+            stat = FetchWindowStat(from_block=from_block, to_block=to_block + 50, returned_log_count=0, cap=None)
+            yield LogPage(from_block=from_block, to_block=to_block + 50, logs=[], stats=(stat,))
+            return
         stat = FetchWindowStat(from_block=from_block, to_block=from_block + 9, returned_log_count=0, cap=None)
         yield LogPage(from_block=from_block, to_block=from_block + 9, logs=[], stats=(stat,))
         later = from_block + 20
@@ -432,7 +436,7 @@ class _GappyFetcher:
         yield LogPage(from_block=later, to_block=to_block, logs=[], stats=(stat,))
 
 
-@pytest.mark.parametrize("mode", ["gap", "empty"])
+@pytest.mark.parametrize("mode", ["gap", "empty", "overrun"])
 def test_pages_must_cover_the_range_without_gaps(db_session, sim, mode):
     _enroll(db_session)
     fetchers = _fetchers()
@@ -485,3 +489,37 @@ def test_a_cursor_moved_under_a_warm_batch_only_delays_that_group(db_session, si
     assert moved["done"] and summary.failed_groups == 0
     behind = [addr for addr in addrs[1:] if _cursor(db_session, _T1, addr).last_indexed_block < _TARGET]
     assert behind == []
+
+
+def test_a_sibling_enrolled_far_back_mid_sweep_leaves_the_batch(db_session, sim):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from tests.conftest import DATABASE_URL
+
+    lagging = address(0xF00)
+    batched = [address(0xF01 + i) for i in range(3)]
+    _enroll(db_session, addr=lagging, seed=_TARGET - 5_000)
+    for addr in batched:
+        _enroll(db_session, addr=addr, seed=_TARGET - 300)
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
+    db_session.commit()
+    engine = create_engine(DATABASE_URL)
+    done = {"enrolled": False}
+
+    def enrol_while_singles_run(method, params):
+        if method == "eth_getLogs" and params[0].get("address") == lagging and not done["enrolled"]:
+            done["enrolled"] = True
+            with Session(engine) as other:
+                _enroll(other, addr=batched[0], topics=(_T2,), seed=_TARGET - 300_000)
+
+    sim.before_request = enrol_while_singles_run
+    try:
+        _scan(db_session, scan_mode="warm")
+    finally:
+        engine.dispose()
+
+    assert done["enrolled"]
+    multi = [r for r in sim.getlogs if len(r["addresses"]) > 1]
+    assert multi and all(r["to"] - r["from"] < 1_000 for r in multi)
+    assert batched[0] not in {a for r in multi for a in r["addresses"]}

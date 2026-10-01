@@ -1661,6 +1661,7 @@ def _warm_sweep_chain(
             writes=writes,
             claims=claims,
             visit_single=visit_single,
+            max_lag=max_lag,
         )
 
 
@@ -1679,6 +1680,7 @@ def _sweep_batch(
     writes: _WriteSizes,
     claims: GroupClaims | None,
     visit_single: Callable[[str], None],
+    max_lag: int,
 ) -> None:
     keys = [(chain_id, a) for a in addresses]
     held = [key for key in keys if claims is None or claims.claim([key])]
@@ -1697,14 +1699,19 @@ def _sweep_batch(
             hash_at=hash_at,
             confirmation_depth=confirmation_depth,
         )
-        if plan.rewinds:
-            rewinding = [(chain_id, address) for address in sorted(plan.rewinds)]
+        frontier: dict[str, int] = {}
+        for member in plan.members:
+            frontier[member.event_address] = min(frontier.get(member.event_address, member.last), member.last)
+        # Re-checked at this plan: a rewind, or a sibling enrolled far back since the chain was planned, goes alone.
+        leaving = sorted(a for a in batch if a in plan.rewinds or target - frontier.get(a, target) > max_lag)
+        if leaving:
+            departing = [(chain_id, address) for address in leaving]
             if claims is not None:
-                claims.release(rewinding)
-            held = [key for key in held if key not in rewinding]
-            for _chain, address in rewinding:
+                claims.release(departing)
+            held = [key for key in held if key not in departing]
+            for address in leaving:
                 visit_single(address)
-            split = [[a for a in batch if a not in plan.rewinds]]
+            split = [[a for a in batch if a not in leaving]]
         else:
             steps = run_plan(
                 session,
@@ -1764,6 +1771,7 @@ def _sweep_batch(
                 writes=writes,
                 claims=claims,
                 visit_single=visit_single,
+                max_lag=max_lag,
             )
 
 
@@ -2491,6 +2499,7 @@ def run_event_log_indexer_loop(
                                     total_cursors=max(warm_summary.total_cursors, cold_summary.total_cursors),
                                     budget_exhausted=cold_pending,
                                     failed_groups=warm_summary.failed_groups + cold_summary.failed_groups,
+                                    stalled_cursors=warm_summary.stalled_cursors + cold_summary.stalled_cursors,
                                 )
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted

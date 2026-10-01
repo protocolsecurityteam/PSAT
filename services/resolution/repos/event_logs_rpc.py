@@ -15,7 +15,7 @@ from services.clients.rpc import RpcClientTimeout, rpc_request
 logger = logging.getLogger(__name__)
 
 # One eth_getLogs per window up to this span. HyperRPC bills per request regardless of range, so small pages waste the
-# budget (measured ~140x). Upstreams that can't handle a range fail loudly rather than truncate, so ``_fetch_range``
+# budget (measured ~140x). Upstreams that can't handle a range fail loudly rather than truncate, so ``iter_pages``
 # bisects on error down to MIN_BISECT_SPAN.
 MAX_BLOCK_RANGE = 1_000_000
 MIN_BISECT_SPAN = 10_000

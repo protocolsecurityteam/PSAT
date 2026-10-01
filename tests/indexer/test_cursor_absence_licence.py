@@ -671,7 +671,7 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
 
 
 def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
-    """R8. ``_fetch_range`` is shared with the monitoring watcher, which must keep returning pages, not
+    """R8. ``iter_pages`` is shared with the monitoring watcher, which must keep returning pages, not
     bisect-and-raise."""
     monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "50000")
     assert default_result_cap() == 50_000
