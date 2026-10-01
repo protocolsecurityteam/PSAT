@@ -235,17 +235,19 @@ class RpcEventLogFetcher:
             end = min(to_block, start + self.max_block_range - 1)
             windows.append((start, end))
             start = end + 1
-        pending = windows[::-1]
+        # Each range carries whether a ceiling split produced it: such a range may sit below the bisect floor without
+        # the upstream ever having refused that size, so a refusal there keeps bisecting down to one block.
+        pending = [(lo, hi, False) for lo, hi in windows[::-1]]
         rejected = 0
         rejected_span: int | None = None
         while pending:
-            lo, hi = pending.pop()
-            raw_logs = self._request_range(address_filter, topic_filter, lo, hi)
+            lo, hi, split_by_ceiling = pending.pop()
+            raw_logs = self._request_range(address_filter, topic_filter, lo, hi, below_floor=split_by_ceiling)
             span = hi - lo + 1
             if raw_logs is _REJECTED:
                 rejected += 1
                 rejected_span = span if rejected_span is None else min(rejected_span, span)
-                pending.extend(_halves(lo, hi)[::-1])
+                pending.extend((a, b, split_by_ceiling) for a, b in _halves(lo, hi)[::-1])
                 continue
             # A page at the cap is indistinguishable from a truncated one, so bisect it like an error. The ``is not
             # None`` guard matters: ``>=`` against None raises TypeError, which would escape the bisect.
@@ -272,7 +274,7 @@ class RpcEventLogFetcher:
                 )
                 raw_logs = None
                 rejected += 1
-                pending.extend(_halves(lo, hi)[::-1])
+                pending.extend((a, b, split_by_ceiling) for a, b in _halves(lo, hi)[::-1])
                 continue
             if max_page_logs is not None and count is not None and count > max_page_logs:
                 if span > 1:
@@ -289,7 +291,7 @@ class RpcEventLogFetcher:
                     )
                     raw_logs = None
                     rejected += 1
-                    pending.extend(_halves(lo, hi)[::-1])
+                    pending.extend((a, b, True) for a, b in _halves(lo, hi)[::-1])
                     continue
                 # Blocks are atomic, so one block over the ceiling is taken whole; memory is bounded by it instead.
                 logger.warning(
@@ -321,9 +323,16 @@ class RpcEventLogFetcher:
             rejected_span = None
 
     def _request_range(
-        self, address_filter: str | list[str] | None, topic_filter: list[list[str] | None], lo: int, hi: int
+        self,
+        address_filter: str | list[str] | None,
+        topic_filter: list[list[str] | None],
+        lo: int,
+        hi: int,
+        *,
+        below_floor: bool = False,
     ) -> Any:
-        """The response for one range, or ``_REJECTED`` when the range must be bisected."""
+        """The response for one range, or ``_REJECTED`` when the range must be bisected. ``below_floor`` lets a refusal
+        bisect under ``min_bisect_span``, down to one block."""
         log_filter: dict[str, Any] = {"topics": topic_filter, "fromBlock": hex(lo), "toBlock": hex(hi)}
         # Omit the key rather than send null: absence is the spec's "any emitter", explicit null isn't.
         if address_filter is not None:
@@ -342,7 +351,7 @@ class RpcEventLogFetcher:
         except RuntimeError as exc:
             # Upstream cap or timeout: halve; at the floor it's a real error.
             span = hi - lo + 1
-            if span <= self.min_bisect_span:
+            if span <= (1 if below_floor else self.min_bisect_span):
                 raise
             logger.debug(
                 "eth_getLogs window rejected; bisecting",

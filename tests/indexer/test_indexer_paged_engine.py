@@ -389,6 +389,58 @@ def test_a_local_ceiling_discard_is_not_an_upstream_refusal(sim):
     assert pages[0].rejected == 1 and pages[0].rejected_span is None
 
 
+def _merged_wide_range_sim(sim, *, lo: int, hi: int, logs: int, refuse_over: int) -> None:
+    """The upstream serves exactly ``[lo, hi]`` whole (an aggregator merging its split sub-requests) but refuses any
+    other request holding more than ``refuse_over`` logs."""
+    every = (hi - lo + 1) // logs
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=lo, hi=lo + every * (logs - 1), every=every))
+    lane = sim.lanes[(1, _ADDR)]
+
+    def refuse(_chain, a, b):
+        if (a, b) == (lo, hi) or len(lane.between(a, b)) <= refuse_over:
+            return None
+        return "{'code': -32005, 'message': 'Limit exceeded'}"
+
+    sim.refuse = refuse
+
+
+def test_a_refusal_below_the_floor_after_a_ceiling_split_keeps_bisecting(sim):
+    lo, hi = _SEED + 1, _SEED + 20_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi, logs=3_000, refuse_over=600)
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=10_000)
+
+    pages = list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=lo, to_block=hi, max_page_logs=1_000))
+
+    # The whole range came back over the ceiling, its 10,000-block halves were refused at the floor, and the
+    # bisection went on below it rather than failing the group on every pass.
+    assert pages[0].from_block == lo and pages[-1].to_block == hi
+    assert all(a.to_block + 1 == b.from_block for a, b in zip(pages, pages[1:]))
+    assert sum(len(p.logs) for p in pages) == 3_000
+    assert max(p.to_block - p.from_block + 1 for p in pages) < 10_000
+
+
+def test_a_refusal_at_the_floor_without_a_ceiling_split_still_raises(sim):
+    lo, hi = _SEED + 1, _SEED + 10_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi + 10_000, logs=3_000, refuse_over=600)
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=10_000)
+    with pytest.raises(RuntimeError, match="Limit exceeded"):
+        list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=lo, to_block=hi, max_page_logs=1_000))
+
+
+def test_the_engine_completes_a_group_whose_upstream_refuses_split_halves(db_session, sim):
+    lo, hi = _SEED + 1, _SEED + 20_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi, logs=3_000, refuse_over=600)
+    _enroll(db_session, seed=_SEED)
+    db_session.execute(update(IndexedEventCursor).values(request_span_limit=20_000))
+    db_session.commit()
+    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=1_000)
+
+    _drain(db_session, limits=limits)
+
+    assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == 3_000
+    assert _cursor(db_session).last_indexed_block == _TARGET
+
+
 def test_over_ceiling_page_is_discarded_and_bisected_with_no_writes(db_session, sim):
     burst = [
         SimLog(address=_ADDR, topics=(_T1,), data="0x", block=_SEED + 10 + i // 10, tx_index=i % 10, log_index=i % 10)
