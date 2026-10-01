@@ -419,6 +419,9 @@ class _GappyFetcher:
     def __init__(self, mode: str) -> None:
         self.mode = mode
 
+    def fetch_logs(self, *, event_address, topics, from_block, to_block):
+        raise AssertionError("the paged engine streams pages")
+
     def iter_pages(self, *, event_address, topics, from_block, to_block, max_page_logs=None):
         if self.mode == "empty":
             return
