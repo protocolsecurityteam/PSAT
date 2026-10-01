@@ -60,7 +60,10 @@ def _enroll(session, addr: str, *, seed: int, basis: str = ENROLLMENT_BASIS_PRED
 
 def _logs(addr: str, lo: int, hi: int, every: int) -> list[SimLog]:
     return [
-        SimLog(address=addr, topics=(_TOPIC,), data="0x" + word(b), block=b, tx_index=0, log_index=0)
+        # Positions unique per block across addresses, as on chain, so batched pages pass strict decoding.
+        SimLog(
+            address=addr, topics=(_TOPIC,), data="0x" + word(b), block=b, tx_index=0, log_index=int(addr, 16) % 1_000
+        )
         for b in range(lo, hi + 1, every)
     ]
 

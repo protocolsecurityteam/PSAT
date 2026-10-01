@@ -21,7 +21,7 @@ from db.models import (
     IndexedEventLog,
     IndexerWork,
 )
-from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
+from services.resolution.repos.event_logs_rpc import FetchWindowStat, LogPage, RpcEventLogFetcher
 from tests.conftest import requires_postgres
 from tests.support.sim_chain import SimChain, SimLog, address, topic, word
 from utils.chains import chain_by_id
@@ -411,3 +411,74 @@ def test_each_page_folds_its_count_only_into_the_cursors_it_advanced(db_session,
     t2 = _cursor(db_session, _T2)
     assert t2.last_indexed_block > _SEED + 5_000
     assert t2.max_window_log_count == sim.getlogs[1]["served"] < 10_000
+
+
+class _GappyFetcher:
+    """Streams pages that skip a range, or none at all, as a broken upstream adapter might."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+
+    def iter_pages(self, *, event_address, topics, from_block, to_block, max_page_logs=None):
+        if self.mode == "empty":
+            return
+        stat = FetchWindowStat(from_block=from_block, to_block=from_block + 9, returned_log_count=0, cap=None)
+        yield LogPage(from_block=from_block, to_block=from_block + 9, logs=[], stats=(stat,))
+        later = from_block + 20
+        stat = FetchWindowStat(from_block=later, to_block=to_block, returned_log_count=0, cap=None)
+        yield LogPage(from_block=later, to_block=to_block, logs=[], stats=(stat,))
+
+
+@pytest.mark.parametrize("mode", ["gap", "empty"])
+def test_pages_must_cover_the_range_without_gaps(db_session, sim, mode):
+    _enroll(db_session)
+    fetchers = _fetchers()
+
+    summary = scan_enrolled_events(
+        db_session,
+        fetchers={1: _GappyFetcher(mode)},
+        head_fetchers=fetchers[1],
+        block_hash_fetchers=fetchers[2],
+        engine="paged",
+    )
+
+    assert summary.failed_groups == 1
+    assert _cursor(db_session).last_indexed_block <= _SEED + 10
+
+
+def test_a_cursor_moved_under_a_warm_batch_only_delays_that_group(db_session, sim, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from tests.conftest import DATABASE_URL
+
+    addrs = [address(0xE00 + i) for i in range(4)]
+    for i, addr in enumerate(addrs):
+        sim.add_many(
+            1,
+            [
+                SimLog(address=addr, topics=(_T1,), data="0x", block=b, tx_index=i, log_index=i)
+                for b in range(_TARGET - 300, _TARGET + 1, 11)
+            ],
+        )
+        _enroll(db_session, addr=addr, seed=_TARGET - 400)
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
+    db_session.commit()
+    engine = create_engine(DATABASE_URL)
+    moved = {"done": False}
+
+    def enrol_sibling_mid_fetch(method, params):
+        if method == "eth_getLogs" and not moved["done"] and len(params[0].get("address") or []) == 4:
+            moved["done"] = True
+            with Session(engine) as other:
+                _enroll(other, addr=addrs[0], topics=(_T2,), seed=_TARGET - 400)
+
+    sim.before_request = enrol_sibling_mid_fetch
+    try:
+        summary = _scan(db_session, scan_mode="warm")
+    finally:
+        engine.dispose()
+
+    assert moved["done"] and summary.failed_groups == 0
+    behind = [addr for addr in addrs[1:] if _cursor(db_session, _T1, addr).last_indexed_block < _TARGET]
+    assert behind == []

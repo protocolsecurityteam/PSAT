@@ -8,7 +8,7 @@ import logging
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import services.resolution.mapping_enumerator as mapping_enumerator
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
@@ -114,6 +114,22 @@ def _set(field: str, value):
     return mutate
 
 
+def _clash(kind: str):
+    """Make the log at one block collide with the log 50 blocks earlier."""
+
+    def mutate(log: SimLog, raw: dict) -> dict:
+        if log.block != _SEED + 551:
+            return raw
+        earlier = SimChain(heads={1: _HEAD}).raw(1, dataclasses.replace(log, block=_SEED + 501))
+        if kind == "identity":
+            return {**raw, "transactionHash": earlier["transactionHash"], "logIndex": earlier["logIndex"]}
+        if kind == "position":
+            return {**raw, "blockNumber": earlier["blockNumber"], "blockHash": earlier["blockHash"]}
+        return {**raw, "blockNumber": earlier["blockNumber"], "logIndex": "0x1"}
+
+    return mutate
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -125,6 +141,9 @@ def _set(field: str, value):
         pytest.param(_set("blockNumber", hex(_TARGET + 5)), id="out-of-range"),
         pytest.param(_set("data", "0xabc"), id="odd-length-data"),
         pytest.param(_set("topics", [topic(0x99)]), id="out-of-filter"),
+        pytest.param(_clash("identity"), id="conflicting-identity"),
+        pytest.param(_clash("position"), id="conflicting-position"),
+        pytest.param(_clash("block-hash"), id="two-hashes-one-block"),
     ],
 )
 def test_a_malformed_log_rejects_the_page_without_advancing(db_session, sim, caplog, mutate):
@@ -365,3 +384,55 @@ def test_role_plane_withholds_every_holder_set_on_an_undecodable_row(db_session,
     assert rows
     published = [row["holders"] for row in rows if row["holders"] is not None]
     assert (published == []) is undecodable
+
+
+def test_a_stall_stays_visible_in_progress_published_mid_pass(db_session, sim):
+    healthy = address(0xB9)
+    _fill(sim)
+    sim.add_many(1, [SimLog(healthy, (_T1,), "0x", b, 0, 0) for b in range(_SEED + 2, _TARGET + 1, 100)])
+    sim.mutate_raw = _drop("blockHash")
+    _enroll(db_session)
+    enroll_event_cursor(db_session, chain_id=1, event_address=healthy, topic0=_T1, start_block=_SEED)
+    db_session.commit()
+    published = []
+    fetchers = _fetchers()
+
+    summary = scan_enrolled_events(
+        db_session,
+        fetchers=fetchers[0],
+        head_fetchers=fetchers[1],
+        block_hash_fetchers=fetchers[2],
+        engine="paged",
+        on_commit=published.append,
+    )
+
+    # The stalled group sorts first, so every later commit's progress must still carry its stall.
+    assert summary.stalled_cursors == 2
+    assert published and all(p.stalled_cursors == 2 for p in published)
+
+
+def test_a_stall_recovered_through_the_warm_batch_clears(db_session, sim):
+    other = address(0xBA)
+    for addr in (_ADDR, other):
+        sim.add_many(1, [SimLog(addr, (_T1,), "0x", b, 0, 0) for b in range(_TARGET - 400, _TARGET + 1, 7)])
+        enroll_event_cursor(db_session, chain_id=1, event_address=addr, topic0=_T1, start_block=_TARGET - 500)
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
+    db_session.commit()
+    sim.mutate_raw = lambda log, raw: {**raw, "removed": True} if log.address == _ADDR else raw
+    fetchers = _fetchers()
+
+    def sweep():
+        return scan_enrolled_events(
+            db_session,
+            fetchers=fetchers[0],
+            head_fetchers=fetchers[1],
+            block_hash_fetchers=fetchers[2],
+            engine="paged",
+            scan_mode="warm",
+        )
+
+    assert sweep().stalled_cursors == 1
+    assert indexer._STALLED_GROUPS
+    sim.mutate_raw = None
+    assert sweep().stalled_cursors == 0
+    assert indexer._STALLED_GROUPS == set()

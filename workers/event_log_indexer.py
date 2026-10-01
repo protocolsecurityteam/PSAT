@@ -1026,11 +1026,16 @@ def run_plan(
             to_block=chunk_end,
             max_page_logs=limits.max_page_logs,
         )
+        expected_from = frontier + 1
         while True:
             _end_transaction(session)
             page = next(page_iter, None)
             if page is None:
                 break
+            # Advancing a cursor to a page's end is only sound over gap-free, in-range pages.
+            if page.from_block != expected_from or page.to_block > chunk_end or page.to_block < page.from_block:
+                raise RuntimeError("eth_getLogs pages are not contiguous over the requested range")
+            expected_from = page.to_block + 1
             logs = sorted(page.logs, key=lambda log: log.block_number)
             density = _page_density(page)
             prefixes = _write_prefixes(logs, page.to_block, max_rows=write_max_rows, max_bytes=write_max_bytes)
@@ -1113,6 +1118,8 @@ def run_plan(
                 return
             if limits.deadline is not None and _monotonic() >= limits.deadline:
                 return
+        if expected_from != chunk_end + 1:
+            raise RuntimeError("eth_getLogs pages did not cover the requested range")
         frontier = min((pos for pos in position.values() if pos < target), default=target)
 
 
@@ -1500,6 +1507,7 @@ class _PassState:
                         caught_up_cursors=self.caught_up_cursors + members_at_target,
                         total_cursors=self.total_cursors,
                         failed_groups=self.failed_groups,
+                        stalled_cursors=self.stalled_cursors,
                     )
                 )
             if self.stopping():
@@ -1713,8 +1721,16 @@ def _sweep_batch(
             )
             _complete, members_at_target = state.drive(session, steps, visit)
             state.caught_up_cursors += members_at_target
+            for address in batch:
+                state.cleared(chain_id, address)
     except CursorsMoved as exc:
-        state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+        if len(batch) == 1:
+            state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[])
+        else:
+            # A group that moved since planning mustn't hold back the rest; the halves re-plan.
+            session.rollback()
+            half = len(batch) // 2
+            split = [batch[:half], batch[half:]]
     except RuntimeError as exc:
         session.rollback()
         if len(batch) == 1:
@@ -2295,6 +2311,8 @@ def run_event_log_indexer_loop(
             "enrolled": 0,
             "status": {"cold": "running", "warm": "running"},
             "warm_max_lag_blocks": {},
+            # The last completed pass's stalls per lane, so a pass in progress doesn't read as healthy.
+            "stalled": {"cold": 0, "warm": 0},
             "triad": (0, 0),
             "reconcile": (0, 0),
             "last_beat": 0.0,
@@ -2308,6 +2326,9 @@ def run_event_log_indexer_loop(
                 enrolled = published["enrolled"]
                 statuses = dict(published["status"])
                 warm_max_lag_blocks = dict(published["warm_max_lag_blocks"])
+                stalled_cursors = sum(
+                    max(published["stalled"][lane], published[lane].stalled_cursors) for lane in ("cold", "warm")
+                )
                 caught_up_cursors, total_cursors = published["triad"]
                 reenqueued, drift_reenqueued = published["reconcile"]
                 published["last_beat"] = time.monotonic()
@@ -2338,7 +2359,7 @@ def run_event_log_indexer_loop(
                     "deferred_reenqueued_last_pass": reenqueued,
                     "role_drift_reenqueued_last_pass": drift_reenqueued,
                     "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
-                    "stalled_cursors": cold.stalled_cursors + warm.stalled_cursors,
+                    "stalled_cursors": stalled_cursors,
                 },
             )
 
@@ -2355,6 +2376,7 @@ def run_event_log_indexer_loop(
         def publish_pass(lane: str, summary: ScanSummary, status: str, enrolled: int | None = None) -> None:
             with state_lock:
                 published[lane] = summary
+                published["stalled"][lane] = summary.stalled_cursors
                 published["status"][lane] = status
                 if enrolled is not None:
                     published["enrolled"] = enrolled
