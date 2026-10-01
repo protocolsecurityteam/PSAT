@@ -533,3 +533,71 @@ def test_shutdown_during_rpc_timeout_does_not_visit_remaining_groups(session):
     assert head.calls == 1
     assert summary.failed_groups == 1 and summary.windows_scanned == 0
     assert _log_count(session, "0x" + "00" * 19 + "01") == 0
+
+
+@requires_postgres
+def test_time_budgeted_backfill_is_identical_to_unbudgeted(session, monkeypatch):
+    """The group and pass time budgets change only when pages run, never which blocks are indexed."""
+    import workers.event_log_indexer as indexer
+    from db.models import IndexedEventCursor, IndexedEventLog
+
+    authorities = ["0x" + h * 20 for h in ("a1", "b2", "c3")]
+
+    def drain(clock_step_s: float) -> tuple[list, list, int]:
+        now = [0.0]
+
+        def fake_clock() -> float:
+            now[0] += clock_step_s
+            return now[0]
+
+        monkeypatch.setattr(indexer, "_monotonic", fake_clock)
+        for addr in authorities:
+            enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC)
+        session.commit()
+        fetcher = _RangeCappedFetcher()
+        fetchers, heads, hashes = _maps(fetcher)
+        passes = 0
+        while passes < 10_000:
+            passes += 1
+            scan_enrolled_events(
+                session,
+                fetchers=fetchers,
+                head_fetchers=heads,
+                block_hash_fetchers=hashes,
+                max_block_span=_MAX_SAFE_SPAN,
+                max_windows_per_cursor=10_000,
+                max_windows_per_pass=10_000,
+                group_budget_s=30,
+                pass_budget_s=120,
+            )
+            pending = session.execute(
+                select(func.count()).select_from(IndexedEventCursor).where(~IndexedEventCursor.backfill_complete)
+            ).scalar_one()
+            if pending == 0:
+                break
+        logs = session.execute(
+            select(IndexedEventLog.event_address, IndexedEventLog.block_number, IndexedEventLog.tx_hash).order_by(
+                IndexedEventLog.event_address, IndexedEventLog.block_number
+            )
+        ).all()
+        cursors = session.execute(
+            select(
+                IndexedEventCursor.event_address,
+                IndexedEventCursor.last_indexed_block,
+                IndexedEventCursor.backfill_complete,
+                IndexedEventCursor.max_window_log_count,
+            ).order_by(IndexedEventCursor.event_address)
+        ).all()
+        session.execute(delete(IndexedEventLog))
+        session.execute(delete(IndexedEventCursor))
+        session.commit()
+        return logs, cursors, passes
+
+    unbudgeted_logs, unbudgeted_cursors, one_pass = drain(clock_step_s=0.0)
+    budgeted_logs, budgeted_cursors, many_passes = drain(clock_step_s=11.0)
+
+    assert one_pass == 1
+    assert many_passes > 10  # the budgets really cut visits and passes short
+    assert len(unbudgeted_logs) == len(authorities) * (_TARGET // _DENSITY)
+    assert budgeted_logs == unbudgeted_logs
+    assert budgeted_cursors == unbudgeted_cursors

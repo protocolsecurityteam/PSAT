@@ -10,7 +10,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
@@ -647,6 +647,28 @@ def _cursor_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, 
 ENGINES = ("legacy", "paged")
 
 
+class GroupClaims:
+    """The (chain, address) groups a scan thread is working, so the other thread skips them.
+
+    Efficiency only: two threads writing one group stay correct through the per-page position check.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._held: set[tuple[int, str]] = set()
+
+    def claim(self, keys: Sequence[tuple[int, str]]) -> bool:
+        with self._lock:
+            if any(key in self._held for key in keys):
+                return False
+            self._held.update(keys)
+            return True
+
+    def release(self, keys: Sequence[tuple[int, str]]) -> None:
+        with self._lock:
+            self._held.difference_update(keys)
+
+
 def _resolve_engine(engine: str | None) -> str:
     chosen = (engine or settings.ENGINE).strip().lower()
     if chosen not in ENGINES:
@@ -1170,6 +1192,7 @@ def scan_enrolled_events(
     page_limits: PageLimits | None = None,
     group_budget_s: float = settings.GROUP_BUDGET_S,
     pass_budget_s: float = settings.PASS_BUDGET_S,
+    claims: GroupClaims | None = None,
 ) -> ScanSummary:
     engine = _resolve_engine(engine)
     pass_started = _monotonic()
@@ -1183,29 +1206,31 @@ def scan_enrolled_events(
             IndexedEventCursor.last_run_at,
             IndexedEventCursor.last_indexed_block,
             IndexedEventCursor.backfill_complete,
+            IndexedEventCursor.last_advanced_at,
+            IndexedEventCursor.enrollment_basis,
         )
     ).all()
     # Skip zero/invalid addresses from before the enroll-time guard; 0x0 never emits logs.
     rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
     _end_transaction(session)
     groups: dict[tuple[int, str], dict[str, Any]] = {}
-    for chain_id, event_address, topic0, last_run_at, last_block, complete in rows:
+    for chain_id, event_address, topic0, last_run_at, last_block, complete, advanced_at, basis in rows:
         entry = groups.setdefault(
-            (chain_id, event_address.lower()), {"topics": set(), "runs": [], "last_blocks": [], "complete": True}
+            (chain_id, event_address.lower()),
+            {"topics": set(), "runs": [], "last_blocks": [], "complete": True, "never_advanced": False, "hint": False},
         )
         entry["topics"].add(topic0.lower())
         entry["runs"].append(last_run_at)
         entry["last_blocks"].append(int(last_block or 0))
         entry["complete"] &= bool(complete)
+        entry["never_advanced"] |= advanced_at is None
+        entry["hint"] |= basis in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES
 
-    _epoch = datetime.min.replace(tzinfo=timezone.utc)
-
-    def _rotation_key(item: tuple[tuple[int, str], dict[str, Any]]) -> tuple[int, datetime, str]:
-        (chain_id, address), entry = item
-        runs = entry["runs"]
-        if any(run is None for run in runs):
-            return (0, _epoch, address)
-        return (1, min(runs), address)
+    def _rotation_key(item: tuple[tuple[int, str], dict[str, Any]]) -> tuple[int, int, datetime, str]:
+        # Never-advanced groups first (a new hint group isn't stuck behind an old dense backfill), then the bases the
+        # resolver can use, then least recently run.
+        (_chain_id, address), entry = item
+        return (0 if entry["never_advanced"] else 1, 0 if entry["hint"] else 1, min(entry["runs"]), address)
 
     inserted = 0
     windows_scanned = 0
@@ -1289,6 +1314,10 @@ def scan_enrolled_events(
         # partial progress survives a later failure.
         group_members_at_target = 0
         visit = _GroupVisit(chain_id=chain_id, event_address=event_address)
+        claim = [(chain_id, event_address)]
+        if claims is not None and not claims.claim(claim):
+            stopped_short = True
+            continue
         try:
             if chain_id not in targets:
                 targets[chain_id] = max(0, head_fetcher.head_block() - chain_confirmation_depth)
@@ -1402,6 +1431,9 @@ def scan_enrolled_events(
                     "exc_msg": sanitize_string(str(exc))[:200],
                 },
             )
+        finally:
+            if claims is not None:
+                claims.release(claim)
         caught_up_cursors += group_members_at_target
         if scan_mode == "warm" and chain_id in targets:
             frontier = visit.frontier if visit.frontier is not None else min(entry["last_blocks"])
@@ -1938,6 +1970,9 @@ def _cursor_progress(session: Session) -> tuple[int, int]:
     return int(caught_up or 0), int(total or 0)
 
 
+_HEARTBEAT_MIN_GAP_S = 5.0
+
+
 def run_event_log_indexer_loop(
     *,
     fetchers: Mapping[int, LogFetcher],
@@ -1945,35 +1980,177 @@ def run_event_log_indexer_loop(
     block_hash_fetchers: Mapping[int, BlockHashFetcher],
     interval: float = DEFAULT_INTERVAL_S,
     stop_event: Event | None = None,
+    engine: str | None = None,
 ) -> None:
-    """Run the durable event-log indexer as two decoupled jobs.
+    """Run the durable event-log indexer.
 
-    * Backfill (enroll + scan) on its own thread, each pass bounded by a window budget so busy authorities backfill
-    across passes.
-    * Reconcile + heartbeat every ``interval`` on this loop, so deferred capabilities self-heal promptly and the fleet
-    view stays live regardless of scan duration.
+    * With the paged engine, two scan threads: a cold thread (enrolment, then cold groups within a pass budget) and a
+    warm thread sweeping every ``interval`` regardless of cold load. Each has its own session; a shared claim set keeps
+    them off the same group, and correctness rests on the per-page position check, not on that set.
+    * With the legacy engine, one backfill thread runs both, as before.
+    * This loop reconciles and beats every ``interval``; scan threads also refresh the heartbeat as pages commit.
 
-    The thread publishes its last scan summary for the heartbeat.
+    Both scan threads are joined before returning, so the caller's process singleton outlives every commit.
     """
-    # New threads start with an empty context, so bind here and again in the thread.
+    engine = _resolve_engine(engine)
+    # New threads start with an empty context, so bind here and again in each thread.
     with bind_trace_context(worker_id=WORKER_ID):
-        logger.info("starting event log indexer loop interval=%ss", interval)
+        logger.info("starting event log indexer loop interval=%ss engine=%s", interval, engine)
         stop_event = stop_event or Event()
+        claims = GroupClaims()
 
         state_lock = Lock()
         published: dict[str, Any] = {
-            "summary": ScanSummary(),
+            "cold": ScanSummary(),
+            "warm": ScanSummary(),
             "enrolled": 0,
-            "status": "running",
+            "status": {"cold": "running", "warm": "running"},
             "warm_max_lag_blocks": {},
+            "triad": (0, 0),
+            "reconcile": (0, 0),
+            "last_beat": 0.0,
         }
+        threads: list[Thread] = []
 
-        def publish_progress(summary: ScanSummary) -> None:
+        def beat() -> None:
             with state_lock:
-                published["summary"] = summary
+                cold: ScanSummary = published["cold"]
+                warm: ScanSummary = published["warm"]
+                enrolled = published["enrolled"]
+                statuses = dict(published["status"])
+                warm_max_lag_blocks = dict(published["warm_max_lag_blocks"])
+                caught_up_cursors, total_cursors = published["triad"]
+                reenqueued, drift_reenqueued = published["reconcile"]
+                published["last_beat"] = time.monotonic()
+            status = (
+                "error"
+                if "error" in statuses.values()
+                else "degraded"
+                if "degraded" in statuses.values()
+                else "running"
+            )
+            # The threads catch per-pass errors, so a dead one is a fatal stall.
+            dead = [t.name for t in threads if not t.is_alive()]
+            if dead and not stop_event.is_set():
+                status = "error"
+                logger.error(
+                    "event log indexer scan thread is not alive; indexing has stalled", extra={"threads": dead}
+                )
+            record_heartbeat(
+                HEARTBEAT_EVENT_INDEXER,
+                status=status,
+                detail={
+                    "enrolled_last_pass": enrolled,
+                    "inserted_last_pass": cold.inserted + warm.inserted,
+                    "windows_scanned": cold.windows_scanned + warm.windows_scanned,
+                    "caught_up_cursors": caught_up_cursors,
+                    "total_cursors": total_cursors,
+                    "pending_cursors": max(0, total_cursors - caught_up_cursors),
+                    "deferred_reenqueued_last_pass": reenqueued,
+                    "role_drift_reenqueued_last_pass": drift_reenqueued,
+                    "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
+                },
+            )
 
-        def backfill_loop() -> None:
+        def progress(lane: str) -> Callable[[ScanSummary], None]:
+            def publish(summary: ScanSummary) -> None:
+                with state_lock:
+                    published[lane] = summary
+                    due = time.monotonic() - published["last_beat"] >= _HEARTBEAT_MIN_GAP_S
+                if due:
+                    beat()
+
+            return publish
+
+        def publish_pass(lane: str, summary: ScanSummary, status: str, enrolled: int | None = None) -> None:
+            with state_lock:
+                published[lane] = summary
+                published["status"][lane] = status
+                if enrolled is not None:
+                    published["enrolled"] = enrolled
+                if lane == "warm":
+                    published["warm_max_lag_blocks"] = dict(summary.warm_max_lag_blocks)
+
+        def enroll(session: Session) -> int:
+            with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
+                from services.resolution.indexer_scheduler import drain_enrollment
+
+                enrolled = drain_enrollment(
+                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
+                )
+                ph["enrolled"] = enrolled
+            return enrolled
+
+        def scan(session: Session, mode: Literal["warm", "cold"]) -> ScanSummary:
+            return scan_enrolled_events(
+                session,
+                fetchers=fetchers,
+                head_fetchers=head_fetchers,
+                block_hash_fetchers=block_hash_fetchers,
+                stop_event=stop_event,
+                scan_mode=mode,
+                on_commit=progress(mode),
+                engine=engine,
+                claims=claims,
+            )
+
+        def log_pass(summary: ScanSummary, status: str, enrolled: int, scan_mode: str) -> None:
+            # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is visible.
+            logger.info(
+                "event log indexer pass complete",
+                extra={
+                    "scan_mode": scan_mode,
+                    "enrolled": enrolled,
+                    "inserted": summary.inserted,
+                    "windows_scanned": summary.windows_scanned,
+                    "caught_up_cursors": summary.caught_up_cursors,
+                    "total_cursors": summary.total_cursors,
+                    "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
+                    "budget_exhausted": summary.budget_exhausted,
+                    "failed_groups": summary.failed_groups,
+                    "status": status,
+                },
+            )
+
+        def cold_loop() -> None:
             # ``threading.Thread`` doesn't inherit context.
+            with bind_trace_context(worker_id=WORKER_ID):
+                while not stop_event.is_set():
+                    enrolled = 0
+                    summary = ScanSummary()
+                    status = "running"
+                    try:
+                        with SessionLocal() as session:
+                            enrolled = enroll(session)
+                            with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
+                                summary = scan(session, "cold")
+                                ph["windows_scanned"] = summary.windows_scanned
+                                ph["inserted"] = summary.inserted
+                    except Exception:
+                        logger.exception("event log indexer backfill pass failed")
+                        status = "error"
+                    status = _heartbeat_status_for_pass(status, summary)
+                    log_pass(summary, status, enrolled, "cold")
+                    publish_pass("cold", summary, status, enrolled)
+                    # Only unfinished history uses the short pause.
+                    stop_event.wait(DEFAULT_BACKFILL_BUSY_INTERVAL_S if summary.budget_exhausted else interval)
+
+        def warm_loop() -> None:
+            with bind_trace_context(worker_id=WORKER_ID):
+                while not stop_event.is_set():
+                    started = time.monotonic()
+                    summary = ScanSummary()
+                    status = "running"
+                    try:
+                        with SessionLocal() as session:
+                            summary = scan(session, "warm")
+                    except Exception:
+                        logger.exception("event log indexer warm sweep failed")
+                        status = "error"
+                    publish_pass("warm", summary, _heartbeat_status_for_pass(status, summary))
+                    stop_event.wait(max(0.0, interval - (time.monotonic() - started)))
+
+        def legacy_loop() -> None:
             with bind_trace_context(worker_id=WORKER_ID):
                 next_warm_at = 0.0
                 cold_pending = True
@@ -1983,40 +2160,17 @@ def run_event_log_indexer_loop(
                     status = "running"
                     try:
                         with SessionLocal() as session:
-                            with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
-                                from services.resolution.indexer_scheduler import drain_enrollment
-
-                                enrolled = drain_enrollment(
-                                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
-                                )
-                                ph["enrolled"] = enrolled
+                            enrolled = enroll(session)
                             with log_timed_phase(logger, "indexer_scan", record_metric=False) as ph:
                                 warm_due = time.monotonic() >= next_warm_at
                                 warm_summary = ScanSummary()
                                 if warm_due:
-                                    warm_summary = scan_enrolled_events(
-                                        session,
-                                        fetchers=fetchers,
-                                        head_fetchers=head_fetchers,
-                                        block_hash_fetchers=block_hash_fetchers,
-                                        stop_event=stop_event,
-                                        scan_mode="warm",
-                                        on_commit=publish_progress,
-                                    )
-                                    with state_lock:
-                                        published["warm_max_lag_blocks"] = dict(warm_summary.warm_max_lag_blocks)
+                                    warm_summary = scan(session, "warm")
+                                    publish_pass("warm", warm_summary, "running")
                                     next_warm_at = time.monotonic() + interval
                                 cold_summary = ScanSummary()
                                 if cold_pending or warm_due or enrolled:
-                                    cold_summary = scan_enrolled_events(
-                                        session,
-                                        fetchers=fetchers,
-                                        head_fetchers=head_fetchers,
-                                        block_hash_fetchers=block_hash_fetchers,
-                                        stop_event=stop_event,
-                                        scan_mode="cold",
-                                        on_commit=publish_progress,
-                                    )
+                                    cold_summary = scan(session, "cold")
                                     cold_pending = cold_summary.budget_exhausted
                                 summary = ScanSummary(
                                     inserted=warm_summary.inserted + cold_summary.inserted,
@@ -2031,28 +2185,9 @@ def run_event_log_indexer_loop(
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
-                    # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is
-                    # visible.
                     status = _heartbeat_status_for_pass(status, summary)
-                    logger.info(
-                        "event log indexer pass complete",
-                        extra={
-                            "enrolled": enrolled,
-                            "inserted": summary.inserted,
-                            "windows_scanned": summary.windows_scanned,
-                            "caught_up_cursors": summary.caught_up_cursors,
-                            "total_cursors": summary.total_cursors,
-                            "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
-                            "budget_exhausted": summary.budget_exhausted,
-                            "failed_groups": summary.failed_groups,
-                            "status": status,
-                        },
-                    )
-                    with state_lock:
-                        published["summary"] = summary
-                        published["enrolled"] = enrolled
-                        published["status"] = status
-                    # Only unfinished history uses the short pause.
+                    log_pass(summary, status, enrolled, "all")
+                    publish_pass("cold", summary, status, enrolled)
                     backfill_wait = (
                         min(DEFAULT_BACKFILL_BUSY_INTERVAL_S, max(0.0, next_warm_at - time.monotonic()))
                         if cold_pending
@@ -2060,8 +2195,13 @@ def run_event_log_indexer_loop(
                     )
                     stop_event.wait(backfill_wait)
 
-        backfill = Thread(target=backfill_loop, name="event-indexer-backfill", daemon=True)
-        backfill.start()
+        if engine == "paged":
+            threads.append(Thread(target=cold_loop, name="event-indexer-backfill", daemon=True))
+            threads.append(Thread(target=warm_loop, name="event-indexer-warm", daemon=True))
+        else:
+            threads.append(Thread(target=legacy_loop, name="event-indexer-backfill", daemon=True))
+        for thread in threads:
+            thread.start()
 
         try:
             while not stop_event.is_set():
@@ -2084,45 +2224,24 @@ def run_event_log_indexer_loop(
                         )
                 except Exception:
                     logger.exception("deferred-resolution reconcile pass failed")
-                # Read the triad from the table independently of the backfill thread, in its own session so a failure
+                # Read the triad from the table independently of the scan threads, in its own session so a failure
                 # doesn't blank the heartbeat.
-                caught_up_cursors = 0
-                total_cursors = 0
+                triad = (0, 0)
                 try:
                     with SessionLocal() as session:
-                        caught_up_cursors, total_cursors = _cursor_progress(session)
+                        triad = _cursor_progress(session)
                 except Exception:
                     logger.exception("event log indexer cursor-progress count failed")
                 with state_lock:
-                    summary = published["summary"]
-                    enrolled = published["enrolled"]
-                    status = published["status"]
-                    warm_max_lag_blocks = dict(published["warm_max_lag_blocks"])
-                # The thread catches per-pass errors, so a dead thread is a fatal stall.
-                if not backfill.is_alive() and not stop_event.is_set():
-                    status = "error"
-                    logger.error("event log indexer backfill thread is not alive; indexing has stalled")
-                # Triad from the live table; windows_scanned/inserted from the last summary.
-                record_heartbeat(
-                    HEARTBEAT_EVENT_INDEXER,
-                    status=status,
-                    detail={
-                        "enrolled_last_pass": enrolled,
-                        "inserted_last_pass": summary.inserted,
-                        "windows_scanned": summary.windows_scanned,
-                        "caught_up_cursors": caught_up_cursors,
-                        "total_cursors": total_cursors,
-                        "pending_cursors": max(0, total_cursors - caught_up_cursors),
-                        "deferred_reenqueued_last_pass": reenqueued,
-                        "role_drift_reenqueued_last_pass": drift_reenqueued,
-                        "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
-                    },
-                )
+                    published["triad"] = triad
+                    published["reconcile"] = (reenqueued, drift_reenqueued)
+                beat()
                 stop_event.wait(interval)
         finally:
             stop_event.set()
             # Don't release the singleton while a scan can commit.
-            backfill.join()
+            for thread in threads:
+                thread.join()
 
 
 def _build_indexer_fetchers(
@@ -2183,8 +2302,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
+    engine = _resolve_engine(None)
+    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(engine=engine)
     run_event_log_indexer_loop(
+        engine=engine,
         fetchers=fetchers,
         head_fetchers=head_fetchers,
         block_hash_fetchers=block_hash_fetchers,

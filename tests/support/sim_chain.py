@@ -89,6 +89,11 @@ class SimChain:
         self.getlogs: list[dict[str, Any]] = []
         # Called before serving each request (e.g. to assert no DB transaction is open, or to deliver SIGTERM).
         self.before_request: Callable[[str, list[Any]], None] | None = None
+        # A moving head: when set, it answers the chain's head instead of ``heads``.
+        self.head_fn: Callable[[int], int] | None = None
+
+    def head(self, chain_id: int) -> int:
+        return self.head_fn(chain_id) if self.head_fn is not None else self.heads[chain_id]
 
     # -- fixture building --
 
@@ -140,10 +145,10 @@ class SimChain:
             self.before_request(method, params)
         assert chain_id is not None, "the indexer always routes by chain"
         if method == "eth_blockNumber":
-            return hex(self.heads[chain_id])
+            return hex(self.head(chain_id))
         if method == "eth_getBlockByNumber":
             block = int(params[0], 16)
-            if block > self.heads[chain_id]:
+            if block > self.head(chain_id):
                 return None
             return {"number": params[0], "hash": self.block_hash(chain_id, block)}
         if method == "eth_getLogs":

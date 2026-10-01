@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -27,6 +28,7 @@ from workers.event_log_indexer import (
 
 _ADDR = "0x" + "ab" * 20
 _TOPIC = "0x" + "cd" * 32
+_RUN = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 class _FakeResult:
@@ -68,9 +70,12 @@ class _BoomHead:
 @pytest.mark.parametrize(
     ("rows", "scan_kwargs", "expected_failed_groups", "expected_rollbacks", "expected_address"),
     [
-        pytest.param([(1, _ADDR, _TOPIC, None, 0, False)], {}, 1, 1, _ADDR, id="default-mode"),
+        pytest.param([(1, _ADDR, _TOPIC, _RUN, 0, False, None, None)], {}, 1, 1, _ADDR, id="default-mode"),
         pytest.param(
-            [(1, _ADDR, _TOPIC, None, 100, True), (1, "0x" + "12" * 20, _TOPIC, None, 100, True)],
+            [
+                (1, _ADDR, _TOPIC, _RUN, 100, True, _RUN, None),
+                (1, "0x" + "12" * 20, _TOPIC, _RUN, 100, True, _RUN, None),
+            ],
             {"scan_mode": "warm"},
             2,
             0,  # warm mode fails the whole chain's head read, not one address group
