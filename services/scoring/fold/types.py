@@ -24,7 +24,7 @@ class _Instance:
     pricing_blocked: str | None
     native_only: bool
     asset_identity_undecidable: bool
-    # Lets a merged unit's row say which member reaches each entity (inv.5 is per entity).
+    # Lets a merged unit's row say which member reaches each entity (reachability is per entity).
     principal_address: str = ""
 
 
@@ -40,7 +40,7 @@ class _Row:
     principal_addresses: set[str] = field(default_factory=set)
     # Each member's own gate; row-level ``weakness`` is their max, and ``_aggregate`` re-attributes per entity.
     member_gate: dict[str, tuple[float, str, str]] = field(default_factory=dict)
-    # §3.1 pt 5: the zero-address rule's count and the instances it emptied.
+    # the zero-address rule's count and the instances it emptied.
     zero_reach_keys_refused: int = 0
     zero_reach_stripped: list[dict[str, Any]] = field(default_factory=list)
     instances: list[_Instance] = field(default_factory=list)
@@ -152,7 +152,7 @@ class _WithheldComposition:
 
     @property
     def counter_key(self) -> str:
-        """Both halves, because the vocabulary mixes an earned negative with undetermined kinds (inv. 1)."""
+        """Both halves, because the vocabulary mixes an earned negative with undetermined kinds."""
         return f"{self.deletability.state}/{self.deletability.reason}"
 
     def as_json(self) -> dict[str, Any]:
@@ -182,7 +182,7 @@ class _WithheldComposition:
 
 
 def _gate_claim(chain: tuple[P.ActAsStep, ...], execution: EX.ProvingExecution) -> dict[str, Any]:
-    """§7.2 arm 1's caller conjunct, evaluated and published as a three-state token rather than left for the reader
+    """arm 1's caller conjunct, evaluated and published as a three-state token rather than left for the reader
     to apply.
     """
     return EX.gate_claim(execution, claimed_caller=chain[-1].caller if chain else None)

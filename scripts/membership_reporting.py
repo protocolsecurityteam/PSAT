@@ -1,5 +1,5 @@
-"""Verdict/report helpers for the membership reconcile CLI (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.4), built on the
-gate's own internals so they can't fork (invariant 13).
+"""Verdict/report helpers for the membership reconcile CLI, built on the
+gate's own internals so they can't fork.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def active_witness_rules(session: Session, *, contract_id: int, protocol_id: int
 
 def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any] | None:
     """A member's pointer names this candidate, but the member is heuristic-only and the edge isn't an inheriting
-    kind (DEPLOYER_HEURISTIC_SPEC.md §6).
+    kind.
     """
     address = (contract.address or "").lower()
     if not address:
@@ -84,7 +84,7 @@ def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int)
 
 
 def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: str) -> dict[str, Any] | None:
-    """The two W4-H bars (DEPLOYER_HEURISTIC_SPEC.md §1), with the measured numbers."""
+    """The two W4-H bars, with the measured numbers."""
     affinity = gate.compute_deployer_affinity(session, protocol_id=protocol_id, address=deployer)
     if affinity.anchor_count == 0:
         return None
@@ -107,7 +107,7 @@ def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: st
 
 
 def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any]:
-    """Nearest witness rule and the missing evidence (invariant 5). Token fields only."""
+    """Nearest witness rule and the missing evidence. Token fields only."""
     address = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
     if chain_id is None:
@@ -139,7 +139,7 @@ def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict
         )
     ]
     if verified:
-        # Only the W1 code precondition withholds membership (invariant 3).
+        # Only the W1 code precondition withholds membership.
         if not code_probed:
             missing = "w1_code_probe"
         elif code_row is not None and code_row.code_absent_at_probe:

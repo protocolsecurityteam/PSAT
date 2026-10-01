@@ -362,7 +362,7 @@ def _sheet_ceiling(instance: _Instance, key: str, value_plane: P.ValuePlane) -> 
     controlled node itself under ``canonical`` (a downstream node's code still stands); and the sheet is determined and
     complete per ``planes.ceiling_for``, whose refusals keep their own tokens.
 
-    Anti-gaming (inv. 13): lowering the figure requires holding less or being non-upgradeable. Obfuscating the proxy
+    Anti-gaming: lowering the figure requires holding less or being non-upgradeable. Obfuscating the proxy
     fails closed: no proven capability means no row at all, charged to confidence, not a cheaper number.
     """
     if instance.signal.claim_id not in K.CODE_CONTROL_CAPABILITIES:

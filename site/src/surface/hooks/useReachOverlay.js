@@ -19,7 +19,7 @@ export function useReachOverlay({
   const visiblePrincipals = useMemo(() => {
     const visibleAddrs = new Set(allMachines.map((m) => m.address?.toLowerCase()));
     // Chain-scope first so another chain's principal can't ride in on a
-    // same-address twin (inv. 13).
+    // same-address twin.
     return (companyData?.principals || []).filter((p) =>
       !isRoleIdAddress(p.address || "") &&
       principalOnChain(p, activeChain) &&

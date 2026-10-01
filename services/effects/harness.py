@@ -1,7 +1,7 @@
-"""Tier-1 harness core (EFFECTS_RESOLUTION_SPEC §4 / §8).
+"""Tier-1 harness core.
 
 Shared by every recipe: verdict and discrepancy shapes, identity selection and raw-revert authorization from
-``differential_probe`` (§8.2/§8.3), and transcript emission through an injected store (§8.5; ``transcript_ptr`` is an
+``differential_probe``, and transcript emission through an injected store (``transcript_ptr`` is an
 artifact key). Pure given its seams; nothing is persisted here.
 """
 
@@ -42,15 +42,14 @@ __all__ = [
     "unknown",
 ]
 
-# Persists a bounded transcript and returns its artifact key (§8.5).
+# Persists a bounded transcript and returns its artifact key.
 TranscriptStore = Callable[[dict[str, Any]], str]
 
 
 @dataclass(frozen=True)
 class SimContext:
-    """Replay provenance stamped into every transcript (§8.5, inv.
-
-    14). ``hardfork`` for both tiers; anvil/foundry versions only for Tier 2 (§8.7).
+    """Replay provenance stamped into every transcript. ``hardfork`` for both tiers; anvil/foundry versions only
+    for Tier 2.
     """
 
     chain_id: int
@@ -65,7 +64,7 @@ class SimContext:
 
 @dataclass
 class Discrepancy:
-    """A §9 plane-disagreement, recorded on the verdict but not routed here."""
+    """A plane-disagreement, recorded on the verdict but not routed here."""
 
     kind: str
     effect_class: str
@@ -75,10 +74,10 @@ class Discrepancy:
 
 @dataclass
 class ObservedEffect:
-    """A tiered, transcripted verdict (§8.5, inv. 8).
+    """A tiered, transcripted verdict.
 
     ``details`` is the code-plane witness (cacheable on the behavioural hash); ``concrete`` is state-plane residue that
-    must never enter a cache key (inv. 3/12).
+    must never enter a cache key.
     """
 
     effect_class: str
@@ -92,8 +91,8 @@ class ObservedEffect:
     transcript: dict[str, Any] | None = None
     transcript_ptr: str | None = None
     discrepancy: Discrepancy | None = None
-    # Verdicts depending on state the recipe manufactured (a scheduled op, a time warp) must never transfer to a twin
-    # (inv. 13); ``_is_cacheable`` refuses them.
+    # Verdicts depending on state the recipe manufactured (a scheduled op, a time warp) must never transfer to a twin;
+    # ``_is_cacheable`` refuses them.
     state_dependent: bool = False
 
     @property
@@ -119,7 +118,7 @@ def select_identities(
     principal: str | None,
     random_count: int = 2,
 ) -> tuple[list[str], str | None]:
-    """The impersonation set: two or more deterministic random controls plus the resolved principal (§8.2), derived
+    """The impersonation set: two or more deterministic random controls plus the resolved principal, derived
     as in the differential probe.
     """
     randoms = derive_random_identities(selector, contract_address, max(2, random_count))
@@ -131,7 +130,7 @@ def authorization_opened(
     randoms_after: Sequence[EthCallResult],
 ) -> bool:
     """Did a state change open a gate to random callers? Only when at least two randoms were consistently rejected
-    before and all succeed after (§8.2), via :func:`attribute` on raw reverts (§8.3). A single-identity flip never
+    before and all succeed after, via :func:`attribute` on raw reverts. A single-identity flip never
     opens anything.
     """
     if len(randoms_before) < 2 or len(randoms_after) < 2:
@@ -142,7 +141,7 @@ def authorization_opened(
 
 
 def new_transcript(ctx: SimContext, *, feature: str, tier: str, effect_class: str) -> dict[str, Any]:
-    """A transcript with the replay minimum (§8.5): tier, block, hardfork, anvil/foundry versions.
+    """A transcript with the replay minimum: tier, block, hardfork, anvil/foundry versions.
 
     Calls are appended by :func:`record_calls`.
     """
@@ -173,7 +172,7 @@ def record_calls(
     *,
     label: str = "",
 ) -> None:
-    """Append issued calls and raw results. Decoded labels are for humans only (§8.3)."""
+    """Append issued calls and raw results. Decoded labels are for humans only."""
     for call in calls:
         transcript["calls"].append({"label": label, **{k: _jsonable(v) for k, v in call.items()}})
     for res in results:
@@ -204,9 +203,9 @@ def _jsonable(v: Any) -> Any:
 
 
 def emit(store: TranscriptStore, effect: ObservedEffect) -> ObservedEffect:
-    """Persist the transcript through the store and stamp the key (§8.5).
+    """Persist the transcript through the store and stamp the key.
 
-    A missing ``transcript_ptr`` is a bug (inv. 8; the §8-rule-5 test).
+    A missing ``transcript_ptr`` is a bug (every probed verdict needs a transcript).
     """
     if effect.transcript is not None:
         effect.transcript_ptr = store(effect.transcript)
@@ -269,7 +268,7 @@ def unknown(
     transcript: dict[str, Any] | None = None,
     discrepancy: Discrepancy | None = None,
 ) -> ObservedEffect:
-    """The §8 fail-closed verdict for every non-observation; may carry a recorded discrepancy."""
+    """The fail-closed verdict for every non-observation; may carry a recorded discrepancy."""
     return ObservedEffect(
         effect_class=effect_class,
         verdict=VERDICT_UNKNOWN,

@@ -128,7 +128,7 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
             basis="destination_unconstrained_proven",
         )
     # Join on the parameter, not the function: the fork proof applies only if ``sentinel_param`` is the parameter this
-    # sink calls through (read from the witness, never the name, inv. 1). Any other shape stays not_determined.
+    # sink calls through (read from the witness, never the name). Any other shape stays not_determined.
     destination_param = witness.get("destination_param")
     if fork_param is not None and target_kind == "param" and isinstance(destination_param, str) and destination_param:
         if fork_param == destination_param:
@@ -150,7 +150,7 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
 def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Destination:
     """A destination the static lattice proved caller-relative, and what the caller gate is worth against it.
 
-    The lattice proof is universal, so it needs no existence witness (inv. 9), but the two kinds differ:
+    The lattice proof is universal, so it needs no existence witness, but the two kinds differ:
 
     ``msg_sender``: the payee is the caller. ``open`` makes the destination proven unconstrained, but the price is
     withheld (a drain and a redemption look the same); ``restricted`` gets the ordinary constrained convention.

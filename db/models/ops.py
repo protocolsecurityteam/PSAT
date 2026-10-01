@@ -141,7 +141,7 @@ class MappingEnumerationCache(Base):
     same slow scans. ``specs_hash`` keys spec changes to fresh rows. Truncated and errored results are cached too.
 
     Every status must fit ``status``, or the upsert no-ops and a stale ``complete`` keeps being served;
-    ``tests/test_mapping_enumeration_status_vocabulary.py`` checks the vocabulary.
+    ``tests/resolution/test_mapping_enumeration_status_vocabulary.py`` checks the vocabulary.
     """
 
     __tablename__ = "mapping_enumeration_cache"
@@ -290,7 +290,7 @@ class EffectsPlanMarker(Base):
 
 
 class OpsKv(Base):
-    """Minimal key/value row for operational markers (e.g. the membership gate's ``enabled_chains_seen``, spec §3.4)."""
+    """Minimal key/value row for operational markers (e.g. the membership gate's ``enabled_chains_seen``)."""
 
     __tablename__ = "ops_kv"
 

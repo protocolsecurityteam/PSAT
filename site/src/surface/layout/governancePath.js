@@ -14,7 +14,7 @@ import { coalesceChain } from "../entityKey.js";
 // it instead of `controls`); excluding it hid every owner → value-moving hop.
 const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls", "controls_value"]);
 
-// Flows are intra-chain; legacy flows without a chain are kept (inv. 13).
+// Flows are intra-chain; legacy flows without a chain are kept.
 // Shared by the canvas and the walk so they agree.
 export function flowOnChain(flow, activeChain) {
   if (!activeChain || !flow || flow.to_chain == null) return true;

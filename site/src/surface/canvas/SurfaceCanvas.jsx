@@ -25,7 +25,7 @@ const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
 
 // Everything here is on the single active chain, so bare-address topology sets
-// are collision-free; entity lookups still key by (chain, address) (inv. 13).
+// are collision-free; entity lookups still key by (chain, address).
 export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);

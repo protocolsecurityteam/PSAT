@@ -200,7 +200,7 @@ def distill_contract_signals(
     return signals
 
 
-# Artifact bodies are immutable, so caching by ``(job_id, artifact_name)`` can't give two answers (inv. 11). Tests clear
+# Artifact bodies are immutable, so caching by ``(job_id, artifact_name)`` can't give two answers. Tests clear
 # it via :func:`clear_transcript_cache`.
 _TRANSCRIPT_CACHE: dict[tuple[str, str], Any] = {}
 

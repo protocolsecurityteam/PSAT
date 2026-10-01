@@ -171,11 +171,11 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
         )
 
 
-# ``ops_kv`` key for the chain-enable boot sweep (spec §3.4 event 4).
+# ``ops_kv`` key for the chain-enable boot sweep.
 ENABLED_CHAINS_SEEN_KEY = "enabled_chains_seen"
 
 
-# Class C reasons that are counterevidence against an existing A/B row and revoke it (invariant 8).
+# Class C reasons that are counterevidence against an existing A/B row and revoke it.
 _DEPLOYER_COUNTEREVIDENCE_REASONS = frozenset(
     {"cross_protocol_collision", "foreign_or_unknown_creations", "enumeration_coverage_gap"}
 )
@@ -197,7 +197,7 @@ def _register_protocol_deployer(
     contract_address: str | None = None,
     reprobe_sink: set[int] | None = None,
 ) -> ProtocolDeployer | None:
-    """§3.3 ladder wiring: classify the EOA and register A/B (Class C registers nothing).
+    """ladder wiring: classify the EOA and register A/B (Class C registers nothing).
 
     An unrevoked Class B row whose snapshot already covers *contract_address* is reused; otherwise reclassify, and a
     counterevidence Class C revokes the stale row. The Etherscan enumeration is only paid when Class B is reachable (two
@@ -265,7 +265,7 @@ def _register_protocol_deployer(
 def _write_deployer_witness(session: Session, *, contract: Contract, registry_row: ProtocolDeployer) -> bool:
     """W4 for one deployed contract: the persisted creation tx and the registry row.
 
-    No creation tx, no witness (invariant 2).
+    No creation tx, no witness.
     """
     if (contract.deployer or "").lower() != registry_row.address:
         return False
@@ -317,7 +317,7 @@ def _consume_reprobes(
     context: str,
     exclude: Collection[int] = (),
 ) -> None:
-    """Consume the gate's ``reprobe_contract_ids`` (invariant 8): probe them (bounded), then evaluate once.
+    """Consume the gate's ``reprobe_contract_ids``: probe them (bounded), then evaluate once.
 
     Still-blocked candidates settle later. Never raises.
     """
@@ -368,7 +368,7 @@ def run_probe_pass(
     *,
     heartbeat: Callable[[], None] | None = None,
 ) -> gate.PromotionResult:
-    """§3.4 event 1: settle this protocol's fresh candidates, bounded to ``PSAT_PROBE_PASS_MAX`` probes (lowest ids
+    """settle this protocol's fresh candidates, bounded to ``PSAT_PROBE_PASS_MAX`` probes (lowest ids
     first); commits before evaluating. Idempotent: ``needs_probe`` picks up the deferred tail next pass.
     *heartbeat* is called after each probe to keep the lease.
     """
@@ -388,7 +388,7 @@ def run_probe_pass(
     resolved: set[str] = set()
     deferred = 0
     for contract in candidates:
-        # Also re-target demoted members whose completed probe predates a revocation (invariant 8).
+        # Also re-target demoted members whose completed probe predates a revocation.
         if needs_probe(session, contract) or probe_predates_revocation(session, contract):
             if len(probed) >= probe_budget:
                 deferred += 1
@@ -473,7 +473,7 @@ def _structural_intake(session: Session, job: Job, contract: Contract, request: 
 def _gate_intake(session: Session, job: Job, contract: Contract | None, request: dict) -> None:
     """Route one Contract row through the gate: nomination, W2/W4 witnesses, the event-1 probe, promotion.
 
-    Commits; never stamps ``protocol_id`` (invariant 1).
+    Commits; never stamps ``protocol_id``.
     """
     protocol_id = job.protocol_id
     if not protocol_id or contract is None:
@@ -487,7 +487,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
         tags = [discovered_by] if isinstance(discovered_by, str) and discovered_by else [""]
     with log_timed_phase(logger, "gate_nomination", log_failure=True):
         for tag in tags:
-            # The W5 assertion is consumed at nomination (invariant 14).
+            # The W5 assertion is consumed at nomination.
             gate.nominate(
                 session, contract=contract, protocol_id=protocol_id, source_tag=tag, human_assertion=human_assertion
             )
@@ -572,7 +572,7 @@ def _enqueue_selection_pass(session: Session, protocol_id: int) -> None:
 
 
 def run_chain_enable_sweep(session: Session) -> None:
-    """§3.4 event 4: compare ``PSAT_SUPPORTED_CHAIN_IDS`` with the ``enabled_chains_seen`` marker; for each newly
+    """compare ``PSAT_SUPPORTED_CHAIN_IDS`` with the ``enabled_chains_seen`` marker; for each newly
     enabled chain, probe its parked candidates and enqueue selection for protocols that gained members.
     Re-enabling a chain sweeps again.
     """
@@ -668,7 +668,7 @@ class DiscoveryWorker(BaseWorker):
             if isinstance(_raw, dict):
                 prev_inventory = _raw
 
-        # Invariant 3: the declared chain set (requested chain plus the persisted ``Protocol.chains``) narrows the
+        # the declared chain set (requested chain plus the persisted ``Protocol.chains``) narrows the
         # ``eth_getCode`` probe to confirming membership. Always a list; ``None`` would re-enable the all-chain probe.
         declared_chains: list[str] = []
         seen_declared: set[str] = set()
@@ -730,7 +730,7 @@ class DiscoveryWorker(BaseWorker):
         )
         job.protocol_id = protocol_row.id
 
-        # Persist the declared chains (invariant 3): prior, requested, and newly confirmed ones (not candidates). Never
+        # Persist the declared chains: prior, requested, and newly confirmed ones (not candidates). Never
         # shrinks.
         proven_chains: set[str] = set(declared_chains)
         for entry in inventory.get("contracts", []):
@@ -800,7 +800,7 @@ class DiscoveryWorker(BaseWorker):
                 }
             )
         # One SELECT plus a bulk add instead of hundreds of round-trips. Chainless entries inherit this discovery's
-        # chain (inv. 6) rather than writing NULL and duplicating.
+        # chain rather than writing NULL and duplicating.
         inventory_default_chain = canonical_chain(chain) or "ethereum"
         bulk_upsert_discovered_contracts(
             session,
@@ -810,7 +810,7 @@ class DiscoveryWorker(BaseWorker):
         )
         session.commit()
 
-        # §3.4 event 1: probe fresh nominations and let them promote. Never blocks discovery.
+        # probe fresh nominations and let them promote. Never blocks discovery.
         try:
             with log_timed_phase(logger, "membership_probe_pass") as probe_ph:
                 probe_result = run_probe_pass(session, protocol_row.id)
@@ -881,7 +881,7 @@ class DiscoveryWorker(BaseWorker):
             protocol.get("url"),
         )
 
-        # Seed sibling scans with the discovery's chain via the registry (inv. 6); scans still attribute each address's
+        # Seed sibling scans with the discovery's chain via the registry; scans still attribute each address's
         # own chain.
         spawn_chain = request.get("chain")
         spawn_chain_id = request.get("chain_id")
@@ -980,7 +980,7 @@ class DiscoveryWorker(BaseWorker):
 
         self.update_detail(session, job, f"Fetching verified source for {address}")
         # Both Etherscan calls in parallel under the global rate limit. An address job without a resolvable chain is a
-        # data bug (inv. 6).
+        # data bug.
         fetch_chain = require_chain(
             getattr(job, "chain_id", None),
             chain=request.get("chain") if isinstance(request, dict) else None,
@@ -1004,7 +1004,7 @@ class DiscoveryWorker(BaseWorker):
         sources = parse_sources(result)
         remappings = parse_remappings(result)
 
-        # Stamp the source hash and analyzer version for cross-chain reuse (invariant 1); cache-hit jobs never reach
+        # Stamp the source hash and analyzer version for cross-chain reuse; cache-hit jobs never reach
         # here.
         from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
@@ -1028,7 +1028,7 @@ class DiscoveryWorker(BaseWorker):
             logger.debug("Could not fetch deployer for %s: %s", address, creators_or_exc)
 
         # Chain from the job's chain_id, never the request: a chainless submission would write NULL and duplicate
-        # against ``'ethereum'`` rows (inv. 1/6/12).
+        # against ``'ethereum'`` rows.
         request = job.request if isinstance(job.request, dict) else {}
         chain_name = fetch_chain.name
         existing = session.execute(
@@ -1039,7 +1039,7 @@ class DiscoveryWorker(BaseWorker):
             )
         ).scalar_one_or_none()
 
-        # Invariant 1: a job's ``protocol_id`` is a nomination, never a stamp (a dependency like WETH9 isn't a member);
+        # a job's ``protocol_id`` is a nomination, never a stamp (a dependency like WETH9 isn't a member);
         # membership is earned in ``_gate_intake``.
         request_sources = [s for s in (request.get("discovery_sources") or []) if isinstance(s, str)]
 
@@ -1066,7 +1066,7 @@ class DiscoveryWorker(BaseWorker):
                 address=address.lower(),
                 chain=chain_name,
                 protocol_id=None,
-                # Recorded at write so a failed intake can't strand an unclaimed row (spec §3.1).
+                # Recorded at write so a failed intake can't strand an unclaimed row.
                 nominated_protocol_id=job.protocol_id,
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),
@@ -1098,7 +1098,7 @@ class DiscoveryWorker(BaseWorker):
             job.name = f"{contract_name}_{address[2:10]}"
             session.commit()
 
-        # Cross-chain reuse (invariant 1): if a completed job analysed the same source on another chain, reuse its
+        # Cross-chain reuse: if a completed job analysed the same source on another chain, reuse its
         # code-plane analysis. State is still resolved per (chain, address).
         if not request.get("force"):
             donor = find_completed_static_cache(
@@ -1134,7 +1134,7 @@ def main():
         force=True,
     )
     worker = DiscoveryWorker()
-    # §3.4 event 4 at boot; a failure leaves the marker for the next boot and must not crash-loop.
+    # Reconcile newly enabled chains at boot; a failure leaves the marker for the next boot and must not crash-loop.
     session = SessionLocal()
     try:
         run_chain_enable_sweep(session)

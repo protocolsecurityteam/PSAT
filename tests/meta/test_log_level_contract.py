@@ -33,8 +33,8 @@ PIPELINE_WORKERS: tuple[str, ...] = (
 # the contract instead of silently opting out.
 #
 # Deliberately outside the perimeter:
-#   * ``services/scoring/planes.py`` and ``loop.py`` — monitor thread / CLI
-#     only; no accumulator is ever bound, and planes.py's loader WARNINGs are
+#   * ``services/scoring/planes/`` and ``loop.py`` — monitor thread / CLI
+#     only; no accumulator is ever bound, and the scoring plane loaders' WARNINGs are
 #     documented deliberate no-pairs.
 #   * ``services/monitoring/**`` other than ``balance_reads.py`` — daemon
 #     loops with no accumulator. ``balance_reads`` is in because the

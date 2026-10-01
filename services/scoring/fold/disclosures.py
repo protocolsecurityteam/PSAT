@@ -12,7 +12,7 @@ from utils.scoring_status import (
     VALUE_STATE_PROVEN_NO_REACH,
 )
 
-# Preference order per slot, covering the self-service pair (SPEC §7 G7) and msg_value siblings, so the earned negative
+# Preference order per slot, covering the self-service pair (G7) and msg_value siblings, so the earned negative
 # carries the token the row actually published.
 _UNCHARGED_CONDITIONAL_TOKENS = (
     "self_service_bound_conditional_on_upgrade_authority",
@@ -197,7 +197,7 @@ _NOTE_WARNINGS = {
     "concrete_destination_existential_not_a_fixed_destination": (
         "an observed sink is existential and cannot prove a fixed destination"
     ),
-    # Excluded rows publish no witness_notes, so these surface as warnings too (inv. 6).
+    # Excluded rows publish no witness_notes, so these surface as warnings too.
     "self_service_uncharged_product_surface": (
         "the payout is proven bounded to the caller's own position and the record is cleared before "
         "the external call, so the row is uncharged product surface and creates no finding"

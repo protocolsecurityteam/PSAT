@@ -1,5 +1,5 @@
 /* One verdict only; coloured dots, never emoji; no low-confidence or accusatory
-   signals (site/prototypes/audit-panel/HANDOFF.md). */
+   signals. */
 .ps-audits-panel {
   padding: 12px;
   display: flex;

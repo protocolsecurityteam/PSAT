@@ -47,11 +47,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Spec §3.1: derived, never a separate status column.
+# derived, never a separate status column.
 
 
 def membership_state(contract: Contract, *, code_absent_at_probe: bool | None = None) -> MembershipState:
-    """The §3.1 state. ``code_absent_at_probe=None`` (not probed) never proves absence."""
+    """The derived membership state. ``code_absent_at_probe=None`` (not probed) never proves absence."""
     if contract.protocol_id is not None:
         return "member"
     if contract.nominated_protocol_id is None:
@@ -92,7 +92,7 @@ def _has_nonlineage_witness(session: Session, *, contract_id: int, protocol_id: 
 
 
 def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """Whether this member may serve as another rule's via-fact (DEPLOYER_HEURISTIC_SPEC.md §6): False exactly when
+    """Whether this member may serve as another rule's via-fact: False exactly when
     all its active admitting witnesses are heuristic. Heuristic members are full members operationally; the
     boundary is evidentiary, so they have no transitive amplification. A row with no admitting witness isn't a
     heuristic admission.
@@ -106,7 +106,7 @@ def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int)
 
 
 def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: int) -> bool:
-    """F2: a member whose only admitting witness is W3-D2 (non-transitive, §3.2), or only heuristic ones, can't
+    """F2: a member whose only admitting witness is W3-D2 (non-transitive), or only heuristic ones, can't
     anchor perimeter or corroboration facts.
     """
     for row in active_witnesses(session, contract_id=contract_id, protocol_id=protocol_id):
@@ -122,7 +122,7 @@ def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: i
 def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory: str) -> int | None:
     """The id of this protocol's member at *factory* with a non-D2 admitting witness (F2), or None.
 
-    Lowest id wins (invariant 9).
+    Lowest id wins.
     """
     for member in session.execute(
         select(Contract)
@@ -137,7 +137,8 @@ def _anchoring_member_factory_id(session: Session, *, protocol_id: int, factory:
 def _anchoring_member_factory(session: Session, *, protocol_id: int, factory: str) -> bool:
     """Whether *factory* is this protocol's member with a non-D2 admitting witness.
 
-    Its creations count as mapped for Class B exclusivity and the shared-operator check (a deliberate §3.3 deviation);
+    Its creations count as mapped for Class B exclusivity and the shared-operator check (a deliberate extension of
+    deployer lineage);
     it admits nothing.
     """
     return _anchoring_member_factory_id(session, protocol_id=protocol_id, factory=factory) is not None
@@ -183,7 +184,7 @@ def _member_factory_created(session: Session, *, protocol_id: int, contract: Con
     return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract) is not None
 
 
-# Witness-fact verification (spec §3.2, invariant 6): admission and cascade re-check the edge, never mere witness
+# Witness-fact verification: admission and cascade re-check the edge, never mere witness
 # presence.
 
 
@@ -193,7 +194,7 @@ def _chain_key(chain: str | None) -> str:
 
 
 def _member_rows_at(session: Session, *, protocol_id: int, address: str, chain_key: str) -> list[Contract]:
-    """This protocol's evidence members at (address, chain), excluding heuristic-only members (§6)."""
+    """This protocol's evidence members at (address, chain), excluding heuristic-only members."""
     rows = session.execute(
         select(Contract)
         .where(
@@ -210,7 +211,7 @@ _PROBE_CONTROLLER_READS = ("owner", "authority", "admin")
 
 
 def _probe_controller_values(session: Session, contract: Contract) -> set[str]:
-    """Controllers the latest §3.5 probe resolved (owner/authority/admin only; impl/beacon are W2 facts)."""
+    """Controllers the latest probe resolved (owner/authority/admin only; impl/beacon are W2 facts)."""
     chain_id = chain_id_for_chain_name(contract.chain)
     row = session.get(ContractProbeAttempt, (contract.id, chain_id if chain_id is not None else 0))
     if row is None or not isinstance(row.results, dict) or row.results.get("status") != "probed":
@@ -363,8 +364,8 @@ def _principal_perimeter_fact(
     chain_key: str,
     exclude_contract_id: int | None = None,
 ) -> dict[str, Any] | None:
-    """§3.3 Class-A reading for the D1-principal arm: *address* is a resolved EOA principal of a member hosting a
-    non-D2 admitting witness (F2). Smallest principal row wins (invariant 9).
+    """Class-A reading for the D1-principal arm: *address* is a resolved EOA principal of a member hosting a
+    non-D2 admitting witness (F2). Smallest principal row wins.
     """
     for fp_id, function_id, resolved_type, _safe_address, member in _member_principal_rows(
         session,
@@ -499,7 +500,7 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
 
 
 def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: str):
-    """Every §3.3 perimeter observation of *address*, as ``(fact, anchoring_member_id)``; the caller checks
+    """Every perimeter observation of *address*, as ``(fact, anchoring_member_id)``; the caller checks
     anchoring.
     """
     members = _member_ids_subquery(protocol_id)
@@ -513,7 +514,7 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         .order_by(ControllerValue.contract_id, ControllerValue.id)
     ):
         yield {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}, member_id
-    # Only authority-derived principals are perimeter observations (invariant 6).
+    # Only authority-derived principals are perimeter observations.
     for fp_id, function_id, member_id in session.execute(
         select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)

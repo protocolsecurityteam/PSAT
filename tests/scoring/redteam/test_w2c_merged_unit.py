@@ -82,7 +82,7 @@ def test_r9_a_merged_units_weakness_is_per_reached_entity(fold):
     """Value only the 4/8 member reaches is not priced at the 3/7 member's rung.
 
     ``_row_for`` keeps the max weakness over members while the row folds the
-    UNION of their reach. inv. 5's weakest path is the weakest path TO THAT
+    UNION of their reach. Each entity's weakest path is the weakest path TO THAT
     ENTITY; the union, which no single member reaches, is priced at the
     coalition able to act as every contributing member.
     """
@@ -205,11 +205,11 @@ def test_r11_a_proven_reach_with_no_magnitude_witness_is_unanswered(fold):
     assert witnessed["reach_magnitude_witnessed_pct"] == 100.0
     assert unwitnessed["reach_magnitude_signals"]["proven_reach_in_denominator"] == 1
     assert unwitnessed["reach_magnitude_signals"]["magnitude_witnessed"] == 0
-    # Answering the magnitude may only RAISE the term (inv. 6).
+    # Answering the magnitude may only RAISE the term.
     assert witnessed["reach_magnitude_witnessed_pct"] >= unwitnessed["reach_magnitude_witnessed_pct"]
 
     # The finding SURVIVES its missing magnitude, at the unpriced band's floor:
-    # the reach is proven and only its SIZE is not, which inv. 7's floor rule
+    # the reach is proven and only its SIZE is not, which the unpriced floor rule
     # governs. It is the dollar figure that is not_determined, never the row.
     assert unwitnessed_doc.findings[0]["reach_entities"] == [KEY_C]
     assert unwitnessed_doc.findings[0]["value_band"] == "not_determined"

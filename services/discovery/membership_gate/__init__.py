@@ -1,11 +1,12 @@
-"""Contract-membership gate, the sole writer of ``Contract.protocol_id`` (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3–§5).
+"""Contract-membership gate, the sole writer of ``Contract.protocol_id``.
 
-Membership is earned with a recorded witness; no source's identity confers it, and no witness may derive from LLM output
-(invariant 2). Functions mutate the session without committing so the gate write lands with the triggering fact.
+Membership is earned with a recorded witness; no source's identity confers it, and no witness may derive from LLM
+output.
+Functions mutate the session without committing so the gate write lands with the triggering fact.
 
-Modules: ``rules`` (witness vocabulary and constructors), ``readers`` (evidence predicates), ``deployers`` (§3.3 trust
+Modules: ``rules`` (witness vocabulary and constructors), ``readers`` (evidence predicates), ``deployers`` (trust
 ladder), ``transitivity`` (W3 anchor chains, exclusivity, re-verification), ``admission`` (nomination,
-promotion/demotion, stratum iii), ``revocation`` (invariant-8 cascade), ``heuristics`` (W4-H), ``fixpoint`` (deltas,
+promotion/demotion, stratum iii), ``revocation`` (demotion cascade), ``heuristics`` (W4-H), ``fixpoint`` (deltas,
 targeting, the stratified fixpoint). This module re-exports the pre-split surface, private names included.
 """
 

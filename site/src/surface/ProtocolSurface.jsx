@@ -57,7 +57,7 @@ function ProtocolSurface({
     const source = companyData?.contracts || initialData?.contracts;
     if (Array.isArray(source) && source.some((c) => Array.isArray(c.functions))) {
       // Composite keys, like the /functions payload: a bare address would let
-      // one chain's functions overwrite another's (inv. 13).
+      // one chain's functions overwrite another's.
       return Object.fromEntries(
         source
           .filter((c) => c.address && coalesceChain(c.chain) === activeChain)
@@ -336,7 +336,7 @@ function ProtocolSurface({
           }
         : {};
     if (!address && !named) return { ok: false, kind: "empty" };
-    // Identity is (chain, address) (inv. 13). Switch chains only when the
+    // Identity is (chain, address). Switch chains only when the
     // payload witnesses the entity there; otherwise not-found.
     const requestedChain = coalesceChain(example?.chain || activeChain);
     if (requestedChain !== activeChain) {

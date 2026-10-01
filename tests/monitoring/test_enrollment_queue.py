@@ -1,4 +1,4 @@
-"""Integration tests for the dirty-queue enrollment reconciler (design §2.3).
+"""Integration tests for the dirty-queue enrollment reconciler.
 
 Real Postgres + the real ``enroll_protocol_contracts`` stack; only the RPC wire (``eth_blockNumber``) is stubbed.
 Covers mark/claim/drain, lease exclusivity + expiry, the ``dirty_at``-guarded delete, poisoned-protocol backoff,

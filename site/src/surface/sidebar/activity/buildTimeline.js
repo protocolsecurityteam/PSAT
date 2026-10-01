@@ -59,7 +59,7 @@ function upgradeSub(im, isFirst) {
   return isFirst ? addr : `→ ${addr}`;
 }
 
-// Same-transaction cause (§3.4), exactly as the backend published it.
+// Same-transaction cause, exactly as the backend published it.
 function withCause(sub, ev) {
   const cause = ev?.data?.caused_by;
   if (!cause || typeof cause !== "object" || !cause.event_type) return sub;
@@ -169,7 +169,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
 }
 
 // Returns surviving rows plus per-section withheld counts. Every caller shows
-// the count (invariant 4), and the Timeline needs it to tell empty from
+// the count, and the Timeline needs it to tell empty from
 // filtered sections.
 export function filterTimelineBySalience({ above = [], below = [] }, minSalience) {
   const keptAbove = above.filter((row) => salienceAllows(row.salience, minSalience));

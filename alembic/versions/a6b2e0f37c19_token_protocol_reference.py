@@ -7,8 +7,7 @@ Delivery evidence accretes: a receipt read at a block is a fact that never comes
 back. This table is REFRESHED every producer cycle, because the predicate behind
 ``absent_from_universe`` is anti-monotone — discovery growing can only turn an
 absence into a presence — so a verdict taken against a smaller universe must be
-able to withdraw. Withdrawal is the safe direction (SHEET_OBSERVATION_SPEC.md
-§10.6.5), and a row that could not withdraw would pin a condemnation the tree has
+able to withdraw. Withdrawal is the safe direction, and a row that could not withdraw would pin a condemnation the tree has
 already dissolved.
 
 It exists because the presentation layer cannot assemble the universe itself:

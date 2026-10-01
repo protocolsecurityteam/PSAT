@@ -95,9 +95,8 @@ def _request_rpc_url(job: Job) -> str | None:
 
 
 def _parent_chain_id(job: Job) -> int:
-    """The parent job's ``chain_id`` (inv.
-
-    6): the column, else derived from ``request["chain"]``, else mainnet. Arms the inv-7 URL/chain guard.
+    """The parent job's ``chain_id``: the column, else derived from ``request["chain"]``, else mainnet. Arms the
+    URL/chain guard.
     """
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
@@ -107,9 +106,8 @@ def _parent_chain_id(job: Job) -> int:
 
 
 def _parent_chain_name(job: Job) -> str:
-    """Canonical chain name of the parent, stamped on spawned impl children so chain never cascades as ``None`` (inv.
-
-    6). Mainnet is ``"ethereum"``.
+    """Canonical chain name of the parent, stamped on spawned impl children so chain never cascades as ``None``.
+    Mainnet is ``"ethereum"``.
     """
     chain_id = _parent_chain_id(job)
     try:
@@ -293,7 +291,7 @@ def _finalize_upgrade_history(
             )
             backfill_protocol_id = contract_row.protocol_id or contract_row.nominated_protocol_id
             if backfill_protocol_id is not None and stats["impl_addrs"]:
-                # Nominated, not stamped (invariant 1); membership is earned via the gate (W2).
+                # Nominated, not stamped; membership is earned via the gate (W2).
                 backfill_historical_impl_contracts(
                     session,
                     protocol_id=backfill_protocol_id,
@@ -430,7 +428,7 @@ def _apply_proxy_cache(session, src_contract, contract_row, proxy_state: dict | 
             setattr(contract_row, field, getattr(src_contract, field))
     session.commit()
 
-    # §3.4 event 2a fires on the cache path too: copied pointers are the same fact delta.
+    # Pointer-change evaluation runs on the cache path too: copied pointers are the same fact delta.
     from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
     own_address = (getattr(contract_row, "address", None) or "").lower()
@@ -550,7 +548,7 @@ class StaticWorker(BaseWorker):
         if row is not None or not job.address:
             return row
         # Chain from ``jobs.chain_id`` (a chainless request has ``chain=None`` but a real chain_id), mainnet-coalesced
-        # for legacy NULL rows (invariants 1/6/12).
+        # for legacy NULL rows.
         chain_name = _parent_chain_name(job)
         stmt = (
             sa_select(Contract)
@@ -795,8 +793,8 @@ class StaticWorker(BaseWorker):
             contract_row.admin = admin
             session.commit()
 
-            # §3.4 event 2a: new pointers are a fact delta for the gate (the proxy and every pointer target). Never a
-            # stamp (invariant 1).
+            # new pointers are a fact delta for the gate (the proxy and every pointer target). Never a
+            # stamp.
             from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
             edge_addrs = tuple(
@@ -893,7 +891,7 @@ class StaticWorker(BaseWorker):
                 continue
 
             impl_name = f"{base_name}: ({label})"
-            # The child carries the proxy's membership (spec §5.2), which the evaluate above may have just set; never a
+            # The child carries the proxy's membership, which the evaluate above may have just set; never a
             # source tag.
             parent_is_member = bool(contract_row is not None and contract_row.protocol_id is not None)
             child_request = {
@@ -907,10 +905,10 @@ class StaticWorker(BaseWorker):
                 "discovery_relationship": "implementation",
                 "parent_is_member": parent_is_member,
             }
-            # Always stamp the parent's chain (inv. 6) so the child can't default elsewhere.
+            # Always stamp the parent's chain so the child can't default elsewhere.
             impl_chain = request.get("chain") or _parent_chain_name(job)
             child_request["chain"] = impl_chain
-            # Defence in depth (inv. 14): a disabled chain spawns nothing.
+            # Defence in depth: a disabled chain spawns nothing.
             if not chain_enabled(impl_chain):
                 logger.info(
                     "Skipping implementation child: chain not enabled for this deployment",
@@ -973,7 +971,7 @@ class StaticWorker(BaseWorker):
                 resolve_secondary_impl_addresses,
             )
 
-            # From ``jobs.chain_id``, mainnet-coalesced (invariants 1/6/12).
+            # From ``jobs.chain_id``, mainnet-coalesced.
             proxy_chain_name = _parent_chain_name(job)
             proxy_stmt = (
                 sa_select(Contract)
@@ -1544,10 +1542,10 @@ class StaticWorker(BaseWorker):
         session.commit()
 
     def _publish_materialization(self, session, job: Job, address: str, contract_name: str) -> None:
-        """Record this job's analysis bundle in ``contract_materializations`` (F4a).
+        """Record this job's analysis bundle in ``contract_materializations``.
 
         Previously only the authority recursion wrote this store, so whether monitoring used a contract's real tracking
-        plan depended on graph traversal. Publishing here makes coverage follow from analysis (invariant 8).
+        plan depended on graph traversal. Publishing here makes coverage follow from analysis.
 
         Reads back the three stored artifacts (identical on fresh and cache paths; an unstored bundle must not be
         claimed). A row stamped ``ANALYSIS_SCHEMA_VERSION`` requires a bundle proven to be of that era: cache hits leave

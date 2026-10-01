@@ -44,7 +44,7 @@ class Contract(Base):
     protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
     )
-    # The protocol that nominated this address (spec §3.1). Not membership: ``protocol_id`` is the member stamp, written
+    # The protocol that nominated this address. Not membership: ``protocol_id`` is the member stamp, written
     # only by ``services.discovery.membership_gate``.
     nominated_protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
@@ -380,7 +380,7 @@ class ContractCreationWitness(Base):
     )
 
 
-# ``ContractMembershipWitness.rule`` vocabulary (spec §3.2); deterministic evidence only, never LLM output.
+# ``ContractMembershipWitness.rule`` vocabulary; deterministic evidence only, never LLM output.
 WITNESS_RULE_W1_CODE = "w1_code"
 WITNESS_RULE_W2_STRUCTURAL = "w2_structural"
 WITNESS_RULE_W3_CONTROL = "w3_control"
@@ -389,7 +389,7 @@ WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
 WITNESS_RULE_W4_FACTORY = "w4_factory"
 WITNESS_RULE_W5_HUMAN = "w5_human"
 WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
-# W4-H (DEPLOYER_HEURISTIC_SPEC.md §1): admitted on measured deployer affinity, not proof. The distinct rule string is
+# W4-H: admitted on measured deployer affinity, not proof. The distinct rule string is
 # how nothing presents it as proven.
 WITNESS_RULE_W4H_DEPLOYER_AFFINITY = "w4h_deployer_affinity"
 WITNESS_RULES = frozenset(
@@ -404,15 +404,14 @@ WITNESS_RULES = frozenset(
         WITNESS_RULE_W6_LLAMA_SEED,
     }
 )
-# W1 is the code precondition for every promotion (invariant 3) and admits nothing alone.
+# W1 is the code precondition for every promotion and admits nothing alone.
 ADMITTING_WITNESS_RULES = frozenset(WITNESS_RULES - {WITNESS_RULE_W1_CODE})
 
 
 class ContractMembershipWitness(Base):
     """One reason a contract is (or was) a protocol member.
 
-    Member iff ``contracts.protocol_id`` is set and at least one unrevoked row exists. Rows are revoked, never deleted
-    (invariant 4).
+    Member iff ``contracts.protocol_id`` is set and at least one unrevoked row exists. Rows are revoked, never deleted.
     """
 
     __tablename__ = "contract_membership_witnesses"
@@ -472,8 +471,8 @@ class ContractMembershipWitness(Base):
 
 
 class ContractProbeAttempt(Base):
-    """Latest corroboration-probe attempt per (contract, chain) (spec §3.5): which reads ran, at what block, and what
-    they resolved, so a parked candidate is explainable (invariant 5).
+    """Latest corroboration-probe attempt per (contract, chain): which reads ran, at what block, and what
+    they resolved, so a parked candidate is explainable.
     """
 
     __tablename__ = "contract_probe_attempts"
@@ -483,7 +482,7 @@ class ContractProbeAttempt(Base):
     # NULL = the probe never reached the wire (unroutable chain).
     block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # {"status": "probed"|"not_routable", "reads": {...}, "resolved_addresses": [...]}; the addresses feed targeted
-    # candidate lookups (spec §3.4).
+    # candidate lookups.
     results: Mapped[Any] = mapped_column(JSONB, nullable=False)
     probed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -689,7 +688,7 @@ class AddressLabel(Base):
 
     Distinct from worker-populated, per-contract ``PrincipalLabel``.
 
-    Global plus per-chain override (invariant 12). ``chain IS NULL`` is global (right for EOAs; the whole legacy
+    Global plus per-chain override. ``chain IS NULL`` is global (right for EOAs; the whole legacy
     population). A concrete ``chain`` overrides on that chain only, which matters for contracts. Surrogate ``id``;
     uniqueness via two partial unique indexes, since Postgres treats NULL ≠ NULL.
     """

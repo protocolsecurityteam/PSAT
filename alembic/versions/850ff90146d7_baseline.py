@@ -567,7 +567,7 @@ def upgrade() -> None:
     op.create_index("ix_monitored_events_event_type", "monitored_events", ["event_type"], unique=False)
     # ### end Alembic commands ###
 
-    # Cross-process Etherscan response cache. Not an ORM model — written/read via raw SQL in utils/etherscan.py.
+    # Cross-process Etherscan response cache. Not an ORM model — written/read via raw SQL in services/clients/etherscan.py.
     # ttl_expires_at NULL means immutable (e.g. verified source code).
     op.create_table(
         "etherscan_cache",

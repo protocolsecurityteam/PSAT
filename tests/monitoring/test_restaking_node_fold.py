@@ -241,7 +241,7 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         root / "tests" / "monitoring" / "test_restaking_position.py",
         root / "services" / "monitoring" / "restaking_reads.py",
         root / "services" / "monitoring" / "restaking_enrollment.py",
-        # The scorer's value plane: SCORER_INTEGRATION_STRATEGY §7.1 mandates a fold read keyed
+        # The scorer's value plane requires a fold read keyed
         # by the positions' OWN entity keys, which cannot use spot-balance readers.
         root / "services" / "scoring" / "planes" / "value.py",
         root / "services" / "scoring" / "planes" / "provenance.py",

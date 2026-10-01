@@ -109,7 +109,7 @@ class DefiLlamaWorker(BaseWorker):
                 chain_by_address[addr] = chain
 
         # Unattributed addresses inherit the job chain rather than chain=NULL, which would duplicate a sibling's
-        # 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain; inv. 1/6/12).
+        # 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain).
         protocol_id = protocol_row.id
         chain_id = request.get("chain_id") or 1
         try:

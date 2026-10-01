@@ -768,7 +768,7 @@ def test_a_missing_chain_anchor_never_mints_a_chainless_node(db_session, monkeyp
 
 
 def test_a_disabled_chain_omits_and_mints_nothing(db_session, anchor, monkeypatch):
-    """Invariant 14. An off-allowlist chain is an OMISSION, not a carve-out."""
+    """An off-allowlist chain is an OMISSION, not a carve-out."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     contract.chain = "base"

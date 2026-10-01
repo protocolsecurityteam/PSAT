@@ -1,8 +1,8 @@
-"""[P2-pre] company/inventory persist chain threading (MULTICHAIN_INVARIANTS.md Appendix A).
+"""Company/inventory persist chain threading.
 
 Regression for the PR-154 preview DB: 10 mainnet addresses had two stubs, one ``chain=NULL`` (defillama
 persist, no chain) and one ``'ethereum'`` (dapp-crawl persist ~1 min later); ``NULL ≠ NULL`` defeats
-``uq_contract_address_chain`` (invariants 1, 6, 12).
+``uq_contract_address_chain``.
 
 Fix is in ``db.queue.bulk_upsert_discovered_contracts``: entries without an evidence chain inherit the
 job's ``default_chain`` and the dedup key is mainnet-coalesced (``NULL≡'ethereum'``). No backfill.
@@ -70,7 +70,7 @@ def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_sessio
     row = rows[0]
     assert row.chain == "ethereum"
     assert set(row.discovery_sources or []) == {"defillama", "dapp_crawl"}
-    # Writers nominate, never stamp (membership-gate invariant 1).
+    # Writers nominate, never stamp.
     assert row.protocol_id is None
     assert row.nominated_protocol_id == proto_id
 
@@ -127,7 +127,7 @@ def test_same_address_two_evidence_chains_yields_two_rows(db_session, proto_id):
     db_session.commit()
 
     rows = db_session.query(Contract).filter(Contract.address == addr).all()
-    # Same address on two chains = two distinct deployments (invariant 1).
+    # Same address on two chains = two distinct deployments.
     assert {r.chain for r in rows} == {"ethereum", "base"}
 
 

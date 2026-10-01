@@ -10,7 +10,7 @@ pragma solidity ^0.8.24;
 //   authorized caller is whichever receiver the (param) eid maps to. Resolution
 //   recovers the principal set by ENUMERATING the mapping's value set from its
 //   `ReceiverSet` setter events (mapping value enumeration). See
-//   tests/test_param_keyed_mapping_enumeration.py.
+//   tests/resolution/test_param_keyed_mapping_enumeration.py.
 //
 // The namespaced storage struct (assembly `$.slot := <constant>`), the verbatim
 // gate, the `setReceiver`→`_setReceiver` writer, and the

@@ -49,7 +49,7 @@ class JobStage(str, enum.Enum):
 
 
 def derive_job_chain_id(chain_value: Any, address: str | None) -> int | None:
-    """Resolve a job's ``chain_id`` from ``request["chain"]`` (invariant 1).
+    """Resolve a job's ``chain_id`` from ``request["chain"]``.
 
     Address-less company/root jobs return None (allowed by the CHECK). Missing chain means mainnet; unrecognized values
     fall back to mainnet with a warning. Mirrors the M0.2 backfill.

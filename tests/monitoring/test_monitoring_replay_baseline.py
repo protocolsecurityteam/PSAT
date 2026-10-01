@@ -145,7 +145,7 @@ def test_replay_classifies_every_window_spec(db_session):
 
 
 def test_replay_queues_no_reanalysis(db_session):
-    """Invariant 5: none of these writes touch a control slot. Pinned so a
+    """None of these writes touch a control slot. Pinned so a
     taxonomy change cannot widen the trigger set as a side effect."""
     env = build_replay(db_session)
     env.run()
@@ -156,7 +156,7 @@ def test_replay_queues_no_reanalysis(db_session):
 def test_member_witness_qualification_republishes_the_transfers(db_session, openness):
     """Liveness + the G3 interface on real logs: the 388 Transfer logs publish again once the
     spec carries a member witness AND a proven-restricted writer; anything weaker (including
-    the absent third state) stays silent (invariant 4). The injected record names the
+    the absent third state) stays silent. The injected record names the
     mapping whose entry moved, since a record naming none promotes nothing and would test
     the refusal, not liveness."""
     fixture = copy.deepcopy(load_replay_fixture())

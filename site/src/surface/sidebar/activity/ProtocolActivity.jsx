@@ -50,7 +50,7 @@ export function ProtocolActivity({
 
   const { data: fetchedLabels } = useResource(
     () => api(`/api/company/${encodeURIComponent(companyName)}/addresses`).then((addrs) => {
-      // (chain, address) keys (inv. 13) so one chain's name doesn't overwrite
+      // (chain, address) keys so one chain's name doesn't overwrite
       // another's.
       const map = {};
       for (const a of addrs?.all_addresses || []) {

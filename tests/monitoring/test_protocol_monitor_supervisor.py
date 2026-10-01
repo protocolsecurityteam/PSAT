@@ -1,4 +1,4 @@
-"""Stage 6 - thread-supervisor + stop-event tests (design §2.5, HR3).
+"""Stage 6 - thread-supervisor + stop-event tests (HR3).
 
 The ``Supervisor`` is driven with injected fast-failing loops (its restart/backoff/heartbeat
 policy is what's asserted; the error heartbeat is captured by a pure spy, no DB). The real

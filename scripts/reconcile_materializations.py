@@ -1,4 +1,4 @@
-"""Queue bounded re-analysis for monitored contracts without a current materialization (F4, invariant 11).
+"""Queue bounded re-analysis for monitored contracts without a current materialization.
 
 Bumping ``ANALYSIS_SCHEMA_VERSION`` turns every row into a miss and the fleet silently drops to baseline watching; this
 rebuilds at a chosen rate. Daily cap ``PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY`` (default 25, 0 disables); jobs

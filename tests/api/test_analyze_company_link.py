@@ -1,7 +1,7 @@
 """/api/analyze optional company linking: an address submission naming a
 company resolves to the EXISTING Protocol row (lookup-only) and stamps
 ``protocol_id`` + an attributed W5 human assertion on the job request
-(membership gate, invariant 14) — never a source tag. The gate consumes the
+(explicit membership approval) — never a source tag. The gate consumes the
 assertion at nomination time. Address-only submissions stay standalone;
 company-only submissions keep minting their protocol in discovery.
 """

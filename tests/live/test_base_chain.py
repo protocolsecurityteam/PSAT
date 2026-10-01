@@ -1,4 +1,4 @@
-"""Base (chain 8453) second-chain live analogs — MULTICHAIN_INVARIANTS.md inv. 2/4/14.
+"""Base (chain 8453) second-chain live analogs.
 
 Phase-2 gate L2 evidence; runs ONLY in the CI preview (never a dev box) and skips the whole module on a
 mainnet-only deployment (prod stays mainnet-only; only the preview sets ``PSAT_SUPPORTED_CHAIN_IDS=1,8453``, see
@@ -106,7 +106,7 @@ def base_monitored_contract(
 
 def test_base_monitored_contract_chain_roundtrips(base_monitored_contract):
     # The chain field must round-trip as 'base' — the whole point of the
-    # second-chain data-model check (inv. 2).
+    # second-chain data-model check.
     assert base_monitored_contract["chain"] == BASE_CHAIN
     assert base_monitored_contract["address"] == WEETH_BASE_ADDRESS.lower()
     assert base_monitored_contract["is_active"] is True
@@ -167,7 +167,7 @@ def test_fleet_exposes_base_by_chain(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    """`/api/fleet` carries a per-chain breakdown (inv. 4, WI-D); the indexer ``by_chain`` is checked tolerantly (Base
+    """`/api/fleet` carries a per-chain breakdown (WI-D); the indexer ``by_chain`` is checked tolerantly (Base
     may be idle)."""
     r = live_client._session.get(live_client._url("/api/fleet"), timeout=30)
     r.raise_for_status()
@@ -197,7 +197,7 @@ def test_monitoring_health_exposes_chains(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    """`/api/health/monitoring` carries per-chain staleness (inv. 4, WI-D).
+    """`/api/health/monitoring` carries per-chain staleness (WI-D).
 
     Shape-tolerant: Base may be absent or idle; 503 is accepted (returned when any daemon is stale, still with
     ``chains``).

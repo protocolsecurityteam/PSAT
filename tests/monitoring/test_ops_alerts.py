@@ -1,4 +1,4 @@
-"""Tests for the ops watchdog + monitoring health endpoint (design §2.6, Stage 2).
+"""Tests for the ops watchdog + monitoring health endpoint.
 
 Real integration against the test DB with synthetic ``worker_heartbeats`` rows;
 only the Discord HTTP wire (``requests.post`` inside ``notifier._send_discord``)
@@ -389,7 +389,7 @@ def _addr(n: int) -> str:
     return "0x" + f"{n:040x}"
 
 
-# ── per-chain health (invariant 4) ───────────────────────────────────────────
+# ── per-chain health ───────────────────────────────────────────
 
 
 @requires_postgres

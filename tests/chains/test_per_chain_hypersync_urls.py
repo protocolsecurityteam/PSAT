@@ -1,6 +1,6 @@
-"""M1.1 item 2 — per-chain HyperSync resolver.
+"""Per-chain HyperSync resolver.
 
-URL selection in the resolution repos is driven by the evaluation's chain (registry, inv. 5), not a hardcoded
+URL selection in the resolution repos is driven by the evaluation's chain (registry), not a hardcoded
 mainnet literal: chain 1 still resolves to the mainnet endpoint; a chain with ``hypersync_url=None`` is
 UNAVAILABLE (scan skipped, never redirected to mainnet); per-chain URLs thread to the client builder.
 
@@ -59,11 +59,11 @@ def _capture_build_url(monkeypatch):
 
 def test_registry_drives_per_chain_hypersync_availability():
     assert hypersync_url_for_chain(1) == MAINNET_URL
-    # Base earned proven HyperSync coverage in Phase 2 → repo enabled there.
+    # Base has a HyperSync URL in the registry and is enabled here.
     assert hypersync_url_for_chain(8453) == BASE_URL
     # A chain without proven coverage → indexer/repo disabled there.
     assert hypersync_url_for_chain(UNAVAILABLE_CHAIN_ID) is None
-    # Unknown chain id degrades to unavailable, not a raise (fail-loud is M1.2).
+    # Unknown chain id degrades to unavailable, not a raise (unknown-chain validation is separate).
     assert hypersync_url_for_chain(999999) is None
 
 

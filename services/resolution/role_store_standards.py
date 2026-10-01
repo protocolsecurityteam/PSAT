@@ -3,7 +3,7 @@
 A delegated role gate resolves only if we know which events carry grant/revoke history and which bytecode selectors
 confirm the standard. Both the indexer's enrollment (``all_topic0s`` / ``detect_standards``) and
 ``EnumerableRoleStoreAdapter`` read this table, so recognized upgrades enumerate automatically and novel ones fail
-closed loudly (CONTROLLER_RESOLUTION_SPEC.md §5).
+closed loudly.
 
 Selectors and topic0s are derived from signatures, cross-checked against
 ``rolegate-fix-evidence/roles_ground_truth.json`` (Solady ``RoleSet`` 0xaddc47d7…758201b8, ``hasRole(address,uint256)``

@@ -41,7 +41,7 @@
 # `destination_param: "a"` for class B. Suppression is the failure mode that got
 # past every test the last time: a proposal that resolved every binding to
 # `not_determined` passed the whole suite while erasing the positive control. See
-# tests/test_determinism_gate.py::test_the_proved_binding_is_present_and_not_hedged.
+# tests/static/test_determinism_gate.py::test_the_proved_binding_is_present_and_not_hedged.
 #
 # Usage: scripts/determinism_gate.sh [--quick]
 #   --quick  4 seeds instead of 8 (local iteration only; not a gating run)

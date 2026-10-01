@@ -1,22 +1,20 @@
 """Membership-gate schema: nominations, witnesses, deployer registry, ops_kv.
 
-DISCOVERY_MEMBERSHIP_GATE_SPEC.md §4. Additions only; nothing dropped.
+Additions only; nothing dropped.
 
-- ``contracts.nominated_protocol_id`` — which protocol nominated the address
-  (§3.1). Backfilled for existing orphans from job provenance, else the
+- ``contracts.nominated_protocol_id`` — which protocol nominated the address.
+  Backfilled for existing orphans from job provenance, else the
   single-protocol deployment; rows with neither stay NULL (``unclaimed``).
-- ``contract_membership_witnesses`` — one row per recorded membership reason
-  (§4.2). Uniqueness on (contract, protocol, rule, via_address) is a partial
+- ``contract_membership_witnesses`` — one row per recorded membership reason.
+  Uniqueness on (contract, protocol, rule, via_address) is a partial
   index pair because Postgres treats NULL ≠ NULL and w1/w5/w6 rows carry no
   via_address.
-- ``protocol_deployers`` — the §3.3 trust ladder registry. Class C is the
+- ``protocol_deployers`` — the trust ladder registry. Class C is the
   absence of a row.
 - ``contract_probe_attempts`` — latest owner/authority/EIP-1967 probe reads
-  per (contract, chain) so a parked candidate is explainable (§3.5,
-  invariant 5). ``contract_creation_witnesses`` keeps the code/creation arm
-  unchanged (§4.4).
-- ``ops_kv`` — minimal persistent marker store for ``enabled_chains_seen``
-  (§3.4 event 4).
+  per (contract, chain) so a parked candidate is explainable. ``contract_creation_witnesses`` keeps the code/creation arm
+  unchanged.
+- ``ops_kv`` — minimal persistent marker store for ``enabled_chains_seen``.
 
 Revision ID: b7d3e9a02c51
 Revises: e5b2d9a41c73
@@ -49,7 +47,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_contracts_nominated_protocol_id", "contracts", ["nominated_protocol_id"])
 
-    # Orphan backfill (§4.1): job provenance first, then the single-protocol
+    # Orphan backfill: job provenance first, then the single-protocol
     # deployment; rows with neither stay NULL (unclaimed). Source tags carry no
     # protocol linkage, so they cannot recover it.
     op.execute(

@@ -5,7 +5,7 @@ The bug: ``_event_address_for_descriptor`` fell through to ``job.address`` (the 
 self-administered OZ AccessControl descriptor (KING Distributor's shape: no ``authority_contract``, no hint
 ``event_address``). The proxy stayed un-indexed, every privileged function fell back to a ~30-40 s HyperSync scan,
 inflating the policy stage to ~13 min and causing run-to-run controller drift. The fix routes the fallback through
-the resolver's ``runtime_addr``. See POLICY_STAGE_ROOTCAUSE_VERDICT.md.
+the resolver's ``runtime_addr``.
 """
 
 from __future__ import annotations

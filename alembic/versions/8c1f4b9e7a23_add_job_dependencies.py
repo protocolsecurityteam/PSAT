@@ -44,7 +44,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-# Mirror of ``JobStage`` from db/models.py — kept inline so the migration
+# Mirror of ``JobStage`` from db/models/jobs.py — kept inline so the migration
 # is self-contained and survives a future enum addition. ``server_default``
 # / runtime values for required_stage are validated by the application.
 _JOB_STAGE_ENUM = postgresql.ENUM(

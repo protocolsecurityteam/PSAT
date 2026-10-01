@@ -1,4 +1,4 @@
-"""Regression tests for the ``flow.out`` destination/amount lattice (SDG §3).
+"""Regression tests for the ``flow.out`` destination/amount lattice.
 
 Each test compiles a real Solidity fixture and drives production ``build_effects``
 (``build_claims`` for the passthrough test). Guards the two -12 theft-vs-routing

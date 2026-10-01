@@ -113,7 +113,7 @@ export function ActivityPanel({
     return () => clearInterval(t);
   }, []);
 
-  // Monitoring spans chains; key by (chain, address) (inv. 13) so the active
+  // Monitoring spans chains; key by (chain, address) so the active
   // chain's row resolves.
   const contractByAddress = useMemo(() => {
     const map = new Map();

@@ -71,7 +71,7 @@ def agent_address_touches(
 ) -> AddressTouchesResponse:
     """Contracts an address has function-level authority over.
 
-    Optional ``chain`` scopes to one deployment (inv. 12); legacy NULL-chain rows count as mainnet.
+    Optional ``chain`` scopes to one deployment; legacy NULL-chain rows count as mainnet.
     """
     addr_lc = (address or "").lower()
     chain_name: str | None = None

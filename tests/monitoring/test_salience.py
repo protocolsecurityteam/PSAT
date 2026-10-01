@@ -1,7 +1,7 @@
-"""The salience spine: §4.2's rule table, the mechanical gate keeping ``routine`` honest,
+"""The salience spine: the rule table, the mechanical gate keeping ``routine`` honest,
 E5's ``signal_class``, the three mint sites, the notifier opt-in, and the enrichment seam.
 
-The census is per-RULE: every §4.2 row is exercised with its basis asserted. The gate:
+The census is per-RULE: every row is exercised with its basis asserted. The gate:
 **no ``routine`` is minted from an absent input**; both routine arms need a positive finding
 (stamped ``signal_class`` with basis, or decoded ``not_top_level_call``), and removing either
 must fall back to ``not_determined`` (visible), never ``routine``.
@@ -101,7 +101,7 @@ def rate(db_session, mc, event_type: str, data: dict | None = None) -> tuple[str
 
 
 # ---------------------------------------------------------------------------
-# §4.2 rule table — one named test per rule, basis asserted
+# Salience rule table — one named test per rule, basis asserted
 # ---------------------------------------------------------------------------
 
 
@@ -373,7 +373,7 @@ def test_rule_safe_exec_indirect(db_session, make_mc):
     ids=["absent-block", "phase-1-steady-state", "over-budget"],
 )
 def test_rule_safe_exec_not_enriched(db_session, make_mc, data):
-    """The phase-1 steady state. A Safe execution we could not examine is
+    """Enrichment unavailable. A Safe execution we could not examine is
     unclassified and VISIBLE — never demoted on ignorance."""
     assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
         sal.SALIENCE_NOT_DETERMINED,
@@ -445,7 +445,7 @@ def test_no_rule_mints_routine_without_a_positive_basis(db_session, make_mc):
 
 
 def test_every_level_ships_a_non_empty_basis_from_the_closed_vocabulary(db_session, make_mc):
-    """Invariant 6, over every shape this file exercises."""
+    """Every tested shape publishes a non-empty basis from the closed vocabulary."""
     mc = make_mc()
     shapes: list[tuple[str, dict | None]] = [
         ("ownership_transferred", {}),
@@ -471,7 +471,7 @@ def test_every_level_ships_a_non_empty_basis_from_the_closed_vocabulary(db_sessi
 
 
 def test_not_determined_sorts_with_notable_never_with_routine():
-    """Invariant 5 as arithmetic."""
+    """Not-determined ranks alongside notable and above routine."""
     assert sal.salience_rank(sal.SALIENCE_NOT_DETERMINED) == sal.salience_rank(sal.SALIENCE_NOTABLE)
     assert sal.salience_rank(sal.SALIENCE_NOT_DETERMINED) > sal.salience_rank(sal.SALIENCE_ROUTINE)
     assert sal.salience_rank(sal.SALIENCE_ALERT) > sal.salience_rank(sal.SALIENCE_NOTABLE)
@@ -481,7 +481,7 @@ def test_not_determined_sorts_with_notable_never_with_routine():
 
 
 # ---------------------------------------------------------------------------
-# E5 — signal_class on freshly built polling plans
+# Signal classification on freshly built polling plans
 # ---------------------------------------------------------------------------
 
 
@@ -656,7 +656,7 @@ def test_poll_mint_from_a_config_entry_is_notable(db_session, make_mc):
 
 
 def test_poll_mint_from_a_pre_stamp_entry_is_visible_not_routine(db_session, make_mc):
-    """The phase-1 freshness dependency, at the mint site: a persisted plan
+    """The polling-plan freshness dependency, at the mint site: a persisted plan
     entry carrying no ``signal_class`` stamps nothing, and the row renders."""
     mc = make_mc(last_known_state={"rate": 7})
     data = _poll(db_session, mc, _poll_entry(), 9)
@@ -718,7 +718,7 @@ def test_scan_mint_stamps_salience_on_the_persisted_row(db_session, make_mc):
     assert len(events) == 1
     persisted = db_session.execute(select(MonitoredEvent)).scalars().one()
     assert persisted.event_type == "safe_tx_executed"
-    # Phase 1: no enricher, so the Safe execution is unclassified and VISIBLE.
+    # No enricher, so the Safe execution is unclassified and VISIBLE.
     assert persisted.data["salience"] == sal.SALIENCE_NOT_DETERMINED
     assert persisted.data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
 
@@ -781,7 +781,7 @@ def test_verification_read_mint_stamps_the_entrys_signal_class(db_session, make_
     assert row.data["signal_class_basis"] == SIGNAL_BASIS_NO_GATE_PROVENANCE
     assert row.data["salience"] == sal.SALIENCE_ROUTINE
     assert row.data["salience_basis"] == [sal.BASIS_METRIC_FIELD_DIFF]
-    # Invariant 1: the routine level did not gate the insert.
+    # The routine level did not gate the insert.
     assert row.data["witness"] == "read_verified"
 
 
@@ -792,7 +792,7 @@ def test_verification_read_mint_stamps_the_entrys_signal_class(db_session, make_
 
 @pytest.fixture(autouse=True)
 def _no_wire():
-    """The driver's transaction fetch is real from phase 2 on, and these tests
+    """The driver's transaction fetch issues RPC calls, and these tests
     hand it an unreachable endpoint. Stub the batch call so the offline suite
     stays hermetic; the fetch itself is exercised against fixture transactions
     in ``tests/monitoring/test_enrichment_decode.py``."""
@@ -875,14 +875,14 @@ def test_the_driver_recomputes_salience_for_rows_an_enricher_changed(db_session,
 def _without_correlation(data: dict) -> dict:
     """The row minus the zero-RPC correlation join's own publication.
 
-    E3 runs beside the per-event registry rather than inside it, so a test
+    Correlation runs beside the per-event registry rather than inside it, so a test
     about ONE enricher's failure has to say which keys it is talking about.
     """
     return {key: value for key, value in data.items() if key not in ("correlated_events", "correlated_scope")}
 
 
 def test_a_failing_enricher_leaves_the_row_as_the_taxonomy_wrote_it(db_session, make_mc):
-    """§3.0 rule 4: enrichment failure is never fatal, and never rewrites."""
+    """Enrichment failure is never fatal, and never rewrites."""
     mc = make_mc(contract_type="safe")
     before = {"salience": sal.SALIENCE_NOT_DETERMINED, "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]}
     event = _seed_event(db_session, mc, "safe_tx_executed", dict(before))
@@ -899,7 +899,7 @@ def test_a_failing_enricher_leaves_the_row_as_the_taxonomy_wrote_it(db_session, 
 
 
 # ---------------------------------------------------------------------------
-# §5a — the notifier opt-in
+# The notifier opt-in
 # ---------------------------------------------------------------------------
 
 
@@ -951,7 +951,7 @@ def test_salience_allows(db_session, notify_env, minimum, level, allowed):
 
 
 def test_a_subscription_without_min_salience_receives_exactly_what_it_does_today(db_session, notify_env):
-    """Invariant 7: no existing subscription is muted."""
+    """No existing subscription is muted."""
     sub, emit = notify_env
     assert sub.event_filter is None
     event = emit("ownership_transferred", {"salience": sal.SALIENCE_ROUTINE, "new_owner": ADDR(9)})
@@ -1004,7 +1004,7 @@ def test_min_salience_composes_with_the_event_type_filter(db_session, notify_env
 
 
 def test_min_salience_never_overrides_the_tier_gate(db_session, notify_env):
-    """Invariant 2 / integrity-spec invariant 5: an occurrence that only proves
+    """An occurrence that only proves
     a writer ran never pages anyone, at any salience."""
     sub, emit = notify_env
     sub.event_filter = {"min_salience": "routine"}
@@ -1016,7 +1016,7 @@ def test_min_salience_never_overrides_the_tier_gate(db_session, notify_env):
 
 
 # ---------------------------------------------------------------------------
-# §5b — the API boundary
+# The API boundary
 # ---------------------------------------------------------------------------
 
 
@@ -1060,7 +1060,7 @@ def test_a_poll_row_carries_its_signal_class_through_the_api(db_session, api_cli
 
 
 # ---------------------------------------------------------------------------
-# Invariant 8, enforced at the driver
+# Additive enrichment, enforced at the driver
 # ---------------------------------------------------------------------------
 
 
@@ -1171,13 +1171,13 @@ def test_an_unresolvable_chain_costs_that_chain_not_the_window(db_session, make_
 def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_session, make_mc):
     """A transport failure on the transaction batch degrades exactly as a
     per-slot failure does: the hashes are absent from ``ctx.txs``, which reads
-    as "not fetched". The enrichers that need nothing from that map (§3.9's
-    correlation and poll-field classification) must still run — a blip on the
+    as "not fetched". The enrichers that need nothing from that map
+    (correlation and poll-field classification) must still run — a blip on the
     Safe decode may not take them down with it."""
     mc = make_mc(contract_type="safe")
     victim = make_mc()
     event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
-    # Same transaction (``_seed_event``'s hash is shared), so E3 — which needs
+    # Same transaction (``_seed_event``'s hash is shared), so correlation — which needs
     # nothing off the wire — has a real link to publish.
     effect = _seed_event(db_session, victim, "paused", {"salience": sal.SALIENCE_ALERT})
 

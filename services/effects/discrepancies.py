@@ -1,9 +1,8 @@
-"""§9 plane-disagreement routing, two directions with different severity.
+"""plane-disagreement routing, two directions with different severity.
 
 * Direction 1, static-positive / simulation-negative: a matcher bug or probe-soundness hole. Routed to the warning
 channel (``utils.logging.record_degraded`` → ``stage_errors``) with the recipe's
-:class:`~services.effects.harness.Discrepancy`; the verdict stays ``unknown`` (a non-observation never refutes, §8 rule
-1). Rare.
+:class:`~services.effects.harness.Discrepancy`; the verdict stays ``unknown`` (a non-observation never refutes). Rare.
 * Direction 2, static-silent / simulation-positive: the witness stands; a candidate new static idiom. Every proven
 verdict on a blank function is one, so it's an INFO log, not a degraded ``StageError``.
 
@@ -24,12 +23,12 @@ logger = logging.getLogger("services.effects.discrepancies")
 # Direction 2: a witnessed effect on a static-silent function.
 NEW_IDIOM_KIND = "static_silent_sim_positive_new_idiom"
 
-# Direction 3 (§7), the authority plane: only effects calls as a resolved principal, so only it can falsify authority
+# Direction 3, the authority plane: only effects calls as a resolved principal, so only it can falsify authority
 # resolution.
 AUTHORITY_CONTRADICTION_KIND = "authority_exact_member_gate_rejected"
 
 # OpenZeppelin v5 gate-rejection selectors, which name the rejected caller. Selectors only: revert-string or name
-# matching produced false positives (§0.0.1/§7).
+# matching produced false positives.
 _GATE_REJECTION_SELECTORS = frozenset(
     {
         "0xe2517d3f",  # AccessControlUnauthorizedAccount(address,bytes32)
@@ -58,7 +57,7 @@ def authority_contradiction(
     tier: str | None,
     transcript_ptr: str | None,
 ) -> bool:
-    """§7, the third direction on the authority plane. Files a degraded ``StageError`` when:
+    """The third direction on the authority plane. Files a degraded ``StageError`` when:
 
     1. the principal came from an exact ``finite_set`` capability that named it;
     2. the probe as that principal was rejected with a canonical gate selector (:data:`_GATE_REJECTION_SELECTORS`);
@@ -135,7 +134,7 @@ def file_new_idiom_candidate(
     contract_address: str,
     selector: str | None,
 ) -> None:
-    """Direction 2 (§9): emit an INFO vocabulary-growth signal (not a degraded ``StageError``) for a witnessed effect
+    """Direction 2: emit an INFO vocabulary-growth signal (not a degraded ``StageError``) for a witnessed effect
     on a blank function; the caller persists the witness.
     """
     context: dict[str, Any] = {

@@ -1,4 +1,4 @@
-"""Behavioral-hash ladder tests (EFFECTS_RESOLUTION_SPEC §7 / inv. 2).
+"""Behavioral-hash ladder tests.
 
 A real-Slither compile of a mixin default vs a stricter override (gated on local solc; CI has one,
 a fresh clone skips), plus solc-free structural doubles so the core invariants are always covered.
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.compile
 
 
 def test_override_hashes_differently_from_mixin_structural():
-    """inv. 2: a stricter override MUST hash apart from the mixin default even though names are stripped."""
+    """a stricter override MUST hash apart from the mixin default even though names are stripped."""
     latch = _var("StateVariable", "_pausedUntil")
     sender = _var("SolidityVariableComposed", "msg.sender")
     guardian = _var("StateVariable", "guardian")
@@ -180,7 +180,7 @@ def _solc_086() -> str:
 
 
 def test_override_vs_mixin_resolved_hashes_differ_real_slither(tmp_path: Path):
-    """inv. 2 on real IR: the mixin `pauseUntil` default and a stricter override MUST hash apart
+    """On real IR: the mixin `pauseUntil` default and a stricter override MUST hash apart
     (the exact weETH hazard: same name, same inherited file, different gate)."""
     from slither.slither import Slither
 

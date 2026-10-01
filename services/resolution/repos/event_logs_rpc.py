@@ -124,7 +124,7 @@ class RpcEventLogFetcher:
         # No cap by default; only the durable indexer's builder applies the env cap because only it persists the counts.
         # The live monitoring watcher must not start raising at the bisect floor.
         self.result_cap = result_cap
-        # Lets ``rpc_request`` check the URL routes this chain (inv. 7).
+        # Lets ``rpc_request`` check the URL routes this chain.
         self.chain_id = chain_id
         # None uses ``rpc_request``'s default. Timeouts arrive as ``RpcClientTimeout`` and get one same-window retry
         # before being treated as a reject.

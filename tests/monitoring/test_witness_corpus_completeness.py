@@ -1,4 +1,4 @@
-"""Corpus completeness for the witness taxonomy (spec Part 6, G3 artifact).
+"""Corpus completeness for the witness taxonomy.
 
 Zero-diff on golden fixtures proves nothing unless the corpus CONTAINS the shapes the
 taxonomy separates. One contract carries all five degenerate shapes (reentrancy guard,

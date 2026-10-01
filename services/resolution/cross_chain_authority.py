@@ -1,4 +1,4 @@
-"""Cross-chain authority recognition (invariant 15: label early, model late).
+"""Cross-chain authority recognition: labels without cross-chain control edges.
 
 L2 deployments often hand ownership to an aliased L1 address or an OP-stack bridge predeploy, which would otherwise
 classify as anonymous EOAs or contracts. Recognition uses the chain registry (``ChainInfo.bridge_executors`` /
@@ -76,7 +76,7 @@ def classify_cross_chain_authority(
             return CROSS_CHAIN_AUTHORITY_TYPE, {
                 "address": norm,
                 "role": "aliased_l1_owner",
-                # Hint only (inv. 15), not a control edge.
+                # Hint only, not a control edge.
                 "implied_l1_address": implied,
             }
     return None

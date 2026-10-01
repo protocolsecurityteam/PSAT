@@ -393,7 +393,7 @@ class TestMaybeQueueReanalysis:
         assert job2.id != job1.id
 
     def test_dedup_respects_chain(self, db_session, monkeypatch):
-        # Base is made enabled explicitly (inv. 14: re-analysis gates off-allowlist chains).
+        # Base is made enabled explicitly (re-analysis gates off-allowlist chains).
         monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
         addr = "0x" + "cd" * 20
 

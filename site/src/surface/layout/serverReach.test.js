@@ -1,5 +1,5 @@
-// Consumption of the server-computed reach block (SURFACE_REACH_UNIFICATION_
-// SPEC.md payload schema). The scorer walked; these tests pin that the client
+// Consumption of the server-computed reach block. The scorer walked;
+// these tests pin that the client
 // only follows its keys — three distinct states in, three distinct states out,
 // and nothing rendered where the witness is absent.
 

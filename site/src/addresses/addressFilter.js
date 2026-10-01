@@ -1,4 +1,4 @@
-// Membership display for AddressesModal (DISCOVERY_MEMBERSHIP_GATE spec §5.3);
+// Membership display for AddressesModal;
 // states come from the payload, never computed here.
 //
 // - members: proven present. A member admitted only as a historical
@@ -73,7 +73,7 @@ export function candidateReasonText(row) {
   }
   if (kind === "probe_error") return "probe attempt failed";
   if (kind === "no_probe_attempt") return "no probe attempt yet";
-  // Unknown kinds surface verbatim (invariant 5).
+  // Unknown kinds surface verbatim.
   return typeof kind === "string" && kind ? kind : "";
 }
 

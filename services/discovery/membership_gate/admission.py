@@ -78,7 +78,7 @@ HUMAN_ASSERTION_REQUEST_KEY = "human_assertion"
 
 @dataclass(frozen=True)
 class HumanAssertion:
-    """An admin's explicit membership assertion: actor and timestamp, never a source tag (invariant 14)."""
+    """An admin's explicit membership assertion: actor and timestamp, never a source tag."""
 
     actor: str
     asserted_at: datetime
@@ -121,10 +121,9 @@ def nominate(
     """Record that a source nominated *contract* for *protocol_id*.
 
     Sets ``nominated_protocol_id``, never ``protocol_id``. First nomination wins; later differing ones are kept only as
-    provenance. A member's empty slot belongs to its own protocol (invariant 4), never a foreign nomination.
+    provenance. A member's empty slot belongs to its own protocol, never a foreign nomination.
 
-    ``human_assertion`` (W5, spec §5.2) writes the W5 witness and attempts promotion, which still needs W1 (invariant
-    3).
+    ``human_assertion`` (W5) writes the W5 witness and attempts promotion, which still needs W1.
     """
     _require_positive_int(protocol_id, "protocol_id")
     if contract.protocol_id is not None:
@@ -183,7 +182,7 @@ def nominate(
 
 
 def seed_llama_witness(session: Session, *, contract: Contract) -> bool:
-    """W6 seed for the contract's claimed protocol (spec §3.2): the ``defillama`` tag plus a code-present probe on
+    """W6 seed for the contract's claimed protocol: the ``defillama`` tag plus a code-present probe on
     the row's chain. The only W6 producer. A row with any W6 row (active or revoked) is left alone, so a revoked
     seed is never re-armed by the same listing.
     """
@@ -267,9 +266,9 @@ def defer_membership_dirty(session: Session) -> Iterator[None]:
 
 
 def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
-    """Promote iff W1 holds (invariant 3), at least one admitting witness is active, and its via-fact verifies
+    """Promote iff W1 holds, at least one admitting witness is active, and its via-fact verifies
     against stored resolution (a written witness is a claim, not a license). Returns whether the contract is a
-    member on exit; refusals log the missing piece (invariant 5).
+    member on exit; refusals log the missing piece.
     """
     _require_positive_int(protocol_id, "protocol_id")
     if contract.protocol_id == protocol_id:
@@ -284,7 +283,7 @@ def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:
     rules = {row.rule for row in rows}
     # W1 must be a code proof on the contract's own chain.
     expected_chain = chain_id_for_chain_name(contract.chain)
-    # The latest probe verdict outranks a stale W1 row; proven-absent never promotes (§3.1).
+    # The latest probe verdict outranks a stale W1 row; proven-absent never promotes.
     if expected_chain is not None and contract.address:
         code_row = session.get(ContractCreationWitness, (expected_chain, contract.address.lower()))
         if code_row is not None and code_row.code_absent_at_probe is True:
@@ -361,7 +360,7 @@ def demote_member(
     reason: str,
     evidence: dict[str, Any] | None = None,
 ) -> None:
-    """Member to candidate: clear ``protocol_id``, keep nomination and witness history (invariant 4).
+    """Member to candidate: clear ``protocol_id``, keep nomination and witness history.
 
     The caller revokes witnesses.
     """
@@ -437,9 +436,9 @@ def _derive_admitting_facts(
     session: Session, contract: Contract, protocol_id: int, *, heuristic_inheritance: bool = False
 ) -> tuple[list[tuple[str, dict[str, Any], str]], bool]:
     """W2/W3/W4 facts provable from stored resolution for one candidate, in deterministic order, from control and
-    lineage edges only (invariant 6). Returns ``(facts, w4_blocked_on_creation_witness)``.
+    lineage edges only. Returns ``(facts, w4_blocked_on_creation_witness)``.
 
-    ``heuristic_inheritance=True`` also applies the DEPLOYER_HEURISTIC_SPEC.md §6 exception (a heuristic member proxy
+    ``heuristic_inheritance=True`` also applies the same-contract heuristic exception (a heuristic member proxy
     carries its implementations); off for the proof strata.
     """
     addr = (contract.address or "").lower()
@@ -629,7 +628,7 @@ def _derive_admitting_facts(
     w4_blocked = False
     deployer = (contract.deployer or "").lower()
     if deployer and _ADDRESS_RE.match(deployer):
-        # Proof classes only; an H row licenses ``w4h_deployer_affinity`` in the last stratum (§1).
+        # Proof classes only; an H row licenses ``w4h_deployer_affinity`` in the last stratum.
         registry = _proof_registry_row(session, protocol_id=protocol_id, address=deployer)
         if registry is not None:
             chain_id = chain_id_for_chain_name(contract.chain)
@@ -651,7 +650,7 @@ def _derive_admitting_facts(
 
 
 def probe(session: Session, contract: Contract) -> "ProbeResult":
-    """Run the §3.5 corroboration probe for *contract* and persist its results."""
+    """Run the corroboration probe for *contract* and persist its results."""
     from services.discovery.probes import run_probe
 
     return run_probe(session, contract)

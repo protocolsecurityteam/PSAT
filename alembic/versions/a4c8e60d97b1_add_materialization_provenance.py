@@ -4,7 +4,7 @@ A materialization row says "this bundle is the current analysis of this
 contract". Until now nothing on the row said WHO established it or FROM WHAT —
 the recursion was the only writer, so the answer was implicit. Once the main
 pipeline and the promotion sweep also write rows, the producer and its source
-job are facts a reader cannot reconstruct, and invariant 7 requires the source
+job are facts a reader cannot reconstruct, and provenance requires the source
 job to be recorded before a per-job artifact may enter the versioned store.
 
 Nullable on purpose: a row written before this column existed carries no

@@ -4,9 +4,9 @@ Revision ID: b4e1d8a52f39
 Revises: a3f7c9d21e08
 Create Date: 2026-07-17 13:00:00.000000
 
-Expand-contract (invariant 9): add two nullable columns to ``jobs`` so the
+Expand-contract: add two nullable columns to ``jobs`` so the
 job-level static cache can reuse a completed job's code-plane analysis for a new
-``(chain, address)`` deployment of the same verified source (invariant 1 — the
+``(chain, address)`` deployment of the same verified source (the
 "lookup-before-analyze step in the static path" for job ROOTS, the analog of the
 ``contract_materializations`` reuse for nested contracts).
 

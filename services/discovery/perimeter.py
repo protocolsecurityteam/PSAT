@@ -113,7 +113,7 @@ def _parent_company(session: Session, job: Job) -> str | None:
 
 def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, str], Contract | None]:
     """``(parent_is_member, {dep_address: relationship}, parent_contract)`` for structural same-protocol components
-    of the parent (the W2 producer, spec §3.2).
+    of the parent (the W2 producer).
 
     ``relationship_type`` alone isn't enough: it's what the dep is, not the edge (a member calling Lido stETH sees
     ``proxy`` because stETH is a proxy). The Contract row's proxy/impl/beacon fields must link the two.
@@ -135,7 +135,7 @@ def _structural_ownership(session: Session, job: Job) -> tuple[bool, dict[str, s
     if parent_contract is None:
         return False, {}, None
 
-    # Membership, never a source tag (spec §3.2 W2).
+    # Membership, never a source tag (W2).
     parent_is_member = getattr(parent_contract, "protocol_id", None) is not None
     parent_id = getattr(parent_contract, "id", None)
     parent_impl = (getattr(parent_contract, "implementation", None) or "").lower() or None
@@ -200,7 +200,7 @@ def produce_structural_witness(
     protocol_id: int | None,
     relationship: str,
 ) -> str | None:
-    """W2 producer (spec §3.2, invariant 6): write the witness only when the rows' stored resolution carries the edge
+    """W2 producer: write the witness only when the rows' stored resolution carries the edge
     (the parent's ``implementation``/``beacon``, or the candidate proxy's back-link). The witness protocol is the
     parent's membership. Returns the edge kind, or None.
     """
@@ -249,7 +249,7 @@ def produce_structural_witness(
 
 
 def needs_probe(session: Session, contract: Contract) -> bool:
-    """§3.4 event 1 trigger: no probe for the row's own chain, an incomplete attempt (errors aren't verdicts), or a
+    """Probe trigger: no probe for the row's own chain, an incomplete attempt (errors aren't verdicts), or a
     pruned row seen again (pruning is evidence at a block, not terminal).
     """
     from services.discovery.probes import STATUS_PROBED, UNRESOLVABLE_CHAIN_ID
@@ -271,7 +271,7 @@ def needs_probe(session: Session, contract: Contract) -> bool:
 
 def probe_predates_revocation(session: Session, contract: Contract) -> bool:
     """A demoted member keeps its old probe, so ``needs_probe`` skips it; a witness revocation newer than that probe
-    makes it stale (invariant 8), so re-target it. The pickup path for demotions where no inline probe may run.
+    makes it stale, so re-target it. The pickup path for demotions where no inline probe may run.
     """
     from services.discovery.probes import UNRESOLVABLE_CHAIN_ID
 
@@ -290,7 +290,7 @@ def probe_predates_revocation(session: Session, contract: Contract) -> bool:
 
 
 def record_code_witness(session: Session, *, contract: Contract, protocol_id: int, probe_result: "ProbeResult") -> bool:
-    """W1 from a fresh probe: only code-present on the contract's own chain mints it (invariant 3)."""
+    """W1 from a fresh probe: only code-present on the contract's own chain mints it."""
     from db.models import WITNESS_RULE_W1_CODE
     from services.discovery import membership_gate as gate
 
@@ -352,7 +352,7 @@ def _produce_structural_witnesses(
             promoted.append(row.id)
     session.commit()
     if promoted:
-        # A promotion is new evidence (spec §3.4 event 2d).
+        # A promotion is new evidence.
         gate.evaluate(session, gate.FactsDelta(new_member_contract_ids=tuple(promoted)))
         session.commit()
 

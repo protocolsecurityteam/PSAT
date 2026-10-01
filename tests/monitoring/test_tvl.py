@@ -597,7 +597,7 @@ class TestSnapshotDedup:
 
 @requires_postgres
 class TestNativeAssetPricingDispatch:
-    """Native USD pricing dispatches on the contract's chain (inv. 5): ETH-native chains reuse
+    """Native USD pricing dispatches on the contract's chain: ETH-native chains reuse
     the mainnet quote; a non-ETH chain is priced via ``get_native_price`` and skipped
     (partial-flagged), never ETH-quoted, when unavailable."""
 
@@ -837,7 +837,7 @@ class TestContractBreakdownCompositeKey:
         assert all(entry["stale"] for entry in breakdown.values())
 
     def test_read_existing_priced_zero_is_published_unpriced_is_not(self, db_session, _cleanup):
-        """Same distinction as the refresh branch (readiness §2.3): a stored
+        """Same distinction as the refresh branch: a stored
         priced zero is a witnessed holding of nothing and publishes as 0.0;
         a NULL ``usd_value`` stays out of the served figures."""
         protocol = Protocol(name="TestProto_read_pzero")

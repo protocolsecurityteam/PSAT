@@ -1,4 +1,4 @@
-"""Allowlist gating at internal work-origination sites (invariant 14). ``require_supported_chain`` guards the
+"""Allowlist gating at internal work-origination sites. ``require_supported_chain`` guards the
 router edges, but the selection worker's analysis-child spawns and monitoring auto-enroll enforced nothing, so a
 company scan whose DeFiLlama evidence named a non-enabled chain spawned analysis jobs and
 ``monitored_contracts`` rows there. Pinned: off-allowlist discoveries keep their evidence (Contract rows,

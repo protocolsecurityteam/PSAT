@@ -99,7 +99,7 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     if not contract_ids:
         return 0
 
-    # Keyed by chain: the same address is a distinct principal per chain and control never crosses chains (inv. 15).
+    # Keyed by chain: the same address is a distinct principal per chain and control never crosses chains.
     rows_by_key: dict[tuple[str, str], list[tuple[ResolvedControllerType, dict[str, Any]]]] = {}
     for chain, addr, resolved_type, details in session.execute(
         select(
@@ -267,7 +267,7 @@ def materialize_fp_principal_nodes(
         result["out_of_population"].append({"address": address, "reason": reason})
 
     contract = session.get(Contract, contract_id)
-    # NULL is legacy mainnet (inv. 15). An absent contract has no chain; its candidates fail closed.
+    # NULL is legacy mainnet. An absent contract has no chain; its candidates fail closed.
     chain = _mainnet_coalesced_chain(contract.chain) if contract is not None else None
     # A blank address would mint an edge from ``address:``.
     anchor_address = ((contract.address or "").lower() or None) if contract is not None else None

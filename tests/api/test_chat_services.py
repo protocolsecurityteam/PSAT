@@ -1,7 +1,7 @@
 """Offline coverage for services/chat/* and utils/llm.tool_chat.
 
 These modules ship the company-page agent and were only exercised by the CI-excluded
-``tests/live/test_agent_live.py``, so the 70% diff-cover gate kept rejecting the PR; covered here
+``tests/test_agent_live.py``, so the 70% diff-cover gate kept rejecting the PR; covered here
 with real-DB unit tests + a stubbed LLM stream.
 
 ``seeded_protocol`` builds one protocol: proxy/timelock, plain contract and impl; Safe (4-of-7),

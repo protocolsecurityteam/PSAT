@@ -124,7 +124,7 @@ class DAppCrawlWorker(BaseWorker):
                 detail_by_addr[addr] = detail
 
         # Unattributed addresses inherit the job chain rather than chain=NULL, which would duplicate a sibling's
-        # 'ethereum' stub (inv. 1/6/12).
+        # 'ethereum' stub.
         bulk_entries: list[dict] = []
         for addr in addresses:
             normalized = addr.lower()

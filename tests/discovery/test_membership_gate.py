@@ -1,4 +1,4 @@
-"""Membership gate core primitives (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3, §5.1).
+"""Membership gate core primitives.
 
 Covers: the four derived membership states, per-rule evidence constructors,
 witness write/revoke idempotency, promotion/demotion, the deployer trust
@@ -63,7 +63,7 @@ def _contract(
 
 
 # ---------------------------------------------------------------------------
-# membership_state (§3.1)
+# membership_state
 # ---------------------------------------------------------------------------
 
 
@@ -99,7 +99,7 @@ def test_resolve_membership_state_reads_code_probe(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Evidence constructors (invariant 2)
+# Evidence constructors
 # ---------------------------------------------------------------------------
 
 
@@ -184,7 +184,7 @@ def test_nominate_sets_nominated_never_protocol_id(db_session):
 
 def test_nominate_member_keeps_own_protocol_in_empty_slot(db_session):
     # A foreign nomination may never claim a member's NULL nominated slot —
-    # that slot is the member's own demotion provenance (invariant 4).
+    # that slot is the member's own demotion provenance.
     p1 = _protocol(db_session)
     p2 = _protocol(db_session)
     row = _contract(db_session, ADDR(22), protocol_id=p1.id)
@@ -236,7 +236,7 @@ def test_write_witness_rejects_unknown_rule_and_empty_evidence(db_session):
 
 
 def test_write_witness_refuses_hand_rolled_evidence(db_session):
-    # Invariant 2: only constructor-shaped evidence is admissible per rule.
+    # only constructor-shaped evidence is admissible per rule.
     protocol = _protocol(db_session)
     row = _contract(db_session, ADDR(34), nominated_protocol_id=protocol.id)
     good = gate.w1_evidence(chain_id=1, code_probe_block=5)
@@ -435,7 +435,7 @@ def test_demote_member_preserves_nomination_and_history(db_session):
     gate.revoke_witness(db_session, witness, reason="reprobe_found_no_code")
     gate.demote_member(db_session, contract=row, reason="no_admitting_witness")
     assert row.protocol_id is None
-    # Invariant 4: the nomination survives demotion, never destroyed.
+    # the nomination survives demotion, never destroyed.
     assert row.nominated_protocol_id == protocol.id
     survivors = db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id).all()
     assert len(survivors) == 1 and survivors[0].revoked_at is not None
@@ -445,12 +445,12 @@ def test_demote_member_preserves_nomination_and_history(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Deployer trust ladder (§3.3)
+# Deployer trust ladder
 # ---------------------------------------------------------------------------
 
 
 def _seed_w5_witness(db_session, member: Contract, protocol_id: int) -> None:
-    # F2: only a member holding a non-D2 admitting witness anchors the ladder.
+    # only a member holding a non-D2 admitting witness anchors the ladder.
     gate.write_witness(
         db_session,
         contract_id=member.id,
@@ -633,7 +633,7 @@ def _seed_w2_witness(db_session, contract: Contract, anchor: Contract, protocol_
 
 
 def test_classify_deployer_nominated_creation_never_maps(db_session):
-    """F1: a bare nomination is not membership evidence — a shared deployer's
+    """A bare nomination is not membership evidence — a shared deployer's
     foreign creation that is merely nominated must NOT map into the Class-B
     exclusivity set, and the foreign creation must never ride in on W4."""
     protocol = _protocol(db_session)
@@ -656,7 +656,7 @@ def test_classify_deployer_nominated_creation_never_maps(db_session):
         deployer_enumerator=lambda addr: (history, True),
     )
     # No proof-class row exists, so the row can hold no W4 witness. What it may
-    # hold is the labeled heuristic one (DEPLOYER_HEURISTIC_SPEC.md §1) — the
+    # hold is the labeled heuristic one — the
     # distinction the rule string exists to keep.
     rules = {w.rule for w in gate.active_witnesses(db_session, contract_id=foreign.id, protocol_id=protocol.id)}
     assert WITNESS_RULE_W4_DEPLOYER not in rules
@@ -672,7 +672,7 @@ def test_classify_deployer_nominated_creation_never_maps(db_session):
 
 
 def test_classify_deployer_member_factory_child_maps(db_session):
-    """Member-factory mapping rule (deliberate §3.3 deviation): a creation
+    """Member-factory mapping rule (deliberate deviation): a creation
     minted by this protocol's own anchoring MEMBER factory counts as mapped in
     the exclusivity test — mapping only, no admission and no witness."""
     protocol = _protocol(db_session)
@@ -743,7 +743,7 @@ def test_classify_deployer_foreign_protocol_member_factory_does_not_map(db_sessi
 
 
 def test_classify_deployer_d2_only_member_factory_does_not_map(db_session):
-    # F2 carried into the factory rule: a D2-only member factory is
+    # Non-transitivity carried into the factory rule: a D2-only member factory is
     # non-transitive and must not convert its children into mapped creations.
     protocol = _protocol(db_session)
     eoa = ADDR(0x568)
@@ -819,7 +819,7 @@ def test_exclusivity_tolerates_member_factory_children(db_session):
 
 
 def test_enumeration_never_creates_contract_rows(db_session):
-    """Pinned regression, DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a COMPLETE
+    """Pinned enumeration regression: a COMPLETE
     enumeration's unknown creations are counted, never materialized."""
     from sqlalchemy import func, select
 
@@ -843,7 +843,7 @@ def test_enumeration_never_creates_contract_rows(db_session):
     assert db_session.execute(select(Contract).where(Contract.address == unknown)).first() is None
     assert db_session.execute(select(func.count(Contract.id))).scalar_one() == rows_before
 
-    # The counted-but-unknown creation still refuses Class B (F1 pin).
+    # The counted-but-unknown creation still refuses Class B.
     verdict = gate.classify_deployer(
         db_session, protocol_id=protocol.id, address=eoa, creation_history=history, history_complete=True
     )
@@ -852,7 +852,7 @@ def test_enumeration_never_creates_contract_rows(db_session):
 
 
 def test_exclusivity_tolerates_only_evidenced_candidates(db_session):
-    """F1, operator-exclusivity path: a controlled row that is merely
+    """Operator-exclusivity path: a controlled row that is merely
     nominated refuses exclusivity; the same row with a non-lineage witness
     tolerates it."""
     from services.discovery.membership_gate import _controller_is_exclusive
@@ -934,7 +934,7 @@ def _seed_d2_witness(db_session, member: Contract, protocol_id: int, via: str) -
 
 
 def test_classify_deployer_d2_only_member_never_anchors_class_a(db_session):
-    """F2: D2 entries are non-transitive — a principal observed on a D2-only
+    """D2 entries are non-transitive — a principal observed on a D2-only
     member (the EndpointV2 worst case) must not mint a Class-A anchor."""
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(0x530), protocol_id=protocol.id)
@@ -1086,7 +1086,7 @@ def test_demote_deployer_single_level(db_session):
     assert registry.revoked_at is not None
     assert registry.revocation_reason == "foreign_creation_observed"
     assert len(result.revoked_witness_ids) == 2
-    # Only the member with no other admitting witness is demoted (invariant 8).
+    # Only the member with no other admitting witness is demoted.
     assert result.demoted_contract_ids == (lineage_only.id,)
     assert result.reprobe_contract_ids == (lineage_only.id,)
     assert lineage_only.protocol_id is None
@@ -1098,7 +1098,7 @@ def test_demote_deployer_single_level(db_session):
 
 
 # ---------------------------------------------------------------------------
-# evaluate targeting (§3.4 event 2)
+# evaluate targeting
 # ---------------------------------------------------------------------------
 
 
@@ -1134,9 +1134,9 @@ def test_evaluate_targets_only_reachable_candidates(db_session):
     assert unreachable.id not in targeted
     assert unclaimed.id not in targeted
     assert member_at_edge.id not in targeted  # already a member; not a candidate
-    # No candidate here carries a code probe, so nothing may promote
-    # (invariant 3); the W2-reachable candidate parks on a NAMED missing
-    # piece — its W1 probe (invariant 5).
+    # No candidate here carries a code probe, so nothing may promote.
+    # The W2-reachable candidate parks on a NAMED missing
+    # piece — its W1 probe.
     assert result.promoted_contract_ids == ()
     assert result.demoted_contract_ids == ()
     assert by_pointer.id in result.reprobe_contract_ids

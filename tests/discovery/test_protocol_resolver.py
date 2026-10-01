@@ -294,7 +294,7 @@ class TestFetchProtocols:
 
 
 # ---------------------------------------------------------------------------
-# Listing `address` seed (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2 W6)
+# Listing `address` seed (W6)
 # ---------------------------------------------------------------------------
 
 

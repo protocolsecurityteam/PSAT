@@ -438,7 +438,7 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
     block = getattr(outer, "block", None)
     chain_id = getattr(outer, "chain_id", None)
     if not isinstance(chain_id, int):
-        # No chain means nothing to scan (inv. 6).
+        # No chain means nothing to scan.
         return []
     _bump_resolve_counter(outer, "mapping_value_scans")
     from services.resolution.creation_block_floor import resolve_scan_floor
@@ -470,7 +470,7 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
         scan = enumerate_mapping_values_sync(
             contract,
             cast(Any, writer_specs),
-            # inv. 11: one cache-key token format.
+            # one cache-key token format.
             chain=chain_cache_token(chain_id),
             **kwargs,
         )

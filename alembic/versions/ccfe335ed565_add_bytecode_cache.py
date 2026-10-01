@@ -5,7 +5,7 @@ Revises: 95ccb994b48c
 Create Date: 2026-05-01 21:00:00.000000
 
 Cross-process eth_getCode cache. Bytecode is effectively immutable per
-(chain_id, address) — no TTL column. Writers in utils/rpc.py keep the
+(chain_id, address) — no TTL column. Writers in services/clients/rpc.py keep the
 existing in-memory dict layered on top.
 """
 

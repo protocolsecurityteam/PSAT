@@ -2,7 +2,7 @@
 
 A CREATE2 twin is one address on two chains — two distinct entities. The
 unique-address stat must count them as two, matching the multichain entity
-model (inv. 12).
+model.
 """
 
 from __future__ import annotations

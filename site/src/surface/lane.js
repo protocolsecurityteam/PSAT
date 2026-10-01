@@ -56,7 +56,7 @@ export function toneForFunction(fn, lane) {
 
 export function compactActionSummary(fn) {
   // Claim-bearing functions always resolve here. The witness qualifier is
-  // appended only when present and at the bar (§7).
+  // appended only when present and at the bar.
   const claimSentence = sentenceForClaims(fn);
   if (claimSentence) {
     const qualifier = qualifierForClaims(fn);

@@ -1,4 +1,4 @@
-"""Offline tests for chain-qualified address labels (invariant 12, F5) via ``routers/address_labels.py``.
+"""Offline tests for chain-qualified address labels (F5) via ``routers/address_labels.py``.
 
 Global rows keep the historical address-keyed shape, chain-qualified rows override per network,
 and the three can coexist at one address.

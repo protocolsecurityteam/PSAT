@@ -255,7 +255,7 @@ def _primary_chain(contract: dict[str, Any]) -> str:
 
 
 def _within_run_evidence_chains(contracts: list[dict[str, Any]]) -> list[str]:
-    """Registry chains that evidence-bearing entries in this inventory declare (invariant 3 evidence)."""
+    """Registry chains that evidence-bearing entries in this inventory declare (declared evidence)."""
     chains: list[str] = []
     seen: set[str] = set()
     for c in contracts:
@@ -273,7 +273,7 @@ def resolve_unknown_chains(
 ) -> list[dict[str, Any]]:
     """Resolve ``chains=["unknown"]`` entries by probing ``eth_getCode``; mutates and returns the list.
 
-    ``declared_chains`` enforces invariant 3 (probing may confirm membership, never originate it):
+    ``declared_chains`` enforces declared-chain membership (probing may confirm it, never originate it):
 
     * ``None`` (standalone callers): the legacy all-chain probe, writing every hit to ``chains``.
     * a list (the pipeline): probe only declared chains (``Protocol.chains``, the requested chain, and within-run

@@ -1456,7 +1456,7 @@ def _transcript_artifact_name(transcript: dict[str, Any]) -> str:
 
 
 def _chain_id_for_job(job: Job) -> int:
-    """The job's ``chain_id`` (invariant 1), else derived from ``request['chain']``, else mainnet; mirrors
+    """The job's ``chain_id``, else derived from ``request['chain']``, else mainnet; mirrors
     ``policy_worker``.
     """
     from db.models import derive_job_chain_id

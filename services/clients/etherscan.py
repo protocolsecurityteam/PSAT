@@ -757,7 +757,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
             f"etherscan addresstokenbalance, {pages_read} page(s) of {TOKEN_BALANCE_PAGE_SIZE}, ended on a short page"
         )
     else:
-        # An empty list per one third-party index, not proof nothing is held (SHEET_OBSERVATION_SPEC.md §2).
+        # An empty list per one third-party index, not proof nothing is held.
         status = ASSET_SET_STATUS_RETURNED_EMPTY
         basis = f"etherscan addresstokenbalance, {pages_read} page(s), empty list"
     return TokenBalancePage(

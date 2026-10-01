@@ -1,4 +1,4 @@
-"""M0.2 item 2 — SQL-side chain-qualified dedup + reconcile chain-nesting fix (invariant 1).
+"""M0.2 item 2 — SQL-side chain-qualified dedup + reconcile chain-nesting fix.
 
 Same address on two chains yields two independent jobs; dedup never returns a cross-chain match.
 Complements ``test_chain_aware_cache.py`` (Python-side filtering) and

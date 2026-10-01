@@ -1,4 +1,4 @@
-"""Registry behavior tests (inv. 5): id/name lookup, alias resolution,
+"""Registry behavior tests: id/name lookup, alias resolution,
 raise-on-unknown, supported_chain_ids parsing, and per-chain registry
 invariants (hypersync url, native asset, predeploy constants)."""
 
@@ -67,7 +67,7 @@ def test_all_chain_ids_positive_and_unique():
 
 
 def test_every_chain_has_a_native_asset():
-    # inv. 5: the native gas-token symbol is an explicit registry fact for every
+    # The native gas-token symbol is an explicit registry fact for every
     # chain — TVL native-asset pricing dispatches on it (services/monitoring/tvl.py).
     for info in all_chains():
         assert info.native_asset, f"{info.name} is missing a native_asset symbol"

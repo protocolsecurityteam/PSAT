@@ -139,7 +139,7 @@ def find_completed_static_cache(
 
     Looks up the contract by (address, chain), since ``copy_static_cache`` may have reassigned it. If that misses and
     *source_content_hash* is given, falls back to any completed job with the same verified source under the current
-    analyzer (invariant 1); the primary path is unchanged.
+    analyzer; the primary path is unchanged.
     """
     stmt = (
         select(Job)
@@ -150,7 +150,7 @@ def find_completed_static_cache(
         )
         .order_by(Job.updated_at.desc())
     )
-    # Filter on ``jobs.chain_id`` (invariant 1).
+    # Filter on ``jobs.chain_id``.
     if chain is not None:
         stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
     candidates = session.execute(stmt).scalars().all()
@@ -195,7 +195,7 @@ def find_completed_static_cache(
 
         return candidate
 
-    # Cross-chain fallback (invariant 1).
+    # Cross-chain fallback.
     if source_content_hash:
         return _find_static_cache_by_source_hash(session, source_content_hash)
 

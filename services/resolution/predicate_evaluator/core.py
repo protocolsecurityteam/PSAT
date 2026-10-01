@@ -315,7 +315,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             and leaf_is_caller_tainted(leaf)
             and is_permissionless_caller_shape(leaf)
         ):
-            # Value movement (§2.3): a required effectful external call moving the caller's own assets is open. Usually
+            # Value movement: a required effectful external call moving the caller's own assets is open. Usually
             # classified ``business`` upstream; this guards delegated-tagged leaves that still arrive. Library calls and
             # void merkle verifications stay gated.
             if _is_permit_family_signature(leaf.get("callee_signature")):
@@ -500,7 +500,7 @@ def _maybe_inline_cross_contract_call(
 
     chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(chain_id, int):
-        # Chainless inlining can't key the stack or resolve the callee (inv. 6).
+        # Chainless inlining can't key the stack or resolve the callee.
         return None
     stack = outer_ctx.evaluation_stack if hasattr(outer_ctx, "evaluation_stack") else set()
     callee_identity = callee_signature or callee_selector or ""

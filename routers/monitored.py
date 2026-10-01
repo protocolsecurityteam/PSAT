@@ -107,7 +107,7 @@ def list_monitored_contracts(
     "/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin_key)], response_model=None
 )
 def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> MonitoredContractItem:
-    # Allowlist (inv. 14): enrollment takes scanner leases and RPC on that chain.
+    # Allowlist: enrollment takes scanner leases and RPC on that chain.
     try:
         require_supported_chain(chain=request.chain, context="monitored-contract enrollment")
     except UnsupportedChainError as exc:

@@ -338,7 +338,7 @@ def test_process_address_fanout_swallows_creators_exception(monkeypatch):
 
 def test_cache_hit_routes_row_through_gate_intake(monkeypatch):
     """The static-cache-hit early return must still enter the membership gate:
-    the cache hit reuses ANALYSIS, never protocol membership (invariant 1)."""
+    the cache hit reuses ANALYSIS, never protocol membership."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -414,7 +414,7 @@ def test_fetch_path_routes_existing_row_through_gate_intake(monkeypatch):
 def test_fetch_path_never_stamps_protocol_id_at_write(monkeypatch):
     """The new-row arm writes ``protocol_id=None`` regardless of the job's
     protocol or its request sources — membership is earned in the gate, never
-    conferred by a source's identity (invariant 1)."""
+    conferred by a source's identity."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()

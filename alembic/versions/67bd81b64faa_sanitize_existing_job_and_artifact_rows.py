@@ -8,8 +8,7 @@ Routes existing ``jobs.request`` (JSONB), ``jobs.error`` (Text), and
 inline ``artifacts.data`` (JSONB, for ``dependencies`` /
 ``dynamic_dependencies`` / ``stage_errors``) through the same helpers
 the application uses on its output paths. Storage-backed artifact
-bodies are handled out-of-band by
-``scripts/sanitize_storage_artifacts.py``.
+bodies are outside this migration's scope; it only updates inline rows.
 
 Idempotent. Downgrade is a no-op.
 """

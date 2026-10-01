@@ -1,4 +1,4 @@
-"""Canonical chain registry (invariant 5): every per-chain constant lives in :class:`ChainInfo`.
+"""Canonical chain registry: every per-chain constant lives in :class:`ChainInfo`.
 
 :func:`canonical_chain` is the loose-label front door.
 """
@@ -66,7 +66,7 @@ def canonical_chain_list(values: Iterable[Any] | None) -> list[str] | None:
     return out
 
 
-# Per-chain tuning happens at enablement (inv. 14).
+# Per-chain tuning happens at enablement.
 DEFAULT_CONFIRMATION_DEPTH = 12
 MAX_GETLOGS_RANGE = 2000
 
@@ -80,7 +80,7 @@ class UnknownChainError(ValueError):
 
 
 class UnsupportedChainError(ValueError):
-    """Fail-loud signal where a chain used to default to mainnet (invariant 6).
+    """Fail-loud signal where a chain used to default to mainnet.
 
     A ``ValueError`` so existing handlers still catch it.
     """
@@ -105,7 +105,7 @@ class ChainInfo:
     # Nominal seconds per block, so wall-clock budgets can be expressed in blocks. Required: a borrowed 12s would
     # misjudge every L2. Never a claim about a real block timestamp.
     block_time_s: float
-    # Populated at Phase 2 enablement (inv. 15).
+    # Populated at Phase 2 enablement.
     bridge_executors: tuple[str, ...]
     cross_domain_messengers: tuple[str, ...]
     # Etherscan v2 stats action for the native USD price. ``ethprice`` serves most chains (including non-ETH L1s); BSC
@@ -118,7 +118,7 @@ class ChainInfo:
         return self.chain_id in supported_chain_ids()
 
 
-# HyperSync is set only where coverage is proven; others are indexer-disabled until proven (inv. 14).
+# HyperSync is set only where coverage is proven; others are indexer-disabled until proven.
 _CHAINS: tuple[ChainInfo, ...] = (
     ChainInfo(
         chain_id=1,
@@ -177,14 +177,14 @@ _CHAINS: tuple[ChainInfo, ...] = (
         name="base",
         aliases=(),
         native_asset="ETH",
-        # Preview-validated (inv. 14): HyperSync is unreachable from the dev network.
+        # Preview-validated: HyperSync is unreachable from the dev network.
         hypersync_url="https://base.hypersync.xyz",
         explorer_base_url="https://basescan.org",
         # 75 × ~2s ≈ mainnet's 12 × ~12s; OP-stack unsafe-head reorgs are possible until the L1 batch posts.
         confirmation_depth=75,
         max_getlogs_range=MAX_GETLOGS_RANGE,
         block_time_s=2,  # OP-stack: 2s
-        # OP-stack predeploys (inv. 15): L2StandardBridge executes bridged transfers; L2CrossDomainMessenger's
+        # OP-stack predeploys: L2StandardBridge executes bridged transfers; L2CrossDomainMessenger's
         # xDomainMessageSender surfaces an aliased L1 owner.
         bridge_executors=("0x4200000000000000000000000000000000000010",),
         cross_domain_messengers=("0x4200000000000000000000000000000000000007",),
@@ -343,7 +343,7 @@ def require_chain(
     chain: str | None = None,
     context: str,
 ) -> ChainInfo:
-    """Resolve by ``chain_id`` then name, or raise :class:`UnsupportedChainError` (invariant 6).
+    """Resolve by ``chain_id`` then name, or raise :class:`UnsupportedChainError`.
 
     Never falls back to mainnet.
     """
@@ -374,7 +374,7 @@ def require_supported_chain(
     chain: str | None = None,
     context: str,
 ) -> ChainInfo:
-    """Resolve a chain and require it in ``PSAT_SUPPORTED_CHAIN_IDS`` (invariant 14).
+    """Resolve a chain and require it in ``PSAT_SUPPORTED_CHAIN_IDS``.
 
     For state-writing edges; read-only listings skip it so a since-disabled chain's rows stay reachable.
     """
@@ -409,7 +409,7 @@ def chain_enabled(chain: str | int | None) -> bool:
 
 
 def chain_cache_token(chain: str | int | None) -> str:
-    """Cache-key token for a chain (invariant 11): the decimal chain id, collapsing name and id keys onto one row.
+    """Cache-key token for a chain: the decimal chain id, collapsing name and id keys onto one row.
 
     ``None`` is mainnet. An unregistered name is its own lowercased bucket rather than mainnet, so a lookup misses
     instead of colliding across chains.

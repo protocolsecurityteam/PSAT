@@ -727,7 +727,7 @@ def scan_enrolled_events(
             pass_budget = max(1, len(groups))
             max_windows_per_cursor = 1
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
-    # Chains skipped for lack of a fetcher, logged once each (inv. 4/10) so they aren't silent.
+    # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
     skipped_chains: set[int] = set()
     for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
         if stop_event is not None and stop_event.is_set():
@@ -748,7 +748,7 @@ def scan_enrolled_events(
                     extra={"chain_id": chain_id},
                 )
             continue
-        # Per-chain finality depth (inv. 10); mainnet is 12, and the passed-in depth is the fallback for unregistered
+        # Per-chain finality depth; mainnet is 12, and the passed-in depth is the fallback for unregistered
         # chains.
         try:
             chain_confirmation_depth = chain_by_id(chain_id).confirmation_depth
@@ -959,7 +959,7 @@ def enroll_from_completed_jobs(
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
-        # Stamp the job's own chain (``Job.chain_id``, else derived from its request), never a default (inv. 6).
+        # Stamp the job's own chain (``Job.chain_id``, else derived from its request), never a default.
         job_chain_id = (
             job.chain_id
             if isinstance(job.chain_id, int)
@@ -1460,7 +1460,7 @@ def _build_indexer_fetchers(
 ) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
     """Per-chain fetchers for the scan loop.
 
-    The chain set is registry chains with ``hypersync_url`` (inv. 10); others get no fetcher and their cursors are
+    The chain set is registry chains with ``hypersync_url``; others get no fetcher and their cursors are
     skipped and logged. Every fetcher posts JSON-RPC through the chain's eRPC route (``require_rpc_url(chain_id=...)``);
     routing, the HyperRPC upstreams, failover and auth are eRPC config. ``hypersync_url`` is only the coverage signal
     (it rejects JSON-RPC).

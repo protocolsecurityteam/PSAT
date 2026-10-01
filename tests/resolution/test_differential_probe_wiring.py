@@ -1,7 +1,7 @@
-"""Phase 2 wiring tests: the differential probe's integration into the capability
-resolver (DIFFERENTIAL_PROBE_PLAN §3.6). Hermetic — the wire is injected, no RPC.
+"""Wiring tests: the differential probe's integration into the capability
+resolver. Hermetic — the wire is injected, no RPC.
 
-Asserts the strictly-additive invariant (§7.1): the probe runs ONLY for the
+Asserts the strictly-additive invariant: the probe runs ONLY for the
 gated-unknown population, a confirmed-public verdict re-projects to public, every
 other outcome keeps the static gated verdict, and any failure is swallowed.
 """
@@ -65,7 +65,7 @@ def test_should_probe_only_gated_unknown_external_check():
 
 
 # ---------------------------------------------------------------------------
-# §3.6 verdict landing
+# verdict landing
 # ---------------------------------------------------------------------------
 
 

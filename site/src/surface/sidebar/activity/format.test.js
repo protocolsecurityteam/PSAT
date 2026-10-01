@@ -274,7 +274,7 @@ describe("decodeEvent — Safe activity", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The enriched Safe execution (§5c). The renderer reads what the backend
+// The enriched Safe execution. The renderer reads what the backend
 // decoded and NEVER re-derives it: a mirrored decode would drift, and a
 // drifted mirror that renders the wrong call is worse than a bare hash.
 // ---------------------------------------------------------------------------

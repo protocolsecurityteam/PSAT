@@ -25,7 +25,7 @@ MAX_BATCH_SIZE = 500
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-# Derived from the registry (inv. 5).
+# Derived from the registry.
 COMMON_CHAIN_IDS = chain_name_to_id_map()
 
 # Keyed by (chain_id, address) so URL aliases share a slot; RPC errors aren't cached.
@@ -74,7 +74,7 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
     if cached is not None:
         return cached
     try:
-        # inv-7 exemption: this call discovers the chain id.
+        # Chain-discovery exemption: this call discovers the chain id.
         raw = rpc_request(rpc_url, "eth_chainId", [], retries=0)
     except Exception:
         return None
@@ -284,7 +284,7 @@ def default_rpc_url(
 
     An explicit URL wins only if local (Anvil/fork). Returns None for unresolvable chains or unset ``ERPC_BASE_URL`` so
     callers fail loud via :func:`require_rpc_url`. No mainnet or public-node fallback: a chainless call is a plumbing
-    bug (invariant 6).
+    bug.
     """
     if is_local_rpc_url(explicit_rpc_url):
         return explicit_rpc_url
@@ -332,7 +332,7 @@ def require_rpc_url(
 
 @dataclass(frozen=True)
 class ChainContext:
-    """A chain id bound to its RPC URL (invariant 7), so a caller can't pair one chain's id with another's URL.
+    """A chain id bound to its RPC URL, so a caller can't pair one chain's id with another's URL.
 
     Build via :func:`chain_context`.
     """
@@ -382,7 +382,7 @@ def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
 
 
 def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
-    """Invariant 7 guard: a declared *chain_id* must match the id in an eRPC URL path. No-op for non-eRPC URLs."""
+    """URL/chain guard: a declared *chain_id* must match the id in an eRPC URL path. No-op for non-eRPC URLs."""
     if chain_id is None:
         return
     url_chain_id = _erpc_chain_id_from_url(rpc_url)
@@ -592,8 +592,8 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
                 _log_getcode_pressure()
             return code, keccak_hex
 
-    # Outside the lock so misses don't serialize. Declare the caller's chain_id, never the URL-derived one, or the inv-7
-    # guard is a tautology.
+    # Outside the lock so misses don't serialize. Declare the caller's chain_id, never the URL-derived one, or the
+    # URL/chain guard is a tautology.
     raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"], chain_id=chain_id)
     code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
     # ``bytes.fromhex`` raises on odd-length hex.
@@ -664,7 +664,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
         return out
 
     calls: list[tuple[str, list[Any]]] = [("eth_getCode", [addr, "latest"]) for addr in to_fetch]
-    # The caller's chain_id, not the URL-derived one (inv-7).
+    # The caller's chain_id, not the URL-derived one.
     raw_results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     pg_writes: list[tuple[str, str, str]] = []
     with _GETCODE_CACHE_LOCK:

@@ -54,7 +54,7 @@ def list_jobs() -> list[JobDict]:
 
 @router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def analyze_address(request: AnalyzeRequest) -> JobDict:
-    # Allowlist (inv. 14) on the resolved chain, so chainless and company/dapp submissions are unaffected. An address
+    # Allowlist on the resolved chain, so chainless and company/dapp submissions are unaffected. An address
     # submission naming a chain must name a registered one: the string is stored verbatim.
     if request.address and request.chain and request.chain.strip():
         try:
@@ -71,7 +71,7 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
         # ``rpc_url`` is honored only as a local-node override, so a hosted URL can't shadow eRPC. Sanitized on output.
         req_dict = request.model_dump()
         # Lookup-only, so a typo 404s instead of minting a protocol. The membership claim rides as an attributed W5
-        # assertion for the gate (invariant 14), never a source tag.
+        # assertion for the gate, never a source tag.
         if request.address and request.company:
             protocol_row = session.execute(
                 select(Protocol).where(func.lower(Protocol.name) == request.company.lower()).limit(1)
@@ -122,7 +122,7 @@ def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
             session.refresh(contract, attribute_names=["job_id"])
             if contract.job_id is not None:
                 continue
-            # Allowlist gate (inv. 14), mirroring the selection worker.
+            # Allowlist gate, mirroring the selection worker.
             if not chain_enabled(contract.chain):
                 logger.info(
                     "analyze-remaining: skipping stub on non-enabled chain",
@@ -189,7 +189,7 @@ def delete_company_address(
 ) -> DeleteCompanyAddressResponse:
     """Remove a Contract row.
 
-    Scoped by chain (defaults to mainnet, inv. 12): address alone raised ``MultipleResultsFound``. FK cascades clean up
+    Scoped by chain (defaults to mainnet): address alone raised ``MultipleResultsFound``. FK cascades clean up
     coverage and upgrade attribution.
     """
     if not deps._ADDRESS_RE.match(address):

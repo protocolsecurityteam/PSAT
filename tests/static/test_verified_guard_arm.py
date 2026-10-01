@@ -1,7 +1,7 @@
 """W2's verified-guard satisfier, ``verified_guard_verdicts``.
 
 Closes one fail-open: a reentrancy guard var declared on a contract must never license a function
-that does not carry the guard. Each refusal fixture removes exactly one conjunct of the §2.4 proof
+that does not carry the guard. Each refusal fixture removes exactly one conjunct of the proof
 and has a positive sibling differing in that one construct, so ``not_determined`` cannot pass
 because the analysis never reached the code. Assertions are on the whole verdict dict.
 """
@@ -244,7 +244,7 @@ def test_a13_sibling_adding_only_the_revert_is_proven(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# A14 — no name drives an effect (invariant 1)
+# A14 — no name drives an effect
 # ---------------------------------------------------------------------------
 
 _A14_NAME_ONLY_GUARD = """

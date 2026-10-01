@@ -10,7 +10,7 @@ import {
 //
 // `labels` is a legacy Map or buildLabelMaps' `{ global, byChain }`. With
 // `chain` it edits the chain-qualified override (contracts); without, the
-// global row (EOAs/Safe signers, invariant 12). Display is
+// global row (EOAs/Safe signers). Display is
 // chain-specific-wins-else-global.
 export default function AddressLabelInline({ address, labels, chain = null, refreshAll, size = "sm" }) {
   const isAdmin = useIsAdmin();

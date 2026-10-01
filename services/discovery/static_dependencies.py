@@ -120,12 +120,12 @@ def find_dependencies(
 ) -> dict:
     """Resolve an RPC endpoint and return static dependencies.
 
-    *chain_id* arms the inv-7 URL/chain guard; None for the CLI.
+    *chain_id* arms the URL/chain guard; None for the CLI.
     """
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from services.clients.rpc import default_rpc_url
 
-    # Pipeline callers pass a chain-resolved URL; this mainnet default is only for the CLI (inv. 6).
+    # Pipeline callers pass a chain-resolved URL; this mainnet default is only for the CLI.
     effective_rpc = rpc_url or default_rpc_url(chain_id=1)
     if not effective_rpc:
         raise RuntimeError("No RPC URL provided and eRPC not configured (set ERPC_BASE_URL)")

@@ -1,4 +1,4 @@
-"""``eth_simulateV1`` capability preflight (EFFECTS_RESOLUTION_SPEC §3 / inv. 14).
+"""``eth_simulateV1`` capability preflight.
 
 Support is probed per chain at stage init and persisted; recipes needing it route to their declared Tier-2 fallback when
 unsupported. Persistence is behind the injectable :class:`CapabilityStore` (in-memory for now).
@@ -39,9 +39,8 @@ def probe_simulate_support(
     block: str = "latest",
     force: bool = False,
 ) -> bool:
-    """Probe and persist ``eth_simulateV1`` support for ``chain_id`` (inv.
-
-    14). Reused unless ``force``. Any structured response proves support; only :class:`SimulateUnsupportedError` records
+    """Probe and persist ``eth_simulateV1`` support for ``chain_id``. Reused unless ``force``. Any structured
+    response proves support; only :class:`SimulateUnsupportedError` records
     ``False``; other errors propagate so flakes aren't cached.
     """
     if not force:

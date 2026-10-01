@@ -1,9 +1,9 @@
 """W4-H heuristic deployer lineage: trust class H, witness rule, challenges.
 
-DEPLOYER_HEURISTIC_SPEC.md §8. Three schema deltas in one migration: the
+Three schema deltas in one migration: the
 ``protocol_deployers.trust_class`` vocabulary gains ``'H'``, the
 ``contract_membership_witnesses.rule`` vocabulary gains
-``'w4h_deployer_affinity'``, and ``deployer_affinity_challenges`` (§5) is
+``'w4h_deployer_affinity'``, and ``deployer_affinity_challenges`` is
 created — one row per observed foreign anchor, from which the H row's
 active/frozen/suspended/revoked state is derived.
 
@@ -96,7 +96,7 @@ def downgrade() -> None:
         ")"
     )
 
-    # Rows are revoked, never deleted (gate invariant 4), so the vocabulary can
+    # Rows are revoked, never deleted, so the vocabulary can
     # only narrow once the heuristic layer's rows are gone.
     op.execute(f"DELETE FROM {_RULE_TABLE} WHERE rule = 'w4h_deployer_affinity'")
     op.drop_constraint(_RULE_CONSTRAINT, _RULE_TABLE, type_="check")

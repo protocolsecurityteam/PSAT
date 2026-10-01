@@ -150,7 +150,7 @@ def _rpc_url_for_job(job: Job) -> str:
 
 
 def _chain_id_for_job(job: Job) -> int:
-    """The job's ``chain_id`` (invariant 1): the column, else derived from ``request["chain"]``, else mainnet."""
+    """The job's ``chain_id``: the column, else derived from ``request["chain"]``, else mainnet."""
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
         return chain_id

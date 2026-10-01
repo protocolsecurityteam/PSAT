@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 def _contract_chain_filter(chain: str | None):
     """Predicate matching a ``Contract`` on the mainnet-coalesced chain key (legacy mainnet rows have
-    ``chain=NULL``), as in ``routers/jobs.py`` and ``workers/discovery.py`` (invariants 1/6/12).
+    ``chain=NULL``), as in ``routers/jobs.py`` and ``workers/discovery.py``.
     """
     from sqlalchemy import func
 
@@ -542,7 +542,7 @@ def backfill_historical_impl_contracts(
     """Ensure a Contract row for each historical impl, via the membership gate, so audit coverage can link audits
     naming past impls.
 
-    Rows are nominated, never stamped (invariant 1); the gate admits via W2 ``historical_implementation`` once W1 lands.
+    Rows are nominated, never stamped; the gate admits via W2 ``historical_implementation`` once W1 lands.
     Rows owned by another protocol are left alone with a warning. Coverage refreshes only for members.
 
     ``current_impl_address`` is tagged as the live implementation so it stays analysable (see
@@ -639,7 +639,7 @@ def backfill_historical_impl_contracts(
     if not rows_by_addr:
         return
 
-    # §3.4 event 1 probe for W1, best-effort: a failure leaves an explainable candidate (invariants 3+5).
+    # probe for W1, best-effort: a failure leaves an explainable candidate.
     probe_chain_id = chain_id_for_chain_name(chain or "ethereum")
     if probe_chain_id is not None:
         for addr in sorted(rows_by_addr):

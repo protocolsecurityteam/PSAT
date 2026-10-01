@@ -1,4 +1,4 @@
-"""Input-asset seeding for Tier-1 probes (EFFECTS_RESOLUTION_SPEC §4.2/§4.5).
+"""Input-asset seeding for Tier-1 probes.
 
 Deposit-backed conversions (``WeETH.wrap``, vault ``deposit``) pull an input asset the simulated principal doesn't hold.
 ``eth_simulateV1`` with ``validation:false`` skips ETH checks but not ERC-20 state, so the probe reverts and the

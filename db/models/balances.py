@@ -206,7 +206,8 @@ class ContractBalanceLatest(Base):
     * a failed fetch never wins (it would publish "holds nothing");
     * legacy rows (``fetch_id IS NULL``) stay visible until a non-failed fetch exists.
 
-    Hidden from autogenerate by :func:`include_object` via ``info={"is_view": True}``; ``tests/test_alembic_chain.py``
+    Hidden from autogenerate by :func:`include_object` via ``info={"is_view": True}``;
+    ``tests/storage/test_alembic_chain.py``
     checks the diff is empty.
     """
 
@@ -260,7 +261,7 @@ class RestakingPosition(Base):
     )
     # Every read is at this height; unpinned reads write nothing.
     block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    # Reorg witness (inv.11/12), like ``last_indexed_block_hash``.
+    # Reorg witness, like ``last_indexed_block_hash``.
     block_hash: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     eigenpod: Mapped[str | None] = mapped_column(String(42), nullable=True)
     eigenpod_basis: Mapped[str] = mapped_column(String(32), nullable=False)

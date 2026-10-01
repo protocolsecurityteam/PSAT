@@ -1,4 +1,4 @@
-"""Unified protocol monitor: scanner, poller and TVL loops as supervised threads in one process (design §2.5).
+"""Unified protocol monitor: scanner, poller and TVL loops as supervised threads in one process.
 
 One loop's death never touches its siblings; a crash-loop pages via the error heartbeat but never stops. ``--poll`` /
 ``--tvl`` / ``--reconcile`` run a single loop in the foreground as rollback levers and the reconciler entrypoint.

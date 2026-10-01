@@ -1,5 +1,5 @@
-"""M1.1 item 1: a non-mainnet chain (Base, 8453) reaches each threaded path: the resolver's bound RPC URL/chain_id
-(inv. 7), balance Etherscan reads, materialization cache name, monitoring-enroll chain, probe rate bucket,
+"""M1.1 item 1: a non-mainnet chain (Base, 8453) reaches each threaded path: the resolver's bound RPC URL/chain_id,
+balance Etherscan reads, materialization cache name, monitoring-enroll chain, probe rate bucket,
 company-overview join and audit-timeline bytecode read. The wire is stubbed (never the class) to stay hermetic.
 """
 
@@ -38,14 +38,14 @@ def _erpc_base(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 # ---------------------------------------------------------------------------
-# inv. 7 — ChainContext binds chain_id to its RPC URL
+# ChainContext binds chain_id to its RPC URL
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("chain_id", "rpc_url", "chain_name", "expected_url"),
     [
-        # Chain-to-RPC binding (inv. 7): the Base id must bind the Base URL.
+        # Chain-to-RPC binding: the Base id must bind the Base URL.
         pytest.param(_BASE_ID, None, "base", "https://erpc.example" + _BASE_URL_SUFFIX, id="binds_base_url_to_base_id"),
         pytest.param(1, None, "ethereum", "https://erpc.example" + _MAINNET_URL_SUFFIX, id="mainnet_unchanged"),
         pytest.param(_BASE_ID, "http://127.0.0.1:8545", "base", "http://127.0.0.1:8545", id="local_override_wins"),
@@ -255,7 +255,7 @@ def test_job_matches_contract_chain_cross_chain():
 
 
 # ---------------------------------------------------------------------------
-# probe rate-limit bucket is chain-scoped (inv. 12)
+# probe rate-limit bucket is chain-scoped
 # ---------------------------------------------------------------------------
 
 
@@ -301,7 +301,7 @@ def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# routers/jobs — DELETE chain-qualifies (no more MultipleResultsFound) (inv. 12)
+# routers/jobs — DELETE chain-qualifies (no more MultipleResultsFound)
 # ---------------------------------------------------------------------------
 
 

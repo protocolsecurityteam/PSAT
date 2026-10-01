@@ -229,7 +229,7 @@ export function undeterminedTargets(finding, index) {
 }
 
 
-// The published net (spec §3.2) wins over the re-fold. Present-but-non-numeric
+// The published net wins over the re-fold. Present-but-non-numeric
 // is unwitnessed, not zero.
 function publishedNet(finding, refolded) {
   const published = finding?.net_points_lambda;

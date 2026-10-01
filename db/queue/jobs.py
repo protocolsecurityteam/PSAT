@@ -72,7 +72,7 @@ def create_job(
     address = request_dict.get("address")
     job = Job(
         address=address,
-        # Enqueue-path dual-write (invariant 1), sharing the model default's derivation.
+        # Enqueue-path dual-write, sharing the model default's derivation.
         chain_id=derive_job_chain_id(request_dict.get("chain"), address),
         company=request_dict.get("company"),
         name=request_dict.get("name"),
@@ -319,7 +319,7 @@ def reconcile_impl_job_for_proxy(
         # An effects-only retry isn't an implementation analysis.
         stmt = stmt.where(Job.request["effects_resume_work_id"].astext.is_(None))
         # Filter chain in both branches; it used to apply only with a root, letting another chain's job look like a
-        # duplicate (invariant 1).
+        # duplicate.
         if chain is not None:
             stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, impl_lc))
         if root_job_id is not None:

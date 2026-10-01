@@ -4,8 +4,7 @@ Revision ID: b3c5d7e9f1a2
 Revises: b2c3d4e5f6a7
 Create Date: 2026-07-08
 
-Dirty-flag enrollment queue + slow-sweep cursor for the monitoring restructure
-(design §2.3 / Stage 5). ``monitoring_enrollment_queue`` holds one row per
+Dirty-flag enrollment queue + slow-sweep cursor for the monitoring restructure. ``monitoring_enrollment_queue`` holds one row per
 protocol that needs its ``monitored_contracts`` reconciled; the drainer claims
 due rows with a lease and deletes the row it claimed on success.
 ``protocols.last_enrollment_reconcile_at`` is the K-per-tick slow-sweep cursor.

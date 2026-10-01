@@ -63,7 +63,7 @@ describe("InspectorCard empty-callers copy", () => {
   });
 });
 
-// SCORING plan §7.3 — the verbose witness surface. These assert the render, not
+// The verbose witness surface. These assert the render, not
 // just the derivation (memory: verify render logic before claiming what shows).
 function selectedWithClaims(claims, principals = []) {
   return {

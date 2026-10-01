@@ -1,4 +1,4 @@
-"""§7 (G7) — the authority-plane §9 direction.
+"""Authority-plane contradictions between resolution and execution.
 
 Effects is the only stage that executes a call AS a resolved principal, so it can
 falsify authority resolution: an EXACT ``finite_set`` whose member is rejected by
@@ -83,7 +83,7 @@ def test_canonical_gate_rejection_on_an_exact_member_files_a_degraded_error(sele
 @pytest.mark.parametrize(
     ("transcript", "run_kwargs"),
     [
-        # THE case that matters (§7): a state error carries a different, published selector, so a
+        # THE case that matters: a state error carries a different, published selector, so a
         # selector-keyed detector never mistakes it for a gate rejection, where a revert-string substring
         # match would.
         pytest.param(_transcript(STATE_PRECONDITION), {}, id="state_precondition_revert"),

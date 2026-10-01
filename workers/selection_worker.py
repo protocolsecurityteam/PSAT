@@ -142,7 +142,7 @@ class SelectionWorker(BaseWorker):
             extra={"protocol_id": job.protocol_id, "analyze_limit": analyze_limit},
         )
 
-        # §3.4 event-1 sweep: crawl nominations land after discovery's inline probe, so without settling here the member
+        # Nomination sweep: crawl nominations land after discovery's inline probe, so without settling here the member
         # query sees none of them. Selection runs after every nomination writer, so this can't race. Degrades to
         # existing membership.
         try:
@@ -308,7 +308,7 @@ class SelectionWorker(BaseWorker):
             addr = entry["__row_address"]
             # Dedup helpers skip chain filtering for None, so a NULL-chain row would match a job on any chain.
             chain = entry["__row_chain"] or "ethereum"
-            # Deployment allowlist (inv. 14): no analysis children for disabled chains, and no budget consumed.
+            # Deployment allowlist: no analysis children for disabled chains, and no budget consumed.
             if not chain_enabled(chain):
                 _drop(entry, "chain_not_enabled")
                 continue
@@ -339,7 +339,7 @@ class SelectionWorker(BaseWorker):
         company = job.company
         for entry in selected:
             addr = entry["__row_address"]
-            # Child requests must never carry chain=None (inv. 6).
+            # Child requests must never carry chain=None.
             chain = entry["__row_chain"] or "ethereum"
             name = entry.get("name") or (f"{company}_{addr[2:10]}" if company else f"sel_{addr[2:10]}")
             sources = entry.get("discovery_sources") or []

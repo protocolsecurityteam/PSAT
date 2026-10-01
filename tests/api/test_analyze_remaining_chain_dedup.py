@@ -59,7 +59,7 @@ def test_null_chain_contract_does_not_adopt_a_base_job(api_client, db_session):
 
 @requires_postgres
 def test_off_allowlist_chain_stub_is_not_queued(api_client, db_session, monkeypatch):
-    """Inv. 14: analyze-remaining applies the same deployment allowlist gate as
+    """Analyze-remaining applies the same deployment allowlist gate as
     the selection worker — a discovered stub on a non-enabled chain is skipped
     (evidence kept, no job spawned); enabled-chain stubs still queue."""
     from db.models import Contract, Protocol

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
     """Exactly-enumerated Safe owner sets (``resolved_type='safe'``, ``membership_quality == 'exact'``), by Safe
     address, for signer-overlap comparison. Disagreeing exact rows are omitted (no recency column to arbitrate).
-    Grows monotonically as contracts resolve (inv-6).
+    Grows monotonically as contracts resolve.
     """
     rows = session.execute(
         select(func.lower(FunctionPrincipal.address), FunctionPrincipal.details)

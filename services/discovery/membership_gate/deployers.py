@@ -1,4 +1,4 @@
-"""The §3.3 deployer trust ladder and its registry rows."""
+"""The deployer trust ladder and its registry rows."""
 
 from __future__ import annotations
 
@@ -39,14 +39,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DeployerClassification:
-    """Ladder verdict: ``trust_class`` 'A'/'B', or None for Class C (the absence of a row, invariant 7)."""
+    """Ladder verdict: ``trust_class`` 'A'/'B', or None for Class C (the absence of a row)."""
 
     trust_class: str | None
     evidence: dict[str, Any]
 
 
 def _nonlineage_corroborating_member_ids(session: Session, *, protocol_id: int, address: str) -> list[int]:
-    """Members deployed by *address* whose membership rests on a non-lineage witness (§3.3 Class B condition 1), also
+    """Members deployed by *address* whose membership rests on a non-lineage witness (the Class B anchor
+    requirement), also
     holding a non-D2 admitting witness (F2).
     """
     candidates = {
@@ -80,12 +81,13 @@ def classify_deployer(
     history_complete: bool = False,
     creation_factories: Mapping[str, str] | None = None,
 ) -> DeployerClassification:
-    """§3.3 trust-ladder verdict for one EOA (read-only; ``register_deployer`` writes A/B rows).
+    """trust-ladder verdict for one EOA (read-only; ``register_deployer`` writes A/B rows).
 
     ``creation_history`` is the EOA's full Etherscan creation list; ``history_complete=False`` can never reach Class B
     (absence of counterevidence isn't proof).
 
-    ``creation_factories`` (created → factory) feeds the member-factory rule, a deliberate §3.3 deviation: a creation by
+    ``creation_factories`` (created → factory) feeds the member-factory rule, a deliberate extension of deployer
+    lineage: a creation by
     this protocol's own anchoring member factory counts as mapped for exclusivity. It admits nothing itself.
     """
     _require_positive_int(protocol_id, "protocol_id")
@@ -231,7 +233,7 @@ def register_deployer(
 ) -> ProtocolDeployer:
     """Upsert the registry row for an A/B verdict.
 
-    Class C raises (invariant 7). H is granted by ``grant_heuristic_deployer``.
+    Class C raises. H is granted by ``grant_heuristic_deployer``.
     """
     if classification.trust_class not in PROOF_DEPLOYER_TRUST_CLASSES:
         raise ValueError("Class C is the absence of a registry row; nothing to register")
@@ -272,7 +274,7 @@ def _heuristic_registry_row(session: Session, *, protocol_id: int, address: str)
 
 
 def _proof_registry_row(session: Session, *, protocol_id: int, address: str) -> ProtocolDeployer | None:
-    """The unrevoked Class-A/B row for (P, E), or None; its existence keeps H unminted (§1)."""
+    """The unrevoked Class-A/B row for (P, E), or None; its existence keeps H unminted."""
     return session.execute(
         select(ProtocolDeployer).where(
             ProtocolDeployer.protocol_id == protocol_id,

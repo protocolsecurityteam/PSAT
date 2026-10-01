@@ -101,7 +101,7 @@ def _resolve_job_concurrency(stage_value: str) -> int:
 
 
 def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
-    """Chain label for the ``chain`` logging contextvar (invariant 4): ``request['chain']`` so existing Loki filters
+    """Chain label for the ``chain`` logging contextvar: ``request['chain']`` so existing Loki filters
     work, else the name of the job's ``chain_id``, else ``None`` (not bound).
     """
     chain = request.get("chain")
@@ -476,7 +476,7 @@ class BaseWorker:
                             )
                         else:
                             # Terminal: degrade dependents so they don't block, then mark failed_terminal, via an
-                            # overridable finalizer so fail-forward stages (effects, inv. 15) can advance instead.
+                            # overridable finalizer so fail-forward stages (effects) can advance instead.
                             self._finalize_terminal_failure(
                                 session,
                                 job,
@@ -811,7 +811,7 @@ class BaseWorker:
     ) -> None:
         """Finalize an exhausted or terminal failure: degrade dependents and mark ``failed_terminal``.
 
-        Overridable so fail-forward stages (effects, inv. 15) can advance instead. Called from both failure paths with
+        Overridable so fail-forward stages (effects) can advance instead. Called from both failure paths with
         whichever session rolled back successfully.
         """
         self._degrade_dependencies(session, job)

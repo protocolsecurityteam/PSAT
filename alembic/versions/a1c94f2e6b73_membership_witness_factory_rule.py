@@ -1,7 +1,6 @@
 """Admit the ``w4_factory`` membership-witness rule.
 
-The W4 family gains a second arm (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2,
-owner ruling): lineage from the protocol's own anchoring MEMBER factory, per
+The W4 family gains a second arm: lineage from the protocol's own anchoring MEMBER factory, per
 the ``contract_creation_witnesses.creation_factory`` attribution. Vocabulary
 change only — the rule CHECK constraint is the sole thing that has to move.
 
@@ -34,7 +33,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Rows are revoked, never deleted (invariant 4), so a downgrade cannot
+    # Rows are revoked, never deleted, so a downgrade cannot
     # narrow the vocabulary while any w4_factory row is on record.
     op.execute(f"DELETE FROM {_TABLE} WHERE rule = 'w4_factory'")
     op.drop_constraint(_CONSTRAINT, _TABLE, type_="check")

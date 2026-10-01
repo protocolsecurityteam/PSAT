@@ -187,8 +187,8 @@ def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):
     from services.monitoring.enrollment import enroll_protocol_contracts
 
     monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-    # This test models a deployment where base has passed the inv-14 enablement
-    # checklist; enrollment gates off-allowlist chains (inv. 14), so make the
+    # This test models a deployment where Base is enabled. Enrollment gates
+    # off-allowlist chains, so make the
     # base-enabled premise explicit rather than relying on the {1} default.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
 

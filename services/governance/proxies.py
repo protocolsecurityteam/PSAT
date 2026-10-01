@@ -43,7 +43,7 @@ def _display_name(entry: "Mapping[str, Any]") -> str:
 
 
 def _merge_proxy_impl_entries(entries: "list[AnalysisListEntry]") -> "list[AnalysisListEntry]":
-    # (chain, address) so a CREATE2 twin's impl folds only into its own chain's proxy (inv. 12).
+    # (chain, address) so a CREATE2 twin's impl folds only into its own chain's proxy.
     impl_by_proxy: dict[tuple[str, str], AnalysisListEntry] = {}
     merged_proxies: set[tuple[str, str]] = set()
 

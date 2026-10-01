@@ -9,7 +9,7 @@ import { EntityRef } from "../EntityRef.jsx";
 // Picked-audit state is one radio: null, an audit_id, or ALL_PROVEN.
 const ALL_PROVEN = "all";
 
-// Proof-first audits panel (site/prototypes/audit-panel/HANDOFF.md). Only
+// Proof-first audits panel. Only
 // assert what's cryptographically verified: one verdict, "Running audited code"
 // (isBytecodeVerifiedAudit). Low-confidence or accusatory states are
 // deliberately omitted.

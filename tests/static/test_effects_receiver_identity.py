@@ -8,8 +8,8 @@ compile the shapes and drive production ``build_effects`` and the claims phase.
 Three refusals, one test each: ``visibility`` may not decide the binding (a
 ``LocalVariable`` answers like an internal state variable); the auto-getter
 selector is licensed by the DECLARED TYPE, not the name; a formal of an internal
-helper is not an ABI slot of the entry point. Protocol-agnostic by construction
-(§0.0.6): shapes only, never a named protocol.
+helper is not an ABI slot of the entry point. Protocol-agnostic by construction:
+shapes only, never a named protocol.
 """
 
 from __future__ import annotations

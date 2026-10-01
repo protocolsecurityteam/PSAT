@@ -1,9 +1,9 @@
-"""M0.2 item 2 — the ``chain`` logging contextvar is bound per job (invariant 4).
+"""The ``chain`` logging contextvar is bound per job.
 
 ``BaseWorker._execute_job`` binds ``chain`` so every job-scoped log line can be
 filtered per chain in Loki. It prefers the human-readable chain name in
 ``request['chain']`` and falls back to the canonical name of the job's
-first-class ``chain_id`` (M0.2) when the request omits chain.
+first-class ``chain_id`` when the request omits chain.
 """
 
 from __future__ import annotations

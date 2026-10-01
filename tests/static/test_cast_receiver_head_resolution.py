@@ -7,7 +7,7 @@ getter from it (``input_token_hints``, the cross-contract join, ``effect_targets
 fabricate ``TMP_n()``, which seeds nothing or the WRONG token. The solc compile and
 ``build_effects`` are real.
 
-Protocol-agnostic (§0.0.6): the fixture models the *shape* (library-wrapped pull,
+Protocol-agnostic: the fixture models the *shape* (library-wrapped pull,
 cast of a state var / parameter / mapping element), never a named protocol.
 """
 

@@ -72,7 +72,7 @@ def solodit_stub(monkeypatch):
         return list(results)
 
     monkeypatch.setattr(solodit, "search", fake_search)
-    # audit_reports.py imports solodit as ``_solodit`` — patch there too.
+    # services.discovery.audit_reports imports solodit as ``_solodit`` — patch there too.
     from services.discovery import audit_reports as ar
 
     monkeypatch.setattr(ar._solodit, "search", fake_search)

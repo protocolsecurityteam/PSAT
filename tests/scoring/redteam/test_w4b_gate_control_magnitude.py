@@ -36,7 +36,7 @@ from tests.support.scoring_builders import (
 
 
 def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
-    """Phase 6, whole. The dollars are the DESTINATION's witness, not the sheet.
+    """Act-as composition, whole. The dollars are the DESTINATION's witness, not the sheet.
 
     Three witnesses, all published: the role licenses ``exit`` at the vault,
     ``exit`` carries its own fork-proven ``flow.out`` magnitude, and a restricted
@@ -411,7 +411,7 @@ def test_w4b_a_destination_with_no_flow_out_witness_composes_nothing(fold):
 
 
 def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
-    """pause.set is untouched by Phase 6 (§7).
+    """Act-as composition leaves pause.set unchanged.
 
     The destination witness Phase 6 reuses answers how much a CALL MOVES, not how
     much a freeze immobilises, so even with every act-as witness the freeze row
@@ -434,7 +434,7 @@ def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
 
 
 def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
-    """inv. 6: composing an answer may only raise the term, and only where real.
+    """Composing an answer may only raise the term, and only where real.
 
     The composed signal counts as answered; the unwitnessed freeze beside it does
     not, so the term rises by exactly one signal's worth.
@@ -453,14 +453,14 @@ def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
 
 
 def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
-    """§9.5 case 2, as the corpus actually answers it.
+    """A seed without a licensed first hop cannot compose a downstream magnitude.
 
     The spec expected the timelock behind RolesAuthority ``0x4df6b733`` to regain
     a witnessed magnitude at Phase 6. It does not: the seized node is an
     AUTHORITY whose outgoing hop names no licensed function, and the vault two
     hops out is behind that break. A chain is as strong as its weakest step, so
     the magnitude stays not_determined, as for the two EOAs the shipped document
-    over-charged. That is §9.5 case 2's OTHER admissible outcome ("both sides
+    over-charged. That is the OTHER admissible outcome ("both sides
     fall to not_determined"), and this test pins which.
     """
     signals = _composing_signals()
