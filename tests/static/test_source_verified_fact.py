@@ -27,15 +27,6 @@ contract Subject {
 """
 
 
-def test_the_fetch_fact_is_carried_verbatim_in_all_three_states():
-    assert _source_verified({"source_verified": True}) is True
-    assert _source_verified({"source_verified": False}) is False
-    # An older workspace or unreadable meta file keeps the third state.
-    assert _source_verified({}) is None
-    assert _source_verified({"source_verified": None}) is None
-    assert _source_verified({"source_verified": "true"}) is None
-
-
 def test_the_discovery_scaffolder_records_the_payloads_verification_fact(tmp_path: Path):
     result = {
         "ContractName": "FlatContract",

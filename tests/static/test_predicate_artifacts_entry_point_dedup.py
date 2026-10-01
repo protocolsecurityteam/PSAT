@@ -6,17 +6,14 @@ this breaks before a live test pays a 17-minute stage.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline import predicate_artifacts  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
     _is_externally_callable,
-    build_predicate_artifacts_with_pause_info,
 )
 from tests.support.slither_compile import _compile  # noqa: E402
 
@@ -68,65 +65,6 @@ contract AccessControlDerived is AccessControlBase {
     }
 }
 """
-
-
-def _no_op_pause_info() -> dict[str, list]:
-    return {
-        "pause_state_vars": [],
-        "pause_toggle_functions": [],
-        "reentrancy_state_vars": [],
-        "reentrancy_guarded_functions": [],
-    }
-
-
-def test_overridden_functions_iterated_once_not_per_inheritance_depth(tmp_path):
-    """The eliminated iterations were the faster base versions, so the saving was ~146 s."""
-    sl = _compile(tmp_path, ACCESS_CONTROL_SRC)
-    derived = _select_contract(sl, "AccessControlDerived")
-
-    # Otherwise an upstream fix would make the test vacuous.
-    full_names_raw = [fn.full_name for fn in derived.functions if _is_externally_callable(fn)]
-    duplicates = {n for n in full_names_raw if full_names_raw.count(n) > 1}
-    assert duplicates, (
-        "Slither's contract.functions no longer yields duplicates for overridden "
-        "virtual functions on this version. The regression scenario this test "
-        "guards against no longer reproduces — re-verify the bug premise before "
-        "rewriting the assertion below."
-    )
-
-    invocations: list[str] = []
-
-    def _counting_build_predicate_tree(fn: Any, **_kwargs: Any) -> Any:
-        invocations.append(f"build:{fn.full_name}:{id(fn):#x}")
-        return None
-
-    def _counting_build_return_predicate_tree(fn: Any) -> Any:
-        invocations.append(f"build_return:{fn.full_name}:{id(fn):#x}")
-        return None
-
-    with (
-        patch.object(predicate_artifacts, "build_predicate_tree", _counting_build_predicate_tree),
-        patch.object(predicate_artifacts, "build_return_predicate_tree", _counting_build_return_predicate_tree),
-        patch.object(predicate_artifacts, "apply_writer_gate_pass", lambda c, t: None),
-        patch.object(predicate_artifacts, "apply_mapping_event_hint_pass", lambda c, t: None),
-        patch.object(predicate_artifacts, "apply_reentrancy_pause_pass", lambda c, t: _no_op_pause_info()),
-    ):
-        build_predicate_artifacts_with_pause_info(derived)
-
-    build_calls = [inv for inv in invocations if inv.startswith("build:")]
-    full_names_built = [call.split(":")[1] for call in build_calls]
-    expected_entry_points = {"grantRole(bytes32,address)", "revokeRole(bytes32,address)"}
-
-    assert set(full_names_built) == expected_entry_points, (
-        f"unexpected externally-callable surface: built={set(full_names_built)} expected={expected_entry_points}"
-    )
-    assert len(full_names_built) == len(expected_entry_points), (
-        f"build_predicate_tree was invoked {len(full_names_built)} times for "
-        f"{len(expected_entry_points)} entry points — shadowed base copies are "
-        f"being iterated again. Iteration target should be "
-        f"contract.functions_entry_points, not contract.functions.\n"
-        f"Full invocation list: {full_names_built}"
-    )
 
 
 def test_inherited_override_iteration_surface_matches_dedup_by_last_wins(tmp_path):

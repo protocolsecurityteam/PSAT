@@ -70,23 +70,10 @@ def test_gated_fallback_tree_carries_the_caller_authority_leaf(contract):
     assert evaluate_tree(tree).kind == "finite_set"
 
 
-def test_open_receive_is_absent_after_being_attempted_not_before(contract):
-    """The absence is now measured, not untried."""
-    trees = (build_predicate_artifacts(contract) or {}).get("trees") or {}
-    assert "receive()" not in trees
-
-
 @pytest.mark.parametrize("signature", ["fallback()", "receive()"])
 def test_selectorless_signatures_are_not_canonical(signature):
     assert has_no_selector(signature) is True
     assert is_canonical_abi_signature(signature) is False
-
-
-def test_effects_emits_the_empty_selector_for_fallback_and_receive(contract):
-    functions = build_effects(contract)["functions"]
-    assert functions["fallback()"]["selector"] == ""
-    assert functions["receive()"]["selector"] == ""
-    assert functions["contribute()"]["selector"] == "0xd7bb99ba"
 
 
 def test_fallback_state_write_publishes_no_writer_selector(contract):

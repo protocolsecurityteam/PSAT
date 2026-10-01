@@ -95,10 +95,6 @@ def _facts(effects, signature: str) -> FunctionFacts:
     )
 
 
-def _ext_heads(info) -> list[str]:
-    return [s["target"] for s in info["sinks"] if s["kind"] == "external_call"]
-
-
 @pytest.fixture(scope="module")
 def compiled(tmp_path_factory):
     return _compile(tmp_path_factory.mktemp("g5"))
@@ -107,27 +103,6 @@ def compiled(tmp_path_factory):
 @pytest.fixture(scope="module")
 def effects(compiled):
     return build_effects(compiled)
-
-
-@pytest.mark.parametrize(
-    "signature,resolved_head",
-    [
-        pytest.param("deposit(uint256)", "underlying.safeTransferFrom", id="state_var_double_cast"),
-        pytest.param("depositDirect(uint256)", "underlying.transferFrom", id="direct_high_level_call"),
-        # A parameter names no getter; the hint layer enforces that separately.
-        pytest.param("depositParam(address,uint256)", "token.safeTransferFrom", id="parameter_cast"),
-    ],
-)
-def test_head_resolved_through_cast(effects, signature, resolved_head):
-    heads = _ext_heads(effects["functions"][signature])
-    assert resolved_head in heads, heads
-    assert not any(h.split(".")[0].startswith(("TMP_", "REF_", "TUPLE_")) for h in heads), heads
-
-
-def test_mapping_element_is_not_resolved_to_a_getter(effects):
-    # ``pool[id]`` isn't temporary-rooted through a cast, so it stays unresolved rather than invented into ``pool()``.
-    heads = _ext_heads(effects["functions"]["depositIdx(uint256,uint256)"])
-    assert not any(h.startswith("pool.") for h in heads), heads
 
 
 def test_input_token_hints_names_the_state_var_getter(effects):

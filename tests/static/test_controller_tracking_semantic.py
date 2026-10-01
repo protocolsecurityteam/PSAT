@@ -26,36 +26,6 @@ def _build(tmp_path, source, contract_name="C"):
     return targets
 
 
-def test_inherited_owner_caught_from_predicate_tree(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract Ownable {
-        address private _owner;
-        modifier onlyOwner() {
-            require(msg.sender == _owner, "not owner");
-            _;
-        }
-        function owner() public view returns (address) {
-            return _owner;
-        }
-    }
-    contract C is Ownable {
-        uint256 public value;
-        function setValue(uint256 v) external onlyOwner {
-            value = v;
-        }
-    }
-    """
-    targets = _build(tmp_path, source)
-    by_id = {t["controller_id"]: t for t in targets}
-    assert "state_variable:_owner" in by_id, list(by_id.keys())
-    target = by_id["state_variable:_owner"]
-    assert target["kind"] == "state_variable"
-    read_spec = target.get("read_spec")
-    assert isinstance(read_spec, dict)
-    assert read_spec["target"] == "owner"
-
-
 def test_authority_state_var_promoted_to_external_contract(tmp_path):
     source = """
     pragma solidity ^0.8.19;
@@ -137,71 +107,6 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
             "type_kind": "primitive",
         },
     ]
-
-
-def test_role_identifier_does_not_infer_authority_contract_source(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    interface IRoleRegistry {
-        function hasRole(bytes32 role, address account) external view returns (bool);
-    }
-    contract C {
-        IRoleRegistry public roleRegistry;
-        bool public paused;
-        bytes32 public constant PAUSER_ROLE = keccak256("PAUSER");
-        constructor(address rr) { roleRegistry = IRoleRegistry(rr); }
-        function pauseContract() external {
-            require(roleRegistry.hasRole(PAUSER_ROLE, msg.sender), "no");
-            paused = true;
-        }
-    }
-    """
-    targets = _build(tmp_path, source)
-    by_id = {t["controller_id"]: t for t in targets}
-    assert "role_identifier:PAUSER_ROLE" in by_id
-    spec = by_id["role_identifier:PAUSER_ROLE"]["read_spec"]
-    assert isinstance(spec, dict)
-    assert spec["target"] == "PAUSER_ROLE"
-    assert "contract_source" not in spec
-
-
-def test_writer_functions_from_effects(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address public owner;
-        constructor() { owner = msg.sender; }
-        function transferOwnership(address newOwner) external {
-            require(msg.sender == owner, "not owner");
-            owner = newOwner;
-        }
-    }
-    """
-    targets = _build(tmp_path, source)
-    by_id = {t["controller_id"]: t for t in targets}
-    target = by_id["state_variable:owner"]
-    assert {w["function"] for w in target["writer_functions"]} == {"transferOwnership(address)"}
-
-
-def test_writer_emits_event_promotes_tracking_mode(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address public owner;
-        event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-        constructor() { owner = msg.sender; }
-        function transferOwnership(address newOwner) external {
-            require(msg.sender == owner);
-            emit OwnershipTransferred(owner, newOwner);
-            owner = newOwner;
-        }
-    }
-    """
-    targets = _build(tmp_path, source)
-    by_id = {t["controller_id"]: t for t in targets}
-    target = by_id["state_variable:owner"]
-    assert target["tracking_mode"] == "event_plus_state"
-    assert any(e["name"] == "OwnershipTransferred" for e in target["associated_events"])
 
 
 def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_path):

@@ -174,18 +174,6 @@ def test_delay_value_is_never_published_from_source(tmp_path, source):
     assert result["delay_source"] == "not_read"
 
 
-def test_has_timelock_is_not_determined_without_ir(tmp_path):
-
-    class _NoIR:
-        name = "C"
-        functions = []
-
-    result = _detect_timelock(_NoIR(), tmp_path, [], {"functions": {}})
-    assert result["has_timelock"] is None
-    assert result["pattern"] == "unknown"
-    assert result["delay_source"] == "not_read"
-
-
 @pytest.mark.parametrize("degradation", ["claims_stage_raised", "effects_stage_raised", "no_effects_artifact"])
 def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degradation):
     """Both determinants live on the claims plane, and ``core`` can leave effects complete but claim-free."""

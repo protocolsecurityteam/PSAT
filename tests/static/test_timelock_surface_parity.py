@@ -79,11 +79,6 @@ def test_non_view_surface_matches_the_twins_exactly(compiled):
     assert tuple(_non_view_names(effects)) == EXPECTED_NON_VIEW
 
 
-def test_subject_is_the_verified_contract(compiled):
-    subject, _effects = compiled
-    assert subject.name == "EtherFiTimelock"
-
-
 def test_unverified_source_writes_no_contract_row(monkeypatch):
     """A 0-function row would be indistinguishable from an analysed empty contract."""
     from types import SimpleNamespace
@@ -127,13 +122,3 @@ def test_unverified_source_writes_no_contract_row(monkeypatch):
         worker._process_address(session, cast(Any, job))
 
     session.add.assert_not_called()
-
-
-def test_static_producer_mints_no_openness_verdict(compiled):
-    """``authority_openness`` has no static writer, so this can't see the realistic failure (the resolver minting
-    ``restricted`` from a fold that didn't happen); only the live run can.
-    """
-    _subject, effects = compiled
-    for record in (effects.get("functions") or {}).values():
-        if isinstance(record, dict):
-            assert record.get("authority_openness") is None

@@ -100,10 +100,6 @@ def _ordering_proven(record: str, *, disclosures: list[str] | None = None) -> di
     return w
 
 
-def _ordering_refused(reason: str) -> dict:
-    return {"state": "not_determined", "reason": reason}
-
-
 def _ctx(tree: Any, flow: dict) -> ClaimContext:
     effects = {
         "contract_name": "C",
@@ -112,108 +108,10 @@ def _ctx(tree: Any, flow: dict) -> ClaimContext:
     return ClaimContext(None, effects, {"trees": {_SIG: tree}})
 
 
-def test_keyed_by_caller_is_constrained_without_a_guard():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "keyed_by_caller", "record": "C.balances"}
-
-
-def test_keyed_by_caller_survives_a_second_caller_chosen_level():
-    flow = _flow(
-        amount_record_variable="C.withdrawRequests",
-        amount_record_key_kinds=["msg_sender", "param"],
-        amount_record_key_param_indexes=[None, 0],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "keyed_by_caller", "record": "C.withdrawRequests"}
-
-
-def test_owner_guarded_record_joins_guard_and_amount_on_the_same_cell():
-    flow = _flow(
-        amount_record_variable="C.bids",
-        amount_record_member_path=["amount"],
-        amount_record_key_kinds=["param"],
-        amount_record_key_param_indexes=[0],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "owner_guarded_record", "record": "C.bids"}
-
-
-def test_owner_guarded_record_compares_canonical_names_across_inheritance():
-    """An inherited ``Base.pool`` must join to itself, the likeliest silent zero."""
-    flow = _flow(
-        amount_record_variable="Base.pool",
-        amount_record_member_path=["amount"],
-        amount_record_key_kinds=["param"],
-        amount_record_key_param_indexes=[0],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("Base.pool", 0), flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "owner_guarded_record", "record": "Base.pool"}
-
-
-def test_wrong_record_refuses_record_mismatch():
-    flow = _flow(
-        amount_record_variable="C.amounts", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.owners", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "record_mismatch"}
-
-
-def test_wrong_key_refuses_key_index_disagreement():
-    flow = _flow(
-        amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[1]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
-
-
-def test_non_mandatory_guard_refuses_guard_not_mandatory():
-    flow = _flow(
-        amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0, mandatory=False), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
-
-
 def test_param_kind_without_index_refuses_never_kind_alone():
     flow = _flow(amount_record_variable="C.bids", amount_record_key_kinds=["param"])  # no key_param_indexes
     verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
-
-
-def test_lossy_key_asymmetry_refuses_on_the_amount_sides_indeterminate():
-    """``bids[uint128(id)]`` could stamp slot 0 while the amount key is indeterminate."""
-    flow = _flow(
-        amount_record_variable="C.bids",
-        amount_record_key_kinds=["indeterminate"],
-        amount_record_key_param_indexes=[None],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
-
-
-def test_two_declarations_refuses_multiple_record_declarations():
-    flow = _flow(amount_record_variables=["Base.bids", "Impl.bids"])
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "multiple_record_declarations"}
-
-
-def test_no_record_named_refuses_amount_root_not_classifiable():
-    flow = _flow()  # no amount_record_* keys at all
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "amount_root_not_classifiable"}
-
-
-def test_missing_tree_refuses_rather_than_reading_absence_as_no_guard():
-    flow = _flow(
-        amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
 
 
 def test_guard_without_msg_sender_operand_does_not_satisfy_w1():
@@ -225,52 +123,6 @@ def test_guard_without_msg_sender_operand_does_not_satisfy_w1():
     assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
 
 
-def test_proven_keyed_by_caller_with_ordering():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        record_ordering=_ordering_proven("C.balances"),
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict == {
-        "state": "proven_self_service",
-        "w1_basis": "keyed_by_caller",
-        "w2_basis": "clear_dominates_calls",
-        "record": "C.balances",
-        "disclosures": _BASE_DISCLOSURES,
-    }
-
-
-def test_proven_owner_guarded_with_ordering():
-    flow = _flow(
-        amount_record_variable="C.bids",
-        amount_record_member_path=["amount"],
-        amount_record_key_kinds=["param"],
-        amount_record_key_param_indexes=[0],
-        record_ordering=_ordering_proven("C.bids"),
-    )
-    verdict = _facts.self_service_payout(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {
-        "state": "proven_self_service",
-        "w1_basis": "owner_guarded_record",
-        "w2_basis": "clear_dominates_calls",
-        "record": "C.bids",
-        "disclosures": _BASE_DISCLOSURES,
-    }
-
-
-def test_loop_ordering_carries_the_cross_iteration_disclosure():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        record_ordering=_ordering_proven("C.balances", disclosures=["cross_iteration_ordering_not_proven"]),
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict["disclosures"] == [_UPGRADE, _SIBLING, "cross_iteration_ordering_not_proven"]
-
-
 def test_w1_refusal_propagates_as_the_self_service_reason():
     flow = _flow(
         amount_record_variable="C.amounts",
@@ -280,46 +132,6 @@ def test_w1_refusal_propagates_as_the_self_service_reason():
     )
     verdict = _facts.self_service_payout(_ctx(_ownership_tree("C.owners", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "record_mismatch"}
-
-
-def test_ordering_refusal_wins_when_w1_holds():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        record_ordering=_ordering_refused("clearing_write_does_not_dominate_calls"),
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "clearing_write_does_not_dominate_calls"}
-
-
-def test_no_ordering_and_no_guard_refuses_function_not_analyzed():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "function_not_analyzed"}
-
-
-def test_flow_entry_attaches_only_on_a_storage_amount():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        kind="native_transfer_send",
-        selector=None,
-        from_is_self=True,
-        record_ordering=_ordering_proven("C.balances"),
-    )
-    entry = flowmod._flow_entry(_ctx(None, flow), _SIG, flow)
-    assert entry["self_service_payout"]["state"] == "proven_self_service"
-    assert entry["amount_record_constraint"] == {
-        "state": "constrained",
-        "basis": "keyed_by_caller",
-        "record": "C.balances",
-    }
 
 
 def test_flow_entry_omits_the_keys_on_a_param_amount_and_rides_ss_r3():

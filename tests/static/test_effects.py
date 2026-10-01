@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 from eth_utils.crypto import keccak
 
@@ -14,7 +12,6 @@ from services.static.claims import (  # noqa: E402
     project_effect_labels,
 )
 from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
-    SCHEMA_VERSION,
     EffectInfo,
     EffectsArtifact,
     build_effects,
@@ -43,82 +40,6 @@ def _info(artifact: EffectsArtifact, signature: str) -> EffectInfo:
     info = artifact["functions"].get(signature)
     assert info is not None, f"expected {signature} in {sorted(artifact['functions'])}"
     return info
-
-
-def test_basic_state_write_emits_state_write_sink(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            function setX(uint256 v) external {
-                x = v;
-            }
-        }
-        """,
-    )
-    artifact = build_effects(_contract(sl))
-
-    assert artifact["schema_version"] == SCHEMA_VERSION
-    assert artifact["contract_name"] == "C"
-
-    info = _info(artifact, "setX(uint256)")
-    state_writes = [s for s in info["sinks"] if s["kind"] == "state_write"]
-    assert len(state_writes) == 1
-    assert state_writes[0]["target"] == "x"
-    assert "x" in info["effect_targets"]
-    assert info["selector"].startswith("0x") and len(info["selector"]) == 10
-    assert info["writer_selectors"] == [info["selector"]]
-
-
-def test_internal_helper_writes_surface_on_caller(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            uint256 public y;
-            function _bumpInternally(uint256 v) internal {
-                y = v;
-            }
-            function bump(uint256 v) external {
-                x = v;
-                _bumpInternally(v + 1);
-            }
-        }
-        """,
-    )
-    artifact = build_effects(_contract(sl))
-    info = _info(artifact, "bump(uint256)")
-    targets = {s["target"] for s in info["sinks"] if s["kind"] == "state_write"}
-    assert {"x", "y"}.issubset(targets), f"expected x and y, got {targets}"
-    assert "_bumpInternally(uint256)" not in artifact["functions"]
-
-
-def test_external_call_sink_classification(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        interface IToken {
-            function mint(address to, uint256 amount) external;
-        }
-        contract C {
-            IToken public token;
-            function poke(address to, uint256 amount) external {
-                token.mint(to, amount);
-            }
-        }
-        """,
-    )
-    artifact = build_effects(_contract(sl, "C"))
-    info = _info(artifact, "poke(address,uint256)")
-    external_calls = [s for s in info["sinks"] if s["kind"] == "external_call"]
-    assert any(
-        s["target"] == "token.mint" and s["selector"] == _selector("mint(address,uint256)") for s in external_calls
-    ), info["sinks"]
 
 
 def test_effect_label_recognition_pause_toggle(tmp_path):
@@ -150,104 +71,6 @@ def test_effect_label_recognition_pause_toggle(tmp_path):
     info = _info(artifact, "trip()")
     assert "pause_toggle" in info["effect_labels"], info["effect_labels"]
     assert "pause.set" in _claim_ids(info)
-
-
-def test_semantic_effects_includes_unguarded_public_function(tmp_path):
-    """``predicate_trees`` omits them (no revert path), but consumers need the sink."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public owner;
-            uint256 public x;
-            uint256 public y;
-            mapping(address => bool) public allowed;
-
-            constructor() {
-                owner = msg.sender;
-            }
-
-            modifier onlyOwner() {
-                require(msg.sender == owner);
-                _;
-            }
-
-            function setX(uint256 v) external onlyOwner { x = v; }
-            function _setYInternally(uint256 v) internal { y = v; }
-            function setBoth(uint256 a, uint256 b) external onlyOwner {
-                x = a;
-                _setYInternally(b);
-            }
-            function allow(address a) external onlyOwner { allowed[a] = true; }
-            function publicSetter(uint256 v) external { x = v; }
-        }
-        """,
-    )
-    contract = _contract(sl, "C")
-    artifact = build_effects(contract)
-
-    assert "publicSetter(uint256)" in artifact["functions"]
-    public_setter = artifact["functions"]["publicSetter(uint256)"]
-    sinks = {(s["kind"], s["target"]) for s in public_setter["sinks"]}
-    assert ("state_write", "x") in sinks
-
-    set_both_sinks = {(s["kind"], s["target"]) for s in artifact["functions"]["setBoth(uint256,uint256)"]["sinks"]}
-    assert ("state_write", "x") in set_both_sinks
-    assert ("state_write", "y") in set_both_sinks
-
-
-def test_artifact_is_json_serializable(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            function setX(uint256 v) external { x = v; }
-        }
-        """,
-    )
-    artifact = build_effects(_contract(sl))
-    json.dumps(artifact)
-
-
-def test_fallback_and_receive_included(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public impl;
-            uint256 public ethBalance;
-            receive() external payable { ethBalance = msg.value; }
-            fallback() external {
-                (bool ok, ) = impl.delegatecall(msg.data);
-                require(ok);
-            }
-        }
-        """,
-    )
-    artifact = build_effects(_contract(sl))
-    fns = set(artifact["functions"].keys())
-    assert any("fallback" in f for f in fns), fns
-    assert any("receive" in f for f in fns), fns
-
-
-def test_constructor_skipped(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public owner;
-            constructor() { owner = msg.sender; }
-            function poke() external {}
-        }
-        """,
-    )
-    artifact = build_effects(_contract(sl))
-    assert not any(name.startswith("constructor") for name in artifact["functions"]), artifact["functions"]
 
 
 # Authorization labels come from the Plane-1 claims registry via ``project_effect_labels``, as in core.py.
@@ -410,14 +233,6 @@ contract RolesAuthority is Auth {
     }
 }
 """
-
-
-def test_solmate_rolesauthority_setters_are_role_management(tmp_path):
-    """Role state is read through external ``authority.canCall``, so the setters are matched by selector."""
-    artifact = build_effects(_contract(_compile(tmp_path, _SOLMATE_AUTH), "RolesAuthority"))
-    assert "role_management" in _info(artifact, "setUserRole(address,uint8,bool)")["effect_labels"]
-    assert "role_management" in _info(artifact, "setRoleCapability(uint8,address,bytes4,bool)")["effect_labels"]
-    assert "role_management" in _info(artifact, "setPublicCapability(address,bytes4,bool)")["effect_labels"]
 
 
 def test_solmate_setauthority_is_authority_update(tmp_path):

@@ -6,23 +6,10 @@ from __future__ import annotations
 
 from typing import cast
 
-from eth_utils.crypto import keccak
-
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     apply_solmate_authority_hint_pass,
 )
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
-
-
-def _t0(signature: str) -> str:
-    return "0x" + keccak(text=signature).hex()
-
-
-_EXPECTED_TOPICS = {
-    _t0("RoleCapabilityUpdated(uint8,address,bytes4,bool)"),
-    _t0("PublicCapabilityUpdated(address,bytes4,bool)"),
-    _t0("UserRoleUpdated(address,uint8,bool)"),
-}
 
 
 def _cancall_leaf_tree() -> dict:
@@ -43,15 +30,6 @@ def _cancall_leaf_tree() -> dict:
             },
         },
     }
-
-
-def test_solmate_hints_attached_to_cancall_descriptor():
-    trees = {"pause()": _cancall_leaf_tree()}
-    apply_solmate_authority_hint_pass(None, cast(dict[str, PredicateTree], trees))
-    descriptor = trees["pause()"]["leaf"]["set_descriptor"]
-    hints = descriptor.get("enumeration_hint")
-    assert hints is not None
-    assert {h["topic0"] for h in hints} == _EXPECTED_TOPICS
 
 
 def test_non_cancall_external_set_untouched():

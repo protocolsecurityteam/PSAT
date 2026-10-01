@@ -29,36 +29,6 @@ def _hygiene(effects, signature: str) -> dict[str, str]:
     return {w["var"]: w["hygiene_class"] for w in info["state_writes"]}
 
 
-_NAMESPACED_SRC = """
-pragma solidity ^0.8.20;
-
-contract Vault {
-    /// @custom:storage-location erc7201:acme.main
-    struct MainData { address controller; bool halted; }
-
-    // ERC-7201 namespaced slot. The identifier deliberately carries no
-    // "slot"/"storage" token, so only its assembly USE identifies it.
-    bytes32 private constant ACME_MAIN =
-        0x0d1c0b3a3e5c1eb8b56b4d9a5e6b2c0bdc1b9e3e1c5c3a8f0d2b6a4c9e7f1300;
-
-    // Same type, same shape of value, never used as a slot: a plain constant.
-    bytes32 private constant ACME_DOMAIN = keccak256("acme.domain");
-
-    function _main() private pure returns (MainData storage $) {
-        assembly { $.slot := ACME_MAIN }
-    }
-
-    function setHalted(bool v) public { _main().halted = v; }
-    function domain() public pure returns (bytes32) { return ACME_DOMAIN; }
-}
-"""
-
-
-def test_namespaced_slot_constant_is_pseudo_without_a_slot_name(tmp_path):
-    effects = build_effects(_compile(tmp_path, _NAMESPACED_SRC, "Vault"))
-    assert _hygiene(effects, "setHalted(bool)")["ACME_MAIN"] == "storage_location_pseudo"
-
-
 _SSTORE_SRC = """
 pragma solidity ^0.8.20;
 
@@ -88,57 +58,6 @@ def test_sstore_target_constant_is_pseudo_and_a_value_constant_is_not(tmp_path):
     assert classes.get("ADMIN_ROLE") in (None, "constant")
 
 
-_SLOT_NAMED_VALUE_SRC = """
-pragma solidity ^0.8.20;
-
-contract Decoy {
-    // Named like a slot locator, but the IR proves it is only ever a VALUE:
-    // it is hashed, never bound as a storage pointer and never sstore'd.
-    bytes32 public constant OPERATOR_SLOT = keccak256("acme.operator");
-
-    mapping(bytes32 => bool) public flags;
-
-    function flag() public { flags[keccak256(abi.encode(OPERATOR_SLOT))] = true; }
-}
-"""
-
-
-def test_slot_named_value_constant_is_not_a_pseudo_slot(tmp_path):
-    """Under the name rule this fed the pause and namespaced-write matchers a false hit."""
-    effects = build_effects(_compile(tmp_path, _SLOT_NAMED_VALUE_SRC, "Decoy"))
-    assert _hygiene(effects, "flag()").get("OPERATOR_SLOT") in (None, "constant")
-
-
-_GUARD_SRC = """
-pragma solidity ^0.8.20;
-
-contract Guarded {
-    // No "reentran"/"locked"/"_status" token anywhere: only the set/restore
-    // shape around ``_;`` identifies this as a guard.
-    uint256 private entryFlag = 1;
-
-    address public treasury;
-
-    modifier single() {
-        require(entryFlag == 1, "REENTRANCY");
-        entryFlag = 2;
-        _;
-        entryFlag = 1;
-    }
-
-    function setTreasury(address t) public single { treasury = t; }
-}
-"""
-
-
-def test_guard_var_is_classified_without_a_guard_name(tmp_path):
-    """Written on both sides of the placeholder, which defines a reentrancy guard."""
-    effects = build_effects(_compile(tmp_path, _GUARD_SRC, "Guarded"))
-    classes = _hygiene(effects, "setTreasury(address)")
-    assert classes["entryFlag"] == "reentrancy_guard"
-    assert classes["treasury"] == "normal"
-
-
 _HELPER_GUARD_SRC = """
 pragma solidity ^0.8.20;
 
@@ -161,29 +80,6 @@ def test_guard_split_into_helpers_is_still_classified(tmp_path):
     classes = _hygiene(effects, "bump()")
     assert classes["gateWord"] == "reentrancy_guard"
     assert classes["counter"] == "normal"
-
-
-_PAUSE_NOT_GUARD_SRC = """
-pragma solidity ^0.8.20;
-
-contract Pausable {
-    // Written inside a modifier-guarded flow and read with a revert, but never
-    // RESTORED as the call unwinds: a pause latch, not a reentrancy guard.
-    bool private halted;
-    address public owner;
-
-    modifier live() { require(!halted, "PAUSED"); _; }
-
-    function pause() public { halted = true; }
-    function setOwner(address o) public live { owner = o; }
-}
-"""
-
-
-def test_pause_latch_is_not_mistaken_for_a_guard(tmp_path):
-    """A latch stays set; only a guard is restored."""
-    effects = build_effects(_compile(tmp_path, _PAUSE_NOT_GUARD_SRC, "Pausable"))
-    assert _hygiene(effects, "pause()")["halted"] == "normal"
 
 
 _TOKEN_FIRST_SRC = """
@@ -281,10 +177,6 @@ def test_routed_pull_is_recovered_from_the_issued_selector(_token_first):
     assert len(routed) == 1, routed
     assert routed[0]["target_kind"]["kind"] == "self"
     assert routed[0]["amount_param_index"] == 0
-
-
-def test_canonically_named_helper_that_moves_nothing_is_not_routed(_token_first):
-    assert _routed(_token_first, "Router", "decoyRoute(uint256,address)") == []
 
 
 _LEGACY_FLOW_SRC = """

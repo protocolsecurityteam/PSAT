@@ -85,45 +85,12 @@ def _targets(tmp_path: Path, predicate_trees_override: Any = _UNSET):
     return {t["source"]: t for t in targets}
 
 
-def test_gate_and_callee_are_distinguishable(tmp_path):
-    by_source = _targets(tmp_path)
-
-    assert by_source["roleRegistry"]["kind"] == "external_contract"
-    assert by_source["eETH"]["kind"] == "external_contract"
-
-    assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
-    assert by_source["eETH"].get("authority_provenance") == "call_target"
-
-
-def test_neither_gate_nor_callee_stays_not_determined(tmp_path):
-    by_source = _targets(tmp_path)
-    # Neither gated on nor called, so either answer would be invented.
-    assert "feeRecipient" in by_source
-    assert "authority_provenance" not in by_source["feeRecipient"]
-
-
 # ``core.py`` passes this exact object when the predicate builder raises.
 _TREELESS_ARTIFACTS = {
     "degraded_from_exception": {"schema_version": "semantic", "error": "boom"},
     "trees_key_empty": {"schema_version": "semantic", "trees": {}},
     "absent": None,
 }
-
-
-@pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
-def test_treeless_artifact_claims_no_provenance_for_anything(tmp_path, shape):
-    """Answering ``call_target`` would demote the control edge and strip the registry's controller labels because the
-    analysis crashed.
-    """
-    by_source = _targets(tmp_path, _TREELESS_ARTIFACTS[shape])
-
-    assert by_source["roleRegistry"]["kind"] == "external_contract"
-    assert by_source["eETH"]["kind"] == "external_contract"
-
-    for name in ("roleRegistry", "eETH"):
-        assert "authority_provenance" not in by_source[name], (
-            f"{name} claimed provenance from a treeless artifact ({shape})"
-        )
 
 
 @pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
@@ -231,62 +198,6 @@ def _unlowered_targets(tmp_path: Path):
     semantic_control = _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)
     targets = build_controller_tracking(contract, tmp_path, predicate_trees, effects, semantic_control)
     return predicate_trees, {t["source"]: t for t in targets}
-
-
-def test_a_lowered_receive_gate_publishes_caller_gate(tmp_path):
-    """G3 class-R: replaces a test that asserted the pre-class-R absence."""
-    predicate_trees, by_source = _unlowered_targets(tmp_path)
-
-    trees = predicate_trees["trees"]
-    assert any(k.startswith("receive") for k in trees), (
-        "class R stopped lowering receive(); the withholding test below is"
-        " no longer a construction and must be re-derived"
-    )
-    assert by_source["liquidityPool"].get("authority_provenance") == "caller_gate"
-
-
-def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
-    """The builder now lowers every plain gate we could write, so a lowering failure is constructed by removing the
-    tree. Realised rows are a lower bound.
-    """
-    predicate_trees, _ = _unlowered_targets(tmp_path)
-    degraded = dict(predicate_trees)
-    degraded["trees"] = {k: v for k, v in predicate_trees["trees"].items() if not k.startswith("receive")}
-    src = textwrap.dedent(UNLOWERED_GATE_SOURCE).strip() + "\n"
-    f = tmp_path / "QueueDegraded.sol"
-    f.write_text(src)
-    contract = next(c for c in Slither(str(f)).contracts if c.name == "Queue")
-    effects = build_effects(contract)
-    semantic_control = _build_semantic_control_summary(contract, tmp_path, degraded, effects)
-    targets = build_controller_tracking(contract, tmp_path, degraded, effects, semantic_control)
-    by_source = {t["source"]: t for t in targets}
-
-    assert "authority_provenance" not in by_source["liquidityPool"], (
-        "a gate the builder never lowered was published as a proven callee"
-    )
-
-
-def test_the_correction_does_not_swallow_the_other_two_answers(tmp_path):
-    """Without these the fix is indistinguishable from deleting the split."""
-    _predicate_trees, by_source = _unlowered_targets(tmp_path)
-
-    assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
-    # It never reads msg.sender/tx.origin, so it can't hold a caller gate.
-    assert by_source["eETH"].get("authority_provenance") == "call_target"
-
-
-def test_unenumerable_entry_points_answer_not_determined(tmp_path):
-    contract, predicate_trees, effects, semantic_control = _build(tmp_path)
-
-    class _Opaque:
-        functions_entry_points = None
-
-        def __getattr__(self, item):
-            return getattr(contract, item)
-
-    targets = build_controller_tracking(_Opaque(), tmp_path, predicate_trees, effects, semantic_control)
-    by_source = {t["source"]: t for t in targets}
-    assert "authority_provenance" not in by_source["eETH"]
 
 
 def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):

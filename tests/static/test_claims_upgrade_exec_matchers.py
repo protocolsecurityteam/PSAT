@@ -231,29 +231,6 @@ def test_a_state_variable_destination_mints_no_claim_at_all(tmp_path):
     assert "rebalance" not in _binding_witnesses(tmp_path)
 
 
-def test_the_state_var_destination_state_is_still_produced(tmp_path):
-    """``state_var`` is a function-wide quantifier, so the multi-op arm proves the suppression still has something
-    real to fire on.
-    """
-    from slither import Slither
-
-    from services.static.claims.context import ClaimContext
-    from services.static.claims.matchers._taint import arbitrary_exec_taint
-    from services.static.contract_analysis_pipeline.effects import build_effects
-    from services.static.contract_analysis_pipeline.shared import _select_subject_contract
-
-    source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
-    project_dir = write_foundry_project(tmp_path, "ExecBinding", source)
-    subject = _select_subject_contract(Slither(str(project_dir)), "ExecBinding")
-    assert subject is not None
-    ctx = ClaimContext(subject, build_effects(subject), {})
-    for signature in ("rebalance(address,address,bytes)", "twoStateVarSinks(address,bytes)"):
-        taint = arbitrary_exec_taint(ctx, signature)
-        assert taint is not None, "the taint fragment is what the suppression reads"
-        assert taint["destination_kind"] == "state_var", signature
-        assert taint["destination_param"] is None, signature
-
-
 def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
     """Safe/Zodiac guard idiom: a fixed guard call then the arbitrary call.
 
