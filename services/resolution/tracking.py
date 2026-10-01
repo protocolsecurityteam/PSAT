@@ -533,7 +533,7 @@ def probe_declared_vault_backlink(
     """Does *principal_address* declare *gated_contract_address* as its ``vault()``, at a pinned height, with the
     negative control passed?
 
-    This corroborates the (M, V) pairing structurally (inv.2). It says nothing about what M is: half the positive pairs
+    This corroborates the (M, V) pairing structurally. It says nothing about what M is: half the positive pairs
     on the corpus are Tellers, solvers and vaults, not managers.
 
     Returns ``None`` when the height can't be pinned. ``declared_vault_matches_gated_contract`` is ``True`` or

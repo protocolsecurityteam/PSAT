@@ -1,4 +1,4 @@
-"""Contract-side ERC-20 seeding (§16.6-A) — the token analogue of the existing
+"""Contract-side ERC-20 seeding — the token analogue of the existing
 native ``contract_balance_override``.
 
 A payout the contract's LIVE token balance cannot cover reverts before its send.
@@ -6,7 +6,7 @@ Seeding the CONTRACT's own balance of a token it provably holds unblocks it, and
 a verdict proven under that seed is a CAPABILITY claim ("would move value IF the
 contract were funded"), so it carries the weaker ``contract_balance_seeded``
 qualifier exactly as the ETH seed does. The token is derived from measured
-holdings, never hardcoded (§0.0.2).
+holdings, never hardcoded.
 """
 
 from __future__ import annotations

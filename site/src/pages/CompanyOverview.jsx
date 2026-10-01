@@ -156,7 +156,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
 
-  // Composite keys so CREATE2 twins keep a row each (inv. 13).
+  // Composite keys so CREATE2 twins keep a row each.
   const coverageByAddr = (() => {
     const map = {};
     for (const row of auditCoverage?.coverage || []) {

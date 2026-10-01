@@ -225,7 +225,7 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     # Contracts table populated with all discovered addresses, tagged
     # dapp_crawl. ``protocol_id`` stays NULL: every discovery write is a
     # nomination, and only the membership gate promotes on a recorded
-    # witness (services/discovery/membership_gate.py). A dapp_crawl
+    # witness (services/discovery/membership_gate/). A dapp_crawl
     # scrape sees every 0x... on a page, including third-party tokens
     # and infrastructure — none of which may become members here.
     contracts = (

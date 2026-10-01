@@ -1,4 +1,4 @@
-"""NULL-chain Contract lookups in ``services.discovery.upgrade_history`` (MULTICHAIN_INVARIANTS.md 1/6/12).
+"""NULL-chain Contract lookups in ``services.discovery.upgrade_history``.
 
 ``project_to_events`` (proxy-row lookup) and ``backfill_historical_impl_contracts`` (impl dedup + current-impl
 anchor) used a raw ``chain == <value>`` / ``chain IS NULL`` predicate that ignored NULL≡mainnet, so legacy
@@ -39,7 +39,7 @@ def stub_etherscan(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_membership_probe(monkeypatch):
-    """Stub-the-wire: the backfill's near-line §3.5 probe never leaves the machine."""
+    """Stub-the-wire: the backfill's near-line probe never leaves the machine."""
     monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
 
 

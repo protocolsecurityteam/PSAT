@@ -5,7 +5,7 @@ database.
 
     python -m services.scoring.cli score --protocol 1 [--out FILE]
     python -m services.scoring.cli differential --protocol 1 \
-        --against scoring_prototype/score_v3.json [--out FILE]
+        --against ORACLE_JSON [--out FILE]
     python -m services.scoring.cli dirty --protocol 1
 """
 

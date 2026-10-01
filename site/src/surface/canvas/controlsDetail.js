@@ -1,6 +1,6 @@
 import { entityKey } from "../entityKey.js";
 
-// Keyed by each row's own chain so twins don't overwrite each other (inv. 13);
+// Keyed by each row's own chain so twins don't overwrite each other;
 // chainless legacy rows use the active chain.
 export function buildControlsDetailMap(rows, chain) {
   const map = new Map();

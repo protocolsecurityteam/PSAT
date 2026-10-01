@@ -1,9 +1,9 @@
-"""[P2-pre] entity-write chain threading (MULTICHAIN_INVARIANTS.md Appendix A).
+"""Entity-write chain threading.
 
 The Contract-row chain and every resolution-spawned child job derive their chain from ``jobs.chain_id``
 (via the registry), never the ``request`` JSONB. A chainless ``/api/analyze`` used to write
 ``Contract.chain=NULL`` and duplicate ``'ethereum'`` stubs, since ``NULL ≠ NULL`` defeats
-``uq_contract_address_chain`` (invariants 1, 6, 12).
+``uq_contract_address_chain``.
 
 Real-DB tests: the fix hinges on the SQL ``coalesce(chain,'ethereum')`` predicate. The "chain_id set, request
 chainless" case overrides the column directly, mimicking a legacy submission after Phase 0 backfill.
@@ -60,7 +60,7 @@ def test_chainless_mainnet_job_writes_ethereum_and_dedups_null_row(db_session, m
     db_session.commit()
 
     job = create_job(db_session, {"address": addr})
-    assert job.chain_id == 1  # Phase-0 dual-write: chainless address job → mainnet.
+    assert job.chain_id == 1  # Chain-id dual-write: chainless address job → mainnet.
 
     worker = DiscoveryWorker()
     _patch_discovery(monkeypatch, worker)
@@ -159,10 +159,10 @@ def test_resolution_child_job_stamped_from_chain_id_not_request(db_session, monk
     from workers.resolution_worker import ResolutionWorker
 
     # Models a base-enabled deployment: discovered-child spawns gate off-allowlist
-    # chains (inv. 14), so make the premise explicit rather than relying on {1}.
+    # chains, so make the premise explicit rather than relying on {1}.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     parent_addr, child_addr = _addr(), _addr()
-    # Chainless payload, first-class chain_id says Base — the P2-pre scenario.
+    # Chainless payload, but the first-class chain_id says Base.
     parent = create_job(db_session, {"address": parent_addr})
     parent.chain_id = 8453
     db_session.commit()

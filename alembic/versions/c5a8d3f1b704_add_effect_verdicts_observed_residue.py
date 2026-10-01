@@ -1,11 +1,11 @@
 """add effect_verdicts.observed_residue
 
-State-plane observation residue that has no dedicated column: the §5b downstream
+State-plane observation residue that has no dedicated column: the downstream
 value-reach figures (holder addresses + their USD) and the bookkeeping that
 bounds the hit-path residue re-probe.
 
 These lived in ``ObservedEffect.details`` and therefore in
-``effect_behavior_cache.details`` — a CROSS-DEPLOYMENT code-plane row (inv. 3),
+``effect_behavior_cache.details`` — a CROSS-DEPLOYMENT code-plane row,
 so one contract's holder addresses and USD were re-published as another's on
 every cache hit. They belong here, beside ``concrete_destination``, keyed on the
 deployment coordinates.

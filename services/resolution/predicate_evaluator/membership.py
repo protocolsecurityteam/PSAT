@@ -109,7 +109,7 @@ def _observed_event_key_words(
 
     scan_chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(scan_chain_id, int):
-        # Chainless reads can't default to mainnet (inv. 6).
+        # Chainless reads can't default to mainnet.
         return []
 
     out: set[str] = set()
@@ -199,7 +199,7 @@ def _observed_event_key_words_from_hypersync(
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
         if not isinstance(scan_chain_id, int):
             return []
-        # Per-chain endpoint (inv. 5): meta override, env override, registry. No coverage means no scan.
+        # Per-chain endpoint: meta override, env override, registry. No coverage means no scan.
         # ``PSAT_HYPERSYNC_URL`` overrides every chain, so it's a single-chain dev override only.
         registry_url = hypersync_url_for_chain(scan_chain_id)
         url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url

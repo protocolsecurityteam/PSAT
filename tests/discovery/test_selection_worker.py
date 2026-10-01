@@ -697,7 +697,7 @@ class TestAnalyzeLimitFilling:
 
 
 # ---------------------------------------------------------------------------
-# Nomination settle: selection runs the §3.4 event-1 probe pass before ranking
+# Nomination settle: selection runs the nomination probe pass before ranking
 # ---------------------------------------------------------------------------
 
 

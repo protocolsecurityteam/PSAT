@@ -292,7 +292,7 @@ def classify_single(
     """Classify one contract via bytecode patterns and storage slots.
 
     Returns ``address``, ``type`` and type-specific metadata. *code_cache* avoids duplicate ``eth_getCode`` calls.
-    *chain_id* arms the inv-7 URL/chain guard.
+    *chain_id* arms the URL/chain guard.
     """
     address = normalize_address(address)
     if bytecode is None:

@@ -53,7 +53,7 @@ export function SurfaceFilterPanel({
         onPreview={onPreview}
         onCommit={onCommit}
       >
-        {/* Multichain only (inv. 13). */}
+        {/* Multichain only. */}
         <ChainSwitcher chains={availableChains} active={activeChain} onSelect={onSelectChain} />
         <div className="ps-filter-row">
           <span className="ps-filter-gutter">Type</span>

@@ -1,4 +1,4 @@
-"""Delegated role-gate refine-only guard (ROLEGATE_FIX_SPEC.md §3.1 [AMENDED]).
+"""Delegated role-gate refine-only guard.
 
 Cross-contract inlining may only *refine* a caller-tainted delegated gate, never un-gate it.
 When the un-inlined outer leaf would fail closed and the inline result projects public, the
@@ -16,7 +16,7 @@ The real registry's opaque ``onlyX`` leaf compiles to a ``business/equality/trut
 an erased ``view_call`` operand and an expression NOT starting with ``return `` (reaches
 ``:1976``); a *minimal* Solady fixture folds to a ``computed`` / ``return ok_1`` leaf that takes
 the materialization fallback instead. FIXTURE 1 therefore seeds the faithful ``view_call``
-callee tree directly (ROLEGATE_FIX_SPEC §1.2.2).
+callee tree directly.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from tests.conftest import _can_connect  # noqa: E402
 
 
 # The guard runs UNCONDITIONALLY (not behind earned_public_enabled()); every
-# behavioral test therefore runs under both flag states (ROLEGATE_FIX_SPEC §6.9).
+# behavioral test therefore runs under both flag states.
 @pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
 def both_flags(request, monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
@@ -206,7 +206,7 @@ contract CallerLike {{
 
 # The faithful real-registry opaque leaf: business/equality/truthy with the
 # account erased into a `view_call` operand and an expression that does NOT
-# start with "return " -> reaches the :1976 guard (ROLEGATE_FIX_SPEC §1.1).
+# start with "return " -> reaches the refine-only guard.
 def _opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
     return {
         callee_sig: {
@@ -449,11 +449,11 @@ def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
     assert [c.kind for c in cap.conditions] == ["time"]
 
 
-# Section 3 — the :1976 guard, two-hop DB (both flags).
+# Section 3 — the refine-only guard, two-hop DB (both flags).
 
 
 def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
-    """THE acceptance shape (ROLEGATE_FIX_SPEC §6.1): the real registry ``onlyOperatingMultisig``
+    """THE acceptance shape: the real registry ``onlyOperatingMultisig``
     leaf reaches :1976; inline projects public, so the guard fires (external_check_only,
     authority_public False, basis carries the tag)."""
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
@@ -630,7 +630,7 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
     control_l = _NEGATIVE_CONTROL_ADDR.lower()
 
     def _stub(rpc_url, method, params=None, **kwargs):
-        # The adapter's pin-once (§A1) reads eth_blockNumber when the pass height is unpinned
+        # The adapter's pin-once reads eth_blockNumber when the pass height is unpinned
         # (netguard blocks the head read); answer above the seeded grant so fold + probe pin to it.
         if method == "eth_blockNumber":
             return hex(25_000_000)
@@ -662,7 +662,7 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
 
 
 def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypatch):
-    """FIXTURE 1 ADAPTER-LIVE (ROLEGATE_FIX_SPEC §6.12 / CONTROLLER_RESOLUTION_SPEC §6 Stage 2):
+    """FIXTURE 1 ADAPTER-LIVE:
     same opaque shape as the guard fixture, but the registry is a recognized Solady role store,
     so the adapter enumerates it and the function resolves ``finite_set([multisig])`` without the guard."""
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
@@ -736,7 +736,7 @@ def test_fixture7_no_arg_paused_stays_public(session, both_flags):
 
 
 def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
-    """Documented sacrifice (ROLEGATE_FIX_SPEC §6.8): a delegated pause pointlessly taking the
+    """Documented sacrifice: a delegated pause pointlessly taking the
     caller address (arg unused) now gates. The inline is conditional_universal(pause), not a
     cofinite, so the counterfactual does not spare it. Accepted fail-closed trade."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_PAUSE_AND_ALLOW, "Registry"))
@@ -748,7 +748,7 @@ def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
 
 
 def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
-    """AMENDED regression anchor (ROLEGATE_FIX_SPEC §6.11): a transparent delegated denylist emits
+    """AMENDED regression anchor: a transparent delegated denylist emits
     a root cofinite; the counterfactual is NOT public, so the guard does not fire and the function
     stays PUBLIC with a deny-by-exception condition."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_DENYLIST, "Registry"))

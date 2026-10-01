@@ -154,7 +154,7 @@ SCORE_TRIGGERS = (
     SCORE_TRIGGER_MANUAL,
 )
 
-# The two disclosures ride every proven verdict (SPEC §5 G7), so excluded rows carry them too.
+# The two disclosures ride every proven verdict (G7), so excluded rows carry them too.
 SELF_SERVICE_STATE_PROVEN = "proven_self_service"
 SELF_SERVICE_BASIS_BOUNDED = "proven_self_service_bounded"
 SELF_SERVICE_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
@@ -167,5 +167,5 @@ TRACE_STEP_ENUMERABLE_ROLE_STORE = "enumerable_role_store"
 # constraint.
 NO_SELECTOR = ""
 
-# Any constant change bumps it (strategy §7.2).
+# Any constant change bumps it.
 MODEL_VERSION = "1.4.1-provisional"

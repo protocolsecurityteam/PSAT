@@ -1,4 +1,4 @@
-"""The selection stage's omission ledger (C2).
+"""The selection stage's omission ledger.
 
 `contracts.id=11` (0xcd425f44…, an OZ TimelockController with authority over 53
 `function_principals` rows) has no analysis job: it ranked 0.3836 at queue

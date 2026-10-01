@@ -39,13 +39,13 @@ pragma solidity ^0.8.27;
 // (``block.timestamp > pausedUntil + 300`` → 300) as freeze windows. The provable
 // shape — the clock and the latch inside ONE absorbed additive group, i.e. their time
 // difference, bounded by a constant on the other side — still resolves, from compiled
-// source, in ``tests/test_pause_duration_clock_opacity.py``. Stamping the additive
+// source, in ``tests/static/test_pause_duration_clock_opacity.py``. Stamping the additive
 // sign in the static plane is what would restore this contract's bound provably.
 // Only the middle one may render as "indefinite latch (no self-recovery bound)".
 // What this fixture still gates is a reader that INVENTS a bound — scraping a
 // constant by name, or letting one latch inherit the other's window — because that
 // value is read downstream as a severity REDUCER on the most severe case there is.
-// ``tests/test_label_corpus_discrimination.py`` holds the assertions.
+// ``tests/static/test_label_corpus_discrimination.py`` holds the assertions.
 
 contract TimedLatch {
     address public owner;

@@ -450,7 +450,7 @@ def test_build_functions_for_protocol_unknown_company_raises(db_session):
 
 def test_build_functions_for_protocol_two_chains_shared_address(db_session):
     """Same address on two chains keeps BOTH chains' function analyses, keyed by composite
-    ``<chain>::<address>`` (invariant 13).
+    ``<chain>::<address>``.
 
     A CREATE2 twin can carry a different per-chain verdict (``pause()`` gated on mainnet,
     earned-public on base); the old flat ``{address: functions}`` map collapsed them last-wins.
@@ -1360,7 +1360,7 @@ def test_fund_flows_controller_admitted_for_reach_witnessed_authority(db_session
     as a ``type=controller`` fund_flow even with no FunctionPrincipal row.
 
     Regression for the RolesAuthority route gap: ``load_control_closure``
-    (services/scoring/planes.py) walks ``controller_value`` edges, so the score
+    (services/scoring/planes/) walks ``controller_value`` edges, so the score
     document publishes "authority reaches vault" — but the FP-gated flow pass
     never emitted the edge (a RolesAuthority gates functions without being a
     FunctionPrincipal itself), so the surface graph carried no route and every
@@ -1808,7 +1808,7 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
 
 def test_standalone_twins_do_not_merge_controller_attribution(db_session):
     """Two standalone CREATE2 twins at the SAME address on ethereum and base, each governed by a
-    DIFFERENT Safe, must not merge controller attribution (multichain invariant 13).
+    DIFFERENT Safe, must not merge controller attribution.
 
     The attribution fold used to render every contract to a BARE address before
     ``assign_primary_controllers``, so the twins collapsed onto one key, their
@@ -1948,8 +1948,8 @@ def test_flows_and_principals_carry_chain_fields(db_session):
 def test_controls_detail_rows_carry_chain_for_twins(db_session):
     """One Safe governing same-address CREATE2 twins on two chains yields two
     ``controls_detail`` rows with the SAME bare ``address`` but distinct
-    ``chain`` tokens — so a consumer can tell the two governed contracts apart
-    (multichain invariant 13). Without the chain discriminator the two rows are
+    ``chain`` tokens — so a consumer can tell the two governed contracts apart.
+    Without the chain discriminator the two rows are
     indistinguishable.
     """
     p = _add_protocol(db_session, f"twin-detail-{uuid.uuid4().hex[:8]}")
@@ -2224,7 +2224,7 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_flagged_as_possibly_inc
 
 
 def test_a_long_list_the_fetch_paged_to_exhaustion_is_not_read_as_truncated(db_session):
-    """§9.5-addendum B.1. A de-capped list is longer than the page size and WHOLE.
+    """A de-capped list is longer than the page size and WHOLE.
 
     Before the migration onto ``asset_set_status`` this compared the rendered list's
     LENGTH to ``TOKEN_BALANCE_PAGE_SIZE``, so paging the endpoint to exhaustion made

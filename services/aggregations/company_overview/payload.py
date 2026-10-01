@@ -45,7 +45,7 @@ logger = logging.getLogger("services.aggregations.company_overview")
 def _protocol_inventory_filter(protocol_id: int):
     """Members plus this protocol's candidates/pruned rows.
 
-    Another protocol's members never surface; unclaimed rows are outside the model (spec §3.1).
+    Another protocol's members never surface; unclaimed rows are outside the model.
     """
     return or_(
         Contract.protocol_id == protocol_id,
@@ -71,7 +71,7 @@ def _witness_display_entry(row: ContractMembershipWitness) -> dict[str, Any]:
 
 
 def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
-    """Invariant 5: parked state named from the persisted probe row. ``no_probe_attempt`` means no row exists."""
+    """parked state named from the persisted probe row. ``no_probe_attempt`` means no row exists."""
     if attempt is None:
         return {"kind": "no_probe_attempt"}
     results = attempt.results if isinstance(attempt.results, dict) else {}
@@ -100,7 +100,7 @@ def _candidate_reason(attempt: ContractProbeAttempt | None) -> dict[str, Any]:
 
 
 def _membership_fields(session: Session, rows: list[Contract]) -> dict[int, dict[str, Any]]:
-    """Membership display fields (spec §5.2). One query per evidence table, never per row."""
+    """Membership display fields. One query per evidence table, never per row."""
     chain_ids = {cr.id: chain_id_for_chain_name(cr.chain) for cr in rows}
     code_pairs = sorted(
         {(cid, cr.address.lower()) for cr in rows if cr.address and (cid := chain_ids.get(cr.id)) is not None}

@@ -125,7 +125,7 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):
 # vault's ``exit`` is witnessed consulting, with NO host setter anywhere. The
 # host arm is asked first, so this is the only way a composed entry publishes
 # ``basis.arm == "gating_authority"`` — and without it the shape ships covered at
-# the join and uncovered in the document (CAP-A §R1.3).
+# the join and uncovered in the document.
 _DELETES_THE_GATING_AUTHORITYS_ROLES = ((f"ethereum::{_GATING_AUTHORITY}", EOA, "setUserRole"),)
 
 
@@ -155,7 +155,7 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold, de
     destination's calldata itself — via the HOST arm or the GATING AUTHORITY arm —
     so a route-only or hop-count rule would wrongly withhold.
 
-    Parametrised over both arms per CAP-A §R1.3: only the host arm reached a
+    Parametrised over both arms to check the host witness: only the host arm reached a
     composed entry, so the published ``basis.arm == "gating_authority"`` had no carrier.
     """
     row = _gate_row(
@@ -316,7 +316,7 @@ def test_case7_both_arms_hold_on_a_subsumed_row(fold, deletability, expect_publi
 
 
 def test_an_unresolvable_gating_authority_is_disclosed_and_not_read_as_a_negative(fold):
-    """inv. 13. Obscuring the gating authority LOWERS published dollars, so it
+    """Obscuring the gating authority LOWERS published dollars, so it
     pays unless the obscuring itself is published: the entry lands on
     ``not_determined`` under its own token and the census counts the two apart."""
     # No gating witness at all: the join cannot ask the authority arm.
@@ -644,7 +644,7 @@ def test_an_unresolvable_pointer_never_reaches_object_storage():
     assert record.reason in EX.FAULT_REASONS
 
 
-# §7.2 arm 1's CALLER conjunct — "gate claims transfer ON CALLER MATCH"
+# The caller-match conjunct — "gate claims transfer ON CALLER MATCH"
 
 # The address the last act-as step names as its caller, and one that is not it.
 _CLAIMED_CALLER = KEY_C.partition("::")[2]

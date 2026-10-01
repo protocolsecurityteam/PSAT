@@ -63,7 +63,7 @@ function EventRow({ row, chain, now, onPreview, onNavigate }) {
 }
 
 // Only proven `routine` rows collapse; `not_determined` is unrated, and
-// collapsing it would suppress from ignorance (invariant 5).
+// collapsing it would suppress from ignorance.
 const MIN_COLLAPSE_RUN = 2;
 
 function groupRoutineRuns(rows) {

@@ -238,7 +238,7 @@ def test_f8_propose_only_does_not_collapse_a_timelock(fold):
 
 
 def test_w4_an_unread_proposer_threshold_cannot_rank_as_the_strongest(fold):
-    """inv.5 takes the WEAKEST path, and unread must not win by construction."""
+    """The score takes the WEAKEST path, and unread must not win by construction."""
     population = _timelock_population(include_execute=True)
     principals = {
         1: facts(1, SAFE, "safe", owners=OWNERS),  # threshold never read
@@ -254,7 +254,7 @@ def test_w4_an_unread_proposer_threshold_cannot_rank_as_the_strongest(fold):
 
 
 def test_w6_an_unreadable_module_set_leaves_the_kn_credit_standing():
-    """§7.1: only a PROVEN module or guard withholds the demotion."""
+    """Only a PROVEN module or guard withholds the demotion."""
     proven_empty = {
         "module_set": [],
         "module_set_basis": "storage_linked_list_terminated",

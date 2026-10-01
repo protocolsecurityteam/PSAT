@@ -93,7 +93,7 @@ _COVERAGE_PROVING_TRACE_STEPS = frozenset(
     {"solmate_roles_authority", "enumerable_role_store", "live_getter_resolution", "live_slot_resolution"}
 )
 
-# Only reasons reporting a completed read. ``empty_by_design`` rests on an accessor name (inv.2); failure states never
+# Only reasons reporting a completed read. ``empty_by_design`` rests on an accessor name; failure states never
 # license credit; ``owner_read_burn_address`` rests on a convention, not a read.
 _READ_CONFIRMED_EMPTY_REASONS = frozenset({"owner_read_zero", "slot_read_zero"})
 

@@ -129,7 +129,7 @@ def queue_secondary_impl_jobs(
 
     if not secondary_addrs:
         return []
-    # Defence in depth (inv. 14): a disabled chain spawns nothing.
+    # Defence in depth: a disabled chain spawns nothing.
     if not chain_enabled(chain):
         logger.info(
             "Skipping secondary-impl spawn: chain not enabled for this deployment",

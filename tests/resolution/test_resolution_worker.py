@@ -1089,8 +1089,7 @@ class TestStructuralOwnershipPropagation:
     def test_proxy_back_link_on_another_chain_does_not_propagate(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The back-linking row exists only on ANOTHER chain (CREATE2 twin): not evidence on the parent's chain
-        (readiness §2.5)."""
+        """The back-linking row exists only on ANOTHER chain (CREATE2 twin): not evidence on the parent's chain."""
         session = db_session_for_resolution
         parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
@@ -1201,7 +1200,7 @@ class TestStructuralOwnershipPropagation:
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A non-member parent (``protocol_id`` NULL): source tags are irrelevant, ``parent_is_member``
-        is False and no witness is produced (spec §3.2 W2)."""
+        is False and no witness is produced (W2)."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(

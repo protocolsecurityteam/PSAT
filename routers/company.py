@@ -137,7 +137,7 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
 
 @router.get("/api/company/{company_name}/functions", response_model=None)
 def company_functions(company_name: str, response: Response, request: Request) -> CompanyFunctionsResponse | Response:
-    """Function entries keyed by ``"<chain>::<address>"`` (invariant 13).
+    """Function entries keyed by ``"<chain>::<address>"``.
 
     Split out: ~2 MB and 120-290ms TTFB the canvas doesn't need to render.
     """

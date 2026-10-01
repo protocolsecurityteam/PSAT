@@ -379,7 +379,7 @@ def search_protocol_inventory(
     unknown_count = sum(1 for c in contracts if _primary_chain(c) == "unknown")
     if unknown_count:
         _debug_log(debug, f"Resolving chain for {unknown_count} unknown-chain contract(s)")
-        # A requested chain counts as declared (invariant 3); ``None`` keeps the legacy all-chain probe.
+        # A requested chain counts as declared; ``None`` keeps the legacy all-chain probe.
         resolve_declared = declared_chains
         if resolve_declared is not None:
             resolve_declared = [*resolve_declared, requested_chain] if requested_chain else list(resolve_declared)

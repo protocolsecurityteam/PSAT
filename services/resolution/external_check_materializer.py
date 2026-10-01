@@ -278,7 +278,7 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
 
     from services.resolution.hypersync_bound import hypersync_url_for_chain
 
-    # Per-chain endpoint (inv. 5); no coverage means no candidates. ``PSAT_HYPERSYNC_URL`` is a single-chain dev
+    # Per-chain endpoint; no coverage means no candidates. ``PSAT_HYPERSYNC_URL`` is a single-chain dev
     # override only.
     url = os.getenv("PSAT_HYPERSYNC_URL") or hypersync_url_for_chain(chain_id)
     if not url:

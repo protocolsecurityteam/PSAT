@@ -59,7 +59,7 @@ def bulk_upsert_discovered_contracts(
     for address, chain, entry in norm_entries:
         key = (address, _mainnet_coalesced_chain(chain))
         clean_sources = [s for s in (entry.get("new_sources") or []) if s]
-        # Invariant 1: discovery only nominates; the membership gate promotes.
+        # discovery only nominates; the membership gate promotes.
         source_tag = clean_sources[0] if clean_sources else ""
         existing = existing_by_key.get(key)
         if existing is None:
@@ -117,7 +117,7 @@ def upsert_discovered_contract(
 
     Every discovery worker writes through here so corroboration shows as a multi-element array (ranking boosts it). On
     an existing row: sources are unioned in order; the nomination is recorded via the membership gate (``protocol_id``
-    is never written here, invariant 1); ``contract_name``/``confidence``/``chains``/``discovery_url`` are
+    is never written here); ``contract_name``/``confidence``/``chains``/``discovery_url`` are
     first-writer-wins.
 
     Chainless entries inherit *default_chain*, sharing the mainnet-coalesced key with
@@ -241,7 +241,7 @@ def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> tuple
     """Rewrite src deployer rows to dst.
 
     On a shared address dst's row survives, revoked if either side was. Returns dropped src rows and surviving revoked
-    rows, whose invariant-8 demotion the caller runs after the FK rewrite.
+    rows, whose demotion the caller runs after the FK rewrite.
     """
     dropped = 0
     cascade: list[ProtocolDeployer] = []
@@ -288,7 +288,7 @@ def _merge_deployer_rows(session: Session, *, src_id: int, dst_id: int) -> tuple
 def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None:
     """Reassign every protocols.id FK from ``src`` to ``dst``, then delete src.
 
-    Used when ``get_or_create_protocol`` finds a pre-resolver duplicate. A gate operation (invariant 1): membership,
+    Used when ``get_or_create_protocol`` finds a pre-resolver duplicate. A gate operation: membership,
     witness and deployer rows move in one transaction, with unique-key collisions resolved before the blind rewrite, and
     revoked deployer survivors demoted after. ``nominated_protocol_id`` is rewritten, not left to SET NULL.
     """
@@ -309,7 +309,7 @@ def _merge_protocol_into(session: Session, src: Protocol, dst: Protocol) -> None
     # The raw rewrite bypasses the identity map.
     session.expire_all()
     for deployer_row in cascade_rows:
-        # Invariant 8 for the surviving revoked row, so reconcile reports no drift after the merge.
+        # Cascade demotion for the surviving revoked row, so reconcile reports no drift after the merge.
         result = gate_demote_deployer(session, deployer_row=deployer_row, reason="protocol_merge_revoked_deployer")
         logger.info(
             "protocol merge deployer demotion cascade",

@@ -1149,7 +1149,7 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
 
 
 # ---------------------------------------------------------------------------
-# Job lifecycle (merged from tests/test_queue.py)
+# Job lifecycle
 # ---------------------------------------------------------------------------
 
 

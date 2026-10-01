@@ -215,7 +215,7 @@ def test_prefetch_cleared_after_plan(clean):
 
 # ---------------------------------------------------------------------------
 # calldata data-loading helpers: batched (prefetch) vs single-row are identical.
-# These are the pause-path N+1 members (calldata.py), verified in isolation.
+# These are the pause-path N+1 members (``services/effects/calldata/``), verified in isolation.
 # ---------------------------------------------------------------------------
 
 

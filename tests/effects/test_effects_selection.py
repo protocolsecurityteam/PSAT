@@ -697,7 +697,7 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_se
     """The witness is the FETCH's ``asset_set_status``, and nothing else.
 
     An at-cap holder is marked ``at_page_cap`` so the reach probe names it as the reason an asset
-    could not be valued. THE LENGTH ARM IS GONE (§9.5-addendum B.1): the fetch pages to exhaustion,
+    could not be valued. THE LENGTH ARM IS GONE: the fetch pages to exhaustion,
     so a list longer than ``TOKEN_BALANCE_PAGE_SIZE`` is a routine COMPLETE list and comparing a
     count to the cap flagged every large sheet. ``not_determined`` is still the below-cap answer
     (there is no ``complete`` state). ``at_page_cap`` fires on ZERO local holders (U2 de-capping

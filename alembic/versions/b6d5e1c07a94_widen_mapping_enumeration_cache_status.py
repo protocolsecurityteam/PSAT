@@ -22,7 +22,7 @@ Deliberately not an enum or a CHECK constraint — the vocabulary is
 owned by ``services/resolution/mapping_enumerator.py`` and adding a
 member should not need a migration. What must not silently regress is
 the *fit*, and that is pinned by
-``tests/test_mapping_enumeration_status_vocabulary.py``, which
+``tests/resolution/test_mapping_enumeration_status_vocabulary.py``, which
 round-trips every status the enumerator can emit through the real
 column. The vocabulary is intentionally not enumerated here: a list in
 a migration comment is a copy that goes stale.

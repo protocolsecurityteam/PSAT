@@ -1,6 +1,6 @@
 """P4 guard: caller-keyed time predicates under the Part-2 openness.
 
-Part-2 decision (plan §5): a caller-keyed time/threshold predicate lowers to a runtime
+Part-2 decision (plan): a caller-keyed time/threshold predicate lowers to a runtime
 side-condition (open-modulo-condition), EXCEPT a deny-by-default time **allowlist**, which
 stays gated. ``predicate_evaluator._is_caller_keyed_time_allowlist`` discriminates on the
 proceed-relation lower-bounding the caller value (``value >= now``), so the unset (0)

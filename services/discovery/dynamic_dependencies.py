@@ -179,7 +179,7 @@ def resolve_trace_rpc(rpc_url: str | None = None) -> str:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from services.clients.rpc import default_rpc_url
 
-    # Pipeline callers pass a chain-resolved URL; this mainnet default is only for the CLI (inv. 6).
+    # Pipeline callers pass a chain-resolved URL; this mainnet default is only for the CLI.
     resolved = default_rpc_url(chain_id=1)
     if resolved:
         return resolved

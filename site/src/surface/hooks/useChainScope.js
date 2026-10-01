@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import { coalesceChain } from "../entityKey.js";
 import { deriveAvailableChains, defaultChainFor, pickActiveChain } from "../chainScope.js";
 
-// The page renders one chain (inv. 13). `chosenChain` is seeded once from
+// The page renders one chain. `chosenChain` is seeded once from
 // ?chain=, read synchronously so the first render is already scoped.
 export function useChainScope({ companyData, embedded }) {
   const [chosenChain, setChosenChain] = useState(() => {

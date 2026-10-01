@@ -1,7 +1,7 @@
 """Observability contract for the scoring boundary.
 
-The fold and resolution planes are log-free (every refusal is published into the score document,
-SCORING_INVARIANTS inv. 11/12), so the impure boundary around them is the only place a pricing
+The fold and resolution planes are log-free (every refusal is published into the score document), so the impure
+boundary around them is the only place a pricing
 regression or unreadable execution record can become visible. Locked here: ``document_summary``
 reads every field off the finished document; ``score_protocol`` times its impure steps and WARNs
 for the two grade-integrity facts; the distiller's I/O edges name what they could not read (W2

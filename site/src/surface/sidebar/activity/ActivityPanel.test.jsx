@@ -721,8 +721,8 @@ describe("ActivityPanel — state that must not outlive its selection", () => {
 
 // ---------------------------------------------------------------------------
 // Salience: the two-position control (All / Alerts, default Alerts), the
-// always-visible hidden count, and the routine-run collapse. Invariant 4
-// (routine hides, never deletes) is what these pin; the count + one-click All
+// always-visible hidden count, and the routine-run collapse. These pin the rule
+// that routine activity hides without being deleted; the count + one-click All
 // is what keeps the Alerts default from being silent suppression.
 // ---------------------------------------------------------------------------
 
@@ -953,7 +953,7 @@ describe("ActivityPanel — the attached webhook states its alert groups", () =>
     expect(new Set(body.event_filter.event_types)).toEqual(
       new Set(eventTypesFromGroupKeys(groupKeysFromConfig(SAFE_CONTRACT.monitoring_config))),
     );
-    // Invariant 7 at the producer: the save still enumerates every type the
+    // The save still enumerates every type the
     // pre-split `signers` group carried.
     expect(body.event_filter.event_types).toContain("safe_tx_executed");
     expect(body.event_filter.event_types).toContain("signer_added");

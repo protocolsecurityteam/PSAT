@@ -1,4 +1,4 @@
-"""F3 — deployer expansion runs on the requested chain, not a mainnet default.
+"""Deployer expansion runs on the requested chain, not a mainnet default.
 
 ``search_protocol_inventory``'s Etherscan ``getcontractcreation``/``txlist`` calls must carry the requested chain's
 id, or an L2 search silently expands mainnet deployers. A chainless search (chain=None) keeps the documented

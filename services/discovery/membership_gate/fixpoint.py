@@ -1,4 +1,4 @@
-"""Event-driven evaluation (spec §3.4): fact deltas, candidate targeting, and the stratified fixpoint."""
+"""Event-driven evaluation: fact deltas, candidate targeting, and the stratified fixpoint."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class FactsDelta:
-    """What changed; only candidates these facts can reach are re-checked (spec §3.4 event 2)."""
+    """What changed; only candidates these facts can reach are re-checked."""
 
     new_member_contract_ids: tuple[int, ...] = ()
     # Newly resolved pointer/controller addresses from a fact-writer commit.
@@ -59,12 +59,12 @@ class PromotionResult:
     targeted_contract_ids: tuple[int, ...] = ()
     promoted_contract_ids: tuple[int, ...] = ()
     demoted_contract_ids: tuple[int, ...] = ()
-    # Candidates blocked on a probe fact (W1 or creation witness) plus demoted members (invariant 8). The caller
+    # Candidates blocked on a probe fact (W1 or creation witness) plus demoted members. The caller
     # schedules probes; the gate never touches the wire.
     reprobe_contract_ids: tuple[int, ...] = ()
 
 
-# Full-creation-history provider for §3.3 Class B: ``enumerator(eoa) -> (created_addresses, history_complete)``. Without
+# Full-creation-history provider for Class B: ``enumerator(eoa) -> (created_addresses, history_complete)``. Without
 # one, Class B can't be minted. May expose ``coverage_gaps`` (F3 counterevidence) and ``creations`` (factory
 # attributions) attributes.
 DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
@@ -73,7 +73,7 @@ DeployerEnumerator = Callable[[str], "tuple[Sequence[str], bool]"]
 def _standing_vias_named_by_edges(session: Session, edge_addresses: Sequence[str]) -> set[str]:
     """New edge values naming a standing via-fact (an active W2/W3/W4 via or unrevoked deployer EOA).
 
-    A new observation of one can invalidate facts resting on it, so they seed the revocation stratum (§3.2).
+    A new observation of one can invalidate facts resting on it, so they seed the revocation stratum.
     """
     addrs = sorted({a.lower() for a in edge_addresses if a})
     if not addrs:
@@ -103,7 +103,7 @@ def _standing_vias_named_by_edges(session: Session, edge_addresses: Sequence[str
 
 
 def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
-    """Indexed candidate lookups per §3.4 event 2."""
+    """Indexed candidate lookups for changed facts."""
     candidate = (Contract.protocol_id.is_(None), Contract.nominated_protocol_id.is_not(None))
     targeted: set[int] = set()
 
@@ -153,7 +153,7 @@ def _target_candidates(session: Session, facts_delta: FactsDelta) -> set[int]:
         )
 
     # Candidates reaching the delta through their own facts (a pointer to it, or it as their controller); both
-    # directions must target (invariant 9). Fresh edges count too, since they change a standing member's transitivity.
+    # directions must target. Fresh edges count too, since they change a standing member's transitivity.
     reach_addrs = edge_addrs | member_addrs | principal_addrs
     if reach_addrs:
         reach_list = sorted(reach_addrs)
@@ -204,12 +204,11 @@ def evaluate(
     *,
     deployer_enumerator: DeployerEnumerator | None = None,
 ) -> PromotionResult:
-    """Targeted gate check for one fact delta (spec §3.4 events 2–3): indexed candidate lookup, then the stratified
+    """Targeted gate check for one fact delta (events 2–3): indexed candidate lookup, then the stratified
     fixpoint. Doesn't commit.
 
     ``changed_deployer_addresses`` forces a ladder re-check of standing registry rows for those EOAs.
-    ``new_member_contract_ids`` also seeds revocation: a member another protocol claimed is counterevidence (invariant
-    8).
+    ``new_member_contract_ids`` also seeds revocation: a member another protocol claimed is counterevidence.
     """
     targeted = _target_candidates(session, facts_delta)
     dirty_vias = {a.lower() for a in facts_delta.changed_deployer_addresses if a}
@@ -298,7 +297,7 @@ def evaluate_role_plane_change(
     rows: Sequence[Mapping[str, Any]],
     context: str,
 ) -> PromotionResult | None:
-    """§3.4 event 2 for a role-holder plane rewrite.
+    """Targeted evaluation for a role-holder plane rewrite.
 
     The registry and its holders are named as edge addresses so ``_standing_vias_named_by_edges`` revisits dependent
     W3-D1 witnesses. A NULL holder set names nothing.
@@ -331,7 +330,7 @@ def evaluate_principal_change(
     addresses: Sequence[str] | set[str],
     context: str,
 ) -> PromotionResult | None:
-    """§3.4 event 2 for a ``FunctionPrincipal`` rewrite (invariant 8).
+    """Targeted evaluation for a ``FunctionPrincipal`` rewrite.
 
     *addresses* must be the union of principals before and after, since dropped principals are only reachable via the
     pre-image. The contract's own address is named too.
@@ -363,7 +362,7 @@ def _stratified_fixpoint(
     w4h_extra_addresses: Sequence[str] = (),
     deployer_enumerator: DeployerEnumerator | None = None,
 ) -> PromotionResult:
-    """Stratified fixpoint (spec §3.4 event 3, invariants 8+9).
+    """Stratified fixpoint.
 
     Each round: (i) revocations to quiescence, (ii) deployer reclassification, (iii) admissions, in stable sorted order,
     so the result depends only on stored evidence (confluence).
@@ -373,7 +372,7 @@ def _stratified_fixpoint(
     rows aren't re-registered in a run. ``_FIXPOINT_ROUND_CAP`` is only a guard.
 
     Stratum (ii) checks candidate-named pairs, rows named by ``changed_deployer_addresses``, and rows of protocols whose
-    member set shrank (invariant 8, same run).
+    member set shrank (in the same run).
     """
     targeted = set(candidate_ids)
     pending: set[int] = set(targeted)
@@ -436,7 +435,7 @@ def _stratified_fixpoint(
             if contract is None or contract.protocol_id is not None:
                 continue
             if contract.nominated_protocol_id is None:
-                # Unclaimed rows are outside the gate's flow (§3.1); nomination is the entry ticket.
+                # Unclaimed rows are outside the gate's flow; nomination is the entry ticket.
                 continue
             for protocol_id in _admission_protocols(session, contract):
                 outcome = _attempt_admission(session, contract, protocol_id)
@@ -466,7 +465,7 @@ def _stratified_fixpoint(
             # A promotion is a foreign anchor for other protocols' H rows with the same deployer.
             w4h_named_addresses |= deployer_addrs
             # A promotion is counterevidence for other protocols' standing witnesses, so re-seed revocation with it and
-            # the vias citing it (invariant 8).
+            # the vias citing it.
             dirty_vias |= _standing_vias_named_by_edges(session, sorted(promoted_addrs))
             # ``d2_exclusive`` witnesses are keyed on the controller, reached only through the promoted row's
             # controllers.
@@ -507,7 +506,7 @@ def _stratified_fixpoint(
 
 
 def _protocols_of_demoted(session: Session, contract_ids: Sequence[int] | set[int]) -> set[int]:
-    """Former protocols of just-demoted members, kept in ``nominated_protocol_id`` (invariant 4)."""
+    """Former protocols of just-demoted members, kept in ``nominated_protocol_id``."""
     ids = sorted(set(contract_ids))
     if not ids:
         return set()
@@ -612,8 +611,8 @@ def _reclassify_deployers(
                     creation_factories={c.address: c.factory for c in records if getattr(c, "factory", None)},
                 )
         if verdict.trust_class is None and verdict.evidence.get("reason") == "cross_protocol_collision":
-            # Invariant 7: a collision is Class C for every party, so every protocol's proof row for this EOA falls this
-            # pass. H is exempt (DEPLOYER_HEURISTIC_SPEC.md §4/§5): a foreign observation is a challenge, and the quorum
+            # a collision is Class C for every party, so every protocol's proof row for this EOA falls this
+            # pass. H is exempt: a foreign observation is a challenge, and the quorum
             # freezes without de-stamping.
             standing = list(
                 session.execute(
@@ -657,7 +656,8 @@ def _reclassify_deployers(
             elif existing.trust_class == DEPLOYER_TRUST_CLASS_B and verdict.evidence.get("reason") == (
                 "foreign_or_unknown_creations"
             ):
-                # A fresh enumeration found a creation outside the member/candidate set (§3.3 revocation).
+                # A fresh enumeration found a creation outside the member/candidate set (which revokes deployer
+                # exclusivity).
                 reason = "foreign_or_unknown_creations"
             elif existing.trust_class == DEPLOYER_TRUST_CLASS_B and deployer in coverage_gaps:
                 # F3: a complete enumeration missing a known creation is counterevidence (unlike cap incompleteness).

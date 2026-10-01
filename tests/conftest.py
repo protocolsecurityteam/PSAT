@@ -384,7 +384,7 @@ def _stub_chain_resolver(monkeypatch):
 def _scrub_storage_env(monkeypatch):
     """Clear ARTIFACT_STORAGE_* before every test.
 
-    `db/models.py` calls `load_dotenv()` at import, which re-populates these
+    `db/models/session.py` calls `load_dotenv()` at import, which re-populates these
     from a developer's `.env` after any one-time scrub. Doing it per-test
     via monkeypatch is the only reliable way to keep the storage-off path
     available; tests that need real storage receive `storage_bucket`, which

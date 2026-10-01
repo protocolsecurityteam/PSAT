@@ -140,7 +140,7 @@ def test_cc2_gate_control_over_the_same_node_earns_no_ceiling(fold):
 
 
 def test_cc3_a_downstream_entity_of_a_code_controlled_node_earns_no_ceiling(fold):
-    """§3.2, the constraint that keeps this from undoing the reach-model fix.
+    """A downstream governed node cannot borrow the controlled node's ceiling.
 
     Code control expands over the closure, but for a downstream B that A merely governs you are
     back to gate control one level down (B's own code still stands). So the ceiling is the
@@ -362,7 +362,7 @@ def test_cc6_two_holders_over_one_ceiling_do_not_flatten(fold):
 
 
 def test_cc7_a_sheet_ceiling_charges_the_exposure_budget_nothing(fold):
-    """§6.4. Ceilings are risk-weighted upper bounds, never expected loss.
+    """Ceilings are risk-weighted upper bounds, never expected loss.
 
     A ceiling in the numerator (1) inflates ``exposure_usd`` off bounds, so the coverage
     disclosure would claim near-total coverage on their strength, and (2) SPENDS the entity's

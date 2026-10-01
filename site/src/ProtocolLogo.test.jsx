@@ -1,4 +1,4 @@
-// Direct render test for ProtocolLogo (split out of the old components.test.jsx).
+// Direct render test for ProtocolLogo.
 
 import React from "react";
 import { describe, it, expect } from "vitest";

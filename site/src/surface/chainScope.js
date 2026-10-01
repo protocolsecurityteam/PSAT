@@ -1,4 +1,4 @@
-// Chain scope for the Surface page (inv. 13), kept pure so it provably
+// Chain scope for the Surface page, kept pure so it provably
 // coalesces like entityKey and invalid ?chain falls back to the default rather
 // than a blank canvas.
 

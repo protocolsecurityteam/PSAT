@@ -1,4 +1,4 @@
-"""M0.2 item 2 — one cache-key token format everywhere (invariant 11).
+"""One cache-key token format everywhere.
 
 The mapping-enumeration cache once keyed one contract by chain name and by ``str(chain_id)``;
 ``chain_cache_token`` collapses both onto the decimal chain id so L1 (``mapping_enumerator._chain_key``)

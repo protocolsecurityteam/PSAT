@@ -36,7 +36,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # One process serves every chain (inv. 6); each protocol's own chain is still derived. Logged so the fallback isn't
+    # One process serves every chain; each protocol's own chain is still derived. Logged so the fallback isn't
     # a buried default.
     fallback_chain = RECONCILER_FALLBACK_CHAIN
     logger.info("enrollment reconciler daemon starting with fallback chain=%s", fallback_chain)

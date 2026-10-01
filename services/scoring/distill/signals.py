@@ -343,7 +343,7 @@ def _build_signal(
         verdict_id = witness.get("effect_verdict_id")
         if verdict_id is not None:
             verdict = next((v for v in facts.verdicts.get(func.id, []) if v.id == int(verdict_id)), None)
-            # inv.9: a verdict carries its transcript pointer or no traceability claim, never "no transcript".
+            # a verdict carries its transcript pointer or no traceability claim, never "no transcript".
             citations.append(
                 {
                     "field": "claims[].witness.effect_verdict_id",
@@ -423,7 +423,7 @@ def _reach_for_claim(
         return reach
 
     if claim_id == "pause.set":
-        # FIELDS §5: value membership requires the fork proof that the latch takes effect.
+        # value membership requires the fork proof that the latch takes effect.
         effective = any(
             _is_true(((e.get("witness") or {}).get("observed") or {}).get("pause_effective")) for e in entries
         )
@@ -624,7 +624,7 @@ def _severity(
                 (MSG_VALUE_ARM_PASSTHROUGH,),
                 notes,
             )
-        # W1 and W2 is the amount witness the open-caller withhold waits on, so it's evaluated first (SPEC §4) and gated
+        # W1 and W2 is the amount witness the open-caller withhold waits on, so it's evaluated first and gated
         # on a determined destination. A refused conjunction falls through to the withhold.
         if claim_id == "flow.out" and self_service.proven and destination.tri.is_determined:
             return (

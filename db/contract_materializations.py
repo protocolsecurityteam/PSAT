@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 ANALYSIS_SCHEMA_VERSION = 6
 
 
-# Who produced a row and from which job; invariant 7 requires the source job for anything monitoring enrolls from.
+# Who produced a row and from which job; provenance requires the source job for anything monitoring enrolls from.
 PRODUCED_BY_RESOLUTION = "resolution"
 PRODUCED_BY_PIPELINE = "pipeline"
 PRODUCED_BY_PROMOTION_SWEEP = "promotion_sweep"
@@ -274,7 +274,7 @@ def find_reusable_by_source_hash(
     *,
     source_content_hash: str,
 ) -> ContractMaterialization | None:
-    """Any ready, current-version row with this source hash, on any chain (invariant 1): the bundle is a pure
+    """Any ready, current-version row with this source hash, on any chain: the bundle is a pure
     function of the source, so all matches are identical.
     """
     if not source_content_hash:
@@ -369,7 +369,7 @@ def materialize_or_wait(
 ) -> ContractMaterialization:
     """Look up or build the materialization row for a content key.
 
-    ``source_hash_fn`` enables cross-chain reuse (invariant 1); called at most once, only on a keccak miss. A ready row
+    ``source_hash_fn`` enables cross-chain reuse; called at most once, only on a keccak miss. A ready row
     with the same source hash is copied instead of building.
 
     Three phases, each its own short transaction so no connection idles during ``builder()`` (Neon's pooler drops idle

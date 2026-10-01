@@ -6,7 +6,7 @@ import { useResource } from "../../shared/useResource.js";
 import { coalesceChain } from "../entityKey.js";
 
 // Coverage rows span chains; only the active chain's contribute, so a twin
-// covered elsewhere doesn't light this node (inv. 13).
+// covered elsewhere doesn't light this node.
 export function auditHighlightSet(coverage, activeAuditId, activeChain) {
   const showAll = activeAuditId === "all";
   const out = new Set();

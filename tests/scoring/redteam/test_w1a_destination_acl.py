@@ -49,7 +49,7 @@ def test_w1a_a_parameter_bound_call_site_composes_on_the_destinations_own_acl(fo
 
 
 def test_w1a_an_acl_admitted_step_publishes_the_witness_shape_that_admitted_it(fold):
-    """inv. 16: no abstraction above a witness, and no basis borrowed from one.
+    """No abstraction above a witness, and no basis borrowed from one.
 
     An ACL-admitted step must not be rendered through the state-variable
     sentence (no state variable, no on-chain read). It names the shape, the

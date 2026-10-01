@@ -94,7 +94,7 @@ def enrich_with_activity(
         chain = _primary_chain(contract)
         if chain not in CHAIN_IDS:
             # Unknown chain: can't query the right explorer, and mainnet would rank it by an unrelated address's
-            # activity (inv. 12).
+            # activity.
             last_ts = None
             score = 0.0
         else:

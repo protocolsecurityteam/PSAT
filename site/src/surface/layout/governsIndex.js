@@ -8,7 +8,7 @@ import { collectDirectCallers } from "./controlGraph.js";
 
 export function buildGovernsIndex(machines = [], functionData = {}) {
   // Iterate the chain-scoped machines rather than the cross-chain functionData
-  // map, which would fold in another chain's authority (inv. 13).
+  // map, which would fold in another chain's authority.
   const byAuthority = new Map();
   for (const machine of machines) {
     const contractLc = String(machine?.address || "").toLowerCase();

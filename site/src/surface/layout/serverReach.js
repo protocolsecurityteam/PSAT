@@ -1,6 +1,5 @@
-// Consumes the server reach block (scorer_closure_v1,
-// SURFACE_REACH_UNIFICATION_SPEC.md); the client never re-walks. Composite keys
-// are projected to bare addresses on the active chain (inv. 13).
+// Consumes the server reach block (scorer_closure_v1); the client never re-walks. Composite keys
+// are projected to bare addresses on the active chain.
 
 import { coalesceChain, entityKey } from "../entityKey.js";
 

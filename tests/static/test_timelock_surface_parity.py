@@ -59,7 +59,7 @@ def _require_solc() -> None:
     """FAIL, never skip, when the pinned solc is absent.
 
     `_compile_subject` raises `SolcNotInstalled` so callers can skip, and
-    `WITNESS_INTEGRITY_LEDGER.md:584` records that courtesy silently disabling the label-corpus
+    that courtesy silently disables the label-corpus
     gate. A parity test that skips proves nothing while reporting green."""
     binary = label_corpus._solc_select_binary(SOLC_VERSION)
     if not binary.exists():

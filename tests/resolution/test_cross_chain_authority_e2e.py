@@ -1,5 +1,4 @@
-"""Cross-chain authority POSITIVE arm, end-to-end through the real labeling path
-(MULTICHAIN_INVARIANTS.md invariant 15).
+"""Cross-chain authority POSITIVE arm, end-to-end through the real labeling path.
 
 Unlike ``test_cross_chain_authority.py`` (which monkeypatches the classifier), only the
 wire (``services.resolution.tracking._rpc_request``) is stubbed so the genuine

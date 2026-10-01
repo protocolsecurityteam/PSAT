@@ -73,7 +73,7 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
 @router.get("/api/health/monitoring", dependencies=[Depends(deps.require_admin_key)])
 def monitoring_health() -> Any:
     """Monitoring-fleet liveness for an uptime checker: 503 when any daemon is stale or erroring, with per-chain
-    detail (invariant 4). Operator-only.
+    detail. Operator-only.
     """
     from services.monitoring.ops_alerts import collect_chain_health, collect_stale_processes
 
@@ -108,7 +108,7 @@ def config() -> dict[str, str]:
 @router.get("/api/stats", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def pipeline_stats() -> PipelineStatsResponse:
     with deps.SessionLocal() as session:
-        # A CREATE2 twin is two entities (inv. 12).
+        # A CREATE2 twin is two entities.
         unique_addresses = (
             session.execute(
                 select(func.count(distinct(tuple_(Job.chain_id, Job.address)))).where(Job.address.isnot(None))

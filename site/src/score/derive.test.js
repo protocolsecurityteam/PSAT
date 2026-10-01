@@ -256,8 +256,8 @@ describe("derive — rows and ledger", () => {
 
   it("charges each row the published net, not the reconstruction of it", () => {
     // The re-fold agrees with every published net on this corpus (fold.test
-    // pins that); where they could disagree the document wins — spec §3.2
-    // pins the row to −net_points_lambda.
+    // pins that); where they could disagree the document wins
+    // and pins the row to −net_points_lambda.
     for (const row of view.rows) expect(row.net).toBe(F[row.index].net_points_lambda);
     const doc = { findings: F.map((f, i) => (i === 0 ? { ...f, net_points_lambda: 19.5 } : f)) };
     const rows = deductionRows(doc, buildContractIndex([]));

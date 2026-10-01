@@ -1,4 +1,4 @@
-"""Admin-curated address labels (invariant 12): a row is global (``chain IS NULL``, right for EOAs/Safe signers) or a
+"""Admin-curated address labels: a row is global (``chain IS NULL``, right for EOAs/Safe signers) or a
 chain-qualified override (safe for contracts cross-chain). Global rows keep the historical address-keyed shape.
 """
 

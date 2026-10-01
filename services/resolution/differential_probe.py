@@ -1,14 +1,14 @@
-"""Differential on-chain probe: turns "gated, principals unknown" into an observed fact (DIFFERENTIAL_PROBE_PLAN §3).
+"""Differential on-chain probe: turns "gated, principals unknown" into an observed fact.
 
 For an unresolved caller-dependent gate, ``eth_call`` it with ``from = RANDOM`` (in no allowlist) and, when known,
 ``from = PRINCIPAL``. A caller-discriminating gate gives different outcomes; a non-caller gate gives the same.
 
-The risk is upgrading a gated function to public when both reverted for an unrelated reason (§3.3). So a public upgrade
-needs at least two distinct random identities all succeeding plus a block-independence cross-check (§3.5), and revert
+The risk is upgrading a gated function to public when both reverted for an unrelated reason. So a public upgrade
+needs at least two distinct random identities all succeeding plus a block-independence cross-check, and revert
 attribution compares raw revert data (decoding is transcript-only).
 
 Pure given an injected ``call_batch`` (wrapping :func:`services.clients.rpc.eth_call_batch`); the caller supplies the
-pinned block and applies the verdict (§3.6).
+pinned block and applies the verdict.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def differential_probe_enabled() -> bool:
 
 
 def _block_independence_delta() -> int:
-    """Blocks to step back for the §3.5.1 re-probe (~7 days); override with ``PSAT_PROBE_BLOCK_DELTA``."""
+    """Blocks to step back for the re-probe (~7 days); override with ``PSAT_PROBE_BLOCK_DELTA``."""
     try:
         return max(1, int(os.getenv("PSAT_PROBE_BLOCK_DELTA", "50000")))
     except ValueError:
@@ -74,9 +74,9 @@ def synthesize_calldata(
 ) -> str | None:
     """Build ``selector ++ abi.encode(default_args)``.
 
-    Arguments are zero/empty (most gates fire before argument validation, §3.2.1). Address args at
-    ``caller_correlated_indices`` are set to ``identity`` so self-service paths are reachable (§3.2.2). Returns None on
-    unparseable or unencodable types, which keeps the static verdict (§3.2.3). Never raises.
+    Arguments are zero/empty (most gates fire before argument validation). Address args at
+    ``caller_correlated_indices`` are set to ``identity`` so self-service paths are reachable. Returns None on
+    unparseable or unencodable types, which keeps the static verdict. Never raises.
     """
     if not isinstance(selector, str) or not selector.startswith("0x") or len(selector) != 10:
         return None
@@ -179,7 +179,7 @@ def _default_value_for_type(type_str: str) -> Any:
 
 def derive_random_identities(selector: str, contract_address: str, n: int = _RANDOM_IDENTITY_COUNT) -> list[str]:
     """``n`` deterministic random callers from ``keccak(selector ++ address ++ salt)``, so replays use the same
-    addresses (§6.6).
+    addresses.
     """
     sel = bytes.fromhex(selector[2:]) if selector.startswith("0x") else bytes.fromhex(selector)
     addr = bytes.fromhex(contract_address[2:]) if contract_address.startswith("0x") else bytes.fromhex(contract_address)
@@ -225,7 +225,7 @@ def decode_error(revert_data: str | None) -> str | None:
 
 
 def attribute(randoms: Sequence[EthCallResult], principal: EthCallResult | None) -> Attribution:
-    """Map probe outcomes to an attribution (§3.3, §3.4).
+    """Map probe outcomes to an attribution.
 
     * Any node error among randoms → indeterminate.
     * Randoms disagreeing → indeterminate (state- or arg-specific).
@@ -265,7 +265,7 @@ def attribute(randoms: Sequence[EthCallResult], principal: EthCallResult | None)
             return "not_caller_discriminating"
         return "indeterminate"
 
-    # One-sided (§3.4).
+    # One-sided.
     if all_success:
         return "not_caller_discriminating"  # candidate public
     if all_revert and randoms_same_gate:
@@ -297,14 +297,14 @@ def run_differential_probe(
     block_delta: int | None = None,
     caller_correlated_indices: Iterable[int] = (),
 ) -> ProbeResult:
-    """Probe one gated-unknown function; returns a verdict with a replayable transcript (§6.1).
+    """Probe one gated-unknown function; returns a verdict with a replayable transcript.
 
-    ``block`` must be pinned, never ``latest`` (§6.2).
+    ``block`` must be pinned, never ``latest``.
 
-      * ``public``          → ``conditional_universal``
+      * ``public`` → ``conditional_universal``
       * ``gated_confirmed`` → keep gated, attach two-sided evidence
-      * ``gated_observed``  → keep gated, attach one-sided evidence
-      * ``keep_static``     → unchanged
+      * ``gated_observed`` → keep gated, attach one-sided evidence
+      * ``keep_static`` → unchanged
     """
     calldata = synthesize_calldata(
         selector,
@@ -374,7 +374,7 @@ def run_differential_probe(
         transcript["verdict"] = "keep_static"
         return ProbeResult(attribution, "keep_static", transcript, attribution, calldata)
 
-    # Candidate public: run the §3.5 block-independence check first.
+    # Candidate public: run the block-independence check first.
     delta = block_delta if block_delta is not None else _block_independence_delta()
     older_block = block - delta
     if older_block < 1:

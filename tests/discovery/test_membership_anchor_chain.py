@@ -1,4 +1,4 @@
-"""Anchored-authority-chain transitivity (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2, deliberate extension).
+"""Anchored-authority-chain transitivity.
 
 Shapes pinned here come from the dev DB: a protocol's governance component (registry → timelock → multisig)
 enters the graph only through W3-D2 edges, so D2 non-transitivity leaves it and every ward it governs
@@ -84,12 +84,12 @@ def _anchored_member(db_session, protocol, address):
 
 def _anchored_holder(db_session, protocol, address):
     """A role holder / Safe signer that is itself an independently anchored MEMBER: the only terminal a SET-valued
-    link may root at (spec §3.2 extension, set-arity rule)."""
+    link may root at (extension, set-arity rule)."""
     return _anchored_member(db_session, protocol, address).address
 
 
 def _probe_read(db_session, subject, value):
-    """Persist the §3.5 probe read of a governance getter (the derivation a W3-D2 witness rests on,
+    """Persist the probe read of a governance getter (the derivation a W3-D2 witness rests on,
     ``W3_D2_SOURCES``; a bare caller gate is not one), merged into the subject's attempt row under the first
     free slot of the three reads the gate consults."""
     row = db_session.get(ContractProbeAttempt, (subject.id, 1))
@@ -268,7 +268,7 @@ def test_anchor_chain_evidence_round_trips_and_is_stable(db_session, protocol):
         anchor_chain=first.anchor_chain,
     )
     assert gate._validate_evidence("w3_control", evidence) == evidence
-    # A hand-rolled chain with an unknown link kind is refused (invariant 2).
+    # A hand-rolled chain with an unknown link kind is refused.
     with pytest.raises(ValueError):
         gate._validate_evidence(
             "w3_control",
@@ -301,7 +301,7 @@ def test_anchor_chain_evidence_round_trips_and_is_stable(db_session, protocol):
 )
 def test_anchor_chain_link_detail_is_a_closed_set_per_kind(kind, detail):
     """The detail is the W3 source or the identity the link was read under —
-    never free text, never another kind's token (invariant 2)."""
+    never free text, never another kind's token."""
     link = {"from": ADDR(1), "address": ADDR(2), "kind": kind, "detail": detail}
     evidence = {
         "direction": "d1",
@@ -538,7 +538,7 @@ def test_sibling_safes_sharing_a_signer_do_not_launder_each_other(db_session, pr
             gate._via_transitivity(db_session, protocol_id=protocol.id, via_address=safe.address, chain_key="ethereum")
             is None
         )
-    # The signer is a perimeter principal for the §3.3 ladder, which reads
+    # The signer is a perimeter principal for the ladder, which reads
     # safe_owner facts on purpose — only the anchor chain refuses them.
     assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=shared_signer) is not None
     assert (
@@ -608,7 +608,7 @@ def test_set_valued_link_may_not_root_at_a_perimeter_principal(db_session, proto
 
 def test_singleton_link_still_roots_at_a_perimeter_principal(db_session, protocol):
     """The arity split cuts only the SET-valued kinds: a single resolved
-    owner/authority is one named authority, and still roots at a §3.3
+    owner/authority is one named authority, and still roots at a
     perimeter principal."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x1401))
     registry = _d2_member(db_session, protocol, ADDR(0x1402), controls=anchor)
@@ -733,7 +733,7 @@ def test_foreign_promotion_of_a_published_anchor_revokes_in_the_same_run(db_sess
 
     Once another protocol claims the address a published anchor chain cites, the link is proven foreign; the same
     ``evaluate`` that promotes must revoke the dependent D1 and demote its member. Waiting for reconcile leaves a
-    member with no verified witness (invariant 8)."""
+    member with no verified witness."""
     _anchor, timelock, safe, ward, proxy, independent = _timelock_shape(db_session, protocol, 0x2400)
     other = Protocol(name=f"claimant-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
@@ -778,7 +778,7 @@ def test_api_level_new_member_delta_seeds_the_revocation_stratum(db_session, pro
 def test_foreign_promotion_breaks_a_d2_exclusive_via_in_the_same_run(db_session, protocol):
     """``d2_exclusive`` publishes no anchor chain and keys dependents on the controller, so a promoted row reaches
     them only through its controllers. A controller whose observed control set widened past the protocol is no
-    longer exclusive, and everything it licensed must fall in the promoting run (invariant 8)."""
+    longer exclusive, and everything it licensed must fall in the promoting run."""
     # Built without ``_d2_member``: exclusivity needs the controller's whole
     # observed ward set inside the protocol, so this shape carries no
     # unclaimed ward.
@@ -885,7 +885,7 @@ def test_two_arrival_orders_settle_identically(db_session, protocol):
 
 
 # ---------------------------------------------------------------------------
-# (g) §2 overreach family stays refused under the new arm
+# (g) overreach family stays refused under the new arm
 # ---------------------------------------------------------------------------
 
 

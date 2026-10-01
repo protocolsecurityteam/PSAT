@@ -17,7 +17,7 @@ import { coalesceChain, entityKey } from "../surface/entityKey.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/g;
 
-// Contract rows get per-chain overrides (invariant 12), but mainnet and legacy
+// Contract rows get per-chain overrides, but mainnet and legacy
 // NULL rows map to the global row so single-chain behaviour is unchanged.
 function rowLabelChain(row) {
   const c = row?.chain;
@@ -45,7 +45,7 @@ export default function AddressesModal({ companyName, onClose }) {
   const isAdmin = useIsAdmin();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  // Chain-aware so per-network contract labels resolve (invariant 12).
+  // Chain-aware so per-network contract labels resolve.
   const [labels, setLabels] = useState(() => ({ global: new Map(), byChain: new Map() }));
   const [filter, setFilter] = useState("");
   const [sortBy, setSortBy] = useState("rank"); // rank | name | address
@@ -80,7 +80,7 @@ export default function AddressesModal({ companyName, onClose }) {
     return cleanup;
   }, [refresh]);
 
-  // (chain, address) keys (invariant 13) so the same address on two chains
+  // (chain, address) keys so the same address on two chains
   // isn't collapsed.
   const addrIndex = useMemo(() => {
     const m = new Map();

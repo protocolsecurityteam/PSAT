@@ -1,9 +1,8 @@
-"""Stratified fixpoint cascade + gate-side W2/W3 enforcement
-(DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.4 event 3, invariants 6/8/9).
+"""Stratified fixpoint cascade + gate-side W2/W3 enforcement.
 
 Multi-round promotion chains, revocation cascade to quiescence, confluence across arrival orders, termination on
-cyclic pointers, the §7 overreach regression fixtures (Lido/EigenLayer/USDC/WETH9 shapes + the shared-operator
-two-hop kill), event-2 delta targeting per hook, and the W5 human-assertion flow.
+cyclic pointers, the overreach regression fixtures (Lido/EigenLayer/USDC/WETH9 shapes + the shared-operator
+two-hop kill), fact-delta targeting per hook, and the W5 human-assertion flow.
 """
 
 from __future__ import annotations
@@ -83,7 +82,7 @@ def _member(session, protocol: Protocol, address: str, **fields) -> Contract:
 
 
 def _probe_read(session, subject: Contract, value: str) -> None:
-    """The §3.5 probe read of a governance getter — the derivation a W3-D2
+    """The probe read of a governance getter — the derivation a W3-D2
     witness rests on (``W3_D2_SOURCES``); a bare caller gate is not one."""
     row = session.get(ContractProbeAttempt, (subject.id, 1))
     reads = dict(row.results.get("reads", {})) if row is not None and isinstance(row.results, dict) else {}
@@ -140,7 +139,7 @@ def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
     sibling = _contract(db_session, _addr(0x1A2), nominated_protocol_id=protocol.id, deployer=deployer)
     _code_fact(db_session, impl.address, tx=_TX)
     _code_fact(db_session, sibling.address, tx=_TX)
-    # F1: a bare nomination never maps into the exclusivity set. The sibling
+    # a bare nomination never maps into the exclusivity set. The sibling
     # maps through an unrevoked W2 whose edge no longer holds (former anchor
     # rewritten) — W4 stays the witness that verifies and admits it.
     former_anchor = _member(db_session, protocol, _addr(0x1A3), implementation=sibling.address)
@@ -189,7 +188,7 @@ def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
 
 def test_fixpoint_without_enumerator_never_mints_class_b(db_session):
     """No positive exclusivity evidence at hand → no Class B row and no W4
-    admission; the sibling parks (invariant 5 posture, Class C by absence)."""
+    admission; the sibling parks (Class C by absence)."""
     protocol = _protocol(db_session, "noenum")
     deployer = _addr(0x2D0)
     member = _member(db_session, protocol, _addr(0x2A0), implementation=_addr(0x2A1), deployer=deployer)
@@ -203,7 +202,7 @@ def test_fixpoint_without_enumerator_never_mints_class_b(db_session):
 
     assert impl.id in result.promoted_contract_ids
     # Without an enumerator the EOA can reach no PROOF class; anything it
-    # licenses is the labeled heuristic rule (DEPLOYER_HEURISTIC_SPEC.md §1).
+    # licenses is the labeled heuristic rule.
     assert (
         db_session.query(ProtocolDeployer)
         .filter(ProtocolDeployer.address == deployer, ProtocolDeployer.trust_class.in_(["A", "B"]))
@@ -214,7 +213,7 @@ def test_fixpoint_without_enumerator_never_mints_class_b(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Fixpoint: revocation cascade (invariant 8)
+# Fixpoint: revocation cascade
 # ---------------------------------------------------------------------------
 
 
@@ -291,14 +290,14 @@ def test_revocation_cascade_demotes_exactly_the_witnessless(db_session):
     assert set(result.reprobe_contract_ids) == {a.id, b.id}
     assert a.protocol_id is None and b.protocol_id is None
     assert c.protocol_id == protocol.id
-    # Invariant 4: history preserved — revoked, never deleted.
+    # history preserved — revoked, never deleted.
     assert db_session.query(ContractMembershipWitness).filter_by(contract_id=b.id).count() == 1
     assert _active_rules(db_session, b) == set()
     assert _active_rules(db_session, c) == {"w5_human"}
 
 
 # ---------------------------------------------------------------------------
-# Fixpoint: confluence + termination (invariant 9)
+# Fixpoint: confluence + termination
 # ---------------------------------------------------------------------------
 
 
@@ -372,7 +371,7 @@ def test_fixpoint_terminates_on_cyclic_pointers(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Overreach regression fixtures (§7 / invariant 6)
+# Overreach regression fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -624,7 +623,7 @@ def test_evaluate_committed_swallows_failures(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# W5 flow (spec §5.2, invariants 3 + 14)
+# W5 flow
 # ---------------------------------------------------------------------------
 
 
@@ -652,7 +651,7 @@ def test_w5_assertion_candidate_until_w1_then_member(db_session):
 
 
 def test_w5_assertion_on_unroutable_chain_stays_candidate(db_session):
-    """Invariant 3 binds W5: an assertion on a chain that never resolves can
+    """W1 binds W5: an assertion on a chain that never resolves can
     never satisfy W1, so the row stays a candidate-with-W5-witness."""
     protocol = _protocol(db_session, "w5park")
     row = _contract(db_session, _addr(0x901), chain="unknown")
@@ -834,13 +833,13 @@ def test_fresh_foreign_enumeration_revokes_class_b_and_blocks_w4(db_session):
     assert sibling.protocol_id is None
     assert sibling.id not in result.promoted_contract_ids
     assert _active_rules(db_session, sibling) == set()
-    # Independent-witness members are untouched (invariant 8).
+    # Independent-witness members are untouched.
     assert corr1.protocol_id == protocol.id and corr2.protocol_id == protocol.id
 
 
 def test_collision_revokes_other_protocols_standing_row(db_session):
     """A collision verdict for (Q, EOA) is Class C for EVERY party
-    (invariant 7): P's standing row for the same EOA falls in the same
+    P's standing row for the same EOA falls in the same
     reclassification pass, with its full demote cascade."""
     protocol_p = _protocol(db_session, "coll-p")
     protocol_q = _protocol(db_session, "coll-q")
@@ -1001,7 +1000,7 @@ def test_secondary_impl_edge_matches_case_insensitively(db_session):
 
 # ---------------------------------------------------------------------------
 # Review round 2 (NEW-1): a demotion that voids a Class-A anchor revokes the
-# standing registry row in the SAME evaluate run (invariant 8's trigger),
+# standing registry row in the SAME evaluate run,
 # without any candidate naming the EOA.
 # ---------------------------------------------------------------------------
 

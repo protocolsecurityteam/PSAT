@@ -5,7 +5,7 @@ import { isRoleIdAddress } from "../format.js";
 import { entityKey } from "../entityKey.js";
 
 // Built from all machines and principals; visibility is a canvas concern.
-// Role-id pseudo addresses are excluded. Keyed by (chain, address) (inv. 13) so
+// Role-id pseudo addresses are excluded. Keyed by (chain, address) so
 // another chain's address can't alias in.
 export function buildEntityIndex(allMachines = [], principals = [], chain = "ethereum") {
   const index = new Map();

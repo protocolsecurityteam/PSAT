@@ -3,7 +3,7 @@
 Enrollment reads ``contract_materializations``, which only the authority recursion wrote (as a side
 effect of the dependencies it visited), so 136 of 183 monitored contracts watched on the baseline
 registry alone despite completed jobs holding a substantive plan. These tests pin the producer's
-contract: what it writes, what it refuses to write, and (invariant 7) that every row names its
+contract: what it writes, what it refuses to write, and that every row names its
 writer and source job.
 """
 
@@ -120,7 +120,7 @@ def test_publish_writes_a_current_row_with_provenance(cm_db):
         "source_job_id": "job-1",
         "materialized_at": _provenance(row)["materialized_at"],
     }
-    # Invariant 7: the source job is on the row, not inferred from a name.
+    # The source job is on the row, not inferred from a name.
     assert cm.find_by_address(cm_db, chain="ethereum", address=ADDR) is not None
 
 

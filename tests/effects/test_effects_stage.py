@@ -59,7 +59,7 @@ def clean_jobs(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Flag-dynamic transition (§3a.4 / inv. 15).
+# Flag-dynamic transition.
 # ---------------------------------------------------------------------------
 
 
@@ -69,7 +69,7 @@ def test_flag_defaults_off(monkeypatch):
 
 
 def test_scoring_tier_translation_resolves_the_string_collision():
-    # §0 tier-string collision guard: the stored "tier2" (fork-observed) maps to the OBSERVED scoring
+    # tier-string collision guard: the stored "tier2" (fork-observed) maps to the OBSERVED scoring
     # tier (scoring Tier 1), never scoring Tier 2; an unknown string fails closed to None.
     from services.effects.config import (
         SCORING_TIER_OBSERVED,
@@ -101,7 +101,7 @@ def test_policy_next_stage_flag_on_is_effects(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Worker behavior: inert pass-through + fail-forward (inv. 15).
+# Worker behavior: inert pass-through + fail-forward.
 # ---------------------------------------------------------------------------
 
 
@@ -135,7 +135,7 @@ def test_flag_on_zero_candidate_passthrough(clean_jobs, test_session_local):
 
 @requires_postgres
 def test_fail_forward_exhaustion_advances_never_terminal(clean_jobs, test_session_local, monkeypatch):
-    """inv. 15: on retry exhaustion the stage advances to ``coverage`` and NEVER emits ``failed_terminal``."""
+    """on retry exhaustion the stage advances to ``coverage`` and NEVER emits ``failed_terminal``."""
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "0")  # first failure = exhaustion
 
     session = clean_jobs
@@ -170,14 +170,14 @@ def test_fail_forward_on_terminal_kind_also_advances(clean_jobs, test_session_lo
 
 
 # ---------------------------------------------------------------------------
-# §9 direction 2 is a benign metric, not a degradation: a HEALTHY run of many proven verdicts
+# direction 2 is a benign metric, not a degradation: a HEALTHY run of many proven verdicts
 # files ZERO degraded discrepancies and reports the idiom-candidate count as a metric.
 # ---------------------------------------------------------------------------
 
 
 @requires_postgres
 def test_healthy_multi_proven_run_files_no_degraded_discrepancies(clean_effects, monkeypatch):
-    """Selection returns only blank-claim functions, so every proven verdict is a §9 direction-2
+    """Selection returns only blank-claim functions, so every proven verdict is a direction-2
     event; N of them must NOT flood ``stage_errors`` with ``degraded`` entries
     (``discrepancies_filed`` stays 0 while ``new_idiom_candidates`` reflects N)."""
     session = clean_effects

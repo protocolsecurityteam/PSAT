@@ -1,4 +1,4 @@
-// Entity identity is (chain, address) (inv. 13); these helpers are the single
+// Entity identity is (chain, address); these helpers are the single
 // place that builds the key. Legacy rows have NULL chain, which means
 // "ethereum".
 

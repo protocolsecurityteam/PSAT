@@ -41,14 +41,14 @@ export function useSurfaceModel({ companyData, functionData, functionsLoading, a
   );
 
   // SurfaceCanvas keys by bare address, so a twin's flow on another chain must
-  // not draw here (inv. 13).
+  // not draw here.
   const scopedFundFlows = useMemo(
     () => (companyData?.fund_flows || []).filter((f) => flowOnChain(f, activeChain)),
     [companyData, activeChain]
   );
 
   // Chain-scoped so a principal from another chain can't attach to a
-  // same-address card (inv. 13).
+  // same-address card.
   const principalsByAddress = useMemo(() => {
     const map = new Map();
     for (const p of companyData?.principals || []) {

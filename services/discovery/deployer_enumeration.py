@@ -1,4 +1,4 @@
-"""Deployer creation enumeration with coverage honesty (spec §3.3 Class B).
+"""Deployer creation enumeration with coverage honesty (Class B).
 
 The single Class-B evidence path, used by both ``workers/discovery.py`` and ``membership_gate.evaluate``'s
 ``deployer_enumerator``, so they can't disagree.
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Cap on one chain's combined creation set and each ``txlist`` window. Hitting it is truncation, so
-# ``history_complete=False`` and Class C (§3.3).
+# ``history_complete=False`` and Class C.
 DEPLOYER_ENUMERATION_CAP = 10_000
 
 # Per-chain budget for ``txlistinternal&txhash`` calls. Exceeding it drops the chain from scope and makes the history
@@ -119,7 +119,7 @@ def _internal_creations(
 
 def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation], list[int], bool]:
     """``(creations, enumerated chain scope, history_complete)`` for one EOA across enabled chains (EOAs are
-    chain-agnostic, §3.3/§4.3). The scope is recorded so evidence says what was enumerated.
+    chain-agnostic). The scope is recorded so evidence says what was enumerated.
 
     Completeness must be positive: a failed ``txlist``, a cap hit, an exceeded internal budget, or a failed internal
     lookup drops that chain and sets ``history_complete=False``. An empty enumeration never licenses exclusivity (it's

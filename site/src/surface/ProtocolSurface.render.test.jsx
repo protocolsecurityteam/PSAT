@@ -1,5 +1,5 @@
-// Direct render tests for ProtocolSurface's public prop API (split out of the
-// old src/components.test.jsx). Complements App.test.jsx: the App suite proves
+// Direct render tests for ProtocolSurface's public prop API.
+// Complements ../../App.test.jsx: the App suite proves
 // a route reaches the component, this suite proves the component honors its
 // props in isolation.
 

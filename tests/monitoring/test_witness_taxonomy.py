@@ -1,4 +1,4 @@
-"""The three-tier witness taxonomy and its verification reads (F1 / F2 / F9b).
+"""The three-tier witness taxonomy and its verification reads.
 
 Unit coverage of ``classify_witness_tier`` + ``extract_governance_topics``, and integration
 coverage of the ``_process_window`` tier gate, the coalesced verification-read pass and the
@@ -462,7 +462,7 @@ def test_hint_occurrences_publish_nothing_and_coalesce_to_one_read(db_session, s
 
 
 def test_pre_enrollment_hint_never_marks_a_read(db_session, seeded):
-    """Invariant 9 via the new route: a verification read compares the CURRENT slot against
+    """Verification via the new route: a verification read compares the CURRENT slot against
     last_known_state, so an ancient occurrence triggering one would publish history as live."""
     mc = seeded(WITNESS_TIER_HINT)
     mc.enrollment_block = 10_000
@@ -759,7 +759,7 @@ def test_only_a_proven_controller_identity_binds_a_read(db_session, seeded):
 
 
 def test_unbindable_hint_records_not_determined(db_session, seeded):
-    """Invariant 9: a hint resolving to no read is recorded, not dropped; an unverifiable
+    """a hint resolving to no read is recorded, not dropped; an unverifiable
     interval must not look quiet."""
     mc = seeded(WITNESS_TIER_HINT, with_plan=False)
     dirty: dict = {}

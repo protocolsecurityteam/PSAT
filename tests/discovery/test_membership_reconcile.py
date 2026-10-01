@@ -1,4 +1,4 @@
-"""Reconcile CLI (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §5.4, invariant 13):
+"""Reconcile CLI:
 verdicts recomputed from stored witnesses with EDGE VALIDITY re-verified —
 zero drift on a freshly gated DB; seeded drift detected in report and fixed by
 apply; the report is read-only.
@@ -92,7 +92,7 @@ def _freshly_gated(session):
 
 
 def test_full_ladder_gated_db_reconciles_zero_drift(db_session):
-    """Invariant-13 handshake: a DB whose every membership fact was earned
+    """Reconciliation handshake: a DB whose every membership fact was earned
     through the gate's own primitives — W5 anchor, W2 impl, a Class-A registry
     row earned by the ladder plus its W4 member, a revoked-and-demoted row,
     and a parked candidate — reconciles with zero drift."""
@@ -165,7 +165,7 @@ def test_manually_flipped_stamp_detected_and_fixed(db_session):
     row = _contract(db_session, ADDR(4), nominated_protocol_id=protocol.id)
     _code_fact(db_session, row.address)
     # Out-of-band stamp with no witness rows — the exact drift shape
-    # invariant 1 forbids.
+    # the gate refuses: membership requires a verifying witness.
     row.protocol_id = protocol.id
     db_session.flush()
 
@@ -178,7 +178,7 @@ def test_manually_flipped_stamp_detected_and_fixed(db_session):
 
 
 def test_witness_with_demoted_via_member_counts_as_invalid(db_session):
-    # Edge validity (invariant 13): the dependent's W2 row is still ACTIVE,
+    # Edge validity: the dependent's W2 row is still ACTIVE,
     # but its via-member was demoted — presence is not validity.
     protocol, anchor, proxy, _parked = _freshly_gated(db_session)
     for witness in gate.active_witnesses(db_session, contract_id=anchor.id, protocol_id=protocol.id):
@@ -224,7 +224,7 @@ def test_cleared_stamp_with_valid_witnesses_repromoted(db_session):
 
 
 def test_report_counts_late_inheritance_candidates(db_session):
-    """The report-mode observation names a pending candidate the §6
+    """The report-mode observation names a pending candidate the
     late-arrival sweep would admit, admits nothing itself, and clears once the
     gate's next evaluate carries the candidate."""
     protocol = _protocol(db_session)

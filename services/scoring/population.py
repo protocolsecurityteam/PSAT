@@ -2,7 +2,7 @@
 
 ``function_score_signals`` is replaced wholesale per contract, so every present row is current. Centralizing the query
 prevents a job-scoped filter that would double-count or drop re-analysed contracts. The order is part of the contract:
-inv. 11/12 require byte-identical documents.
+deterministic folds require byte-identical documents.
 """
 
 from __future__ import annotations
@@ -56,10 +56,7 @@ def current_signal_rows(session: Session, protocol_id: int) -> list[FunctionScor
 
 
 def current_signals_for_protocol(session: Session, protocol_id: int) -> list[FunctionSignal]:
-    """The fold's input: every current signal for one protocol, typed and totally ordered by identity key (inv.
-
-    11/12).
-    """
+    """The fold's input: every current signal for one protocol, typed and totally ordered by identity key."""
     return [signal_from_row(row) for row in current_signal_rows(session, protocol_id)]
 
 

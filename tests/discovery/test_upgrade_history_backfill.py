@@ -32,7 +32,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def _stub_membership_probe(monkeypatch):
-    """Stub-the-wire: the backfill's near-line §3.5 probe never leaves the
+    """Stub-the-wire: the backfill's near-line probe never leaves the
     machine — tests seed code facts directly via ``_seed_code_fact``."""
     monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
 
@@ -57,7 +57,7 @@ def _backfill(session, *, protocol_id, chain, impl_addrs, current_impl_address=N
 
 def _seed_code_fact(session, addr, *, chain_id=1, block=90, absent=False):
     """Persist the W1 code-probe fact the gate requires for every promotion
-    (invariant 3) — the offline stand-in for the §3.5 probe."""
+    — the offline stand-in for the probe."""
     from db.models import ContractCreationWitness
 
     session.add(
@@ -188,8 +188,7 @@ def _add_contract(session, **fields):
 
 def test_backfill_creates_rows_as_candidates_without_evidence(db_session, seed_protocol, worker, stub_etherscan):
     """No member proxy names these impls in an UpgradeEvent and no code fact
-    exists, so the rows land as NOMINATED candidates — never members
-    (gate invariants 1+3)."""
+    exists, so the rows land as NOMINATED candidates — never members."""
     from db.models import Contract
 
     protocol_id, _ = seed_protocol
@@ -805,7 +804,7 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
     assert inserted == 0
     assert db_session.query(AuditContractCoverage).filter_by(protocol_id=protocol_id).count() == 0
 
-    # Late backfill; code fact seeded so the gate can promote (invariant 3).
+    # Late backfill; code fact seeded so the gate can promote.
     stub_etherscan.names[impl_addr] = "HistoricalImpl"
     _seed_code_fact(db_session, impl_addr)
     _backfill(

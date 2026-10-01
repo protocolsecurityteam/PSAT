@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TransitivityProof:
-    """Which §3.2 arm proved a W3-D1 via transitive; ``anchor_chain`` or ``principal_fact`` set accordingly."""
+    """Which arm proved a W3-D1 via transitive; ``anchor_chain`` or ``principal_fact`` set accordingly."""
 
     arm: str
     anchor_chain: dict[str, Any] | None = None
@@ -86,12 +86,12 @@ def _via_transitivity(
     in_progress: frozenset[str] = frozenset(),
     depth: int = 0,
 ) -> TransitivityProof | None:
-    """§3.2 W3-D1: the via is transitive if it's a member through an independent witness (w2/w4/w5/w6 or w3-d1); or a
+    """W3-D1: the via is transitive if it's a member through an independent witness (w2/w4/w5/w6 or w3-d1); or a
     D2 controller proven exclusive; or (spec extension, ``_anchor_chain_for``) a D2-only member controller whose
     own controllers root in the anchored perimeter; or (owner ruling) a perimeter-principal EOA of an anchoring
     member.
 
-    Strongest arm first so re-derivation is stable (invariant 9). Every arm is monotone in the member set, so the
+    Strongest arm first so re-derivation is stable. Every arm is monotone in the member set, so the
     fixpoint can't oscillate. The candidate never counts toward its own license.
     """
     if via_address in in_progress:
@@ -137,7 +137,7 @@ def _via_transitivity(
     )
     if fact is None:
         return None
-    # §3.2 shared-operator warning as positive counterevidence: a perimeter principal controlling a provably foreign row
+    # shared-operator warning as positive counterevidence: a perimeter principal controlling a provably foreign row
     # licenses nothing.
     if _address_proven_foreign(session, protocol_id=protocol_id, address=via_address):
         logger.info(
@@ -247,7 +247,7 @@ def _independent_anchor_rule(
     """The rule by which this member is anchored independently of *blocked*, the anchor-chain cycle break.
 
     W3-D2 never anchors; W5/W6 anchor outright; W2/W3-D1 only via an independently anchored member. Smallest rule name
-    wins (invariant 9).
+    wins.
     """
     contract = session.get(Contract, contract_id)
     if contract is None:
@@ -312,7 +312,7 @@ def _link_root(
     depth: int,
     require_member_terminal: bool,
 ) -> dict[str, Any] | None:
-    """Where a controller link terminates: an independently anchored member, a §3.3 perimeter principal of one, or
+    """Where a controller link terminates: an independently anchored member, a perimeter principal of one, or
     recursively a D2-only member controller that anchors. Returns the chain suffix, or None.
 
     ``require_member_terminal`` binds set-valued links to a member anchor, and the element itself must be an
@@ -357,7 +357,8 @@ def _anchor_chain_for(
     in_progress: frozenset[str],
     depth: int,
 ) -> dict[str, Any] | None:
-    """Spec §3.2 extension: a D2-only member controller is transitive when at least one of its own controller links
+    """Controller-chain extension: a D2-only member controller is transitive when at least one of its own
+    controller links
     roots in the anchored perimeter, none is proven foreign, and it controls no foreign row. Set-valued links root
     only at member anchors. Returns the anchor-chain evidence, or None.
     """
@@ -407,7 +408,7 @@ def _controller_is_exclusive(
     chain_key: str,
     exclude_contract_ids: set[int],
 ) -> bool:
-    """Shared-operator kill (spec §3.2): every contract the controller is observed controlling on its chain maps into
+    """Shared-operator kill: every contract the controller is observed controlling on its chain maps into
     this protocol's member/candidate set, with at least one proven member (heuristic-only members are tolerated
     but never the proof). Any foreign or unclaimed observation refuses. ``call_target``/NULL rows aren't control
     observations.
@@ -473,12 +474,12 @@ def _witness_fact_holds(
             return False
         return _proof_registry_row(session, protocol_id=protocol_id, address=via) is not None
     if rule == WITNESS_RULE_W4H_DEPLOYER_AFFINITY:
-        # A heuristic witness holds while its H row is unrevoked; freezing only stops new admissions (§5).
+        # A heuristic witness holds while its H row is unrevoked; freezing only stops new admissions.
         if not via or (contract.deployer or "").lower() != via:
             return False
         return _heuristic_registry_row(session, protocol_id=protocol_id, address=via) is not None
     if rule == WITNESS_RULE_W4_FACTORY:
-        # Re-derived: the attribution must still name this factory, which must still anchor (invariant 8).
+        # Re-derived: the attribution must still name this factory, which must still anchor.
         if not via:
             return False
         return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract, factory=via) is not None
@@ -488,7 +489,7 @@ def _witness_fact_holds(
         if member is None or member.protocol_id != protocol_id or _chain_key(member.chain) != chain_key:
             return False
         if evidence.get(W2_HEURISTIC_VIA_KEY) is True:
-            # §6: re-verified without the evidence-membership test, but only for same-contract edges.
+            # re-verified without the evidence-membership test, but only for same-contract edges.
             if evidence.get("edge_kind") not in W2_SAME_CONTRACT_EDGE_KINDS:
                 return False
         elif not member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id):
@@ -538,8 +539,7 @@ def _witness_fact_holds(
                 return False
             recorded = evidence.get("anchor_chain")
             recorded_principal = evidence.get("principal_fact")
-            # A published proof must still be citable as-is; a different arm, anchor or host is a new fact to re-derive
-            # (invariant 8).
+            # A published proof must still be citable as-is; a different arm, anchor or host is a new fact to re-derive.
             if proof.arm == "anchor_chain":
                 if recorded_principal is not None:
                     return False

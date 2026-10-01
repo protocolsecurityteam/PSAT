@@ -535,7 +535,7 @@ def test_fetch_upgrade_events_parity_parallel_vs_sequential(monkeypatch, tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# Multichain (M1.1): chain_id threading to the Etherscan getLogs query
+# Multichain: chain_id threading to the Etherscan getLogs query
 # ---------------------------------------------------------------------------
 
 

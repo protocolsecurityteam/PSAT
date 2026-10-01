@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT
 
 # Status values that signal the worker pipeline is finished with a job.
-# ``failed_terminal`` is its own JobStatus enum value (db/models.py); a row
+# ``failed_terminal`` is its own JobStatus enum value (db/models/jobs.py); a row
 # in that state will never advance, so treating it as terminal here is
 # correct and avoids a 600s wait on a row that's never going to flip.
 _TERMINAL_STATUSES = ("completed", "failed", "failed_terminal")

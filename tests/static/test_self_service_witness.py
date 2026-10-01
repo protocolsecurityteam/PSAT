@@ -7,7 +7,7 @@
   ``build_predicate_tree`` + ``build_claims``, proving the join's two walks actually meet on
   the REAL producers (U1-U4); a unit test supplies both halves itself and cannot.
 
-Per SPEC §5.5 every conjunct has a fixture removing exactly it (asserting ``not_determined``)
+Every conjunct has a fixture removing exactly it (asserting ``not_determined``)
 and a positive sibling; assertions are on the whole verdict dict, never ``is not None``.
 """
 

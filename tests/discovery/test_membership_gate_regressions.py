@@ -4,7 +4,7 @@ frozen legacy orphan-adoption migrations.
 Leak paths: ``dapp_crawl`` scraping widely-held/shared contracts (WETH, stETH,
 EigenLayer cores) into a protocol's rows, and ``upgrade_history`` multiplying a
 foreign proxy's impls (one EigenPodManager proxy -> 7 impls tagged etherfi).
-Under DISCOVERY_MEMBERSHIP_GATE_SPEC.md every write is a nomination and
+Under the membership gate every write is a nomination and
 promotion needs a recorded witness. The migrations ``3a8f4d1c9b07`` and
 ``4d72e9b1f035`` inline frozen deploy-time snapshots of the retired tiers.
 """
@@ -18,7 +18,7 @@ import pytest
 from tests.conftest import requires_postgres
 
 # ---------------------------------------------------------------------------
-# 2. Writer-side gate — db/queue.py
+# 2. Writer-side gate — db/queue/discovery.py
 # ---------------------------------------------------------------------------
 
 
@@ -44,7 +44,7 @@ def seed_protocol(db_session):
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """Stub etherscan name lookup AND the §3.5 near-line probe so tests stay
+    """Stub etherscan name lookup AND the near-line probe so tests stay
     offline (stub-the-wire rule).
 
     Duplicated from ``test_upgrade_history_backfill.py`` to stay self-contained.
@@ -214,7 +214,7 @@ class TestCallTargetOverreachShape:
     """The dev-DB shape behind the WETH9 / EndpointV2 / DepositContract / Lido
     admissions: members carry ControllerValue rows naming the externals they
     integrate with. ``call_target`` is an operand and NULL is not-determined —
-    neither admits a D2 controller (invariant 6, ``W3_D2_SOURCES``). The third
+    neither admits a D2 controller (``W3_D2_SOURCES``). The third
     refused provenance, ``caller_gate``, is pinned with the full EndpointV2
     shape in test_membership_caller_gate_admission.py."""
 
@@ -241,7 +241,7 @@ class TestCallTargetOverreachShape:
         gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
         db_session.commit()
 
-    # CRITICAL (invariant 6): a ControllerValue whose provenance is refused never admits a D2 controller.
+    # CRITICAL: a ControllerValue whose provenance is refused never admits a D2 controller.
     @pytest.mark.parametrize(
         ("tag", "controller_id", "provenance"),
         [

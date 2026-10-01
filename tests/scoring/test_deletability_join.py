@@ -432,11 +432,11 @@ def test_no_filter_anywhere_on_principal_type():
     assert "principal_type" not in {field.name for field in P.SetterPrincipal.__dataclass_fields__.values()}
 
 
-# --- the published verdict (inv. 13) ----------------------------------------
+# --- the published verdict ----------------------------------------
 
 
 def test_a_withheld_verdict_discloses_its_state_reason_and_authority_witnesses():
-    """Obscuring evidence must not pay (inv. 13): an unresolvable gating
+    """Obscuring evidence must not pay: an unresolvable gating
     authority withholds the figure and LOWERS published exposure, so the withheld
     entry publishes the state, typed reason and authority asked about (the token
     the consumer's ``refused`` counter is keyed on)."""

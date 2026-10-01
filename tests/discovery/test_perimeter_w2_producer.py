@@ -1,4 +1,4 @@
-"""Perimeter W2 producer (spec §3.2/§5.2): ``_structural_ownership``'s verified
+"""Perimeter W2 producer: ``_structural_ownership``'s verified
 edges become witness rows + gate promotion — never a stamped ``protocol_id``.
 """
 
@@ -201,7 +201,7 @@ def test_witness_pass_nominates_and_promotes_w1_holders_only(db_session, monkeyp
         {with_w1.address: "implementation", without_w1.address: "proxy"},
     )
 
-    # Both nominated + witnessed; only the W1 holder promotes (invariant 3).
+    # Both nominated + witnessed; only the W1 holder promotes.
     assert with_w1.nominated_protocol_id == protocol.id
     assert with_w1.protocol_id == protocol.id
     assert without_w1.nominated_protocol_id == protocol.id
@@ -212,7 +212,7 @@ def test_witness_pass_nominates_and_promotes_w1_holders_only(db_session, monkeyp
 
 def test_witness_pass_probes_unprobed_candidates_near_line(db_session, monkeypatch, erpc_env):
     # A dep with an existing row (and an existing job — it never re-enters the
-    # fetch path) still completes W2+W1 here: the pass runs the event-1 probe
+    # fetch path) still completes W2+W1 here: the pass runs the nomination probe
     # for witnessed candidates lacking an attempt, and promotes.
     protocol = _protocol(db_session)
     parent = _contract(db_session, ADDR(0x440), protocol_id=protocol.id, implementation=ADDR(0x441))

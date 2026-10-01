@@ -1,4 +1,4 @@
-"""Membership reconcile (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.4, §5.4, invariant 13).
+"""Membership reconcile.
 
 Recomputes each claimed row's verdict from stored witnesses only (no probes) via the gate's own ``promote`` in a
 rolled-back savepoint, so reconcile and gate can't diverge. Drift on a freshly gated DB is a bug report; exits nonzero.
@@ -96,9 +96,7 @@ def audit(session: Session, *, protocol_ids: list[int] | None = None) -> list[Dr
 
 
 def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None = None) -> list[Drift]:
-    """DEPLOYER_HEURISTIC_SPEC.md §8.5 / §9 inv.
-
-    10: recompute the heuristic layer from stored witnesses and report disagreements and revoked ``w4h`` registry rows.
+    """Recompute the heuristic layer from stored witnesses and report disagreements and revoked ``w4h`` registry rows.
     Runs in a rolled-back savepoint.
     """
     drifts: list[Drift] = []
@@ -158,7 +156,7 @@ def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None
 
 
 def late_inheritance_would_admit(session: Session, *, protocol_ids: list[int] | None = None) -> list[int]:
-    """Report-only observation: candidates the gate's §6 late-arrival sweep would admit, computed by the gate itself
+    """Report-only observation: candidates the gate's late-arrival sweep would admit, computed by the gate itself
     in a rolled-back savepoint.
     """
     stmt = select(Contract.id).where(Contract.protocol_id.is_(None), Contract.nominated_protocol_id.is_not(None))

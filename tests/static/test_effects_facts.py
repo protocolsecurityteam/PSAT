@@ -1,8 +1,8 @@
-"""Regression tests for the Plane-0 facts hardening in ``effects.py``.
+"""Regression tests for the Plane-0 facts hardening in ``effects/``.
 
 Each test compiles a real Solidity fixture and drives the production
 ``build_effects`` -> ``build_claims`` -> ``project_effect_labels`` sequence. The
-six fixes (spec §3 FACT records / §5 prerequisites), one section each:
+six fixes (FACT records / prerequisites), one section each:
 (a) sink ``origin`` body vs guard; (b) keying prefers a concrete body over a 0-node
 interface re-declaration; (c) member-level write facts; (d) ``hygiene_class`` and
 the hygiene-gated ownership harvest; (e) native ``transfer``/``send`` value sinks;

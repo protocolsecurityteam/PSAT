@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 ContractMaterialization.status == "ready",
             )
             if args.chain:
-                # Rows use the decimal-id chain token (inv. 11).
+                # Rows use the decimal-id chain token.
                 from utils.chains import chain_cache_token
 
                 stmt = stmt.where(ContractMaterialization.chain == chain_cache_token(args.chain))

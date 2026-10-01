@@ -1,5 +1,5 @@
 // /api/address_labels wrappers. A label is global (EOAs/Safe signers) or a
-// chain-qualified override (contracts differ per chain) (invariant 12); omit
+// chain-qualified override (contracts differ per chain); omit
 // `chain` for the global row.
 
 import { api } from "./client.js";

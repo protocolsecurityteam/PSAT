@@ -1,4 +1,4 @@
-"""Phase 8 recipe fixes: S2 (share-accounted supply) and G6-A (vacuous inputs).
+"""Recipe regressions for share-accounted supply and vacuous inputs.
 
 Drives the REAL ``recipes.supply`` / ``recipes.value_out`` against minimal wire fakes and the
 ``effects_worker._is_cacheable`` seam: a vacuous non-observation needs its own reason AND must be refused by the cache.
@@ -32,7 +32,8 @@ MINT_CALLDATA = MINT_SEL + "00" * 64
 
 class SharesChain:
     """Share-accounted token: ``totalSupply()`` reads a CONSTANT pooled backing while mint/burn still
-    emit ``Transfer(0x0, user)`` / ``Transfer(user, 0x0)``. The §S2 shape: zero delta, yet not an absence of supply
+    emit ``Transfer(0x0, user)`` / ``Transfer(user, 0x0)``. The vacuous-supply shape: zero delta, yet not an
+    absence of supply
     change."""
 
     def __init__(self, *, emit: str | None, total_supply: int = 10**24) -> None:

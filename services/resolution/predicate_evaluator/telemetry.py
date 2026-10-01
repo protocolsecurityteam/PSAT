@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
 
-# Delegated-role-gate durability telemetry (CONTROLLER_RESOLUTION_SPEC §5), keyed by callee signature so a new
+# Delegated-role-gate durability telemetry, keyed by callee signature so a new
 # un-foldable role-store standard shows up as a new label (then add it to role_store_standards.py).
 _GUARD_FIRE_COUNTS: "Counter[str]" = Counter()
 _DELEGATED_GATE_UNRESOLVED_COUNTS: "Counter[str]" = Counter()

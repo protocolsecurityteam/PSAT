@@ -474,8 +474,8 @@ def route_comparison(
     }
 
 
-# §7.2 arm 1: gate claims transfer on CALLER match; routing is irrelevant because ``isAuthorized(msg.sender, msg.sig)``
-# reads no argument, but it reads the caller, so an execution for X proves the gate for X only.
+# Caller-match arm: gate claims transfer on CALLER match. ``isAuthorized(msg.sender, msg.sig)`` reads no argument,
+# so routing is irrelevant. It reads the caller, so an execution for X proves the gate for X only.
 #
 # A mismatch doesn't retract the act-as chain (it stands on its own witness); it removes the corroboration, and the
 # outcome says so.

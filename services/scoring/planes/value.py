@@ -280,7 +280,7 @@ def ceiling_for(plane: ValuePlane, key: str) -> tuple[float | None, str]:
     The alias test uses the key as passed (safe: ambiguous keys canonicalize to themselves). A truncated asset list
     refuses first, even admits: its total is a floor, and a floor published as an upper bound is false. Callers:
     ``fold._entity_contribution`` and ``fold._unresolved_stake``; every reason is pinned by
-    ``tests/test_value_plane_ceiling.py``.
+    ``tests/scoring/test_value_plane_ceiling.py``.
     """
     if key in plane.alias_ambiguous:
         return None, CEILING_ALIAS_AMBIGUOUS

@@ -469,7 +469,7 @@ def _composition_report(
         "composed_usd": round(sum(sorted(entry.usd for entry in composed.values())), 2),
         # Published beside the admitted count so survivors don't read as coverage.
         "composed_withheld": len(withheld),
-        # inv. 13: keyed on state and reason so "no row" is apart from "authority unresolvable"; otherwise obscuring the
+        # keyed on state and reason so "no row" is apart from "authority unresolvable"; otherwise obscuring the
         # authority would look like an absent finding.
         "composed_withheld_by_deletability": refused_magnitudes,
         "composed_withheld_by_arm": _counted(record.arm for record in withheld),

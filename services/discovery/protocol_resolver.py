@@ -106,7 +106,7 @@ def _make_result(primary: dict, siblings: list[dict]) -> dict:
         "url": primary.get("url"),
         "name": primary.get("name"),
         "chains": primary.get("chains", []),
-        # The listing's own address per sibling, the same provenance as the W6 seed (spec §3.2).
+        # The listing's own address per sibling, the same provenance as the W6 seed.
         "listing_addresses": listing_addresses(siblings),
         "all_slugs": [s.get("slug") for s in siblings if s.get("slug")],
         # Every sibling's display name, for ``get_or_create_protocol``'s duplicate merge; primary first.

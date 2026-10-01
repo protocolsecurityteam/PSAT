@@ -1,10 +1,10 @@
-"""Unit tests for the differential probe (DIFFERENTIAL_PROBE_PLAN §3, gated by
-Phase 1). Every attribution-table row is exercised against recorded outcomes via
+"""Unit tests for the differential probe. Every attribution-table row is
+exercised against recorded outcomes via
 a stubbed ``call_batch`` — no live RPC. Soundness invariants asserted:
 
   * a public verdict requires ≥2 random SUCCESSES + block-independence;
   * indeterminate / inconclusive / synthesis-miss NEVER upgrade (fail closed);
-  * the §3.5 block-independence cross-check withholds on state-dependent admission.
+  * the block-independence cross-check withholds on state-dependent admission.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ class StubWire:
 
 
 # ---------------------------------------------------------------------------
-# §3.3 / §3.4 attribution table
+# attribution table
 # ---------------------------------------------------------------------------
 
 
@@ -122,7 +122,7 @@ def test_attribute_table(randoms, principal, expected):
 
 
 # ---------------------------------------------------------------------------
-# §3.2 calldata synthesis
+# calldata synthesis
 # ---------------------------------------------------------------------------
 
 
@@ -176,7 +176,7 @@ def test_synth_miss_returns_none(selector, signature):
 
 
 # ---------------------------------------------------------------------------
-# §6.6 deterministic random identities + decode_error
+# deterministic random identities + decode_error
 # ---------------------------------------------------------------------------
 
 
@@ -198,7 +198,7 @@ def test_decode_error_shapes():
 
 
 # ---------------------------------------------------------------------------
-# orchestration: run_differential_probe (§3.5 cross-check + §3.6 verdict)
+# orchestration: run_differential_probe
 # ---------------------------------------------------------------------------
 
 ADDR = "0x" + "77" * 20
@@ -279,10 +279,10 @@ def test_run_indeterminate_keeps_static():
 
 
 # ---------------------------------------------------------------------------
-# recorded REAL transcript (§6.1) — captured once from the eRPC mainnet archive
+# recorded REAL transcript — captured once from the eRPC mainnet archive
 # at block 25289222, replayed through a stubbed wire (the materializer test
 # pattern). Grounds the attribution in genuine node responses, not hand-encoded
-# bytes. See scripts/authority_audit/PHASE0_HANDPROBE.md.
+# bytes; the recorded outcomes below are the replay source.
 # ---------------------------------------------------------------------------
 
 

@@ -1,4 +1,4 @@
-"""Unit tests for db/queue.py helpers."""
+"""Unit tests for db/queue/ helpers."""
 
 from __future__ import annotations
 

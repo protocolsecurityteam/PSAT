@@ -1,4 +1,4 @@
-"""§14 case 8: no constant data-claim.
+"""no constant data-claim.
 
 A published string that DESCRIBES what a field means may be a constant; one that
 makes a CLAIM ABOUT THE DATA must be derived from the carrier's own data (a
@@ -538,7 +538,7 @@ def test_no_published_narration_names_a_concept_the_document_does_not_publish(re
     ids=["republished", "withheld"],
 )
 def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):
-    """§14 case 7 applied to case 8: ``_ComposedMagnitude.as_json`` and
+    """``_ComposedMagnitude.as_json`` and
     ``_WithheldComposition.as_json`` have no findings/subsumed branch; asserts
     the consequence on the population earlier passes never measured."""
     weaker = sig(

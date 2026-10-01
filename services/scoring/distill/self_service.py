@@ -21,7 +21,7 @@ logger = logging.getLogger("services.scoring.distill")
 
 
 # Consumes U5's per-flow ``self_service_payout``: W1 (amount from a caller-owned cell) and W2 (cleared before external
-# calls, or a verified reentrancy guard). Replayed as a universal over out-flows, never re-derived (inv. 9).
+# calls, or a verified reentrancy guard). Replayed as a universal over out-flows, never re-derived.
 SELF_SERVICE_BASIS = SELF_SERVICE_BASIS_BOUNDED
 SELF_SERVICE_UNCHARGED_NOTE = "self_service_uncharged_product_surface"
 _SELF_SERVICE_PROVEN_STATE = SELF_SERVICE_STATE_PROVEN

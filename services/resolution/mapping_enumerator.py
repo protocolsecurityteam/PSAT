@@ -542,7 +542,7 @@ def enumerate_mapping_allowlist_sync(
     ``status``.
 
     Every status must fit L2's column, or a rejected write would leave an older ``complete`` row standing.
-    ``tests/test_mapping_enumeration_status_vocabulary.py`` round-trips the vocabulary.
+    ``tests/resolution/test_mapping_enumeration_status_vocabulary.py`` round-trips the vocabulary.
     """
     specs_as_dicts = [dict(s) for s in writer_specs]
     cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))

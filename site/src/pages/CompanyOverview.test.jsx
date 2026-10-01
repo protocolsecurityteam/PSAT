@@ -2,7 +2,7 @@
 // over the protocol's all-chains contract + coverage arrays. Those reductions
 // used to key by bare address, so a CREATE2 twin (same address on two chains)
 // deduped to a single entry and the count under-reported. Identity is
-// (chain, address) (inv. 13): two chains at one address are two covered
+// (chain, address): two chains at one address are two covered
 // contracts, not one.
 
 import React from "react";

@@ -78,7 +78,7 @@ def _rpc_url_for_job(job: Job) -> str:
 
 
 def _chain_id_for_job(job: Job) -> int:
-    """The job's ``chain_id`` (invariant 1): the column, else derived from ``request["chain"]``, else mainnet."""
+    """The job's ``chain_id``: the column, else derived from ``request["chain"]``, else mainnet."""
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
         return chain_id
@@ -122,7 +122,7 @@ def _membership_gate_controller_hook(
     *,
     removed_values: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Membership-gate event-2 hook for the ControllerValue commit (spec §3.4 event 2b); best-effort.
+    """Membership-gate event-2 hook for the ControllerValue commit; best-effort.
 
     ``removed_values`` (F5) are controller addresses the rewrite dropped; Class-A rows anchored on them are re-checked
     in the same evaluate (as changed deployers and edge names).
@@ -255,7 +255,7 @@ class ResolutionWorker(BaseWorker):
                     )
                 )
             session.commit()
-            # §3.4 event 2b: committed controllers are the gate's W3 fuel (plus the subject itself).
+            # committed controllers are the gate's W3 fuel (plus the subject itself).
             _membership_gate_controller_hook(
                 session, contract_row, snapshot.get("controller_values", {}), removed_values=pre_rewrite_values
             )
@@ -438,7 +438,7 @@ class ResolutionWorker(BaseWorker):
             return 0
         written = persist_role_holder_planes(session, rows)
         session.commit()
-        # §3.4 event 2: role holders are anchor-chain links, so a grant/revoke can make or break a W3-D1 witness.
+        # role holders are anchor-chain links, so a grant/revoke can make or break a W3-D1 witness.
         from services.discovery.membership_gate import evaluate_role_plane_change
 
         evaluate_role_plane_change(

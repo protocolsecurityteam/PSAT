@@ -23,7 +23,7 @@ caller restriction with an undetermined authority, which is why
 ``authority_openness`` exists beside it.
 
 Comments only -- no column, type, nullability or data changes. The matching
-``comment=`` kwargs land on ``db/models.py`` in the same commit so
+``comment=`` kwargs land on ``db/models/contracts.py`` in the same commit so
 ``alembic check`` (CI's schema-drift gate, which diffs the built database
 against ``Base.metadata`` and reports comment mismatches as ``modify_comment``)
 stays clean in both directions.

@@ -245,7 +245,7 @@ def test_scan_uses_registry_confirmation_depth_per_chain(session, monkeypatch):
 @requires_postgres
 def test_scan_logs_once_when_chain_has_no_fetcher(session, caplog):
     # A cursor enrolled on a chain with no fetcher (indexer disabled for it) is
-    # skipped — but loudly, once, so a stalled chain is visible (inv. 4/10).
+    # skipped — but loudly, once, so a stalled chain is visible.
     enroll_event_cursor(session, chain_id=_BASE, event_address=_AUTHORITY, topic0=_TOPIC, start_block=100)
     enroll_event_cursor(
         session, chain_id=_BASE, event_address="0x" + "7d" * 20, topic0="0x" + "cc" * 32, start_block=100

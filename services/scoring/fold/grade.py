@@ -74,7 +74,7 @@ def _grade(
     gaps: list[dict[str, Any]] = []
     any_priced = False
     for finding in findings:
-        # W2c/R9: inv.5 is the weakest path to that entity, so charge per-entity rungs, not the unit's weakest.
+        # Each entity's rung is its weakest path, so charge per-entity rungs, not the unit's weakest.
         per_entity_weakness = finding.get("weakness_by_entity") or {}
         mine = 0.0
         # Excludes entities whose budget earlier rows spent, so exhaustion isn't published as zero.
@@ -86,7 +86,7 @@ def _grade(
         charged_entities = list(finding["reach_entities"]) + [
             k for k in exclusive if k not in finding["reach_entities"]
         ]
-        # §6.4: sheet ceilings stay out of the exposure numerator; charging them would inflate exposure and spend budget
+        # sheet ceilings stay out of the exposure numerator; charging them would inflate exposure and spend budget
         # a later real measurement needs. Composed extraction ceilings are witnessed flows and still charge.
         sheet_ceilings = set(finding.get("entities_priced_from_a_sheet_ceiling") or [])
         exclusive_ceilings = set(finding.get("subsumed_exclusive_sheet_ceiling_entities") or [])
@@ -98,7 +98,7 @@ def _grade(
             key_fraction = finding["severity_proven"] * per_entity_weakness.get(key, finding["weakness"])
             excluded = False
             if key in sheet_ceilings:
-                # §6.4: this row's own figure is a sheet ceiling and charges nothing, but a subsumed row's witnessed
+                # this row's own figure is a sheet ceiling and charges nothing, but a subsumed row's witnessed
                 # figure may still apply below.
                 held = None
                 excluded = True

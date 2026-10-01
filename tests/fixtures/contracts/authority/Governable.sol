@@ -12,7 +12,7 @@ pragma solidity ^0.8.25;
 //   `view_call` to the internal accessor (selector 0x95260843), which has no
 //   external function and reverts. Bug #4: resolution must fall back to the
 //   canonical PUBLIC getter `governor()` (0x0c340a24). See
-//   tests/test_canonical_authority_getter_resolution.py.
+//   tests/resolution/test_canonical_authority_getter_resolution.py.
 
 contract Governable {
     // keccak256("LRTSquare.governor");

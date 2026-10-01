@@ -1419,7 +1419,7 @@ def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypa
 def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, monkeypatch):
     """Adverse direction: the SAME failure on a value-check gate (``require(amount >
     0)``) must NOT flag the function; marking real public functions unsupported is an
-    over-hedge the spec forbids."""
+    over-hedge: a value constraint does not establish caller authority."""
     import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _VALUE_GATED)

@@ -1,4 +1,4 @@
-"""Invariant-8 revocation: the deployer demotion cascade and revocation quiescence."""
+"""Deployer revocation: the deployer demotion cascade and revocation quiescence."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _demote_if_no_verified_witness(
     reason: str,
     evidence: dict[str, Any] | None = None,
 ) -> tuple[list[int], bool]:
-    """Invariant 8: demote members left with no admitting witness whose via-fact verifies; failing witnesses are
+    """demote members left with no admitting witness whose via-fact verifies; failing witnesses are
     revoked in the same pass. Returns (extra revoked ids, demoted?).
     """
     contract = session.get(Contract, contract_id)
@@ -131,7 +131,7 @@ def _revoke_deployer_registry_row(
 
 
 def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> DemotionResult:
-    """Deployer revocation cascaded to quiescence (invariant 8): W4 witnesses revoked, unsupported members demoted,
+    """Deployer revocation cascaded to quiescence: W4 witnesses revoked, unsupported members demoted,
     and each demotion recursively invalidates W2/W3 witnesses resting on it. Demoted contracts are re-probe
     candidates.
     """
@@ -145,7 +145,7 @@ def demote(session: Session, *, deployer_row: ProtocolDeployer, reason: str) -> 
 
 
 def _cascade_deployer_demotions(session: Session, result: DemotionResult) -> DemotionResult:
-    """§3.2 invalidation: each demoted member is a via-fact, so recurse.
+    """Membership invalidation: each demoted member is a via-fact, so recurse.
 
     Terminates because revocations only shrink the active set.
     """
@@ -215,7 +215,7 @@ def _controllers_of(session: Session, contract_ids: Sequence[int] | set[int]) ->
 def _vias_citing_evidence_address(session: Session, addresses: Sequence[str] | set[str]) -> set[str]:
     """Vias of standing W3 witnesses whose recorded proof names one of *addresses* (anchor-chain link, terminal
     anchor, or perimeter-principal host). Such witnesses' via is the controller, so otherwise they'd never reach
-    the revocation frontier (invariant 8).
+    the revocation frontier.
 
     Written as containment against the ``evidence`` column (not a ``->`` path) so the GIN index applies.
     """
@@ -300,7 +300,7 @@ def _revocation_quiescence(session: Session, seed_vias: Sequence[str] | set[str]
             if was_demoted:
                 demoted.append(contract_id)
             # Follow every revocation, not only demotions: a member can keep membership but lose its anchoring, and the
-            # F2 facts keyed on it must be re-checked (invariant 8).
+            # F2 facts keyed on it must be re-checked.
             contract = session.get(Contract, contract_id)
             addr = (contract.address or "").lower() if contract is not None else ""
             if addr:

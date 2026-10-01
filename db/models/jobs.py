@@ -35,7 +35,7 @@ class Job(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     address: Mapped[str | None] = mapped_column(String(42), nullable=True)
-    # Chain identity (invariant 1), derived from ``request["chain"]`` and dual-written. Required for address-scoped jobs
+    # Chain identity, derived from ``request["chain"]`` and dual-written. Required for address-scoped jobs
     # by CHECK; reads still use ``request["chain"]`` until the M0.2 Item-2 flip.
     chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=_job_chain_id_insert_default)
     company: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -88,7 +88,7 @@ class Job(Base):
         # For the M0.2 Item-2 dedup lookups on ``(lower(address), chain_id)``.
         Index("ix_jobs_lower_address_chain_id", text("lower(address)"), "chain_id"),
         Index("ix_jobs_source_content_hash", "source_content_hash"),
-        # Address-scoped jobs need a chain_id (invariant 1).
+        # Address-scoped jobs need a chain_id.
         CheckConstraint(
             "address IS NULL OR chain_id IS NOT NULL",
             name="ck_jobs_chain_id_required_for_address",

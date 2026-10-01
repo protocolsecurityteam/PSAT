@@ -187,7 +187,7 @@ def tx(*, to: str, input_hex: str, tx_hash: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# E1 — the direct call
+# the direct call
 # ---------------------------------------------------------------------------
 
 
@@ -219,7 +219,7 @@ def test_a_direct_exec_transaction_publishes_the_witnessed_call(db_session, safe
     assert block["gas_token"] == ZERO
     assert block["refund_receiver"] == ZERO
     assert block[sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED] is False
-    # E2, and it is display only — the level below is the ``operation == 0``
+    # Signature resolution is display only — the level below is the ``operation == 0``
     # floor either way.
     assert block["target_function"] == {
         "selector": SET_FEE,
@@ -297,7 +297,7 @@ def test_a_signature_from_another_chain_does_not_resolve(db_session, safe, proto
 
 
 # ---------------------------------------------------------------------------
-# E1 — the top-level-call check
+# the top-level-call check
 # ---------------------------------------------------------------------------
 
 
@@ -393,7 +393,7 @@ def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, saf
 
 
 # ---------------------------------------------------------------------------
-# E1 + E4 — delegatecall, the design-critical trap
+# delegatecall, the design-critical trap
 # ---------------------------------------------------------------------------
 
 
@@ -963,7 +963,7 @@ def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
 
 
 # ---------------------------------------------------------------------------
-# E2 — the timelock namespace
+# the timelock namespace
 # ---------------------------------------------------------------------------
 
 
@@ -1029,7 +1029,7 @@ def test_a_timelock_without_a_decoded_selector_publishes_nothing(db_session, mak
 
 
 # ---------------------------------------------------------------------------
-# E3 — the correlation join, both directions
+# the correlation join, both directions
 # ---------------------------------------------------------------------------
 
 
@@ -1231,7 +1231,7 @@ def test_a_cause_in_another_tenant_withholds_the_direction(db_session, safe, mak
 
 
 def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc):
-    """DELIBERATE, additive deviation: §3.4's query has no window restriction, so an effect stored before its cause
+    """The same-transaction cause query has no window restriction, so an effect stored before its cause
     arrives still links (no extra lookup, cannot re-notify a committed row; not the look-back OQ4 declined).
     Pinned so nobody "fixes" it into a regression."""
     victim = make_mc(address=ADDR(0xC0FFE9), contract_type="regular")
@@ -1372,7 +1372,7 @@ def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, saf
 
 
 # ---------------------------------------------------------------------------
-# §5a — the Discord embed
+# The Discord embed
 # ---------------------------------------------------------------------------
 
 

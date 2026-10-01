@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Emit ``site/src/surface/chains.json`` from the chain registry (inv.
-
-5). ``tests/chains/test_chains_json_parity.py`` fails CI if it's stale.
+"""Emit ``site/src/surface/chains.json`` from the chain registry. ``tests/chains/test_chains_json_parity.py`` fails
+CI if it's stale.
 
     python scripts/gen_chains_json.py
 """

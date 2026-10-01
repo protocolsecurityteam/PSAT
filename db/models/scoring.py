@@ -252,7 +252,7 @@ class ProtocolScore(Base):
     # Per-plane row counts, max ``updated_at``, and ledger references, for replay and coverage audits.
     provenance: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=False)
     # The constants the grade used, stored per row so scores stay comparable across recalibration; includes
-    # uncalibrated-arm flags (strategy §7.2).
+    # uncalibrated-arm flags.
     model_parameters: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=False)
 
     __table_args__ = (

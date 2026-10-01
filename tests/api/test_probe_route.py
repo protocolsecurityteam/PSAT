@@ -85,7 +85,7 @@ _MEMBERSHIP_TREE = {
 def test_probe_membership_uses_explicit_chain_id_job(api_client, db_session):
     """A CREATE2 twin has one completed job per chain, each with its own
     predicate_trees. An explicit ``chain_id`` must load *that* chain's trees,
-    not the most-recently-updated job's (inv. 12)."""
+    not the most-recently-updated job's."""
     import api as api_module
 
     _no_auth(api_module)
@@ -589,7 +589,7 @@ def test_probe_signature_unguarded_function_returns_yes(api_client, db_session):
 
 @requires_postgres
 def test_probe_rate_limit_blocks_after_limit(api_client, db_session, monkeypatch):
-    """v4 plan §15: 10/min/key/contract. Pinned with a tight
+    """Default rate: 10/min/key/contract. Pinned with a tight
     limit so the test runs fast — same algorithm at any size."""
     import api as api_module
 

@@ -1,4 +1,4 @@
-"""Side effects follow claim strength (invariant 5), plus the event-type column width.
+"""Side effects follow claim strength, plus the event-type column width.
 
 The scanner never hands a hint- or activity-tier row to the notifier, so these exercise the
 notifier's own gate: the second lock on the same door, for any caller that hands one anyway.
@@ -146,7 +146,7 @@ def test_the_split_mutes_no_pre_split_signers_filter():
 
 
 def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
-    """The other direction of invariant 7: a save naming its groups used the post-split
+    """Group attribution: a save naming its groups used the post-split
     vocabulary, so `signers` means signers; legacy expansion may not put executions back."""
     groups = ["signers"]
     for event_type in _SAFE_EXEC_TYPES:

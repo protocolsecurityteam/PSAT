@@ -67,7 +67,7 @@ def coalesce_chain(chain: str | None) -> str:
 
     NULL/empty/``"mainnet"`` become ``"ethereum"``; everything else is lowercased. Not
     :func:`utils.chains.canonical_chain`, which folds extra aliases. Without this, one vault could get three keys and be
-    charged three times; ``tests/test_scoring_schema.py`` pins it.
+    charged three times; ``tests/scoring/test_scoring_schema.py`` pins it.
     """
     token = str(chain or "").strip().lower()
     if not token or token == "mainnet":

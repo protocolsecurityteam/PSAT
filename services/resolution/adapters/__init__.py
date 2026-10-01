@@ -101,7 +101,7 @@ class BytecodeRepo(Protocol):
 
 @dataclass
 class EvaluationContext:
-    # Required (inv. 6); no mainnet default.
+    # Required; no mainnet default.
     chain_id: int
     rpc_url: str | None = None
     block: int | None = None

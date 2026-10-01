@@ -45,7 +45,7 @@ def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractItem]:
 )
 def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollResponse:
     """Run enrollment directly, bypassing in-flight job checks; for fixing wrong results or manual DB changes."""
-    # Allowlist (inv. 14): re-enroll spawns monitoring work on that chain.
+    # Allowlist: re-enroll spawns monitoring work on that chain.
     try:
         require_supported_chain(chain=chain, context="protocol re-enroll")
     except UnsupportedChainError as exc:

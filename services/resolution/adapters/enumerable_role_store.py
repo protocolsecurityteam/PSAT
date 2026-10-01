@@ -1,13 +1,13 @@
 """Enumerable role-store adapter: resolves a delegated ``registry.onlyX(msg.sender)`` gate to its controllers without
-parsing role names (CONTROLLER_RESOLUTION_SPEC.md §3.2).
+parsing role names.
 
 1. Fold the standard's grant/revoke events at the authority proxy into a candidate universe (every current role holder),
 plus the registry's own owner/admin values for hybrid gates. The durable index drives cold/warm lifecycle.
 2. Probe the gate at a pinned block: a negative control that must revert, then each candidate. The gate is its own
-ground truth, so false positives are impossible (§7.3).
+ground truth, so false positives are impossible.
 3. Optionally cross-check the enumerable getter; a mismatch declines.
 
-Probe transport failures are indeterminate and decline to ``probe_unavailable`` (§7.7). Cold index defers via
+Probe transport failures are indeterminate and decline to ``probe_unavailable``. Cold index defers via
 ``deferred_reconciler``; warm with no events settles unconfirmed. New standards are recognized only in
 ``role_store_standards.py``.
 """
@@ -184,7 +184,7 @@ class EnumerableRoleStoreAdapter:
             memo=_pass_memo(ctx),
         )
         if probe.transport_failed:
-            # Transport failure is indeterminate, not non-membership (§7.7).
+            # Transport failure is indeterminate, not non-membership.
             return _check_only(authority, callee_selector, ["probe_unavailable"])
         if probe.control_passed:
             # The gate passed a random address: not an allowlist.
@@ -466,7 +466,7 @@ def _pin_probe_block(ctx: EvaluationContext, rpc_url: str) -> int | None:
     """One height for the whole enumeration: ``ctx.block`` if pinned, else one memoized ``eth_blockNumber`` per
     chain.
 
-    ``None`` settles to ``probe_unavailable`` (§7.7).
+    ``None`` settles to ``probe_unavailable``.
     """
     if isinstance(ctx.block, int):
         return ctx.block

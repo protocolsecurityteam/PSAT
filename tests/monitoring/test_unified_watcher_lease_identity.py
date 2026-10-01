@@ -1,10 +1,10 @@
-"""Stage-4 lease gating + event-identity tests for the unified watcher (W2a).
+"""Lease gating + event-identity tests for the unified watcher.
 
 Real test DB and pipeline; only the RPC wire (``rpc_request``, ``rpc_batch_request_classified``)
-and ``notifier._send_discord`` are stubbed. Covers design §2.4 (two-layer singleton), HR2
+and ``notifier._send_discord`` are stubbed. Covers the two-layer singleton, HR2
 (duplicate pass adds zero rows/jobs/posts), batch-timelock identity, the partial-index poll
 exclusion, the per-chain lease gate, the poll-path duplicate non-guarantee (Risk #7) and the
-governance-rotation dirty-mark (§2.3 call-site 5).
+governance-rotation dirty-mark.
 """
 
 from __future__ import annotations
@@ -199,7 +199,7 @@ def _count_jobs(session, address):
 
 
 # ---------------------------------------------------------------------------
-# THE duplicate-pass property test (design §4 Stage 4 / HR2)
+# THE duplicate-pass property test
 # ---------------------------------------------------------------------------
 
 
@@ -295,7 +295,7 @@ def test_within_window_duplicate_log_collapses_to_one_row(db_session, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Lease gating (design §2.4 Layer 1)
+# Lease gating
 # ---------------------------------------------------------------------------
 
 
@@ -431,7 +431,7 @@ def test_poll_path_may_duplicate_without_lease_protection(db_session, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Governance-rotation dirty-mark (design §2.3 call-site 5)
+# Governance-rotation dirty-mark
 # ---------------------------------------------------------------------------
 
 

@@ -1408,7 +1408,7 @@ def test_match_contracts_for_audit_per_contract_dedupe_prefers_reviewed_commit(d
 
 
 # ---------------------------------------------------------------------------
-# Bytecode anchor (Phase 2)
+# Bytecode anchor
 # ---------------------------------------------------------------------------
 
 

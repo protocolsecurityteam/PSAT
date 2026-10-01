@@ -100,7 +100,7 @@ def _gate_ref(tree: Any) -> str:
 
     ``gate:none`` covers both ungated and un-lowerable gates, which is fine because the cache identity also includes the
     kernel ``behavior_hash`` (whole stripped bytecode), so rows sharing ``gate:none`` share their gate.
-    ``tests/test_effects_hashing.py`` pins that. Consumers of an absent role fail closed to no probe.
+    ``tests/effects/test_effects_hashing.py`` pins that. Consumers of an absent role fail closed to no probe.
     """
     roles = sorted(_authority_roles(tree))
     return "gate:" + ("+".join(roles) if roles else "none")

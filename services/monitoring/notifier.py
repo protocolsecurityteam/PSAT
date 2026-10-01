@@ -447,7 +447,8 @@ _READ_WITNESSED_WILDCARD_SEEDS = frozenset({"state_changed_poll"})
 # ``event_types``, so the key had to land with the split. Inert today: the UI always passes every group.
 _FILTER_GROUPS_KEY = "groups"
 
-# Mirrors ``MONITOR_ALERT_GROUPS`` in ``site/src/surface/meta.js``; pinned by ``tests/test_witness_notifier_gating.py``.
+# Mirrors ``MONITOR_ALERT_GROUPS`` in ``site/src/surface/meta.js``; pinned by
+# ``tests/monitoring/test_witness_notifier_gating.py``.
 _KNOWN_FILTER_GROUPS = frozenset(
     {"upgrades", "ownership", "pause", "roles", "signers", "safe_exec", "timelock", "state"}
 )

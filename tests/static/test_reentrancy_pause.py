@@ -263,7 +263,7 @@ def test_apply_pass_classifies_pause_leaf(tmp_path):
 # Regression pin: a function with BOTH a role check and a pause check in the same require
 # chain must keep the role leaf's authority and add a SEPARATE pause leaf (confirmed on
 # EtherFi LiquidityPool.pauseContract). The downstream target_address/selector-null
-# regression is covered in test_capability_resolver.py.
+# regression is covered in tests/resolution/test_capability_resolver.py.
 # ---------------------------------------------------------------------------
 
 

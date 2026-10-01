@@ -1,9 +1,9 @@
-"""Behavioural-hash identity for effects dedup (EFFECTS_RESOLUTION_SPEC §7).
+"""Behavioural-hash identity for effects dedup.
 
 Three of four ladder rungs; the bytecode-region lifter needs EVM CFG recovery we don't have.
 
 The ``PausableUntil`` mixin is byte-identical across 11 contracts, but eETH/weETH override ``pauseUntil()`` with
-stricter gating, so the key is the hash of the resolved (executing) function, never a name or file hash (inv. 2).
+stricter gating, so the key is the hash of the resolved (executing) function, never a name or file hash.
 
 Function access is duck-typed so tests can use structural doubles instead of Slither objects.
 """
@@ -91,7 +91,7 @@ def _normalize_unit(unit: Any, visited: frozenset[Any]) -> list[str]:
 
 
 def resolved_function_hash(function: Any) -> str:
-    """§7 item 1, the primary key: the normalized resolved-IR/CFG hash.
+    """The primary key: the normalized resolved-IR/CFG hash.
 
     The caller passes the override-resolved function.
     """
@@ -150,7 +150,7 @@ def bytecode_fallback_hash(
     *,
     immutable_references: dict[str, Any] | None = None,
 ) -> str:
-    """§7 item 2, the unverified fallback: stripped runtime bytecode plus selector.
+    """The unverified fallback: stripped runtime bytecode plus selector.
 
     Sound (identical bytecode means identical behaviour) but under-dedups. Pass ``immutable_references`` on verified
     contracts.
@@ -165,7 +165,7 @@ def contract_surface_hash(
     *,
     immutable_references: dict[str, Any] | None = None,
 ) -> str:
-    """Stripped runtime bytecode hash of the whole contract, the projection-level key (§7).
+    """Stripped runtime bytecode hash of the whole contract, the projection-level key.
 
     No selector, since projections cover the whole entry surface.
     """

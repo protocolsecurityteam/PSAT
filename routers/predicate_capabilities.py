@@ -24,7 +24,7 @@ router = APIRouter()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
-# v4 plan §15: 10/min per (admin_key, address). Per-process, so N workers allow N×limit.
+# 10/min per (admin_key, address). Per-process, so N workers allow N×limit.
 
 _PROBE_RATE_LIMIT = int(os.environ.get("PSAT_PROBE_RATE_LIMIT", "10"))
 _PROBE_RATE_WINDOW_S = float(os.environ.get("PSAT_PROBE_RATE_WINDOW_S", "60"))
@@ -39,7 +39,7 @@ _capabilities_limiter = SlidingWindowRateLimiter(_CAP_RATE_LIMIT, _CAP_RATE_WIND
 
 
 def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> None:
-    """429 when the window is exhausted; limit 0 disables. Chain is in the key (inv. 12)."""
+    """429 when the window is exhausted; limit 0 disables. Chain is in the key."""
     # Module-level knobs stay authoritative and monkeypatchable.
     _probe_limiter.limit = _PROBE_RATE_LIMIT
     _probe_limiter.window_s = _PROBE_RATE_WINDOW_S
@@ -70,7 +70,7 @@ def _capabilities_rate_check(request: Request, route: str) -> None:
         )
 
 
-# Per-process TTL cache (v4 plan §15). Best-effort; the resolver is read-only.
+# Per-process TTL cache. Best-effort; the resolver is read-only.
 _CAPABILITIES_CACHE_TTL_S = float(os.environ.get("PSAT_CAPABILITIES_CACHE_TTL_S", "60"))
 _capabilities_cache: dict[tuple[str, int, int | None], tuple[float, dict[str, Any]]] = {}
 
@@ -191,7 +191,7 @@ def probe_contract_membership(
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
-        # Explicit chain_id scopes to that chain's job (inv. 12) so a twin's trees can't cross-load.
+        # Explicit chain_id scopes to that chain's job so a twin's trees can't cross-load.
         if "chain_id" in req.model_fields_set:
             job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
         job = session.execute(job_stmt).scalar_one_or_none()
@@ -339,7 +339,7 @@ def get_contract_capabilities(
     with deps.SessionLocal() as session:
         # Scopes ``_load_state_var_values`` by (address, chain) and keeps the cache aligned with the resolver.
         chain_str: str | None = None
-        # Hard-filter to the requested chain (inv. 12): falling back served another chain's trees under this chain_id.
+        # Hard-filter to the requested chain: falling back served another chain's trees under this chain_id.
         latest_job = session.execute(
             select(Job)
             .where(func.lower(Job.address) == addr)
@@ -405,7 +405,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        # Per (chain, address) entity (inv. 13): per bare address collapsed twins and dropped one chain.
+        # Per (chain, address) entity: per bare address collapsed twins and dropped one chain.
         jobs_by_entity: dict[str, list[Job]] = {}
         for job in session.execute(
             select(Job).where(

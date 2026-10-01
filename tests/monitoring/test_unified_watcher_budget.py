@@ -1,4 +1,4 @@
-"""Bounded cohort-scanner tests for ``scan_for_events`` (Stage 1 / W1a).
+"""Bounded cohort-scanner tests for ``scan_for_events``.
 
 Real test DB and decode pipeline; only the RPC wire is stubbed (head read and the shared
 getLogs fetcher). Covers cohort split/rotation, window budgets, per-window commits, the
@@ -199,7 +199,7 @@ def test_per_cohort_turn_cap_hands_off_within_pass(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Runaway-cursor backstop (F6)
+# Runaway-cursor backstop
 # ---------------------------------------------------------------------------
 
 

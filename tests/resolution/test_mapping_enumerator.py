@@ -715,7 +715,7 @@ def test_l1_rekey_distinguishes_chain():
 
 
 def test_l1_enumeration_cache_size_capped(monkeypatch):
-    """P1.3: the present-set L1 cache is size-capped — many distinct addresses evict the
+    """The present-set L1 cache is size-capped — many distinct addresses evict the
     oldest rather than growing unbounded (the lazy per-key TTL del is not a size bound)."""
     monkeypatch.setattr(mapping_enumerator, "_CACHE_MAX", 8)
     rely_topic = _event_topic0("Rely(address)")

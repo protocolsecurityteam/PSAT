@@ -4,7 +4,7 @@ Revision ID: a1b2c3d4e5f6
 Revises: c7d1e9a4b2f8
 Create Date: 2026-07-08
 
-Layer-1 singleton primitive for the monitoring restructure (design §2.4): a
+Singleton primitive for the monitoring restructure: a
 named, TTL'd row lease that gates each scan/poll daemon pass. Row-based rather
 than a pg advisory lock so it survives per-window commits and pgbouncer
 transaction pooling. Additive; no backfill.

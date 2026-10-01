@@ -487,7 +487,7 @@ def test_every_refusal_token_has_a_case_and_they_do_not_collapse():
 
 
 def test_the_native_fact_consumer_reads_the_same_answer_from_either_witness():
-    """§1 D3's non-disturbance rule, asserted rather than assumed.
+    """The native fact consumer preserves the answer across both witness shapes.
 
     ``native_value_state`` is ``native_fact``'s existing consumer and feeds the
     fold's native-only reach branch. A proven zero reaches it two ways — the

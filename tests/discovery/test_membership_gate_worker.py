@@ -1,7 +1,7 @@
-"""Discovery-worker membership-gate producers (spec §3.3 wire, §3.4 events 1+4).
+"""Discovery-worker membership-gate producers.
 
 Covers the deployer-ladder enumeration wire, the worker's gate intake, the
-event-1 probe pass, and the chain-enable boot sweep. All wire stubbed at the
+nomination probe pass, and the chain-enable boot sweep. All wire stubbed at the
 transport boundary (``probes.rpc_request`` / ``etherscan.get``) — never the
 real network.
 """
@@ -224,7 +224,7 @@ def _created_addresses(creations) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# §3.3 ladder wire: enumeration
+# ladder wire: enumeration
 # ---------------------------------------------------------------------------
 
 
@@ -426,13 +426,13 @@ def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# §3.3 ladder wire: registration
+# ladder wire: registration
 # ---------------------------------------------------------------------------
 
 
 def _seed_stale_w2(session, contract: Contract, former_anchor: Contract, protocol_id: int) -> None:
     """An unrevoked W2 row whose edge no longer holds (the anchor's pointer
-    was since rewritten). F1 membership evidence for the Class-B mapping test;
+    was since rewritten). Membership evidence for the Class-B mapping test;
     promotion still requires a witness that VERIFIES — the W4 under test."""
     former_anchor.implementation = contract.address
     session.flush()
@@ -497,7 +497,7 @@ def test_ladder_wire_cap_exceeded_is_class_c_no_row(db_session, monkeypatch):
 
 
 def test_ladder_wire_counts_unknown_creations_without_materializing(db_session, monkeypatch):
-    """DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: an unknown creation in a complete
+    """Coverage honesty: an unknown creation in a complete
     enumeration is COUNTED (Class B refuses) but never becomes a contracts row."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
@@ -520,7 +520,7 @@ def test_ladder_wire_counts_unknown_creations_without_materializing(db_session, 
 
 def test_ladder_wire_member_factory_child_mints_b_with_factory_evidence(db_session, monkeypatch):
     """2a: a creation minted by the protocol's own anchoring MEMBER factory
-    counts as mapped (deliberate §3.3 deviation) — Class B mints and the
+    counts as mapped (deliberate deviation) — Class B mints and the
     evidence records the factory attribution."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
@@ -549,7 +549,7 @@ def test_ladder_wire_member_factory_child_mints_b_with_factory_evidence(db_sessi
 
 
 def test_fixpoint_enumeration_counts_unknowns_without_materializing(db_session, monkeypatch):
-    """Gate-side wire of §7 ruling 3: unknown creations count against Class B
+    """Gate-side coverage honesty: unknown creations count against Class B
     but never create a contracts row."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
@@ -575,8 +575,7 @@ def test_fixpoint_enumeration_counts_unknowns_without_materializing(db_session, 
 
     assert db_session.execute(select(Contract).where(Contract.address == unknown)).first() is None
     # The unknown creation held no evidence, so Class B stayed refused. The
-    # EOA may still hold the labeled heuristic row (DEPLOYER_HEURISTIC_SPEC.md
-    # §1) — what it may not hold is a PROOF class.
+    # EOA may still hold the labeled heuristic row — what it may not hold is a PROOF class.
     assert (
         db_session.execute(
             select(ProtocolDeployer).where(
@@ -592,7 +591,7 @@ def test_ladder_wire_class_a_skips_enumeration(db_session, monkeypatch):
 
     protocol = _protocol(db_session)
     member = _contract(db_session, ADDR(0x270), protocol_id=protocol.id)
-    # F2: only a member with a non-D2 admitting witness anchors Class A.
+    # only a member with a non-D2 admitting witness anchors Class A.
     anchor = _contract(db_session, ADDR(0x272), protocol_id=protocol.id)
     _seed_w2(db_session, member, anchor, protocol.id)
     eoa = ADDR(0x271)
@@ -662,7 +661,6 @@ def test_ladder_wire_refuses_b_on_coverage_gap(db_session, monkeypatch, eoa, see
 def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch):
     # A registered B row does not survive a Class C verdict carrying
     # counterevidence: the row is revoked and lineage-only members demote
-    # (invariant 8).
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x2C4)
@@ -699,7 +697,7 @@ def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch
 
 
 def test_ladder_wire_coverage_gap_revokes_standing_b_row(db_session, monkeypatch):
-    # F3: a coverage gap (known creation missing from a COMPLETE enumeration)
+    # a coverage gap (known creation missing from a COMPLETE enumeration)
     # is positive counterevidence against a standing B row — unlike budget/cap
     # incompleteness, which never revokes.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
@@ -724,7 +722,7 @@ def test_ladder_wire_coverage_gap_revokes_standing_b_row(db_session, monkeypatch
 
 
 def test_fixpoint_coverage_gap_revokes_standing_b_row(db_session):
-    # F3, gate path: the enumerator adapter surfaces the gap; the fixpoint's
+    # gate path: the enumerator adapter surfaces the gap; the fixpoint's
     # stratum-(ii) reclassification revokes the standing row.
     protocol = _protocol(db_session)
     eoa = ADDR(0x2E6)
@@ -774,7 +772,7 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
     assert len(calls) == 1
 
     # Address outside the snapshot: full re-enumeration (fix-2's revocation
-    # opportunity), snapshot refreshed to cover the newcomer. F1: the
+    # opportunity), snapshot refreshed to cover the newcomer. The
     # newcomer maps through membership evidence, never its bare nomination.
     newcomer = _contract(db_session, ADDR(0x2C7), nominated_protocol_id=protocol.id, deployer=eoa)
     _seed_w2(db_session, newcomer, _contract(db_session, ADDR(0x2C8), protocol_id=protocol.id), protocol.id)
@@ -787,7 +785,7 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# §3.3 Class B through the gate fixpoint (worker adapter)
+# Class B through the gate fixpoint (worker adapter)
 # ---------------------------------------------------------------------------
 
 
@@ -809,7 +807,7 @@ def test_fixpoint_mints_class_b_through_worker_adapter(db_session, monkeypatch):
             code_absent_at_probe=False,
         )
     )
-    # F1: the sibling maps into the exclusivity set only through membership
+    # the sibling maps into the exclusivity set only through membership
     # evidence; its stale W2 maps it while W4 remains the admitting witness.
     _seed_stale_w2(db_session, sibling, _contract(db_session, ADDR(0x313), protocol_id=protocol.id), protocol.id)
     db_session.flush()
@@ -839,7 +837,7 @@ def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, mon
     eoa = ADDR(0x316)
     members = _seed_class_b_shape(db_session, protocol, eoa)
     stray = _contract(db_session, ADDR(0x317), nominated_protocol_id=protocol.id, deployer=eoa)
-    # F1: the stray maps only through membership evidence.
+    # the stray maps only through membership evidence.
     _seed_w2(db_session, stray, _contract(db_session, ADDR(0x318), protocol_id=protocol.id), protocol.id)
     # The enumerated window misses the stray known creation → coverage gap.
     _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
@@ -870,7 +868,7 @@ def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, mon
 def test_w5_end_to_end_admin_submission_to_membership(api_client, db_session, monkeypatch):
     """Admin address+company submission → job.request carries the attributed
     assertion → fetch intake writes the W5 witness (candidate until W1) → the
-    event-1 probe supplies W1 and the row promotes to member."""
+    nomination probe supplies W1 and the row promotes to member."""
     from db.models import WITNESS_RULE_W5_HUMAN
 
     protocol = _protocol(db_session)
@@ -887,7 +885,7 @@ def test_w5_end_to_end_admin_submission_to_membership(api_client, db_session, mo
     request = job.request if isinstance(job.request, dict) else {}
 
     # No eRPC route: intake records the W5 witness, but W1 is missing —
-    # candidate, never a member (invariant 3).
+    # candidate, never a member.
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
     _gate_intake(db_session, job, contract, request)
     w5 = (
@@ -932,7 +930,7 @@ def test_gate_intake_promotes_witnessed_candidate_and_never_stamps_otherwise(db_
     bare_request = {"discovery_sources": ["dapp_crawl"]}
     job2 = _job(db_session, protocol_id=protocol.id, address=bare.address, request=bare_request)
     _gate_intake(db_session, job2, bare, bare_request)
-    # Nominated as a candidate; no witness → no stamp (invariant 1).
+    # Nominated as a candidate; no witness → no stamp.
     assert bare.protocol_id is None
     assert bare.nominated_protocol_id == protocol.id
 
@@ -999,7 +997,7 @@ def test_gate_intake_registers_deployer_and_writes_w4(db_session, monkeypatch):
         ContractCreationWitness(chain_id=1, address=newcomer.address, creation_tx_hash=_TX, creation_block=50)
     )
     _seed_w1(db_session, newcomer, protocol.id)
-    # F1: the newcomer maps into the exclusivity set through its stale W2;
+    # the newcomer maps into the exclusivity set through its stale W2;
     # the W4 under test is what verifies and admits.
     _seed_stale_w2(db_session, newcomer, _contract(db_session, ADDR(0x2B2), protocol_id=protocol.id), protocol.id)
     db_session.flush()
@@ -1023,7 +1021,7 @@ def test_gate_intake_registers_deployer_and_writes_w4(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# §3.4 event 1: near-line probe pass
+# near-line probe pass
 # ---------------------------------------------------------------------------
 
 
@@ -1155,7 +1153,7 @@ def test_probe_pass_budget_defers_tail_with_named_record(db_session, monkeypatch
 def test_probe_pass_retargets_demoted_member_after_revocation(db_session, monkeypatch, erpc_env):
     """Request/queue-context demotions run no inline probe; the next probe
     pass re-targets the row because its completed attempt predates the newest
-    witness revocation (invariant 8 via the normal event flow)."""
+    witness revocation (via the normal event flow)."""
     from datetime import datetime, timezone
 
     protocol = _protocol(db_session)
@@ -1252,7 +1250,7 @@ def test_probe_pass_reprobes_renominated_pruned_rows(db_session, monkeypatch, er
 
 
 # ---------------------------------------------------------------------------
-# W6 live producer (spec §3.2 W6): defillama tag + W1 mint the seed witness
+# W6 live producer: defillama tag + W1 mint the seed witness
 # ---------------------------------------------------------------------------
 
 
@@ -1367,7 +1365,7 @@ def test_seed_llama_witness_never_rearms_revoked_seed(db_session):
 
 
 # ---------------------------------------------------------------------------
-# §3.4 event 4: chain-enable boot sweep
+# chain-enable boot sweep
 # ---------------------------------------------------------------------------
 
 

@@ -109,7 +109,7 @@ def _confidence(
 
     The perimeter is the protocol's ``contracts`` rows plus the value plane and the control closure. Discovery fixes it,
     so losing analysis can't raise confidence. ``discovery_entities`` adds every endpoint of every discovered relation,
-    walked or not, so declining a relation can only charge confidence (inv. 6). The headline is the minimum of four
+    walked or not, so declining a relation can only charge confidence. The headline is the minimum of four
     terms: reachability, capability, pricing, and reach magnitude.
 
     Reach magnitude counts a proven reach with no proven magnitude as unanswered. Its denominator is the whole

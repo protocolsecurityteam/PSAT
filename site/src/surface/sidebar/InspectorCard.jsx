@@ -5,7 +5,7 @@ import { claimWitnessFacts } from "../../vocab/witnessFacts.js";
 import { sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../vocab/principalNotes.js";
 import { clickable } from "../../shared/clickable.js";
 
-// A contract principal is a way-point, never a settled key (SCORING plan §4);
+// A contract principal is a way-point, never a settled key;
 // renders nothing for a settled key.
 function TerminalNote({ principal }) {
   const note = terminalControllerNote(principal);
@@ -144,7 +144,7 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
   );
 }
 
-// Only present, at-the-bar witness fields render (SCORING plan §7.3); silent
+// Only present, at-the-bar witness fields render; silent
 // otherwise.
 function WitnessFacts({ fn }) {
   const facts = claimWitnessFacts(fn);

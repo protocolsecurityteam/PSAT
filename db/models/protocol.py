@@ -176,10 +176,10 @@ class AuditContractCoverage(Base):
     )
 
 
-# ``ProtocolDeployer.trust_class`` (spec §3.3). Class C is the absence of a row.
+# ``ProtocolDeployer.trust_class``. Class C is the absence of a row.
 DEPLOYER_TRUST_CLASS_A = "A"
 DEPLOYER_TRUST_CLASS_B = "B"
-# Heuristic affinity (DEPLOYER_HEURISTIC_SPEC.md §1), below the proof classes; only allowed while no active A/B row
+# Heuristic affinity, below the proof classes; only allowed while no active A/B row
 # exists.
 DEPLOYER_TRUST_CLASS_H = "H"
 PROOF_DEPLOYER_TRUST_CLASSES = frozenset({DEPLOYER_TRUST_CLASS_A, DEPLOYER_TRUST_CLASS_B})
@@ -212,7 +212,7 @@ class ProtocolDeployer(Base):
 
 
 class DeployerAffinityChallenge(Base):
-    """One observed foreign anchor against a class-H row (DEPLOYER_HEURISTIC_SPEC.md §5).
+    """One observed foreign anchor against a class-H row.
 
     Derived from a real witness for another protocol (``foreign_witness_id``), revoked with it. The H row's state is
     derived from these, never stored.

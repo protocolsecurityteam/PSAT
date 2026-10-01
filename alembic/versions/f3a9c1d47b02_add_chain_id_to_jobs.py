@@ -1,25 +1,25 @@
-"""add chain_id to jobs (expand-contract, invariants 1 & 9)
+"""add chain_id to jobs (expand-contract)
 
 Revision ID: f3a9c1d47b02
 Revises: d5e7f9a1b3c5
 Create Date: 2026-07-14 12:00:00.000000
 
-First-class chain identity for the analysis deployment (invariant 1). This is
-the *expand* half of an expand-contract sequence (invariant 9): add a nullable
+First-class chain identity for the analysis deployment. This is
+the *expand* half of an expand-contract sequence: add a nullable
 column, backfill from the existing ``request->>'chain'`` string, verify, then
 land a CHECK constraint (NOT a ``SET NOT NULL`` — company/root jobs with
-``address IS NULL`` legitimately keep ``chain_id`` NULL). Reads still come from
-``request["chain"]`` until the M0.2 Item-2 dedup flip; nothing here changes
-mainnet behaviour.
+``address IS NULL`` legitimately keep ``chain_id`` NULL). This migration adds
+and backfills the column and enforces its constraint; it does not change the
+application's read paths or mainnet behaviour.
 
-Backfill rules (normative, from MULTICHAIN_INVARIANTS.md M0.2 Item 1):
+Backfill rules:
   - ``address IS NULL``            → keep NULL (company/root jobs)
   - chain absent / NULL / empty    → 1 (mainnet edge default)
   - ``"ethereum"`` / ``"mainnet"`` → 1 (registry canonicalization)
   - ``"unknown"`` sentinel         → 1 (not registry-resolvable → fallback)
   - other recognized chain name    → its registry id
   - unrecognized non-sentinel name → 1, with a loud warning (historical rows
-    are made valid first, per invariant 6's ordering constraint)
+    are made valid first, before rejecting invalid chain names)
 
 Safety checklist:
   - Adding a nullable column is metadata-only in Postgres 11+ (no table

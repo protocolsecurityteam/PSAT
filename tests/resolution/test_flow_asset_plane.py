@@ -446,7 +446,7 @@ def test_sinks_sharing_a_selector_fold_to_one_read(monkeypatch: pytest.MonkeyPat
 
 def test_same_name_different_selector_does_not_fold(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two declarations sharing an identifier but not a minted selector are two
-    assets. Folding them on the name is the inv.2 shape this plane replaces."""
+    assets. Folding them on the name is the name-derived inference this plane replaces."""
     a = _state_var_receiver(SEL_TOKEN, "token")
     b = _state_var_receiver(SEL_REWARD_TOKEN, "token")
     payload, seen = _run(

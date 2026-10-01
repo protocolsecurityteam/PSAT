@@ -1,4 +1,4 @@
-"""The external_bool gate-shape discriminator (Wave 5 B2).
+"""The external_bool gate-shape discriminator.
 
 A void external call on a state-var-held address that passes ``msg.sender`` is NOT
 caller-gate evidence when the callee is effectful: msg.sender is the funds/burn

@@ -215,7 +215,7 @@ export const ETHERFI_COMPANY_RICH = {
   fund_flows: [
     { from: VAULT_ADDR, to: POOL_ADDR, label: "rebalance", usd: 1000000 },
   ],
-  // Server-computed reach (SURFACE_REACH_UNIFICATION_SPEC payload schema):
+  // Server-computed reach:
   // the safe's walk reaches the Vault at hop 1 and the LiquidityPool at hop 2
   // through it, and was refused continuing from the pool to the EOA — a
   // not_determined frontier entry, distinct from both reached and absent.
