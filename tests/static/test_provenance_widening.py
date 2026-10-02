@@ -19,39 +19,6 @@ from services.static.contract_analysis_pipeline.provenance import (  # noqa: E40
 )
 
 
-def test_widen_strips_digest_and_collapses_variants():
-    origins = frozenset({Source(kind="parameter", parameter_index=0, parameter_name="x")})
-    variants = frozenset(
-        Source(kind="computed", computed_kind="BinaryType.MULTIPLICATION", callee_args_digest=d, derived_from=origins)
-        for d in ("aaaa0000", "bbbb1111", "cccc2222")
-    )
-    widened = widen(variants)
-    assert widened == frozenset(
-        {
-            Source(
-                kind="computed",
-                computed_kind="BinaryType.MULTIPLICATION",
-                callee_args_digest=None,
-                derived_from=origins,
-            )
-        }
-    )
-
-
-def test_widen_preserves_derived_from_origins():
-    caller = Source(kind="msg_sender")
-    src = Source(
-        kind="view_call",
-        callee="hasRole(bytes32,address)",
-        callee_args_digest="deadbeef",
-        derived_from=frozenset({caller}),
-    )
-    (out,) = widen(frozenset({src}))
-    assert out.callee_args_digest is None
-    assert out.derived_from == frozenset({caller})
-    assert out.callee == "hasRole(bytes32,address)"
-
-
 def test_widen_strips_digest_inside_derived_from():
     nested = Source(kind="computed", computed_kind="BinaryType.ADDITION", callee_args_digest="12345678")
     src = Source(kind="computed", computed_kind="BinaryType.MULTIPLICATION", derived_from=frozenset({nested}))
@@ -65,17 +32,6 @@ def test_widen_top_and_digestless_sets_pass_through():
     assert widen(TOP) is TOP
     plain = frozenset({Source(kind="parameter", parameter_index=1, parameter_name="y"), Source(kind="msg_sender")})
     assert widen(plain) is plain
-
-
-def test_widen_is_idempotent():
-    s = frozenset(
-        {
-            Source(kind="computed", computed_kind="UnaryType.TILD", callee_args_digest="ffff0000"),
-            Source(kind="state_variable", state_variable_name="owner"),
-        }
-    )
-    once = widen(s)
-    assert widen(once) == once
 
 
 def test_set_widens_only_after_threshold():

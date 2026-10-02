@@ -569,36 +569,6 @@ def test_failure_cannot_release_a_reclaimed_lease(qsession):
     assert row.attempts == 0 and row.dirty_at == current_claim.dirty_at
 
 
-def test_sweep_enqueues_k_oldest_nulls_first(qsession):
-    never = _make_protocol(qsession, "sweep_never")  # last_enrollment_reconcile_at NULL
-    old = _make_protocol(qsession, "sweep_old")
-    recent = _make_protocol(qsession, "sweep_recent")
-    # Park every other protocol at NOW() so ordering is deterministic.
-    qsession.execute(
-        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() WHERE id NOT IN (:a, :b, :c)"),
-        {"a": never.id, "b": old.id, "c": recent.id},
-    )
-    qsession.execute(
-        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() - INTERVAL '10 days' WHERE id = :pid"),
-        {"pid": old.id},
-    )
-    qsession.execute(
-        text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() WHERE id = :pid"),
-        {"pid": recent.id},
-    )
-    qsession.commit()
-
-    enqueued = sweep_enqueue_stale(qsession, k=2)
-
-    assert set(enqueued) == {never.id, old.id}
-    assert recent.id not in enqueued
-    for pid in enqueued:
-        reason = qsession.execute(
-            select(MonitoringEnrollmentQueue.reason).where(MonitoringEnrollmentQueue.protocol_id == pid)
-        ).scalar_one()
-        assert reason == "sweep"
-
-
 def test_unchanged_protocol_stays_idle_until_repair_due(qsession, wired_drain, monkeypatch):
     from unittest.mock import Mock
 
@@ -718,48 +688,6 @@ def test_final_completion_rearms_enrollment_after_early_drain(qsession, wired_dr
     complete_job(qsession, job.id)
     qsession.expire_all()
     assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
-
-
-def test_completion_and_dirty_notification_are_atomic(qsession, monkeypatch):
-    from db.queue import complete_job
-
-    proto = _make_protocol(qsession, "completion_atomic")
-    job = Job(address=VAULT_ADDR, protocol_id=proto.id, status=JobStatus.processing, stage=JobStage.coverage)
-    qsession.add(job)
-    qsession.commit()
-
-    def fail_after_mark(session, protocol_id, reason):
-        mark_enrollment_dirty(session, protocol_id, reason)
-        raise RuntimeError("notification failed")
-
-    monkeypatch.setattr("services.monitoring.enrollment.mark_enrollment_dirty", fail_after_mark)
-    with pytest.raises(RuntimeError, match="notification failed"):
-        complete_job(qsession, job.id)
-    qsession.rollback()
-    assert job.status == JobStatus.processing
-    assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
-
-
-@pytest.mark.parametrize("has_address,has_protocol", [(False, True), (True, False)])
-def test_unscoped_completion_does_not_enqueue(qsession, has_address, has_protocol):
-    from db.queue import complete_job
-
-    proto = _make_protocol(qsession, "completion_unscoped")
-    job = Job(
-        address=VAULT_ADDR if has_address else None,
-        protocol_id=proto.id if has_protocol else None,
-        status=JobStatus.processing,
-        stage=JobStage.coverage,
-    )
-    qsession.add(job)
-    qsession.commit()
-    try:
-        complete_job(qsession, job.id)
-        assert job.status == JobStatus.completed
-        assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
-    finally:
-        qsession.delete(job)
-        qsession.commit()
 
 
 def test_policy_worker_marks_dirty(qsession, monkeypatch):

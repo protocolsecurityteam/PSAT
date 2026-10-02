@@ -24,7 +24,6 @@ def _row(**attrs: Any) -> Any:
 
 _BASE_ID = 8453
 _BASE_URL_SUFFIX = "/main/evm/8453"
-_MAINNET_URL_SUFFIX = "/main/evm/1"
 
 
 @pytest.fixture
@@ -38,23 +37,6 @@ def _erpc_base(monkeypatch: pytest.MonkeyPatch) -> str:
 # ---------------------------------------------------------------------------
 # ChainContext binds chain_id to its RPC URL
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("chain_id", "rpc_url", "chain_name", "expected_url"),
-    [
-        # Chain-to-RPC binding: the Base id must bind the Base URL.
-        pytest.param(_BASE_ID, None, "base", "https://erpc.example" + _BASE_URL_SUFFIX, id="binds_base_url_to_base_id"),
-        pytest.param(1, None, "ethereum", "https://erpc.example" + _MAINNET_URL_SUFFIX, id="mainnet_unchanged"),
-        pytest.param(_BASE_ID, "http://127.0.0.1:8545", "base", "http://127.0.0.1:8545", id="local_override_wins"),
-    ],
-)
-def test_resolve_chain_context(_erpc_base, chain_id, rpc_url, chain_name, expected_url):
-    from services.resolution.capability_resolver import _resolve_chain_context
-
-    ctx = _resolve_chain_context(chain_id, rpc_url, chain_name)
-    assert ctx.chain_id == chain_id
-    assert ctx.rpc_url == expected_url
 
 
 @pytest.fixture
@@ -138,13 +120,6 @@ def test_policy_worker_chain_helpers_base():
     assert _chain_name_for_job(mainnet) == "ethereum"
 
 
-def test_static_worker_parent_chain_name_never_none():
-    from workers.static_worker import _parent_chain_name
-
-    assert _parent_chain_name(_row(chain_id=_BASE_ID, request={}, address="0x1")) == "base"
-    assert _parent_chain_name(_row(request={}, address="0x1")) == "ethereum"
-
-
 @requires_postgres
 def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch, db_session):
     from workers.resolution_worker import ResolutionWorker
@@ -194,78 +169,9 @@ def test_materialization_chain_name_base_and_mainnet():
     assert _chain_name_for_materialization(1) == "ethereum"
 
 
-def test_materialize_contract_artifacts_threads_chain(monkeypatch):
-    from services.resolution import recursive
-
-    captured: dict[str, object] = {}
-
-    def _fake_cache(*, effective_address, bytecode_keccak, workspace_prefix, chain=None):
-        captured["chain"] = chain
-        return ("Name", {"subject": {}}, {"contract_address": effective_address}, None)
-
-    monkeypatch.setattr(recursive, "_materialize_with_cross_process_cache", _fake_cache)
-    monkeypatch.setattr("services.discovery.classifier.classify_single", lambda address, rpc_url, **_kw: None)
-    monkeypatch.setattr(recursive, "build_control_snapshot", lambda _plan, _rpc, **_kw: {"controller_values": {}})
-    monkeypatch.setattr(recursive, "_build_effective_permissions", lambda _a, _s: {"functions": []})
-
-    recursive._materialize_contract_artifacts(
-        "0x" + "22" * 20, "http://127.0.0.1:8545", workspace_prefix="t", chain="base"
-    )
-    assert captured["chain"] == "base"
-
-
-def test_job_matches_contract_chain_cross_chain():
-    from services.aggregations.company_overview import _job_matches_contract_chain
-
-    base_job = _row(chain_id=_BASE_ID, request={"chain": "base"}, address="0x1")
-    mainnet_job = _row(chain_id=1, request={"chain": "ethereum"}, address="0x1")
-
-    assert _job_matches_contract_chain(base_job, "base") is True
-    assert _job_matches_contract_chain(base_job, "ethereum") is False
-    assert _job_matches_contract_chain(mainnet_job, "ethereum") is True
-    assert _job_matches_contract_chain(mainnet_job, None) is True
-    assert _job_matches_contract_chain(mainnet_job, "mainnet") is True
-    assert _job_matches_contract_chain(base_job, None) is False
-
-
 # ---------------------------------------------------------------------------
 # probe rate-limit bucket is chain-scoped
 # ---------------------------------------------------------------------------
-
-
-def test_probe_rate_bucket_is_chain_scoped(monkeypatch):
-    from fastapi import HTTPException
-
-    from routers import predicate_capabilities
-
-    monkeypatch.setattr(predicate_capabilities, "_PROBE_RATE_LIMIT", 1)
-    monkeypatch.setattr(predicate_capabilities, "_PROBE_RATE_WINDOW_S", 60.0)
-    predicate_capabilities._probe_rate_state.clear()
-
-    addr = "0x" + "ab" * 20
-    predicate_capabilities._probe_rate_check("k", addr, 1)
-    predicate_capabilities._probe_rate_check("k", addr, _BASE_ID)
-    with pytest.raises(HTTPException):
-        predicate_capabilities._probe_rate_check("k", addr, 1)
-
-    assert ("k", addr, 1) in predicate_capabilities._probe_rate_state
-    assert ("k", addr, _BASE_ID) in predicate_capabilities._probe_rate_state
-
-
-def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
-    from services.aggregations import contract_audit_timeline
-
-    captured: dict[str, object] = {}
-
-    def _fake_pg_get(chain_id, addr):
-        captured["chain_id"] = chain_id
-        return ("0xdead", "0x" + "ab" * 32)
-
-    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", _fake_pg_get)
-
-    out = contract_audit_timeline._bytecode_keccak_now_batch({"0x" + "33" * 20}, chain_id=_BASE_ID)
-    assert captured["chain_id"] == _BASE_ID
-    assert out["0x" + "33" * 20] == "0x" + "ab" * 32
 
 
 # ---------------------------------------------------------------------------

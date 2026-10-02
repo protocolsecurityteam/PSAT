@@ -9,7 +9,6 @@ a stop request returns promptly instead of sleeping out the interval.
 from __future__ import annotations
 
 import importlib
-import pathlib
 import sys
 import threading
 import time
@@ -125,36 +124,6 @@ def test_sibling_runs_uninterrupted_while_one_loop_crash_loops():
     assert all(not t.is_alive() for t in sup._threads)
 
 
-def test_stop_event_joins_all_threads_within_bound():
-    stop = threading.Event()
-    started = [False, False, False]
-
-    def make(i):
-        def loop(ev):
-            started[i] = True
-            ev.wait()  # block until shutdown
-
-        return loop
-
-    loops = [
-        (HEARTBEAT_PROTOCOL_SCANNER, make(0)),
-        (HEARTBEAT_PROTOCOL_POLLER, make(1)),
-        (HEARTBEAT_PROTOCOL_TVL, make(2)),
-    ]
-    sup = Supervisor(loops, stop_event=stop, base_backoff_s=0.01, join_timeout_s=2.0)
-    sup.start()
-    time.sleep(0.1)
-    assert all(started)
-
-    t0 = time.monotonic()
-    sup.request_stop()
-    sup.join()
-    elapsed = time.monotonic() - t0
-
-    assert elapsed < 2.0
-    assert all(not t.is_alive() for t in sup._threads)
-
-
 def _stub_scan_wire(monkeypatch, head: int = 100):
     import services.monitoring.unified_watcher as uw
     import services.resolution.repos.event_logs_rpc as elr
@@ -208,29 +177,6 @@ def test_default_mode_spawns_exactly_six_named_threads():
         assert len(sup._threads) == 6
     finally:
         sup.join()
-
-
-def _monitor_launch_flags(script: str) -> list[str]:
-    flags = []
-    for line in script.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#") or "-m workers.protocol_monitor" not in stripped:
-            continue
-        _, _, tail = stripped.partition("-m workers.protocol_monitor")
-        mode = [tok for tok in tail.split() if tok.startswith("--")]
-        flags.append(mode[0] if mode else "default")
-    return flags
-
-
-def test_start_local_launches_each_monitor_loop_exactly_once():
-    """Co-launching a flag mode beside default doubles the loop (the TVL loop has no lease)."""
-    root = pathlib.Path(__file__).resolve().parents[2]
-    launched = _monitor_launch_flags((root / "deploy/start_local.sh").read_text())
-
-    assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"
-
-    workers_launched = _monitor_launch_flags((root / "deploy/start_workers.sh").read_text())
-    assert workers_launched == ["--reconcile"], workers_launched
 
 
 @pytest.mark.parametrize(

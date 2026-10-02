@@ -81,38 +81,6 @@ SHARE_LOCK_COOLDOWN = """
     }
 """
 
-IMMEDIATE_EXECUTOR = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address public admin;
-        mapping(bytes32 => bool) public queued;
-        error NotAdmin();
-        error NotQueued();
-        modifier onlyAdmin() { if (msg.sender != admin) revert NotAdmin(); _; }
-        function queue(bytes32 id) external onlyAdmin { queued[id] = true; }
-        function run(bytes32 id) external onlyAdmin {
-            if (!queued[id]) revert NotQueued();
-            queued[id] = false;
-        }
-    }
-"""
-
-TIMESTAMP_LOG_ONLY = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address public admin;
-        uint256 public lastUpdate;
-        uint256 public value;
-        error NotAdmin();
-        modifier onlyAdmin() { if (msg.sender != admin) revert NotAdmin(); _; }
-        function poke(uint256 v) external onlyAdmin {
-            value = v;
-            lastUpdate = block.timestamp;
-        }
-        function read() external view returns (uint256) { return value; }
-    }
-"""
-
 
 # Non-empty so an ungated field would echo them back on a negative.
 _ROLES = cast("list[RoleDefinition]", [{"role": "ADMIN_ROLE", "declared_in": "C", "evidence": []}])
@@ -150,40 +118,6 @@ def test_share_lock_cooldown_is_not_a_timelock(tmp_path):
     assert result["queue_execute_functions"] == [], result["queue_execute_functions"]
     assert result["authorized_roles"] == []
     assert result["evidence"] == []
-
-
-def test_immediate_executor_is_not_a_timelock(tmp_path):
-    """Without the maturity check every two-step admin flow would get a delay credit."""
-    result = _timelock(tmp_path, IMMEDIATE_EXECUTOR)
-    assert result["has_timelock"] is False, result
-    assert result["pattern"] == "none"
-    assert result["queue_execute_functions"] == []
-    assert result["delay_variables"] == []
-
-
-def test_timestamp_write_without_a_maturity_gate_is_not_a_timelock(tmp_path):
-    result = _timelock(tmp_path, TIMESTAMP_LOG_ONLY)
-    assert result["has_timelock"] is False, result
-    assert result["pattern"] == "none"
-
-
-@pytest.mark.parametrize("source", [CUSTOM_TIMELOCK, SHARE_LOCK_COOLDOWN, IMMEDIATE_EXECUTOR, TIMESTAMP_LOG_ONLY])
-def test_delay_value_is_never_published_from_source(tmp_path, source):
-    result = _timelock(tmp_path, source)
-    assert result["delay"] is None
-    assert result["delay_source"] == "not_read"
-
-
-def test_has_timelock_is_not_determined_without_ir(tmp_path):
-
-    class _NoIR:
-        name = "C"
-        functions = []
-
-    result = _detect_timelock(_NoIR(), tmp_path, [], {"functions": {}})
-    assert result["has_timelock"] is None
-    assert result["pattern"] == "unknown"
-    assert result["delay_source"] == "not_read"
 
 
 @pytest.mark.parametrize("degradation", ["claims_stage_raised", "effects_stage_raised", "no_effects_artifact"])

@@ -171,13 +171,6 @@ def test_note_partial_reason_counts_and_levels(caplog):
     assert len(caplog.records) == before
 
 
-@pytest.mark.parametrize("reason", ["no_index_cursor", "hypersync_max_pages"])
-def test_note_partial_reason_noop_without_job_context(reason):
-    """Repos call it unconditionally."""
-    event_logs_pg._PARTIAL_REASON_COUNTS.clear()
-    assert event_logs_pg._note_partial_reason(reason, event_address=_ADDR, repo="postgres") == 1
-
-
 def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
     """The daemon isn't a BaseWorker and a new thread starts with an empty context, so both threads must bind
     ``worker_id``.

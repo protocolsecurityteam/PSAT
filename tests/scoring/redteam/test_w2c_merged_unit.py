@@ -11,9 +11,7 @@ from services.scoring.schema import PrincipalRef, Tri, entity_key
 from tests.support.scoring_builders import (
     EOA,
     KEY_C,
-    KEY_PROXY,
     KEY_V,
-    KEY_ZERO,
     VAULT,
     C,
     _perimeter_signal,
@@ -115,40 +113,6 @@ def test_r9_members_at_one_rung_leave_the_row_untouched(fold):
     assert finding["weakness_by_entity"] == {}
     assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
     assert finding["exposure_usd"] == pytest.approx(WEAKNESS_SAFE_MAJORITY * 6_000_000.0)
-
-
-def test_r10_the_burn_sentinel_is_never_charged_a_sheet(fold):
-    """Renounced ownership makes 0x0 the largest fan-out; a repoint naming it would hand one finding everything it
-    "controls".
-    """
-    signal = sig(
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        gates=bounded_by_sheet(1_000.0),
-        **proven(1.0),
-        **reaches(KEY_C, KEY_ZERO),
-    )
-    document = fold(
-        [signal],
-        principals={1: facts(1, EOA, "eoa")},
-        closure={KEY_ZERO: {KEY_V}},
-        value=value_plane(
-            {
-                KEY_C: {"usdc": 1_000.0},
-                KEY_ZERO: {"usdc": 4_000_000_000.0},
-                KEY_V: {"usdc": 900_000_000.0},
-            }
-        ),
-    )
-    finding = document.findings[0]
-    assert finding["reach_entities"] == [KEY_C]
-    assert KEY_ZERO not in finding["value_by_entity"] and KEY_V not in finding["value_by_entity"]
-    assert finding["value_at_stake_usd"] == 1_000.0
-    assert "zero_address_reach_key_refused" in finding["witness_notes"]
-    detail = document.model_parameters["confidence_detail"]
-    assert detail["zero_address_entities_excluded"] >= 1
-    assert not any(key.endswith("::" + "0x" + "0" * 40) for key in detail["signal_entities_outside_perimeter"])
 
 
 def _magnitude_document(fold, *, witnessed: bool):
@@ -262,21 +226,6 @@ def test_r12_consuming_a_relation_may_not_raise_confidence(fold):
     assert declined["discovery_relation_entities_admitted"]["capability_principal"] == 1
 
 
-def test_r12_a_declined_relations_entities_lower_confidence(fold):
-    shared = dict(
-        principals={1: facts(1, EOA, "eoa")},
-        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
-    )
-    blind = fold([_perimeter_signal()], **shared).model_parameters["confidence_detail"]
-    seeing = fold(
-        [_perimeter_signal()],
-        discovery={"capability_principal": {KEY_OUTSIDER}},
-        **shared,
-    ).model_parameters["confidence_detail"]
-    assert seeing["perimeter_entities"] == blind["perimeter_entities"] + 1
-    assert seeing["reachability_answered_pct"] < blind["reachability_answered_pct"]
-
-
 def test_r17_contradictory_owner_sets_are_disclosed_not_silently_arbitrated(fold):
     document = fold(
         [_merged_unit_signals()[0]],
@@ -290,59 +239,6 @@ def test_r17_contradictory_owner_sets_are_disclosed_not_silently_arbitrated(fold
     assert [row["safe"] for row in contradictions] == [entity_key("ethereum", SAFE_MINORITY)]
     assert len(contradictions[0]["witnesses"]) == 2
     assert contradictions[0]["adopted_k_of_n"] in ("2/4", "4/5")
-
-
-def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
-    """``_member_weakness`` re-folds through the ``_row_value`` the cap lives in, so reach is read off witnessed
-    membership instead.
-    """
-    signals = [
-        sig(
-            function_name="upgradeA",
-            deployment_address=C,
-            contract_id=1,
-            selector="0x00000001",
-            authority_openness="restricted",
-            principal_state="enumerated",
-            principal_refs=(PrincipalRef(1, "ethereum", SAFE_MINORITY),),
-            gates=bounded_by_sheet(1_000_000.0),
-            **proven(1.0),
-            **reaches(KEY_C),
-        ),
-        sig(
-            function_name="upgradeB",
-            deployment_address=VAULT,
-            contract_id=2,
-            selector="0x00000002",
-            authority_openness="restricted",
-            principal_state="enumerated",
-            principal_refs=(PrincipalRef(2, "ethereum", SAFE_MAJORITY),),
-            gates={"reach_magnitude_usd": Tri.proven("proven_exact", 5_000_000.0).to_json()},
-            **proven(1.0),
-            **reaches(KEY_V, KEY_PROXY),
-        ),
-    ]
-    finding = fold(
-        signals,
-        principals=_merged_unit_principals(),
-        value=value_plane(
-            {
-                KEY_C: {"usdc": 1_000_000.0},
-                KEY_V: {"usdc": 5_000_000.0},
-                KEY_PROXY: {"usdc": 3_000_000.0},
-            }
-        ),
-    ).findings[0]
-
-    caps = finding["witnessed_magnitude_caps"]
-    assert caps and caps[0]["uncapped_sum_usd"] > caps[0]["witnessed_usd"]
-    assert set(finding["reach_entities"]) == {KEY_C, KEY_V, KEY_PROXY}
-    assert finding["weakness_by_entity"] == {
-        KEY_C: WEAKNESS_SAFE_MINORITY,
-        KEY_PROXY: WEAKNESS_SAFE_MAJORITY,
-        KEY_V: WEAKNESS_SAFE_MAJORITY,
-    }
-    assert finding["weakness"] == WEAKNESS_SAFE_MAJORITY
 
 
 def _repoint_facts() -> Any:

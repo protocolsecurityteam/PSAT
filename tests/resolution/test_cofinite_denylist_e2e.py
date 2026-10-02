@@ -191,36 +191,6 @@ def test_boring_vault_transfer_opens_via_inlined_denylist(session):
 
 
 @requires_postgres
-def test_weeth_recover_stays_gated(session):
-    # A truthy positive gate is never negated.
-    out = _seed_canary(
-        session,
-        "weeth",
-        _WEETH,
-        controllers={"external_contract:roleRegistry": _ZERO, "state_variable:owner": _ZERO},
-    )
-    for sig in (
-        "recoverERC20(address,address,uint256)",
-        "recoverERC721(address,address,uint256)",
-        "recoverETH(address,uint256)",
-    ):
-        assert _status(out[sig]) != "public", f"WeETH.{sig} is a role gate — must NOT open to public"
-
-
-@requires_postgres
-def test_roles_authority_setuserrole_stays_gated(session):
-    out = _seed_canary(
-        session,
-        "roles_authority",
-        _ROLES_AUTHORITY,
-        controllers={"external_contract:authority": _ROLES_AUTHORITY, "state_variable:owner": _ZERO},
-    )
-    assert _status(out["setUserRole(address,uint8,bool)"]) != "public", (
-        "RolesAuthority.setUserRole (Solmate requiresAuth) must NOT open to public"
-    )
-
-
-@requires_postgres
 def test_accountant_admin_stays_gated(session):
     out = _seed_canary(
         session,

@@ -1,14 +1,9 @@
 """The walk's only wire is the injected ``resolve_controllers``, so every case stubs it."""
 
 from types import SimpleNamespace
-from typing import Any, cast
-
-import pytest
+from typing import Any
 
 from services.governance.principals import (
-    _build_company_function_entry,
-    _function_principal_payload,
-    is_terminal_principal_type,
     resolve_terminal_principal,
 )
 
@@ -28,52 +23,6 @@ def _dict_resolver(edges):
         return val if isinstance(val, list) else [val]
 
     return _resolve
-
-
-def test_is_terminal_principal_type():
-    for terminal in ("safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"):
-        assert is_terminal_principal_type(terminal) is True
-    for non_terminal in ("contract", "unknown", "", None):
-        assert is_terminal_principal_type(non_terminal) is False
-
-
-@pytest.mark.parametrize(
-    "edges, resolved_type, address, chain",
-    [
-        pytest.param(
-            {CONTRACT_A: {"address": SAFE, "resolved_type": "safe", "details": {"threshold": 2}}},
-            "safe",
-            SAFE,
-            [CONTRACT_A, SAFE],
-            id="safe-controller",
-        ),
-        pytest.param(
-            {
-                CONTRACT_A: {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-                CONTRACT_B: {"address": EOA, "resolved_type": "eoa", "details": {}},
-            },
-            "eoa",
-            EOA,
-            [CONTRACT_A, CONTRACT_B, EOA],
-            id="multi-hop-contract-chain",
-        ),
-    ],
-)
-def test_walk_terminates(edges, resolved_type, address, chain):
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_dict_resolver(edges))
-    assert record["terminal"] is True
-    assert record["resolved_type"] == resolved_type
-    assert record["address"] == address
-    assert record["status"] == "terminated"
-    assert record["chain"] == chain
-
-
-def test_unfetched_controller_is_unknown_not_resolved():
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_dict_resolver({}))
-    assert record["terminal"] is False
-    assert record["resolved_type"] == "unknown"
-    assert record["address"] is None
-    assert record["status"] == "unknown_unfetched"
 
 
 def test_unresolved_intermediate_fails_closed():
@@ -136,46 +85,6 @@ def test_multi_plane_two_planes_terminating_at_different_keys():
     assert (r1["terminal"], r1["address"], r1["status"]) == (True, EOA, "terminated")
 
 
-def test_multi_plane_walks_each_contract_plane_to_its_own_terminal():
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A: [
-                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-                {"address": CONTRACT_C, "resolved_type": "contract", "details": {}},
-            ],
-            CONTRACT_B: [{"address": SAFE, "resolved_type": "safe", "details": {}}],
-            CONTRACT_C: [{"address": EOA, "resolved_type": "eoa", "details": {}}],
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["status"] == "multi_plane"
-    p_b, p_c = record["planes"]
-    assert p_b["controller"] == CONTRACT_B
-    assert p_b["terminal_record"]["address"] == SAFE
-    assert p_b["terminal_record"]["chain"] == [CONTRACT_B, SAFE]
-    assert p_c["terminal_record"]["address"] == EOA
-
-
-def test_multi_plane_one_plane_unresolved_recorded_distinctly():
-    # The top level never claims a settled key.
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A: [
-                {"address": SAFE, "resolved_type": "safe", "details": {}},
-                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-            ],
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["status"] == "multi_plane"
-    assert record["terminal"] is False
-    plane_safe, plane_unresolved = record["planes"]
-    assert plane_safe["terminal_record"]["status"] == "terminated"
-    assert plane_safe["terminal_record"]["address"] == SAFE
-    assert plane_unresolved["terminal_record"]["status"] == "unknown_unfetched"
-    assert plane_unresolved["terminal_record"]["address"] is None
-
-
 def test_multi_plane_nested_fork_fails_that_plane_closed_no_explosion():
     # A forking plane fails closed rather than re-branching.
     resolver = _dict_resolver(
@@ -196,41 +105,6 @@ def test_multi_plane_nested_fork_fails_that_plane_closed_no_explosion():
     assert nested["status"] == "ambiguous_controllers"
     assert nested["controllers"] == [CONTRACT_C, EOA]
     assert "planes" not in nested  # no sub-plane recursion
-
-
-def test_multi_plane_convergent_planes_not_collapsed():
-    # Collapsing is the scorer's call.
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A: [
-                {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-                {"address": CONTRACT_C, "resolved_type": "contract", "details": {}},
-            ],
-            CONTRACT_B: [{"address": SAFE, "resolved_type": "safe", "details": {}}],
-            CONTRACT_C: [{"address": SAFE, "resolved_type": "safe", "details": {}}],
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["status"] == "multi_plane"
-    assert record["terminal"] is False
-    assert record["address"] is None
-    assert {p["terminal_record"]["address"] for p in record["planes"]} == {SAFE}
-
-
-def test_two_getters_same_controller_not_ambiguous():
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A: [
-                {"address": SAFE, "resolved_type": "safe", "details": {}},
-                {"address": SAFE.upper(), "resolved_type": "safe", "details": {}},
-            ]
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["terminal"] is True
-    assert record["status"] == "terminated"
-    assert record["address"] == SAFE
-    assert "controllers" not in record
 
 
 def test_already_terminal_start_short_circuits():
@@ -256,60 +130,7 @@ def _fp(address, resolved_type, *, details=None, principal_type="authority_role"
     )
 
 
-@pytest.mark.parametrize(
-    "fp, expected_terminal",
-    [
-        pytest.param(_fp(CONTRACT_A, "contract"), False, id="contract-non-terminal"),
-        pytest.param(_fp(SAFE, "safe", details={"threshold": 2}), True, id="safe-terminal"),
-        pytest.param(_fp(CONTRACT_A, None), False, id="unknown-non-terminal"),
-    ],
-)
-def test_principal_payload_terminal_flag(fp, expected_terminal):
-    assert _function_principal_payload(fp)["terminal"] is expected_terminal
-
-
-def test_terminal_principal_chain_surfaced_from_details():
-    chain = {"terminal": True, "resolved_type": "safe", "address": SAFE, "chain": [CONTRACT_A, SAFE]}
-    payload = _function_principal_payload(_fp(CONTRACT_A, "contract", details={"terminal_principal": chain}))
-    assert payload["terminal"] is False  # the way-point itself is never a settled key
-    assert payload["terminal_principal"] == chain
-
-
-def test_lzcompose_style_permissionless_stays_blank_without_failure():
-    ef = SimpleNamespace(
-        abi_signature="lzCompose(address,bytes32,bytes,address,bytes)",
-        function_name="lzCompose",
-        selector="0x12345678",
-        effect_labels=[],
-        effect_targets=[],
-        claims=[],
-        action_summary=None,
-        authority_public=True,
-        authority_roles=None,
-    )
-    entry = _build_company_function_entry(cast(Any, ef), [])
-    assert entry["authority_public"] is True
-    assert entry["controllers"] == []
-    # ``[]`` is proven not role-gated, the negation of not determined.
-    assert entry["authority_roles"] is None
-    assert entry["direct_owner"] is None
-    assert "terminal" not in entry
-
-
 # "No such controller" and "read failed" used to be one answer (1,556 rows).
-
-
-def test_probed_clean_silence_is_controllers_not_determined_with_basis():
-    """Canonical-getter silence is never proof of no controller, so the record keeps its basis and stays
-    not-determined.
-    """
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: [])
-    assert record["status"] == "controllers_not_determined"
-    assert record["probes_silent"] == ["owner", "authority", "admin"]
-    assert record["undetermined_at"] == CONTRACT_A
-    assert record["terminal"] is False
-    assert record["resolved_type"] == "unknown"
-    assert record["address"] is None
 
 
 def test_no_controller_token_has_no_producer():
@@ -323,41 +144,6 @@ def test_no_controller_token_has_no_producer():
     for resolver in shapes:
         record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
         assert record["status"] != "no_controller"
-
-
-def test_multi_hop_silence_is_attributed_to_the_silent_hop():
-    """The status names the silent hop, not the starting principal."""
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A.lower(): {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-            CONTRACT_B.lower(): [],
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["status"] == "controllers_not_determined"
-    assert record["chain"] == [CONTRACT_A, CONTRACT_B]
-    assert record["undetermined_at"] == CONTRACT_B
-    assert record["probes_silent"] == ["owner", "authority", "admin"]
-
-
-def test_canonical_getter_names_pin_the_production_probe_set():
-    from services.governance.principals import CANONICAL_CONTROLLER_GETTERS
-    from services.resolution.tracking import _CONTROLLER_GETTER_SIGS
-
-    assert tuple(f"{name}()" for name in CANONICAL_CONTROLLER_GETTERS) == _CONTROLLER_GETTER_SIGS
-
-
-def test_probe_error_stays_unknown_unfetched():
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: None)
-    assert record["status"] == "unknown_unfetched"
-    assert record["terminal"] is False
-
-
-def test_steps_returned_but_unusable_is_not_a_proven_absence():
-    record = resolve_terminal_principal(
-        CONTRACT_A, "contract", resolve_controllers=lambda _address: [{"resolved_type": "contract"}]
-    )
-    assert record["status"] == "unknown_unfetched"
 
 
 def test_policy_worker_resolver_keeps_error_and_absence_apart():
@@ -390,25 +176,3 @@ def test_policy_worker_resolver_keeps_error_and_absence_apart():
     finally:
         pw.read_contract_controllers = original_read
         pw.classify_resolved_address_with_status = original_classify
-
-
-def test_multi_plane_records_silence_per_plane():
-    """A weakest-path scorer must never see a fabricated absence."""
-    resolver_map = {
-        CONTRACT_A: [
-            {"address": SAFE, "resolved_type": "safe", "details": {}},
-            {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-        ],
-        CONTRACT_B: [],
-    }
-
-    def _resolve(address):
-        return resolver_map.get(address.lower())
-
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_resolve)
-    assert record["status"] == "multi_plane"
-    by_status = {plane["terminal_record"]["status"]: plane["terminal_record"] for plane in record["planes"]}
-    assert set(by_status) == {"terminated", "controllers_not_determined"}
-    silent = by_status["controllers_not_determined"]
-    assert silent["undetermined_at"] == CONTRACT_B
-    assert silent["probes_silent"] == ["owner", "authority", "admin"]

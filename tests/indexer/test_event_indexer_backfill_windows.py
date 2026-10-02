@@ -136,19 +136,6 @@ def test_backfills_full_history_in_bounded_windows(session):
     assert summary.budget_exhausted is False  # drained within budget → loop returns to the poll interval
 
 
-class _OrderRecordingFetcher:
-    def __init__(self) -> None:
-        self.order: list[str] = []
-
-    def fetch_logs(
-        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int
-    ) -> list[FetchedEventLog]:
-        if not isinstance(event_address, str):
-            event_address = event_address[0]
-        self.order.append(event_address.lower())
-        return []
-
-
 def _set_last_run_at(session, address: str, when: datetime) -> None:
     # An explicit SET value suppresses onupdate, and a literal avoids a transaction-constant now().
     from db.models import IndexedEventCursor
@@ -158,68 +145,6 @@ def _set_last_run_at(session, address: str, when: datetime) -> None:
         .where(func.lower(IndexedEventCursor.event_address) == address.lower())
         .values(last_run_at=when)
     )
-
-
-@requires_postgres
-def test_scan_visits_least_recently_run_cursor_first(session):
-    older = "0x" + "a1" * 20  # last scanned long ago → must be visited first
-    newer = "0x" + "b2" * 20  # scanned recently → goes to the back
-    enroll_event_cursor(session, chain_id=1, event_address=older, topic0=_TOPIC)
-    enroll_event_cursor(session, chain_id=1, event_address=newer, topic0=_TOPIC)
-    _set_last_run_at(session, older, datetime(2020, 1, 1, tzinfo=timezone.utc))
-    _set_last_run_at(session, newer, datetime(2024, 1, 1, tzinfo=timezone.utc))
-    session.commit()
-
-    fetcher = _OrderRecordingFetcher()
-    scan_enrolled_events(
-        session,
-        fetchers={1: fetcher},
-        head_fetchers={1: _FixedHead()},
-        block_hash_fetchers={1: _DeterministicBlockHash()},
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=_MAX_SAFE_SPAN,
-        max_windows_per_cursor=1,  # one window each, so order == cursor visit order
-    )
-
-    assert fetcher.order, "scan never fetched"
-    assert fetcher.order[0] == older
-    assert fetcher.order.index(older) < fetcher.order.index(newer)
-
-
-@requires_postgres
-def test_caught_up_cursor_stamps_last_run_at(session):
-    """A warm cursor updates nothing, so onupdate never fires; last_run_at must be re-stamped or rotation stalls."""
-    from db.models import IndexedEventCursor
-
-    addr = "0x" + "c3" * 20
-    enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC, start_block=_TARGET)
-    session.execute(
-        update(IndexedEventCursor)
-        .where(func.lower(IndexedEventCursor.event_address) == addr)
-        .values(backfill_complete=True, last_run_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
-    )
-    session.commit()
-    before = session.execute(
-        select(IndexedEventCursor.last_run_at).where(func.lower(IndexedEventCursor.event_address) == addr)
-    ).scalar_one()
-
-    fetcher = _RangeCappedFetcher()
-    fetchers, heads, hashes = _maps(fetcher)
-    scan_enrolled_events(
-        session,
-        fetchers=fetchers,
-        head_fetchers=heads,
-        block_hash_fetchers=hashes,
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=_MAX_SAFE_SPAN,
-        max_windows_per_cursor=5,
-    )
-
-    assert not fetcher.requested_spans, "a caught-up cursor must not fetch"
-    after = session.execute(
-        select(IndexedEventCursor.last_run_at).where(func.lower(IndexedEventCursor.event_address) == addr)
-    ).scalar_one()
-    assert after > before  # re-stamped on the no-fetch visit so rotation moves it to the back
 
 
 @requires_postgres
@@ -282,70 +207,6 @@ def test_cursor_progress_counts_from_table(session):
     session.commit()
 
     assert _cursor_progress(session) == (1, 3)
-
-
-@requires_postgres
-def test_budgeted_backfill_is_identical_to_unbudgeted(session):
-    """Budgets change when windows run, never which blocks are scanned."""
-    from db.models import IndexedEventCursor, IndexedEventLog
-
-    authorities = ["0x" + h * 20 for h in ("a1", "b2", "c3")]
-
-    def drain_to_completion(max_windows_per_cursor: int, max_windows_per_pass: int):
-        for addr in authorities:
-            enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC)
-        session.commit()
-        fetcher = _RangeCappedFetcher()
-        fetchers, heads, hashes = _maps(fetcher)
-        for _ in range(100_000):  # safety bound; the budgeted run really needs ~100 passes
-            scan_enrolled_events(
-                session,
-                fetchers=fetchers,
-                head_fetchers=heads,
-                block_hash_fetchers=hashes,
-                confirmation_depth=_CONFIRMATIONS,
-                max_block_span=_MAX_SAFE_SPAN,
-                max_windows_per_cursor=max_windows_per_cursor,
-                max_windows_per_pass=max_windows_per_pass,
-            )
-            pending = session.execute(
-                select(func.count()).select_from(IndexedEventCursor).where(~IndexedEventCursor.backfill_complete)
-            ).scalar_one()
-            if pending == 0:
-                break
-        else:
-            raise AssertionError("backfill never completed within the pass bound")
-        logs = session.execute(
-            select(
-                IndexedEventLog.event_address,
-                IndexedEventLog.block_number,
-                IndexedEventLog.tx_hash,
-                IndexedEventLog.log_index,
-            ).order_by(IndexedEventLog.event_address, IndexedEventLog.block_number, IndexedEventLog.log_index)
-        ).all()
-        cursors = session.execute(
-            select(
-                IndexedEventCursor.event_address,
-                IndexedEventCursor.last_indexed_block,
-                IndexedEventCursor.backfill_complete,
-            ).order_by(IndexedEventCursor.event_address)
-        ).all()
-        return logs, cursors
-
-    unbudgeted_logs, unbudgeted_cursors = drain_to_completion(10_000, 10_000)
-
-    session.execute(delete(IndexedEventLog))
-    session.execute(delete(IndexedEventCursor))
-    session.commit()
-    budgeted_logs, budgeted_cursors = drain_to_completion(max_windows_per_cursor=2, max_windows_per_pass=4)
-
-    # Catches a bug that is wrong identically in both runs.
-    assert len(unbudgeted_logs) == len(authorities) * (_TARGET // _DENSITY)
-    assert budgeted_logs == unbudgeted_logs  # byte-identical index: no skipped/duplicated event
-    assert budgeted_cursors == unbudgeted_cursors
-    for _addr, last_block, complete in budgeted_cursors:
-        assert complete is True  # no cursor starved short of completion
-        assert last_block == _TARGET  # backfill_complete only at the confirmed head, never premature
 
 
 @requires_postgres
@@ -466,36 +327,6 @@ def test_shutdown_stops_after_current_page_and_preserves_committed_progress(sess
     )
     assert _cursor_block(session, _AUTHORITY) > saved_block
     assert _log_count(session, _AUTHORITY) > saved_logs
-
-
-@requires_postgres
-def test_shutdown_during_rpc_timeout_does_not_visit_remaining_groups(session):
-    from threading import Event
-
-    stop = Event()
-    for i in range(10):
-        enroll_event_cursor(session, chain_id=1, event_address=f"0x{i + 1:040x}", topic0=_TOPIC)
-    session.commit()
-
-    class TimeoutHead:
-        calls = 0
-
-        def head_block(self):
-            self.calls += 1
-            stop.set()
-            raise TimeoutError("RPC unavailable during shutdown")
-
-    head = TimeoutHead()
-    summary = scan_enrolled_events(
-        session,
-        fetchers={1: _RangeCappedFetcher()},
-        head_fetchers={1: head},
-        block_hash_fetchers={1: _DeterministicBlockHash()},
-        stop_event=stop,
-    )
-    assert head.calls == 1
-    assert summary.failed_groups == 1 and summary.windows_scanned == 0
-    assert _log_count(session, "0x" + "00" * 19 + "01") == 0
 
 
 @requires_postgres

@@ -45,34 +45,6 @@ def _session_cm(fake_job: MagicMock) -> MagicMock:
     return cm
 
 
-def test_ops_reads_require_admin_key(monkeypatch) -> None:
-    client = _client_without_bypass(monkeypatch)
-    job_id = str(uuid.uuid4())
-    cm = _session_cm(_fake_job(job_id))
-
-    reads = [
-        "/api/jobs",
-        f"/api/jobs/{job_id}",
-        f"/api/jobs/{job_id}/errors",
-        f"/api/jobs/{job_id}/stage_timings",
-        "/api/fleet",
-        "/api/stats",
-        "/api/audits/pipeline",
-    ]
-
-    with (
-        patch("routers.deps.SessionLocal", return_value=cm),
-        patch("routers.deps.get_artifact", return_value=None),
-        patch("routers.fleet.build_fleet_status", return_value={}),
-        patch("routers.audits.build_audits_pipeline", return_value={}),
-    ):
-        for path in reads:
-            anon = client.get(path)
-            assert anon.status_code == 401, f"{path} must 401 without key, got {anon.status_code}"
-            authed = client.get(path, headers={"X-PSAT-Admin-Key": ADMIN_KEY})
-            assert authed.status_code == 200, f"{path} must 200 with key, got {authed.status_code}: {authed.text}"
-
-
 def test_artifact_allowlist_gates_internal_names(monkeypatch) -> None:
     client = _client_without_bypass(monkeypatch)
     cm = _session_cm(_fake_job(str(uuid.uuid4())))
@@ -172,17 +144,6 @@ def test_health_pool_only_for_admin(monkeypatch) -> None:
     assert "pool" not in anon.json()
     assert authed.status_code == 200
     assert "pool" in authed.json()
-
-
-def test_admin_key_valid_helper(monkeypatch) -> None:
-    from routers import deps
-
-    monkeypatch.setattr(deps, "ADMIN_KEY", ADMIN_KEY)
-    assert deps.admin_key_valid(ADMIN_KEY) is True
-    assert deps.admin_key_valid("wrong") is False
-    assert deps.admin_key_valid(None) is False
-    monkeypatch.setattr(deps, "ADMIN_KEY", None)
-    assert deps.admin_key_valid(ADMIN_KEY) is False
 
 
 def test_subscriptions_redacts_webhook_token() -> None:

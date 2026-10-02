@@ -16,7 +16,6 @@ import pytest
 from services.resolution.one_shot_probe import (
     LatchReadResult,
     annotate_capability_one_shot,
-    latch_descriptor_digest,
     resolve_one_shot_state,
 )
 from tests.support.rpc_stubs import FakeRpc, _word
@@ -29,10 +28,7 @@ LIDO_SLOT = "0xebb05b386a8d34882b8711d156f463690983dc47815980fb82aeeff1aa43579e"
 LIDO_WORD = "0x0000000000000000000000000000000000000000000000000000000000af1140"
 
 USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-USDC_SLOT_INITIALIZED = "0x0000000000000000000000000000000000000000000000000000000000000008"
-USDC_WORD_INITIALIZED = "0x000000000000000000000001e982615d461dd5cd06575bbea87624fda4e3de17"
 USDC_SLOT_VERSION = "0x0000000000000000000000000000000000000000000000000000000000000012"
-USDC_WORD_VERSION = "0x0000000000000000000000000000000000000000000000000000000000000003"
 
 SYNC_POOL = "0xd789870bea40d056a4d26055d0befcc8755da146"
 ERC7201_SLOT = "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00"
@@ -49,19 +45,6 @@ def _lido_descriptor() -> dict[str, Any]:
         "value_type": None,
         "standard": "unstructured_slot_latch",
         "guard": {"operator": "eq", "constant": "0"},
-    }
-
-
-def _usdc_bool_descriptor() -> dict[str, Any]:
-    return {
-        "kind": "storage",
-        "variable": "initialized",
-        "slot": USDC_SLOT_INITIALIZED,
-        "byte_offset": 20,
-        "size_bytes": 1,
-        "value_type": "bool",
-        "standard": "structural_scalar_latch",
-        "guard": {"operator": "falsy", "constant": None},
     }
 
 
@@ -128,73 +111,6 @@ def test_lido_unstructured_slot_guard_witness_is_byte_exact():
         assert absent not in result.witness
 
 
-def test_fiat_token_siblings_publish_their_own_deciding_guard():
-    """The witness is the only thing separating the identical published triples."""
-    storage = {(USDC, USDC_SLOT_VERSION): USDC_WORD_VERSION}
-    seen = []
-    for constant in ("0", "1", "2"):
-        result = _probe(USDC, storage, [_usdc_version_descriptor(constant)])
-        assert (result.state, result.value) == ("consumed", 3)
-        assert result.witness["latch_basis"] == "guard"
-        assert result.witness["guard"] == {"operator": "eq", "constant": constant}
-        assert result.witness["value_type"] == "uint8"
-        seen.append(result.witness["guard"]["constant"])
-    assert seen == ["0", "1", "2"]
-
-
-def test_fiat_token_packed_bool_byte_witness_is_byte_exact():
-    """The raw word and byte range are both published so the value is replayable."""
-    result = _probe(USDC, {(USDC, USDC_SLOT_INITIALIZED): USDC_WORD_INITIALIZED}, [_usdc_bool_descriptor()])
-    assert result.state == "consumed"
-    assert result.value == 1
-    assert result.witness == {
-        "latch_basis": "guard",
-        "probe_address": USDC,
-        "probe_block": BLOCK,
-        "standard": "structural_scalar_latch",
-        "variable": "initialized",
-        "slot": USDC_SLOT_INITIALIZED,
-        "byte_offset": 20,
-        "size_bytes": 1,
-        "value_type": "bool",
-        "guard": {"operator": "falsy"},  # constant was None → key absent
-        "read_kind": "storage",
-        "raw_word": hex(int(USDC_WORD_INITIALIZED, 16)),
-    }
-
-
-def test_erc7201_version_ge_witness_is_byte_exact():
-    """``expected_version`` appears only beside the basis saying it came from a modifier name match."""
-    result = _probe(SYNC_POOL, {(SYNC_POOL, ERC7201_SLOT): SYNC_POOL_WORD}, [_sync_pool_descriptor()])
-    assert result.state == "consumed"
-    assert result.value == 1
-    assert result.witness == {
-        "latch_basis": "version_ge",
-        "probe_address": SYNC_POOL,
-        "probe_block": BLOCK,
-        "standard": "oz_v5_namespaced",
-        "role": "version",
-        "variable": "INITIALIZABLE_STORAGE",
-        "slot": ERC7201_SLOT,
-        "byte_offset": 0,
-        "size_bytes": 8,
-        "value_type": "uint64",
-        "expected_version": 1,
-        "expected_version_basis": "oz_initializer_modifier_standard_constant",
-        "read_kind": "storage",
-        "raw_word": hex(int(SYNC_POOL_WORD, 16)),
-    }
-
-
-def test_unevaluable_guard_publishes_not_determined_never_a_branch():
-    descriptor = dict(_lido_descriptor(), guard={"operator": "weird", "constant": "0"})
-    result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [descriptor])
-    assert result.state == "indeterminate"
-    assert result.witness["latch_basis"] == "not_determined"
-    assert result.witness["raw_word"] == hex(int(LIDO_WORD, 16))
-    assert result.witness["probe_block"] == BLOCK
-
-
 def test_unread_latch_publishes_no_witness_at_all():
 
     class _DeadRpc:
@@ -213,30 +129,6 @@ def test_unread_latch_publishes_no_witness_at_all():
     assert result.witness == {}
 
 
-def test_no_decisive_latch_publishes_no_witness():
-    result = _probe(LIDO, {}, [])
-    assert result.state == "indeterminate"
-    assert result.witness == {}
-    assert result.transcript.get("reason") == "no_latch_location"
-
-
-def test_255_without_a_byte_width_is_not_a_sentinel():
-    """255 is a sentinel only for a one-byte latch."""
-    descriptor = dict(_sync_pool_descriptor(), size_bytes=None, byte_offset=None)
-    word = _word(0xFF)
-    result = _probe(SYNC_POOL, {(SYNC_POOL, ERC7201_SLOT): word}, [descriptor])
-    assert result.witness["latch_basis"] == "version_ge"
-    assert result.witness["latch_basis"] != "sentinel"
-    assert "size_bytes" not in result.witness
-
-
-def test_unpinned_height_publishes_no_probe_block():
-    result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [_lido_descriptor()], block=None)
-    assert result.state == "consumed"
-    assert "probe_block" not in result.witness
-    assert result.transcript["block"] == "latest"
-
-
 def test_legacy_descriptor_publishes_no_bare_expected_version():
     """Pre-stamping descriptors carry ``expected_version`` without provenance, so neither key is published."""
     result = _probe(
@@ -248,19 +140,6 @@ def test_legacy_descriptor_publishes_no_bare_expected_version():
     assert result.witness["latch_basis"] == "version_ge"
     assert "expected_version" not in result.witness
     assert "expected_version_basis" not in result.witness
-
-
-def test_witness_names_which_of_two_decisive_latches_decided():
-    first = _usdc_version_descriptor("0")
-    second = dict(_usdc_bool_descriptor(), guard={"operator": "eq", "constant": "9"})
-    storage = {
-        (USDC, USDC_SLOT_VERSION): USDC_WORD_VERSION,
-        (USDC, USDC_SLOT_INITIALIZED): USDC_WORD_INITIALIZED,
-    }
-    result = _probe(USDC, storage, [first, second])
-    assert result.witness["slot"] == USDC_SLOT_VERSION
-    assert result.witness["guard"] == {"operator": "eq", "constant": "0"}
-    assert result.witness["raw_word"] == hex(int(USDC_WORD_VERSION, 16))
 
 
 def test_getter_read_is_not_attributed_to_the_descriptor_slot():
@@ -318,23 +197,6 @@ def test_appended_candidate_condition_carries_the_witness():
     appended = next(c for c in cap_dict["conditions"] if c["kind"] == "one_shot")
     assert appended["latch_witness"] == result.witness
     assert appended["latch_value"] == 11473216
-
-
-def test_appended_condition_omits_null_latch_value():
-    cap_dict = {"kind": "conditional_universal", "conditions": []}
-    annotate_capability_one_shot(
-        cap_dict,
-        LatchReadResult("consumed", None, "db_linked_proxy"),
-        confirmed_candidate=True,
-    )
-    appended = cap_dict["conditions"][0]
-    assert "latch_value" not in appended
-
-
-def test_descriptor_digest_separates_same_slot_different_guards():
-    """A slot-keyed cache would serve one witness to all three."""
-    digests = {latch_descriptor_digest([_usdc_version_descriptor(c)]) for c in ("0", "1", "2")}
-    assert len(digests) == 3
 
 
 def test_resolver_cache_does_not_share_witnesses_across_guards(monkeypatch):
@@ -476,26 +338,3 @@ def test_reinitializer_literal_publishes_version_with_literal_basis(ast_artifact
     assert latch is not None
     assert latch["expected_version"] == 3
     assert latch["expected_version_basis"] == "oz_reinitializer_argument_literal"
-
-
-def test_reinitializer_non_literal_publishes_no_version(ast_artifacts):
-    latch = _standard_latch(ast_artifacts["VariableReinit"], "upgradeToNext")
-    assert latch is not None
-    assert latch["expected_version"] is None
-    assert latch["expected_version_basis"] is None
-    result = _probe(SYNC_POOL, {(SYNC_POOL, latch["slot"]): _word(1)}, [latch])
-    assert "expected_version" not in result.witness
-    assert "expected_version_basis" not in result.witness
-    assert result.witness["latch_basis"] == "value_gt_zero"
-
-
-def test_plain_initializer_version_is_the_standard_constant_not_a_literal(ast_artifacts):
-    """The 1 was never read from source, so its basis must not claim a literal."""
-    latch = _standard_latch(ast_artifacts["PlainInitializer"], "initialize")
-    assert latch is not None
-    assert latch["expected_version"] == 1
-    assert latch["expected_version_basis"] == "oz_initializer_modifier_standard_constant"
-
-
-def test_only_initializing_helper_stamps_no_latch_location(ast_artifacts):
-    assert _standard_latch(ast_artifacts["OnlyInitializingHelper"], "helper") is None

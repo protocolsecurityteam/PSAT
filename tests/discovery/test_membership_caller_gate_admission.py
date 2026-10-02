@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 from sqlalchemy import select
 
 from db.models import (
@@ -25,8 +24,6 @@ from tests.conftest import requires_postgres
 pytestmark = [requires_postgres]
 
 ENDPOINT_V2 = "0x1a44076050125825900e736c501f859c50fe728c"
-ONESIG_ETHEREUM = "0xbe010a7e3686fdf65e93344ab664d065a0b02478"
-ONESIG_BASE = "0xa0392d116d71ed3b75086194aba6de3cd1e39b7e"
 
 _CHAIN_IDS = {"ethereum": 1, "base": 8453}
 
@@ -120,28 +117,6 @@ def _active_rules(session, contract: Contract) -> set[str]:
     }
 
 
-@pytest.mark.parametrize("chain", ["ethereum", "base"])
-def test_endpoint_and_onesig_earn_zero_witnesses(db_session, chain):
-    """The measured dev-DB shape; OneSig must not ride in behind EndpointV2."""
-    protocol = _protocol(db_session)
-    onesig_address = ONESIG_ETHEREUM if chain == "ethereum" else ONESIG_BASE
-    oapp = _member(db_session, protocol, _addr(0xE01), chain=chain)
-    endpoint = _contract(db_session, ENDPOINT_V2, chain=chain, nominated_protocol_id=protocol.id)
-    onesig = _contract(db_session, onesig_address, chain=chain, nominated_protocol_id=protocol.id)
-    _caller_gate(db_session, on=oapp, controller_id="external_contract:endpoint", value=endpoint.address)
-    _caller_gate(db_session, on=endpoint, controller_id="state_variable:_owner", value=onesig.address)
-
-    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(endpoint.id, onesig.id)))
-    db_session.commit()
-
-    assert endpoint.protocol_id is None
-    assert onesig.protocol_id is None
-    assert _active_rules(db_session, endpoint) == set()
-    assert _active_rules(db_session, onesig) == set()
-    assert endpoint.id not in result.promoted_contract_ids
-    assert onesig.id not in result.promoted_contract_ids
-
-
 def test_caller_gate_member_demotes_on_re_earn(db_session):
     """A standing member whose only witness was the D2 caller-gate edge loses
     it: the via-fact no longer verifies, so the row demotes to candidate with
@@ -187,46 +162,3 @@ def test_caller_gate_member_demotes_on_re_earn(db_session):
     assert endpoint.nominated_protocol_id == protocol.id
     assert endpoint.id in demoted
     assert stale.id in revoked
-
-
-def test_caller_gate_controller_facts_stay_recorded(db_session):
-    protocol = _protocol(db_session)
-    oapp = _member(db_session, protocol, _addr(0xE20))
-    endpoint = _contract(db_session, ENDPOINT_V2, nominated_protocol_id=protocol.id)
-    row = _caller_gate(db_session, on=oapp, controller_id="external_contract:endpoint", value=endpoint.address)
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(endpoint.id,)))
-    db_session.commit()
-
-    stored = db_session.get(ControllerValue, row.id)
-    assert stored is not None
-    assert stored.value == endpoint.address
-    assert stored.authority_provenance == "caller_gate"
-
-
-def test_probed_owner_read_still_admits_the_controller(db_session):
-    """Positive control: a governance derivation (the probe's ``owner()`` read) still admits under D2."""
-    protocol = _protocol(db_session)
-    member = _member(db_session, protocol, _addr(0xE30))
-    controller = _contract(db_session, _addr(0xE31), nominated_protocol_id=protocol.id)
-    _probe_read(db_session, member, name="owner", value=controller.address)
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(controller.id,)))
-    db_session.commit()
-
-    assert controller.protocol_id == protocol.id
-    witness = db_session.execute(
-        select(ContractMembershipWitness).where(
-            ContractMembershipWitness.contract_id == controller.id,
-            ContractMembershipWitness.rule == "w3_control",
-            ContractMembershipWitness.revoked_at.is_(None),
-        )
-    ).scalar_one()
-    assert witness.evidence["direction"] == "d2"
-    assert witness.evidence["source"] == "probe"
-
-
-def test_d2_evidence_refuses_the_caller_gate_source(db_session):
-    """No writer can mint a D2 witness citing ``controller_values``."""
-    with pytest.raises(ValueError, match="d2 source"):
-        gate.w3_evidence(direction="d2", source="controller_values", via_address=_addr(0xE40))

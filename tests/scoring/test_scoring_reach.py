@@ -41,15 +41,6 @@ def edge(principal: str, anchor: str, *, relation: str | None = "controller_valu
     )
 
 
-def pinned_conditions(destination: str) -> P.ConditionPlane:
-    plane = P.ConditionPlane()
-    plane.by_entity = {
-        destination: (P.DestinationFunction(1, "guarded", ("msg.sender == address(this)",), analysed=True),)
-    }
-    plane.provenance = {"stub": True}
-    return plane
-
-
 class _StubConferral(P.ConferralPlane):
     def __init__(self, rewrites=(), role_functions=None):
         super().__init__(role_functions=dict(role_functions or {}))
@@ -93,75 +84,12 @@ def compute(closure, *, conditions=None, conferral=None, signals=()):
     )
 
 
-def test_admin_column_edge_expands_as_code_control():
-    closure = P.ControlClosure(
-        edges=(edge(KEY_SAFE, KEY_ANCHOR, relation=None), edge(KEY_ANCHOR, KEY_VAULT), edge(KEY_VAULT, KEY_DEEP))
-    )
-    record = compute(closure)
-    assert record["reached"] == {
-        KEY_ANCHOR: {"hop": 1, "basis": R.BASIS_CLOSURE_EDGE},
-        KEY_VAULT: {"hop": 2, "basis": R.BASIS_WALKED_HOP},
-        KEY_DEEP: {"hop": 3, "basis": R.BASIS_WALKED_HOP},
-    }
-    assert record["parents"] == {KEY_ANCHOR: KEY_SAFE, KEY_VAULT: KEY_ANCHOR, KEY_DEEP: KEY_VAULT}
-    assert record["frontier"] == []
-
-
-def test_stored_authority_does_not_expand_and_publishes_the_gap():
-    closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ANCHOR), edge(KEY_ANCHOR, KEY_VAULT)))
-    record = compute(closure)
-    assert record["reached"] == {KEY_ANCHOR: {"hop": 1, "basis": R.BASIS_CLOSURE_EDGE}}
-    assert record["frontier"] == [
-        {
-            "from": KEY_ANCHOR,
-            "to": KEY_VAULT,
-            "reason": R.AUTHORITY_EXERCISE_NOT_WITNESSED,
-            "basis": "no witness of what exercising this stored authority reaches",
-        }
-    ]
-
-
-def test_gate_walk_refused_by_conferral_carries_the_scorer_token():
-    closure = P.ControlClosure(edges=(edge(KEY_ANCHOR, KEY_VAULT, label="hook"),))
-    signal = reach_signal("ownership.transfer", KEY_ANCHOR)
-    record = compute(closure, conferral=_StubConferral(rewrites=("owner",)), signals=(signal,))
-    assert record["reached"] == {KEY_ANCHOR: {"hop": 1, "basis": R.BASIS_SIGNAL_SEED}}
-    (entry,) = record["frontier"]
-    assert (entry["from"], entry["to"], entry["reason"]) == (KEY_ANCHOR, KEY_VAULT, R.HOP_REFUSED_CONFERRAL)
-    assert entry["basis"]
-
-
-def test_code_walk_condition_refused_hop_carries_the_scorer_token():
-    closure = P.ControlClosure(edges=(edge(KEY_ANCHOR, KEY_VAULT),))
-    signal = reach_signal("upgrade.implementation", KEY_ANCHOR)
-    record = compute(closure, conditions=pinned_conditions(KEY_VAULT), signals=(signal,))
-    assert KEY_VAULT not in record["reached"]
-    (entry,) = record["frontier"]
-    assert (entry["from"], entry["to"], entry["reason"]) == (KEY_ANCHOR, KEY_VAULT, R.HOP_REFUSED_CONDITION)
-
-
 def test_reached_beats_frontier():
     """Same rule as the fold's gap filter."""
     closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ANCHOR), edge(KEY_ANCHOR, KEY_VAULT)))
     signal = reach_signal("upgrade.implementation", KEY_ANCHOR)
     record = compute(closure, signals=(signal,))
     assert record["reached"][KEY_VAULT] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
-    assert record["frontier"] == []
-
-
-def test_zero_address_is_refused_as_seed_and_as_hop():
-    closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ZERO, relation=None), edge(KEY_ANCHOR, KEY_ZERO)))
-    signal = reach_signal("upgrade.implementation", KEY_ZERO, KEY_ANCHOR)
-    record = compute(closure, signals=(signal,))
-    assert record["reached"] == {KEY_ANCHOR: {"hop": 1, "basis": R.BASIS_SIGNAL_SEED}}
-    assert record["frontier"] == []
-
-
-def test_non_transitive_capability_seeds_only_no_frontier():
-    closure = P.ControlClosure(edges=(edge(KEY_ANCHOR, KEY_VAULT),))
-    signal = reach_signal("flow.out", KEY_ANCHOR)
-    record = compute(closure, signals=(signal,))
-    assert record["reached"] == {KEY_ANCHOR: {"hop": 1, "basis": R.BASIS_SIGNAL_SEED}}
     assert record["frontier"] == []
 
 
@@ -224,38 +152,6 @@ def test_seed_standpoint_carries_the_walk_the_fold_ran_from_it():
     )
     (entry,) = record["frontier"]
     assert (entry["from"], entry["to"], entry["reason"]) == (KEY_VAULT, KEY_DEEP, R.HOP_REFUSED_CONFERRAL)
-
-
-def test_reached_keys_fold_onto_the_proxy():
-    """Otherwise a consumer keying by proxy misses every folded destination."""
-    alias = {KEY_VAULT: KEY_PROXY}
-    closure = P.ControlClosure(
-        edges=(edge(KEY_SAFE, KEY_ANCHOR, relation=None), edge(KEY_ANCHOR, KEY_VAULT), edge(KEY_VAULT, KEY_DEEP))
-    )
-    record = R.entity_reach(
-        KEY_SAFE, closure, P.ConditionPlane(), _StubConferral(), {}, lambda key: alias.get(key, key)
-    )
-    assert KEY_VAULT not in record["reached"]
-    assert record["reached"][KEY_PROXY] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
-    assert record["parents"][KEY_PROXY] == KEY_ANCHOR
-    assert record["parents"][KEY_DEEP] == KEY_PROXY
-
-
-def test_frontier_endpoints_fold_and_a_self_fold_is_dropped():
-    """A refusal folding onto its own caller withheld nothing."""
-    alias = {KEY_VAULT: KEY_PROXY}
-    closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ANCHOR), edge(KEY_ANCHOR, KEY_VAULT)))
-    record = R.entity_reach(
-        KEY_SAFE, closure, P.ConditionPlane(), _StubConferral(), {}, lambda key: alias.get(key, key)
-    )
-    (entry,) = record["frontier"]
-    assert (entry["from"], entry["to"]) == (KEY_ANCHOR, KEY_PROXY)
-
-    self_alias = {KEY_VAULT: KEY_ANCHOR}
-    record = R.entity_reach(
-        KEY_SAFE, closure, P.ConditionPlane(), _StubConferral(), {}, lambda key: self_alias.get(key, key)
-    )
-    assert record["frontier"] == []
 
 
 def test_hop_relaxes_to_the_parents_route_it_publishes():

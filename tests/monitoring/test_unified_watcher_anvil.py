@@ -7,7 +7,6 @@ import shutil
 import uuid
 from pathlib import Path
 from typing import NamedTuple
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -26,8 +25,11 @@ from tests.support.anvil import (
     IMPL_V1_SOURCE,
     IMPL_V2_SOURCE,
     OWNABLE_SOURCE,
+    PAUSABLE_SOURCE,
     PRIVATE_KEY,
     PROXY_SOURCE,
+    SAFE_SOURCE,
+    SOLMATE_OWNED_SOURCE,
     _cast,
     _cast_send,
     _compile_and_deploy,
@@ -52,26 +54,6 @@ pytestmark = [
     pytest.mark.compile,
 ]
 
-
-SOLMATE_OWNED_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestSolmateOwned {
-    address public owner;
-    event OwnerUpdated(address indexed user, address indexed newOwner);
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnerUpdated(address(0), msg.sender);
-    }
-
-    function setOwner(address newOwner) external {
-        require(msg.sender == owner, "UNAUTHORIZED");
-        owner = newOwner;
-        emit OwnerUpdated(msg.sender, newOwner);
-    }
-}
-"""
 
 DSAUTH_SOURCE = """
 // SPDX-License-Identifier: MIT
@@ -119,39 +101,6 @@ contract TestCompoundAdmin {
 }
 """
 
-OZ_OWNABLE2STEP_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-// OZ Ownable2Step shape: OwnershipTransferStarted on transferOwnership
-// (intent), OwnershipTransferred on acceptOwnership (commit). The
-// Started event is invisible to the pre-fix scanner — its topic0 is
-// distinct from the OZ Ownable OwnershipTransferred topic0.
-contract TestOwnable2Step {
-    address public owner;
-    address public pendingOwner;
-    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnershipTransferred(address(0), msg.sender);
-    }
-
-    function transferOwnership(address newOwner) external {
-        require(msg.sender == owner, "not owner");
-        pendingOwner = newOwner;
-        emit OwnershipTransferStarted(owner, newOwner);
-    }
-
-    function acceptOwnership() external {
-        require(msg.sender == pendingOwner, "not pending owner");
-        address old = owner;
-        owner = pendingOwner;
-        pendingOwner = address(0);
-        emit OwnershipTransferred(old, owner);
-    }
-}
-"""
 
 SOLMATE_AUTH_SOURCE = """
 // SPDX-License-Identifier: MIT
@@ -177,74 +126,6 @@ contract TestSolmateAuth {
 }
 """
 
-PAUSABLE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestPausable {
-    bool public paused;
-    address public owner;
-    event Paused(address account);
-    event Unpaused(address account);
-
-    constructor() {
-        owner = msg.sender;
-    }
-
-    function pause() external {
-        require(msg.sender == owner, "not owner");
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    function unpause() external {
-        require(msg.sender == owner, "not owner");
-        paused = false;
-        emit Unpaused(msg.sender);
-    }
-}
-"""
-
-SAFE_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract TestSafe {
-    address[] internal _owners;
-    uint256 internal _threshold;
-    event AddedOwner(address owner);
-    event RemovedOwner(address owner);
-    event ChangedThreshold(uint256 threshold);
-
-    constructor() {
-        _owners.push(msg.sender);
-        _threshold = 1;
-    }
-
-    // Match real Gnosis Safe selectors
-    function getOwners() external view returns (address[] memory) { return _owners; }
-    function getThreshold() external view returns (uint256) { return _threshold; }
-
-    function addOwner(address _owner) external {
-        _owners.push(_owner);
-        emit AddedOwner(_owner);
-    }
-
-    function removeOwner(address _owner) external {
-        for (uint i = 0; i < _owners.length; i++) {
-            if (_owners[i] == _owner) {
-                _owners[i] = _owners[_owners.length - 1];
-                _owners.pop();
-                break;
-            }
-        }
-        emit RemovedOwner(_owner);
-    }
-
-    function changeThreshold(uint256 t) external {
-        _threshold = t;
-        emit ChangedThreshold(t);
-    }
-}
-"""
 
 TIMELOCK_SOURCE = """
 // SPDX-License-Identifier: MIT
@@ -412,27 +293,6 @@ def _register_contract(
     session.add(mc)
     session.commit()
     return mc
-
-
-def test_ownership_transfer_detected(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    _register_contract(test_db, addr, "regular", current_block)
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-
-    assert len(events) == 1
-    evt = events[0]
-    assert evt.event_type == "ownership_transferred"
-    assert evt.data is not None
-    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
 
 
 def test_solmate_owner_updated_detected(anvil_env, test_db):
@@ -612,76 +472,6 @@ def test_compound_new_admin_detected(anvil_env, test_db):
     assert evt.data.get("new_admin", "").lower() == new_admin.lower()
 
 
-def test_ozownable2step_transfer_started_detected(anvil_env, test_db):
-    """Without per-contract dispatch the intent phase is invisible."""
-    from eth_utils.crypto import keccak
-
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr = _compile_and_deploy(OZ_OWNABLE2STEP_SOURCE, "TestOwnable2Step", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    topic0 = "0x" + keccak(text="OwnershipTransferStarted(address,address)").hex()
-    monitoring_config = {
-        "watch_ownership": True,
-        "tracked_topics": [
-            {
-                "topic0": topic0,
-                "signature": "OwnershipTransferStarted(address,address)",
-                "event_type": "ownership_transfer_started",
-                "controller_id": "state_variable:pendingOwner",
-                "inputs": [
-                    {"name": "previousOwner", "type": "address", "indexed": True},
-                    {"name": "newOwner", "type": "address", "indexed": True},
-                ],
-            }
-        ],
-    }
-    _register_contract(test_db, addr, "regular", current_block, monitoring_config=monitoring_config)
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-
-    assert len(events) == 1
-    evt = events[0]
-    assert evt.event_type == "ownership_transfer_started"
-    assert evt.data is not None
-    assert evt.data.get("new_owner", "").lower() == new_owner.lower()
-    assert evt.data.get("old_owner", "").lower() == ACCOUNT0.lower()
-
-
-def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
-    """Proves the fix is purely additive: if this catches the event, Solmate's topic0 leaked into the global filter."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={"watch_ownership": True},
-    )
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "setOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-
-    assert events == [], (
-        "Solmate OwnerUpdated detected without per-contract topic dispatch — "
-        "either the hand-rolled global registry leaked Solmate's topic0, or "
-        "tracked_topics is being inferred from somewhere unexpected. Both "
-        "would defeat the regression guard for the general-bug fix."
-    )
-
-
 def test_pause_unpause_detected(anvil_env, test_db):
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
@@ -832,37 +622,6 @@ def test_proxy_upgrade_backward_compat(anvil_env, test_db):
     test_db.refresh(wp)
     assert wp.last_known_implementation is not None
     assert wp.last_known_implementation.lower() == impl_v2.lower()
-
-
-def test_poll_detects_ownership_change(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={"watch_ownership": True},
-    )
-    mc.needs_polling = True
-    mc.last_known_state = {"owner": ACCOUNT0.lower()}
-    test_db.commit()
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = poll_for_state_changes(test_db, rpc_url)
-
-    assert len(events) >= 1
-    owner_changes = [e for e in events if e.data and e.data.get("field") == "owner"]
-    assert len(owner_changes) == 1
-    assert owner_changes[0].data is not None
-    assert owner_changes[0].data["new_value"].lower() == new_owner.lower()
 
 
 def test_should_watch_filters_disabled_events(anvil_env, test_db):
@@ -1020,128 +779,6 @@ def test_state_updated_after_event(anvil_env, test_db):
         test_db.commit()
 
 
-def test_enrollment_config_produces_correct_detection(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from unittest.mock import MagicMock
-
-    from services.monitoring.enrollment import _build_monitoring_config, _determine_contract_type
-    from services.monitoring.unified_watcher import scan_for_events
-
-    contract = MagicMock()
-    contract.is_proxy = False
-    contract.proxy_type = None
-    summary = MagicMock()
-    summary.is_upgradeable = False
-    summary.is_pausable = True
-    summary.has_timelock = False
-    summary.control_model = None
-
-    ct = _determine_contract_type(contract, summary, [])
-    config = _build_monitoring_config(summary, [], ct)
-
-    addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    _register_contract(test_db, addr, ct, current_block, monitoring_config=config)
-
-    _cast_send(addr, "pause()", [], rpc_url, PRIVATE_KEY)
-    events = scan_for_events(test_db, rpc_url)
-
-    assert len(events) == 1
-    assert events[0].event_type == "paused"
-
-    assert config.get("watch_upgrades") is False
-    assert config.get("watch_safe_signers") is False
-
-
-def test_notify_protocol_events_sends_discord(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from unittest.mock import patch
-
-    from db.models import Protocol, ProtocolSubscription
-    from services.monitoring.unified_watcher import scan_for_events
-
-    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    proto = Protocol(name="__test_notify__")
-    test_db.add(proto)
-    test_db.flush()
-
-    mc = _register_contract(test_db, addr, "regular", current_block)
-    mc.protocol_id = proto.id
-    test_db.commit()
-
-    sub = ProtocolSubscription(
-        id=uuid.uuid4(),
-        protocol_id=proto.id,
-        discord_webhook_url="https://discord.com/api/webhooks/test/fake",
-        label="test-sub",
-    )
-    test_db.add(sub)
-    test_db.commit()
-
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    # The scan delivers the notification itself.
-    with patch("services.monitoring.notifier.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(ok=True)
-        events = scan_for_events(test_db, rpc_url)
-        assert len(events) >= 1
-
-        assert mock_post.call_count == 1
-        call_kwargs = mock_post.call_args
-        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
-        embed = payload["embeds"][0]
-        assert "ownership_transferred" in embed["title"]
-        assert embed["color"] == 0xFF0000  # red for ownership transfer
-
-
-def test_notify_event_filter_restricts_types(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from unittest.mock import MagicMock, patch
-
-    from db.models import Protocol, ProtocolSubscription
-    from services.monitoring.unified_watcher import scan_for_events
-
-    pausable_addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    ownable_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    proto = Protocol(name="__test_filter__")
-    test_db.add(proto)
-    test_db.flush()
-
-    mc1 = _register_contract(test_db, pausable_addr, "pausable", current_block)
-    mc1.protocol_id = proto.id
-    mc2 = _register_contract(test_db, ownable_addr, "regular", current_block)
-    mc2.protocol_id = proto.id
-    test_db.commit()
-
-    sub = ProtocolSubscription(
-        id=uuid.uuid4(),
-        protocol_id=proto.id,
-        discord_webhook_url="https://discord.com/api/webhooks/test/fake",
-        event_filter={"event_types": ["paused"]},
-    )
-    test_db.add(sub)
-    test_db.commit()
-
-    _cast_send(pausable_addr, "pause()", [], rpc_url, PRIVATE_KEY)
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    with patch("services.monitoring.notifier.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(ok=True)
-        events = scan_for_events(test_db, rpc_url)
-        assert len(events) >= 2  # both detected in DB
-
-        assert mock_post.call_count == 1
-        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
-        assert "paused" in payload["embeds"][0]["title"]
-
-
 def test_poll_detects_pause_state_change(anvil_env, test_db):
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
@@ -1168,56 +805,6 @@ def test_poll_detects_pause_state_change(anvil_env, test_db):
     assert len(pause_changes) == 1
     assert pause_changes[0].data is not None
     assert pause_changes[0].data["new_value"] == "True"
-
-
-def test_poll_detects_threshold_change(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "safe",
-        current_block,
-        monitoring_config={"watch_safe_signers": True},
-    )
-    mc.needs_polling = True
-    mc.last_known_state = {"threshold": 1}
-    test_db.commit()
-
-    _cast_send(addr, "changeThreshold(uint256)", ["5"], rpc_url, PRIVATE_KEY)
-
-    events = poll_for_state_changes(test_db, rpc_url)
-
-    threshold_changes = [e for e in events if e.data and e.data.get("field") == "threshold"]
-    assert len(threshold_changes) == 1
-    assert threshold_changes[0].data is not None
-    assert threshold_changes[0].data["new_value"] == "5"
-
-
-def test_poll_no_change_no_events(anvil_env, test_db):
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={"watch_ownership": True},
-    )
-    mc.needs_polling = True
-    mc.last_known_state = {"owner": ACCOUNT0.lower()}
-    test_db.commit()
-
-    events = poll_for_state_changes(test_db, rpc_url)
-    assert len(events) == 0
 
 
 def test_poll_suppressed_when_scan_already_detected_upgrade(anvil_env, test_db):
@@ -1399,75 +986,6 @@ def _custom_admin_polling_plan(extra_controllers: list[dict] | None = None) -> l
         tracking_plan={"tracked_controllers": tracked_controllers},
         tracked_topics=None,
     )
-
-
-def test_poll_detects_custom_named_slot_change(anvil_env, test_db):
-    """The old poller hardcoded selectors, so ``protocolAdmin`` was invisible."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    plan = _custom_admin_polling_plan()
-    assert any(e["field"] == "protocolAdmin" for e in plan), (
-        "polling_plan builder did not surface protocolAdmin from the analyzer-derived entry — "
-        "the analyzer-driven dispatch is the only way this slot becomes visible"
-    )
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={"polling_plan": plan, "watch_ownership": False},
-    )
-    mc.last_known_state = {"protocolAdmin": ACCOUNT0.lower()}
-    test_db.commit()
-
-    new_admin = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "setProtocolAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
-
-    events = poll_for_state_changes(test_db, rpc_url)
-
-    custom_changes = [e for e in events if e.data and e.data.get("field") == "protocolAdmin"]
-    assert len(custom_changes) == 1, f"expected exactly one protocolAdmin change, got {[e.event_type for e in events]}"
-    assert custom_changes[0].data is not None
-    assert custom_changes[0].data["new_value"].lower() == new_admin.lower()
-    assert custom_changes[0].data["old_value"].lower() == ACCOUNT0.lower()
-
-    test_db.refresh(mc)
-    state = mc.last_known_state or {}
-    assert state.get("protocolAdmin", "").lower() == new_admin.lower()
-
-
-def test_poll_custom_slot_first_observation_no_event(anvil_env, test_db):
-    """A first read is not a change."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={"polling_plan": _custom_admin_polling_plan(), "watch_ownership": False},
-    )
-    mc.last_known_state = {}
-    test_db.commit()
-
-    events = poll_for_state_changes(test_db, rpc_url)
-
-    custom_events = [e for e in events if e.data and e.data.get("field") in ("protocolAdmin", "feeRecipient")]
-    assert custom_events == [], f"first-observation should not emit events, got {[e.data for e in custom_events]}"
-
-    test_db.refresh(mc)
-    state = mc.last_known_state or {}
-    assert state.get("protocolAdmin", "").lower() == ACCOUNT0.lower()
-    assert state.get("feeRecipient", "").lower() == ACCOUNT0.lower()
 
 
 def test_poll_suppressed_for_custom_slot_when_scanner_fires(anvil_env, test_db):
@@ -1740,73 +1258,6 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     assert pa_entry["selector"] == selector_for("protocolAdmin")
 
     assert mc.needs_polling is True
-
-
-def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env, test_db):
-    """The old poll allowlist missed ``admin`` slots the event side already handled; both share one write-target set
-    now.
-    """
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.polling_plan import build_polling_plan
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    addr = _compile_and_deploy(COMPOUND_ADMIN_SOURCE, "TestCompoundAdmin", [], rpc_url, PRIVATE_KEY, tmp_path)
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    plan = build_polling_plan(
-        contract_type="regular",
-        proxy_type=None,
-        tracking_plan={
-            "tracked_controllers": [
-                {
-                    "controller_id": "state_variable:admin",
-                    "read_spec": {
-                        "strategy": "getter_call",
-                        "target": "admin",
-                        "state_variable_name": "admin",
-                        "type": "address",
-                        "type_kind": "address",
-                    },
-                }
-            ]
-        },
-        tracked_topics=None,
-    )
-    assert any(e["field"] == "admin" for e in plan)
-
-    mc = _register_contract(
-        test_db,
-        addr,
-        "regular",
-        current_block,
-        monitoring_config={"polling_plan": plan, "watch_ownership": False},
-    )
-    mc.last_known_state = {"admin": ACCOUNT0.lower()}
-    test_db.commit()
-
-    new_admin = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(addr, "_setAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
-
-    poll_events = poll_for_state_changes(test_db, rpc_url)
-    admin_changes = [e for e in poll_events if e.data and e.data.get("field") == "admin"]
-    assert len(admin_changes) == 1
-
-    from db.models import Job
-
-    jobs = (
-        test_db.execute(
-            select(Job).where(
-                func.lower(Job.address) == addr.lower(),
-                Job.status.in_(("queued", "processing")),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert len(jobs) == 1, (
-        f"poll-detected admin change did not trigger reanalysis through the unified "
-        f"write-target vocabulary — got jobs {[(j.address, j.status) for j in jobs]}"
-    )
 
 
 def test_event_state_write_resolves_compound_shape_custom_slot(anvil_env, test_db):

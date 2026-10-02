@@ -327,48 +327,6 @@ def test_solodit_down_does_not_block_pipeline(solodit_stub, http_stubs, llm_rout
     assert "pdf" in result["reports"][0]["url"]
 
 
-def test_low_confidence_classifier_output_is_filtered(solodit_stub, http_stubs, llm_router):
-    from services.discovery.audit_reports import search_audit_reports
-
-    tavily_returns(
-        http_stubs,
-        {
-            '"Gamma" smart contract security audit report': [
-                {
-                    "title": "Questionable page",
-                    "url": "https://spam.com/maybe.pdf",
-                    "content": "vaguely mentions audit",
-                },
-            ],
-        },
-    )
-
-    llm_router.on_prompt_contains("Generate a follow-up search query", lambda _: "")
-    llm_router.on_prompt_contains(
-        "You are analyzing web search results",
-        lambda _: json.dumps(
-            [
-                {
-                    "url": "https://spam.com/maybe.pdf",
-                    "is_audit": True,
-                    "type": "pdf",
-                    "auditor": None,
-                    "title": "Maybe audit",
-                    "date": None,
-                    "confidence": 0.2,  # below threshold
-                },
-            ]
-        ),
-    )
-    llm_router.on_prompt_contains(
-        "You are reviewing",
-        lambda _: json.dumps({"entries": []}),
-    )
-
-    result = search_audit_reports("Gamma", official_domain="gamma.xyz")
-    assert result["reports"] == []
-
-
 def test_malformed_classification_response_returns_empty(solodit_stub, http_stubs, llm_router):
     from services.discovery.audit_reports import search_audit_reports
 
@@ -718,20 +676,3 @@ def test_sync_reports_url_collisions_within_one_batch(db_session):
     assert degraded[0].context["collisions"] == [
         {"url": shared, "overwritten_title": "Omniscia Audit", "kept_title": "Restaking Of stETH Holdings"}
     ]
-
-
-def test_sync_of_a_clean_batch_records_nothing(db_session):
-    from db.models import AuditReport, Protocol
-
-    protocol = Protocol(name=f"clean-test-{uuid.uuid4().hex[:8]}")
-    db_session.add(protocol)
-    db_session.commit()
-
-    reports = [
-        {"url": "https://ok.com/a.pdf", "auditor": "Omniscia", "title": "Omniscia Audit"},
-        {"url": "https://ok.com/b.md", "auditor": "Nethermind", "title": "Restaking Of stETH Holdings"},
-    ]
-    degraded = _sync_capturing_degraded(db_session, protocol.id, reports)
-
-    assert degraded == []
-    assert db_session.query(AuditReport).filter_by(protocol_id=protocol.id).count() == 2

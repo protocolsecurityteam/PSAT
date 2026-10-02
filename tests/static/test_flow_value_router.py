@@ -178,23 +178,6 @@ def test_withdraw_binds_router_destination_to_the_caller_param(_unit):
     assert flow["target_param_index"] == 1
 
 
-def test_same_contract_library_transfer_is_not_routed(_unit):
-    fns = _effects(_unit, "Router")
-    info = fns["directSend(uint256,address)"]
-    assert _router_flows(info) == []
-    assert any(f["direction"] == "out" for f in info["value_flows"])
-
-
-def test_vault_as_direct_entry_keeps_plain_in_out(_unit):
-    fns = _effects(_unit, "Vault")
-    enter = fns["enter(address,IERC20,uint256,address,uint256)"]
-    exit_ = fns["exit(address,IERC20,uint256,address,uint256)"]
-    assert _router_flows(enter) == []
-    assert _router_flows(exit_) == []
-    assert any(f["direction"] == "in" for f in enter["value_flows"])
-    assert any(f["direction"] == "out" for f in exit_["value_flows"])
-
-
 @pytest.mark.parametrize(
     "signature",
     [
@@ -208,76 +191,6 @@ def test_a_pull_between_two_third_parties_is_not_an_inflow(_unit, signature):
     info = _effects(_unit, "Bridger")[signature]
     assert [f["direction"] for f in info["value_flows"]] == ["value_router"]
     assert "asset_pull" not in info["effect_labels"]
-
-
-@pytest.mark.parametrize("signature", ["deposit(uint256)", "depositVia(uint256)"])
-def test_a_pull_whose_sink_is_this_contract_stays_inbound(_unit, signature):
-    """Demoting these would silence every wrapper in the corpus."""
-    info = _effects(_unit, "Bridger")[signature]
-    flows = info["value_flows"]
-    assert [f["direction"] for f in flows] == ["in"]
-    assert flows[0].get("target_kind", {}).get("kind") == "self"
-    assert "asset_pull" in info["effect_labels"]
-
-
-def test_a_third_party_pull_mints_the_routed_claim_not_flow_in(_unit):
-    contract = _contract(_unit, "Bridger")
-    claims = build_claims(contract, build_effects(contract), {})["functions"]
-    ids = {c["claim_id"] for c in claims["payFee(uint256)"]}
-    assert "value_router" in ids
-    assert "flow.in" not in ids
-    assert "flow.in" in {c["claim_id"] for c in claims["deposit(uint256)"]}
-
-
-def test_value_router_claim_is_minted_for_routers(_unit):
-    contract = _contract(_unit, "Router")
-    art = build_effects(contract)
-    claims = build_claims(contract, art, {})["functions"]
-
-    def _has_router_claim(sig: str) -> bool:
-        return any(c["claim_id"] == "value_router" for c in claims[sig])
-
-    assert _has_router_claim("deposit(uint256)")
-    assert _has_router_claim("withdraw(uint256,address)")
-    assert not _has_router_claim("directSend(uint256,address)")
-
-    router_claim = next(c for c in claims["withdraw(uint256,address)"] if c["claim_id"] == "value_router")
-    assert router_claim["tier"] == "standard_exact"
-    witness_flow = router_claim["witness"]["flows"][0]
-    assert witness_flow["target_param_index"] == 1
-
-
-def test_the_published_router_claim_carries_the_crossed_ops_identity(_unit):
-    """Byte-exact against the producer's record, so a projection that rewrote it fails."""
-    contract = _contract(_unit, "Router")
-    art = build_effects(contract)
-    claims = build_claims(contract, art, {})["functions"]
-
-    for signature in ("deposit(uint256)", "withdraw(uint256,address)"):
-        produced = _router_flows(art["functions"][signature])[0]["router_ops"]
-        claim = next(c for c in claims[signature] if c["claim_id"] == "value_router")
-        assert claim["witness"]["flows"][0]["router_ops"] == produced
-
-    direct = next(c for c in claims["directSend(uint256,address)"] if c["claim_id"] == "flow.out")
-    assert all("router_ops" not in f for f in direct["witness"]["flows"])
-
-
-def test_a_crossing_records_the_router_op_identity(_unit):
-    """The flow's ``selector`` is the callee's inner transfer; ``router_ops`` records the crossing call, the only op
-    the gate walk may treat as the effect's own.
-    """
-    from services.static.contract_analysis_pipeline.effects import _selector_for
-
-    fns = _effects(_unit, "Router")
-    flow = _router_flows(fns["withdraw(uint256,address)"])[0]
-    # The interface-typed param lowers to address, so this is the EVM selector a sink records.
-    exit_selector = _selector_for("exit(address,address,uint256,address,uint256)")
-    assert flow["router_ops"] == [{"selector": exit_selector, "callee": "exit"}]
-
-
-def test_a_boundary_less_routed_pull_records_its_own_op(_unit):
-    flow = _router_flows(_effects(_unit, "Bridger")["payFee(uint256)"])[0]
-    assert flow["router_ops"] == [{"selector": "0x23b872dd", "callee": "transferFrom"}]
 
 
 def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_path):

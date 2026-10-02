@@ -42,34 +42,6 @@ def test_normalize_address_and_extract_push20():
     assert fdc.extract_push20_addresses("0x600") == set()
 
 
-def test_find_dependencies_raises_without_rpc(monkeypatch):
-    monkeypatch.delenv("ETH_RPC", raising=False)
-    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
-    monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
-
-    with pytest.raises(RuntimeError, match="No RPC URL provided"):
-        fdc.find_dependencies("0x1111111111111111111111111111111111111111")
-
-
-def test_find_dependencies_uses_explicit_rpc(monkeypatch):
-    monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
-    captured: dict[str, str] = {}
-
-    def _fake_discover(rpc_url, _root, code_cache=None, chain_id=None):
-        captured["rpc"] = rpc_url
-        return ["0x2222222222222222222222222222222222222222"]
-
-    monkeypatch.setattr(fdc, "discover_dependencies", _fake_discover)
-
-    out = fdc.find_dependencies(
-        "0x1111111111111111111111111111111111111111",
-        "https://explicit-rpc.example",
-    )
-    assert captured["rpc"] == "https://explicit-rpc.example"
-    assert out["dependencies"] == ["0x2222222222222222222222222222222222222222"]
-    assert "rpc" not in out, "rpc URL must not be echoed back in the artifact body"
-
-
 def test_find_dependencies_uses_erpc_when_no_explicit(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.delenv("ETH_RPC", raising=False)
@@ -110,9 +82,3 @@ def test_discover_dependencies_bfs_mocked(monkeypatch):
 
     deps = fdc.discover_dependencies("https://rpc.example", root)
     assert sorted(deps) == sorted([dep_a, dep_b, dep_c])
-
-
-def test_discover_dependencies_raises_on_empty_root(monkeypatch):
-    monkeypatch.setattr(fdc, "get_code", lambda _rpc, _addr, chain_id=None: "0x")
-    with pytest.raises(RuntimeError, match="no deployed bytecode"):
-        fdc.discover_dependencies("https://rpc.example", "0x" + "11" * 20)

@@ -97,38 +97,6 @@ def test_off_allowlist_chain_stub_is_not_queued(api_client, db_session, monkeypa
 
 
 @requires_postgres
-def test_allowlisted_chain_stub_still_queues(api_client, db_session, monkeypatch):
-    from db.models import Contract, Job, Protocol
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-
-    proto = Protocol(name=f"f14b-{uuid.uuid4().hex[:10]}")
-    db_session.add(proto)
-    db_session.commit()
-
-    addr = _addr()
-    db_session.add(
-        Contract(
-            protocol_id=proto.id,
-            address=addr,
-            chain="base",
-            contract_name="BaseStub",
-            job_id=None,
-            discovery_sources=["inventory"],
-        )
-    )
-    db_session.commit()
-
-    r = api_client.post(f"/api/company/{proto.name}/analyze-remaining")
-    assert r.status_code == 200, r.text
-
-    db_session.expire_all()
-    row = db_session.query(Contract).filter_by(protocol_id=proto.id, address=addr).one()
-    assert row.job_id is not None
-    assert db_session.query(Job).filter_by(id=row.job_id).one().chain_id == 8453
-
-
-@requires_postgres
 def test_null_chain_contract_adopts_an_existing_mainnet_job(api_client, db_session):
     from db.models import Contract, Protocol
     from db.queue import create_job

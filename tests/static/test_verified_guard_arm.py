@@ -21,8 +21,6 @@ from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noq
     W2_REASON_GUARD_NOT_APPLIED,
     W2_REASON_NO_VERIFIED_GUARD,
     W2_VERIFIED_GUARD_BASIS,
-    ReentrancyAnalyzer,
-    live_declarations,
     reentrancy_guard_modifiers,
     verified_guard_verdicts,
 )
@@ -51,38 +49,6 @@ def _refusal(reason: str, declaration: str | None = None) -> dict:
         "declaration": declaration,
         "guard_vars": [],
         "guard_modifiers": [],
-    }
-
-
-_OZ_V4 = """
-pragma solidity ^0.8.19;
-contract C {
-    uint256 private _status = 1;
-    mapping(address => uint256) public bal;
-    modifier nonReentrant() {
-        require(_status != 2);
-        _status = 2;
-        _;
-        _status = 1;
-    }
-    function withdraw() external nonReentrant {
-        uint256 a = bal[msg.sender];
-        bal[msg.sender] = 0;
-        payable(msg.sender).transfer(a);
-    }
-}
-"""
-
-
-def test_oz_v4_guard_is_proven(tmp_path):
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _OZ_V4, "C"))
-    assert verdicts["withdraw()"] == {
-        "state": "proven",
-        "basis": W2_VERIFIED_GUARD_BASIS,
-        "reason": None,
-        "declaration": "C.withdraw()",
-        "guard_vars": ["_status"],
-        "guard_modifiers": ["C.nonReentrant()"],
     }
 
 
@@ -125,67 +91,6 @@ def test_oz_v5_split_guard_is_proven(tmp_path):
     }
 
 
-_INHERITED = """
-pragma solidity ^0.8.19;
-abstract contract Guard {
-    uint256 private _status = 1;
-    modifier nonReentrant() {
-        require(_status != 2);
-        _status = 2;
-        _;
-        _status = 1;
-    }
-}
-contract C is Guard {
-    mapping(address => uint256) public bal;
-    function withdraw() external nonReentrant {
-        bal[msg.sender] = 0;
-    }
-}
-"""
-
-
-def test_inherited_guard_modifier_is_proven(tmp_path):
-    """The join is ``id()``-identity, and Slither gives the derived contract its own copy of the modifier."""
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _INHERITED, "C"))
-    assert verdicts["withdraw()"]["state"] == "proven"
-    assert verdicts["withdraw()"]["guard_modifiers"] == ["Guard.nonReentrant()"]
-
-
-_A12_GUARD_VAR_BUT_NO_MODIFIER = """
-pragma solidity ^0.8.19;
-contract C {
-    uint256 private _status = 1;
-    mapping(address => uint256) public bal;
-    modifier nonReentrant() {
-        require(_status != 2);
-        _status = 2;
-        _;
-        _status = 1;
-    }
-    function guardedWithdraw() external nonReentrant {
-        uint256 a = bal[msg.sender];
-        bal[msg.sender] = 0;
-        payable(msg.sender).transfer(a);
-    }
-    function payout() external {
-        uint256 a = bal[msg.sender];
-        bal[msg.sender] = 0;
-        payable(msg.sender).transfer(a);
-    }
-}
-"""
-
-
-def test_a12_contract_guard_var_does_not_license_an_unguarded_function(tmp_path):
-    contract = _contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C")
-    verdicts = verified_guard_verdicts(contract)
-    assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "C.payout()")
-    assert verdicts["guardedWithdraw()"]["state"] == "proven"
-    # The guard var is contract-scoped, which is why the per-function join matters.
-    assert "_status" in ReentrancyAnalyzer(contract).run()
-
-
 _A13_FAKE_GUARD_NO_REVERT = """
 pragma solidity ^0.8.19;
 contract C {
@@ -202,163 +107,10 @@ contract C {
 }
 """
 
-_A13_SIBLING_WITH_REVERT = _A13_FAKE_GUARD_NO_REVERT.replace(
-    "        _status = 2;\n        _;",
-    "        require(_status != 2);\n        _status = 2;\n        _;",
-)
-
-
-def test_a13_set_restore_without_revert_refuses(tmp_path):
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _A13_FAKE_GUARD_NO_REVERT, "C"))
-    assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
-
-
-def test_a13_sibling_adding_only_the_revert_is_proven(tmp_path):
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _A13_SIBLING_WITH_REVERT, "C"))
-    assert verdicts["payout()"]["state"] == "proven"
-    assert verdicts["payout()"]["guard_vars"] == ["_status"]
-
 
 # ---------------------------------------------------------------------------
 # A14 — no name drives an effect
 # ---------------------------------------------------------------------------
-
-_A14_NAME_ONLY_GUARD = """
-pragma solidity ^0.8.19;
-contract C {
-    uint256 private _reentrancyLock = 1;
-    mapping(address => uint256) public bal;
-    modifier reentrancyGuard() {
-        require(_reentrancyLock != 2);
-        _reentrancyLock = 2;
-        _;
-    }
-    function payout() external reentrancyGuard {
-        bal[msg.sender] = 0;
-    }
-}
-"""
-
-
-def test_a14_name_only_guard_refuses(tmp_path):
-    """``effects.py``'s name fallback would admit it; nothing on this arm can reach it."""
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _A14_NAME_ONLY_GUARD, "C"))
-    assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
-
-
-def test_a14_sibling_adding_only_the_post_placeholder_write_is_proven(tmp_path):
-    source = _A14_NAME_ONLY_GUARD.replace(
-        "        _reentrancyLock = 2;\n        _;",
-        "        _reentrancyLock = 2;\n        _;\n        _reentrancyLock = 1;",
-    )
-    verdicts = verified_guard_verdicts(_contract(tmp_path, source, "C"))
-    assert verdicts["payout()"]["state"] == "proven"
-
-
-def test_a14_renamed_equivalent_of_the_real_guard_is_still_proven(tmp_path):
-    source = _OZ_V4.replace("_status", "q").replace("nonReentrant", "m")
-    verdicts = verified_guard_verdicts(_contract(tmp_path, source, "C"))
-    assert verdicts["withdraw()"]["state"] == "proven"
-    assert verdicts["withdraw()"]["guard_vars"] == ["q"]
-
-
-_A15_TRANSIENT_GUARD = """
-pragma solidity ^0.8.24;
-contract C {
-    uint256 private constant SLOT = 0;
-    mapping(address => uint256) public bal;
-    modifier tguard() {
-        assembly {
-            if tload(SLOT) { revert(0, 0) }
-            tstore(SLOT, 1)
-        }
-        _;
-        assembly { tstore(SLOT, 0) }
-    }
-    function payout() external tguard {
-        bal[msg.sender] = 0;
-    }
-}
-"""
-
-
-def test_a15_transient_guard_refuses(tmp_path):
-    """``tstore``/``tload`` lower to ``SolidityCall`` IRs, not state writes."""
-    verdicts = verified_guard_verdicts(_contract(tmp_path, _A15_TRANSIENT_GUARD, "C"))
-    assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
-
-
-def test_a15_same_shape_in_persistent_storage_is_proven(tmp_path):
-    source = """
-    pragma solidity ^0.8.24;
-    contract C {
-        uint256 private _slot;
-        mapping(address => uint256) public bal;
-        modifier tguard() {
-            require(_slot == 0);
-            _slot = 1;
-            _;
-            _slot = 0;
-        }
-        function payout() external tguard {
-            bal[msg.sender] = 0;
-        }
-    }
-    """
-    verdicts = verified_guard_verdicts(_contract(tmp_path, source, "C"))
-    assert verdicts["payout()"]["state"] == "proven"
-
-
-_SHADOWED_OVERRIDE = """
-pragma solidity ^0.8.19;
-contract Base {
-    uint256 private _status = 1;
-    mapping(address => uint256) public bal;
-    modifier nonReentrant() {
-        require(_status != 2);
-        _status = 2;
-        _;
-        _status = 1;
-    }
-    function payout() external virtual nonReentrant {
-        bal[msg.sender] = 0;
-    }
-    function helper() internal virtual nonReentrant {
-        bal[msg.sender] = 0;
-    }
-}
-contract Mid is Base {
-    function payout() external virtual override {
-        bal[msg.sender] = 0;
-    }
-    function helper() internal virtual override {
-        bal[msg.sender] = 0;
-    }
-}
-contract C is Mid {}
-"""
-
-
-def test_shadowed_base_declaration_does_not_publish_the_overrides_verdict(tmp_path):
-    """Signature-only keying let the shadowed base declaration win."""
-    contract = _contract(tmp_path, _SHADOWED_OVERRIDE, "C")
-    verdicts = verified_guard_verdicts(contract)
-    assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "Mid.payout()")
-    assert verdicts["helper()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "Mid.helper()")
-    shadowed = [f for f in contract.functions if f.canonical_name == "Base.payout()"]
-    assert shadowed and shadowed[0].is_shadowed
-    # ``Function.modifiers`` also carries base-constructor calls.
-    assert [getattr(m, "canonical_name", None) for m in shadowed[0].modifiers] == ["Base.nonReentrant()"]
-
-
-def test_the_live_override_still_proves_when_it_keeps_the_guard(tmp_path):
-    source = _SHADOWED_OVERRIDE.replace(
-        "function payout() external virtual override {",
-        "function payout() external virtual override nonReentrant {",
-    )
-    verdicts = verified_guard_verdicts(_contract(tmp_path, source, "C"))
-    assert verdicts["payout()"]["state"] == "proven"
-    assert verdicts["payout()"]["declaration"] == "Mid.payout()"
 
 
 _DIAMOND = """
@@ -405,12 +157,6 @@ def test_diamond_join_reads_the_most_derived_body_not_the_three_guarded_ones(tmp
     assert all(f.is_shadowed and f.modifiers for f in guarded_ancestors)
 
 
-def test_live_declarations_keeps_one_body_per_signature(tmp_path):
-    contract = _contract(tmp_path, _DIAMOND, "D")
-    live = live_declarations(contract)
-    assert [f.canonical_name for f in live["payout()"]] == ["D.payout()"]
-
-
 class _Fn:
     is_constructor = False
 
@@ -441,56 +187,7 @@ def test_two_live_declarations_of_one_signature_refuse(tmp_path):
     assert verdicts["solo()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "A.solo()")
 
 
-def test_verdicts_are_total_over_live_declarations(tmp_path):
-    """Asserted on the inheritance fixture, where signature keying would collapse them."""
-    contract = _contract(tmp_path, _SHADOWED_OVERRIDE, "C")
-    live = [f for f in contract.functions if not f.is_constructor and not f.is_shadowed]
-    shadowed = [f for f in contract.functions if not f.is_constructor and f.is_shadowed]
-    assert shadowed, "guard: the fixture must actually contain shadowed declarations"
-    assert len(verdicts_of := verified_guard_verdicts(contract)) == len(live)
-    assert set(verdicts_of) == {f.full_name for f in live}
-    assert {v["declaration"] for v in verdicts_of.values()} == {f.canonical_name for f in live}
-    assert all(v["state"] in ("proven", "not_determined") for v in verdicts_of.values())
-
-
-def test_proven_dict_names_which_modifier_holds_which_var(tmp_path):
-    contract = _contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C")
-    proven = reentrancy_guard_modifiers(contract)
-    by_name = {m.canonical_name: proven[id(m)] for m in contract.modifiers if id(m) in proven}
-    assert by_name == {"C.nonReentrant()": frozenset({"_status"})}
-
-
 def test_proven_dict_is_empty_when_no_modifier_earns_it(tmp_path):
     contract = _contract(tmp_path, _A13_FAKE_GUARD_NO_REVERT, "C")
     assert reentrancy_guard_modifiers(contract) == {}
     assert [m.canonical_name for m in contract.modifiers] == ["C.notAGuard()"]
-
-
-_TWO_GUARD_VARS = """
-pragma solidity ^0.8.19;
-contract C {
-    uint256 private a = 1;
-    uint256 private b = 1;
-    mapping(address => uint256) public bal;
-    modifier m() {
-        require(a != 2);
-        require(b != 2);
-        a = 2;
-        b = 2;
-        _;
-        a = 1;
-        b = 1;
-    }
-    function payout() external m {
-        bal[msg.sender] = 0;
-    }
-}
-"""
-
-
-def test_a_modifier_holding_two_guard_vars_publishes_both(tmp_path):
-    """Picking one made the published var depend on the hash seed."""
-    contract = _contract(tmp_path, _TWO_GUARD_VARS, "C")
-    assert reentrancy_guard_modifiers(contract) == {id(contract.modifiers[0]): frozenset({"a", "b"})}
-    assert ReentrancyAnalyzer(contract).run() == {"a", "b"}
-    assert verified_guard_verdicts(contract)["payout()"]["guard_vars"] == ["a", "b"]

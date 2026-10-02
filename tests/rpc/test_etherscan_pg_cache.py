@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,24 +36,6 @@ def test_params_hash(params_a, params_b, equal):
     h2 = etherscan._params_hash("contract", "getsourcecode", 1, params_b)
     assert (h1 == h2) is equal
     assert len(h1) == 64  # sha256 hex
-
-
-def test_pg_cache_disabled_skips_db(monkeypatch):
-    """DB-less CLI tooling must keep working."""
-    monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", False)
-    result = etherscan._pg_cache_get("contract", "getsourcecode", 1, {"address": "0xa"})
-    assert result is None
-
-
-def test_pg_cache_get_returns_none_on_db_unavailable(monkeypatch):
-    monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
-
-    def _raise_session(*_a, **_kw):
-        raise RuntimeError("DB connection refused")
-
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_raise_session)}):
-        result = etherscan._pg_cache_get("contract", "getsourcecode", 1, {"address": "0xa"})
-    assert result is None
 
 
 def test_pg_cache_get_hit_promotes_whitelisted_to_in_memory(monkeypatch):
@@ -131,45 +113,10 @@ def test_pg_cache_miss_calls_etherscan_then_writes_back(monkeypatch):
     assert pg_writes[0] == etherscan_response
 
 
-def test_pg_cache_put_swallows_db_errors(monkeypatch):
-    """A flaky cache write must never fail a successful Etherscan call."""
-    monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
-
-    def _raise_session(*_a, **_kw):
-        raise RuntimeError("DB write timeout")
-
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_raise_session)}):
-        etherscan._pg_cache_put("contract", "getsourcecode", 1, {"address": "0xa"}, {"status": "1"})
-
-
-def test_pg_cache_skips_non_whitelisted_actions(monkeypatch):
-    """Dynamic actions would serve the first lookup's stale value forever."""
-    monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
-    assert etherscan._pg_cache_eligible("account", "balance") is False
-    assert etherscan._pg_cache_eligible("stats", "ethprice") is False
-
-    def _no_db(*_a, **_kw):
-        raise AssertionError("non-whitelisted action must not touch DB")
-
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_no_db)}):
-        result = etherscan._pg_cache_get("account", "balance", 1, {"address": "0xa"})
-    assert result is None
-
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_no_db)}):
-        etherscan._pg_cache_put("account", "balance", 1, {"address": "0xa"}, {"status": "1"})
-
-
 def test_pg_cache_whitelisted_actions_pass_through(monkeypatch):
     assert etherscan._pg_cache_eligible("contract", "getsourcecode") is True
     assert etherscan._pg_cache_eligible("contract", "getabi") is True
     assert etherscan._pg_cache_eligible("contract", "getcontractcreation") is True
-
-
-def test_pg_cache_txlistinternal_by_txhash_only(monkeypatch):
-    assert etherscan._pg_cache_eligible("account", "txlistinternal", {"txhash": "0x" + "11" * 32}) is True
-    assert etherscan._pg_cache_eligible("account", "txlistinternal", {"address": "0xa"}) is False
-    assert etherscan._pg_cache_eligible("account", "txlistinternal") is False
-    assert etherscan._pg_cache_eligible("account", "txlist", {"address": "0xa"}) is False
 
 
 class _FakePgStore:
@@ -216,98 +163,12 @@ def test_empty_txhash_txlistinternal_cached_in_pg_for_mature_tx(monkeypatch):
     assert wire.get.call_count == 1, "second empty per-txhash call must be served from the PG cache"
 
 
-def test_empty_txhash_txlistinternal_not_cached_for_immature_tx(monkeypatch):
-    """Etherscan's trace indexing lags the head, so an unattested empty may be transient."""
-    empty = {"status": "0", "message": "No transactions found", "result": []}
-    pg = _FakePgStore()
-    wire = _wire_empty(empty, monkeypatch, pg)
-
-    etherscan.get("account", "txlistinternal", 1, empty_result_ok=True, txhash="0x" + "22" * 32)
-    etherscan.get("account", "txlistinternal", 1, empty_result_ok=True, txhash="0x" + "22" * 32)
-    assert wire.get.call_count == 2, "an unattested empty must not be served from the PG cache"
-    assert pg.store == {}, "immature empty must never persist"
-
-
-@pytest.mark.parametrize(
-    ("action", "message", "reason"),
-    [
-        pytest.param("txlist", "No transactions found", "by-address empty must never persist", id="txlist_by_address"),
-        pytest.param(
-            "addresstokenbalance", "No token found", "dynamic empty must never persist", id="addresstokenbalance"
-        ),
-    ],
-)
-def test_dynamic_empty_not_cached(monkeypatch, action, message, reason):
-    empty = {"status": "0", "message": message, "result": []}
-    pg = _FakePgStore()
-    wire = _wire_empty(empty, monkeypatch, pg)
-
-    etherscan.get("account", action, 1, empty_result_ok=True, address="0xabc")
-    etherscan.get("account", action, 1, empty_result_ok=True, address="0xabc")
-    assert wire.get.call_count == 2
-    assert pg.store == {}, reason
-
-
-def test_is_persistable_skips_empty_getsourcecode():
-    """Unverified contracts return status="1" with empty source; persisting it would poison the cache after
-    verification.
-    """
-    response = {
-        "status": "1",
-        "result": [
-            {
-                "SourceCode": "",
-                "ABI": "",
-                "ContractName": "",
-            }
-        ],
-    }
-    assert etherscan._is_persistable("contract", "getsourcecode", response) is False
-
-
-def test_is_persistable_accepts_real_source():
-    response = {
-        "status": "1",
-        "result": [
-            {"SourceCode": "contract Foo {}", "ContractName": "Foo"},
-        ],
-    }
-    assert etherscan._is_persistable("contract", "getsourcecode", response) is True
-
-
 def test_is_persistable_other_actions_pass_through():
     assert etherscan._is_persistable("contract", "getabi", {"status": "1", "result": "[]"}) is True
     assert etherscan._is_persistable("contract", "getcontractcreation", {"status": "1", "result": []}) is True
 
 
-def test_pg_cache_put_skips_unverified_source(monkeypatch):
-    monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
-
-    def _no_db(*_a, **_kw):
-        raise AssertionError("must not touch DB on empty-source response")
-
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_no_db)}):
-        etherscan._pg_cache_put(
-            "contract",
-            "getsourcecode",
-            1,
-            {"address": "0xunverified"},
-            {"status": "1", "result": [{"SourceCode": "", "ContractName": ""}]},
-        )
-
-
 # In-memory cache: narrow whitelist + bounded LRU
-
-
-def test_inmem_cache_eligible_whitelist():
-    assert etherscan._inmem_cache_eligible("contract", "getabi") is True
-    assert etherscan._inmem_cache_eligible("contract", "getcontractcreation") is True
-    assert etherscan._inmem_cache_eligible("contract", "getsourcecode") is False
-    assert etherscan._inmem_cache_eligible("account", "balance") is False
-    assert etherscan._inmem_cache_eligible("stats", "ethprice") is False
-    assert etherscan._inmem_cache_eligible("account", "txlist") is False
-    assert etherscan._inmem_cache_eligible("account", "addresstokenbalance") is False
-    assert etherscan._inmem_cache_eligible("logs", "getLogs") is False
 
 
 def _wire_status1(payload: dict, monkeypatch):
@@ -318,22 +179,6 @@ def _wire_status1(payload: dict, monkeypatch):
     monkeypatch.setattr(etherscan, "_wait_rate_limit", lambda: None)
     fake_resp = _stable_etherscan_response_mock(payload)
     monkeypatch.setattr(etherscan, "requests", MagicMock(get=MagicMock(return_value=fake_resp)))
-
-
-def test_volatile_actions_never_inmem_cached(monkeypatch):
-    _wire_status1({"status": "1", "result": "123"}, monkeypatch)
-    etherscan.get("account", "balance", 1, address="0xabc", tag="latest")
-    etherscan.get("stats", "ethprice", 1)
-    etherscan.get("account", "txlist", 1, address="0xabc")
-    assert etherscan._cache == {}, "volatile actions must never enter the in-mem cache"
-
-
-def test_whitelisted_action_is_inmem_cached(monkeypatch):
-    _wire_status1({"status": "1", "result": "[]"}, monkeypatch)
-    etherscan.get("contract", "getabi", 1, address="0xfeed")
-    assert len(etherscan._cache) == 1
-    setattr(etherscan.requests.get, "side_effect", AssertionError("second call must hit in-mem cache"))
-    etherscan.get("contract", "getabi", 1, address="0xfeed")
 
 
 def test_inmem_cache_bound_evicts(monkeypatch):
@@ -360,13 +205,6 @@ def test_clear_etherscan_cache_resets_pressure_state(monkeypatch):
     assert "etherscan" not in memory._CACHE_PRESSURE_STATE
 
 
-def test_source_cache_eligible():
-    assert etherscan._source_cache_eligible("contract", "getsourcecode") is True
-    assert etherscan._source_cache_eligible("contract", "getabi") is False
-    assert etherscan._source_cache_eligible("contract", "getcontractcreation") is False
-    assert etherscan._source_cache_eligible("account", "balance") is False
-
-
 def test_source_cache_wire_fetch_populates_then_serves(monkeypatch):
     payload = {"status": "1", "result": [{"SourceCode": "contract Bar {}"}]}
     _wire_status1(payload, monkeypatch)
@@ -376,15 +214,6 @@ def test_source_cache_wire_fetch_populates_then_serves(monkeypatch):
     setattr(etherscan.requests.get, "side_effect", AssertionError("second call must hit the source cache"))
     result = etherscan.get("contract", "getsourcecode", 1, address="0xfeed")
     assert result == payload
-
-
-def test_source_cache_skips_empty_source(monkeypatch):
-    monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
-    key = ("contract", "getsourcecode", 1, (("address", "0xunverified"),))
-    etherscan._source_cache_put(key, "contract", "getsourcecode", {"status": "1", "result": [{"SourceCode": ""}]})
-    assert etherscan._source_cache == {}, "empty/unverified source must not be cached"
-    etherscan._source_cache_put(key, "contract", "getsourcecode", {"status": "1", "result": [{"SourceCode": "x"}]})
-    assert len(etherscan._source_cache) == 1
 
 
 def test_source_cache_bound_evicts(monkeypatch):

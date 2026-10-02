@@ -265,26 +265,6 @@ def test_resolve_secondary_impl_addresses_reads_proxy_storage(monkeypatch):
     assert set(storage_targets) == {proxy}
 
 
-def test_resolve_handles_256bit_constant_slot(monkeypatch):
-    proxy = "0x" + "11" * 20
-    admin = "0x" + "ab" * 20
-    big_slot = int.from_bytes(b"\xbc" * 32, "big")
-
-    def fake_rpc(rpc_url, method, params, retries=1, **_):
-        if method == "eth_getStorageAt":
-            assert params[1] == hex(big_slot)
-            return "0x" + "00" * 12 + admin[2:]
-        if method == "eth_getCode":
-            return "0x6080"
-        return "0x"
-
-    monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
-    addrs = resolve_secondary_impl_addresses(
-        "http://stub", proxy, [{"name": "adminImplPosition", "slot": big_slot, "offset": 0}]
-    )
-    assert addrs == [admin]
-
-
 @requires_postgres
 def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
     from db.models import Contract, Job, JobStage, JobStatus

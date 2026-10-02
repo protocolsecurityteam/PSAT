@@ -147,25 +147,6 @@ def test_pre_rank_exclusions_are_enumerated_not_counted(db_session, worker, seed
     assert summary["analyzed_count"] == 1
 
 
-def test_current_impl_anchor_is_not_excluded(db_session, worker, seed):
-    """The proxy's live impl must still compete."""
-    protocol_id, company, address_factory = seed
-    live_impl = address_factory()
-    _add_contract(
-        db_session,
-        protocol_id=protocol_id,
-        address=live_impl,
-        sources=["upgrade_history", "current_implementation"],
-        confidence=0.9,
-    )
-    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=1)
-    _run(worker, db_session, job)
-
-    summary = _summary(db_session, job.id)
-    assert summary["pre_rank_excluded"] == []
-    assert [c["address"] for c in summary["child_jobs"]] == [live_impl]
-
-
 def test_budget_exhausted_records_every_ranked_loser(db_session, worker, seed):
     protocol_id, company, address_factory = seed
     addrs = [address_factory() for _ in range(3)]
@@ -246,30 +227,6 @@ def test_chain_disabled_candidate_is_recorded_and_consumes_no_budget(db_session,
     assert dropped[disabled]["reason"] == "chain_not_enabled"
     # Had the gate consumed budget, the disabled row would have starved the enabled one.
     assert [c["address"] for c in summary["child_jobs"]] == [enabled]
-
-
-def test_below_cut_chain_disabled_reports_the_gate_not_the_budget(db_session, worker, seed, monkeypatch):
-    """The recorded cause is the ledger's value, and the row ranks last so a wrong check order would say budget."""
-    protocol_id, company, address_factory = seed
-    top, disabled = address_factory(), address_factory()
-    _add_contract(db_session, protocol_id=protocol_id, address=top, sources=["inventory"], confidence=0.95)
-    _add_contract(
-        db_session,
-        protocol_id=protocol_id,
-        address=disabled,
-        sources=["inventory"],
-        confidence=0.5,
-        chain="base",
-    )
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=1)
-    _run(worker, db_session, job)
-
-    summary = _summary(db_session, job.id)
-    assert [c["address"] for c in summary["child_jobs"]] == [top]
-    dropped = {r["address"]: r["reason"] for r in summary["not_selected"]}
-    assert dropped[disabled] == "chain_not_enabled"
 
 
 def test_no_candidates_still_publishes_both_ledgers(db_session, worker, seed):

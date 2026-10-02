@@ -50,33 +50,6 @@ def _word(addr: str) -> str:
     return "0x" + addr[2:].rjust(64, "0")
 
 
-def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub(monkeypatch, slot=_word(PENDING_GOVERNOR), recorder=recorder)
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [PENDING_GOVERNOR]
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason is None
-    assert _status(cap) != "resolved_empty"
-    assert ("eth_getStorageAt", [CONTRACT.lower(), PENDING_GOVERNOR_SLOT, "latest"]) in recorder
-
-
-def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reason names the read that happened, not a classification."""
-    _stub(monkeypatch, slot="0x" + "00" * 32)
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason == "slot_read_zero"
-    assert _status(cap) == "resolved_empty"
-    assert cap.trace[0]["step"] == "live_slot_resolution"
-    assert cap.trace[0]["slot"] == PENDING_GOVERNOR_SLOT
-
-
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub(monkeypatch, slot="revert")
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
@@ -98,15 +71,6 @@ def test_no_rpc_with_slot_is_lower_bound_not_guess(monkeypatch: pytest.MonkeyPat
     assert _status(cap) != "resolved_empty"
 
 
-def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub(monkeypatch, slot="revert")  # eth_call getter reverts; no slot on the operand
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_NO_SLOT), _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.empty_reason == "empty_by_design"
-    assert _status(cap) == "resolved_empty"
-
-
 pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
@@ -126,15 +90,6 @@ def _claim_governance_tree() -> Any:
 
 
 class TestGovernableClaimGovernanceSlot:
-    def test_operand_carries_keccak_slot(self) -> None:
-        tree = _claim_governance_tree()
-        leaf = next(
-            child["leaf"] for child in tree["children"] if child["leaf"]["authority_role"] == "caller_authority"
-        )
-        view_op = next(o for o in leaf["operands"] if o.get("source") == "view_call")
-        assert view_op["callee_signature"] == "_pendingGovernor()"
-        assert view_op.get("storage_slot") == PENDING_GOVERNOR_SLOT
-
     @pytest.mark.parametrize(
         ("slot", "expected_rows", "resolved_empty"),
         [

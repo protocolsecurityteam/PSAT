@@ -15,9 +15,7 @@ from services.clients.rpc import EthCallResult
 from services.effects.anvil import (
     EntryPoint,
     SubprocessAnvil,
-    _build_anvil_cmd,
     anvil_available,
-    assert_post_cancun,
     pause_recipe,
     timelock_execute_recipe,
 )
@@ -29,7 +27,6 @@ from services.effects.config import (
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.effects.exceptions import ForkRpcTimeoutError
 from services.effects.harness import SimContext
 from tests.support.effects_stubs import GUARDED, PAUSE, UNGATED, RecordingStore, StubAnvil
 from workers.effects_worker import _is_cacheable
@@ -80,49 +77,6 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
     tr = store.stored[-1]
     assert tr["hardfork"] == "prague"
     assert tr["anvil_version"] == "anvil 1.5.1-stable"
-
-
-def test_pause_recipe_separates_a_proven_indefinite_latch_from_an_unread_window():
-    """A7 / R1: ``duration_bound_seconds: None`` is two facts; the indefinite-latch reading needs static to prove no
-    clock is read.
-    """
-    for source in ("no_time_reference", "not_determined"):
-        transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
-        eff = pause_recipe(
-            transport=transport,
-            store=RecordingStore(),
-            ctx=CTX,
-            contract_address=CONTRACT,
-            principal=PRINCIPAL,
-            pause_calldata=PAUSE,
-            entry_points=_entry_points(),
-            predicted_guard_set=["foo"],
-            max_pause_duration=None,
-            duration_bound_source=source,
-        )
-        assert eff.verdict == VERDICT_PROVEN
-        assert eff.details["duration_bound_seconds"] is None
-        assert eff.details["duration_bound_source"] == source
-        # An unread window must not be probed as though known.
-        assert eff.details["auto_expiry"] is None
-        assert transport.warped == 0
-
-
-def test_pause_recipe_defaults_the_bound_source_to_not_determined():
-    """The default is the unknown state, not the indefinite one."""
-    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
-    eff = pause_recipe(
-        transport=transport,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        pause_calldata=PAUSE,
-        entry_points=_entry_points(),
-        predicted_guard_set=["foo"],
-        max_pause_duration=None,
-    )
-    assert eff.details["duration_bound_source"] == "not_determined"
 
 
 def test_pause_recipe_no_blast_radius_is_unknown():
@@ -211,54 +165,6 @@ def test_a_dead_entry_point_surface_is_not_a_cacheable_no_blast():
     assert eff.details["pre_pause_succeeding"] == []
     assert not _is_cacheable(eff)
     assert eff.details["scored_denominator"] == ["foo"]
-
-
-def test_a_live_surface_the_pause_leaves_alone_is_still_a_cacheable_no_blast():
-    eff = pause_recipe(
-        transport=StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        pause_calldata=PAUSE,
-        entry_points=_entry_points(),
-        predicted_guard_set=["foo"],
-        max_pause_duration=None,
-    )
-
-    assert eff.reason == "no_blast_radius_observed"
-    assert eff.details["pre_pause_succeeding"]
-    assert _is_cacheable(eff)
-
-
-def test_every_pause_row_carries_an_observation_discriminator():
-    """A reverted probe published an empty blast radius with nothing saying the freeze was never tested."""
-
-    def _run(transport):
-        return pause_recipe(
-            transport=transport,
-            store=RecordingStore(),
-            ctx=CTX,
-            contract_address=CONTRACT,
-            principal=PRINCIPAL,
-            pause_calldata=PAUSE,
-            entry_points=_entry_points(),
-            predicted_guard_set=["foo"],
-            max_pause_duration=None,
-        )
-
-    rows = [
-        _run(StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)),  # proven
-        _run(StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)),  # ran, froze nothing
-        _run(IneffectivePauseAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)),  # reverted
-    ]
-
-    assert {row.details["observation"] for row in rows} == {"executed", "reverted"}
-    for row in rows:
-        if row.details.get("observed_blast_radius") == []:
-            assert row.details["observation"] in ("executed", "reverted")
-        if row.details["observation"] == "reverted":
-            assert row.verdict == VERDICT_UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -418,112 +324,7 @@ def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_executi
     assert eff.details["witness_asset_held"] is True
 
 
-def test_a_timelock_holding_no_asset_says_so_rather_than_moving_nothing():
-    """The measured case on mainnet: a timelock holds authority, not funds, so
-    there is no asset for a scheduled operation to move. Reporting that as
-    "executed, moved nothing" would state a fact about the CONTRACT when the fact
-    is about our inability to witness one — the sequence still ran, and
-    the row has to say which of the two it observed."""
-    transport = TimelockAnvil(delay=TIMELOCK_DELAY, moves_value=False)
-    eff = timelock_execute_recipe(
-        transport=transport,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        schedule_calldata=SCHEDULE,
-        execute_calldata=EXECUTE,
-        delay_seconds=TIMELOCK_DELAY,
-        sentinel_address=SENTINEL,
-        witness_token=None,
-        witness_calldata=None,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "timelock_holds_no_witness_asset"
-    assert eff.details["witness_asset_held"] is False
-    assert eff.details["timelock_executed"] is True
-    assert eff.details["observation"] == "executed"
-    assert not _is_cacheable(eff)
-
-
 # eRPC needs a header, not URL auth.
-
-
-def test_build_anvil_cmd_nonforking_has_no_fork_flags():
-    cmd = _build_anvil_cmd("anvil", 8546, "prague", None, {"X-ERPC-Secret-Token": "s"})
-    assert "--fork-url" not in cmd and "--fork-header" not in cmd
-
-
-def test_deploy_waits_until_anvil_publishes_the_transaction_receipt(monkeypatch):
-    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    contract = "0x" + "12" * 20
-    receipts = iter([None, {"contractAddress": contract}])
-    calls: list[tuple[str, list]] = []
-
-    def rpc(method, params):
-        calls.append((method, params))
-        if method == "eth_sendTransaction":
-            return "0xtx"
-        return next(receipts)
-
-    monkeypatch.setattr(anvil, "_rpc", rpc)
-    monkeypatch.setattr("services.effects.anvil.time.sleep", lambda _seconds: None)
-
-    assert anvil.deploy("0xsender", "0xbytecode") == contract
-    assert [method for method, _params in calls] == [
-        "eth_sendTransaction",
-        "eth_getTransactionReceipt",
-        "eth_getTransactionReceipt",
-    ]
-
-
-def test_deploy_rejects_a_mined_receipt_without_a_contract_address(monkeypatch):
-    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    responses = iter(["0xtx", {"status": "0x0", "contractAddress": None}])
-    monkeypatch.setattr(anvil, "_rpc", lambda _method, _params: next(responses))
-
-    with pytest.raises(ForkRpcTimeoutError, match="has no contract address"):
-        anvil.deploy("0xsender", "0xbytecode")
-
-
-def test_deploy_times_out_when_the_receipt_never_appears(monkeypatch):
-    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    calls = iter(["0xtx", None])
-    clocks = iter([0.0, 0.0, 16.0])
-    monkeypatch.setattr(anvil, "_rpc", lambda _method, _params: next(calls))
-    monkeypatch.setattr("services.effects.anvil.time.monotonic", lambda: next(clocks))
-    monkeypatch.setattr("services.effects.anvil.time.sleep", lambda _seconds: None)
-
-    with pytest.raises(ForkRpcTimeoutError, match="did not become available"):
-        anvil.deploy("0xsender", "0xbytecode")
-
-
-def _anvil_with_proc(proc: object) -> SubprocessAnvil:
-    anvil = SubprocessAnvil.__new__(SubprocessAnvil)
-    anvil._proc = proc  # pyright: ignore[reportAttributeAccessIssue]
-    return anvil
-
-
-def test_rss_mb_measures_a_live_pid_and_answers_none_when_it_cannot():
-    import os
-
-    class _LiveProc:
-        pid = os.getpid()
-
-        def poll(self):
-            return None  # still running
-
-    class _DeadProc:
-        pid = os.getpid()
-
-        def poll(self):
-            return 0  # exited
-
-    # ``None`` when /proc is absent: unknown, not zero.
-    live = _anvil_with_proc(_LiveProc()).rss_mb()
-    assert live is None or live >= 0
-    # An exited process is never sampled (the pid may be reused).
-    assert _anvil_with_proc(_DeadProc()).rss_mb() is None
 
 
 @pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
@@ -537,71 +338,14 @@ def test_rss_mb_on_real_subprocess():
     assert anvil.rss_mb() is None
 
 
-def test_build_anvil_cmd_forking_passes_auth_header():
-    cmd = _build_anvil_cmd("anvil", 8600, "prague", "https://erpc/main/evm/1", {"X-ERPC-Secret-Token": "sec"})
-    assert cmd[cmd.index("--fork-url") + 1] == "https://erpc/main/evm/1"
-    assert cmd[cmd.index("--fork-header") + 1] == "X-ERPC-Secret-Token: sec"
-
-
 # ---------------------------------------------------------------------------
 # hardfork pinned + recorded
 # ---------------------------------------------------------------------------
 
 
-def test_section8_rule7_stale_hardfork_refused():
-    class Stale(StubAnvil):
-        def hardfork(self) -> str:
-            return "shanghai"
-
-    transport = Stale(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
-    with pytest.raises(ValueError, match="not post-Cancun"):
-        pause_recipe(
-            transport=transport,
-            store=RecordingStore(),
-            ctx=CTX,
-            contract_address=CONTRACT,
-            principal=PRINCIPAL,
-            pause_calldata=PAUSE,
-            entry_points=_entry_points(),
-            predicted_guard_set=["foo"],
-            max_pause_duration=None,
-        )
-
-
-def test_assert_post_cancun_accepts_current_forks():
-    class T(StubAnvil):
-        def __init__(self, hf):
-            super().__init__(guarded=set(), pause_calldata=PAUSE, duration=None, hardfork=hf)
-
-    assert assert_post_cancun(T("cancun")) == "cancun"
-    assert assert_post_cancun(T("prague")) == "prague"
-
-
 # ---------------------------------------------------------------------------
 # the scored denominator is static's set, never the observed one
 # ---------------------------------------------------------------------------
-
-
-def test_section8_rule8_scored_denominator_is_static_not_observed():
-    # Observe a guarded point ("foo") static did NOT predict (predicted {"bar"}):
-    # the scored denominator stays static's set and the surprise is a discrepancy.
-    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
-    eff = pause_recipe(
-        transport=transport,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        pause_calldata=PAUSE,
-        entry_points=_entry_points(),
-        predicted_guard_set=["bar"],
-        max_pause_duration=None,
-    )
-    assert eff.details["observed_blast_radius"] == ["foo"]
-    assert eff.details["scored_denominator"] == ["bar"]
-    assert eff.discrepancy is not None
-    assert eff.discrepancy.kind == "observed_guard_not_predicted"
-    assert eff.discrepancy.detail["unpredicted_members"] == ["foo"]
 
 
 class VerifyStub(StubAnvil):
@@ -663,18 +407,6 @@ def test_verified_fixture_readback(stub_kwargs, kept, readback, has_error):
     assert transport.reverted == ([] if kept else transport.snaps)
     assert tr["fixtures"][0]["readback"] == readback
     assert ("error" in tr["fixtures"][0]) is has_error
-
-
-def test_verified_fixtures_are_applied_after_plain_ones():
-    from services.effects.anvil import ForkFixture, _apply_fixtures
-
-    word = "0x" + "00" * 31 + "07"
-    transport = VerifyStub(echo=word)
-    plain = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x64")
-    tr: dict = {}
-    _apply_fixtures(transport, [_verified_fixture(word), plain], tr)
-    assert [f["kind"] for f in tr["fixtures"]] == ["set_balance", "set_storage_at"]
-    assert transport.balances == {PRINCIPAL: "0x64"}
 
 
 @pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")

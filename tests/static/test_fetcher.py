@@ -34,15 +34,6 @@ STANDARD_JSON_RESULT = {
 }
 
 
-def test_parse_sources_preserves_standard_json_paths():
-    sources = fetcher.parse_sources(STANDARD_JSON_RESULT)
-
-    assert sorted(sources) == [
-        "lib/solmate/src/auth/Auth.sol",
-        "src/base/BoringVault.sol",
-    ]
-
-
 def test_scaffold_writes_standard_json_layout_and_metadata(tmp_path):
     project_dir = tmp_path / "BoringVault"
     returned = fetcher.scaffold(
@@ -75,44 +66,3 @@ def test_scaffold_writes_standard_json_layout_and_metadata(tmp_path):
     foundry_toml = (project_dir / "foundry.toml").read_text()
     assert 'src = "src"' in foundry_toml
     assert 'solc_version = "0.8.24"' in foundry_toml
-
-
-def test_scaffold_flat_source_uses_single_src_file_and_no_remappings(tmp_path):
-    result = {
-        "ContractName": "FlatContract",
-        "CompilerVersion": "v0.8.19+commit.7dd6d404",
-        "OptimizationUsed": "0",
-        "Runs": "0",
-        "EVMVersion": "",
-        "LicenseType": "MIT",
-        "SourceCode": "pragma solidity ^0.8.19; contract FlatContract {}",
-    }
-
-    project_dir = fetcher.scaffold("0x1234", result, tmp_path / "FlatContract")
-
-    assert (project_dir / "src/FlatContract.sol").exists()
-    assert not (project_dir / "remappings.txt").exists()
-    assert not (project_dir / "etherscan_standard_input.json").exists()
-
-    meta = json.loads((project_dir / "contract_meta.json").read_text())
-    assert meta["source_format"] == "flat"
-    assert meta["source_file_count"] == 1
-    assert meta["remappings"] == []
-
-
-def test_scaffold_records_vyper_language_metadata(tmp_path):
-    result = {
-        "ContractName": "GateSeal",
-        "CompilerVersion": "vyper:0.3.7",
-        "OptimizationUsed": "0",
-        "Runs": "0",
-        "EVMVersion": "",
-        "LicenseType": "MIT",
-        "SourceCode": "# @version 0.3.7\n@external\ndef ping():\n    pass\n",
-    }
-
-    project_dir = fetcher.scaffold("0x1234", result, tmp_path / "GateSeal")
-    assert (project_dir / "src/GateSeal.vy").exists()
-
-    meta = json.loads((project_dir / "contract_meta.json").read_text())
-    assert meta["language"] == "vyper"

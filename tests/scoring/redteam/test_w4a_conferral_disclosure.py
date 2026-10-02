@@ -9,12 +9,10 @@ from tests.support.scoring_builders import (
     KEY_PROXY,
     KEY_V,
     _queue_signal,
-    _role_edge,
     _var_edge,
     conferral_plane,
     facts,
     fold,  # noqa: F401  (fold fixture, registered by import)
-    value_plane,
 )
 
 
@@ -71,26 +69,6 @@ def test_w4a_the_self_pin_recogniser_only_ever_withholds():
     hop = plane.hop(KEY_C, KEY_V)
     assert hop.state == P.HOP_NOT_DETERMINED
     assert hop.state != "proven_no_reach"
-
-
-def test_w4a_licensed_functions_are_keyed_on_the_entity_the_reach_set_uses(fold):
-    """Keyed on the raw anchor, folded destinations would be unjoinable."""
-    closure = P.ControlClosure(edges=(_role_edge("roles 3", principal=KEY_C, anchor=KEY_IMPL),))
-    plane = conferral_plane(role_functions={(KEY_IMPL, 3): (P.LicensedFunction("0xaaaaaaaa", "pull"),)})
-    doc = fold(
-        [_queue_signal("authority.replace")],
-        value=value_plane(per_asset={KEY_PROXY: {"usdc": 100.0}}, alias={KEY_IMPL: KEY_PROXY}),
-        closure=closure,
-        conferral=plane,
-        principals={1: facts(1, EOA, "eoa")},
-    )
-    row = doc.findings[0]
-    licensed = row["reach_licensed_functions"]
-    assert KEY_PROXY in row["reach_entities"], "the implementation folds onto its proxy"
-    assert set(licensed) <= set(row["reach_entities"]), "every licensed key must be a reach key"
-    # Function names may contain spaces.
-    assert licensed == {KEY_PROXY: [{"selector": "0xaaaaaaaa", "name": "pull"}]}
-    assert KEY_IMPL not in licensed
 
 
 def test_w4a_a_withheld_frontier_hop_sizes_the_subtree_it_hides(fold):

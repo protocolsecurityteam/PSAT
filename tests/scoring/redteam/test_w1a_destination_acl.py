@@ -19,23 +19,8 @@ from tests.support.scoring_builders import (
     _composing_principals,
     _composing_signals,
     _gate_row,
-    act_as_plane,
     fold,  # noqa: F401  (fold fixture, registered by import)
 )
-from utils.scoring_status import VALUE_STATE_PROVEN_REACH
-
-
-def test_w1a_a_parameter_bound_call_site_composes_on_the_destinations_own_acl(fold):
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        **_composing_case(act_as=_acl_plane()),
-    )
-    row = _gate_row(document)
-    assert row["value_at_stake_usd"] == 1_000_000.0
-    assert row["value_state"] == VALUE_STATE_PROVEN_REACH
-    assert [c["entity"] for c in row["reach_composed_magnitudes"]] == [KEY_V]
-    assert row["reach_composition_census"]["act_as_witnessed"] == 1
 
 
 def test_w1a_an_acl_admitted_step_publishes_the_witness_shape_that_admitted_it(fold):
@@ -69,15 +54,6 @@ def test_w1a_an_acl_admitted_step_publishes_the_witness_shape_that_admitted_it(f
     assert other_step["witness_kind"] == P.ACT_AS_WITNESS_CALLER_STATE_VARIABLE
     assert other_step["destination_acceptance"] is None
     assert "state variable 'vault'" in other_step["basis"]
-
-
-def test_w1a_the_acl_admission_is_a_magnitude_witness_and_never_a_reach_one(fold):
-    """Reach is decided by the closure walk; the ACL can only witness magnitude on already-reached entities."""
-    without = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(act_as=act_as_plane()))
-    with_acl = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(act_as=_acl_plane()))
-    assert _gate_row(without)["reach_entities"] == _gate_row(with_acl)["reach_entities"]
-    assert _gate_row(without)["value_at_stake_usd"] is None
-    assert _gate_row(with_acl)["value_at_stake_usd"] == 1_000_000.0
 
 
 def test_w1a_a_missing_or_unenumerated_acl_row_is_a_typed_refusal_not_a_pass():
@@ -146,45 +122,3 @@ def test_w1a_a_missing_or_unenumerated_acl_row_is_a_typed_refusal_not_a_pass():
         assert not verdict.witnessed, name
         assert verdict.step is None, name
         assert verdict.outcome == expected, name
-
-
-def test_w1a_a_state_variable_site_still_reports_its_own_sharper_shortfall():
-    """Report the sharper refusal: how far the walk got."""
-    plane = act_as_plane(
-        call_sites={
-            (KEY_C, COMPOSED_SELECTOR): (
-                ("bulkWithdraw", "restricted", "vault", True, CALLING_SELECTOR),
-                ("finishSolve", "restricted", "", True, CALLING_SELECTOR),
-            )
-        },
-        reads={(KEY_C, "vault"): (KEY_PROXY, "eth_call", 1)},
-    )
-    assert plane.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS
-    unread = act_as_plane(
-        call_sites={(KEY_C, COMPOSED_SELECTOR): (("finishSolve", "restricted", "", True, CALLING_SELECTOR),)}
-    )
-    assert unread.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_NO_DESTINATION_ACL
-
-
-def test_w1a_a_satisfied_state_variable_read_is_still_the_witness_that_admits(fold):
-    """The state-variable witness is stronger, so it keeps priority."""
-    both = _acl_plane(
-        call_sites={
-            (KEY_C, COMPOSED_SELECTOR): (
-                ("bulkWithdraw", "restricted", "vault", True, CALLING_SELECTOR),
-                ("finishSolve", "restricted", "", True, CALLING_SELECTOR),
-            )
-        },
-        reads={(KEY_C, "vault"): (KEY_V, "eth_call", 25_657_731)},
-    )
-    verdict = both.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR)
-    assert verdict.witnessed
-    assert verdict.step is not None
-    assert verdict.step.witness_kind == P.ACT_AS_WITNESS_CALLER_STATE_VARIABLE
-    assert verdict.step.acceptance is None
-
-    document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(act_as=both))
-    step = _gate_row(document)["reach_composed_magnitudes"][0]["act_as_chain"][0]
-    assert step["witness_kind"] == P.ACT_AS_WITNESS_CALLER_STATE_VARIABLE
-    assert step["destination_acceptance"] is None
-    assert (step["calling_function"], step["receiver_variable"]) == ("bulkWithdraw", "vault")

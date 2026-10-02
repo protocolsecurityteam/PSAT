@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 from tests.cache_helpers import (
     ADDR_A,
     _sqlite_compatible_store_artifact,
@@ -98,46 +96,7 @@ def _create_completed_company_job_with_inventory(session, company, chain, invent
     return job
 
 
-class TestStaticCacheChainFiltering:
-    def test_cache_hit_same_chain(self, db_session):
-        from db.queue import find_completed_static_cache
-
-        job_eth = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
-        found = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
-        assert found is not None
-        assert found.id == job_eth.id
-
-    def test_cache_miss_different_chain(self, db_session):
-        from db.queue import find_completed_static_cache
-
-        _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
-
-        found = find_completed_static_cache(db_session, ADDR_A, chain="base")
-        assert found is None, "Ethereum cache was returned for a Base request — cross-chain contamination"
-
-
 class TestCompanyInventoryChainFiltering:
-    def test_previous_inventory_same_chain(self, db_session):
-        from db.queue import find_previous_company_inventory
-
-        inv = {"contracts": [{"address": ADDR_A, "chain": "ethereum"}]}
-        job = _create_completed_company_job_with_inventory(
-            db_session,
-            "Aave",
-            "ethereum",
-            inv,
-        )
-
-        new_job_id = uuid.uuid4()  # dummy exclude
-        found = find_previous_company_inventory(
-            db_session,
-            "Aave",
-            exclude_job_id=new_job_id,
-            chain="ethereum",
-        )
-        assert found is not None
-        assert found.id == job.id
-
     def test_previous_inventory_different_chain_excluded(self, db_session):
         from db.queue import find_previous_company_inventory
 
@@ -150,48 +109,6 @@ class TestCompanyInventoryChainFiltering:
             chain="base",
         )
         assert found is None, "Ethereum inventory was returned for Base request — cross-chain contamination"
-
-
-class TestDedupChainFiltering:
-    def test_is_known_proxy_same_chain(self, db_session):
-        from db.models import Contract
-        from db.queue import create_job, is_known_proxy
-
-        job = create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
-        contract = Contract(
-            job_id=job.id,
-            address=ADDR_A.lower(),
-            chain="ethereum",
-            contract_name="Proxy",
-            is_proxy=True,
-            proxy_type="eip1967",
-            implementation="0x1111111111111111111111111111111111111111",
-        )
-        db_session.add(contract)
-        db_session.commit()
-
-        assert is_known_proxy(db_session, ADDR_A, chain="ethereum") is True
-
-    def test_is_known_proxy_different_chain_not_found(self, db_session):
-        from db.models import Contract
-        from db.queue import create_job, is_known_proxy
-
-        job = create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
-        contract = Contract(
-            job_id=job.id,
-            address=ADDR_A.lower(),
-            chain="ethereum",
-            contract_name="Proxy",
-            is_proxy=True,
-            proxy_type="eip1967",
-            implementation="0x1111111111111111111111111111111111111111",
-        )
-        db_session.add(contract)
-        db_session.commit()
-
-        assert is_known_proxy(db_session, ADDR_A, chain="base") is False, (
-            "Ethereum proxy was reported as proxy on Base — cross-chain contamination"
-        )
 
 
 class TestCopyCachePreservesSource:

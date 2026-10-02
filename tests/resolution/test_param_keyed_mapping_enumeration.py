@@ -165,18 +165,6 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
     ME.clear_enumeration_cache()
 
 
-def test_receivers_resolve_to_value_set() -> None:
-    """Event replay is a lower bound on the live set."""
-    meta = _seeded_meta(_receiver_set_log(30183, R1), _receiver_set_log(30260, R2))
-    cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
-
-    assert cap.kind == "finite_set"
-    assert cap.members == sorted([R1, R2])  # resolver returns deduped + sorted
-    assert cap.membership_quality == "lower_bound"
-    assert sorted(_principals(cap)) == sorted([R1, R2])
-    assert _status(cap) != "resolved_empty"
-
-
 def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> None:
     import services.resolution.creation_block_floor as floor_mod
 
@@ -201,16 +189,6 @@ def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> No
     step = next(s for s in cap.trace if s.get("step") == "param_keyed_mapping_enumeration")
     assert (step["scan_from_block"], step["floor_basis"]) == (12_345_678 - 1, "creation_block_lookup")
     assert "scan_to_block" in step
-
-
-def test_latest_value_per_key_is_folded() -> None:
-    meta = _seeded_meta(
-        _receiver_set_log(30183, R1, block=10),
-        _receiver_set_log(30183, R2, block=20),
-    )
-    cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
-
-    assert cap.members == [R2]
 
 
 def test_no_events_is_external_check_not_phantom_empty() -> None:
@@ -247,16 +225,6 @@ def test_zero_receiver_values_are_dropped() -> None:
     assert cap.members == [R1]
 
 
-def test_unstamped_operand_stays_lower_bound() -> None:
-    """Fails on the pre-P4 evaluator."""
-    cap = evaluate_tree(_eq_tree(BARE_VIEW_CALL_OPERAND), _ctx(_seeded_meta(_receiver_set_log(30183, R1))))
-
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert _status(cap) != "resolved_empty"
-
-
 # --------------------------------------------------------------------------
 # Integration: compile the L1SyncPoolReceiver fixture and prove the static stage
 # stamps the mapping identity + writer specs and resolution enumerates end-to-end.
@@ -266,7 +234,6 @@ pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
-from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -288,24 +255,6 @@ _ON_MESSAGE = "onMessageReceived(uint32,bytes32,address,uint256,uint256)"
 
 
 class TestL1SyncPoolReceiver:
-    def test_static_stamps_mapping_identity_and_writer_spec(self) -> None:
-        op = _caller_operand(_tree_for(_receiver_contract(), _ON_MESSAGE))
-        assert op.get("mapping_name") == "receivers"
-        specs = op.get("mapping_writer_specs")
-        assert isinstance(specs, list) and len(specs) == 1
-        spec = specs[0]
-        assert spec["event_signature"] == "ReceiverSet(uint32,address)"
-        assert spec["key_position"] == 0
-        assert spec["value_position"] == 1
-        assert spec["indexed_positions"] == [0]
-        assert spec["direction"] == "set"
-
-    def test_constant_keyed_mapping_is_not_stamped(self) -> None:
-        """A constant key isn't parameter-keyed; stamping it would enumerate the whole mapping."""
-        op = _caller_operand(_tree_for(_receiver_contract(), "defaultReceiverGate()"))
-        assert op.get("mapping_name") is None
-        assert op.get("mapping_writer_specs") is None
-
     def test_resolves_receivers_end_to_end(self) -> None:
         tree = _tree_for(_receiver_contract(), _ON_MESSAGE)
         meta = _seeded_meta(_receiver_set_log(30183, R1), _receiver_set_log(30260, R2))

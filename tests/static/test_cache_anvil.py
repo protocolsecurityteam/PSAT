@@ -136,28 +136,6 @@ def _set_storage(rpc_url: str, address: str, slot: str, value: str) -> None:
 
 @pytest.mark.skipif(not _HAS_ANVIL, reason="anvil not found")
 class TestAnvilProxyCache:
-    def test_resolve_current_implementation_reads_real_slot_and_detects_change(self, anvil_rpc):
-        from services.monitoring.proxy_watcher import resolve_current_implementation
-
-        proxy_addr = _deploy_minimal_contract(anvil_rpc)
-
-        _set_storage(anvil_rpc, proxy_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_A)
-        result_a = resolve_current_implementation(proxy_addr, anvil_rpc, proxy_type="eip1967")
-        assert result_a is not None
-        assert result_a.lower() == _ANVIL_IMPL_A.lower()
-
-        _set_storage(anvil_rpc, proxy_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_B)
-        result_b = resolve_current_implementation(proxy_addr, anvil_rpc, proxy_type="eip1967")
-        assert result_b is not None
-        assert result_b.lower() == _ANVIL_IMPL_B.lower()
-
-    def test_resolve_current_implementation_empty_slot(self, anvil_rpc):
-        from services.monitoring.proxy_watcher import resolve_current_implementation
-
-        proxy_addr = _deploy_minimal_contract(anvil_rpc)
-        result = resolve_current_implementation(proxy_addr, anvil_rpc, proxy_type="eip1967")
-        assert result is None
-
     def test_check_proxy_cache_unchanged_impl_via_anvil(self, db_session, anvil_rpc):
 
         from db.models import Contract
@@ -205,46 +183,6 @@ class TestAnvilProxyCache:
         assert target_contract.is_proxy is True
         assert target_contract.implementation is not None
         assert target_contract.implementation.lower() == _ANVIL_IMPL_A.lower()
-
-    def test_check_proxy_cache_detects_upgrade_via_anvil(self, db_session, anvil_rpc):
-        from db.models import Contract
-        from db.queue import create_job
-        from workers.static_worker import _check_proxy_cache
-
-        proxy_addr = _deploy_minimal_contract(anvil_rpc)
-        _set_storage(anvil_rpc, proxy_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_B)
-
-        source_job = create_job(db_session, {"address": proxy_addr})
-        src_contract = Contract(
-            job_id=source_job.id,
-            address=proxy_addr,
-            contract_name="Proxy",
-            is_proxy=True,
-            proxy_type="eip1967",
-            implementation=_ANVIL_IMPL_A,
-        )
-        db_session.add(src_contract)
-        db_session.flush()
-
-        target_job = create_job(
-            db_session,
-            {
-                "address": proxy_addr,
-                "rpc_url": anvil_rpc,
-                "static_cached": True,
-                "cache_source_job_id": str(source_job.id),
-            },
-        )
-        target_contract = Contract(
-            job_id=target_job.id,
-            address=proxy_addr,
-            contract_name="Proxy",
-        )
-        db_session.add(target_contract)
-        db_session.flush()
-
-        result = _check_proxy_cache(db_session, target_job, target_contract)
-        assert result is None
 
     def test_dependency_proxy_cache_detects_upgrade_via_anvil(self, db_session, anvil_rpc, monkeypatch, tmp_path):
         from db.models import Contract

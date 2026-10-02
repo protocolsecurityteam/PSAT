@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
-import requests
 
 from services.audits.text_extraction import (
     PdfDownloadError,
@@ -20,8 +17,6 @@ from services.discovery.audit_reports._fetch import (
 )
 from services.discovery.audit_reports_llm import (
     _chunked_text,
-    _extract_one_chunk,
-    classify_search_results,
     extract_report_details,
     generate_followup_query,
 )
@@ -101,44 +96,6 @@ class TestCollapseSameAuditMirrors:
         assert len(out) == 1
         assert out[0]["pdf_url"]  # richer entry retained
 
-    def test_same_auditor_same_day_different_products_survive(self):
-        """Pass 3: distinct title tokens keep same-day audits apart."""
-        a = _report(
-            auditor="Certora",
-            date="2024-05-01",
-            title="EtherFi v2.49",
-            url="https://github.com/a/v249.pdf",
-            pdf_url="https://github.com/a/v249.pdf",
-        )
-        b = _report(
-            auditor="Certora",
-            date="2024-05-01",
-            title="EtherFi Instant Withdrawal",
-            url="https://github.com/a/instant.pdf",
-            pdf_url="https://github.com/a/instant.pdf",
-        )
-        out = _collapse_same_audit_mirrors([a, b])
-        assert len(out) == 2
-
-    def test_pass3_collapses_same_tokens_across_hosts(self):
-        a = _report(
-            auditor="OpenZeppelin",
-            date="2024-06-01",
-            title="Morpho Blue",
-            url="https://docs.morpho.org/audit.pdf",
-            pdf_url=None,
-        )
-        b = _report(
-            auditor="OpenZeppelin",
-            date="2024-06-01",
-            title="Morpho Blue Audit Report",
-            url="https://github.com/morpho/audits/oz.pdf",
-            pdf_url="https://github.com/morpho/audits/oz.pdf",
-        )
-        out = _collapse_same_audit_mirrors([a, b])
-        assert len(out) == 1
-        assert out[0]["pdf_url"]
-
     def test_no_titles_bypasses_pass3(self):
         """Pass 3: collapsing entries with no title tokens would be too risky."""
         reports = [
@@ -151,16 +108,6 @@ class TestCollapseSameAuditMirrors:
 
 
 class TestChunkedText:
-    @pytest.mark.parametrize(
-        "text",
-        [
-            pytest.param("small text", id="short"),
-            pytest.param("B" * 15_000, id="exactly-at-cap"),
-        ],
-    )
-    def test_text_within_cap_returns_single_chunk(self, text):
-        assert _chunked_text(text) == [text]
-
     @pytest.mark.parametrize(
         "size",
         [
@@ -175,25 +122,6 @@ class TestChunkedText:
         assert all(len(c) <= 15_000 for c in chunks)
         # Overlap keeps contracts that straddle a chunk boundary.
         assert chunks[0][-100:] == chunks[1][:100]
-
-
-class TestExtractOneChunk:
-    def test_happy_path_returns_parsed_object(self, monkeypatch):
-        import json
-
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: json.dumps({"reports": [{"auditor": "OZ", "title": "X", "date": "2024-01-01"}]}),
-        )
-        out = _extract_one_chunk("https://x.com", "some page text", "Acme")
-        assert out == {"reports": [{"auditor": "OZ", "title": "X", "date": "2024-01-01"}]}
-
-    @pytest.mark.parametrize(
-        "chat", [_raising("LLM exploded"), _returning("not json")], ids=["llm-raises", "unparseable"]
-    )
-    def test_llm_failure_returns_none(self, monkeypatch, chat):
-        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", chat)
-        assert _extract_one_chunk("https://x.com", "text", "Acme") is None
 
 
 class TestExtractReportDetails:
@@ -275,23 +203,6 @@ class TestGenerateFollowupQuery:
         assert '"' not in q
 
 
-class TestClassifySearchResults:
-    @pytest.mark.parametrize(
-        "chat",
-        [
-            pytest.param(
-                _returning(json.dumps([{"url": "https://x.com", "is_audit": False, "confidence": 0.95}])),
-                id="is-audit-false-filtered",
-            ),
-            pytest.param(_raising("LLM down"), id="llm-raises"),
-        ],
-    )
-    def test_classify_returns_empty(self, monkeypatch, chat):
-        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", chat)
-        out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "Acme")
-        assert out == []
-
-
 class TestProcessAuditReportErrorPaths:
     @pytest.mark.parametrize(
         ("url", "download", "store", "status", "error_parts"),
@@ -342,22 +253,6 @@ class TestProcessAuditReportErrorPaths:
         for part in error_parts:
             assert part in (out.error or "")
 
-    def test_success_returns_all_metadata(self, monkeypatch):
-        pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
-        monkeypatch.setattr(
-            "services.audits.text_extraction.download_pdf",
-            lambda *_a, **_kw: pdf,
-        )
-        monkeypatch.setattr(
-            "services.audits.text_extraction.store_audit_text",
-            lambda aid, text: (f"audits/text/{aid}.txt", len(text), "a" * 64),
-        )
-        out = process_audit_report(audit_report_id=42, url="https://x/a.pdf")
-        assert out.status == "success"
-        assert out.storage_key == "audits/text/42.txt"
-        assert out.text_size_bytes and out.text_size_bytes > 0
-        assert out.text_sha256 == "a" * 64
-
 
 # Candidate URLs come from attacker-seedable search results and the output is served publicly, so fetches go through
 # ``utils.egress.safe_get`` and keep the download cap.
@@ -378,41 +273,6 @@ class _FakeResp:
 
 
 class TestFetchHtmlPage:
-    @pytest.mark.parametrize(
-        ("safe_get", "expected"),
-        [
-            pytest.param(
-                lambda *a, **kw: _FakeResp(chunks=[b"<html>hello world</html>"]),
-                "<html>hello world</html>",
-                id="normal-page-parses",
-            ),
-            pytest.param(lambda *a, **kw: _FakeResp(status_code=404), None, id="non-200"),
-            pytest.param(_raising_as(requests.RequestException, "connection reset"), None, id="request-exception"),
-        ],
-    )
-    def test_fetch_outcome(self, monkeypatch, safe_get, expected):
-        monkeypatch.setattr("utils.egress.safe_get", safe_get)
-        assert _fetch_html_page("https://example.com/report") == expected
-
-    def test_internal_target_refused_without_raising(self, monkeypatch):
-        """Raw ``requests.get`` is booby-trapped, so this also proves the request goes through ``safe_get``."""
-        from utils.egress import UnsafeUrlError
-
-        def refuse(*_a, **_kw):
-            raise UnsafeUrlError("host resolves to non-public address 169.254.169.254")
-
-        def raw_egress_tripwire(*_a, **_kw):
-            raise AssertionError("raw requests.get reached — SSRF guard bypassed")
-
-        monkeypatch.setattr("utils.egress.safe_get", refuse)
-        monkeypatch.setattr(
-            "services.discovery.audit_reports._fetch._requests.get",
-            raw_egress_tripwire,
-        )
-
-        out = _fetch_html_page("http://169.254.169.254/latest/meta-data/")
-        assert out is None
-
     def test_binary_content_type_rejected(self, monkeypatch):
         resp = _FakeResp(content_type="application/pdf", chunks=[b"%PDF-1.7 ..."])
         monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)

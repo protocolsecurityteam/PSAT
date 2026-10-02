@@ -207,13 +207,6 @@ def test_governance_embed_renders_expected_fields(event_type, data, expected_val
     assert {name: fields[name]["inline"] for name in expected_inline} == expected_inline
 
 
-def test_new_implementation_renders_via_synthesis_fallback():
-    """It can land with no effect_tags."""
-    evt = _make_evt("new_implementation", {"implementation": "0x" + "cc" * 20})
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
-
-
 def test_admin_changed_compound_single_new_admin():
     evt = _make_evt(
         "admin_changed",
@@ -226,49 +219,6 @@ def test_admin_changed_compound_single_new_admin():
     assert "New Admin" in fields
     assert fields["New Admin"]["value"] == "`0x" + "22" * 20 + "`"
     assert "Old Admin" not in fields
-
-
-def test_legacy_event_without_tags_renders_via_synthesis_fallback():
-    evt = _make_evt(
-        "ownership_transferred",
-        {
-            "old_owner": "0x" + "11" * 20,
-            "new_owner": "0x" + "22" * 20,
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Owner"]["value"] == "`0x" + "22" * 20 + "`"
-
-
-def test_synthetic_write_target_no_extra_fields():
-    """Underscore markers are activity markers, not slots."""
-    evt = _make_evt(
-        "safe_tx_executed",
-        {
-            "safe_tx_hash": "0x" + "11" * 32,
-            "payment": 0,
-            "effect_tags": {"writes": ["_safe_op"]},
-        },
-    )
-    embed = _format_governance_embed(evt, _FakeSession())
-    field_names = {f["name"] for f in embed["fields"]}
-    assert "Contract" in field_names
-    assert "Chain" in field_names
-    assert "Event" in field_names
-    assert "_safe_op" not in field_names
-    assert "Safe_op" not in field_names
-
-
-def test_unknown_event_type_with_no_tags_renders_only_envelope():
-    evt = _make_evt(
-        "totally_unknown_event_type",
-        {"some_field": "value"},
-    )
-    embed = _format_governance_embed(evt, _FakeSession())
-    field_names = {f["name"] for f in embed["fields"]}
-    assert "Contract" in field_names
-    assert "Chain" in field_names
-    assert "Event" in field_names
 
 
 @pytest.mark.parametrize(

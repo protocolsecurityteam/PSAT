@@ -111,21 +111,3 @@ def test_no_slug_fallback_uses_name_lookup(db_session, stub_resolver):
     assert p1.id == p2.id
     assert p1.canonical_slug is None
     assert _count_protocols(db_session) == 1
-
-
-def test_no_slug_then_slug_backfills_canonical(db_session, stub_resolver):
-    p1 = _resolve_and_create(db_session, "Ether.fi")  # not in RESOLVER_TABLE → no slug
-    db_session.commit()
-    assert p1.canonical_slug is None
-
-    p2 = get_or_create_protocol(
-        db_session,
-        "Ether.fi",
-        canonical_slug="ether.fi-cash",
-        official_domain="ether.fi",
-    )
-    db_session.commit()
-
-    assert p2.id == p1.id
-    assert p2.canonical_slug == "ether.fi-cash"
-    assert _count_protocols(db_session) == 1

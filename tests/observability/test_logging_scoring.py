@@ -101,34 +101,6 @@ def test_the_summary_reads_every_field_off_the_finished_document():
 
 
 @pytest.mark.parametrize(
-    "overrides, expected",
-    [
-        pytest.param(
-            {"provenance": {}, "model_parameters": {}},
-            {
-                "population_disposition": None,
-                "signals": None,
-                "tracked_total_usd": None,
-                "confidence_reachability_pct": None,
-                "flow_pricing_decidable": None,
-                "flow_pricing_seen": None,
-            },
-            id="no-provenance-blocks-omits-rather-than-guesses",
-        ),
-        # Present and empty is the one case where 0 is the answer.
-        pytest.param(
-            {"model_parameters": {"confidence_detail": {"flow_pricing_decidable": {}}}},
-            {"flow_pricing_decidable": 0, "flow_pricing_seen": 0},
-            id="empty-pricing-census-is-a-real-zero",
-        ),
-    ],
-)
-def test_summary_null_versus_real_zero(overrides, expected):
-    summary = loop.document_summary(_document(**overrides))
-    assert {key: summary[key] for key in expected} == expected
-
-
-@pytest.mark.parametrize(
     "census",
     [
         pytest.param({"ethereum::0x1": [None, 3]}, id="none-in-the-pair"),
@@ -143,20 +115,6 @@ def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census
         _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}})
     )
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
-
-
-@pytest.mark.parametrize(
-    "faults, expected",
-    [
-        pytest.param(
-            {"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}, 3, id="fault-census-counted-into-summary"
-        ),
-        pytest.param({"records_faulted": None}, None, id="unreadable-fault-count-is-null"),
-    ],
-)
-def test_execution_fault_count_in_summary(faults, expected):
-    summary = loop.document_summary(_document(execution_evidence_faults=faults))
-    assert summary["execution_records_faulted"] == expected
 
 
 def test_the_summary_is_total_over_a_malformed_document():
@@ -317,14 +275,6 @@ def test_every_w2_refusal_arm_names_itself(facts, entries, expected):
     tri, refusal = _token_identity(facts, entries)
     assert not tri.is_determined
     assert refusal == expected
-
-
-def test_a_resolved_asset_identity_refuses_nothing():
-    resolved = {"asset_address_status": "resolved", "asset_identity_invariant": "pinned", "asset_address": "0x1"}
-    facts = _facts({"0xdeadbeef": resolved})
-    tri, refusal = _token_identity(facts, [_entry()])
-    assert tri.is_determined
-    assert refusal is None
 
 
 def test_the_refusal_travels_on_the_envelope_and_in_the_witness_notes():

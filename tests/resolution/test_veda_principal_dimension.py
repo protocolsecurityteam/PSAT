@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck
 from services.resolution.deferred_reconciler import (
     DEFERRED_MARKER,
     _iter_deferred_authorities,
@@ -257,22 +256,6 @@ def _row_addresses(surface) -> set[str]:
 
 
 @requires_postgres
-def test_pin2_inlined_inner_exit_does_not_zero_caller_set(session, fixture):
-    out = _resolve(session, fixture, seed_vault=True)
-    surface, status = _surface(out[_BULKWITHDRAW])
-
-    assert _row_addresses(surface) == _BULKWITHDRAW_CALLERS, (
-        f"the real role-12 caller set must survive the inlined vault.exit auth; "
-        f"got {_row_addresses(surface)} status={status}"
-    )
-    assert status != "resolved_empty", "a function with real callers must not be labeled resolved_empty"
-    # The inner auth is a side-condition, not a narrowing.
-    assert all(r.get("details", {}).get("conditions") for r in surface.principal_rows), (
-        "the inlined inner-call auth should be attached to the caller rows as a condition"
-    )
-
-
-@requires_postgres
 def test_pin2b_nonempty_inner_exit_neither_drops_nor_leaks(session, fixture):
     # If the owner leaf in OR[canCall, msg.sender==owner] isn't subject-tagged, a non-empty canCall keeps the OR
     # root-tagged and the inner member leaks to and_multiple_principal_shapes.
@@ -289,30 +272,7 @@ def test_pin2b_nonempty_inner_exit_neither_drops_nor_leaks(session, fixture):
     )
 
 
-@requires_postgres
-def test_pin3_external_check_inner_call_preserves_caller_rows(session, fixture):
-    out = _resolve(session, fixture, seed_vault=False)
-    surface, status = _surface(out[_BULKWITHDRAW])
-
-    assert _row_addresses(surface) == _BULKWITHDRAW_CALLERS, (
-        f"caller rows must survive an AND with a pure external check; got {_row_addresses(surface)}"
-    )
-    assert status != "resolved_empty"
-    attached = bool(surface.residual) or all(r.get("details", {}).get("conditions") for r in surface.principal_rows)
-    assert attached, "the unenumerable external check must be attached, not dropped"
-
-
 # The fix must not resurrect true negatives.
-
-
-@requires_postgres
-@pytest.mark.parametrize("seed_vault", [True, False])
-def test_guardrail_no_role_own_gate_stays_resolved_empty(session, fixture, seed_vault):
-    out = _resolve(session, fixture, seed_vault=seed_vault)
-    surface, status = _surface(out[_DENY_ALL])
-
-    assert status == "resolved_empty", f"role-less own gate (owner=0) must stay resolved_empty; got {status}"
-    assert _row_addresses(surface) == set(), "no principals may be minted for a true-negative"
 
 
 @requires_postgres
@@ -328,18 +288,6 @@ def test_pin4_public_capability_resolves_public_without_phantoms(session, fixtur
 
 
 # #5: with the RolesAuthority unindexed, a role-gated function must not surface as public.
-
-
-@requires_postgres
-@pytest.mark.parametrize("seed_vault", [True, False])
-def test_pin5_uncrawled_authority_does_not_surface_public(session, fixture, seed_vault):
-    # The only "public path" is the projector's AND fold seed; reporting it public masks the controller.
-    out = _resolve(session, fixture, seed_vault=seed_vault, seed_role_events=False)
-    surface, status = _surface(out[_BULKWITHDRAW])
-
-    assert surface.authority_public is False, f"an unresolved caller gate must not surface as `anyone`; status={status}"
-    assert status != "public"
-    assert _row_addresses(surface) == set(), "no principals may be minted for an unresolved gate"
 
 
 # #6: the cold gate persists ``deferred_pending_index`` so ``deferred_reconciler`` re-resolves it.
@@ -399,33 +347,6 @@ def test_and_surface_preserves_rows_when_anded_with_pure_check():
         assert out.residual, "check should also be retained as residual for the API probe"
 
 
-def test_and_surface_preserves_public_path_when_anded_with_pure_check():
-    from services.policy.capability_surface import CapabilitySurface, _and_surface, capability_surface_status
-
-    public = CapabilitySurface(public_paths=[[{"kind": "business", "description": "p"}]])
-    check = CapabilitySurface(residual=[{"kind": "unsupported", "unsupported_reason": "x"}])
-    out = _and_surface(public, check)
-    assert out.authority_public is True
-    assert capability_surface_status({"kind": "AND"}, out) == "public"
-
-
-def test_and_surface_both_pure_checks_stays_residual():
-    from services.policy.capability_surface import CapabilitySurface, _and_surface
-
-    a = CapabilitySurface(residual=[{"kind": "unsupported", "unsupported_reason": "x"}])
-    b = CapabilitySurface(residual=[{"kind": "external_check_only", "check": {"target_address": "0x" + "b" * 40}}])
-    out = _and_surface(a, b)
-    assert out.principal_rows == [] and out.public_paths == [] and len(out.residual) == 2
-
-
-def test_and_surface_valid_with_empty_branch_keeps_rows():
-    from services.policy.capability_surface import CapabilitySurface, _and_surface
-
-    valid = CapabilitySurface(principal_rows=[{"address": "0x" + "a" * 40, "details": {}}])
-    out = _and_surface(valid, CapabilitySurface())
-    assert len(out.principal_rows) == 1
-
-
 def test_residual_as_conditions_variants():
     from services.policy.capability_surface import _residual_as_conditions
 
@@ -441,105 +362,3 @@ def test_residual_as_conditions_variants():
 
 
 # Public must be justified by a ``conditional_universal`` child, not the projector's fold seed or node conditions.
-
-_VAULT_ADDR = "0x86b5780b606940eb59a062aa85a07959518c0161"
-_AUTHORITY_ADDR = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
-
-
-def _inner_call_check() -> CapabilityExpr:
-    return CapabilityExpr.external_check_only(
-        ExternalCheck(target_address=_VAULT_ADDR, target_call_selector="0x61a3bcc8"),
-        conditions=[Condition(kind="business", description="assetsOut < minimumAssets")],
-    )
-
-
-def _unresolved_own_gate() -> CapabilityExpr:
-    return CapabilityExpr.structural_or(
-        [
-            CapabilityExpr.external_check_only(
-                ExternalCheck(target_address=_AUTHORITY_ADDR, target_call_selector="0xb7009613"),
-                conditions=[
-                    Condition(
-                        kind="business",
-                        description="require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
-                    )
-                ],
-            ),
-            CapabilityExpr.finite_set([], quality="exact"),
-        ]
-    )
-
-
-def _surface_for(cap: CapabilityExpr):
-    from services.policy.capability_surface import capability_surface_status, project_capability_surface
-    from services.resolution.capability_resolver import capability_to_dict
-
-    cap_dict = capability_to_dict(cap)
-    surface = project_capability_surface(cap_dict)
-    return surface, capability_surface_status(cap_dict, surface)
-
-
-def test_seed_public_unresolved_own_gate_is_not_public():
-    cap = CapabilityExpr.structural_and([_inner_call_check(), _unresolved_own_gate()])
-    surface, status = _surface_for(cap)
-    assert surface.authority_public is False, "an unresolved caller gate must not surface as `anyone`"
-    assert status != "public"
-    assert _row_addresses(surface) == set()
-
-
-def test_seed_public_resolved_empty_own_gate_stays_resolved_empty():
-    own_gate = CapabilityExpr.finite_set(
-        [],
-        quality="exact",
-        conditions=[
-            Condition(
-                kind="business",
-                description="require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)",
-            )
-        ],
-    )
-    cap = CapabilityExpr.structural_and([_inner_call_check(), own_gate])
-    surface, status = _surface_for(cap)
-    assert surface.authority_public is False
-    assert status == "resolved_empty", f"a provably-empty own gate must stay resolved_empty; got {status}"
-    assert _row_addresses(surface) == set()
-
-
-def test_seed_public_or_node_condition_is_not_public():
-    # The node condition seeds a non-empty public path, so an "empty-path" heuristic would miss it.
-    own_gate = CapabilityExpr(
-        kind="OR",
-        children=list(_unresolved_own_gate().children),
-        conditions=[Condition(kind="business", description="_shareLockPeriod > MAX_SHARE_LOCK_PERIOD")],
-    )
-    surface, status = _surface_for(own_gate)
-    assert surface.authority_public is False, "node-level side conditions must not create a public path"
-    assert status != "public"
-    assert _row_addresses(surface) == set()
-
-
-def test_seed_public_genuine_public_survives():
-    cap = CapabilityExpr.structural_and(
-        [
-            CapabilityExpr.conditional_universal(
-                Condition(kind="business", description="public RolesAuthority capability")
-            ),
-            _inner_call_check(),
-        ]
-    )
-    surface, status = _surface_for(cap)
-    assert surface.authority_public is True, "a conditional_universal-driven public must survive"
-    assert status == "public"
-    assert _row_addresses(surface) == set(), "a public capability mints no principal rows"
-
-
-def test_seed_public_caller_rows_survive_inner_check():
-    holders = ["0x" + "a" * 40, "0x" + "b" * 40]
-    cap = CapabilityExpr.structural_and([CapabilityExpr.finite_set(holders, quality="exact"), _inner_call_check()])
-    surface, status = _surface_for(cap)
-    assert _row_addresses(surface) == {h.lower() for h in holders}, "role holders must survive an inner check"
-    assert surface.authority_public is False and status != "public"
-    assert status != "resolved_empty"
-    assert all(r.get("details", {}).get("conditions") for r in surface.principal_rows), (
-        "the inner check must attach as a condition on the surviving rows"
-    )

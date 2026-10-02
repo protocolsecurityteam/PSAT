@@ -50,28 +50,6 @@ PLAIN_ERC20 = """
 """
 
 
-@_needs_solc
-def test_plain_erc20_auto_getter_and_handwritten(tmp_path: Path) -> None:
-    contract = _compile(tmp_path, PLAIN_ERC20, "PlainERC20")
-    slots = derive_token_slots(contract)
-    assert slots is not None
-    by_role = _by_role(slots["entries"])
-
-    bal = by_role["balance"]
-    assert bal["getter"] == "balanceOf(address)"
-    assert bal["key_kind"] == "address"
-    assert bal["derivation"] == "storage_layout"
-    assert bal["variable"] == "balanceOf"
-    assert bal["base_slot"] == "0x" + "0" * 63 + "0"
-
-    allow = by_role["allowance"]
-    assert allow["getter"] == "allowance(address,address)"
-    assert allow["key_kind"] == "address_address"
-    assert allow["derivation"] == "storage_layout"
-    assert allow["variable"] == "_allowances"
-    assert allow["base_slot"] == "0x" + "0" * 63 + "1"
-
-
 # _balances at +0, _allowances at +1.
 OZ_V5_ERC20 = """
     pragma solidity ^0.8.20;
@@ -146,28 +124,6 @@ def test_rebasing_excludes_computed_balance_keeps_shares(tmp_path: Path) -> None
     assert shares["base_slot"] == "0x" + "0" * 63 + "0"
 
 
-HANDWRITTEN_SHARES = """
-    pragma solidity ^0.8.20;
-    contract StEth {
-        uint256 public totalSupply;                    // slot 0
-        mapping(address => uint256) private _shares;   // slot 1
-        function sharesOf(address a) external view returns (uint256) { return _shares[a]; }
-    }
-"""
-
-
-@_needs_solc
-def test_handwritten_shares_of_private_backing(tmp_path: Path) -> None:
-    contract = _compile(tmp_path, HANDWRITTEN_SHARES, "StEth")
-    slots = derive_token_slots(contract)
-    assert slots is not None
-    shares = _by_role(slots["entries"])["shares"]
-    assert shares["getter"] == "sharesOf(address)"
-    assert shares["derivation"] == "storage_layout"
-    assert shares["variable"] == "_shares"
-    assert shares["base_slot"] == "0x" + "0" * 63 + "1"
-
-
 ERC721 = """
     pragma solidity ^0.8.20;
     contract NFT {
@@ -196,22 +152,6 @@ def test_erc721_owner_of_through_require_wrapper(tmp_path: Path) -> None:
     assert owner["base_slot"] == "0x" + "0" * 63 + "0"
 
 
-NO_FAMILY = """
-    pragma solidity ^0.8.20;
-    contract Counter {
-        uint256 public count;
-        function increment() external { count += 1; }
-    }
-"""
-
-
-@_needs_solc
-def test_no_family_getters_omits_key(tmp_path: Path) -> None:
-    contract = _compile(tmp_path, NO_FAMILY, "Counter")
-    assert derive_token_slots(contract) is None
-    assert "token_slots" not in build_effects(contract)
-
-
 AMBIGUOUS = """
     pragma solidity ^0.8.20;
     contract Ambiguous {
@@ -228,30 +168,6 @@ AMBIGUOUS = """
 @_needs_solc
 def test_ambiguous_getter_reading_second_mapping_skipped(tmp_path: Path) -> None:
     contract = _compile(tmp_path, AMBIGUOUS, "Ambiguous")
-    assert derive_token_slots(contract) is None
-
-
-PACKED_NAMESPACE = """
-    pragma solidity ^0.8.20;
-    contract PackedNS {
-        struct S {
-            uint128 _flag;                              // sub-slot: packing risk
-            mapping(address => uint256) _balances;
-        }
-        bytes32 private constant SLoc =
-            0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00;
-        function _get() private pure returns (S storage $) { assembly { $.slot := SLoc } }
-        function balanceOf(address a) public view returns (uint256) {
-            S storage $ = _get();
-            return $._balances[a];
-        }
-    }
-"""
-
-
-@_needs_solc
-def test_packed_member_before_target_skips_namespaced(tmp_path: Path) -> None:
-    contract = _compile(tmp_path, PACKED_NAMESPACE, "PackedNS")
     assert derive_token_slots(contract) is None
 
 

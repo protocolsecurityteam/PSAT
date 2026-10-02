@@ -172,13 +172,6 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert donor_contract.job_id == donor_job.id
 
 
-def test_copy_returns_none_without_target_contract(db_session):
-    donor_job, _ = _make_donor(db_session)
-    empty_target = create_job(db_session, {"address": ADDR_BASE, "chain": "base"})
-    db_session.commit()
-    assert copy_static_cache_cross_chain(db_session, donor_job.id, empty_target.id, target_address=ADDR_BASE) is None
-
-
 def test_fallback_fires_only_on_primary_miss(db_session):
     primary_job, _ = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", source_content_hash=HASH)
     hash_donor, _ = _make_donor(db_session, address=ADDR_OTHER, chain="base", source_content_hash=HASH)

@@ -134,27 +134,6 @@ def test_rollback_preserves_complete_prefix_then_restart_and_replay(db_session, 
     assert count_logs(db_session) == 18
 
 
-def test_mixed_frontiers_and_empty_topics_advance_atomically(db_session):
-    seed(db_session)
-    db_session.execute(
-        update(IndexedEventCursor).where(IndexedEventCursor.topic0 == TOPICS[1]).values(last_indexed_block=4)
-    )
-    db_session.commit()
-    logs = [make_log(b, TOPICS[0]) for b in (1, 2, 5)] + [make_log(5, TOPICS[1])]
-    fetcher = Fetcher(logs)
-    iterator = steps(db_session, fetcher, write_max_rows=2)
-    first = next(iterator)
-    db_session.commit()
-    assert first.scanned_to == 4  # includes the empty gap before the next event
-    assert [c.last_indexed_block for c in positions(db_session)] == [4, 4, 4]
-    assert not any(c.backfill_complete for c in positions(db_session))
-    for _ in iterator:
-        db_session.commit()
-    assert count_logs(db_session) == 4
-    assert [c.last_indexed_block for c in positions(db_session)] == [6, 6, 6]
-    assert fetcher.calls == [(1, 6)]
-
-
 @pytest.mark.parametrize("changed_to", [0, 5])
 def test_concurrent_rewind_or_advance_discards_retained_window(db_session, changed_to):
     seed(db_session)

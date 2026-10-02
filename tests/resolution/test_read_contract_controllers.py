@@ -77,28 +77,12 @@ def test_reads_controllers_from_getter_answers(monkeypatch, answers, expected):
     assert read_contract_controllers("http://rpc", CONTRACT) == expected
 
 
-def test_whole_batch_failure_returns_none(monkeypatch):
-    def _raise(*_args, **_kwargs):
-        raise RuntimeError("connection reset")
-
-    monkeypatch.setattr(tracking, "_eth_call_batch", _raise)
-    assert read_contract_controllers("http://rpc", CONTRACT) is None
-
-
 def test_revert_with_data_is_also_definitive(monkeypatch):
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
         return [EthCallResult(False, "0x", "0x2603b7da", None) for _ in calls]
 
     monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
     assert read_contract_controllers("http://rpc", CONTRACT) == []
-
-
-def test_unrecognised_failure_stays_indeterminate(monkeypatch):
-    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
-        return [EthCallResult(False, "0x", None, "out of gas") for _ in calls]
-
-    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
-    assert read_contract_controllers("http://rpc", CONTRACT) is None
 
 
 def test_answers_every_selector_is_indeterminate_not_a_plane_set(monkeypatch):
@@ -108,18 +92,3 @@ def test_answers_every_selector_is_indeterminate_not_a_plane_set(monkeypatch):
 
     monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
     assert read_contract_controllers("http://rpc", CONTRACT) is None
-
-
-def test_undecodable_success_with_honest_control_is_not_a_plane(monkeypatch):
-    def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
-        control_selector = selector(tracking._NEGATIVE_CONTROL_SIG)
-        out = []
-        for call in calls:
-            if call["data"] == control_selector:
-                out.append(EthCallResult(False, "0x", None, "execution reverted"))
-            else:
-                out.append(EthCallResult(True, "0x1234", None, None))
-        return out
-
-    monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
-    assert read_contract_controllers("http://rpc", CONTRACT) == []

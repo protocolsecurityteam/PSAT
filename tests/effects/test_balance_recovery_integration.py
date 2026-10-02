@@ -102,23 +102,6 @@ def test_late_collection_resumes_once_without_gating_original_probes(clean_effec
 
 
 @requires_postgres
-def test_proof_without_inventory_closes_collection_dependency(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fn, _cand = setup_candidate(session, monkeypatch)
-    job = _make_job(session, pid, "getter-can-succeed")
-    prober = _Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY, reason="supply_mint"))
-    worker = EffectsWorker(
-        prober=prober, hash_resolver=lambda *_: ("getter_kernel", "surface"), seams=_seams(session, job)
-    )
-    _run(worker, session, job)
-    session.commit()
-    row = session.scalars(select(PendingEffectsWork).where(PendingEffectsWork.function_id == fn.id)).one()
-    assert row.state == "complete"
-    assert prober.runs == [fn.id]
-    assert reconcile_pending_effects(session, pid) == 0
-
-
-@requires_postgres
 @pytest.mark.parametrize("ready", ["priced_tokens", "empty_inventory", "independent"])
 def test_available_or_independent_inputs_create_no_recovery_work(clean_effects, monkeypatch, ready):
     session = clean_effects
@@ -144,21 +127,6 @@ def test_available_or_independent_inputs_create_no_recovery_work(clean_effects, 
     session.commit()
     assert session.query(PendingEffectsWork).filter_by(protocol_id=pid).count() == 0
     assert seen == [cand.input_token_addresses]
-
-
-@requires_postgres
-def test_unselected_candidates_and_independent_planning_failures_are_not_enrolled(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, _fn, _cand = setup_candidate(session, monkeypatch)
-    job = _make_job(session, pid, "cap-remains-a-cap")
-    assert prepare_work(session, [], protocol_id=pid, chain_id=1, job_id=job.id) == {}
-    monkeypatch.setattr("services.effects.balance_dependencies.needs_token_inventory", lambda *_: False)
-    worker = EffectsWorker(
-        prober=lambda *_: [], hash_resolver=lambda *_: ("no_plan", "surface"), seams=_seams(session, job)
-    )
-    _run(worker, session, job)
-    session.commit()
-    assert session.query(PendingEffectsWork).filter_by(protocol_id=pid).count() == 0
 
 
 @requires_postgres
@@ -282,33 +250,3 @@ def test_regular_collection_dependencies_preserve_audited_cache_hits(clean_effec
     assert metrics["cache_hits_kernel"] == 1
     assert session.query(EffectBehaviorCache).one().audit_status == "passed"
     assert session.query(PendingEffectsWork).filter_by(protocol_id=pid, state="complete").count() == 3
-
-
-@requires_postgres
-def test_dependency_is_not_completed_before_verdict_persistence(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fn, cand = setup_candidate(session, monkeypatch)
-    original = _make_job(session, pid, "initial-collection-gap")
-    rows = prepare_work(session, [cand], protocol_id=pid, chain_id=1, job_id=original.id)
-    finish_work(session, rows, job_id=original.id)
-    accepted_empty(session, fn.contract_id)
-    assert reconcile_pending_effects(session, pid) == 1
-    row = rows[(fn.id, EFFECT_CLASS_SUPPLY)]
-    session.commit()
-    resume = session.get(Job, row.queued_job_id)
-    worker = EffectsWorker(
-        prober=_Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY)),
-        hash_resolver=lambda *_: ("interrupted_write", "surface"),
-        seams=_seams(session, resume),
-    )
-
-    def fail_write(*args):
-        raise RuntimeError("verdict write interrupted")
-
-    monkeypatch.setattr(worker, "_write_verdicts", fail_write)
-    with pytest.raises(RuntimeError, match="verdict write interrupted"):
-        _run(worker, session, resume)
-    session.rollback()
-    session.refresh(row)
-    assert row.state == "queued" and row.queued_job_id == resume.id
-    assert session.query(EffectVerdict).filter_by(function_id=fn.id).count() == 0

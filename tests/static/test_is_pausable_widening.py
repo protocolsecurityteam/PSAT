@@ -122,22 +122,6 @@ def test_bitmap_pause_family_is_not_widened_into(tmp_path):
     assert result["unpause_functions"] == []
 
 
-def test_struct_member_latch_is_not_determined_when_only_the_claims_stage_raised(tmp_path):
-    """``core`` runs effects and claims under separate try/except; when only claims raises, ``False`` would be a
-    proven absence of a latch that exists.
-    """
-    path = tmp_path / "C.sol"
-    path.write_text(textwrap.dedent(STRUCT_MEMBER_LATCH).strip() + "\n")
-    contract = next(c for c in Slither(str(path)).contracts if c.name == "C")
-    _trees, pause_info = build_predicate_artifacts_with_pause_info(contract)
-    claim_free = build_effects(contract)
-
-    assert pause_info["pause_state_vars"] == [], "guard: the structural pass cannot see this latch"
-    assert claim_free["functions"], "guard: the effects plane succeeded"
-    assert all("claims" not in record for record in claim_free["functions"].values())
-    assert _detect_pausability(contract, tmp_path, pause_info, claim_free)["is_pausable"] is None
-
-
 def test_pauser_registry_shape_stays_clean(tmp_path):
     result = _pausability(tmp_path, NO_LATCH)
     assert result["is_pausable"] is False

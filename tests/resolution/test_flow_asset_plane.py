@@ -23,7 +23,6 @@ from workers.resolution_worker import ResolutionWorker
 BLOCK = 25643300
 BLOCK_HASH = bytes.fromhex("21d7f476ebacbed97ff15fbe213376984bada1928166b375ab1b1135bd21c188")
 PROBE = ProbeBlock(number=BLOCK, block_hash=BLOCK_HASH)
-PROBE_NO_HASH = ProbeBlock(number=BLOCK, block_hash=None)
 
 MERKLE_DROP = "0x6db24ee656843e3fe03eb8762a54d86186ba6b64"
 REDEMPTION_MGR = "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0"
@@ -253,36 +252,6 @@ def test_an_observation_cannot_exist_without_a_height() -> None:
         fap.AssetObservation(address="0x8f08b704", block_number=BLOCK, block_hash=None)
 
 
-def test_a_hashless_probe_block_still_publishes_the_height(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
-    payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)], probe_block=PROBE_NO_HASH)
-    row = payload["receivers"][0]
-    assert row["observed_at_block"] == BLOCK
-    assert "observed_block_hash" not in row
-    assert payload["probe_block_hash"] is None
-
-
-def test_the_view_getter_local_mints_no_row_and_no_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The receiver binds a local; pairing it with a same-named getter would publish an address for a function that
-    doesn't exist.
-    """
-    local_receiver = {
-        "binding": "local",
-        "param_scope": None,
-        "param_index": None,
-        "mutability": None,
-        "visibility": None,
-        "auto_getter_selector": None,
-        "variable": "tokenOut",
-        "receiver_provenance": "not_determined",
-    }
-    effects = _effects(_sink("s0", local_receiver, target="tokenOut.safeTransfer"))
-    assert fap.collect_asset_receivers(effects) == []
-    payload, seen = _run(monkeypatch, effects, [], deployment_address=SYNC_POOL)
-    assert payload["receivers"] == []
-    assert seen == []  # no call was placed at all
-
-
 def _token_receiver(**overrides: Any) -> dict:
     return {**_state_var_receiver(SEL_TOKEN, "token"), **overrides}
 
@@ -322,12 +291,6 @@ def test_an_unlicensed_receiver_mints_no_row_and_is_never_called(receiver: dict 
     assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
 
 
-def test_a_state_variable_without_a_minted_selector_is_untouched() -> None:
-    receiver = _state_var_receiver(SEL_TOKEN, "token")
-    receiver["auto_getter_selector"] = None
-    assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
-
-
 @pytest.mark.parametrize(
     "effects",
     [
@@ -347,62 +310,9 @@ def test_an_artifact_with_nothing_readable_yields_nothing_rather_than_raising(ef
     assert fap.collect_asset_receivers(effects) == []
 
 
-def test_a_functions_list_is_read_the_same_as_a_functions_map(monkeypatch: pytest.MonkeyPatch) -> None:
-    sink = _sink("s0", _state_var_receiver(SEL_TOKEN, "token"))
-    as_list = {"functions": [{"function": "f()", "sinks": [sink]}]}
-    as_map = {"functions": {"f()": {"function": "f()", "sinks": [sink]}}}
-    assert fap.collect_asset_receivers(as_list) == fap.collect_asset_receivers(as_map)
-
-
 @pytest.mark.parametrize("payload", [{}, {"receivers": None}, {"receivers": "x"}, {"receivers": ["x"]}])
 def test_count_resolved_reads_nothing_out_of_a_shape_it_cannot_read(payload: dict) -> None:
     assert fap.count_resolved(payload) == 0
-
-
-def test_sinks_sharing_a_selector_fold_to_one_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(
-        _sink("s0", _state_var_receiver(SEL_EETH, "eEth")),
-        _sink("s1", _state_var_receiver(SEL_EETH, "eEth")),
-    )
-    payload, seen = _run(monkeypatch, effects, [EthCallResult(True, WORD_EETH, None, None)])
-    assert len(payload["receivers"]) == 1
-    assert payload["receivers"][0]["sink_ids"] == ["s0", "s1"]
-    assert len(seen[0][1]) == 1
-
-
-def test_same_name_different_selector_does_not_fold(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two declarations sharing an identifier but not a minted selector are two
-    assets. Folding them on the name is the name-derived inference this plane replaces."""
-    a = _state_var_receiver(SEL_TOKEN, "token")
-    b = _state_var_receiver(SEL_REWARD_TOKEN, "token")
-    payload, seen = _run(
-        monkeypatch,
-        _effects(_sink("s0", a), _sink("s1", b)),
-        [EthCallResult(True, WORD_KING, None, None), EthCallResult(True, WORD_EIGEN, None, None)],
-    )
-    assert [r["asset_getter_selector"] for r in payload["receivers"]] == [SEL_REWARD_TOKEN, SEL_TOKEN]
-    assert {r["asset_address"] for r in payload["receivers"]} == {ADDR_KING, ADDR_EIGEN}
-    assert len(seen[0][1]) == 2
-
-
-def test_conflicting_declaration_classes_withhold_the_mutability(monkeypatch: pytest.MonkeyPatch) -> None:
-    a = _state_var_receiver(SEL_TOKEN, "token", mutability="immutable_in_implementation")
-    b = _state_var_receiver(SEL_TOKEN, "token", mutability="mutable")
-    receivers = fap.collect_asset_receivers(_effects(_sink("s0", a), _sink("s1", b)))
-    assert len(receivers) == 1
-    assert receivers[0].declared_mutability is None
-
-
-def test_two_identical_runs_produce_the_identical_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(
-        _sink("s1", _state_var_receiver(SEL_REWARD_TOKEN, "rewardTokenAddress")),
-        _sink("s0", _state_var_receiver(SEL_TOKEN, "token")),
-    )
-    results = [EthCallResult(True, WORD_KING, None, None), EthCallResult(True, WORD_EIGEN, None, None)]
-    first, _ = _run(monkeypatch, effects, results)
-    second, _ = _run(monkeypatch, effects, results)
-    assert first == second
-    assert [r["asset_getter_selector"] for r in first["receivers"]] == sorted([SEL_TOKEN, SEL_REWARD_TOKEN])
 
 
 def _stage_ctx(

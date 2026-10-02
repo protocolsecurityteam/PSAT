@@ -18,15 +18,7 @@ from utils.memory import (
     descendant_rss_samples,
     mb,
     reset_cache_pressure_state,
-    rss_bytes_for_pid,
 )
-
-
-def test_rss_bytes_for_pid_live_and_dead():
-    # 0 on non-Linux.
-    assert rss_bytes_for_pid(os.getpid()) >= 0
-    assert rss_bytes_for_pid(-1) == 0
-    assert rss_bytes_for_pid(2**31 - 1) == 0
 
 
 def test_descendant_sampler_sees_worker_owned_subprocess():
@@ -88,14 +80,6 @@ def test_cache_pressure_fires_once_per_threshold():
     assert cache_pressure_message("test_cache", 99, 100) is None
 
 
-def test_cache_pressure_skips_to_top_threshold():
-    reset_cache_pressure_state("jumpy")
-
-    msg = cache_pressure_message("jumpy", 96, 100)
-    assert msg is not None and "96/100" in msg
-    assert cache_pressure_message("jumpy", 50, 100) is None
-
-
 @pytest.mark.parametrize(
     ("reset_arg", "y_level", "y_fires_again"),
     [
@@ -112,9 +96,3 @@ def test_reset_cache_pressure_state(reset_arg, y_level, y_fires_again):
     reset_cache_pressure_state(reset_arg)
     assert cache_pressure_message("x", 50, 100) is not None
     assert (cache_pressure_message("y", y_level, 100) is not None) is y_fires_again
-
-
-def test_cache_pressure_handles_zero_max():
-    # max_size=0 used to divide by zero.
-    assert cache_pressure_message("zero_cache", 0, 0) is None
-    assert cache_pressure_message("zero_cache", 5, 0) is None

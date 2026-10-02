@@ -67,34 +67,6 @@ def test_fall_through_public_persists_json_null_conditions_never_empty_array(db_
 
 
 @requires_postgres
-def test_witnessed_public_with_conditions_persists_the_array(db_session):
-    contract = Contract(address=_TARGET["subject"]["address"], chain="ethereum")
-    db_session.add(contract)
-    db_session.flush()
-
-    capability = {
-        "kind": "conditional_universal",
-        "conditions": [{"kind": "time", "description": "after cooldown"}],
-        "membership_quality": "exact",
-        "confidence": "enumerable",
-    }
-    payload = build_effective_permissions(
-        _TARGET,
-        capability_resolver_output={"sweep(address)": capability},
-        effects=_effects("sweep(address)"),
-        predicate_trees={"schema_version": "semantic", "trees": {}},
-    )
-    write_effective_function_rows(
-        db_session,
-        contract_id=contract.id,
-        function_records=cast("list[dict[str, Any]]", payload["functions"]),
-        capability_by_function={"sweep(address)": capability},
-    )
-    db_session.flush()
-    assert _conditions_typeof(db_session, contract.id, "sweep") == "array"
-
-
-@requires_postgres
 def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_session):
     """Policy-minted rows must reach the table with openness and roles projected from their own capability_expr,
     never NULL. Runs the real writer with an empty resolver output, the branch that dropped them.

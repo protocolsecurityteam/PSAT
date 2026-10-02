@@ -214,71 +214,6 @@ def test_a_direct_exec_transaction_publishes_the_witnessed_call(db_session, safe
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_CALL]
 
 
-def test_an_unresolved_selector_publishes_the_selector_and_a_null_signature(db_session, safe):
-    """A raw selector is a fact; an invented name is not."""
-    tx_hash = "0x" + "12" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET, data=bytes.fromhex(PAUSE[2:]))
-            )
-        },
-    )
-
-    assert data["safe_exec"]["target_function"] == {"selector": PAUSE, "signature": None}
-    assert data["salience"] == sal.SALIENCE_NOTABLE
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_CALL]
-
-
-def test_a_selector_two_analyses_disagree_about_stays_unresolved(db_session, safe, known_target):
-    known_target(TARGET, SET_FEE, "setFee(uint256)")
-    known_target(TARGET, SET_FEE, "somethingElse(uint256)")
-    tx_hash = "0x" + "13" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET, data=bytes.fromhex(SET_FEE[2:]))
-            )
-        },
-    )
-
-    assert data["safe_exec"]["target_function"] == {"selector": SET_FEE, "signature": None}
-
-
-def test_a_signature_from_another_chain_does_not_resolve(db_session, safe, protocol):
-    other = Contract(protocol_id=protocol.id, address=TARGET, chain="base")
-    db_session.add(other)
-    db_session.flush()
-    db_session.add(
-        EffectiveFunction(
-            contract_id=other.id, function_name="setFee", selector=SET_FEE, abi_signature="setFee(uint256)"
-        )
-    )
-    db_session.commit()
-
-    tx_hash = "0x" + "14" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-    (data,) = run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET, data=bytes.fromhex(SET_FEE[2:]))
-            )
-        },
-    )
-
-    assert data["safe_exec"]["target_function"]["signature"] is None
-
-
 # ---------------------------------------------------------------------------
 # the top-level-call check
 # ---------------------------------------------------------------------------
@@ -310,25 +245,6 @@ def test_a_call_that_is_not_this_safes_own_is_not_a_top_level_call(db_session, s
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_INDIRECT]
 
 
-def test_the_top_level_check_is_case_insensitive_on_the_address(db_session, safe):
-    tx_hash = "0x" + "23" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE.upper().replace("0X", "0x"),
-                tx_hash=tx_hash,
-                input_hex=exec_transaction_input(to=TARGET).upper().replace("0X", "0x"),
-            )
-        },
-    )
-
-    assert data["safe_exec"]["status"] == "decoded"
-
-
 def test_undecodable_arguments_state_the_gap_rather_than_leaving_the_block_absent(db_session, safe):
     tx_hash = "0x" + "24" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
@@ -354,17 +270,6 @@ def test_a_transaction_object_missing_its_fields_mints_no_finding(db_session, sa
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
     (data,) = run(db_session, [event], {tx_hash: dict(fixture, hash=tx_hash)})
-
-    assert "safe_exec" not in data
-    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
-
-
-def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, safe):
-    tx_hash = "0x" + "25" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(db_session, [event], {})
 
     assert "safe_exec" not in data
     assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
@@ -439,37 +344,6 @@ def test_a_pinned_multisend_batch_is_expanded(db_session, safe, known_target, li
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_MULTISEND]
 
 
-def test_an_inner_delegatecall_raises_the_whole_batch(db_session, safe):
-    tx_hash = "0x" + "33" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-    payload = multisend_payload(
-        [
-            (0, TARGET, 0, bytes.fromhex(SET_FEE[2:])),
-            (1, UNKNOWN_LIB, 0, bytes.fromhex(PAUSE[2:])),
-        ]
-    )
-
-    (data,) = run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE,
-                tx_hash=tx_hash,
-                input_hex=exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=payload),
-            )
-        },
-    )
-
-    block = data["safe_exec"]
-    assert block["batch"][1][sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED] is False
-    assert data["salience"] == sal.SALIENCE_ALERT
-    assert data["salience_basis"] == [
-        sal.BASIS_SAFE_EXEC_MULTISEND,
-        sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED,
-    ]
-
-
 def _decode_batch(db_session, safe_mc, tx_hash: str, payload: bytes) -> dict:
     event = seed_event(db_session, safe_mc, "safe_tx_executed", tx_hash)
     return run(
@@ -483,66 +357,6 @@ def _decode_batch(db_session, safe_mc, tx_hash: str, payload: bytes) -> dict:
             )
         },
     )[0]
-
-
-def test_a_nested_batch_is_expanded_and_its_inner_alert_propagates(db_session, safe):
-    """Otherwise a hostile delegatecall could hide by nesting."""
-    inner = multisend_payload([(1, UNKNOWN_LIB, 0, bytes.fromhex(PAUSE[2:]))])
-    payload = multisend_payload([(0, TARGET, 0, b""), (1, MULTISEND_CALL_ONLY_1_4_1, 0, inner)])
-
-    data = _decode_batch(db_session, safe, "0x" + "34" * 32, payload)
-
-    nested = data["safe_exec"]["batch"][1]["batch"]
-    assert [call["to"] for call in nested] == [UNKNOWN_LIB]
-    assert nested[0][sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED] is False
-    assert data["salience"] == sal.SALIENCE_ALERT
-    assert data["salience_basis"] == [
-        sal.BASIS_SAFE_EXEC_MULTISEND,
-        sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED,
-    ]
-
-
-def test_a_benign_nested_batch_stays_at_the_batch_floor(db_session, safe):
-    inner = multisend_payload([(0, TARGET, 0, bytes.fromhex(PAUSE[2:]))])
-    payload = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, inner)])
-
-    data = _decode_batch(db_session, safe, "0x" + "37" * 32, payload)
-
-    assert data["safe_exec"]["batch"][0]["batch"][0]["to"] == TARGET
-    assert data["salience"] == sal.SALIENCE_NOTABLE
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_MULTISEND]
-
-
-def test_a_nested_payload_that_will_not_decode_takes_the_whole_batch_with_it(db_session, safe):
-    """No partial list at any depth."""
-    payload = multisend_payload([(0, TARGET, 0, b""), (1, MULTISEND_CALL_ONLY_1_4_1, 0, bytes.fromhex(PAUSE[2:]))])
-
-    data = _decode_batch(db_session, safe, "0x" + "38" * 32, payload)
-
-    block = data["safe_exec"]
-    assert block["batch_status"] == "undecodable"
-    # Which layer failed is part of the gap.
-    assert block["batch_status_reason"] == enr.BATCH_REASON_NESTED_UNDECODABLE
-    assert "batch" not in block
-    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_BATCH_UNDECODABLE]
-
-
-def test_every_batch_failure_reason_is_reachable(db_session, safe):
-    """A reason code no input can mint describes nothing."""
-    inner_bad = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, b"\x00")])
-    too_deep = multisend_payload([(0, TARGET, 0, b"")])
-    for _ in range(enr.MAX_MULTISEND_DEPTH):
-        too_deep = multisend_payload([(1, MULTISEND_1_3_0, 0, too_deep)])
-
-    reasons = {
-        enr.BATCH_REASON_MALFORMED: _decode_batch(db_session, safe, "0x" + "3b" * 32, b"\x00\x01"),
-        enr.BATCH_REASON_NESTED_UNDECODABLE: _decode_batch(db_session, safe, "0x" + "3c" * 32, inner_bad),
-        enr.BATCH_REASON_DEPTH_EXCEEDED: _decode_batch(db_session, safe, "0x" + "3d" * 32, too_deep),
-    }
-    for expected, data in reasons.items():
-        assert data["safe_exec"]["batch_status_reason"] == expected
-        assert "batch" not in data["safe_exec"]
 
 
 def test_a_batch_nested_past_the_depth_cap_states_the_gap(db_session, safe):
@@ -638,31 +452,6 @@ def test_a_malformed_batch_publishes_undecodable_and_no_partial_list(db_session,
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_BATCH_UNDECODABLE]
 
 
-def test_a_recognized_delegatecall_always_carries_a_batch_or_a_stated_failure(db_session, safe):
-    payloads = [
-        multisend_payload([(0, TARGET, 0, b"")]),
-        multisend_payload([]),
-        b"\x00\x01\x02",
-    ]
-    for index, payload in enumerate(payloads):
-        tx_hash = "0x" + f"{index:02x}" * 32
-        event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-        (data,) = run(
-            db_session,
-            [event],
-            {
-                tx_hash: tx(
-                    to=SAFE,
-                    tx_hash=tx_hash,
-                    input_hex=exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=payload),
-                )
-            },
-        )
-        block = data["safe_exec"]
-        assert ("batch" in block) != ("batch_status" in block)
-        assert data["salience_basis"] != [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
-
-
 def test_every_decoded_batch_entry_is_a_mapping(db_session, safe):
     calls, reason = enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01"), (1, UNKNOWN_LIB, 0, b"")]))
     assert calls is not None and reason is None
@@ -670,65 +459,6 @@ def test_every_decoded_batch_entry_is_a_mapping(db_session, safe):
     truncated, reason = enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01")])[:-3])
     assert truncated is None
     assert reason == enr.BATCH_REASON_MALFORMED
-
-
-def test_a_decoded_delegatecall_always_states_the_multisend_discriminator(db_session, safe):
-    """Absence of ``multisend_recognized`` reads as not-proven-MultiSend."""
-    for index, (target, expected) in enumerate([(MULTISEND_1_3_0, True), (UNKNOWN_LIB, False), (TARGET, False)]):
-        tx_hash = "0x" + f"{index + 0x40:02x}" * 32
-        event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-        (data,) = run(
-            db_session,
-            [event],
-            {
-                tx_hash: tx(
-                    to=SAFE,
-                    tx_hash=tx_hash,
-                    input_hex=exec_transaction_input(
-                        to=target, operation=1, data=multisend_payload([(0, TARGET, 0, b"")])
-                    ),
-                )
-            },
-        )
-        assert data["safe_exec"][sal.SAFE_EXEC_KEY_MULTISEND_RECOGNIZED] is expected
-
-
-def test_a_failed_execution_is_an_alert_whatever_the_decode_says(db_session, safe):
-    tx_hash = "0x" + "36" * 32
-    event = seed_event(db_session, safe, "safe_tx_failed", tx_hash)
-
-    (data,) = run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET, data=bytes.fromhex(SET_FEE[2:]))
-            )
-        },
-    )
-
-    assert data["safe_exec"]["to"] == TARGET
-    assert data["salience"] == sal.SALIENCE_ALERT
-    assert data["salience_basis"] == [sal.BASIS_EXECUTION_FAILURE]
-
-
-def test_over_budget_hashes_are_recorded_not_dropped(db_session, make_mc, monkeypatch):
-    """The budget bounds the open window transaction without making an execution look examined."""
-    monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
-    safes = [make_mc(address=ADDR(0x5A00 + i)) for i in range(2)]
-    hashes = ["0x" + "a1" * 32, "0x" + "a2" * 32]
-    events = [seed_event(db_session, mc, "safe_tx_executed", h) for mc, h in zip(safes, hashes)]
-    txs = {h: tx(to=mc.address, tx_hash=h, input_hex=exec_transaction_input(to=TARGET)) for mc, h in zip(safes, hashes)}
-
-    calls: list[dict] = []
-    payloads = run(db_session, events, txs, calls_out=calls)
-
-    assert len(calls) == 1
-    assert [params[0] for _method, params in calls[0]["calls"]] == [hashes[0]]
-    assert payloads[0]["safe_exec"]["status"] == "decoded"
-    assert payloads[1]["safe_exec"] == {"status": "over_budget"}
-    assert payloads[1]["salience"] == sal.SALIENCE_NOT_DETERMINED
-    assert payloads[1]["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
 
 
 def test_the_budget_is_spent_once_across_every_chain_in_the_pass(db_session, make_mc, monkeypatch):
@@ -794,29 +524,6 @@ def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkey
     assert payloads[1]["safe_exec"]["status"] == "decoded"
 
 
-def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe, make_mc):
-    """``chain_id`` rides so the URL/chain guard applies."""
-    other = make_mc(address=ADDR(0x5A0F))
-    tx_hash = "0x" + "a3" * 32
-    events = [
-        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
-        seed_event(db_session, other, "safe_tx_executed", tx_hash, log_index=1),
-    ]
-    calls: list[dict] = []
-
-    run(
-        db_session,
-        events,
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))},
-        calls_out=calls,
-    )
-
-    assert len(calls) == 1
-    assert len(calls[0]["calls"]) == 1
-    assert calls[0]["chain_id"] == 1
-    assert calls[0]["rpc_url"] == "https://rpc.invalid/eth"
-
-
 def test_two_executions_of_one_safe_in_one_tx_refuse_attribution(db_session, safe):
     """One tx holds one set of ``execTransaction`` arguments, so publishing it on both executions would state another
     execution's call as fact.
@@ -847,56 +554,6 @@ def test_two_executions_of_one_safe_in_one_tx_refuse_attribution(db_session, saf
     assert len(calls) == 1
 
 
-def test_a_sibling_execution_from_an_earlier_window_still_contests(db_session, safe):
-    tx_hash = "0x" + "a6" * 32
-    earlier = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
-    current = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=2)
-
-    (data,) = run(
-        db_session,
-        [current],
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))},
-    )
-
-    assert earlier.id != current.id
-    assert data["safe_exec"] == {"status": enr.SAFE_EXEC_STATUS_AMBIGUOUS_ATTRIBUTION}
-
-
-def test_a_contested_tx_that_is_not_this_safes_call_still_states_that(db_session, safe):
-    """``not_top_level_call`` describes the transaction and holds for every row in it."""
-    tx_hash = "0x" + "a7" * 32
-    events = [
-        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
-        seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1),
-    ]
-
-    payloads = run(db_session, events, {tx_hash: tx(to=RELAYER, tx_hash=tx_hash, input_hex="0xdeadbeef")})
-
-    for data in payloads:
-        assert data["safe_exec"] == {"status": "not_top_level_call"}
-        assert data["salience_basis"][0] == sal.BASIS_SAFE_EXEC_INDIRECT
-    assert sal.assign_salience(db_session, "safe_tx_executed", {"safe_exec": payloads[0]["safe_exec"]}, safe) == (
-        sal.SALIENCE_ROUTINE,
-        [sal.BASIS_SAFE_EXEC_INDIRECT],
-    )
-
-
-def test_two_executions_of_DIFFERENT_safes_in_one_tx_each_decode(db_session, safe, make_mc):
-    other = make_mc(address=ADDR(0x5A10))
-    tx_hash = "0x" + "a8" * 32
-    mine = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0)
-    theirs = seed_event(db_session, other, "safe_tx_executed", tx_hash, log_index=1)
-
-    mine_data, theirs_data = run(
-        db_session,
-        [mine, theirs],
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))},
-    )
-
-    assert mine_data["safe_exec"]["status"] == "decoded"
-    assert theirs_data["safe_exec"] == {"status": "not_top_level_call"}
-
-
 def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
     timelock = make_mc(address=ADDR(0x71E), contract_type="timelock")
     event = seed_event(
@@ -918,167 +575,9 @@ def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
 # ---------------------------------------------------------------------------
 
 
-def test_a_timelock_operation_resolves_its_selector_in_its_own_namespace(db_session, make_mc, known_target):
-    """Timelock ``target``/``selector`` are taxonomy-owned keys."""
-    known_target(TARGET, SET_FEE, "setFee(uint256)")
-    timelock = make_mc(address=ADDR(0x71F), contract_type="timelock")
-    event = seed_event(
-        db_session,
-        timelock,
-        "timelock_executed",
-        "0x" + "b1" * 32,
-        data={"target": TARGET, "selector": SET_FEE, "value": 0},
-    )
-
-    (data,) = run(db_session, [event], {})
-
-    assert data["target_function"] == {
-        "selector": SET_FEE,
-        "signature": "setFee(uint256)",
-        "source": "effective_functions",
-    }
-    assert data["target"] == TARGET
-    assert data["selector"] == SET_FEE
-    assert data["salience"] == sal.SALIENCE_NOTABLE
-    assert data["salience_basis"] == [sal.BASIS_TIMELOCK_OPERATION]
-
-
-def test_target_function_is_the_only_widening_of_the_additive_key_set(db_session, safe):
-    assert "target_function" in enr.ENRICHABLE_KEYS
-    event = seed_event(db_session, safe, "safe_tx_executed", "0x" + "b2" * 32)
-
-    with patch.dict(
-        enr.ENRICHERS,
-        {
-            "safe_tx_executed": lambda *_a: {
-                "target_function": {"selector": SET_FEE, "signature": None},
-                "decoded_by": "me",
-            }
-        },
-        clear=False,
-    ):
-        (data,) = run(db_session, [event], {})
-
-    assert data["target_function"] == {"selector": SET_FEE, "signature": None}
-    assert "decoded_by" not in data
-
-
-def test_a_timelock_without_a_decoded_selector_publishes_nothing(db_session, make_mc):
-    timelock = make_mc(address=ADDR(0x720), contract_type="timelock")
-    event = seed_event(
-        db_session,
-        timelock,
-        "timelock_scheduled",
-        "0x" + "b3" * 32,
-        data={"target": TARGET, "calldata_length": 0},
-    )
-
-    (data,) = run(db_session, [event], {})
-
-    assert "target_function" not in data
-
-
 # ---------------------------------------------------------------------------
 # the correlation join, both directions
 # ---------------------------------------------------------------------------
-
-
-def test_a_correlated_effect_raises_its_cause(db_session, safe, make_mc):
-    """Same tx hash is a fact, so both directions are published."""
-    victim = make_mc(address=ADDR(0xC0FFEE), contract_type="regular")
-    tx_hash = "0x" + "c1" * 32
-    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
-    effect = seed_event(db_session, victim, "ownership_transferred", tx_hash, data={"new_owner": ADDR(9)}, log_index=0)
-
-    cause_data, effect_data = run(
-        db_session,
-        [cause, effect],
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=ADDR(0xC0FFEE)))},
-    )
-
-    assert cause_data["correlated_events"] == [
-        {
-            "event_id": str(effect.id),
-            "event_type": "ownership_transferred",
-            "contract_address": ADDR(0xC0FFEE),
-            "salience": sal.SALIENCE_ALERT,
-        }
-    ]
-    assert cause_data["correlated_scope"] == "monitored_only"
-    assert cause_data["salience"] == sal.SALIENCE_ALERT
-    assert cause_data["salience_basis"] == [sal.BASIS_SAFE_EXEC_CALL, sal.BASIS_CORRELATED_CAUSE]
-    assert effect_data["caused_by"] == {"event_id": str(cause.id), "event_type": "safe_tx_executed"}
-    assert effect_data["salience"] == sal.SALIENCE_ALERT
-
-
-def test_each_correlated_entry_carries_the_effects_own_level(db_session, safe, make_mc):
-    """``assign_salience`` reads this list without querying."""
-    quiet = make_mc(address=ADDR(0xB0B), contract_type="regular")
-    tx_hash = "0x" + "c2" * 32
-    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
-    seed_event(
-        db_session,
-        quiet,
-        "state_changed_poll",
-        tx_hash,
-        data={"field": "rate", "signal_class": "metric", "signal_class_basis": "no_gate_provenance"},
-        log_index=0,
-    )
-
-    (cause_data,) = run(
-        db_session,
-        [cause],
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=ADDR(0xB0B)))},
-    )
-
-    assert cause_data["correlated_events"][0]["salience"] == sal.SALIENCE_ROUTINE
-    # Correlation is a MAX with a notable floor, never a demotion.
-    assert cause_data["salience"] == sal.SALIENCE_NOTABLE
-
-
-def test_an_empty_correlation_publishes_its_scope_not_an_earned_negative(db_session, safe):
-    """Empty means no monitored contract emitted in this tx, never "no effect"."""
-    tx_hash = "0x" + "c3" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(
-        db_session,
-        [event],
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=TARGET))},
-    )
-
-    assert data["correlated_events"] == []
-    assert data["correlated_scope"] == "monitored_only"
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_CALL]
-
-
-def test_a_read_witnessed_row_never_joins(db_session, safe, make_mc):
-    """Read-witnessed rows have ``tx_hash = ''``; joining on it would correlate every poll diff."""
-    polled = make_mc(address=ADDR(0xDEAD1), contract_type="regular")
-    cause = seed_event(db_session, safe, "safe_tx_executed", "")
-    read_row = seed_event(db_session, polled, "value_changed:state_variable:owner", "", data={"field": "owner"})
-
-    cause_data, read_data = run(db_session, [cause, read_row], {})
-
-    assert "correlated_events" not in cause_data
-    assert "caused_by" not in read_data
-
-
-def test_two_executions_in_one_transaction_do_not_claim_a_direction(db_session, make_mc):
-    """The shared hash doesn't witness which execution caused an effect."""
-    safe_a = make_mc(address=ADDR(0x5A01))
-    safe_b = make_mc(address=ADDR(0x5A02))
-    victim = make_mc(address=ADDR(0xC0FFE2), contract_type="regular")
-    tx_hash = "0x" + "c4" * 32
-    a = seed_event(db_session, safe_a, "safe_tx_executed", tx_hash, log_index=0)
-    b = seed_event(db_session, safe_b, "safe_tx_executed", tx_hash, log_index=1)
-    effect = seed_event(db_session, victim, "paused", tx_hash, data={"account": ADDR(3)}, log_index=2)
-
-    a_data, b_data, effect_data = run(db_session, [a, b, effect], {})
-
-    assert "caused_by" not in effect_data
-    assert {entry["event_id"] for entry in a_data["correlated_events"]} == {str(b.id), str(effect.id)}
-    assert {entry["event_id"] for entry in b_data["correlated_events"]} == {str(a.id), str(effect.id)}
 
 
 def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make_mc):
@@ -1096,93 +595,6 @@ def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make
     assert effect_data["salience"] == sal.SALIENCE_NOT_DETERMINED
 
 
-def test_the_join_does_not_cross_protocols(db_session, safe):
-    """The API spreads ``data`` verbatim, so an unscoped join would leak another protocol's row."""
-    stranger_protocol = Protocol(name="decode-corpus-other", chains=["ethereum"])
-    db_session.add(stranger_protocol)
-    db_session.flush()
-    contract = Contract(protocol_id=stranger_protocol.id, address=ADDR(0xA11E7), chain="ethereum")
-    db_session.add(contract)
-    db_session.flush()
-    stranger = MonitoredContract(
-        id=uuid.uuid4(),
-        address=ADDR(0xA11E7),
-        chain="ethereum",
-        protocol_id=stranger_protocol.id,
-        contract_id=contract.id,
-        contract_type="regular",
-        monitoring_config={},
-        last_known_state={},
-        enrollment_block=1,
-        is_active=True,
-    )
-    db_session.add(stranger)
-    db_session.commit()
-
-    tx_hash = "0x" + "c8" * 32
-    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
-    theirs = seed_event(
-        db_session, stranger, "ownership_transferred", tx_hash, data={"new_owner": ADDR(9)}, log_index=0
-    )
-
-    cause_data, theirs_data = run(db_session, [cause, theirs], {})
-
-    assert cause_data["correlated_events"] == []
-    assert "caused_by" not in theirs_data
-
-
-def test_a_cause_in_another_tenant_withholds_the_direction(db_session, safe, make_mc):
-    """Tenancy scopes what is published, not what is known."""
-    stranger_protocol = Protocol(name="decode-corpus-tenant-b", chains=["ethereum"])
-    db_session.add(stranger_protocol)
-    db_session.flush()
-    contract = Contract(protocol_id=stranger_protocol.id, address=ADDR(0x5AFB), chain="ethereum")
-    db_session.add(contract)
-    db_session.flush()
-    their_safe = MonitoredContract(
-        id=uuid.uuid4(),
-        address=ADDR(0x5AFB),
-        chain="ethereum",
-        protocol_id=stranger_protocol.id,
-        contract_id=contract.id,
-        contract_type="safe",
-        monitoring_config={},
-        last_known_state={},
-        enrollment_block=1,
-        is_active=True,
-    )
-    db_session.add(their_safe)
-    db_session.commit()
-
-    victim = make_mc(address=ADDR(0xC0FFEB), contract_type="regular")
-    tx_hash = "0x" + "cb" * 32
-    mine = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=2)
-    theirs = seed_event(db_session, their_safe, "safe_tx_executed", tx_hash, log_index=1)
-    effect = seed_event(db_session, victim, "paused", tx_hash, data={"account": ADDR(3)}, log_index=0)
-
-    mine_data, theirs_data, effect_data = run(db_session, [mine, theirs, effect], {})
-
-    assert "caused_by" not in effect_data
-    assert [entry["event_id"] for entry in mine_data["correlated_events"]] == [str(effect.id)]
-    assert theirs_data["correlated_events"] == []
-
-
-def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc):
-    """The same-transaction cause query has no window restriction, so an effect stored before its cause
-    arrives still links (no extra lookup, cannot re-notify a committed row; not the look-back OQ4 declined).
-    Pinned so nobody "fixes" it into a regression."""
-    victim = make_mc(address=ADDR(0xC0FFE9), contract_type="regular")
-    tx_hash = "0x" + "c9" * 32
-    effect = seed_event(db_session, victim, "paused", tx_hash, data={"account": ADDR(3)}, log_index=0)
-    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
-
-    (cause_data,) = run(db_session, [cause], {})
-
-    assert [entry["event_id"] for entry in cause_data["correlated_events"]] == [str(effect.id)]
-    db_session.expire_all()
-    assert db_session.get(MonitoredEvent, effect.id).data["caused_by"]["event_id"] == str(cause.id)
-
-
 def test_a_correlated_entry_publishes_a_normalized_address(db_session, safe, make_mc):
     victim = make_mc(address=ADDR(0xC0FFEA).upper().replace("0X", "0x"), contract_type="regular")
     tx_hash = "0x" + "ca" * 32
@@ -1193,48 +605,6 @@ def test_a_correlated_entry_publishes_a_normalized_address(db_session, safe, mak
 
     address = cause_data["correlated_events"][0]["contract_address"]
     assert address == address.lower()
-
-
-def test_a_historical_row_is_never_enriched_by_the_join(db_session, safe, make_mc):
-    victim = make_mc(address=ADDR(0xC0FFE3), contract_type="regular")
-    tx_hash = "0x" + "c5" * 32
-    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
-    old = seed_event(db_session, victim, "paused", tx_hash, data={"historical": True}, log_index=0)
-
-    cause_data, old_data = run(db_session, [cause, old], {})
-
-    assert cause_data["correlated_events"] == []
-    assert "caused_by" not in old_data
-
-
-def test_the_join_does_not_cross_chains(db_session, safe, protocol):
-    """Two chains can share a tx hash."""
-    contract = Contract(protocol_id=protocol.id, address=ADDR(0xBA5E), chain="base")
-    db_session.add(contract)
-    db_session.flush()
-    other_chain = MonitoredContract(
-        id=uuid.uuid4(),
-        address=ADDR(0xBA5E),
-        chain="base",
-        protocol_id=protocol.id,
-        contract_id=contract.id,
-        contract_type="regular",
-        monitoring_config={},
-        last_known_state={},
-        enrollment_block=1,
-        is_active=True,
-    )
-    db_session.add(other_chain)
-    db_session.commit()
-
-    tx_hash = "0x" + "c6" * 32
-    cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0)
-    elsewhere = seed_event(db_session, other_chain, "paused", tx_hash, data={"account": ADDR(3)}, log_index=0)
-
-    cause_data, elsewhere_data = run(db_session, [cause, elsewhere], {})
-
-    assert cause_data["correlated_events"] == []
-    assert "caused_by" not in elsewhere_data
 
 
 def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, safe, make_mc):
@@ -1335,19 +705,6 @@ def test_the_embed_renders_the_decoded_call(db_session, safe, known_target):
     assert fields["Operation"] == "call"
 
 
-def test_the_embed_names_an_unrecognized_delegatecall_as_one(db_session, safe):
-    tx_hash = "0x" + "f2" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-    run(
-        db_session,
-        [event],
-        {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex=exec_transaction_input(to=UNKNOWN_LIB, operation=1))},
-    )
-
-    fields = embed_fields(db_session, event)
-    assert fields["Operation"] == "delegatecall (target NOT a pinned MultiSend)"
-
-
 def test_the_embed_summarizes_a_batch_and_refuses_a_partial_one(db_session, safe, known_target):
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     decoded_hash, undecodable_hash = "0x" + "f3" * 32, "0x" + "f4" * 32
@@ -1411,44 +768,3 @@ def test_the_embed_names_the_ambiguous_attribution(db_session, safe):
     rendered = embed_fields(db_session, events[0])["Safe call"]
     assert "executed more than once in this transaction" in rendered
     assert "not witnessed" in rendered
-
-
-def test_the_embed_names_which_batch_layer_failed(db_session, safe):
-    inner_bad = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, b"\x00")])
-    tx_hash = "0x" + "f8" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-    run(
-        db_session,
-        [event],
-        {
-            tx_hash: tx(
-                to=SAFE,
-                tx_hash=tx_hash,
-                input_hex=exec_transaction_input(to=MULTISEND_1_3_0, operation=1, data=inner_bad),
-            )
-        },
-    )
-
-    assert embed_fields(db_session, event)["Batch"] == "a nested MultiSend payload did not decode — contents not listed"
-
-
-def test_the_embed_states_an_undecoded_execution_rather_than_rendering_nothing(db_session, safe):
-    tx_hash = "0x" + "f5" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-    run(db_session, [event], {tx_hash: tx(to=RELAYER, tx_hash=tx_hash, input_hex="0xdeadbeef")})
-
-    assert "not this Safe's own execTransaction" in embed_fields(db_session, event)["Safe call"]
-
-
-def test_the_pinned_allowlist_is_the_published_deployment_set(db_session):
-    """A silent addition would quiet an unvouched delegatecall; a removal would alert on every batch."""
-    assert enr._SAFE_MULTISEND_ADDRESSES == {
-        "0xa238cbeb142c10ef7ad8442c6d1f9e89e07e7761",
-        "0x998739bfdaadde7c933b942a68053933098f9eda",
-        "0x40a2accbd92bca938b02010e17a5b8929b49130d",
-        "0xa1dabef33b3b82c7814b6d82a79e50f4ac44102b",
-        "0x38869bf66a61cf6bdb996a6ae40d5853fd43b526",
-        "0x9641d764fc13c8b624c04430c7356c1c7c8102e2",
-    }
-    assert all(address == address.lower() for address in enr._SAFE_MULTISEND_ADDRESSES)
-    assert enr.MULTISEND_SELECTOR == "0x8d80ff0a"

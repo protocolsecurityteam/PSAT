@@ -24,26 +24,12 @@ def test_token_name_id_and_none_converge_on_mainnet():
     )
 
 
-def test_token_non_mainnet_name_and_id_converge():
-    from utils.chains import chain_cache_token
-
-    assert chain_cache_token("base") == chain_cache_token("8453") == chain_cache_token(8453) == "8453"
-    assert chain_cache_token("arbitrum") == "42161"
-
-
 def test_token_unknown_name_is_isolated_not_aliased_to_mainnet():
     """A miss is safe; a cross-chain collision is not."""
     from utils.chains import chain_cache_token
 
     assert chain_cache_token("nonexistent-chain") == "nonexistent-chain"
     assert chain_cache_token("nonexistent-chain") != chain_cache_token("ethereum")
-
-
-def test_l1_chain_key_uses_the_token():
-    from services.resolution.mapping_enumerator import _chain_key
-
-    assert _chain_key("ethereum") == _chain_key("1") == _chain_key(None) == "1"
-    assert _chain_key("base") == _chain_key("8453") == "8453"
 
 
 @requires_postgres

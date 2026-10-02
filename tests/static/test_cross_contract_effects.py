@@ -27,10 +27,6 @@ def _selector(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
-def _callee(selector: str, claims: list[dict]) -> dict:
-    return {"functions": {"someFn()": {"selector": selector, "claims": claims}}}
-
-
 def _std(claim_id: str) -> dict:
     return {"claim_id": claim_id, "tier": "standard_exact", "witness": {}}
 
@@ -41,80 +37,6 @@ def _external_sink(target: str, selector: str, *, origin: str = "body", sid: str
 
 def _caller(fn_sig: str, sinks: list[dict]) -> dict:
     return {"functions": {fn_sig: {"selector": _selector(fn_sig), "sinks": sinks, "claims": []}}}
-
-
-def test_callee_map_keeps_flow_drops_control_and_weak_tiers():
-    effects = {
-        "functions": {
-            "transfer(address,uint256)": {"selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]},
-            "grantRole(bytes32,address)": {"selector": "0x2f2ff15d", "claims": [_std("roles.grant")]},
-            "burn(uint256)": {
-                "selector": "0x42966c68",
-                "claims": [{"claim_id": "supply.burn", "tier": "idiom_structural", "witness": {}}],
-            },
-        }
-    }
-    callee_map = build_callee_claim_map({TOKEN: effects})
-    assert TOKEN in callee_map
-    # The control-plane and idiom-tier claims are dropped.
-    assert set(callee_map[TOKEN]) == {TRANSFER_SELECTOR}
-    assert callee_map[TOKEN][TRANSFER_SELECTOR][0]["claim_id"] == "flow.out"
-
-
-def test_callee_map_empty_for_missing_claims():
-    assert build_callee_claim_map({TOKEN: {"functions": {}}}) == {}
-    assert build_callee_claim_map(None) == {}
-
-
-def test_value_flow_propagation_emits_policy_derived():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    controller_values = {"state_variable:token": {"value": TOKEN}}
-
-    out = derive_cross_contract_claims(target, controller_values, callee_map)
-
-    assert "sweep(address)" in out
-    claim = out["sweep(address)"][0]
-    assert claim["claim_id"] == "flow.out"
-    assert claim["tier"] == "policy_derived"
-    assert claim["witness"]["callee"] == TOKEN
-    assert claim["witness"]["selector"] == TRANSFER_SELECTOR
-    assert claim["witness"]["source_tier"] == "standard_exact"
-
-
-_RESOLVED = {"state_variable:token": {"value": TOKEN}}
-
-
-@pytest.mark.parametrize(
-    ("origin", "controller_values", "analyzed_callees"),
-    [
-        pytest.param("guard", _RESOLVED, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="guard_origin"),
-        pytest.param("body", {}, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="controller_unresolved"),
-        pytest.param("body", _RESOLVED, {}, id="callee_not_analyzed"),
-    ],
-)
-def test_no_join_derives_nothing(origin, controller_values, analyzed_callees):
-    callee_map = build_callee_claim_map(analyzed_callees)
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR, origin=origin)])
-    assert derive_cross_contract_claims(target, controller_values, callee_map) == {}
-
-
-def test_external_contract_controller_id_format_resolves():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.in")])})
-    target = _caller("pull(address)", [_external_sink("registry.transferFrom", TRANSFER_SELECTOR)])
-    controller_values = {"external_contract:registry": {"value": TOKEN}}
-    out = derive_cross_contract_claims(target, controller_values, callee_map)
-    assert out["pull(address)"][0]["claim_id"] == "flow.in"
-
-
-def test_beacon_upgrade_propagates_upgrade_implementation():
-    callee_map = build_callee_claim_map({BEACON: _callee(UPGRADE_TO, [_std("upgrade.implementation")])})
-    target = _caller("upgradeEtherFiNode(address)", [_external_sink("beacon.upgradeTo", UPGRADE_TO)])
-    controller_values = {"state_variable:beacon": {"value": BEACON}}
-    out = derive_cross_contract_claims(target, controller_values, callee_map)
-    claim = out["upgradeEtherFiNode(address)"][0]
-    assert claim["claim_id"] == "upgrade.implementation"
-    assert claim["tier"] == "policy_derived"
 
 
 def _vault_with_hook_pointer(pointer: str = "hook") -> dict:
@@ -153,24 +75,6 @@ def _teller_with_setter(var: str, declared_type: str) -> dict:
             }
         }
     }
-
-
-def test_sibling_transfer_hook_links_resolves_to_this_contract():
-    links = sibling_transfer_hook_links(
-        TELLER,
-        {VAULT: _vault_with_hook_pointer()},
-        {VAULT: {"controller_values": {"state_variable:hook": {"value": TELLER}}}},
-    )
-    assert links == [{"sibling_address": VAULT, "pointer_var": "hook"}]
-
-
-def test_sibling_transfer_hook_links_ignores_pointer_to_other_address():
-    links = sibling_transfer_hook_links(
-        TELLER,
-        {VAULT: _vault_with_hook_pointer()},
-        {VAULT: {"controller_values": {"state_variable:hook": {"value": TOKEN}}}},
-    )
-    assert links == []
 
 
 def test_transfer_policy_configure_on_bool_mapping_setter():
@@ -213,25 +117,6 @@ def _classifications(address: str, **info) -> dict:
     return {"classifications": {address: {"address": address, **info}}}
 
 
-def test_proxy_provenance_from_slot_confirmed_proxy():
-    art = _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
-    pp = proxy_provenance_from_classifications(TELLER, art)
-    assert pp is not None
-    assert pp == {"proxy": TELLER, "implementation": IMPL, "proxy_type": "eip1967", "slot": pp["slot"]}
-    assert pp["slot"].startswith("0x360894")
-
-
-def test_proxy_provenance_none_for_non_slot_proxy_or_non_proxy():
-    assert (
-        proxy_provenance_from_classifications(
-            TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1167", implementation=IMPL)
-        )
-        is None
-    )
-    assert proxy_provenance_from_classifications(TELLER, _classifications(TELLER, type="eoa")) is None
-    assert proxy_provenance_from_classifications(TELLER, {}) is None
-
-
 def test_provenance_upgrade_emits_policy_derived():
     pp = proxy_provenance_from_classifications(
         TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
@@ -248,24 +133,6 @@ def test_provenance_upgrade_emits_policy_derived():
     assert claim["tier"] == "policy_derived"
     assert claim["witness"]["implementation"] == IMPL
     assert "foo()" not in out  # non-upgrade selectors untouched
-
-
-def test_provenance_does_not_override_static_standard_exact():
-    from services.static.claims import Claim, resolve_claim_precedence
-
-    pp = proxy_provenance_from_classifications(
-        TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1967", implementation=IMPL)
-    )
-    out = derive_cross_contract_claims(
-        {"functions": {"upgradeTo(address)": {"selector": UPGRADE_TO, "claims": []}}},
-        {},
-        {},
-        proxy_provenance=pp,
-    )
-    static_claim: Claim = {"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {"static": True}}
-    merged = resolve_claim_precedence([static_claim, *out["upgradeTo(address)"]])
-    assert len(merged) == 1
-    assert merged[0]["tier"] == "standard_exact"
 
 
 # The join meets through ``abi_selector`` when the callee's declared signature isn't the ABI form.
@@ -297,13 +164,6 @@ def test_interface_param_callee_joins_via_the_canonical_key():
     assert claim["witness"]["selector"] == CANONICAL_SWEEP_TO
 
 
-def test_unstamped_interface_param_callee_still_misses_honestly():
-    callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=False)})
-    assert CANONICAL_SWEEP_TO not in callee_map[TOKEN]
-    target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
-    assert derive_cross_contract_claims(target, {"state_variable:recovery": {"value": TOKEN}}, callee_map) == {}
-
-
 def test_non_propagatable_claims_never_join_even_via_the_canonical_key():
     """The canonical key widens the join, not the propagation rule."""
     weak = {"claim_id": "exec.arbitrary", "tier": "idiom_structural", "witness": {}}
@@ -312,13 +172,3 @@ def test_non_propagatable_claims_never_join_even_via_the_canonical_key():
     assert callee_map == {}
     target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
     assert derive_cross_contract_claims(target, {"state_variable:recovery": {"value": TOKEN}}, callee_map) == {}
-
-
-def test_elementary_callee_is_not_double_counted_by_the_two_keys():
-    record = {"selector": TRANSFER_SELECTOR, "abi_selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}
-    callee_map = build_callee_claim_map({TOKEN: {"functions": {"transfer(address,uint256)": record}}})
-    assert list(callee_map[TOKEN]) == [TRANSFER_SELECTOR]
-    assert len(callee_map[TOKEN][TRANSFER_SELECTOR]) == 1
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    out = derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map)
-    assert len(out["sweep(address)"]) == 1

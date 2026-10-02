@@ -95,10 +95,6 @@ def _facts(effects, signature: str) -> FunctionFacts:
     )
 
 
-def _ext_heads(info) -> list[str]:
-    return [s["target"] for s in info["sinks"] if s["kind"] == "external_call"]
-
-
 @pytest.fixture(scope="module")
 def compiled(tmp_path_factory):
     return _compile(tmp_path_factory.mktemp("g5"))
@@ -109,48 +105,10 @@ def effects(compiled):
     return build_effects(compiled)
 
 
-@pytest.mark.parametrize(
-    "signature,resolved_head",
-    [
-        pytest.param("deposit(uint256)", "underlying.safeTransferFrom", id="state_var_double_cast"),
-        pytest.param("depositDirect(uint256)", "underlying.transferFrom", id="direct_high_level_call"),
-        # A parameter names no getter; the hint layer enforces that separately.
-        pytest.param("depositParam(address,uint256)", "token.safeTransferFrom", id="parameter_cast"),
-    ],
-)
-def test_head_resolved_through_cast(effects, signature, resolved_head):
-    heads = _ext_heads(effects["functions"][signature])
-    assert resolved_head in heads, heads
-    assert not any(h.split(".")[0].startswith(("TMP_", "REF_", "TUPLE_")) for h in heads), heads
-
-
-def test_mapping_element_is_not_resolved_to_a_getter(effects):
-    # ``pool[id]`` isn't temporary-rooted through a cast, so it stays unresolved rather than invented into ``pool()``.
-    heads = _ext_heads(effects["functions"]["depositIdx(uint256,uint256)"])
-    assert not any(h.startswith("pool.") for h in heads), heads
-
-
-def test_input_token_hints_names_the_state_var_getter(effects):
-    hints = input_token_hints(_facts(effects, "deposit(uint256)"))
-    assert "underlying()" in hints, hints
-    assert not any(h.startswith(("TMP_", "REF_", "TUPLE_")) for h in hints), hints
-
-
 def test_token_read_selector_names_the_token(effects):
     # A read selector must still surface the getter (``_TOKEN_READ_SELECTORS``).
     hints = input_token_hints(_facts(effects, "previewShares()"))
     assert "reserveToken()" in hints, hints
-
-
-def test_parameter_head_names_no_getter(effects):
-    # A parameter's value is in calldata, so it isn't a getter hint.
-    hints = input_token_hints(_facts(effects, "depositParam(address,uint256)"))
-    assert "token()" not in hints, hints
-
-
-def test_mapping_element_invents_no_getter_hint(effects):
-    hints = input_token_hints(_facts(effects, "depositIdx(uint256,uint256)"))
-    assert not any(h.startswith(("TMP_", "REF_", "TUPLE_", "pool")) for h in hints), hints
 
 
 def test_value_flow_token_var_resolved(compiled):

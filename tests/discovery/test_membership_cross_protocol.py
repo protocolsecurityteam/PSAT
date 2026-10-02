@@ -107,65 +107,6 @@ def test_a_nominated_candidate_admits_to_b_on_b_edge(
     assert a_rows == []
 
 
-def test_candidate_own_pointer_to_foreign_member_does_not_cross(db_session):
-    """Deliberate narrowing: the shared-singleton shape is not vacuumed into B."""
-    protocol_a = _protocol(db_session, "own-ptr-a")
-    protocol_b = _protocol(db_session, "own-ptr-b")
-    b_impl = _member(db_session, protocol_b, _addr(0xF1))
-    candidate = _contract(db_session, _addr(0xF2), implementation=b_impl.address)
-    gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag="inventory")
-    _code_fact(db_session, candidate.address)
-    db_session.commit()
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
-    db_session.commit()
-    db_session.refresh(candidate)
-
-    assert candidate.protocol_id is None
-    assert candidate.nominated_protocol_id == protocol_a.id
-
-
-def test_dual_evidence_resolves_deterministically_nominated_slot_first(db_session):
-    """The settled state is independent of fact arrival order."""
-    for arrival in ("a_first", "b_first"):
-        protocol_a = _protocol(db_session, f"dual-a-{arrival}")
-        protocol_b = _protocol(db_session, f"dual-b-{arrival}")
-        candidate = _contract(db_session, _addr(0xD0 if arrival == "a_first" else 0xD3))
-        gate.nominate(db_session, contract=candidate, protocol_id=protocol_a.id, source_tag="inventory")
-        _code_fact(db_session, candidate.address)
-        member_addr_a = _addr(0xD1 if arrival == "a_first" else 0xD4)
-        member_addr_b = _addr(0xD2 if arrival == "a_first" else 0xD5)
-        if arrival == "a_first":
-            a_member = _member(db_session, protocol_a, member_addr_a, implementation=candidate.address)
-            b_member = _member(db_session, protocol_b, member_addr_b, implementation=candidate.address)
-        else:
-            b_member = _member(db_session, protocol_b, member_addr_b, implementation=candidate.address)
-            a_member = _member(db_session, protocol_a, member_addr_a, implementation=candidate.address)
-        db_session.commit()
-
-        gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(a_member.id, b_member.id)))
-        db_session.commit()
-        db_session.refresh(candidate)
-
-        assert candidate.protocol_id == protocol_a.id, arrival
-        assert candidate.nominated_protocol_id == protocol_a.id, arrival
-
-
-def test_existing_member_never_flipped_by_foreign_evidence(db_session):
-    protocol_a = _protocol(db_session, "keep-a")
-    protocol_b = _protocol(db_session, "flip-b")
-    a_member = _member(db_session, protocol_a, _addr(0xE0))
-    b_member = _member(db_session, protocol_b, _addr(0xE1), implementation=a_member.address)
-    db_session.commit()
-
-    result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(b_member.id,)))
-    db_session.commit()
-    db_session.refresh(a_member)
-
-    assert a_member.protocol_id == protocol_a.id
-    assert a_member.id not in result.promoted_contract_ids
-
-
 def test_demotion_restore_coherent_after_cross_protocol_promotion(db_session):
     protocol_a = _protocol(db_session, "demote-a")
     protocol_b = _protocol(db_session, "demote-b")

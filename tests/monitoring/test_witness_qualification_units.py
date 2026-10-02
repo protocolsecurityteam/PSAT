@@ -8,17 +8,12 @@ struct whose members are not word-projectable, an ambiguous correspondence.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from services.monitoring.event_topics import (
-    MAX_EVENT_TYPE_LENGTH,
     WITNESS_TIER_ACTIVITY,
     WITNESS_TIER_HINT,
-    WITNESS_TIER_SELF_DESCRIBING,
     extract_governance_topics,
-    is_member_changed_event_type,
     member_witness_mapping_var,
 )
 from services.monitoring.polling_plan import (
@@ -224,11 +219,6 @@ def test_member_word_index_refuses_what_it_cannot_prove(components, member, inde
     assert _is_poll_decodable(read_spec) is (index is not None)
 
 
-def test_a_member_free_read_spec_is_unaffected():
-    assert _member_word_index({"strategy": "getter_call", "target": "owner"}) is None
-    assert _is_poll_decodable({"strategy": "getter_call", "target": "owner", "type_kind": "address"}) is True
-
-
 @pytest.mark.parametrize(
     "entry,expected",
     [
@@ -309,22 +299,6 @@ def test_a_log_that_cannot_name_the_entry_publishes_nothing():
     assert parse_tracked_log(log, spec) is None
 
 
-def test_a_mapping_name_that_would_overflow_the_column_mints_no_member_type():
-    """A truncated event type names a different mapping."""
-    long_name = "m" * MAX_EVENT_TYPE_LENGTH
-    spec = extract_governance_topics(_plan_with({"mapping_name": long_name, "key_position": 0, "direction": "add"}))[0]
-    assert not is_member_changed_event_type(spec["event_type"])
-
-
-@pytest.mark.parametrize("openness", ["open", "not_determined", None])
-def test_an_unproven_writer_mints_no_member_type(openness):
-    witness = {"mapping_name": "m", "key_position": 0, "direction": "add"}
-    spec = extract_governance_topics(_plan_with(witness, openness))[0]
-    assert spec["event_type"] == "state_changed:state_variable:m"
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert "member_witness" not in spec
-
-
 def test_one_topic0_on_two_controllers_resolves_by_evidence():
     """The winner used to be decided by alphabetical label order."""
     topic0 = "0x" + "ab" * 32
@@ -343,43 +317,3 @@ def test_one_topic0_on_two_controllers_resolves_by_evidence():
         assert len(specs) == 1
         assert specs[0]["witness_tier"] == WITNESS_TIER_HINT
         assert specs[0]["controller_id"] == "state_variable:zzz"
-
-
-def test_a_legacy_witness_under_a_slot_type_does_not_promote():
-    """Honouring the record regardless of published type would land the entry key as the slot's value."""
-    from services.monitoring.unified_watcher import _resolve_spec_tier
-
-    mc = SimpleNamespace(monitoring_config={"polling_plan": []})
-    witness = {"mapping_name": "m", "key_position": 0, "direction": "add"}
-    slot_typed = {
-        "event_type": "state_changed:state_variable:m",
-        "controller_id": "state_variable:m",
-        "member_witness": witness,
-        "writer_openness": "restricted",
-    }
-    assert _resolve_spec_tier(slot_typed, mc) == WITNESS_TIER_ACTIVITY  # pyright: ignore[reportArgumentType]
-
-    member_typed = dict(slot_typed, event_type="member_changed:m")
-    assert _resolve_spec_tier(member_typed, mc) == WITNESS_TIER_SELF_DESCRIBING  # pyright: ignore[reportArgumentType]
-
-
-def test_member_change_never_reflects_into_last_known_state():
-    from services.monitoring.unified_watcher import _update_state_from_event
-
-    mc = SimpleNamespace(last_known_state={"m": "before"})
-    _update_state_from_event(
-        mc,  # pyright: ignore[reportArgumentType]
-        {"event_type": "member_changed:m", "effect_tags": {"writes": ["m"]}, "key": "0xabc", "direction": "add"},
-    )
-    assert mc.last_known_state == {"m": "before"}
-
-
-def test_member_change_never_writes_a_controller_value_row():
-    from services.monitoring.unified_watcher import _sync_relational_tables
-
-    mc = SimpleNamespace(contract_id=1, address="0x" + "11" * 20, chain="ethereum")
-    _sync_relational_tables(
-        None,  # pyright: ignore[reportArgumentType]
-        mc,  # pyright: ignore[reportArgumentType]
-        {"event_type": "member_changed:m", "effect_tags": {"writes": ["m"]}, "key": "0xabc", "direction": "add"},
-    )

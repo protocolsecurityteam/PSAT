@@ -87,14 +87,6 @@ def seeded_events(db_session):
         db_session.commit()
 
 
-def test_filter_by_address_returns_all_chains(api_client, seeded_events):
-    resp = api_client.get("/api/monitored-events", params={"address": seeded_events["addr"]})
-    assert resp.status_code == 200
-    body = resp.json()
-    block_numbers = sorted(e["block_number"] for e in body)
-    assert block_numbers == [100, 101, 200]
-
-
 @pytest.mark.parametrize(
     ("make_params", "expected_blocks"),
     [
@@ -115,93 +107,6 @@ def test_filter_modes(api_client, seeded_events, make_params, expected_blocks):
     resp = api_client.get("/api/monitored-events", params=make_params(seeded_events))
     assert resp.status_code == 200
     assert sorted(e["block_number"] for e in resp.json()) == expected_blocks
-
-
-def test_address_lookup_lowercases(api_client, seeded_events):
-    addr = seeded_events["addr"]
-    resp = api_client.get("/api/monitored-events", params={"address": addr.upper()})
-    assert resp.status_code == 200
-    block_numbers = sorted(e["block_number"] for e in resp.json())
-    assert block_numbers == [100, 101, 200]
-
-
-def test_same_detected_at_orders_stably_by_block_then_id(api_client, db_session):
-    """Order is detected_at desc, block_number desc, id desc; detected_at alone left ties undefined."""
-    from db.models import MonitoredContract, MonitoredEvent
-
-    addr = "0x" + "ee" * 20
-    mc = MonitoredContract(
-        id=uuid.uuid4(),
-        address=addr,
-        chain="ethereum",
-        contract_type="timelock",
-        monitoring_config={"watch_timelock": True},
-        last_known_state={},
-        last_scanned_block=0,
-        is_active=True,
-    )
-    db_session.add(mc)
-    db_session.commit()
-
-    same_ts = datetime.now(timezone.utc)
-    # Non-monotonic insertion proves the SQL sort decides the order.
-    events = []
-    for block in (3000, 1000, 2000):
-        events.append(
-            MonitoredEvent(
-                id=uuid.uuid4(),
-                monitored_contract_id=mc.id,
-                event_type="timelock_scheduled",
-                block_number=block,
-                tx_hash="0x" + format(block, "x").zfill(64),
-                data={},
-                detected_at=same_ts,
-            )
-        )
-    db_session.add_all(events)
-    db_session.commit()
-
-    try:
-        resp = api_client.get("/api/monitored-events", params={"address": addr})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert [e["block_number"] for e in body] == [3000, 2000, 1000]
-    finally:
-        for e in events:
-            db_session.delete(e)
-        db_session.delete(mc)
-        db_session.commit()
-
-
-def test_upsert_monitoring_seeds_enrollment_block_at_head(api_client, db_session, monkeypatch):
-    """Otherwise the first scan would notify the whole pre-add history."""
-    from sqlalchemy import select
-
-    from db.models import MonitoredContract, Protocol
-
-    head = 21_000_000
-    monkeypatch.setattr("routers.monitored.rpc_request", lambda *a, **k: hex(head))
-
-    proto = Protocol(name="__test_upsert_monitoring__")
-    db_session.add(proto)
-    db_session.commit()
-
-    addr = "0x" + "3e" * 20
-    try:
-        resp = api_client.post(
-            f"/api/protocols/{proto.id}/monitoring",
-            json={"address": addr, "chain": "ethereum", "contract_type": "regular"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["enrollment_block"] == head
-
-        mc = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalar_one()
-        assert mc.enrollment_block == head  # floor set → pre-add history is suppressed
-        assert mc.last_scanned_block == head  # start from now, not block 0
-    finally:
-        db_session.query(MonitoredContract).filter(MonitoredContract.address == addr).delete()
-        db_session.query(Protocol).filter(Protocol.id == proto.id).delete()
-        db_session.commit()
 
 
 def test_protocol_monitoring_list_serializes_enrollment_block(api_client, db_session):

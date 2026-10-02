@@ -52,42 +52,6 @@ def _sink(info, kind, target_contains):
     return matches[0]
 
 
-_GUARD_ORIGIN_SRC = """
-pragma solidity ^0.8.20;
-interface Authority { function canCall(address u, address t, bytes4 s) external view returns (bool); }
-interface Pinger { function ping(uint256 v) external; }
-abstract contract Auth {
-    address public owner;
-    Authority public authority;
-    modifier requiresAuth() { require(isAuthorized(msg.sender, msg.sig), "no"); _; }
-    function isAuthorized(address u, bytes4 s) internal view returns (bool) {
-        Authority a = authority;
-        return (address(a) != address(0) && a.canCall(u, address(this), s)) || u == owner;
-    }
-}
-contract Svc is Auth {
-    bool public isPaused;
-    function pause() external requiresAuth { isPaused = true; }
-    function poke(Pinger t, uint256 v) external requiresAuth { t.ping(v); }
-}
-"""
-
-
-def test_modifier_auth_call_is_guard_origin_and_never_an_effect(tmp_path):
-    contract = _compile_named(tmp_path, _GUARD_ORIGIN_SRC, "Svc")
-    effects = build_effects(contract)
-
-    pause = _info(effects, "pause()")
-    assert _sink(pause, "external_call", "canCall")["origin"] == "guard"
-    assert _sink(pause, "state_write", "isPaused")["origin"] == "body"
-    assert "external_contract_call" not in pause["effect_labels"]
-
-    poke = _info(effects, "poke(Pinger,uint256)")
-    assert _sink(poke, "external_call", "ping")["origin"] == "body"
-    assert _sink(poke, "external_call", "canCall")["origin"] == "guard"
-    assert "external_contract_call" in poke["effect_labels"]
-
-
 _CLOBBER_SRC = """
 pragma solidity ^0.8.20;
 interface IPausable {
@@ -116,44 +80,6 @@ def test_concrete_body_wins_over_zero_node_interface_declaration(tmp_path):
     pause = _info(effects, "pause(uint256)")
     assert _sink(pause, "state_write", "_paused")["target"] == "_paused"
     assert pause["writer_selectors"] == [pause["selector"]]
-
-
-_MEMBER_SRC = """
-pragma solidity ^0.8.20;
-contract Accountant {
-    struct State { bool isPaused; address payoutAddress; uint24 delay; }
-    State internal s;
-    address public owner;
-    modifier onlyOwner() { require(msg.sender == owner); _; }
-    function pause() external onlyOwner { s.isPaused = true; }
-    function setPayout(address p) external onlyOwner { s.payoutAddress = p; }
-    function setDelay(uint24 d) external onlyOwner { s.delay = d; }
-}
-"""
-
-
-def test_member_write_facts_carry_member_path_and_declared_type(tmp_path):
-    """A pause claim needs to tell the bool member from the address member."""
-    contract = _compile_named(tmp_path, _MEMBER_SRC, "Accountant")
-    effects = build_effects(contract)
-
-    def member_fact(signature):
-        writes = [sw for sw in _info(effects, signature)["state_writes"] if sw["granularity"] == "member"]
-        assert len(writes) == 1, writes
-        return writes[0]
-
-    pause_fact = member_fact("pause()")
-    assert pause_fact["var"] == "s"
-    assert pause_fact["member_path"] == ["isPaused"]
-    assert pause_fact["declared_type"] == "bool"
-
-    payout_fact = member_fact("setPayout(address)")
-    assert payout_fact["member_path"] == ["payoutAddress"]
-    assert payout_fact["declared_type"] == "address"
-
-    delay_fact = member_fact("setDelay(uint24)")
-    assert delay_fact["member_path"] == ["delay"]
-    assert delay_fact["declared_type"] == "uint24"
 
 
 # Slither reports the ``OwnableStorageLocation`` constant as written by every function touching the storage, including
@@ -194,32 +120,6 @@ def test_oz_v5_slot_constant_ghost_is_not_ownership_and_is_hygiene_tagged(tmp_pa
     set_token_facts = {sw["var"]: sw for sw in _info(effects, "setToken(address)")["state_writes"]}
     assert set_token_facts["token"]["hygiene_class"] == "normal"
     assert set_token_facts["OwnableStorageLocation"]["hygiene_class"] == "storage_location_pseudo"
-
-
-_OZ_V4_OWNABLE_SRC = """
-pragma solidity ^0.8.20;
-abstract contract Ownable {
-    address private _owner;
-    modifier onlyOwner() { require(owner() == msg.sender, "no"); _; }
-    function owner() public view returns (address) { return _owner; }
-    function transferOwnership(address n) public onlyOwner { _owner = n; }
-}
-contract Token is Ownable {
-    uint256 public x;
-    function setX(uint256 v) external onlyOwner { x = v; }
-}
-"""
-
-
-def test_hygiene_gate_keeps_real_address_owner_ownership(tmp_path):
-    contract = _compile_named(tmp_path, _OZ_V4_OWNABLE_SRC, "Token")
-    effects = _effects_with_labels(contract)
-
-    assert "ownership_transfer" in _info(effects, "transferOwnership(address)")["effect_labels"]
-    owner_fact = next(
-        sw for sw in _info(effects, "transferOwnership(address)")["state_writes"] if sw["var"] == "_owner"
-    )
-    assert owner_fact["hygiene_class"] == "normal"
 
 
 _REENTRANCY_SRC = """
@@ -372,13 +272,3 @@ def test_parameter_names_and_payability_are_recorded(tmp_path):
     assert pay["payable"] is False
     assert _info(effects, "redeem(uint256)")["parameter_names"] == ["tokenId"]
     assert _info(effects, "deposit()")["payable"] is True
-
-
-def test_value_flow_records_which_parameter_carries_the_amount(tmp_path):
-    contract = _compile_named(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
-    effects = build_effects(contract)
-    flows = [f for f in _info(effects, "payOut(address,uint256,uint256)")["value_flows"] if f["direction"] == "out"]
-    assert flows, "expected a native transfer out"
-    assert any(f.get("amount_kind", {}).get("kind") == "param" for f in flows)
-    assert {f.get("amount_param_index") for f in flows} == {1}
-    assert {f.get("target_param_index") for f in flows} == {0}

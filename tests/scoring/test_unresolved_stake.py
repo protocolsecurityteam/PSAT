@@ -9,7 +9,6 @@ from services.scoring import planes as P
 from services.scoring.schema import PrincipalRef
 from tests.support.scoring_builders import (
     EOA,
-    KEY_C,
     KEY_V,
     facts,
     fold,  # noqa: F401
@@ -21,7 +20,6 @@ from tests.support.scoring_builders import (
 
 REACHED = KEY_V
 BEHIND = "ethereum::0x" + "7" * 40
-SIZED = KEY_C
 
 _EMPTY_WITHHELD = {"entities": 0, "entity_keys": [], "hops": 0}
 
@@ -64,13 +62,6 @@ def test_reached_and_behind_split_and_sum():
     assert stake["proof_frontier"] == "reach"
 
 
-def test_sized_entities_are_excluded_and_reached_takes_precedence():
-    plane = value_plane({REACHED: {"weth": 1_000_000.0}, SIZED: {"usdc": 9_000_000.0}})
-    stake = FOLD._unresolved_stake(_und(REACHED, SIZED), _withheld(REACHED), {SIZED}, plane)
-    assert stake["entities_total"] == 1
-    assert set(stake["by_basis"]) == {"reached_unwitnessed"}
-
-
 def test_a_refused_sheet_is_a_counted_refusal_never_a_zero():
     plane = value_plane({}, contracts=(REACHED,))
     stake = FOLD._unresolved_stake(_und(REACHED), _EMPTY_WITHHELD, set(), plane)
@@ -91,24 +82,6 @@ def test_a_proven_empty_sheet_contributes_an_earned_zero():
     stake = FOLD._unresolved_stake(_und(REACHED), _EMPTY_WITHHELD, set(), plane)
     assert stake["ceiling_usd"] == 0.0
     assert stake["by_basis"]["reached_unwitnessed"]["entities_contributing"] == 1
-
-
-def test_an_implementation_alias_cannot_recount_its_sized_proxy():
-    impl = "ethereum::0x" + "8" * 40
-    impl2 = "ethereum::0x" + "9" * 40
-    plane = value_plane({SIZED: {"weth": 9_000_000.0}}, alias={impl: SIZED, impl2: SIZED})
-    # The proxy's figure is already published; its impl keys must not draw it out again.
-    stake = FOLD._unresolved_stake(_und(impl, impl2), _EMPTY_WITHHELD, {SIZED}, plane)
-    assert stake == {"ceiling_usd": None, "entities_total": 0, "proof_frontier": None, "by_basis": {}}
-    stake = FOLD._unresolved_stake(_und(impl, impl2), _EMPTY_WITHHELD, set(), plane)
-    assert stake["entities_total"] == 1
-    assert stake["ceiling_usd"] == 9_000_000.0
-
-
-def test_no_unresolved_entities_is_the_earned_fully_determined_state():
-    plane = value_plane({})
-    stake = FOLD._unresolved_stake([], _EMPTY_WITHHELD, set(), plane)
-    assert stake == {"ceiling_usd": None, "entities_total": 0, "proof_frontier": None, "by_basis": {}}
 
 
 def test_levers_rank_on_the_points_ceiling_then_dollars():

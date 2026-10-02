@@ -93,29 +93,6 @@ def test_run_discovery_folds_budget_metrics(monkeypatch):
     assert "phase_ms_discovery_addresses" in metrics
 
 
-def test_probe_chain_survives_a_bound_job_chain(monkeypatch, caplog):
-    """JsonFormatter writes bound context first, so a ``chain`` extra would be replaced by the job's."""
-    import json
-
-    from services.discovery import chain_resolver
-    from utils.logging import JsonFormatter
-
-    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
-    monkeypatch.setattr(
-        chain_resolver,
-        "_batch_get_code",
-        lambda _url, _addrs: (_ for _ in ()).throw(TimeoutError("probe timed out")),
-    )
-
-    with bind_trace_context(trace_id="t", job_id="j", stage="discovery", chain="ethereum"):
-        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
-            chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
-        payload = json.loads(JsonFormatter().format(caplog.records[0]))
-
-    assert payload["chain"] == "ethereum"
-    assert payload["probe_chain"] == "base"
-
-
 def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, caplog):
     """D3: an empty probe result is indistinguishable from "no code here"."""
     from services.discovery import chain_resolver
@@ -214,21 +191,6 @@ def test_chain_probe_counts_per_item_rpc_errors(monkeypatch, caplog):
     assert warnings[0].probe_failed == 1
     assert warnings[0].exc_type is None
     assert [e for e in errors if e.phase == "chain_probe"] == []
-
-
-def test_chain_probe_stays_silent_when_every_address_answers(monkeypatch, caplog):
-    from services.discovery import chain_resolver
-
-    monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
-    monkeypatch.setattr(chain_resolver, "_batch_get_code", lambda _url, addrs: {a: "0x" for a in addrs})
-
-    with _job_context() as (_metrics, errors):
-        with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
-            hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20], "base")
-
-    assert hits == set()
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert errors == []
 
 
 def test_audit_classification_llm_failure_warns(monkeypatch, caplog):

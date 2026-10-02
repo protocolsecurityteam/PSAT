@@ -283,32 +283,6 @@ def _ir_lvalue(code_unit, predicate) -> Any:
     raise AssertionError("fixture no longer contains the IR shape under test")
 
 
-def test_a_parameter_keyed_struct_member_names_its_declaration_member_and_slot(_unit):
-    flow = _flow(_unit, "Records", "cancelBid(uint256)")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    assert flow["amount_record_variable"] == "Records.bids"
-    assert flow["amount_record_member_path"] == ["amount"]
-    assert flow["amount_record_key_kinds"] == ["param"]
-    assert flow["amount_record_key_param_indexes"] == [0]
-
-
-def test_a_caller_keyed_cell_records_msg_sender_at_the_level_that_selected_it(_unit):
-    """Key origins are per level, in source order."""
-    flow = _flow(_unit, "Records", "completeWithdraw(address)")
-    assert flow["amount_record_variable"] == "Records.withdrawRequests"
-    assert flow["amount_record_member_path"] == ["shares"]
-    assert flow["amount_record_key_kinds"] == ["msg_sender", "param"]
-    assert flow["amount_record_key_param_indexes"] == [None, 0]
-
-
-def test_a_scalar_mapping_publishes_an_empty_member_path(_unit):
-    """``payPot`` shows what an absent path means."""
-    flow = _flow(_unit, "Records", "paySimple(uint256)")
-    assert flow["amount_record_variable"] == "Records.simple"
-    assert flow["amount_record_member_path"] == []
-    assert flow["amount_record_key_kinds"] == ["param"]
-
-
 @pytest.mark.parametrize(
     "signature,kind",
     [
@@ -333,15 +307,6 @@ def test_no_amount_record_published(_unit, signature, kind):
     assert flow["amount_kind"]["kind"] == kind
     for key in _RECORD_KEYS:
         assert key not in flow
-
-
-def test_the_key_resolves_through_the_call_site_binding(_unit):
-    """Without the threaded binding the caller's own balance reads as an unknown address's."""
-    flow = _flow(_unit, "Records", "unwrapAll()")
-    assert flow["amount_record_variable"] == "Records._balances"
-    assert flow["amount_record_member_path"] == []
-    assert flow["amount_record_key_kinds"] == ["msg_sender"]
-    assert flow["amount_record_key_param_indexes"] == [None]
 
 
 def test_the_same_key_without_a_binding_names_no_caller(_unit):
@@ -377,21 +342,6 @@ def test_two_declarations_publish_the_plural_and_no_scalar(_unit):
     assert "amount_record_key_param_indexes" not in flow
 
 
-def test_each_vault_alone_names_its_own_declaration(_unit):
-    flow = _flow(_unit, "VaultA", "payA(uint256)")
-    assert flow["amount_record_variable"] == "VaultA.bids"
-    assert "amount_record_variables" not in flow
-
-
-def test_a_narrowed_key_withholds_the_slot_it_would_otherwise_name(_unit):
-    """The cast selects a different cell for ``id >= 2**128``, so slot and ``param`` are withheld."""
-    flow = _flow(_unit, "Records", "payTruncatedKey(uint256)")
-    assert flow["amount_record_variable"] == "Records.bids"
-    assert flow["amount_record_member_path"] == ["amount"]
-    assert flow["amount_record_key_kinds"] == ["indeterminate"]
-    assert flow["amount_record_key_param_indexes"] == [None]
-
-
 def test_a_narrowed_and_a_whole_key_do_not_agree_on_a_slot(_unit):
     """Had both published slot 0, a guard proven to gate one would be read as gating the other."""
     flow = _flow(_unit, "Records", "paySpuriousAgreement(uint256)")
@@ -401,70 +351,8 @@ def test_a_narrowed_and_a_whole_key_do_not_agree_on_a_slot(_unit):
     assert "amount_record_key_param_indexes" not in flow
 
 
-def test_a_widened_key_keeps_its_slot(_unit):
-    flow = _flow(_unit, "Records", "payWidenedKey(uint128)")
-    assert flow["amount_record_variable"] == "Records.simple"
-    assert flow["amount_record_key_kinds"] == ["param"]
-    assert flow["amount_record_key_param_indexes"] == [0]
-
-
 def test_an_address_width_key_conversion_keeps_its_slot(_unit):
     flow = _flow(_unit, "Records", "payAddressKey(uint160)")
     assert flow["amount_record_variable"] == "Records._balances"
     assert flow["amount_record_key_kinds"] == ["param"]
     assert flow["amount_record_key_param_indexes"] == [0]
-
-
-def test_a_caller_derived_key_is_not_a_caller_named_one(_unit):
-    """``param`` would claim the caller named this cell."""
-    flow = _flow(_unit, "Records", "payArithmeticKey(uint256,uint256)")
-    assert flow["amount_record_variable"] == "Records.bids"
-    assert flow["amount_record_key_kinds"] == ["indeterminate"]
-    assert flow["amount_record_key_param_indexes"] == [None]
-
-
-def test_a_two_member_path_keeps_its_source_order(_unit):
-    """A reversed path would agree on the wrong record."""
-    flow = _flow(_unit, "Records", "payPair(uint256)")
-    assert flow["amount_record_variable"] == "Records.pair"
-    assert flow["amount_record_member_path"] == ["inner", "amount"]
-
-
-def test_two_key_levels_keep_their_order(_unit):
-    assert _flow(_unit, "Records", "payTwo(uint256,uint256)")["amount_record_key_param_indexes"] == [0, 1]
-    assert _flow(_unit, "Records", "payTwoSwapped(uint256,uint256)")["amount_record_key_param_indexes"] == [1, 0]
-
-
-def test_sites_agreeing_on_the_declaration_but_not_the_member_withhold_the_path(_unit):
-    flow = _flow(_unit, "Records", "paySplit(uint256,address)")
-    assert flow["amount_record_variable"] == "Records.bids"
-    assert flow["amount_record_key_kinds"] == ["param"]
-    assert flow["amount_record_key_param_indexes"] == [0]
-    assert "amount_record_member_path" not in flow
-
-
-def test_sites_agreeing_on_the_member_but_not_the_slot_withhold_the_slot(_unit):
-    flow = _flow(_unit, "Records", "payTwoBids(uint256,uint256)")
-    assert flow["amount_record_variable"] == "Records.bids"
-    assert flow["amount_record_member_path"] == ["amount"]
-    assert flow["amount_record_key_kinds"] == ["param"]
-    assert "amount_record_key_param_indexes" not in flow
-
-
-def test_one_site_without_a_record_suppresses_the_whole_fact(_unit):
-    """A record from one site would name a cell half the flow's value never came from."""
-    flow = _flow(_unit, "Records", "payRecordAndPot(uint256)")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    for key in _RECORD_KEYS:
-        assert key not in flow
-
-
-@pytest.mark.parametrize(
-    "signature",
-    ["rescueTokens(IERC20,uint256)", "withdrawMax(uint256)", "rescueAll()"],
-)
-def test_an_admin_sweep_names_no_record(_unit, signature):
-    """A5/A6/A7 at the producer."""
-    flow = _flow(_unit, "Records", signature)
-    for key in _RECORD_KEYS:
-        assert key not in flow

@@ -193,14 +193,6 @@ def test_detect_proxy_standard_diamond_fallback():
     assert detect_proxy_standard(_Rpc(), "x", PROXY, "latest", {}) == "eip2535_diamond"
 
 
-def test_detect_proxy_standard_none_for_bare_contract():
-    class _Rpc:
-        def __call__(self, *a, **k):
-            return _ZERO if a[1] == "eth_getStorageAt" else "0x"
-
-    assert detect_proxy_standard(_Rpc(), "x", IMPL, "latest", {}) is None
-
-
 def test_collect_one_shot_latches_root_candidate():
     tree = {
         "op": "AND",

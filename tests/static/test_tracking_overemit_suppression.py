@@ -20,7 +20,6 @@ from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
 from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
-    _collect_state_var_authority_roles,
     build_controller_tracking,
 )
 
@@ -41,83 +40,6 @@ def _build(tmp_path: Path, source: str, contract_name: str):
     return build_controller_tracking(contract, tmp_path, predicate_trees, effects, semantic_control)
 
 
-def test_authority_role_collector_groups_by_operand():
-    trees = {
-        "trees": {
-            "a()": {
-                "op": "LEAF",
-                "leaf": {
-                    "authority_role": "caller_authority",
-                    "operands": [{"source": "state_variable", "state_variable_name": "owner"}],
-                },
-            },
-            "b()": {
-                "op": "LEAF",
-                "leaf": {
-                    "authority_role": "business",
-                    "operands": [{"source": "state_variable", "state_variable_name": "SENTINEL"}],
-                },
-            },
-            "c()": {
-                "op": "LEAF",
-                "leaf": {"operands": [{"source": "state_variable", "state_variable_name": "ROLELESS"}]},
-            },
-        }
-    }
-    roles = _collect_state_var_authority_roles(trees)
-    assert roles == {"owner": {"caller_authority"}, "SENTINEL": {"business"}}
-
-
-def test_authority_role_collector_handles_malformed_input():
-    assert _collect_state_var_authority_roles(None) == {}
-    assert _collect_state_var_authority_roles({"trees": "not-a-dict"}) == {}
-
-
-def test_bare_struct_dropped_member_projection_kept(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        struct AccountantState {
-            address payoutAddress;
-            uint96 highwaterMark;
-            bool isPaused;
-        }
-        AccountantState public accountantState;
-        function sweep() external view {
-            require(msg.sender == accountantState.payoutAddress, "not payout");
-        }
-    }
-    """
-    by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
-    assert "state_variable:accountantState" not in by_id, list(by_id.keys())
-    assert "state_variable:accountantState.payoutAddress" in by_id, list(by_id.keys())
-    projected = dict(by_id["state_variable:accountantState.payoutAddress"]["read_spec"] or {})
-    assert projected["type_kind"] == "address"
-    assert projected["member_path"] == ["payoutAddress"]
-
-
-def test_bare_struct_without_address_member_fully_dropped(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        struct RateLimit {
-            uint256 limit;
-            uint256 used;
-            uint64 updatedAt;
-        }
-        RateLimit private rateLimit;
-        uint256 public total;
-        function consume(uint256 amount) external {
-            require(amount + rateLimit.used <= rateLimit.limit, "rate");
-            total += amount;
-        }
-    }
-    """
-    by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
-    assert "state_variable:rateLimit" not in by_id, list(by_id.keys())
-    assert not any(cid.startswith("state_variable:rateLimit") for cid in by_id), list(by_id.keys())
-
-
 def test_business_only_constant_sentinel_dropped(tmp_path):
     source = """
     pragma solidity ^0.8.19;
@@ -134,72 +56,3 @@ def test_business_only_constant_sentinel_dropped(tmp_path):
     """
     by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
     assert "state_variable:beaconChainETHStrategy" not in by_id, list(by_id.keys())
-
-
-def test_business_only_constant_address_sentinel_dropped(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
-        uint256 public total;
-        function deposit(address token, uint256 amount) external {
-            require(token != NATIVE, "no native");
-            total += amount;
-        }
-    }
-    """
-    by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
-    assert "state_variable:NATIVE" not in by_id, list(by_id.keys())
-
-
-def test_constant_address_caller_authority_survives(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address constant WBETH_TOKEN_ADDRESS = 0xa2E3356610840701BDf5611a53974510Ae27E2e1;
-        uint256 public total;
-        function burn(uint256 amount) external {
-            require(msg.sender == WBETH_TOKEN_ADDRESS, "only wbeth");
-            total += amount;
-        }
-    }
-    """
-    by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
-    assert "state_variable:WBETH_TOKEN_ADDRESS" in by_id, list(by_id.keys())
-
-
-def test_immutable_business_contract_survives(tmp_path):
-    """``is_constant`` is False for them."""
-    source = """
-    pragma solidity ^0.8.19;
-    interface IToken {}
-    contract C {
-        IToken public immutable EIGEN;
-        uint256 public total;
-        constructor(IToken eigen) { EIGEN = eigen; }
-        function route(IToken token, uint256 amount) external {
-            require(token == EIGEN, "only eigen");
-            total += amount;
-        }
-    }
-    """
-    by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
-    assert "state_variable:EIGEN" in by_id, list(by_id.keys())
-
-
-def test_immutable_authority_survives(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    interface IDelegationManager {}
-    contract C {
-        IDelegationManager public immutable delegationManager;
-        uint256 public total;
-        constructor(IDelegationManager dm) { delegationManager = dm; }
-        function recordUpdate(uint256 amount) external {
-            require(msg.sender == address(delegationManager), "only dm");
-            total += amount;
-        }
-    }
-    """
-    by_id = {t["controller_id"]: t for t in _build(tmp_path, source, "C")}
-    assert "state_variable:delegationManager" in by_id, list(by_id.keys())

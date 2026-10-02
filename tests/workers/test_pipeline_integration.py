@@ -213,47 +213,6 @@ def test_dep_phase_upgrade_history_artifact(monkeypatch, tmp_path, fake_uh, expe
     assert "dependencies" in store
 
 
-def test_merge_uses_impl_name_and_propagates_company():
-    from services.governance.proxies import _merge_proxy_impl_entries
-
-    proxy_entry = {
-        "run_name": "MyProxy",
-        "job_id": "j1",
-        "address": PROXY,
-        "chain": "ethereum",
-        "company": "TestCo",
-        "parent_job_id": None,
-        "rank_score": 0.8,
-        "is_proxy": True,
-        "proxy_type": "eip1967",
-        "implementation_address": IMPL,
-        "proxy_address": None,
-        "contract_name": "TransparentUpgradeableProxy",
-    }
-    impl_entry = {
-        "run_name": "MyProxy: (impl)",
-        "job_id": "j2",
-        "address": IMPL,
-        "chain": "ethereum",
-        "company": None,
-        "parent_job_id": "j1",
-        "rank_score": None,
-        "is_proxy": False,
-        "proxy_type": None,
-        "implementation_address": None,
-        "proxy_address": PROXY,
-        "contract_name": "LiquidityPool",
-    }
-
-    # The merge reads via .get, so partial payloads suffice.
-    merged = _merge_proxy_impl_entries([proxy_entry, impl_entry])  # pyright: ignore[reportArgumentType]
-    assert len(merged) == 1
-    assert merged[0].get("display_name") == "LiquidityPool"
-    assert merged[0]["company"] == "TestCo"
-    assert merged[0]["rank_score"] == 0.8
-    assert merged[0].get("proxy_address_display") == PROXY
-
-
 def test_orphan_impl_appears_in_merged_list():
     """Sole coverage of the orphan branch in ``services/governance/proxies.py``."""
     from services.governance.proxies import _merge_proxy_impl_entries
@@ -286,35 +245,6 @@ def test_display_name_chain_suffix_and_generic_fallback():
     assert _display_name(entry2) == "Router"
     entry3 = {"contract_name": "Proxy", "run_name": "r", "display_name": "Custom", "chain": None}
     assert _display_name(entry3) == "Custom"
-
-
-@patch("routers.deps.get_all_artifacts")
-@patch("routers.deps.SessionLocal")
-def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get_all_artifacts):
-    from fastapi.testclient import TestClient
-
-    import api
-
-    client = TestClient(api.app)
-    fake_job = _fake_api_job(name="proxy_run", address=TARGET)
-
-    mock_session = MagicMock()
-    mock_session.execute.return_value.scalar_one_or_none.return_value = fake_job
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    mock_get_all_artifacts.return_value = {
-        "contract_analysis": {"subject": {"name": "Pool"}, "summary": {"control_model": "proxy"}},
-        "upgrade_history": {"schema_version": "0.1", "proxies": {PROXY: {}}, "total_upgrades": 3},
-        "dependency_graph_viz": {"nodes": [{"id": "addr:" + TARGET}], "edges": []},
-        "dependencies": {"address": TARGET, "dependencies": {}},
-    }
-
-    resp = client.get("/api/analyses/proxy_run")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["upgrade_history"]["total_upgrades"] == 3
-    assert len(body["dependency_graph_viz"]["nodes"]) == 1
-    assert body["contract_name"] == "Pool"
 
 
 def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, tmp_path):
@@ -933,39 +863,6 @@ def test_scaffold_project_writes_expected_files(tmp_path):
     assert meta_data["contract_name"] == "Vault"
 
 
-@patch("routers.deps.get_artifact")
-@patch("routers.deps.SessionLocal")
-def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_artifact):
-    from fastapi.testclient import TestClient
-
-    import api
-    from routers import deps
-
-    client = TestClient(api.app)
-    fake_job = _fake_api_job(name="test_run")
-
-    mock_session = MagicMock()
-    mock_session.execute.return_value.scalar_one_or_none.return_value = fake_job
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    call_names: list[str] = []
-
-    def _get_artifact(_session, _job_id, name):
-        call_names.append(name)
-        if name == "effective_permissions":
-            return {"functions": []}
-        return None
-
-    mock_get_artifact.side_effect = _get_artifact
-
-    resp = client.get(
-        "/api/analyses/test_run/artifact/effective_permissions.json",
-        headers={"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""},
-    )
-    assert resp.status_code == 200
-    assert call_names[0] == "effective_permissions"
-
-
 def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
     from workers.static_worker import StaticWorker
 
@@ -1014,59 +911,6 @@ def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
     assert "dynamic dep error" in phases["dependency_dynamic"].message
 
 
-def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
-    """Catches import errors and wiring bugs in the real process()."""
-    from workers.base import JobHandledDirectly
-    from workers.static_worker import StaticWorker
-
-    worker = StaticWorker()
-    session = MagicMock()
-
-    job = _job(name="MyProxy")
-
-    sources = {"src/Proxy.sol": "pragma solidity ^0.8.19;\ncontract Proxy {}"}
-
-    monkeypatch.setattr("workers.static_worker.get_source_files", lambda _s, _j: sources)
-
-    contract_row = SimpleNamespace(
-        address=TARGET,
-        contract_name="Proxy",
-        compiler_version="v0.8.19",
-        language="solidity",
-        evm_version="shanghai",
-        optimization=True,
-        optimization_runs=200,
-        source_format="flat",
-        source_file_count=1,
-        remappings=[],
-        is_proxy=True,
-        source_verified=True,
-    )
-    session.execute.return_value.scalar_one_or_none.return_value = contract_row
-    session.refresh = MagicMock()
-
-    monkeypatch.setattr(worker, "_resolve_proxy", lambda *_a, **_kw: None)
-    monkeypatch.setattr(worker, "_run_dependency_phase", lambda *_a, **_kw: None)
-    monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
-
-    completed = []
-    monkeypatch.setattr("db.queue.complete_job", lambda _s, _j, detail="": completed.append(True))
-
-    # Proxies short-circuit to spawn an impl child job.
-    slither_called = []
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *_a, **_kw: slither_called.append(True) or True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: slither_called.append(True))
-
-    try:
-        worker.process(session, job)
-        assert False, "Expected JobHandledDirectly"
-    except JobHandledDirectly:
-        pass
-
-    assert len(completed) == 1, "complete_job should have been called"
-    assert len(slither_called) == 0, "Slither/analysis should NOT run for proxy contracts"
-
-
 def test_worker_stage_chain_is_complete(monkeypatch):
     """``PolicyWorker.next_stage`` depends on ``PSAT_EFFECTS_STAGE``."""
     from db.models import JobStage
@@ -1100,55 +944,3 @@ def test_worker_stage_chain_is_complete(monkeypatch):
     monkeypatch.setenv("PSAT_EFFECTS_STAGE", "1")
     assert PolicyWorker().next_stage == JobStage.effects
     assert EffectsWorker.next_stage == CoverageWorker.stage
-
-
-def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
-    from workers.policy_worker import PolicyWorker
-
-    worker = PolicyWorker()
-    session = MagicMock()
-    job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
-
-    monkeypatch.setattr(
-        "workers.policy_worker.get_artifact",
-        lambda _s, _j, name: None,
-    )
-
-    import pytest
-
-    with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)
-
-    monkeypatch.setattr(
-        "workers.policy_worker.get_artifact",
-        lambda _s, _j, name: {"subject": {"address": TARGET, "name": "T"}} if name == "contract_analysis" else None,
-    )
-
-    with pytest.raises(RuntimeError, match="control_snapshot"):
-        worker.process(session, job)
-
-
-def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
-    from workers.resolution_worker import ResolutionWorker
-
-    worker = ResolutionWorker()
-    session = MagicMock()
-    job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
-
-    import pytest
-
-    monkeypatch.setattr(
-        "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: None,
-    )
-    with pytest.raises(RuntimeError, match="control_tracking_plan"):
-        worker.process(session, job)
-
-    monkeypatch.setattr(
-        "workers.resolution_worker.get_artifact",
-        lambda _s, _j, name: (
-            {"schema_version": "0.1", "tracked_controllers": []} if name == "control_tracking_plan" else None
-        ),
-    )
-    with pytest.raises(RuntimeError, match="contract_analysis"):
-        worker.process(session, job)

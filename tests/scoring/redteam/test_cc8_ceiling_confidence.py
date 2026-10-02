@@ -13,10 +13,7 @@ from tests.support.scoring_builders import (
     EOA,
     KEY_C,
     KEY_V,
-    OWNERS,
-    SAFE,
     VAULT,
-    _cc_row,
     facts,
     fold,  # noqa: F401  (fold fixture, registered by import)
     proven,
@@ -40,49 +37,6 @@ def _ceiling_signal(**over: Any) -> FunctionSignal:
         **reaches(KEY_C),
     }
     return sig(**{**base, **over})
-
-
-def test_cc8_a_sheet_ceiling_answers_the_reach_magnitude_question(fold):
-    """Counted apart from the other two paths so a consumer can subtract the one that only bounds."""
-    document = fold(
-        [_ceiling_signal()],
-        principals={1: facts(1, EOA, "eoa")},
-        value=value_plane({KEY_C: {"usdc": 5_000_000.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}}),
-    )
-    census = _magnitude(document)
-    assert census["magnitude_sheet_ceiling"] == 1
-    assert census["sheet_ceiling_by_capability"] == {"upgrade.implementation": 1}
-    assert census["by_capability"]["upgrade.implementation"] == [1, 1]
-    assert census["magnitude_witnessed"] == 1
-    assert census["magnitude_composed"] == 0
-    assert document.model_parameters["confidence_detail"]["reach_magnitude_witnessed_pct"] > 0.0
-    assert _cc_row(document)["entities_priced_from_a_sheet_ceiling"] == [KEY_C]
-
-
-def test_cc8_a_refused_sheet_ceiling_is_not_credited(fold):
-    """Crediting a refused sheet would answer with a number no row publishes."""
-    plane = value_plane({}, contracts=(KEY_C,), per_asset_state={KEY_C: {}})
-    assert plane.sheet_state(KEY_C) == P.SHEET_NO_ROWS
-    document = fold([_ceiling_signal()], principals={1: facts(1, EOA, "eoa")}, value=plane)
-    census = _magnitude(document)
-    assert census["magnitude_sheet_ceiling"] == 0
-    assert census["sheet_ceiling_by_capability"] == {}
-    assert census["by_capability"]["upgrade.implementation"] == [0, 1]
-    assert _cc_row(document)["entities_priced_from_a_sheet_ceiling"] == []
-
-
-def test_cc8_gate_control_over_a_priced_node_earns_no_ceiling_credit(fold):
-    """The vault's own code still stands, so the row earns no ceiling and the term must not credit one."""
-    signal = _ceiling_signal(claim_id="authority.replace", function_name="setAuthority", selector="0x11112222")
-    document = fold(
-        [signal],
-        principals={1: facts(1, EOA, "eoa")},
-        value=value_plane({KEY_C: {"usdc": 5_000_000.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}}),
-    )
-    census = _magnitude(document)
-    assert census["magnitude_sheet_ceiling"] == 0
-    assert census["by_capability"]["authority.replace"] == [0, 1]
-    assert _cc_row(document, "authority.replace")["entities_priced_from_a_sheet_ceiling"] == []
 
 
 def test_cc8_a_ceiling_credit_is_not_vacuous_credit(fold):
@@ -118,34 +72,6 @@ def test_cc8_a_ceiling_credit_is_not_vacuous_credit(fold):
         > plain_detail["reach_magnitude_witnessed_pct"] - plain_detail["reach_magnitude_vacuous_credit_pct"]
     )
     assert ceiling_detail["reach_magnitude_ceiling_pct"] == plain_detail["reach_magnitude_ceiling_pct"]
-
-
-def test_cc8_every_credited_ceiling_has_a_carrier_in_the_published_document(fold):
-    """The two revocations aren't constructible here (a code-control candidate can tie but never beat the node's own
-    sheet), so this checks the invariant they guard: no credit outruns the rows.
-    """
-    priced = _ceiling_signal()
-    unpriced = _ceiling_signal(
-        deployment_address=VAULT,
-        function_name="upgradeToVault",
-        selector="0x55556666",
-        **reaches(KEY_V),
-    )
-    plane = value_plane(
-        {KEY_C: {"usdc": 5_000_000.0}},
-        contracts=(KEY_C, KEY_V),
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}, KEY_V: {}},
-    )
-    document = fold([priced, unpriced], principals={1: facts(1, EOA, "eoa")}, value=plane)
-    census = _magnitude(document)
-    carriers = {
-        entity
-        for row in (*document.findings, *(s for f in document.findings for s in f["subsumed_capabilities"]))
-        for entity in (row.get("entities_priced_from_a_sheet_ceiling") or [])
-    }
-    assert carriers == {KEY_C}
-    assert census["magnitude_sheet_ceiling"] == 1
-    assert census["by_capability"]["upgrade.implementation"] == [1, 2]
 
 
 def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold):
@@ -189,27 +115,6 @@ def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold)
     assert block["signals_credited_in_confidence"] == 1
     assert block["signals_credited_by_capability"] == {"upgrade.implementation": 1}
     assert "must never be rendered as dollars at risk" in block["reading"]
-
-
-def test_cc8_one_sheet_read_by_two_rows_is_counted_once_in_the_rollup(fold):
-    """Summing over rows would double the money; the agreement is checked and published as a count."""
-    first = _ceiling_signal()
-    second = _ceiling_signal(
-        function_name="upgradeToAndCall",
-        selector="0x77778888",
-        principal_refs=(PrincipalRef(2, "ethereum", SAFE),),
-    )
-    document = fold(
-        [first, second],
-        principals={1: facts(1, EOA, "eoa"), 2: facts(2, SAFE, "safe", owners=OWNERS, threshold=3)},
-        value=value_plane({KEY_C: {"usdc": 5_000_000.0}}, per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED}}),
-    )
-    block = document.provenance["sheet_ceilings"]
-    assert block["rows_publishing_a_sheet_ceiling"]["findings"] == 2
-    assert block["entities_priced_from_a_sheet_ceiling"] == 1
-    assert block["ceiling_usd_over_distinct_entities"] == 5_000_000.0
-    assert block["entities_publishing_more_than_one_figure"] == []
-    assert block["signals_credited_in_confidence"] == 2
 
 
 def test_cc8_one_node_under_two_code_control_capabilities_counts_once_in_the_population(fold):

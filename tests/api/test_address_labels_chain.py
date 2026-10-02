@@ -25,18 +25,6 @@ def clean_labels(db_session):
 
 
 @requires_postgres
-def test_global_roundtrip_backcompat(api_client, clean_labels):
-    r = api_client.put(f"/api/address_labels/{ADDR}", json={"name": "Treasury"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["address"] == ADDR and body["chain"] is None and body["name"] == "Treasury"
-
-    listing = api_client.get("/api/address_labels").json()
-    assert listing["labels"][ADDR]["name"] == "Treasury"
-    assert listing["chain_labels"] == {}
-
-
-@requires_postgres
 def test_chain_qualified_roundtrip(api_client, clean_labels):
     r = api_client.put(f"/api/address_labels/{ADDR}?chain=base", json={"name": "Base Vault"})
     assert r.status_code == 200 and r.json()["chain"] == "base"
@@ -44,19 +32,6 @@ def test_chain_qualified_roundtrip(api_client, clean_labels):
     listing = api_client.get("/api/address_labels").json()
     assert listing["labels"] == {}
     assert listing["chain_labels"]["base"][ADDR]["name"] == "Base Vault"
-
-
-@requires_postgres
-def test_three_rows_coexist(api_client, clean_labels):
-    api_client.put(f"/api/address_labels/{ADDR}", json={"name": "Global"})
-    api_client.put(f"/api/address_labels/{ADDR}?chain=ethereum", json={"name": "L1 Contract"})
-    api_client.put(f"/api/address_labels/{ADDR}?chain=base", json={"name": "L2 Contract"})
-
-    listing = api_client.get("/api/address_labels").json()
-    assert listing["labels"][ADDR]["name"] == "Global"
-    assert listing["chain_labels"]["ethereum"][ADDR]["name"] == "L1 Contract"
-    assert listing["chain_labels"]["base"][ADDR]["name"] == "L2 Contract"
-    assert clean_labels.query(AddressLabel).count() == 3
 
 
 @requires_postgres

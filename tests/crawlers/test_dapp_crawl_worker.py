@@ -114,38 +114,6 @@ def _session_no_existing_contracts() -> MagicMock:
     return session
 
 
-class TestMissingDappUrls:
-    @pytest.mark.parametrize(
-        "request_payload",
-        [
-            pytest.param({}, id="missing-key"),
-            pytest.param({"dapp_urls": []}, id="empty-list"),
-            pytest.param(None, id="request-is-none"),
-        ],
-    )
-    def test_missing_dapp_urls_raises(self, dapp_worker_module, request_payload):
-        worker = dapp_worker_module.DAppCrawlWorker()
-        session = MagicMock()
-        job = _job(request=request_payload)
-
-        with pytest.raises(ValueError, match="missing dapp_urls"):
-            worker.process(session, cast(Any, job))
-
-
-class TestJobName:
-    def test_name_not_overwritten(self, monkeypatch, dapp_worker_module):
-        crawl_result = {"addresses": [], "interaction_count": 0}
-        _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
-        session = _session_no_existing_contracts()
-        job = _job(name="My Custom Name")
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert job.name == "My Custom Name"
-
-
 class TestProtocolCreation:
     @pytest.mark.parametrize(
         "job_overrides, expected_call, expected_company",

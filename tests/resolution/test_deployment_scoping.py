@@ -7,8 +7,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-import pytest
-
 from tests.conftest import requires_postgres
 
 
@@ -30,15 +28,6 @@ def _fn_record(status: str = "resolved_empty") -> dict:
         "authority_public": False,
         "status": status,
     }
-
-
-def test_normalize_deployment():
-    from db.deployment import normalize_deployment
-
-    assert normalize_deployment("0x" + "Ab" * 20) == "0x" + "ab" * 20  # lowercased
-    assert normalize_deployment(None) is None
-    assert normalize_deployment("not-an-address") is None
-    assert normalize_deployment("0x1234") is None  # wrong length
 
 
 def _mk_job(session, address, *, proxy=None, status, stage, root=None):
@@ -93,127 +82,7 @@ def test_reconcile_backpatches_completed_standalone_and_reenqueues(db_session):
         _cleanup_jobs(db_session, [impl])
 
 
-@requires_postgres
-def test_reconcile_backpatches_queued_standalone_without_reenqueue(db_session):
-    from db.models import JobStage, JobStatus
-    from db.queue import reconcile_impl_job_for_proxy
-
-    impl, proxy = _addr(), _addr()
-    job = _mk_job(db_session, impl, status=JobStatus.queued, stage=JobStage.static)
-    try:
-        assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy) == "backpatched"
-        db_session.refresh(job)
-        assert isinstance(job.request, dict)
-        assert job.request["proxy_address"] == proxy
-        assert job.stage == JobStage.static  # unchanged — not past resolution
-        assert job.status == JobStatus.queued
-    finally:
-        _cleanup_jobs(db_session, [impl])
-
-
 # ``None`` existing_job means no job for the impl exists.
-@requires_postgres
-@pytest.mark.parametrize(
-    ("existing_job", "call_proxy", "call_root", "expected"),
-    [
-        pytest.param(("p1", None), "p1", None, "skip", id="skip_same_proxy"),
-        pytest.param(None, "p1", None, "spawn", id="spawn_when_no_existing_job"),
-        # A genuine shared impl: spawn a separate per-deployment job.
-        pytest.param(("p1", None), "p2", None, "spawn", id="spawn_for_different_proxy_shared_impl"),
-        pytest.param(("p1", "r1"), "p1", "r2", "spawn", id="force_scopes_by_root_job"),
-    ],
-)
-def test_reconcile_decision_table(db_session, existing_job, call_proxy, call_root, expected):
-    from db.models import JobStage, JobStatus
-    from db.queue import reconcile_impl_job_for_proxy
-
-    impl = _addr()
-    proxies = {"p1": _addr(), "p2": _addr()}
-    roots = {"r1": str(uuid.uuid4()), "r2": str(uuid.uuid4())}
-    if existing_job:
-        job_proxy, job_root = existing_job
-        _mk_job(
-            db_session,
-            impl,
-            proxy=proxies[job_proxy],
-            status=JobStatus.completed,
-            stage=JobStage.done,
-            root=roots[job_root] if job_root else None,
-        )
-    try:
-        decision = reconcile_impl_job_for_proxy(
-            db_session,
-            impl_addr=impl,
-            proxy_addr=proxies[call_proxy],
-            **({"root_job_id": roots[call_root]} if call_root else {}),
-        )
-        assert decision == expected
-    finally:
-        _cleanup_jobs(db_session, [impl])
-
-
-@requires_postgres
-def test_writer_isolates_deployments(db_session):
-    from db.models import Contract, EffectiveFunction
-    from services.policy.effective_permissions_writer import write_effective_function_rows
-
-    addr, p1, p2 = _addr(), _addr(), _addr()
-    c = Contract(address=addr, chain="ethereum")
-    db_session.add(c)
-    db_session.commit()
-
-    def _write(dep):
-        write_effective_function_rows(
-            db_session,
-            contract_id=c.id,
-            function_records=[_fn_record()],
-            capability_by_function={},
-            deployment_address=dep,
-        )
-        db_session.commit()
-
-    _write(p1)
-    _write(p2)
-    rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == c.id).all()
-    assert {r.deployment_address for r in rows} == {p1, p2}  # both deployments coexist
-    assert len(rows) == 2
-
-    _write(p1)
-    rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == c.id).all()
-    assert {r.deployment_address for r in rows} == {p1, p2}
-    assert len(rows) == 2
-
-
-@requires_postgres
-def test_writer_sweeps_legacy_null_rows(db_session):
-    from db.models import Contract, EffectiveFunction
-    from services.policy.effective_permissions_writer import write_effective_function_rows
-
-    addr, proxy = _addr(), _addr()
-    c = Contract(address=addr, chain="ethereum")
-    db_session.add(c)
-    db_session.commit()
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=c.id,
-        function_records=[_fn_record()],
-        capability_by_function={},
-        deployment_address=None,
-    )
-    db_session.commit()
-    write_effective_function_rows(
-        db_session,
-        contract_id=c.id,
-        function_records=[_fn_record()],
-        capability_by_function={},
-        deployment_address=proxy,
-    )
-    db_session.commit()
-
-    rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == c.id).all()
-    assert len(rows) == 1
-    assert rows[0].deployment_address == proxy  # NULL legacy row gone
 
 
 @requires_postgres

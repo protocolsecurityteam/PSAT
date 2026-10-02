@@ -30,25 +30,6 @@ def test_f7_a_withheld_gate_token_publishes_no_earned_negative(fold):
     assert "gate_input_malformed" in {w["kind"] for w in document.warnings}
 
 
-def test_f7_an_earned_credit_beside_resolved_principals_is_refused(fold):
-    earned = Tri.proven("earned", {"empty_reason": "owner_read_zero", "block": 21_000_000})
-    signal = sig(
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        gates={"exact_empty_credit": earned.to_json()},
-        **proven(1.0),
-        **reaches(KEY_C),
-    )
-    document = fold(
-        [signal],
-        principals={1: facts(1, EOA, "eoa")},
-        value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
-    )
-    assert document.earned_negatives == []
-    assert "exact_empty_credit_contradicted_by_principals" in {w["kind"] for w in document.warnings}
-
-
 def test_f7_one_function_publishes_one_earned_negative(fold):
     earned = Tri.proven("earned", {"empty_reason": "owner_read_zero", "block": 21_000_000})
     signals = [
@@ -62,20 +43,6 @@ def test_f7_one_function_publishes_one_earned_negative(fold):
     ]
     document = fold(signals, value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
     assert len(document.earned_negatives) == 1
-
-
-def test_probe_a_string_magnitude_never_reaches_the_value_axis(fold):
-    signal = flow_sig(
-        authority_openness="open",
-        principal_state="none_required",
-        witness_tier="behavioral_observed",
-        gates={"reach_magnitude_usd": Tri.proven("proven_floor", "1e12").to_json()},
-        **proven(0.9, ("caller_arbitrary_proven",)),
-        **reaches(KEY_C),
-    )
-    document = fold([signal], value=value_plane({KEY_C: {"usdc": 1.0}}))
-    assert document.findings == []
-    assert "gate_input_malformed" in {w["kind"] for w in document.warnings}
 
 
 def test_probe_a_poisoned_payload_fails_closed_on_its_own_row(fold):

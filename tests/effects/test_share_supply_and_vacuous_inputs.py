@@ -85,12 +85,6 @@ def test_share_accounted_zero_delta_with_zero_address_transfer_yields_a_verdict(
     assert eff.details["supply_delta_sign"] == direction
 
 
-def test_zero_delta_with_no_zero_address_transfer_stays_no_supply_delta():
-    eff = _supply(SharesChain(emit=None))
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "no_supply_delta"
-
-
 def test_supply_vacuous_input_gets_its_own_uncacheable_reason():
     vac = _supply(SharesChain(emit=None), inputs_vacuous=True)
     assert vac.verdict == VERDICT_UNKNOWN

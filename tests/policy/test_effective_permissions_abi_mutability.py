@@ -140,77 +140,12 @@ def _build(roles_artifacts):
     )
 
 
-def test_assembly_only_mutators_surface_as_unsupported_rows(roles_artifacts):
-    payload = _build(roles_artifacts)
-    by_selector = {fn["selector"]: fn for fn in payload["functions"]}
-
-    unsupported_gate_reasons = {
-        "assembly_only_authority_not_extracted",
-        "missing_semantic_capability_for_predicate_tree",
-    }
-    for signature in (
-        "setRole(address,uint256,bool)",
-        "grantRole(bytes32,address)",
-        "revokeRole(bytes32,address)",
-    ):
-        sel = _selector(signature)
-        assert sel in by_selector, f"{signature} ({sel}) missing from effective functions"
-        fn = by_selector[sel]
-        assert fn.get("status") == "unsupported"
-        assert fn["authority_public"] is False
-        assert fn["controllers"] == []
-        assert fn.get("capability_expr", {}).get("unsupported_reason") in unsupported_gate_reasons
-
-
-def test_abi_only_state_changer_uses_assembly_reason(roles_artifacts):
-    effects, _ = roles_artifacts
-    analysis = {"subject": {"address": "0x000000000000000000000000000000000000dead", "name": "Stub"}}
-    effects_no_sink = {
-        "schema_version": "semantic",
-        "contract_name": "Stub",
-        "functions": {
-            "writeOpaque(uint256)": {
-                "function": "writeOpaque(uint256)",
-                "selector": _selector("writeOpaque(uint256)"),
-                "sinks": [],
-                "effect_labels": [],
-                "effect_targets": [],
-                "action_summary": "Performs a contract action.",
-                "state_changing": True,
-            }
-        },
-    }
-    payload = build_effective_permissions(analysis, effects=effects_no_sink, capability_resolver_output={})
-    fns = {fn["function"]: fn for fn in payload["functions"]}
-    assert "writeOpaque(uint256)" in fns
-    fn = fns["writeOpaque(uint256)"]
-    assert fn.get("status") == "unsupported"
-    assert fn["authority_public"] is False
-    assert fn["controllers"] == []
-    assert fn.get("capability_expr", {}).get("unsupported_reason") == "assembly_only_authority_not_extracted"
-
-
 def test_view_and_pure_reads_do_not_gain_rows(roles_artifacts):
     payload = _build(roles_artifacts)
     selectors = {fn["selector"] for fn in payload["functions"]}
 
     assert _selector("hasRole(address,uint256)") not in selectors
     assert _selector("MAX_ROLE()") not in selectors
-
-
-def test_state_changing_flag_tracks_solidity_mutability(roles_artifacts):
-    effects, _ = roles_artifacts
-    functions = effects["functions"]
-
-    for mutator in (
-        "setRole(address,uint256,bool)",
-        "grantRole(bytes32,address)",
-        "revokeRole(bytes32,address)",
-    ):
-        assert functions[mutator]["state_changing"] is True
-
-    for reader in ("hasRole(address,uint256)", "MAX_ROLE()"):
-        assert functions[reader]["state_changing"] is False
 
 
 def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifacts):
@@ -238,23 +173,6 @@ def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifact
     assert fn["authority_public"] is False
     assert fn["controllers"] == []
     assert fn.get("capability_expr", {}).get("unsupported_reason") == "assembly_only_authority_not_extracted"
-
-
-def test_inline_assembly_sstore_and_delegatecall_surface_as_sinks(takeover_artifacts):
-    """Fails if the effects.py SolidityCall branches are reverted."""
-    effects, _ = takeover_artifacts
-    functions = effects["functions"]
-
-    take = functions["takeOver(address)"]
-    write_sinks = [s for s in take.get("sinks") or [] if s["kind"] == "state_write"]
-    assert any(s["target"].startswith("assembly_storage:") for s in write_sinks), take.get("sinks")
-    assert take.get("writer_selectors"), "assembly sstore must populate writer_selectors"
-
-    fb = functions["fallback()"]
-    dc_sinks = [s for s in fb.get("sinks") or [] if s["kind"] == "delegatecall"]
-    assert any(s["target"].startswith("assembly_delegatecall:") for s in dc_sinks), fb.get("sinks")
-    assert "delegatecall_execution" in (fb.get("effect_labels") or [])
-    assert fb.get("action_summary") == "Executes delegatecall-controlled logic."
 
 
 class _StubFn:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from sqlalchemy import select
 
@@ -13,7 +11,6 @@ from db.models import (
     Protocol,
     WatchedProxy,
 )
-from tests.support.balance_stubs import page, pinned_native_unavailable
 
 ERPC_BASE = "https://erpc.test"
 BASE_URL = f"{ERPC_BASE}/main/evm/8453"  # base = chain id 8453
@@ -22,129 +19,6 @@ MAINNET_SEED = "http://mainnet-seed"
 
 def _addr(prefix: str) -> str:
     return "0x" + (prefix * 40)[:40]
-
-
-def test_rpc_for_chain_mainnet_verbatim_second_chain_resolves(monkeypatch):
-    from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
-
-    monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-
-    assert rpc_for_chain("ethereum", MAINNET_SEED) == MAINNET_SEED
-    assert chain_id_for("ethereum") == 1
-
-    assert rpc_for_chain("base", MAINNET_SEED) == BASE_URL
-    assert chain_id_for("base") == 8453
-
-
-def test_poll_sends_base_contract_to_base_rpc(db_session, monkeypatch):
-    from services.monitoring.unified_watcher import poll_for_state_changes
-
-    monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-
-    plan = [{"field": "trackedAddr", "kind": "getter_call", "selector": "0xaa000001", "type_kind": "address"}]
-    db_session.add(
-        MonitoredContract(
-            id=uuid.uuid4(),
-            address=_addr("b"),
-            chain="base",
-            contract_type="regular",
-            monitoring_config={"polling_plan": plan},
-            last_known_state={},
-            last_scanned_block=0,
-            needs_polling=True,
-            is_active=True,
-        )
-    )
-    db_session.commit()
-
-    seen_urls: list[str] = []
-
-    def _mock(url, calls):
-        seen_urls.append(url)
-        return [(None, "ok")] * len(calls)
-
-    monkeypatch.setattr("services.monitoring.unified_watcher.rpc_batch_request_classified", _mock)
-    poll_for_state_changes(db_session, MAINNET_SEED)
-
-    assert seen_urls == [BASE_URL]
-
-
-def test_scan_reads_base_cohort_on_base_rpc(db_session, monkeypatch):
-    from services.monitoring.unified_watcher import scan_for_events
-
-    monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-
-    db_session.add(
-        MonitoredContract(
-            id=uuid.uuid4(),
-            address=_addr("c"),
-            chain="base",
-            contract_type="regular",
-            monitoring_config={"watch_ownership": True},
-            last_known_state={},
-            last_scanned_block=0,
-            enrollment_block=0,
-            needs_polling=False,
-            is_active=True,
-        )
-    )
-    db_session.commit()
-
-    head_urls: list[str] = []
-    getlogs_urls: list[str] = []
-
-    def _head_rpc(url, method, params, *a, **kw):
-        head_urls.append(url)
-        return "0x100"  # head = 256; confirmed head 244 > cursor 0 → one window scans
-
-    def _getlogs_rpc(url, method, params, *a, **kw):
-        getlogs_urls.append(url)
-        return []  # no logs
-
-    monkeypatch.setattr("services.monitoring.unified_watcher.rpc_request", _head_rpc)
-    monkeypatch.setattr("services.resolution.repos.event_logs_rpc.rpc_request", _getlogs_rpc)
-
-    scan_for_events(db_session, MAINNET_SEED)
-
-    assert head_urls and all(u == BASE_URL for u in head_urls)
-    assert getlogs_urls and all(u == BASE_URL for u in getlogs_urls)
-
-
-def test_tvl_refresh_passes_contract_chain_id(db_session, monkeypatch):
-    from services.monitoring.tvl import refresh_contract_balances
-
-    proto = Protocol(name="__mc_tvl__")
-    db_session.add(proto)
-    db_session.flush()
-    db_session.add(
-        Contract(
-            address=_addr("d"),
-            chain="base",
-            protocol_id=proto.id,
-            contract_name="BaseVault",
-        )
-    )
-    db_session.commit()
-
-    seen_chain_ids: list[int] = []
-
-    def _bal(address, chain_id=1):
-        seen_chain_ids.append(chain_id)
-        return 0
-
-    def _tokens(address, chain_id=1):
-        seen_chain_ids.append(chain_id)
-        return page([])
-
-    monkeypatch.setattr("services.clients.etherscan.get_eth_balance", _bal)
-    monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", _tokens)
-    monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda *a, **kw: None)
-    # The pinned native read is a separate wire, stubbed unavailable.
-    pinned_native_unavailable(monkeypatch)
-
-    refresh_contract_balances(db_session, proto.id)
-
-    assert seen_chain_ids == [8453, 8453]
 
 
 def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):

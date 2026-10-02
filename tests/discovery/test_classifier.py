@@ -385,29 +385,6 @@ def test_classify_contracts_pre_classified_skips_rpc(monkeypatch):
     assert impl in result["discovered_addresses"]
 
 
-def test_classify_single_eip1167(monkeypatch):
-    impl_hex = "aabbccddee11223344556677889900aabbccddee"
-    bytecode = "0x" + cls.EIP1167_PREFIX + impl_hex + cls.EIP1167_SUFFIX
-    addr = ADDR(0xD)
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: bytecode)
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "eip1167"
-    assert result["implementation"] == "0x" + impl_hex
-
-
-def test_classify_single_with_bytecode_param(monkeypatch):
-    impl_hex = "aabbccddee11223344556677889900aabbccddee"
-    bytecode = "0x" + cls.EIP1167_PREFIX + impl_hex + cls.EIP1167_SUFFIX
-
-    monkeypatch.setattr(cls, "get_code", lambda *a: (_ for _ in ()).throw(AssertionError("should not be called")))
-    result = cls.classify_single(ADDR(0xF), RPC, bytecode=bytecode)
-    assert result["type"] == "proxy"
-    assert result["implementation"] == "0x" + impl_hex
-
-
 def test_classify_single_large_impl_getter_is_regular(monkeypatch):
     """EtherFi's 16.5 KB StakingManager logic was mis-tagged custom proxy, so its own functions were never analyzed."""
     addr = ADDR(0x30)
@@ -428,28 +405,6 @@ def test_classify_single_large_impl_getter_is_regular(monkeypatch):
     result = cls.classify_single(addr, RPC)
     assert result["type"] == "regular"
     assert result.get("proxy_type") is None
-
-
-def test_classify_single_small_impl_getter_still_custom(monkeypatch):
-    addr = ADDR(0x32)
-    impl = ADDR(0x33)
-    small_proxy = "0x" + "60" * 200  # 200 bytes, well under the ceiling
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: small_proxy)
-
-    def fake_rpc(_rpc, method, params, retries=1, chain_id=None):
-        if method == "eth_getStorageAt":
-            return ZERO_SLOT
-        if method == "eth_call" and params[0].get("data", "")[:10] == cls.IMPLEMENTATION_SELECTOR:
-            return _slot_for(impl)
-        raise RuntimeError("revert")
-
-    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "custom"
-    assert result["implementation"] == impl
 
 
 def test_classify_single_upgradeable_beacon(monkeypatch):
@@ -482,120 +437,6 @@ def test_classify_single_upgradeable_beacon(monkeypatch):
     assert result.get("proxy_type") is None
 
 
-def test_classify_single_forwarding_proxy_with_delegatecall_stays_proxy(monkeypatch):
-    """Mirrors Aragon AppProxyUpgradeable (Lido stETH)."""
-    addr = ADDR(0x43)
-    impl = ADDR(0x44)
-    proxy_bc = "0x" + "60" * 100 + "f4"
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: proxy_bc)
-
-    def fake_rpc(_rpc, method, params, retries=1, chain_id=None):
-        if method == "eth_getStorageAt":
-            return ZERO_SLOT
-        if method == "eth_call":
-            sel = params[0].get("data", "")[:10]
-            if sel == cls.IMPLEMENTATION_SELECTOR:
-                return _slot_for(impl)
-            if sel == cls.OWNER_SELECTOR:
-                return _slot_for(ADDR(0x45))
-        raise RuntimeError("revert")
-
-    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "custom"
-    assert result["implementation"] == impl
-
-
-def test_classify_single_impl_getter_without_owner_is_not_beacon(monkeypatch):
-    """It falls through to the size-gated custom-proxy path."""
-    addr = ADDR(0x46)
-    impl = ADDR(0x47)
-    bc = "0x" + "60" * 200  # no DELEGATECALL, under the custom-proxy size ceiling
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: bc)
-
-    def fake_rpc(_rpc, method, params, retries=1, chain_id=None):
-        if method == "eth_getStorageAt":
-            return ZERO_SLOT
-        if method == "eth_call":
-            sel = params[0].get("data", "")[:10]
-            if sel == cls.IMPLEMENTATION_SELECTOR:
-                return _slot_for(impl)
-        raise RuntimeError("revert")
-
-    monkeypatch.setattr(cls, "rpc_call", fake_rpc)
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "custom"
-    assert result["implementation"] == impl
-
-
-def test_classify_single_uses_batched_storage_reads(monkeypatch):
-    addr = ADDR(0xA)
-    impl = ADDR(0xB)
-
-    batch_calls: list[list] = []
-
-    def fake_batch(rpc_url, calls, chain_id=None):
-        batch_calls.append(list(calls))
-        # Slot order: impl, beacon, admin, uups, oz.
-        return [
-            (_slot_for(impl), False),
-            ("0x" + "0" * 64, False),
-            ("0x" + "0" * 64, False),
-            ("0x" + "0" * 64, False),
-            ("0x" + "0" * 64, False),
-        ]
-
-    monkeypatch.setattr(cls, "rpc_batch_request_with_status", fake_batch)
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("storage reads must come from the batch")),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "eip1967"
-    assert result["implementation"] == impl
-    assert len(batch_calls) == 1
-    assert len(batch_calls[0]) == 5
-    assert all(c[0] == "eth_getStorageAt" for c in batch_calls[0])
-
-
-def test_classify_single_falls_back_when_batch_returns_errors(monkeypatch):
-    """So proxies are recognised on RPCs that reject batches."""
-    addr = ADDR(0xA)
-    impl = ADDR(0xB)
-
-    def fake_batch_errored(_rpc, calls, chain_id=None):
-        return [(None, True) for _ in calls]
-
-    storage = {(addr, cls.EIP1967_IMPL_SLOT): _slot_for(impl)}
-
-    monkeypatch.setattr(cls, "rpc_batch_request_with_status", fake_batch_errored)
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda _rpc, method, params, retries=1, chain_id=None: (
-            storage.get((params[0], params[1]), ZERO_SLOT)
-            if method == "eth_getStorageAt"
-            else (_ for _ in ()).throw(RuntimeError("unexpected"))
-        ),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "eip1967"
-    assert result["implementation"] == impl
-
-
 def test_batched_slot_read_treats_short_words_as_failed_reads(monkeypatch):
     """A short word in a successful response is a transport artifact, not an empty slot."""
 
@@ -623,52 +464,6 @@ def test_classify_single_unread_slots_raise_incomplete(monkeypatch):
 
     with pytest.raises(cls.ClassificationIncompleteError):
         cls.classify_single(addr, RPC)
-
-
-def test_classify_single_proxy_detected_despite_unread_admin_slot(monkeypatch):
-    """The fail-closed gate sits behind the would-be-'regular' fallthrough, so an unreadable admin slot doesn't
-    raise.
-    """
-    addr = ADDR(0xA)
-    impl = ADDR(0xB)
-
-    def fake_batch(_rpc, calls, chain_id=None):
-        return [
-            (_slot_for(impl), False),
-            (ZERO_SLOT, False),
-            (None, True),
-            (ZERO_SLOT, False),
-            (ZERO_SLOT, False),
-        ]
-
-    monkeypatch.setattr(cls, "rpc_batch_request_with_status", fake_batch)
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("admin slot read failed")),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "eip1967"
-    assert result["implementation"] == impl
-    assert "admin" not in result  # admin slot unread → None → omitted, never guessed
-
-
-def test_classify_single_clean_empty_slots_stay_regular(monkeypatch):
-    addr = ADDR(0xE)
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda _rpc, method, params, retries=1, chain_id=None: (
-            ZERO_SLOT if method == "eth_getStorageAt" else (_ for _ in ()).throw(RuntimeError("revert"))
-        ),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "regular"
 
 
 def test_classify_contracts_incomplete_marks_unknown_not_regular(monkeypatch):

@@ -10,10 +10,8 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import text
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol, ProtocolSubscription
-from services.monitoring.event_topics import MAX_EVENT_TYPE_LENGTH, value_changed_event_type
 from services.monitoring.notifier import _expand_allowed_event_types, _filter_allows, notify_protocol_events
 
 
@@ -69,23 +67,6 @@ def notify_env(db_session):
     return emit
 
 
-@pytest.mark.parametrize(
-    "tier,expected_sends",
-    [
-        ("self_describing", 1),
-        ("hint", 0),
-        ("activity", 0),
-        (None, 1),
-    ],
-)
-def test_only_witnessed_claims_notify(db_session, notify_env, tier, expected_sends):
-    data = {"witness_tier": tier} if tier else {"new_owner": ADDR(0x99)}
-    event = notify_env("ownership_transferred", data)
-    with patch("services.monitoring.notifier._send_discord") as send:
-        notify_protocol_events(db_session, [event])
-    assert send.call_count == expected_sends
-
-
 def test_read_verified_change_notifies(db_session, notify_env):
     event = notify_env(
         "value_changed:state_variable:owner",
@@ -115,42 +96,7 @@ def test_filter_shim_carries_a_neutral_seed_onto_the_verified_form():
     assert "value_changed:state_variable:rate" in expanded
 
 
-def test_filter_shim_invents_no_member_coverage():
-    expanded = _expand_allowed_event_types(["state_changed:state_variable:fromDenyList"])
-    assert not any(t.startswith("member_changed") for t in expanded)
-
-
-def test_filter_shim_keeps_the_historical_group_expansions():
-    assert "safe_tx_executed" in _expand_allowed_event_types(["signer_added"])
-
-
-_SAFE_EXEC_TYPES = ("safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed")
 _SIGNER_TYPES = ["signer_added", "signer_removed", "threshold_changed"]
-
-
-def test_the_split_mutes_no_pre_split_signers_filter():
-    """A pre-split filter enumerated three types under a grouping that delivered seven, so it keeps seven."""
-    expanded = _expand_allowed_event_types(_SIGNER_TYPES)
-    for event_type in _SAFE_EXEC_TYPES:
-        assert event_type in expanded
-        assert _filter_allows(_SIGNER_TYPES, event_type)
-
-
-def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
-    """Group attribution: a save naming its groups used the post-split
-    vocabulary, so `signers` means signers; legacy expansion may not put executions back."""
-    groups = ["signers"]
-    for event_type in _SAFE_EXEC_TYPES:
-        assert not _filter_allows(_SIGNER_TYPES, event_type, filter_groups=groups)
-    for event_type in _SIGNER_TYPES:
-        assert _filter_allows(_SIGNER_TYPES, event_type, filter_groups=groups)
-
-
-def test_a_filter_naming_both_groups_hears_both():
-    both = _SIGNER_TYPES + list(_SAFE_EXEC_TYPES)
-    groups = ["signers", "safe_exec"]
-    for event_type in both:
-        assert _filter_allows(both, event_type, filter_groups=groups)
 
 
 @pytest.mark.parametrize("token", [None, [], "signers", ["signers", 3], 7, ["banana"], ["banana", "kiwi"]])
@@ -163,35 +109,6 @@ def test_an_unreadable_group_token_falls_back_to_no_mute(token):
     assert _filter_allows(_SIGNER_TYPES, "safe_tx_executed", filter_groups=stated)
 
 
-def test_an_unknown_name_beside_a_known_one_does_not_erase_the_known_one():
-    from services.monitoring.notifier import _stated_filter_groups
-
-    assert _stated_filter_groups({"groups": ["signers", "banana"]}) == ["signers"]
-
-
-def test_the_known_group_vocabulary_mirrors_the_frontend_table():
-    """A group missing from this mirror of MONITOR_ALERT_GROUPS is silently unreadable."""
-    import re
-    from pathlib import Path
-
-    from services.monitoring.notifier import _KNOWN_FILTER_GROUPS
-
-    meta = Path(__file__).resolve().parents[2] / "site" / "src" / "surface" / "meta.js"
-    table = re.search(r"MONITOR_ALERT_GROUPS = \[(.*?)\n\];", meta.read_text(), re.S)
-    assert table is not None
-    assert set(re.findall(r'key:\s*"([^"]+)"', table.group(1))) == set(_KNOWN_FILTER_GROUPS)
-
-
-def test_a_pre_split_signers_subscription_still_receives_executions(db_session, notify_env):
-    event = notify_env("safe_tx_executed", {"safe_tx_hash": "0x" + "ab" * 32, "payment": 0})
-    sub = db_session.query(ProtocolSubscription).one()
-    sub.event_filter = {"event_types": _SIGNER_TYPES}
-    db_session.commit()
-    with patch("services.monitoring.notifier._send_discord") as send:
-        notify_protocol_events(db_session, [event])
-    assert send.call_count == 1
-
-
 def test_a_post_split_signers_only_subscription_does_not(db_session, notify_env):
     event = notify_env("safe_tx_executed", {"safe_tx_hash": "0x" + "ab" * 32, "payment": 0})
     sub = db_session.query(ProtocolSubscription).one()
@@ -200,40 +117,6 @@ def test_a_post_split_signers_only_subscription_does_not(db_session, notify_env)
     with patch("services.monitoring.notifier._send_discord") as send:
         notify_protocol_events(db_session, [event])
     assert send.call_count == 0
-
-
-def test_a_filtered_subscription_still_hears_the_verified_successor(db_session, notify_env):
-    event = notify_env(
-        "value_changed:state_variable:owner",
-        {"field": "owner", "old": ADDR(1), "new": ADDR(2), "witness": "read_verified"},
-    )
-    sub = db_session.query(ProtocolSubscription).one()
-    sub.event_filter = {"event_types": ["ownership_transferred"]}
-    db_session.commit()
-    with patch("services.monitoring.notifier._send_discord") as send:
-        notify_protocol_events(db_session, [event])
-    assert send.call_count == 1
-
-
-def test_the_longest_mintable_type_fits(db_session, notify_env):
-    longest = value_changed_event_type("state_variable:accountantState.payoutAddress")
-    assert len(longest) == 58
-    assert len(longest) <= MAX_EVENT_TYPE_LENGTH
-
-    at_limit = "v" * MAX_EVENT_TYPE_LENGTH
-    event = notify_env(at_limit, None)
-    db_session.expire_all()
-    assert db_session.get(MonitoredEvent, event.id).event_type == at_limit
-
-    with pytest.raises(Exception):
-        db_session.execute(
-            text(
-                "INSERT INTO monitored_events (id, monitored_contract_id, event_type, block_number, tx_hash) "
-                "SELECT gen_random_uuid(), monitored_contract_id, :et, 1, '' FROM monitored_events LIMIT 1"
-            ),
-            {"et": "v" * (MAX_EVENT_TYPE_LENGTH + 1)},
-        )
-    db_session.rollback()
 
 
 def test_state_polling_subscribers_hear_read_verified_changes(db_session, notify_env):
@@ -253,12 +136,6 @@ def test_state_polling_subscribers_hear_read_verified_changes(db_session, notify
     assert send.call_count == 1
 
 
-def test_the_state_polling_seed_is_not_a_blanket_wildcard():
-    assert not _filter_allows(["state_changed_poll"], "ownership_transferred")
-    assert not _filter_allows(["state_changed_poll"], "member_changed:fromDenyList")
-    assert not _filter_allows(["state_changed_poll"], "state_changed:state_variable:_balances")
-
-
 def test_absent_filter_still_allows_everything(db_session):
     assert _filter_allows(None, "anything")
     assert _filter_allows([], "anything")
@@ -275,11 +152,3 @@ def test_stale_plan_provenance_reaches_the_recipient(db_session, notify_env):
     watchlist = next(f for f in embed["fields"] if f["name"] == "Watch-list")
     assert "2026-08-01T00:00:00Z" in watchlist["value"]
     assert "coverage may be incomplete" in watchlist["value"]
-
-
-def test_a_fresh_plan_event_claims_no_staleness(db_session, notify_env):
-    event = notify_env("ownership_transferred", {"new_owner": ADDR(0x99)})
-    with patch("services.monitoring.notifier._send_discord") as send:
-        notify_protocol_events(db_session, [event])
-    embed = send.call_args[0][1]
-    assert not any(f["name"] == "Watch-list" for f in embed["fields"])

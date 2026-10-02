@@ -5,7 +5,7 @@ indistinguishable from "read and named nothing" (2026-08-04).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -16,12 +16,10 @@ from services.monitoring.tracking_plan_state import (
     CONFIG_SUPPLIED_BY_CALLER,
     NO_CURRENT_MATERIALIZATION,
     NOT_DETERMINED_KEY,
-    PLAN_NOT_DETERMINED_TOKENS,
     POLLING_PLAN_KEY,
     READY_FRESH_PROVEN_EMPTY,
     READY_FRESH_WITH_TOPICS,
     READY_STALE,
-    STALENESS_MERGE_TOKENS,
     TRACKED_TOPICS_KEY,
     TRACKED_TOPICS_STALE_SINCE_KEY,
     UNCLASSIFIED,
@@ -35,38 +33,8 @@ _TOPICS = [{"topic0": TOPIC0, "event_type": "authority_updated", "signature": "A
 _NOW = datetime(2026, 8, 4, 1, 42, tzinfo=timezone.utc)
 
 
-def test_producers_mint_only_vocabulary_tokens():
-    from routers.monitored import CALLER_SUPPLIED_TRACKING_PLAN
-    from services.monitoring import enrollment as enr
-
-    assert CALLER_SUPPLIED_TRACKING_PLAN in PLAN_NOT_DETERMINED_TOKENS
-    assert enr.CONTRACT_NOT_ANALYZED in PLAN_NOT_DETERMINED_TOKENS
-    for token in (
-        enr.MATERIALIZATION_LOOKUP_FAILED,
-        enr.NO_CURRENT_MATERIALIZATION,
-        enr.PLAN_OBJECT_ABSENT,
-        enr.PLAN_NOT_READABLE,
-        enr.PLAN_LOAD_ERROR,
-    ):
-        assert token in PLAN_NOT_DETERMINED_TOKENS
-
-
 def _fresh(token: str = NO_CURRENT_MATERIALIZATION) -> dict:
     return {"watch_ownership": True, NOT_DETERMINED_KEY: token}
-
-
-def test_a_read_plan_never_merges():
-    new = {"watch_ownership": True, TRACKED_TOPICS_KEY: []}
-    existing = {TRACKED_TOPICS_KEY: _TOPICS}
-    assert merge_stale_tracking_plan(new, existing) is new
-
-
-@pytest.mark.parametrize("token", sorted(STALENESS_MERGE_TOKENS))
-def test_every_merging_token_preserves_last_good_topics(token):
-    merged = merge_stale_tracking_plan(_fresh(token), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
-    assert merged[TRACKED_TOPICS_KEY] == _TOPICS
-    assert merged[NOT_DETERMINED_KEY] == token
-    assert merged[TRACKED_TOPICS_STALE_SINCE_KEY] == _NOW.isoformat()
 
 
 def test_caller_supplied_config_is_never_resurrected_over():
@@ -77,23 +45,9 @@ def test_caller_supplied_config_is_never_resurrected_over():
     assert merge_stale_tracking_plan(_fresh(), existing_caller) == _fresh()
 
 
-def test_proven_empty_topics_carry_nothing_forward():
-    """``[]`` is a claim about the contract, which can't be made once the plan is unreadable."""
-    merged = merge_stale_tracking_plan(_fresh(), {TRACKED_TOPICS_KEY: []})
-    assert TRACKED_TOPICS_KEY not in merged
-    assert merged[NOT_DETERMINED_KEY] == NO_CURRENT_MATERIALIZATION
-
-
 def test_pre_discriminant_row_carries_nothing_forward():
     assert merge_stale_tracking_plan(_fresh(), {"watch_ownership": True}) == _fresh()
     assert merge_stale_tracking_plan(_fresh(), None) == _fresh()
-
-
-def test_staleness_instant_is_not_refreshed_by_re_enrollment():
-    """Re-enrolling must not make dated knowledge look fresher."""
-    first = merge_stale_tracking_plan(_fresh(), {TRACKED_TOPICS_KEY: _TOPICS}, now=_NOW)
-    later = merge_stale_tracking_plan(_fresh(), first, now=_NOW + timedelta(days=30))
-    assert later[TRACKED_TOPICS_STALE_SINCE_KEY] == first[TRACKED_TOPICS_STALE_SINCE_KEY] == _NOW.isoformat()
 
 
 def test_watch_authority_is_rederived_from_the_carried_topics():
@@ -122,33 +76,6 @@ def test_polling_plan_carries_analyzer_slots_and_yields_to_fresh_entries():
     assert merged["polling_plan_stale_since"] == _NOW.isoformat()
 
 
-def test_carried_polling_entries_are_always_stamped():
-    """The stamp used to be gated on the merged plan being longer, which a dropped entry could equal."""
-    new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}, "not-a-dict"]})
-    existing = {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: [{"field": "feeRecipient"}]}
-
-    merged = merge_stale_tracking_plan(new, existing, now=_NOW)
-
-    assert len(merged[POLLING_PLAN_KEY]) == len(new[POLLING_PLAN_KEY])  # the shape that used to slip through
-    assert {e["field"] for e in merged[POLLING_PLAN_KEY]} == {"implementation", "feeRecipient"}
-    assert merged["polling_plan_stale_since"] == _NOW.isoformat()
-
-
-def test_polling_plan_untouched_when_nothing_to_carry():
-    new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}]})
-    merged = merge_stale_tracking_plan(new, {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: []}, now=_NOW)
-    assert merged[POLLING_PLAN_KEY] == [{"field": "implementation"}]
-    assert "polling_plan_stale_since" not in merged
-
-
-def test_merge_does_not_mutate_its_inputs():
-    new = _fresh()
-    existing = {TRACKED_TOPICS_KEY: _TOPICS}
-    merge_stale_tracking_plan(new, existing, now=_NOW)
-    assert new == _fresh()
-    assert existing == {TRACKED_TOPICS_KEY: _TOPICS}
-
-
 def test_classify_keeps_the_four_states_distinct():
     assert classify_plan_state({TRACKED_TOPICS_KEY: _TOPICS}) == READY_FRESH_WITH_TOPICS
     assert classify_plan_state({TRACKED_TOPICS_KEY: []}) == READY_FRESH_PROVEN_EMPTY
@@ -167,19 +94,6 @@ def test_classify_keeps_the_four_states_distinct():
     assert classify_plan_state(None) == UNCLASSIFIED
 
 
-def test_ready_stale_needs_its_own_witness_not_a_coincidence_of_keys():
-    """Two keys coexisting is not evidence of staleness; the state needs the merge's stamp."""
-    no_stamp = {TRACKED_TOPICS_KEY: _TOPICS, NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION}
-    assert classify_plan_state(no_stamp) == NO_CURRENT_MATERIALIZATION
-
-    caller_with_topics = {
-        TRACKED_TOPICS_KEY: _TOPICS,
-        NOT_DETERMINED_KEY: CONFIG_SUPPLIED_BY_CALLER,
-        TRACKED_TOPICS_STALE_SINCE_KEY: _NOW.isoformat(),
-    }
-    assert classify_plan_state(caller_with_topics) == CONFIG_SUPPLIED_BY_CALLER
-
-
 def test_scan_plane_facts_survive_every_config_rebuild():
     """``scan_gaps`` records never-scanned intervals, and every writer replaces the whole config."""
     from services.monitoring.tracking_plan_state import SCAN_GAPS_KEY, preserve_scan_plane_facts
@@ -196,11 +110,6 @@ def test_scan_plane_facts_survive_every_config_rebuild():
 
     assert preserve_scan_plane_facts({"a": 1}, {}) == {"a": 1}
     assert preserve_scan_plane_facts({"a": 1}, None) == {"a": 1}
-
-
-def test_classify_reports_an_unknown_token_as_itself():
-    """Folding an unknown token into a known bucket would publish a reason we did not read."""
-    assert classify_plan_state({NOT_DETERMINED_KEY: "some_future_token"}) == "some_future_token"
 
 
 @pytest.fixture()

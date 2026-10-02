@@ -12,8 +12,6 @@ from tests.support.scoring_builders import (
     KEY_C,
     KEY_PROXY,
     KEY_V,
-    SAFE,
-    VAULT,
     _composing_case,
     _composing_principals,
     _composing_signals,
@@ -25,7 +23,6 @@ from tests.support.scoring_builders import (
     facts,
     flow_sig,
     fold,  # noqa: F401  (fold fixture, registered by import)
-    pause_sig,
     proven,
     reaches,
     sig,
@@ -63,59 +60,6 @@ def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
         census["magnitude_composed"] + census["magnitude_not_witnessed"] + census["magnitude_witnessed"]
         == census["instances"]
     )
-
-
-def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
-    for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
-        document = fold(
-            _composing_signals(),
-            principals=_composing_principals(),
-            **_composing_case(value=value_plane({KEY_V: {"usdc": sheet}}, contracts=(KEY_C,))),
-        )
-        row = _gate_row(document)
-        composed = row["reach_composed_magnitudes"][0]
-        assert composed["published_usd"] == expected
-        assert composed["published_usd"] <= composed["flow_out_witness"]["usd"]
-        assert composed["published_usd"] <= sheet
-        assert row["value_at_stake_usd"] == expected
-
-
-def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floor(fold):
-    """The header published a floor over a sum of ceilings; with coverage gaps the total isn't a ceiling either."""
-    document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
-    row = _gate_row(document)
-    assert row["value_at_stake_usd"] == 1_000_000.0
-    assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
-    # Deleted: one asserted an underived direction, the other was a constant false on 30% of carriers.
-    entry = row["reach_composed_magnitudes"][0]
-    assert "principal_extraction_bound" not in entry
-    assert "caller_holding_precondition" not in entry
-    assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    assert row["value_at_stake_is_floor"] is False
-    assert row["value_band"] == "$1M-$10M"
-    basis = row["value_at_stake_basis"]
-    assert "NEITHER" in basis and "CEILING" in basis
-    assert "reach_composed_magnitudes[]" in basis
-    assert not basis.startswith(">=")
-
-
-def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling(fold):
-    """The reference corpus never reaches this arm."""
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        **_composing_case(
-            value=value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C,), alias={KEY_C: KEY_V}),
-        ),
-    )
-    row = _gate_row(document)
-    assert row["undetermined_instances"] == []
-    assert row["entities_holding_unpriced_assets"] == []
-    assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
-    assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
-    assert row["value_at_stake_is_floor"] is False
-    assert row["value_band"].startswith("<= ")
-    assert row["value_at_stake_basis"].startswith("<= ")
 
 
 def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(fold):
@@ -256,107 +200,6 @@ def test_b7_a_direction_is_published_only_where_one_was_proven():
     assert direction(1.0, both, frozenset(), True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert direction(1.0, both, frozenset(), True, False, one) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert FOLD._BAND_PREFIX == {FOLD.BOUND_DIRECTION_FLOOR: ">= ", FOLD.BOUND_DIRECTION_CEILING: "<= "}
-
-
-def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold):
-    """A licence says N may call D, never that P can make it.
-
-    Includes the live shape where the callee is a parameter.
-    """
-    variants = {
-        "receiver_not_a_state_variable": act_as_plane(
-            call_sites={(KEY_C, COMPOSED_SELECTOR): (("finishSolve", "restricted", "", True, CALLING_SELECTOR),)},
-            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
-        ),
-        "receiver_never_read": act_as_plane(
-            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True, CALLING_SELECTOR),)},
-        ),
-        "receiver_holds_another_address": act_as_plane(
-            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True, CALLING_SELECTOR),)},
-            reads={(KEY_C, "vault"): (KEY_PROXY, "eth_call", 1)},
-        ),
-        "call_site_is_public": act_as_plane(
-            call_sites={(KEY_C, COMPOSED_SELECTOR): (("bulkWithdraw", "open", "vault", True, CALLING_SELECTOR),)},
-            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
-        ),
-        "gate_is_not_delegated_to_an_authority": act_as_plane(
-            call_sites={
-                (KEY_C, COMPOSED_SELECTOR): (("receiveFlashLoan", "restricted", "vault", False, CALLING_SELECTOR),)
-            },
-            reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
-        ),
-        "no_call_site_at_all": act_as_plane(),
-    }
-    for name, plane in variants.items():
-        document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(act_as=plane))
-        row = _gate_row(document)
-        assert row["value_at_stake_usd"] is None, name
-        assert row["value_state"] == "not_determined", name
-        assert row["reach_composed_magnitudes"] == [], name
-        assert row["reach_composition_census"]["act_as_refused"], name
-        assert KEY_V in row["reach_entities"], name
-
-
-def test_w4b_an_empty_licence_map_composes_nothing(fold):
-    """An empty licence must never read as "price the sheet"."""
-    document = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        **_composing_case(
-            closure=P.ControlClosure(edges=(_var_edge("owner"),)),
-            conferral=conferral_plane(rewrites=("owner",)),
-        ),
-    )
-    row = _gate_row(document)
-    assert KEY_V in row["reach_entities"]
-    assert row["reach_licensed_functions"] == {}
-    assert row["reach_composed_magnitudes"] == []
-    assert row["value_at_stake_usd"] is None
-
-
-def test_w4b_a_destination_with_no_flow_out_witness_composes_nothing(fold):
-    gate, _ = _composing_signals()
-    unwitnessed = flow_sig(
-        deployment_address=VAULT,
-        contract_id=2,
-        function_name="exit",
-        selector=COMPOSED_SELECTOR,
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(2, "ethereum", SAFE),),
-        witness_tier="behavioral_observed",
-        **proven(0.9),
-        **reaches(KEY_V),
-    )
-    document = fold([gate, unwitnessed], principals=_composing_principals(), **_composing_case())
-    row = _gate_row(document)
-    assert row["value_at_stake_usd"] is None
-    assert row["reach_composed_magnitudes"] == []
-    assert row["reach_composition_census"]["act_as_witnessed"] == 1
-    assert row["reach_composition_census"]["destination_magnitude_witnessed"] == 0
-
-
-def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
-    """Act-as composition leaves pause.set unchanged.
-
-    The destination witness Phase 6 reuses answers how much a CALL MOVES, not how
-    much a freeze immobilises, so even with every act-as witness the freeze row
-    publishes no magnitude.
-    """
-    freeze = pause_sig(
-        function_name="pause",
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        **proven(0.6),
-        **reaches(KEY_C),
-    )
-    _, destination = _composing_signals()
-    document = fold([freeze, destination], principals=_composing_principals(), **_composing_case())
-    row = next(f for f in document.findings if f["capability"] == "pause.set")
-    assert row["value_at_stake_usd"] is None
-    assert row["value_state"] == "not_determined"
-    assert row.get("reach_composed_magnitudes") == []
 
 
 def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):

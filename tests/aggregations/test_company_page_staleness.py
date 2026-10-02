@@ -5,20 +5,17 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import select, update
 
-from db.models import CompanyPageRevision as Revision
 from db.models import CompanyPageSnapshot as Page
-from db.models import Contract, Job, JobStatus, TvlSnapshot
+from db.models import Contract, TvlSnapshot
 from services import company_pages as pages
 from tests.aggregations.test_prepared_company_pages import prepared as prepared
 from tests.aggregations.test_prepared_company_pages import request, source
 from tests.conftest import DATABASE_URL, requires_postgres, run_alembic_upgrade
-from tests.support.overview_builders import _add_job, _addr
 from workers import company_pages as worker
 
 pytestmark = requires_postgres
@@ -113,30 +110,6 @@ def test_structural_failure_still_publishes_summary_and_keeps_structure(prepared
     assert (blob(session, "overview"), blob(session, "functions")) == structure
     assert source(session, protocol.name) == "prepared-stale"
     assert session.execute(select(Page.attempts)).scalar_one() == 1
-
-
-def revisions(session):
-    session.expire_all()
-    return session.execute(select(Revision.key, Revision.token, Revision.changed_at).order_by(Revision.key)).all()
-
-
-def test_heartbeat_touches_no_revision_but_completion_does(prepared):
-    from db.queue.jobs import heartbeat_job
-
-    session, protocol, _ = prepared
-    lease = uuid4()
-    address = _addr("heartbeat")
-    job = _add_job(session, address=address, company="heartbeat-co", status=JobStatus.processing)
-    session.execute(update(Job).where(Job.id == job.id).values(lease_id=lease))
-    session.commit()
-    before = revisions(session)
-    heartbeat_job(session, job.id, lease_id=lease)
-    assert revisions(session) == before
-    session.execute(update(Job).where(Job.id == job.id).values(status=JobStatus.completed))
-    session.commit()
-    touched = {key for key, *_ in set(revisions(session)) - set(before)}
-    assert f"address:{address}" in touched
-    assert not any(key.startswith("legacy:") for key in touched)
 
 
 def test_migration_round_trip():

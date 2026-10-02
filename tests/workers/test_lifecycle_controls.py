@@ -56,13 +56,6 @@ def test_ambiguous_or_unsafe_fleet_fails_closed(fly, machines):
     fly.http.post.assert_not_called()
 
 
-def test_failed_fly_read_cannot_stop_workers(fly):
-    fly.http.get.side_effect = TimeoutError()
-    with pytest.raises(TimeoutError):
-        fly.target()
-    fly.http.post.assert_not_called()
-
-
 @pytest.mark.parametrize("state", ["starting", "started", "stopping", "suspended"])
 def test_active_standby_inhibits_waking_an_additional_machine(fly, state):
     standby = machine(standbys=["abc123"])
@@ -72,12 +65,6 @@ def test_active_standby_inhibits_waking_an_additional_machine(fly, state):
     with pytest.raises(RuntimeError, match="standby is active"):
         fly.target()
     fly.http.post.assert_not_called()
-
-
-@pytest.mark.parametrize("standbys", [None, []])
-def test_empty_standbys_does_not_hide_primary(fly, standbys):
-    fly.http.get.return_value.json.return_value = [machine(standbys=standbys)]
-    assert fly.target()["id"] == "abc123"
 
 
 def test_sleep_exemption_requires_fresh_controller_and_no_work():

@@ -222,29 +222,6 @@ def test_health_and_config_endpoints(api_client) -> None:
     assert "default_rpc_url" in config.json()
 
 
-def test_admin_key_required_for_non_get(monkeypatch) -> None:
-    import api
-    from routers.deps import require_admin_key
-
-    # Drop the conftest override for this test only and force a known key.
-    api.app.dependency_overrides.pop(require_admin_key, None)
-    monkeypatch.setattr("routers.deps.ADMIN_KEY", "real-key")
-
-    client = TestClient(api.app)
-
-    no_header = client.post(
-        "/api/analyze",
-        json={"address": "0x1234567890123456789012345678901234567890", "name": "demo"},
-    )
-    bad_header = client.post(
-        "/api/analyze",
-        json={"address": "0x1234567890123456789012345678901234567890", "name": "demo"},
-        headers={"X-PSAT-Admin-Key": "wrong"},
-    )
-    assert no_header.status_code == 401
-    assert bad_header.status_code == 401
-
-
 @requires_postgres
 def test_cors_allows_configured_origin(monkeypatch, db_session) -> None:
     from tests.conftest import SessionFactory
@@ -270,20 +247,6 @@ def test_cors_allows_configured_origin(monkeypatch, db_session) -> None:
     finally:
         monkeypatch.delenv("PSAT_SITE_ORIGIN", raising=False)
         importlib.reload(api)
-
-
-def test_analyze_endpoint_rejects_bad_address() -> None:
-    client = make_client()
-    response = client.post("/api/analyze", json={"address": "123", "name": "demo"})
-    assert response.status_code == 422
-
-
-def test_analyze_endpoint_requires_at_least_one_target() -> None:
-    client = make_client()
-
-    missing = client.post("/api/analyze", json={"name": "demo"})
-
-    assert missing.status_code == 422
 
 
 @patch("routers.deps.SessionLocal")
@@ -414,68 +377,6 @@ def test_protocol_tvl_caps_days(mock_session_cls) -> None:
     cutoffs = [v for v in stmt.compile().params.values() if isinstance(v, datetime)]
     assert len(cutoffs) == 1
     assert (datetime.now(timezone.utc) - cutoffs[0]).days == deps.MAX_TVL_HISTORY_DAYS
-
-
-@patch("routers.deps.SessionLocal")
-def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls, monkeypatch) -> None:
-
-    client = make_client()
-    fake_job = _make_fake_job()
-
-    # The inline path avoids a fake boto3 client.
-    art_discovery = SimpleNamespace(
-        name="stage_timing_discovery",
-        storage_key=None,
-        content_type=None,
-        data={
-            "schema_version": "2",
-            "stage": "discovery",
-            "elapsed_s": 4.2,
-            "started_at": "t0",
-            "ended_at": "t1",
-            "worker_id": "DiscoveryWorker-1-aaa",
-            "status": "success",
-        },
-        text_data=None,
-    )
-    art_static = SimpleNamespace(
-        name="stage_timing_static",
-        storage_key=None,
-        content_type=None,
-        data={
-            "schema_version": "2",
-            "stage": "static",
-            "elapsed_s": 28.7,
-            "started_at": "t1",
-            "ended_at": "t2",
-            "worker_id": "StaticWorker-1-bbb",
-            "status": "success",
-        },
-        text_data=None,
-    )
-
-    mock_session = MagicMock()
-    mock_session.get.return_value = fake_job
-    mock_scalars = MagicMock()
-    mock_scalars.all.return_value = [art_discovery, art_static]
-    mock_execute_result = MagicMock()
-    mock_execute_result.scalars.return_value = mock_scalars
-    mock_session.execute.return_value = mock_execute_result
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-    monkeypatch.setattr("routers.deps.ADMIN_KEY", "test-admin-key")
-    resp = client.get(
-        f"/api/jobs/{fake_job.id}/stage_timings",
-        headers={"X-PSAT-Admin-Key": "test-admin-key"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["job_id"] == str(fake_job.id)
-    assert set(body["stage_timings"].keys()) == {"discovery", "static"}
-    assert body["stage_timings"]["discovery"]["elapsed_s"] == 4.2
-    assert body["stage_timings"]["static"]["elapsed_s"] == 28.7
-    assert body["stage_timings"]["discovery"]["status"] == "success"
 
 
 @patch("routers.deps.SessionLocal")

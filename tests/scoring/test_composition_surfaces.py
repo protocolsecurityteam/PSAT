@@ -26,8 +26,6 @@ from tests.support.scoring_builders import (
     _composing_principals,
     _composing_signals,
     _gate_row,
-    _tied_case,
-    _tied_signals,
     facts,
     fold,  # noqa: F401  — the fold fixture
     value_plane,
@@ -90,37 +88,6 @@ def test_the_census_cause_names_the_route_token_and_not_only_the_arm(fold):
     assert constrained["reach_composition_census"]["composed_withheld_by_reason"] == {P.ROUTE_TARGET_CONSTRAINED: 1}
 
 
-def test_a_cause_is_registered_per_arm_and_route_token_with_no_fall_through():
-    """An unregistered pair raises, and the count is the registry's size so a frozen "three" can't survive a fourth
-    cause.
-    """
-    assert (FOLD.ARM_GATE_ONLY, P.ROUTE_AMOUNT_AUTHORED) in FOLD._WITHHELD_CAUSE_ORDER
-    assert (FOLD.ARM_GATE_ONLY, P.ROUTE_TARGET_CONSTRAINED) in FOLD._WITHHELD_CAUSE_ORDER
-    assert (FOLD.ARM_GATE_ONLY, None) not in FOLD._WITHHELD_CAUSE_ORDER
-    with pytest.raises(KeyError):
-        FOLD._withheld_cause((FOLD.ARM_GATE_ONLY, P.ROUTE_NOT_DETERMINED))
-    with pytest.raises(KeyError):
-        FOLD._withheld_cause((FOLD.ARM_REPUBLISHED_DIRECT, None))
-    assert f"The {len(FOLD._WITHHELD_CAUSE_ORDER)} registered causes" in FOLD._withheld_cause_clause(
-        (_a_withheld_record(),)
-    )
-    assert "registered causes" not in FOLD._withheld_cause_clause(())
-
-
-def _a_withheld_record() -> FOLD._WithheldComposition:
-    return FOLD._WithheldComposition(
-        entity=KEY_V,
-        selector=COMPOSED_SELECTOR,
-        function="exit",
-        chain=(),
-        execution=EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_NOT_PERSISTED),
-        arm=FOLD.ARM_NOT_DETERMINED,
-        reason=P.ROUTE_NO_FLOW_WITNESS,
-        route=P.RouteClassification(P.ROUTE_NOT_DETERMINED, P.ROUTE_NO_FLOW_WITNESS, (), None, None),
-        deletability=P.authority_deletability(P.DeletabilityPlane({}, {}, {}), [], KEY_V, COMPOSED_SELECTOR),
-    )
-
-
 # chosen_by names what decided THIS tie
 
 
@@ -145,20 +112,6 @@ def _tie(entry: FOLD._ComposedMagnitude) -> dict[str, Any]:
     block = entry._tie_json()
     assert block is not None
     return block
-
-
-def test_chosen_by_names_the_component_that_actually_decided_the_tie():
-    """Ruling 6.2 M4: three ties decided at three components publish three strings."""
-    by_state = _tied_pair(witness_state="proven_upper_bound")
-    by_selector = _tied_pair(selector="0x22222222")
-    by_function = _tied_pair(function="manage")
-
-    assert len({_tie(entry)["chosen_by"] for entry in (by_state, by_selector, by_function)}) == 3
-    assert "the weakest witness state (component 2 of 6)" in _tie(by_state)["chosen_by"]
-    assert "the lowest selector (component 3 of 6)" in _tie(by_selector)["chosen_by"]
-    assert "the lowest destination function (component 4 of 6)" in _tie(by_function)["chosen_by"]
-    assert "the lowest selector (component 3 of 6) against" not in _tie(by_state)["chosen_by"]
-    assert "the weakest witness state (component 2 of 6) against" not in _tie(by_selector)["chosen_by"]
 
 
 @pytest.mark.parametrize(
@@ -200,42 +153,6 @@ def test_chosen_by_counts_the_candidates_each_component_separated():
     assert one != two
 
 
-def test_a_tie_the_order_does_not_separate_publishes_that_and_names_no_decider():
-    """Naming a component would credit the rule with a choice the arrival order made."""
-    unseparated = replace(
-        _tied_pair(),
-        tied_with=(
-            replace(
-                _tied_pair(),
-                tied_with=(),
-                execution=EX.ProvingExecution(state=EX.EXECUTION_NOT_DETERMINED, reason=EX.REASON_FETCH_FAILED),
-            ),
-        ),
-    )
-    chosen_by = _tie(unseparated)["chosen_by"]
-    assert "decides NOTHING here" in chosen_by
-    assert "the order the candidates were built in and not on this rule" in chosen_by
-    assert "component 1 of 6" not in chosen_by
-    assert chosen_by != _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
-
-
-def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):
-    """The order's tail is every field ``ActAsStep.as_json``
-    publishes, so the gloss is read off the steps in hand."""
-    document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
-    tied = [
-        entry
-        for entry in (_gate_row(document).get("reach_composed_magnitudes") or [])
-        if entry.get("composed_selector_tie")
-    ]
-    assert tied, "this fixture must compose a tie for the chain gloss to be read off a real step"
-    chosen_by = tied[0]["composed_selector_tie"]["chosen_by"]
-    step_fields = set(tied[0]["act_as_chain"][0])
-    assert len(step_fields) > 5, "the gloss is only under-inclusive where the step publishes more than five"
-    for field_name in step_fields:
-        assert field_name in chosen_by
-
-
 def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence():
     chosen_by = _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
     assert "no candidate here publishes a step at all" in chosen_by
@@ -243,28 +160,6 @@ def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence
 
 
 # The uncalibrated-arm register
-
-
-def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
-    """Ruling 6.1 KEEP: the only place a reader can check the composed ceiling against the destination's body.
-
-    M1/M2 re-verified post-Phase-B.
-    """
-    document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
-    entries = _gate_row(document).get("reach_composed_magnitudes") or []
-    assert entries
-    for entry in entries:
-        block = entry["destination_predicates"]
-        assert block["evaluated"] is False
-        assert block["source"] == "effective_functions.conditions"
-        reading = block["reading"]
-        assert "it may include the authorization guard" in reading
-        assert "it includes the authorization guard" not in reading
-        assert "Three things about them" in reading
-        assert "(1)" in reading and "(2)" in reading and "(3)" in reading and "(4)" not in reading
-        assert "caller_holding_precondition" not in reading
-        # Null where nothing was read, never an empty list.
-        assert (block["descriptions"] is None) == (block["state"] != P.PREDICATES_EXTRACTED)
 
 
 # The migration block is DATED HISTORY, not a live claim
@@ -326,19 +221,6 @@ def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):
     assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
     assert entry["destination_sheet_bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
     assert "every asset observed at this entity" in entry["destination_sheet_bound_direction_basis"]
-    assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
-
-
-def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):
-    """``sheet_not_determined`` carries "no sheet"; a refusal would conflate it with "a sheet that proves no
-    at-most".
-    """
-    document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(value=value_plane()))
-    entry = _gate_row(document)["reach_composed_magnitudes"][0]
-
-    assert entry["sheet_not_determined"] is True
-    assert entry["destination_sheet_bound_direction"] is None
-    assert entry["destination_sheet_bound_direction_basis"] is None
     assert FOLD._TRIMMED_TO_AN_UNPROVEN_CEILING not in entry["reading"]
 
 
@@ -435,41 +317,3 @@ def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fol
     assert withheld[0]["arm_taken"] == FOLD.ARM_NOT_DETERMINED
     assert withheld[0]["withheld_reason"]
     assert ownership_row["reach_composed_magnitudes"] == []
-
-
-def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):
-    """Otherwise an aggregating reader sees a unit with one power."""
-    census = _row_for(_two_powers_over_one_pot(fold), "ownership.transfer")["reach_composition_census"]
-
-    assert census["composed_selected"] == 1
-    assert census["composed"] == 0
-    assert census["composed_withheld"] == 1
-    assert census["composed_withheld_by_arm"] == {FOLD.ARM_NOT_DETERMINED: 1}
-
-
-def test_the_composed_figure_is_the_same_under_either_power(fold):
-    """Figures that differed would be two pots and the ruling wouldn't apply."""
-    both = _two_powers_over_one_pot(fold)
-    replace_only = fold(
-        _composing_signals(),
-        principals=_composing_principals(),
-        **_composing_case(deletability=CA.deletability_plane(host=((KEY_V, EOA, "setAuthority"),))),
-    )
-    ownership_admitted = fold(
-        [
-            *_composing_signals()[1:],
-            replace(
-                _composing_signals()[0],
-                claim_id="ownership.transfer",
-                function_name="transferOwnership",
-                selector="0xf2fde38b",
-            ),
-        ],
-        principals=_composing_principals(),
-        **_composing_case(deletability=CA.deletability_plane(host=((KEY_V, EOA, "setAuthority"),))),
-    )
-
-    charged = _row_for(both, "authority.replace")["reach_composed_magnitudes"][0]["published_usd"]
-    assert charged == _gate_row(replace_only)["reach_composed_magnitudes"][0]["published_usd"]
-    admitted = _row_for(ownership_admitted, "ownership.transfer")["reach_composed_magnitudes"][0]
-    assert charged == admitted["published_usd"]

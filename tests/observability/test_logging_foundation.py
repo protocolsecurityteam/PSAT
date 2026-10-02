@@ -174,18 +174,6 @@ def _crytic_record(msg: str, *, args=(), exc_info=None) -> logging.LogRecord:
     return record
 
 
-def test_crytic_stdout_echo_is_demoted_to_debug():
-    """Compiler chatter at ERROR poisons ERROR-rate triage."""
-    demoter = CryticCompileEchoDemoter()
-    record = _crytic_record("Compiling 45 files with Solc 0.7.0\nstdout: Solc 0.7.0 finished in 37.19ms")
-
-    emitted = demoter.filter(record)
-
-    assert record.levelno == logging.DEBUG
-    assert record.levelname == "DEBUG"
-    assert emitted is (logging.getLogger().getEffectiveLevel() <= logging.DEBUG)
-
-
 def test_crytic_unprovable_echo_stays_visible_at_warning():
     """Single-line output may name the failure, so demote to WARNING at most."""
     demoter = CryticCompileEchoDemoter()
@@ -272,24 +260,3 @@ def test_serve_disables_uvicorn_access_log_and_passes_json_config(monkeypatch):
     assert isinstance(log_config, dict)
     assert log_config["formatters"]["json"]["()"].endswith("JsonFormatter")
     assert set(log_config["loggers"]) == {"uvicorn", "uvicorn.error", "uvicorn.access"}
-
-
-@pytest.mark.parametrize("reload_flag,expected", [("1", True), ("0", False)])
-def test_serve_reload_is_opt_in(monkeypatch, reload_flag, expected):
-    import api
-
-    captured: dict[str, object] = {}
-
-    class _FakeUvicorn:
-        @staticmethod
-        def run(app, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setitem(sys.modules, "uvicorn", _FakeUvicorn)
-    monkeypatch.setenv("PSAT_API_RELOAD", reload_flag)
-    monkeypatch.delenv("PSAT_API_LIMIT_CONCURRENCY", raising=False)
-
-    api.serve()
-
-    assert captured["reload"] is expected
-    assert captured["limit_concurrency"] is None

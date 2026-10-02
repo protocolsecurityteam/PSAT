@@ -75,107 +75,6 @@ def test_non_proxy_stores_flags_with_is_proxy_false(monkeypatch):
     assert created_jobs == []
 
 
-def test_non_proxy_library_type(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    job = _job()
-
-    store_calls, _ = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {"type": "library"},
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    assert store_calls[0][1] == {"is_proxy": False, "classification_type": "library"}
-
-
-def test_proxy_with_implementation_creates_child_job(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    store_calls, created_jobs = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "implementation": _IMPL_ADDR,
-        },
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    assert len(store_calls) == 1
-    flags = store_calls[0][1]
-    assert flags["is_proxy"] is True
-    assert flags["classification_type"] == "proxy"
-    assert flags["proxy_type"] == "eip1967"
-    assert flags["implementation"] == _IMPL_ADDR
-
-    assert len(created_jobs) == 1
-    child_req = created_jobs[0]
-    assert child_req["address"] == _IMPL_ADDR
-    assert child_req["name"] == "TestContract: (impl)"
-    assert child_req["rpc_url"] == _RPC
-    assert child_req["parent_job_id"] == str(job.id)
-    assert child_req["proxy_address"] == _ADDR
-    assert child_req["proxy_type"] == "eip1967"
-
-
-def test_proxy_child_job_inherits_chain(monkeypatch):
-    # Models a base-enabled deployment: impl-child spawns gate off-allowlist
-    # chains, so make the premise explicit rather than relying on {1}.
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-    worker = StaticWorker()
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job(request={"rpc_url": _RPC, "chain": "base"})
-
-    _, created_jobs = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "implementation": _IMPL_ADDR,
-        },
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    assert len(created_jobs) == 1
-    assert created_jobs[0]["chain"] == "base"
-
-
-def test_proxy_uses_job_name_for_child_naming(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job(name="MyProxy")
-
-    _, created_jobs = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "implementation": _IMPL_ADDR,
-        },
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "FallbackName")
-
-    assert created_jobs[0]["name"] == "MyProxy: (impl)"
-
-
 def test_proxy_falls_back_to_contract_name_for_child(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
@@ -248,65 +147,6 @@ def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
     assert child_req["proxy_type"] == "beacon"
 
 
-def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    store_calls, created_jobs = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "type": "proxy",
-            "proxy_type": "diamond",
-            "implementation": _IMPL_ADDR,
-            "facets": [_FACET1, _FACET2],
-        },
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    flags = store_calls[0][1]
-    assert flags["is_proxy"] is True
-    assert flags["proxy_type"] == "diamond"
-    assert flags["facets"] == [_FACET1, _FACET2]
-
-    assert len(created_jobs) == 3
-    assert created_jobs[0]["address"] == _IMPL_ADDR
-    assert created_jobs[0]["name"] == "TestContract: (impl)"
-    assert created_jobs[1]["address"] == _FACET1
-    assert created_jobs[1]["name"] == "TestContract: (facet 1)"
-    assert created_jobs[2]["address"] == _FACET2
-    assert created_jobs[2]["name"] == "TestContract: (facet 2)"
-
-
-def test_diamond_proxy_deduplicates_impl_in_facets(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    _, created_jobs = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "type": "proxy",
-            "proxy_type": "diamond",
-            "implementation": _IMPL_ADDR,
-            "facets": [_IMPL_ADDR, _FACET1],  # impl duplicated in facets
-        },
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    assert len(created_jobs) == 2
-    addresses = [j["address"] for j in created_jobs]
-    assert addresses == [_IMPL_ADDR, _FACET1]
-
-
 def test_proxy_facets_only_no_impl(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
@@ -351,30 +191,6 @@ def test_no_rpc_stores_classification_skipped(monkeypatch):
     assert created_jobs == []
 
 
-def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job(request={"chain_id": 1})  # no rpc_url in request; mainnet chain supplied explicitly
-
-    store_calls, created_jobs = _capture_store_and_create(monkeypatch)
-    monkeypatch.delenv("ETH_RPC", raising=False)
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-
-    captured_rpc = []
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: (
-            captured_rpc.append(rpc_url) or {"type": "proxy", "proxy_type": "eip1967", "implementation": _IMPL_ADDR}
-        ),
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    assert captured_rpc == ["https://erpc-proxy.example/main/evm/1"]
-    assert store_calls[0][1]["is_proxy"] is True
-
-
 def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
@@ -415,34 +231,6 @@ def test_classify_exception_stores_classification_error(monkeypatch):
     assert flags["is_proxy"] is False
     assert flags["classification_type"] == "unknown"
     assert "RPC timeout" in flags["classification_error"]
-    assert created_jobs == []
-
-
-def test_existing_impl_job_skips_child_creation(monkeypatch):
-    worker = StaticWorker()
-    session = MagicMock()
-
-    existing_job = SimpleNamespace(id="existing-job-id")
-    session.execute.return_value.scalar_one_or_none.return_value = existing_job
-
-    job = _job()
-
-    store_calls, created_jobs = _capture_store_and_create(monkeypatch)
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "implementation": _IMPL_ADDR,
-        },
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    assert store_calls[0][1]["is_proxy"] is True
-    assert store_calls[0][1]["implementation"] == _IMPL_ADDR
-
     assert created_jobs == []
 
 

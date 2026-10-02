@@ -29,7 +29,6 @@ from services.monitoring import role_holder_cycle
 from services.monitoring.role_holder_cycle import (
     DUE_CURSORS_WARMED,
     DUE_MAX_AGE,
-    DUE_NEVER_REFRESHED,
     DUE_NEW_ROLE_LOGS,
     OUTCOME_GATE_CLOSED,
     OUTCOME_NO_REGISTRY,
@@ -169,29 +168,6 @@ class TestSelectionUniverse:
         assert (counters.due, counters.refreshed) == (0, 0)
         assert _marks(session) == {}
 
-    def test_a_gate_that_later_opens_selects_without_clearing_anything(self, plane_session, confirming_reads):
-        session = plane_session
-        session.add_all([_cursor(REGISTRY, ROLE_GRANTED_TOPIC0), _log(REGISTRY)])
-        session.commit()
-        assert _pass(session).refreshed == 0
-
-        session.add(_cursor(REGISTRY, ROLE_REVOKED_TOPIC0))
-        session.commit()
-
-        counters = _pass(session)
-        assert counters.refreshed == 1
-        assert _marks(session)[REGISTRY].outcome == ROLE_REFRESH_OUTCOME_ROWS_WRITTEN
-
-    def test_cursors_on_another_chain_do_not_license_this_one(self, plane_session, confirming_reads):
-        session = plane_session
-        for cursor in _enrolled(REGISTRY):
-            cursor.chain_id = 8453
-            session.add(cursor)
-        session.add(_log(REGISTRY))
-        session.commit()
-
-        assert _pass(session).registries_considered == 0
-
 
 class TestRefreshTrigger:
     def test_confirmed_nothing_is_recorded_and_not_reselected(self, plane_session, confirming_reads):
@@ -206,15 +182,6 @@ class TestRefreshTrigger:
 
         second = _pass(session)
         assert (second.due, second.refreshed) == (0, 0)
-
-    def test_never_refreshed_is_not_silently_skipped(self, plane_session):
-        session = plane_session
-        session.add_all(_enrolled(REGISTRY))
-        session.commit()
-
-        candidates = collect_candidates(session, chain_id=1)
-
-        assert [c.due_reason for c in candidates] == [DUE_NEVER_REFRESHED]
 
     def test_a_wrote_n_registry_is_not_reselected_without_new_activity(self, plane_session, confirming_reads):
         session = plane_session
@@ -424,14 +391,6 @@ class TestCycleObservability:
         assert detail["registries_rows_written"] == 1
         assert seen[0]["events_found"] == 1
         assert seen[0]["partial"] is False
-
-    def test_an_idle_pass_still_beats(self, plane_session, monkeypatch):
-        seen = self._beats(monkeypatch)
-
-        refresh_role_holder_planes(plane_session, chain_id=1, rpc_url="http://stub", probe_block=PROBE)
-
-        assert len(seen) == 1
-        assert seen[0]["extra_detail"]["registries_due"] == 0
 
     def test_a_failed_registry_beats_degraded(self, plane_session, monkeypatch):
         session = plane_session

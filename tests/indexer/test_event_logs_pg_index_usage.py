@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select, text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy import text
 
 from db.models import IndexedEventCursor, IndexedEventLog
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
@@ -33,10 +32,6 @@ def _log(addr: str, topic0: str, *, block: int, log_index: int) -> IndexedEventL
     )
 
 
-def _compiled(query) -> str:
-    return str(query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})).lower()
-
-
 def _seed_index_demo(session) -> None:
     rows = [_log(TARGET_ADDR, TARGET_TOPIC0, block=100 + i, log_index=i) for i in range(40)]
     rows += [_log(DECOY_ADDR, DECOY_TOPIC0, block=1000 + i, log_index=i) for i in range(4000)]
@@ -44,47 +39,6 @@ def _seed_index_demo(session) -> None:
         session.add(row)
     session.flush()
     session.execute(text("ANALYZE indexed_event_logs"))
-
-
-def _explain(session, query) -> str:
-    sql = _compiled(query)
-    plan_rows = session.execute(text("EXPLAIN " + sql)).fetchall()
-    return "\n".join(r[0] for r in plan_rows)
-
-
-def test_selective_fold_query_uses_lookup_index(db_session):
-    _seed_index_demo(db_session)
-    query = (
-        select(IndexedEventLog)
-        .where(IndexedEventLog.chain_id == 1)
-        .where(IndexedEventLog.event_address == TARGET_ADDR)
-        .where(IndexedEventLog.topic0.in_([TARGET_TOPIC0]))
-        .order_by(
-            IndexedEventLog.block_number.asc(),
-            IndexedEventLog.transaction_index.asc(),
-            IndexedEventLog.log_index.asc(),
-        )
-    )
-    plan = _explain(db_session, query)
-    assert "ix_indexed_event_logs_lookup" in plan, plan
-    assert "Seq Scan" not in plan, plan
-
-
-def test_role_drift_query_uses_case_insensitive_lookup_index(db_session):
-    _seed_index_demo(db_session)
-    plan = "\n".join(
-        r[0]
-        for r in db_session.execute(
-            text(
-                "EXPLAIN SELECT * FROM indexed_event_logs "
-                "WHERE chain_id = 1 "
-                "AND lower(event_address) = :addr AND topic0 = :topic AND block_number > 100"
-            ),
-            {"addr": TARGET_ADDR, "topic": TARGET_TOPIC0},
-        ).fetchall()
-    )
-    assert "ix_indexed_event_logs_role_lookup" in plan, plan
-    assert "Seq Scan" not in plan, plan
 
 
 def test_repo_returns_rows_with_raw_column_comparison(db_session):

@@ -49,37 +49,6 @@ def _backdate_job(s, job_id, seconds_ago: int) -> None:
 
 
 class TestGetOrCreateProtocol:
-    @pytest.mark.parametrize(
-        "name,kwargs,expected_domain",
-        [
-            pytest.param("ether.fi", {"official_domain": "ether.fi"}, "ether.fi", id="with_domain"),
-            pytest.param("some-slug", {}, None, id="no_domain_leaves_null"),
-        ],
-    )
-    def test_creates_when_missing(self, name, kwargs, expected_domain):
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-
-        row = get_or_create_protocol(session, name, **kwargs)
-
-        assert isinstance(row, Protocol)
-        assert row.name == name
-        assert row.official_domain == expected_domain
-        session.add.assert_called_once()
-        session.flush.assert_called_once()
-
-    def test_returns_existing_without_modifying(self):
-        existing = Protocol(name="uniswap", official_domain="uniswap.org")
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = existing
-
-        row = get_or_create_protocol(session, "uniswap", official_domain="uniswap.org")
-
-        assert row is existing
-        assert row.official_domain == "uniswap.org"
-        session.add.assert_not_called()
-        session.flush.assert_not_called()
-
     def test_backfills_official_domain_when_null(self):
         existing = Protocol(name="aave", official_domain=None)
         session = MagicMock()

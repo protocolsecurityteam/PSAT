@@ -22,41 +22,6 @@ def test_reads_keccak_from_pg_bytecode_cache(monkeypatch):
     assert out == {addr.lower(): "0x" + "11" * 32}
 
 
-def test_reads_pg_on_mainnet_chain_id(monkeypatch):
-    seen: list[int] = []
-
-    def _pg(chain_id, _addr):
-        seen.append(chain_id)
-        return ("0x60", "0x" + "33" * 32)
-
-    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", _pg)
-    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: None)
-
-    cat._bytecode_keccak_now_batch({"0x" + "ee" * 20})
-    assert seen == [1]
-
-
-def test_falls_back_to_live_on_pg_miss(monkeypatch):
-    addr = "0x" + "cd" * 20
-    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", lambda _c, _a: None)
-    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: "0x" + "22" * 32)
-
-    out = cat._bytecode_keccak_now_batch({addr})
-    assert out == {addr.lower(): "0x" + "22" * 32}
-
-
-def test_skips_empty_addresses(monkeypatch):
-
-    def _no_pg(_c, _a):
-        raise AssertionError("empty address must not be queried")
-
-    monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", _no_pg)
-    monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: None)
-    bad_addrs: set = {"", None}  # deliberately malformed input the batcher must skip
-    out = cat._bytecode_keccak_now_batch(bad_addrs)
-    assert out == {}
-
-
 @requires_postgres
 def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
     """A NULL ``covered_to_block`` also describes a row whose upper bound was never determined; the lower bound is

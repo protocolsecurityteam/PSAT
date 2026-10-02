@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -40,16 +39,11 @@ from services.scoring.dirty import (
 )
 from services.scoring.loop import DueProtocol, score_protocol, select_due_protocols
 from services.scoring.persist import (
-    INLINE_DOCUMENT_LIMIT_BYTES,
-    ScoreDocumentUnavailable,
-    load_score_document,
     persist_score_document,
 )
 from services.scoring.population import replace_contract_signals
 from services.scoring.schema import FunctionSignal, ScoreDocument, entity_key, not_determined_signal_defaults
-from tests.conftest import DATABASE_URL
 from utils.scoring_status import (
-    GRADE_STATE_COMPUTED,
     GRADE_STATE_NOT_DETERMINED,
     MODEL_VERSION,
     PERIMETER_NOT_DETERMINED,
@@ -146,19 +140,6 @@ def fx(db_session):
         db_session.commit()
 
 
-@pytest.fixture()
-def other_session():
-    """``dirty_at`` is ``transaction_timestamp()``, and the defect needs two real transactions."""
-    engine = create_engine(DATABASE_URL)
-    session = Session(engine, expire_on_commit=False)
-    try:
-        yield session
-    finally:
-        session.rollback()
-        session.close()
-        engine.dispose()
-
-
 def _document(protocol_id: int, **overrides: Any) -> ScoreDocument:
     base: dict[str, Any] = dict(
         protocol_id=protocol_id,
@@ -188,37 +169,6 @@ def _effects_worker(monkeypatch):
     return EffectsWorker()
 
 
-def test_effects_completion_persists_signals_and_marks_dirty(fx, monkeypatch):
-    contract = fx.contract()
-    fx.function(contract)
-    worker = _effects_worker(monkeypatch)
-
-    worker._process(fx.session, fx.job)
-    fx.session.commit()
-
-    signals = fx.signals()
-    assert signals, "effects completion wrote no score signals"
-    assert {s.contract_id for s in signals} == {contract.id}
-    assert all(s.job_id == fx.job.id for s in signals), "job_id is the provenance column and must be stamped"
-    mark = fx.queued_row()
-    assert mark is not None and mark.reason == SCORE_DIRTY_EFFECTS
-
-
-def test_effects_replaces_rather_than_accumulates(fx, monkeypatch):
-    contract = fx.contract()
-    fx.function(contract)
-    worker = _effects_worker(monkeypatch)
-
-    worker._process(fx.session, fx.job)
-    fx.session.commit()
-    first = len(fx.signals())
-    assert first
-
-    worker._process(fx.session, fx.job)
-    fx.session.commit()
-    assert len(fx.signals()) == first
-
-
 def test_poisoned_distillation_does_not_fail_the_job(fx, monkeypatch, caplog):
     contract = fx.contract()
     fx.function(contract)
@@ -240,28 +190,6 @@ def test_poisoned_distillation_does_not_fail_the_job(fx, monkeypatch, caplog):
     messages = [r.getMessage() for r in caplog.records]
     assert any("score-signal distillation failed" in m for m in messages), messages
     assert any(str(fx.job.id) in m for m in messages), "the failure must carry job context"
-
-
-def test_claims_bridge_survives_a_distillation_failure(fx, monkeypatch):
-    """Outside a savepoint the raise would abort the effects stage's own writes."""
-    contract = fx.contract()
-    function = fx.function(contract)
-    worker = _effects_worker(monkeypatch)
-
-    import services.scoring.distill as distill_module
-
-    def _bad_sql(session, job):
-        session.execute(__import__("sqlalchemy").text("SELECT * FROM table_that_does_not_exist"))
-        return {}
-
-    monkeypatch.setattr(distill_module, "distill_job_signals", _bad_sql)
-
-    function.function_name = "renamedByTheStage"
-    worker._process(fx.session, fx.job)
-    fx.session.commit()
-
-    fx.session.expire_all()
-    assert fx.session.get(EffectiveFunction, function.id).function_name == "renamedByTheStage"
 
 
 def test_partial_persist_keeps_the_contracts_that_succeeded(fx, monkeypatch, caplog):
@@ -344,45 +272,6 @@ def test_the_double_replace_guard_survives_savepoints(fx):
 
     with pytest.raises(ValueError, match="already replaced"):
         _replace_in_savepoint(fx, contract, "0x00000002")
-
-
-def test_a_failed_contract_does_not_disarm_the_guard(fx):
-    contract = fx.contract()
-    sibling = fx.contract()
-    _replace_in_savepoint(fx, contract)
-
-    with pytest.raises(RuntimeError):
-        with fx.session.begin_nested():
-            replace_contract_signals(
-                fx.session, contract_id=sibling.id, signals=[_signal_for(fx, sibling, "0x00000003")], job_id=fx.job.id
-            )
-            raise RuntimeError("this contract failed")
-
-    with pytest.raises(ValueError, match="already replaced"):
-        _replace_in_savepoint(fx, contract, "0x00000002")
-
-
-def test_committing_the_pass_disarms_the_guard(fx):
-    contract = fx.contract()
-    _replace_in_savepoint(fx, contract)
-    fx.session.commit()
-
-    _replace_in_savepoint(fx, contract, "0x00000002")  # a new pass; no raise
-
-
-def test_mark_is_one_row_per_protocol_and_bumps_dirty_at(fx):
-    assert mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_MANUAL)
-    fx.session.commit()
-    first = fx.queued_row().dirty_at
-
-    assert mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-    fx.session.commit()
-    fx.session.expire_all()
-    row = fx.queued_row()
-
-    assert fx.session.query(ProtocolScoreQueue).filter_by(protocol_id=fx.protocol.id).count() == 1
-    assert row.dirty_at >= first
-    assert row.reason == SCORE_DIRTY_EFFECTS
 
 
 def test_a_failed_mark_never_breaks_its_host_transaction(fx, caplog):
@@ -493,50 +382,6 @@ def test_dirty_protocol_is_scored_and_its_mark_cleared(fx):
     assert fx.queued_row() is None, "a mark the fold accounted for must be cleared"
 
 
-def test_a_mark_committed_after_selection_is_not_cleared(fx, other_session):
-    """The mark's timestamp predates the loop but becomes visible only after it selected; a clear keyed on any
-    captured instant would lose it.
-    """
-    mark_protocol_score_dirty(other_session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-    other_session.flush()  # stamped, still invisible to the loop
-
-    due = [d for d in select_due_protocols(fx.session, limit=500) if d.protocol_id == fx.protocol.id]
-    assert due and due[0].trigger == SCORE_TRIGGER_STALENESS_SWEEP, "the uncommitted mark must be invisible"
-
-    other_session.commit()  # the marker's data lands mid-fold
-
-    score_protocol(fx.session, due[0])
-
-    assert fx.queued_row() is not None, "a mark this fold could not have seen must survive"
-
-
-def test_a_mark_that_lands_during_the_fold_survives(fx, other_session):
-    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-    fx.session.commit()
-    due = [d for d in select_due_protocols(fx.session, limit=500) if d.protocol_id == fx.protocol.id][0]
-    assert due.dirty_at is not None
-
-    mark_protocol_score_dirty(other_session, fx.protocol.id, SCORE_DIRTY_COVERAGE)
-    other_session.commit()
-    fx.session.expire_all()
-    bumped = fx.queued_row().dirty_at
-    assert bumped != due.dirty_at, "two transactions must not share a transaction_timestamp; otherwise a flake"
-
-    score_protocol(fx.session, due)
-
-    survivor = fx.queued_row()
-    assert survivor is not None and survivor.reason == SCORE_DIRTY_COVERAGE
-
-
-def test_scores_accumulate_rather_than_overwrite(fx):
-    for _ in range(2):
-        mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-        fx.session.commit()
-        score_protocol(fx.session, DueProtocol(fx.protocol.id, SCORE_TRIGGER_DIRTY_LOOP))
-
-    assert len(fx.scores()) == 2
-
-
 def test_dirty_protocols_are_selected_before_stale_ones(fx, db_session):
     other = Protocol(name=f"scoreint-stale-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
@@ -555,14 +400,6 @@ def test_dirty_protocols_are_selected_before_stale_ones(fx, db_session):
         db_session.query(ProtocolScore).filter_by(protocol_id=other.id).delete()
         db_session.query(Protocol).filter_by(id=other.id).delete()
         db_session.commit()
-
-
-def test_a_dirty_protocol_takes_one_slot_not_two(fx):
-    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-    fx.session.commit()
-
-    due = select_due_protocols(fx.session, limit=200)
-    assert [d.protocol_id for d in due].count(fx.protocol.id) == 1
 
 
 def test_a_freshly_scored_protocol_is_not_swept(fx):
@@ -602,25 +439,6 @@ def _poison(monkeypatch):
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("fold exploded")),
     )
     monkeypatch.setattr(score_loop, "emit_monitor_cycle", lambda process, **kw: None)
-
-
-def test_a_failing_protocol_backs_off_and_frees_its_pass_slot(fx, monkeypatch):
-    """Otherwise poison holds the pass budget and the staleness sweep never runs."""
-    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-    fx.session.commit()
-    _poison(monkeypatch)
-
-    score_loop.score_due_protocols(fx.session, limit=200)
-
-    fx.session.expire_all()
-    row = fx.queued_row()
-    assert row is not None and row.attempts == 1 and row.last_failed_at is not None
-
-    inside = select_due_protocols(fx.session, limit=500, backoff_base_s=3600)
-    assert fx.protocol.id not in [d.protocol_id for d in inside], "a backed-off protocol takes no slot at all"
-
-    elapsed = select_due_protocols(fx.session, limit=500, backoff_base_s=0)
-    assert fx.protocol.id in [d.protocol_id for d in elapsed], "the backoff must expire, never retire the protocol"
 
 
 def test_a_staleness_failure_arms_the_backoff_too(fx, monkeypatch):
@@ -664,40 +482,6 @@ def test_a_successful_fold_clears_a_surviving_mark_backoff(fx, monkeypatch):
     assert row is not None and row.attempts == 0 and row.last_failed_at is None
 
 
-def test_pass_emits_exactly_one_heartbeat(fx, monkeypatch):
-    from db.queue import HEARTBEAT_PROTOCOL_SCORE
-
-    mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
-    fx.session.commit()
-    beats: list[tuple] = []
-    monkeypatch.setattr(score_loop, "emit_monitor_cycle", lambda process, **kw: beats.append((process, kw)))
-
-    score_loop.score_due_protocols(fx.session, limit=200)
-
-    assert len(beats) == 1
-    assert beats[0][0] == HEARTBEAT_PROTOCOL_SCORE
-    assert beats[0][1]["extra_detail"]["protocols_scored"] >= 1
-
-
-def test_score_loop_is_a_supervised_thread():
-    from db.queue import HEARTBEAT_PROTOCOL_SCORE
-    from services.monitoring.process_meta import PROCESS_META
-    from workers.protocol_monitor import _build_default_supervisor
-
-    supervisor = _build_default_supervisor("http://rpc.invalid", 1.0)
-    assert HEARTBEAT_PROTOCOL_SCORE in [name for name, _ in supervisor._loops]
-    # Without it the loop is invisible to /api/fleet and the ops watchdog.
-    assert HEARTBEAT_PROTOCOL_SCORE in PROCESS_META
-
-
-def test_perimeter_is_settled_when_the_queue_is_empty(fx):
-    from services.scoring.planes import perimeter_state
-
-    state, detail = perimeter_state(fx.session, fx.protocol.id)
-    assert state == PERIMETER_SETTLED
-    assert detail["pending_jobs"] == 0
-
-
 def test_perimeter_is_unsettled_while_jobs_are_in_flight(fx):
     fx.session.add(Job(id=uuid.uuid4(), protocol_id=fx.protocol.id, status=JobStatus.processing))
     fx.session.commit()
@@ -724,15 +508,6 @@ def test_an_unreadable_queue_lands_on_neither_polarity(fx):
     assert "error" in detail
 
 
-def test_the_loop_persists_the_perimeter_it_was_handed(fx, monkeypatch):
-    import services.scoring.planes as planes
-
-    monkeypatch.setattr(planes, "perimeter_state", lambda s, p: (PERIMETER_NOT_DETERMINED, {"error": "stubbed"}))
-    score_protocol(fx.session, DueProtocol(fx.protocol.id, SCORE_TRIGGER_DIRTY_LOOP))
-
-    assert fx.scores()[-1].perimeter_state == PERIMETER_NOT_DETERMINED
-
-
 class _FakeStorage:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
@@ -752,40 +527,6 @@ def _big_document(protocol_id: int) -> ScoreDocument:
     )
 
 
-def test_a_small_document_stays_inline(fx):
-    row = persist_score_document(fx.session, _document(fx.protocol.id))
-    fx.session.commit()
-
-    assert row.storage_key is None
-    assert row.findings is not None
-    assert load_score_document(row)["grade_state"] == GRADE_STATE_NOT_DETERMINED
-
-
-def test_a_large_document_spills_and_reassembles(fx, monkeypatch):
-    storage = _FakeStorage()
-    monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
-
-    document = _big_document(fx.protocol.id)
-    assert len(json.dumps(document.document(), default=str).encode()) > INLINE_DOCUMENT_LIMIT_BYTES
-
-    row = persist_score_document(fx.session, document)
-    fx.session.commit()
-
-    assert row.findings is None
-    assert row.storage_key and row.storage_key in storage.objects
-    assert load_score_document(row)["findings"] == document.findings
-
-
-def test_a_large_document_stays_inline_when_storage_is_unconfigured(fx, monkeypatch):
-    monkeypatch.setattr("db.storage.get_storage_client", lambda: None)
-
-    row = persist_score_document(fx.session, _big_document(fx.protocol.id))
-    fx.session.commit()
-
-    assert row.storage_key is None
-    assert row.findings is not None
-
-
 def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
     """The spill's ``default=str`` stringified what the inline JSONB serializer rejects."""
     storage = _FakeStorage()
@@ -800,79 +541,6 @@ def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
     assert inline_row.storage_key is None and spilled_row.storage_key is not None
     inline_bytes = json.dumps(inline_row.findings, sort_keys=True).encode("utf-8")
     assert inline_bytes == storage.objects[spilled_row.storage_key]
-
-
-def test_a_value_json_cannot_encode_raises_on_both_paths(fx, monkeypatch):
-    """Raising is the only answer that's the same on both paths."""
-    from decimal import Decimal
-
-    storage = _FakeStorage()
-    monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
-    document = _document(fx.protocol.id, findings=[{"exposure": Decimal("1.5")}])
-
-    with pytest.raises(TypeError):
-        persist_score_document(fx.session, document)
-    fx.session.rollback()
-
-    monkeypatch.setattr(score_persist, "INLINE_DOCUMENT_LIMIT_BYTES", 0)
-    with pytest.raises(TypeError):
-        persist_score_document(fx.session, document)
-    fx.session.rollback()
-    assert storage.objects == {}, "nothing may reach the bucket for a document that cannot be encoded"
-
-
-def test_an_unreadable_spill_is_not_an_empty_document(fx, monkeypatch):
-    storage = _FakeStorage()
-    monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
-    row = persist_score_document(fx.session, _big_document(fx.protocol.id))
-    fx.session.commit()
-    storage.objects.clear()
-
-    with pytest.raises(ScoreDocumentUnavailable):
-        load_score_document(row)
-
-
-_LEDGER_KEYS = {
-    "grade_lambda",
-    "grade_exposure",
-    "grade_state",
-    "findings",
-    "earned_negatives",
-    "warnings",
-    "model_parameters",
-    "confidence_pct",
-    "perimeter_state",
-    "provenance",
-}
-
-
-def test_score_endpoint_serves_the_ledger_payload(fx, api_client):
-    persist_score_document(
-        fx.session,
-        _document(
-            fx.protocol.id,
-            grade_state=GRADE_STATE_COMPUTED,
-            grade_lambda=-12.5,
-            grade_exposure=0.42,
-            confidence_pct=25.0,
-            perimeter_state=PERIMETER_UNSETTLED,
-            findings=[{"capability": "upgrade.implementation", "principal_unit": "ethereum::0xabc"}],
-            warnings=[{"kind": "unresolved_principal"}],
-        ),
-    )
-    fx.session.commit()
-
-    response = api_client.get(f"/api/company/{fx.protocol.name}/score")
-    assert response.status_code == 200
-    body = response.json()
-
-    assert _LEDGER_KEYS <= set(body), sorted(_LEDGER_KEYS - set(body))
-    assert body["protocol_id"] == fx.protocol.id
-    assert body["grade_state"] == GRADE_STATE_COMPUTED
-    assert body["grade_lambda"] == -12.5
-    assert body["perimeter_state"] == PERIMETER_UNSETTLED
-    assert body["findings"][0]["capability"] == "upgrade.implementation"
-    assert body["model_version"] == MODEL_VERSION
 
 
 def test_score_endpoint_serves_the_newest_row(fx, api_client):

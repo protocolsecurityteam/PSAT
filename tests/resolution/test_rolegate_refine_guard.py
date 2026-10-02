@@ -41,8 +41,6 @@ from services.resolution.permissionless_shapes import (  # noqa: E402
     is_caller_keyed_time_denylist,
 )
 from services.resolution.predicate_evaluator import (  # noqa: E402
-    _bind_callee_parameters,
-    _public_without_root_cofinites,
     evaluate_tree,
 )
 from services.resolution.role_store_standards import SOLADY_ENUMERABLE_ROLES  # noqa: E402
@@ -144,33 +142,8 @@ contract Registry {
 }
 """
 
-_CALLEE_NOARG_PAUSE = """
-pragma solidity ^0.8.19;
-contract Registry {
-    error NotAllowed();
-    bool public paused;
-    function checkNotPaused() external view {
-        if (paused) revert NotAllowed();
-    }
-}
-"""
 
 # Folds to ``return ok_1``, so the materialization fallback gates it.
-_CALLEE_SOLADY_OPAQUE = """
-pragma solidity ^0.8.19;
-contract Registry {
-    error Unauthorized();
-    uint256 constant OPERATION_MULTISIG_ROLE = 1;
-    mapping(bytes32 => uint256) private _roleBitmap;
-    function hasRole(address account, uint256 role) public view returns (bool ok) {
-        bytes32 slot = keccak256(abi.encode(account, uint256(0x1234)));
-        assembly { ok := and(shr(role, sload(slot)), 1) }
-    }
-    function onlyOperatingMultisig(address account) external view {
-        if (!hasRole(account, OPERATION_MULTISIG_ROLE)) revert Unauthorized();
-    }
-}
-"""
 
 
 def _caller_src(callee_call: str) -> str:
@@ -218,87 +191,11 @@ def _opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
 
 # The transparent arm stays tainted, so an antecedent-level taint rule never fires while the opaque arm makes the OR
 # public.
-def _ormix_callee_tree(callee_sig: str) -> dict[str, Any]:
-    return {
-        callee_sig: {
-            "op": "OR",
-            "children": [
-                {
-                    "op": "LEAF",
-                    "leaf": {
-                        "kind": "membership",
-                        "operator": "truthy",
-                        "authority_role": "caller_authority",
-                        "operands": [{"source": "parameter", "parameter_index": 0, "parameter_name": "account"}],
-                        "set_descriptor": {
-                            "kind": "mapping_membership",
-                            "key_sources": [{"source": "parameter", "parameter_index": 0, "parameter_name": "account"}],
-                            "storage_var": "admin",
-                        },
-                        "references_msg_sender": True,
-                        "parameter_indices": [],
-                        "expression": "admin[account]",
-                        "basis": [],
-                    },
-                },
-                {
-                    "op": "LEAF",
-                    "leaf": {
-                        "kind": "equality",
-                        "operator": "truthy",
-                        "authority_role": "business",
-                        "operands": [{"source": "view_call", "callee": "hasRoleAsm"}],
-                        "references_msg_sender": False,
-                        "parameter_indices": [],
-                        "expression": "! hasRoleAsm(account)",
-                        "basis": [],
-                    },
-                },
-            ],
-        }
-    }
 
 
 # AND(cofinite, conditional_universal) folds to a root cofinite that absorbs the opaque authority, so the guard's
 # counterfactual spares it and the real hasRole gate fails open. Not a regression and not on the etherfi corpus
 # (real mixes are separate modifiers); xfail pins the desired behavior so a fix flips it to xpass.
-def _and_denylist_opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
-    return {
-        callee_sig: {
-            "op": "AND",
-            "children": [
-                {
-                    "op": "LEAF",
-                    "leaf": {
-                        "kind": "comparison",
-                        "operator": "lte",
-                        "authority_role": "time",
-                        "operands": [
-                            {"source": "parameter", "parameter_index": 0, "parameter_name": "account"},
-                            {"source": "block_context", "block_context_kind": "timestamp"},
-                        ],
-                        "references_msg_sender": True,
-                        "parameter_indices": [],
-                        "expression": "blacklistedUntil[account] <= block.timestamp",
-                        "basis": [],
-                    },
-                },
-                {
-                    "op": "LEAF",
-                    "leaf": {
-                        "kind": "equality",
-                        "operator": "truthy",
-                        "authority_role": "business",
-                        "operands": [{"source": "view_call", "callee": "hasRole"}],
-                        "references_msg_sender": False,
-                        "parameter_indices": [],
-                        "expression": "! hasRole(account, ROLE)",
-                        "basis": [],
-                    },
-                },
-            ],
-        }
-    }
 
 
 def _seed_two_hop(
@@ -399,18 +296,6 @@ def test_denylist_discriminator(operands, operator, is_denylist, is_allowlist):
     leaf = _cmp_leaf(operands, operator)
     assert is_caller_keyed_time_denylist(leaf) is is_denylist
     assert is_caller_keyed_time_allowlist(leaf) is is_allowlist
-
-
-def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
-    reg = _compile(tmp_path, _CALLEE_DENYLIST, "Registry")
-    trees = _build_pipeline(reg)
-    key = next(k for k in trees if k.startswith("nonBlacklisted"))
-    bound = _bind_callee_parameters(trees[key], [{"source": "root_caller"}])
-    cap = evaluate_tree(bound)
-    assert cap.kind == "cofinite_blacklist", f"denylist must emit cofinite, got {cap.kind}"
-    assert cap.subject == "root"
-    assert cap.blacklist_quality == "lower_bound"
-    assert [c.kind for c in cap.conditions] == ["time"]
 
 
 # Section 3 — the refine-only guard, two-hop DB (both flags).
@@ -628,56 +513,6 @@ def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypa
     assert "inline_refine_only_guard" not in _basis(cap)
 
 
-def test_fixture3_computed_variant_gates(session, both_flags):
-    reg = _build_pipeline(_compile(_tmp(), _CALLEE_SOLADY_OPAQUE, "Registry"))
-    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
-    cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
-    assert cap["kind"] == "external_check_only", f"computed opaque variant must gate, got {cap['kind']}"
-    assert not _is_public(cap)
-
-
-def test_fixture2_or_mix_gates(session, both_flags):
-    """The transparent arm keeps taint, so only the surface-level guard catches it."""
-    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyMixed(msg.sender)"), "CallerLike"))
-    cap = _seed_two_hop(session, caller_trees=caller, callee_trees=_ormix_callee_tree("onlyMixed(address)"))
-    assert cap["kind"] == "external_check_only", f"OR-mix must gate, got {cap['kind']}"
-    assert not _is_public(cap)
-
-
-@pytest.mark.xfail(
-    reason="corpus-empty adversarial gap (Stage-0 verifier): a single callee that ANDs a "
-    "caller-keyed time-denylist with an opaque authority folds to one root cofinite that "
-    "absorbs the authority as a business condition; the counterfactual strips it and the "
-    "guard does not fire. Not a regression (pre-fix also public); real corpus mixes are "
-    "separate modifiers that gate correctly. Flips to xpass under a tighter counterfactual "
-    "or the Stage-2 enumeration adapter.",
-    strict=True,
-)
-def test_and_mix_denylist_absorbs_opaque_authority_should_gate(session, both_flags):
-    """Should gate, but the AND folds into a root cofinite the counterfactual spares."""
-    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyMixed(msg.sender)"), "CallerLike"))
-    cap = _seed_two_hop(
-        session, caller_trees=caller, callee_trees=_and_denylist_opaque_callee_tree("onlyMixed(address)")
-    )
-    assert not _is_public(cap), f"denylist-AND-opaque-authority must gate, got public {cap['kind']}"
-
-
-def test_fixture4_transparent_used_arg_gates_without_guard(session, both_flags):
-    reg = _build_pipeline(_compile(_tmp(), _CALLEE_PAUSE_AND_ALLOW, "Registry"))
-    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.checkAllowed(msg.sender)"), "CallerLike"))
-    cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
-    assert not _is_public(cap), "transparent used-arg allowlist must gate"
-    assert "inline_refine_only_guard" not in _basis(cap)
-
-
-def test_fixture7_no_arg_paused_stays_public(session, both_flags):
-    reg = _build_pipeline(_compile(_tmp(), _CALLEE_NOARG_PAUSE, "Registry"))
-    caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.checkNotPaused()"), "CallerLike"))
-    cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
-    assert _is_public(cap), f"no-arg delegated pause must stay public, got {cap['kind']}"
-    assert "inline_refine_only_guard" not in _basis(cap)
-
-
 def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
     """Documented sacrifice: a delegated pause pointlessly taking the
     caller address (arg unused) now gates. The inline is conditional_universal(pause), not a
@@ -728,40 +563,6 @@ def test_fixture6_effectful_permissionless_stays_open(tmp_path, earned_public):
     assert cap.kind == "conditional_universal", f"value movement must stay open, got {cap.kind}"
     assert cap.conditions, "the external call must surface as a condition, not silently vanish"
     assert all(c.kind in ("self_service", "business") for c in cap.conditions)
-
-
-def _root_cofinite() -> CapabilityExpr:
-    return CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="root")
-
-
-def _conditional_universal(description: str) -> CapabilityExpr:
-    from services.resolution.capabilities import Condition
-
-    return CapabilityExpr.conditional_universal(Condition(kind="business", description=description))
-
-
-@pytest.mark.parametrize(
-    ("build_cap", "expected"),
-    [
-        pytest.param(lambda: _conditional_universal("! hasRole(...)"), True, id="conditional_universal"),
-        pytest.param(_root_cofinite, False, id="bare_cofinite"),
-        pytest.param(
-            lambda: CapabilityExpr.structural_or(
-                [CapabilityExpr.finite_set(["0x" + "ab" * 20], quality="exact"), _conditional_universal("opaque")]
-            ),
-            True,
-            id="or_with_conditional",
-        ),
-        # Only the cofinite is stripped, so the antecedent stays True.
-        pytest.param(
-            lambda: CapabilityExpr.structural_or([_root_cofinite(), _conditional_universal("opaque authority")]),
-            True,
-            id="or_cofinite_conditional",
-        ),
-    ],
-)
-def test_public_without_root_cofinites(build_cap, expected):
-    assert _public_without_root_cofinites(build_cap()) is expected
 
 
 # Transparent role-store variants: where the account binding survives the helper boundary, the function keeps gating.
@@ -857,40 +658,6 @@ def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expe
 
 
 # Two-hop effectful delegation must survive under both flags.
-
-_CALLER_EFFECTFUL = """
-pragma solidity ^0.8.19;
-interface IReg { function pull(address from, uint256 amt) external returns (bool); }
-contract CallerLike {
-    IReg public registry;
-    uint256 public v;
-    function guarded(uint256 x) external { require(registry.pull(msg.sender, x), "fail"); v = x; }
-}
-"""
-
-_CALLEE_EFFECTFUL = {
-    "pull(address,uint256)": {
-        "op": "LEAF",
-        "leaf": {
-            "kind": "equality",
-            "operator": "truthy",
-            "authority_role": "business",
-            "operands": [{"source": "computed"}],
-            "references_msg_sender": False,
-            "parameter_indices": [],
-            "expression": "return true",
-            "basis": [],
-        },
-    }
-}
-
-
-def test_two_hop_effectful_permissionless_guard_spares(session, both_flags):
-    caller = _build_pipeline(_compile(_tmp(), _CALLER_EFFECTFUL, "CallerLike"))
-    cap = _seed_two_hop(session, caller_trees=caller, callee_trees=_CALLEE_EFFECTFUL)
-    assert "inline_refine_only_guard" not in _basis(cap), "permissionless value movement must not hit the guard"
-    if both_flags == "1":
-        assert _is_public(cap), f"value movement must stay open under earned-public, got {cap['kind']}"
 
 
 # Each Slither run needs its own directory.

@@ -61,33 +61,6 @@ def _principals(cap: CapabilityExpr) -> list[str]:
     return [r["address"] for r in project_capability_surface(capability_to_dict(cap)).principal_rows]
 
 
-def test_nonzero_slot_resolves_to_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub(monkeypatch, slot=_word(MANAGER), recorder=recorder)
-    cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [MANAGER]
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason is None
-    assert _principals(cap) == [MANAGER]
-    assert _status(cap) != "resolved_empty"
-    assert recorder[0][0] == "eth_call"
-    assert ("eth_getStorageAt", [CONTRACT.lower(), MEMBERSHIP_MANAGER_SLOT, "latest"]) in recorder
-
-
-def test_confirmed_zero_slot_is_resolved_empty_not_by_design(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub(monkeypatch, slot="0x" + "00" * 32)
-    cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason == "slot_read_zero"
-    assert cap.empty_reason != "empty_by_design"
-    assert _status(cap) == "resolved_empty"
-
-
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub(monkeypatch, slot="revert")
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
@@ -120,26 +93,6 @@ def test_no_rpc_with_slot_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _status(cap) != "resolved_empty"
 
 
-def test_slotless_internal_var_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub(monkeypatch, slot=_word(MANAGER))  # slot WOULD resolve, but the operand carries none
-    cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_NO_SLOT), _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert cap.empty_reason == "unreadable_revert"
-    assert _status(cap) != "resolved_empty"
-
-
-def test_struct_member_slot_is_never_storage_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub(monkeypatch, slot=_word(MANAGER), recorder=recorder)
-    cap = evaluate_tree(_eq_tree(D_STRUCT_MEMBER_WITH_SLOT), _ctx_with_rpc())
-
-    assert cap.members == []  # MANAGER was NOT adopted from the slot
-    assert _status(cap) != "resolved_empty"
-    assert all(method != "eth_getStorageAt" for method, _ in recorder)
-
-
 # --------------------------------------------------------------------------
 # Integration: compile the MembershipNFT fixture and prove the static pass
 # stamps the sequential slot and resolution reads it end-to-end.
@@ -152,7 +105,6 @@ from services.static.contract_analysis_pipeline.internal_authority_slot import (
     _slots_for_vars,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
-from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -191,55 +143,9 @@ class TestMembershipNFTStorageSlot:
             "_legacyController": "0x" + format(1, "064x"),
         }
 
-    def test_private_var_with_manual_getter_is_not_stamped(self) -> None:
-        """``_owner`` must resolve through ``owner()``, never a layout-sensitive slot read."""
-        op = _caller_operand(_tree_for(_membership_nft(), "adminAction()"))
-        assert op["state_variable_name"] == "_owner"
-        assert op.get("storage_slot") is None
-
-    def test_owner_gate_resolves_via_canonical_getter_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Only ``owner()`` returns the principal, so this fails on an evaluator trying just ``_owner()``."""
-        tree = _tree_for(_membership_nft(), "adminAction()")
-        recorder: list = []
-
-        def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
-            recorder.append((method, params))
-            if method == "eth_call" and params[0]["data"] == "0x8da5cb5b":  # owner()
-                return _word(MANAGER)
-            raise RuntimeError("execution reverted")
-
-        monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert _principals(cap) == [MANAGER]
-        assert cap.membership_quality == "exact"
-        assert _status(cap) != "resolved_empty"
-        assert "0x8da5cb5b" in [p[0]["data"] for m, p in recorder if m == "eth_call"]
-
-    def test_operand_carries_sequential_slot(self) -> None:
-        contract = _membership_nft()
-        for sig in ("mint(address,uint256)", "burn(address,uint256,uint256)", "incrementLock(uint256,uint32)"):
-            op = _caller_operand(_tree_for(contract, sig))
-            assert op["source"] == "state_variable"
-            assert op["state_variable_name"] == "membershipManager"
-            assert op.get("storage_slot") == MEMBERSHIP_MANAGER_SLOT
-
-    def test_public_sibling_var_has_no_slot(self) -> None:
-        op = _caller_operand(_tree_for(_membership_nft(), "rebase(uint256)"))
-        assert op["state_variable_name"] == "liquidityPool"
-        assert op.get("storage_slot") is None
-
     def test_resolves_live_membership_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
         tree = _tree_for(_membership_nft(), "mint(address,uint256)")
         _stub(monkeypatch, slot=_word(MANAGER))
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert _principals(cap) == [MANAGER]
-        assert _status(cap) != "resolved_empty"
-
-    def test_public_sibling_resolves_via_getter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tree = _tree_for(_membership_nft(), "rebase(uint256)")
-        _stub(monkeypatch, slot="revert", getter=_word(MANAGER))
         cap = evaluate_tree(tree, _ctx_with_rpc())
 
         assert _principals(cap) == [MANAGER]

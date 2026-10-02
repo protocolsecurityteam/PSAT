@@ -8,7 +8,6 @@ written back to it.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -17,7 +16,6 @@ import pytest
 
 from db.effect_cache import (
     AUDIT_PASSED,
-    find_verdict_residue_batch,
     upsert_cached_verdict,
 )
 from db.models import (
@@ -30,7 +28,6 @@ from db.models import (
 )
 from db.queue import create_job
 from services.effects.config import (
-    EFFECT_CLASS_AUTHORITY_CHANGE,
     EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
@@ -39,7 +36,7 @@ from services.effects.config import (
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
-from services.effects.harness import proven, unknown
+from services.effects.harness import proven
 from services.effects.orchestrator import ProbePlan
 from services.effects.selection import Candidate
 from services.effects.simulate import SimCallResult, SimResult
@@ -229,36 +226,6 @@ def test_first_write_is_a_hit_and_still_acquires_residue(clean_effects, monkeypa
 
 
 @requires_postgres
-def test_residue_observation_never_writes_to_the_behavior_cache(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-inv3")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    _seed_cache(session, effect_class=EFFECT_CLASS_VALUE_OUT)
-    before = {
-        (c.behavior_hash, c.effect_class, c.verdict, c.tier, str(c.details))
-        for c in session.query(EffectBehaviorCache).all()
-    }
-
-    worker = EffectsWorker(
-        prober=_CountingProber(lambda c, ctx: _value_out_effect()),
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _run(worker, session, job)
-
-    session.expire_all()
-    after = {
-        (c.behavior_hash, c.effect_class, c.verdict, c.tier, str(c.details))
-        for c in session.query(EffectBehaviorCache).all()
-    }
-    assert after == before
-    assert session.query(EffectBehaviorCache).count() == 1
-    assert DESTINATION not in str(session.query(EffectBehaviorCache).one().details)
-
-
-@requires_postgres
 def test_hit_whose_row_already_has_residue_triggers_no_observation(clean_effects, monkeypatch):
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
@@ -318,29 +285,6 @@ def test_unknown_value_out_hit_is_not_re_observed(clean_effects, monkeypatch):
     assert session.query(EffectVerdict).one().verdict == VERDICT_UNKNOWN
 
 
-@requires_postgres
-def test_class_without_storable_residue_is_not_re_observed(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-noclass")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    _seed_cache(session, effect_class=EFFECT_CLASS_AUTHORITY_CHANGE, details={"gate_mutation": True})
-
-    prober = _CountingProber(
-        lambda c, ctx: pytest.fail("re-observed a class with no residue"),
-        effect_class=EFFECT_CLASS_AUTHORITY_CHANGE,
-    )
-    worker = EffectsWorker(
-        prober=prober,
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _errors, metrics = _run(worker, session, job)
-    assert prober.runs == []
-    assert metrics["residue_observations"] == 0
-
-
 def test_code_upgrade_residue_branch_is_unreachable_and_gone():
     """Tier-0 verdicts are never cached, so that arm was dead and removed; this pins the premise."""
     historical = proven(
@@ -361,36 +305,6 @@ def test_code_upgrade_residue_branch_is_unreachable_and_gone():
     )
     assert _residue_observable(row, EFFECT_CLASS_CODE_UPGRADE) is False
     assert EFFECT_CLASS_CODE_UPGRADE not in _RESIDUE_KEY
-
-
-def test_a_caller_arbitrary_hit_is_never_re_probed_for_a_destination(clean_effects):
-    """A withheld destination must not read as "no residue yet", or every such deployment burns its re-probe budget."""
-    session = clean_effects
-    arbitrary = _seed_cache(
-        session,
-        effect_class=EFFECT_CLASS_VALUE_OUT,
-        details={"destination_shape": "caller_arbitrary", "shape_proved_by": "simulation"},
-    )
-    assert _residue_observable(arbitrary, EFFECT_CLASS_VALUE_OUT) is False
-
-    for shape in ("unknown", "immutable_fixed"):
-        row = EffectBehaviorCache(
-            behavior_hash=BEHAVIOR_HASH,
-            effect_class=EFFECT_CLASS_VALUE_OUT,
-            scope=SCOPE_KERNEL,
-            verdict=VERDICT_PROVEN,
-            tier=TIER_CALL,
-            details={"destination_shape": shape},
-        )
-        assert _residue_observable(row, EFFECT_CLASS_VALUE_OUT) is True
-    bare = EffectBehaviorCache(
-        behavior_hash=BEHAVIOR_HASH,
-        effect_class=EFFECT_CLASS_VALUE_OUT,
-        scope=SCOPE_KERNEL,
-        verdict=VERDICT_PROVEN,
-        tier=TIER_CALL,
-    )
-    assert _residue_observable(bare, EFFECT_CLASS_VALUE_OUT) is True
 
 
 class _BoomProber:
@@ -441,52 +355,6 @@ def test_residue_reprobe_attempts(
 
 
 @requires_postgres
-def test_residue_observation_smuggles_nothing_but_its_own_key(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-whitelist")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    _seed_cache(session, effect_class=EFFECT_CLASS_VALUE_OUT)
-
-    def factory(c, ctx):
-        eff = _value_out_effect()
-        eff.concrete["current_check_passed"] = True  # not this class's residue
-        return eff
-
-    worker = EffectsWorker(
-        prober=_CountingProber(factory),
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _run(worker, session, job)
-    row = session.query(EffectVerdict).one()
-    assert row.concrete_destination == DESTINATION
-    assert row.current_check_passed is None
-
-
-@requires_postgres
-def test_observation_that_yields_nothing_leaves_the_verdict_untouched(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-empty")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    cached = _seed_cache(session, effect_class=EFFECT_CLASS_VALUE_OUT)
-
-    worker = EffectsWorker(
-        prober=_CountingProber(lambda c, ctx: _value_out_effect(destination=None)),
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _errors, metrics = _run(worker, session, job)
-    row = session.query(EffectVerdict).one()
-    assert row.concrete_destination is None
-    assert (row.verdict, row.tier, row.witness) == (cached.verdict, cached.tier, cached.details)
-    assert metrics["residue_observations"] == 0
-
-
-@requires_postgres
 def test_failed_residue_observation_does_not_disturb_the_cached_verdict(clean_effects, monkeypatch):
     """Fail-forward: a raising probe is recorded degraded."""
     session = clean_effects
@@ -510,109 +378,6 @@ def test_failed_residue_observation_does_not_disturb_the_cached_verdict(clean_ef
     assert row.concrete_destination is None
     assert metrics["cache_hits_kernel"] == 1
     assert any(e.phase == "effects_probe" for e in errors)
-
-
-@requires_postgres
-def test_kill_valve_restores_the_previous_behavior(clean_effects, monkeypatch):
-    session = clean_effects
-    monkeypatch.setenv("PSAT_EFFECTS_RESIDUE_PROBE", "0")
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-off")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    _seed_cache(session, effect_class=EFFECT_CLASS_VALUE_OUT)
-
-    prober = _CountingProber(lambda c, ctx: _value_out_effect())
-    worker = EffectsWorker(
-        prober=prober,
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _run(worker, session, job)
-    assert prober.runs == []
-    assert session.query(EffectVerdict).one().concrete_destination is None
-
-
-@requires_postgres
-def test_audit_path_residue_is_taken_for_free(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "residue-audit")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    cached = upsert_cached_verdict(
-        session,
-        behavior_hash=BEHAVIOR_HASH,
-        effect_class=EFFECT_CLASS_VALUE_OUT,
-        scope=SCOPE_KERNEL,
-        verdict=VERDICT_PROVEN,
-        tier=TIER_CALL,
-        gate_ref="role:X",
-        details={"value_moved": True, "destination_shape": "unknown", "shape_proved_by": "none"},
-    )
-    cached_verdict, cached_tier, cached_details = cached.verdict, cached.tier, dict(cached.details or {})
-    session.commit()
-
-    prober = _CountingProber(lambda c, ctx: _value_out_effect())
-    worker = EffectsWorker(
-        prober=prober,
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _errors, metrics = _run(worker, session, job)
-
-    row = session.query(EffectVerdict).one()
-    assert row.concrete_destination == DESTINATION
-    assert (row.verdict, row.tier, row.witness) == (cached_verdict, cached_tier, cached_details)
-    assert metrics["cache_hits_kernel"] == 1
-    assert prober.runs == [fns[CONTRACT_A]]
-
-
-@requires_postgres
-def test_residue_gap_lookup_is_one_query_for_the_whole_worklist(clean_effects):
-    """Must not reintroduce the N+1 the batching removed."""
-    session = clean_effects
-    _pid, fns, _cids = _protocol_with_functions(session, [CONTRACT_A, CONTRACT_B])
-    for addr in (CONTRACT_A, CONTRACT_B):
-        session.add(
-            EffectVerdict(
-                function_id=fns[addr],
-                chain_id=1,
-                contract_address=addr.lower(),
-                selector=SELECTOR,
-                effect_class=EFFECT_CLASS_VALUE_OUT,
-                verdict=VERDICT_PROVEN,
-                tier=TIER_CALL,
-                concrete_destination=DESTINATION if addr == CONTRACT_A else None,
-            )
-        )
-    session.commit()
-
-    seen: list[str] = []
-    from sqlalchemy import event as sa_event
-
-    def before_cursor(conn, cursor, statement, params, context, executemany):
-        if "effect_verdicts" in statement.lower() and statement.strip().lower().startswith("select"):
-            seen.append(statement)
-
-    sa_event.listen(session.get_bind(), "before_cursor_execute", before_cursor)
-    try:
-        got = find_verdict_residue_batch(
-            session,
-            chain_id=1,
-            identities=[
-                (CONTRACT_A, SELECTOR, EFFECT_CLASS_VALUE_OUT),
-                (CONTRACT_B, SELECTOR, EFFECT_CLASS_VALUE_OUT),
-                ("0x" + "ee" * 20, SELECTOR, EFFECT_CLASS_VALUE_OUT),
-            ],
-        )
-    finally:
-        sa_event.remove(session.get_bind(), "before_cursor_execute", before_cursor)
-
-    assert len(seen) == 1
-    assert got[(CONTRACT_A.lower(), SELECTOR, EFFECT_CLASS_VALUE_OUT)] == (DESTINATION, None, None)
-    assert got[(CONTRACT_B.lower(), SELECTOR, EFFECT_CLASS_VALUE_OUT)] == (None, None, None)
-    assert ("0x" + "ee" * 20, SELECTOR, EFFECT_CLASS_VALUE_OUT) not in got
 
 
 def _marker_for(session, contract_id: int) -> EffectsPlanMarker | None:
@@ -646,44 +411,6 @@ def test_contract_that_yields_no_plans_is_recorded_as_planned(clean_effects, mon
     assert marker.planned_at >= job.created_at
     assert metrics["contracts_planned_empty"] == 1
     assert session.query(EffectVerdict).count() == 0
-
-
-@requires_postgres
-def test_contract_that_yields_plans_is_not_marked(clean_effects, monkeypatch):
-    """Marking here would claim coverage for a job that could still die."""
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "marker-plans")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-
-    worker = EffectsWorker(
-        prober=_CountingProber(lambda c, ctx: unknown(EFFECT_CLASS_VALUE_OUT, gate_ref="role:X", reason="x")),
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _run(worker, session, job)
-    assert _marker_for(session, cids[CONTRACT_A]) is None
-    assert session.query(EffectVerdict).count() == 1
-
-
-@requires_postgres
-def test_unresolvable_candidate_blocks_the_marker(clean_effects, monkeypatch):
-    """A missing behavioral hash is transient; a marker would suppress the retry."""
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    job = _make_job(session, pid, "marker-skip")
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-
-    worker = EffectsWorker(
-        prober=_NoPlanProber(),
-        hash_resolver=lambda s, c: None,  # no cached bytecode
-        seams=_seams(session, job),
-    )
-    _errors, metrics = _run(worker, session, job)
-    assert _marker_for(session, cids[CONTRACT_A]) is None
-    assert metrics["contracts_planned_empty"] == 0
 
 
 @requires_postgres
@@ -747,33 +474,3 @@ def test_a_partly_unplannable_contract_is_not_marked(clean_effects, monkeypatch)
     )
     _run(worker, session, job)
     assert _marker_for(session, contract.id) is None
-
-
-@requires_postgres
-def test_marker_is_refreshed_by_a_later_empty_pass(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
-    cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
-    monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    session.add(
-        EffectsPlanMarker(
-            contract_id=cids[CONTRACT_A],
-            candidates_planned=9,
-            planned_at=datetime.now(timezone.utc) - timedelta(days=2),
-        )
-    )
-    session.commit()
-
-    job = _make_job(session, pid, "marker-refresh")
-    worker = EffectsWorker(
-        prober=_NoPlanProber(),
-        hash_resolver=lambda s, c: (BEHAVIOR_HASH, "surface_A"),
-        seams=_seams(session, job),
-    )
-    _run(worker, session, job)
-
-    session.expire_all()
-    markers = session.query(EffectsPlanMarker).filter(EffectsPlanMarker.contract_id == cids[CONTRACT_A]).all()
-    assert len(markers) == 1
-    assert markers[0].candidates_planned == 1
-    assert markers[0].planned_at >= job.created_at

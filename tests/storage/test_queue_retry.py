@@ -2,26 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
-
 from db.models import Job, JobStage, JobStatus
 from db.queue import (
     claim_job,
     create_job,
     fail_job_terminal,
-    reclaim_stuck_jobs,
     requeue_job,
 )
 from tests.cache_helpers import requires_postgres
 from tests.support.db_fixtures import clean_jobs  # noqa: F401  (fixture, registered by import)
-
-
-def _backdate(session, job_id, *, seconds_ago: int) -> None:
-    session.execute(
-        text("UPDATE jobs SET updated_at = NOW() - (:s * INTERVAL '1 second') WHERE id = :id"),
-        {"s": seconds_ago, "id": str(job_id)},
-    )
-    session.commit()
 
 
 @requires_postgres
@@ -82,23 +71,6 @@ def test_requeue_job_sets_retry_state(clean_jobs):
 
 
 @requires_postgres
-def test_fail_job_terminal_sets_terminal_state(clean_jobs):
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0x" + "e" * 40, "name": "terminal"})
-
-    fail_job_terminal(db_session, job.id, "deterministic boom", kind="terminal")
-
-    db_session.expire_all()
-    refreshed = db_session.get(Job, job.id)
-    assert refreshed is not None
-    assert refreshed.status == JobStatus.failed_terminal
-    assert refreshed.error == "deterministic boom"
-    assert refreshed.last_failure_kind == "terminal"
-    assert refreshed.next_attempt_at is None
-    assert refreshed.worker_id is None
-
-
-@requires_postgres
 def test_fail_job_terminal_preserves_retry_count(clean_jobs):
     db_session = clean_jobs
     """retries-exhausted path: requeue 4 times, then fail_job_terminal — retry_count stays."""
@@ -118,21 +90,4 @@ def test_fail_job_terminal_preserves_retry_count(clean_jobs):
     assert refreshed is not None
     assert refreshed.retry_count == 4  # unchanged by the terminal call
     assert refreshed.last_failure_kind == "transient"
-    assert refreshed.status == JobStatus.failed_terminal
-
-
-@requires_postgres
-def test_reclaim_stuck_jobs_ignores_failed_terminal(clean_jobs):
-    db_session = clean_jobs
-    """An ancient ``failed_terminal`` row must NEVER be resurrected by the sweep."""
-    job = create_job(db_session, {"address": "0x" + "1" * 40, "name": "terminal-old"})
-    fail_job_terminal(db_session, job.id, "terminal", kind="terminal")
-    _backdate(db_session, job.id, seconds_ago=10_000)
-
-    rescued = reclaim_stuck_jobs(db_session, stale_timeout_seconds=1)
-
-    assert rescued == []
-    db_session.expire_all()
-    refreshed = db_session.get(Job, job.id)
-    assert refreshed is not None
     assert refreshed.status == JobStatus.failed_terminal

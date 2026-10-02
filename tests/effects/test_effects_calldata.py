@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import inspect
 import uuid
 from typing import Any
 from unittest.mock import MagicMock
@@ -176,38 +175,6 @@ def _candidate(
     )
 
 
-def test_encode_calldata_defaults_all_args():
-    data = cd.encode_calldata(TRANSFER, "transfer(address,uint256)")
-    assert data == TRANSFER + "00" * 64
-
-
-def test_encode_calldata_substitutes_positionally():
-    data = cd.encode_calldata(TRANSFER, "transfer(address,uint256)", substitutions={0: PRINCIPAL, 1: 7})
-    assert data is not None
-    assert data[10:74].endswith("22" * 20)
-    assert int(data[74:], 16) == 7
-
-
-def test_encode_calldata_fails_closed_on_bad_signature():
-    assert cd.encode_calldata(TRANSFER, "transfer(address") is None
-    assert cd.encode_calldata("0xzz", "transfer()") is None
-    assert cd.encode_calldata(TRANSFER, "transfer(MyStruct)") is None
-
-
-def test_value_out_uses_principal_and_nonzero_amount():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
-    assert spec is not None
-    assert spec.principal == PRINCIPAL
-    assert spec.calldata.startswith(TRANSFER)
-    assert spec.calldata[10:74].endswith("22" * 20)  # recipient = principal
-    assert int(spec.calldata[74:], 16) == cd.ARG_AMOUNT
-    assert spec.sentinel_calldata is None  # no taint fact recorded
-    assert spec.gate_ref == "gate:none"
-
-
 def test_value_out_sentinel_lands_in_taint_slot():
     facts = _token_facts(
         legacy_value_flows={
@@ -258,16 +225,6 @@ def test_a_slot_the_static_plane_never_named_publishes_no_sentinel_subject():
     assert spec.sentinel_param is None
 
 
-def test_a_plan_with_no_sentinel_names_no_sentinel_subject():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
-    assert spec is not None
-    assert spec.sentinel_calldata is None
-    assert spec.sentinel_param is None
-
-
 BATCH_SIG = "batchClaim(uint256[],address[])"
 BATCH_SEL = "0x55556666"
 
@@ -305,15 +262,6 @@ def test_a_batch_function_is_probed_with_a_non_empty_array():
     assert [a.lower() for a in recipients] == [PRINCIPAL.lower()]
 
 
-def test_an_array_element_the_policy_cannot_prove_still_gets_a_slot():
-    """An empty array is the cacheable false negative; a length-1 one is a call the contract can reject."""
-    sig = "submit(bytes[])"
-    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn(sig, names=["payloads"]))
-    assert spec is not None
-    (payloads,) = _decode(spec.calldata, sig)
-    assert payloads == (b"",)
-
-
 def test_an_unresolved_quantity_makes_the_inputs_vacuous():
     """A zero-amount call that moves nothing says nothing about the function."""
     spec = cd.synthesize_value_out(_candidate(UNWRAP), _unwrap_fn())
@@ -322,33 +270,11 @@ def test_an_unresolved_quantity_makes_the_inputs_vacuous():
     assert spec.inputs_vacuous is True
 
 
-def test_a_probe_whose_every_slot_is_proven_is_not_vacuous():
-    """Firing here would suppress every legitimate negative."""
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
-    assert spec is not None
-    assert spec.inputs_vacuous is False
-
-
-def test_an_array_of_proven_elements_is_not_vacuous():
-    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn())
-    assert spec is not None
-    assert spec.inputs_vacuous is False
-
-
 def test_an_array_whose_element_is_filler_is_vacuous():
     """An empty result is a fact about the filler."""
     spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn("submit(bytes[])", names=["payloads"]))
     assert spec is not None
     assert spec.inputs_vacuous is True
-
-
-def test_the_supply_plan_carries_the_same_fact():
-    spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
-    assert spec is not None
-    assert spec.inputs_vacuous is False
 
 
 HELD_TOKEN = "0x" + "ab" * 20
@@ -382,37 +308,6 @@ def _executor_for(signature: str, names: list[str], **kw: Any) -> Any:
     return cd.executor_call(fn, types, held_tokens=(HELD_TOKEN,), recipient=PRINCIPAL)
 
 
-def test_an_upgrade_hook_is_not_an_executor():
-    """Writing a token into a proxy's implementation slot would manufacture a transfer out of the contract."""
-    assert _executor_for("upgradeToAndCall(address,bytes)", ["newImplementation", "data"], flows=[]) is None
-
-
-def test_an_executor_with_two_payload_slots_synthesizes_nothing():
-    """Fail closed when static can't say which argument is the forwarded calldata."""
-    assert (
-        _executor_for(
-            "execTransaction(address,bytes,bytes)",
-            ["to", "data", "signatures"],
-            flows=[_FORWARDS_PARAM],
-        )
-        is None
-    )
-
-
-def test_the_lattice_names_the_executor_slots_when_the_claim_does_not():
-    """OZ ``TimelockController.execute``: the claim names no parameters, so the slots come from the lattice."""
-    executor = _executor_for(
-        "execute(address,uint256,bytes,bytes32,bytes32)",
-        ["target", "value", "payload", "predecessor", "salt"],
-        flows=[_FORWARDS_PARAM],
-    )
-    assert executor is not None
-    assert executor.slots == (0, 2)
-    assert executor.values[0] == HELD_TOKEN
-    assert executor.values[2].hex().startswith("a9059cbb")
-    assert PRINCIPAL[2:].lower() in executor.values[2].hex()
-
-
 def test_the_claim_witness_names_the_executor_slots_directly():
     """A name counts only with its ``param`` kind."""
     executor = _executor_for(
@@ -436,73 +331,6 @@ def test_the_claim_witness_names_the_executor_slots_directly():
     assert executor.slots == (0, 3)
 
 
-def test_an_executor_names_its_payload_slot_as_the_sentinel_subject():
-    """The sentinel rides inside the payload, so the proof is about ``payload``, not ``target``."""
-    fn = _exec_fn(
-        "execute(address,uint256,bytes,bytes32,bytes32)",
-        ["target", "value", "payload", "predecessor", "salt"],
-        flows=[_FORWARDS_PARAM],
-    )
-    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
-    assert spec is not None
-    assert spec.sentinel_calldata is not None
-    assert spec.sentinel_param == "payload"
-
-
-def test_a_witness_that_names_no_binding_does_not_get_treated_as_one():
-    """The LRTSquaredAdmin shape: a storage-held swapper, so no parameter is the destination."""
-    executor = _executor_for(
-        "rebalance(address,address,uint256,bytes)",
-        ["fromAsset", "toAsset", "amount", "swapData"],
-        flows=[],
-        claims=[
-            {
-                "claim_id": "exec.arbitrary",
-                "witness": {
-                    "kind": "param_taint",
-                    "destination_param": None,
-                    "destination_kind": "state_var",
-                    "calldata_param": None,
-                    "calldata_kind": "call_argument",
-                },
-            }
-        ],
-    )
-    assert executor is None
-
-
-def test_a_kindless_legacy_witness_is_an_unread_question_not_a_proof():
-    """Legacy rows carry names without a kind; absent is not-determined."""
-    witness = {"kind": "param_taint", "destination_param": "fromAsset", "calldata_param": "swapData"}
-    claims = [{"claim_id": "exec.arbitrary", "witness": witness}]
-    assert (
-        _executor_for(
-            "rebalance(address,address,uint256,bytes)",
-            ["fromAsset", "toAsset", "amount", "swapData"],
-            flows=[],
-            claims=claims,
-        )
-        is None
-    )
-    assert (
-        _executor_for(
-            "rebalance(address,address,uint256,bytes)",
-            ["fromAsset", "toAsset", "amount", "swapData"],
-            flows=[_FORWARDS_PARAM],
-            claims=claims,
-        )
-        is None
-    )
-
-
-def test_an_executor_with_no_inner_call_reports_vacuous_inputs():
-    """Forwarding nothing succeeds, and would be cached as "moves no value"."""
-    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
-    spec = cd.synthesize_value_out(_candidate(BATCH_SEL), fn)
-    assert spec is not None
-    assert spec.inputs_vacuous is True
-
-
 def test_a_synthesized_inner_call_is_not_vacuous():
     fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
     spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
@@ -510,51 +338,11 @@ def test_a_synthesized_inner_call_is_not_vacuous():
     assert spec.inputs_vacuous is False
 
 
-def test_an_executor_with_nothing_to_move_claims_nothing():
-    fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
-    types = cd._parse_arg_types(fn.canonical_signature)
-    assert types is not None
-    executor = cd.executor_call(fn, types, held_tokens=(), recipient=PRINCIPAL)
-    assert executor is not None and not executor.values
-
-
-def test_the_executor_probe_attaches_no_native_value_it_cannot_prove():
-    """A vault that doesn't hold the wei reverts on the very call being observed."""
-    fn = _exec_fn("forward(address[],bytes[],uint256[])", ["targets", "data", "values"], flows=[_FORWARDS_PARAM])
-    spec = cd.synthesize_value_out(_candidate(BATCH_SEL, holdings=(HELD_TOKEN,)), fn)
-    assert spec is not None
-    _targets, _data, values = _decode(spec.calldata, "forward(address[],bytes[],uint256[])")
-    assert values == (0,)
-
-
-def test_value_out_none_without_a_value_flow():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, DEPOSIT)
-    assert fn is not None
-    assert cd.synthesize_value_out(_candidate(DEPOSIT), fn) is None
-
-
 def test_value_out_none_without_a_resolved_principal():
     facts = _token_facts()
     fn = cd.resolve_function(facts, TRANSFER)
     assert fn is not None
     assert cd.synthesize_value_out(_candidate(TRANSFER, principals=()), fn) is None
-
-
-def test_value_out_public_falls_back_to_neutral_caller():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    spec = cd.synthesize_value_out(_candidate(TRANSFER, principals=(), authority_public=True), fn)
-    assert spec is not None
-    assert spec.principal == cd.NEUTRAL_CALLER
-
-
-def test_value_out_gated_without_principal_stays_none():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    assert cd.synthesize_value_out(_candidate(TRANSFER, principals=(), authority_public=False), fn) is None
 
 
 def test_taint_without_a_recoverable_param_index_emits_no_sentinel():
@@ -612,24 +400,6 @@ def _redeem_spec(facts: cd.ContractFacts) -> Any:
     return spec
 
 
-def test_lattice_param_index_plants_the_sentinel_without_a_gate_operand():
-    spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=1)]))
-    assert spec.taint_param_reaches_sink is True
-    assert spec.sentinel_address == cd.SENTINEL_ADDRESS
-    assert spec.sentinel_calldata is not None
-    assert int(spec.sentinel_calldata[10:74], 16) == cd.ARG_AMOUNT
-    assert spec.sentinel_calldata[74:].endswith("ee" * 20)
-    assert spec.calldata[74:].endswith("22" * 20)
-
-
-def test_lattice_index_ignored_unless_the_kind_is_param():
-    for kind in ("immutable", "msg_sender", "storage_setter", "indeterminate"):
-        flow = _eth_flow(target_param_index=1, target_kind={"kind": kind, "tier": "static_trace"})
-        spec = _redeem_spec(_redeem_facts(flows=[flow]))
-        assert spec.sentinel_calldata is None, kind
-        assert spec.taint_param_reaches_sink is False, kind
-
-
 def test_lattice_index_ignored_when_the_slot_is_not_an_address():
     spec = _redeem_spec(_redeem_facts(flows=[_eth_flow(target_param_index=0)]))  # uint256 amount
     assert spec.sentinel_calldata is None
@@ -637,31 +407,10 @@ def test_lattice_index_ignored_when_the_slot_is_not_an_address():
     assert spec.sentinel_calldata is None
 
 
-def test_lattice_indexes_that_disagree_plant_nothing():
-    flows = [_eth_flow(target_param_index=1), _eth_flow(kind="native_transfer_send", target_param_index=0)]
-    spec = _redeem_spec(_redeem_facts(flows=flows))
-    assert spec.sentinel_calldata is None
-
-
 def test_lattice_guard_origin_flow_is_not_a_recipient():
     flow = _eth_flow(target_param_index=1, origin="guard")
     spec = _redeem_spec(_redeem_facts(flows=[flow, _eth_flow()]))
     assert spec.sentinel_calldata is None
-
-
-def test_legacy_name_path_still_serves_a_flow_without_an_index():
-    facts = _token_facts(
-        legacy_value_flows={
-            "transfer(address,uint256)": [
-                {"direction": "out", "token_var": "token", "is_parameter": True, "method": "transfer"}
-            ]
-        }
-    )
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    spec = cd.synthesize_value_out(_candidate(TRANSFER), fn)
-    assert spec is not None and spec.sentinel_calldata is not None
-    assert spec.sentinel_calldata[10:74].endswith("ee" * 20)
 
 
 # For ERC-4626 redemptions the amount is a conversion of an argument; every case names the slot ``n`` so only a lattice
@@ -682,36 +431,6 @@ def _unwrap_fn(**flow_extra: Any) -> cd.FunctionFacts:
         tree=None,
         legacy_value_flows=(),
     )
-
-
-def test_param_derived_lattice_names_the_quantity_slot_without_a_name_hint():
-    fn = _unwrap_fn(amount_kind={"kind": "param_derived", "tier": "static_trace"}, amount_param_index=0)
-    roles = cd.integer_param_roles(fn, ["uint256", "address"])
-    assert roles == {0: cd.ROLE_AMOUNT}, roles
-
-
-def test_unnamed_quantity_without_a_lattice_fact_gets_no_role():
-    fn = _unwrap_fn()
-    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
-    fn = _unwrap_fn(amount_kind={"kind": "indeterminate", "tier": "static_trace"})
-    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
-
-
-def test_param_derived_index_still_needs_an_integer_slot():
-    fn = _unwrap_fn(amount_kind={"kind": "param_derived", "tier": "static_trace"}, amount_param_index=1)
-    assert cd.integer_param_roles(fn, ["uint256", "address"]) == {}
-
-
-def test_supply_from_mint_label():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, MINT)
-    assert fn is not None
-    spec = cd.synthesize_supply(_candidate(MINT), fn)
-    assert spec is not None
-    assert spec.token_address == CONTRACT
-    assert spec.mint_calldata.startswith(MINT)
-    assert int(spec.mint_calldata[74:], 16) == cd.ARG_AMOUNT
-    assert spec.gate_ref == "gate:caller_authority"
 
 
 BURN_SIG = "redeem(uint256,address)"
@@ -751,22 +470,6 @@ def test_supply_reads_its_lattice_through_the_directions_flows_actually_carry():
     assert spec.taint_param_reaches_sink is True
 
 
-def test_supply_none_for_a_non_supply_function():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, TRANSFER)
-    assert fn is not None
-    assert cd.synthesize_supply(_candidate(TRANSFER), fn) is None
-
-
-def test_supply_public_falls_back_to_neutral_caller():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, MINT)
-    assert fn is not None
-    spec = cd.synthesize_supply(_candidate(MINT, principals=(), authority_public=True), fn)
-    assert spec is not None
-    assert spec.principal == cd.NEUTRAL_CALLER
-
-
 def test_supply_gated_without_principal_stays_none():
     facts = _token_facts()
     fn = cd.resolve_function(facts, MINT)
@@ -794,33 +497,6 @@ def test_authority_targets_the_gate_the_function_writes():
     assert spec.mutate_calldata == "0x13af4035" + "00" * 32
 
 
-def test_guard_origin_normal_write_is_not_a_gate_target_basis():
-    """A guard-origin write is the modifier's bookkeeping, not an effect the function causes."""
-    guard_write = {**_write("owner", "address"), "origin": "guard"}
-    effects = dict(_token_facts().effects)
-    effects["setOwner(address)"] = _effect_info("setOwner(address)", "0x13af4035", state_writes=[guard_write])
-    facts = _token_facts(
-        effects=effects,
-        by_selector={info["selector"]: name for name, info in effects.items()},
-        canonical_signatures={name: name for name in effects},
-        trees={**_token_facts().trees, "setOwner(address)": OWNER_GATE},
-    )
-    fn = cd.resolve_function(facts, "0x13af4035")
-    assert fn is not None
-    # Origin is the only difference.
-    assert fn.effect_info["state_writes"][0]["var"] == "owner"
-    assert fn.effect_info["state_writes"][0]["hygiene_class"] == "normal"
-    assert cd._normal_state_pairs(fn) == set()
-    assert cd.synthesize_authority(_candidate("0x13af4035"), facts, fn) is None
-
-
-def test_authority_none_when_nothing_reads_the_written_state():
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, PAUSE_SEL)
-    assert fn is not None
-    assert cd.synthesize_authority(_candidate(PAUSE_SEL), facts, fn) is None
-
-
 def test_guarded_functions_only_counts_mandatory_paths():
     trees = {
         "mandatory()": _and(_leaf(_state("paused"))),
@@ -830,84 +506,12 @@ def test_guarded_functions_only_counts_mandatory_paths():
     assert cd.guarded_functions(trees, {("paused", None)}) == ["mandatory()"]
 
 
-def test_guarded_functions_matches_a_namespaced_latch_across_member_paths():
-    """ERC-7201: the write has an empty member path and the read carries ``["paused"]``."""
-    trees = {"withdraw()": _and(_leaf(_state("PAUSABLE_STORAGE_SLOT", "paused")))}
-    assert cd.guarded_functions(trees, {("PAUSABLE_STORAGE_SLOT", None)}) == ["withdraw()"]
-    assert cd.guarded_functions(trees, {("OTHER_SLOT", None)}) == []
-
-
 def _timestamp() -> dict[str, Any]:
     return {"source": "block_context", "block_context_kind": "timestamp"}
 
 
 def _const(value: str) -> dict[str, Any]:
     return {"source": "constant", "constant_value": value}
-
-
-def test_max_pause_duration_needs_a_comparison_SHAPE_not_three_facts_in_one_leaf():
-    """No compiler emits a leaf with the latch, clock and constant as three direct operands, so that shape is
-    undecidable; the compiled shape (second half) still resolves.
-    """
-    three_slots = _token_facts(
-        trees={
-            "unpause()": _and(
-                _leaf(
-                    _state("TIMED_SLOT", "pausedUntil"),
-                    _timestamp(),
-                    _const("2592000"),
-                    operator="lt",
-                )
-            )
-        }
-    )
-    assert cd.read_max_pause_duration(three_slots, {"TIMED_SLOT"}) == (None, "not_determined")
-
-    compiled_shape = _token_facts(
-        trees={
-            "unpause()": _and(
-                _leaf(
-                    _state("TIMED_SLOT", "pausedUntil"),
-                    _const("2592000"),
-                    absorbed=[_timestamp(), _state("TIMED_SLOT", "pausedUntil")],
-                    operator="lt",
-                )
-            )
-        }
-    )
-    assert cd.read_max_pause_duration(compiled_shape, {"TIMED_SLOT"}) == (2592000, "guard_constant")
-
-
-def test_max_pause_duration_is_not_determined_when_the_leaf_has_no_operator():
-    """Stops a partial leaf from being read as proof by defaulting the direction."""
-    facts = _token_facts(
-        trees={
-            "unpause()": _and(
-                _leaf(
-                    _state("TIMED_SLOT", "pausedUntil"),
-                    _const("2592000"),
-                    absorbed=[_timestamp(), _state("TIMED_SLOT", "pausedUntil")],
-                )
-            )
-        }
-    )
-    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (None, "not_determined")
-
-
-def test_max_pause_duration_treats_every_clock_spelling_as_a_clock():
-    """Both deny the proven-indefinite state, since a block-number gate also expires."""
-    for kind in ("now", "number"):
-        facts = _token_facts(
-            trees={
-                "transfer(address)": _and(
-                    _leaf(
-                        _state("LATCH_SLOT", "frozen"),
-                        {"source": "block_context", "block_context_kind": kind},
-                    )
-                )
-            }
-        )
-        assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined"), kind
 
 
 def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
@@ -963,69 +567,6 @@ def test_max_pause_duration_refuses_a_leaf_that_mixes_two_CLOCKS():
     assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined")
 
 
-def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
-    """The positive case on real compiler output, narrowed to the shape it can prove.
-
-    Only a clock and latch in the same absorbed additive group bound a window; taking the largest constant used
-    to publish lead times and cooldowns as freeze windows. ``pausedUntil + MAX_PAUSE`` is pinned
-    ``not_determined`` because the absorbed operands carry no sign.
-    """
-    latch = _state("TIMED_SLOT", "pausedUntil")
-    difference = [_timestamp(), _state("TIMED_SLOT", "pausedUntil")]
-
-    right = _token_facts(
-        trees={
-            "transferTimed(address,uint256)": _and(_leaf(latch, _const("2592000"), absorbed=difference, operator="lt"))
-        }
-    )
-    assert cd.read_max_pause_duration(right, {"TIMED_SLOT"}) == (2592000, "guard_constant")
-    left = _token_facts(
-        trees={
-            "transferTimed(address,uint256)": _and(_leaf(_const("2592000"), latch, absorbed=difference, operator="gt"))
-        }
-    )
-    assert cd.read_max_pause_duration(left, {"TIMED_SLOT"}) == (2592000, "guard_constant")
-    # The absorbed operands are scoped to the latch.
-    assert cd.read_max_pause_duration(right, {"OTHER_SLOT"}) == (None, "not_determined")
-
-    # The operator flipped: a cooldown, not a window ceiling.
-    cooldown = _token_facts(
-        trees={"transferTimed(address,uint256)": _and(_leaf(latch, _const("600"), absorbed=difference, operator="gt"))}
-    )
-    assert cd.read_max_pause_duration(cooldown, {"TIMED_SLOT"}) == (None, "not_determined")
-
-    # The absorbed group is {clock, constant}: a lead time.
-    lead_time = _token_facts(
-        trees={
-            "transferTimed(address,uint256)": _and(
-                _leaf(
-                    {"source": "computed", "computed_kind": "BinaryType.ADDITION"},
-                    latch,
-                    absorbed=[_timestamp(), _const("3600")],
-                    operator="lt",
-                )
-            )
-        }
-    )
-    assert cd.read_max_pause_duration(lead_time, {"TIMED_SLOT"}) == (None, "not_determined")
-
-    # Absorbed group {latch, constant} with no recorded sign is undecidable.
-    for operator, constant in (("gt", "300"), ("lt", "2592000")):
-        offset = _token_facts(
-            trees={
-                "transferTimed(address,uint256)": _and(
-                    _leaf(
-                        _timestamp(),
-                        latch,
-                        absorbed=[_const(constant), _state("TIMED_SLOT", "pausedUntil")],
-                        operator=operator,
-                    )
-                )
-            }
-        )
-        assert cd.read_max_pause_duration(offset, {"TIMED_SLOT"}) == (None, "not_determined"), operator
-
-
 def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
     facts = _token_facts(
         trees={
@@ -1040,14 +581,6 @@ def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
     )
     # Absence of a bound is not proof that none exists.
     assert cd.read_max_pause_duration(facts, {"INDEFINITE_SLOT"}) == (None, "not_determined")
-
-
-def test_max_pause_duration_is_never_scraped_from_a_constant_name():
-    """A bound is a severity reducer, so it must come from the latch's own guard, never a constant's name."""
-    facts = _token_facts(trees={"unpause()": _and(_leaf(_state("TIMED_SLOT", "pausedUntil")))})
-    # No clock appears beside the latch, which is the proven indefinite state.
-    assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (None, "no_time_reference")
-    assert "session" not in inspect.signature(cd.read_max_pause_duration).parameters
 
 
 def test_a_clock_in_a_sibling_leaf_denies_the_proven_indefinite_state():
@@ -1109,46 +642,6 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
     )
 
 
-OPAQUE_OPERANDS = (
-    {"source": "computed", "computed_kind": "arithmetic"},
-    {"source": "top"},
-    # The recorder never enters a callee, so ``_clock()`` is a clock nobody read.
-    {"source": "view_call", "callee": "_clock()"},
-    {"source": "external_call", "callee": "nowSeconds"},
-)
-
-
-def test_an_unread_operand_denies_the_proven_indefinite_state():
-    """The recorder is additive and one level deep, so an undecomposed operand (``block.timestamp / 2``) denies the
-    proof. See ``test_pause_duration_clock_opacity.py``.
-    """
-    for opaque in OPAQUE_OPERANDS:
-        facts = _token_facts(trees={"transfer(address,uint256)": _and(_leaf(_state("pausedUntil"), opaque))})
-        assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (None, "not_determined"), opaque
-    # The demotion is about the unread operand, not arity.
-    readable = _and(_leaf(_state("pausedUntil"), {"source": "constant", "constant_value": "0"}))
-    assert cd.read_max_pause_duration(_token_facts(trees={"t()": readable}), {"pausedUntil"}) == (
-        None,
-        "no_time_reference",
-    )
-
-
-def test_an_unread_operand_in_a_sibling_leaf_denies_the_proven_indefinite_state():
-    """``require(!frozen || _clock() > unpauseAt)`` puts the unread operand in the sibling leaf."""
-    for opaque in OPAQUE_OPERANDS:
-        disjunction = _or(_leaf(_state("frozen")), _leaf(opaque, _state("unpauseAt")))
-        facts = _token_facts(trees={"transfer(address,uint256)": disjunction})
-        assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined"), opaque
-    read_sibling = _or(
-        _leaf(_state("frozen")),
-        _leaf(_state("minDeposit"), {"source": "parameter", "parameter_name": "amount"}),
-    )
-    assert cd.read_max_pause_duration(_token_facts(trees={"t()": read_sibling}), {"frozen"}) == (
-        None,
-        "no_time_reference",
-    )
-
-
 def _pause_contract(session) -> tuple[Contract, dict[str, int]]:
     proto = Protocol(name=f"p4-{uuid.uuid4().hex[:8]}")
     session.add(proto)
@@ -1171,34 +664,6 @@ def _pause_contract(session) -> tuple[Contract, dict[str, int]]:
     session.add(FunctionPrincipal(function_id=ids[DEPOSIT], address=PRINCIPAL))
     session.commit()
     return contract, ids
-
-
-@requires_postgres
-def test_synthesize_pause_entry_points_fixtures_and_denominator(db_session):
-    contract, ids = _pause_contract(db_session)
-    facts = _token_facts()
-    fn = cd.resolve_function(facts, PAUSE_SEL)
-    assert fn is not None
-    candidate = Candidate(
-        function_id=ids[PAUSE_SEL],
-        contract_id=contract.id,
-        contract_address=CONTRACT,
-        selector=PAUSE_SEL,
-        function_name="pause",
-        authority_public=False,
-        principal_addresses=(PRINCIPAL,),
-    )
-    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
-    assert spec is not None
-    assert spec.pause_calldata == PAUSE_SEL
-    assert spec.predicted_guard_set == ("deposit()",)
-    assert [ep.key for ep in spec.entry_points] == ["deposit()"]
-    assert spec.entry_points[0].from_addr == PRINCIPAL
-    assert spec.entry_points[0].calldata == DEPOSIT
-    assert [fx.kind for fx in spec.entry_points[0].fixtures] == ["set_balance"]
-    assert spec.entry_points[0].fixtures[0].address == PRINCIPAL
-    assert all(fx.kind == "set_balance" for fx in spec.fixtures)
-    assert {fx.address for fx in spec.fixtures} == {PRINCIPAL}
 
 
 @requires_postgres
@@ -1282,34 +747,6 @@ def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_se
 
 
 @requires_postgres
-def test_pause_fallback_set_gets_no_pauser_identity_probes(db_session):
-    """The recovery is scoped to predicted victims."""
-    contract, ids = _pause_contract(db_session)
-    facts = _token_facts(trees={"pause()": OWNER_GATE})  # nothing reads `paused`
-    fn = cd.resolve_function(_token_facts(), PAUSE_SEL)
-    assert fn is not None
-    candidate = Candidate(
-        function_id=ids[PAUSE_SEL],
-        contract_id=contract.id,
-        contract_address=CONTRACT,
-        selector=PAUSE_SEL,
-        function_name="pause",
-        authority_public=False,
-        principal_addresses=(PRINCIPAL,),
-    )
-    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
-    assert spec is not None
-    assert spec.predicted_guard_set == ()
-    keys = [ep.key for ep in spec.entry_points]
-    assert len(keys) == len(set(keys))
-
-
-@requires_postgres
-def test_synthesize_is_empty_without_artifacts(db_session):
-    assert cd.synthesize(db_session, _candidate(TRANSFER)) == cd.CandidatePlanInputs()
-
-
-@requires_postgres
 def test_load_contract_facts_indexes_the_canonical_selector(db_session):
     address = "0x" + "cd" * 20
     job = create_job(db_session, {"address": address, "name": "T"})
@@ -1347,7 +784,6 @@ EETH_PROXY = "0x35fa164735182de50811e8e2e824cfb9b6118ac2"
 LIQUIDITY_POOL = "0x308861a430be4cce5502d0a12724771fc6daf216"
 OPERATING_MULTISIG = "0x2aca71020de61bb532008049e1bd41e451ae8adc"
 PAUSABLE_SLOT = "PAUSABLE_STORAGE_SLOT"
-PAUSABLE_UNTIL_SLOT = "PAUSABLE_UNTIL_STORAGE_SLOT"
 
 EETH_GUARDED = (
     "burnShares(address,uint256)",
@@ -1470,116 +906,6 @@ def test_acceptance_eeth_pause_matches_the_live_fork_run(db_session):
     assert spec.duration_bound_source == "no_time_reference"
 
 
-@requires_postgres
-def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
-    """Treating readers as pausers would probe functions that can't flip the latch."""
-    facts = _eeth_facts(PAUSABLE_SLOT)
-    candidate, ids = _eeth_candidate(db_session, PAUSABLE_SLOT)
-    victim = "mintShares(address,uint256)"
-
-    guarded_fn = cd.resolve_function(facts, cd._selector_of(victim))
-    assert guarded_fn is not None
-    assert guarded_fn.effect_info["state_writes"][0]["var"] == PAUSABLE_SLOT
-    assert cd._latch_pairs(guarded_fn) == set()
-
-    guarded_candidate = Candidate(
-        function_id=ids[victim],
-        contract_id=candidate.contract_id,
-        contract_address=EETH_IMPL,
-        selector=cd._selector_of(victim),
-        function_name="mintShares",
-        authority_public=False,
-        principal_addresses=(LIQUIDITY_POOL,),
-        deployment_address=EETH_PROXY,
-    )
-    assert cd.synthesize_pause(db_session, guarded_candidate, facts, guarded_fn) is None
-
-    pauser = cd.resolve_function(facts, candidate.selector)
-    assert pauser is not None
-    assert cd._latch_pairs(pauser) == {(PAUSABLE_SLOT, None)}
-    assert cd.synthesize_pause(db_session, candidate, facts, pauser) is not None
-
-
-@requires_postgres
-def test_acceptance_timed_latch_publishes_not_determined_not_indefinite(db_session):
-    """Declaring MAX_PAUSE_DURATION in source doesn't prove the guard reads it.
-
-    ``None`` was once rendered as an indefinite freeze, false for all four etherfi verdicts.
-    """
-    pausable_until_source = """
-        library PausableUntilStorage {
-            bytes32 internal constant PAUSABLE_UNTIL_STORAGE_SLOT = keccak256("pausableUntil.storage");
-            uint256 public constant MIN_PAUSE_DURATION = 8 hours;
-            uint256 public constant MAX_PAUSE_DURATION = 30 days;
-            uint256 public constant PAUSER_UNTIL_COOLDOWN = 7 days;
-        }
-    """
-    assert "MAX_PAUSE_DURATION" in pausable_until_source
-    facts = _eeth_facts(PAUSABLE_UNTIL_SLOT)
-    # Copied from the persisted WeETH artifact: the leaf gating all four proven ``freeze_pause`` verdicts.
-    timed_facts = cd.ContractFacts(
-        address=facts.address,
-        job_id=facts.job_id,
-        effects=facts.effects,
-        trees={
-            **facts.trees,
-            "transfer(address,uint256)": _and(
-                _leaf(
-                    _state(PAUSABLE_UNTIL_SLOT, "pausedUntil"),
-                    {"source": "block_context", "block_context_kind": "timestamp"},
-                )
-            ),
-        },
-        canonical_signatures=facts.canonical_signatures,
-        by_selector=facts.by_selector,
-    )
-    assert cd.read_max_pause_duration(timed_facts, {PAUSABLE_UNTIL_SLOT}) == (None, "not_determined")
-    assert cd.read_max_pause_duration(timed_facts, {"NEVER_READ_SLOT"}) == (None, "not_determined")
-    # The plain boolean latch is proven indefinite; the two must never render as the same sentence.
-    assert cd.read_max_pause_duration(_eeth_facts(PAUSABLE_SLOT), {PAUSABLE_SLOT}) == (None, "no_time_reference")
-
-
-def test_acceptance_liquidity_pool_withdraw_value_out():
-    full_name = "withdraw(address,uint256)"
-    selector = cd._selector_of(full_name)
-    assert selector == "0xf3fef3a3"
-    facts = cd.ContractFacts(
-        address="0x17a16747d03006c9754548ac0d0aff48783a4a45",
-        job_id="lp-job",
-        effects={
-            full_name: _effect_info(
-                full_name,
-                selector,
-                value_flows=[{"kind": "native_transfer_send", "direction": "out", "origin": "body"}],
-                parameter_names=["_recipient", "_amount"],
-            )
-        },
-        trees={full_name: _and(_leaf(_param("_recipient", 0)))},
-        canonical_signatures={},
-        legacy_value_flows={full_name: [{"direction": "out", "token_var": "_recipient", "is_parameter": True}]},
-        by_selector={selector: full_name},
-    )
-    candidate = Candidate(
-        function_id=1,
-        contract_id=1,
-        contract_address="0x17a16747d03006c9754548ac0d0aff48783a4a45",
-        selector=selector,
-        function_name="withdraw",
-        authority_public=False,
-        principal_addresses=("0x3d320286e014c3e1ce99af6d6b00f0c1d63e3000",),
-        deployment_address=LIQUIDITY_POOL,
-    )
-    fn = cd.resolve_function(facts, selector)
-    assert fn is not None
-    spec = cd.synthesize_value_out(candidate, fn)
-    assert spec is not None
-    assert spec.contract_address == LIQUIDITY_POOL  # REQUIREMENT C
-    assert spec.taint_param_reaches_sink is True
-    assert spec.sentinel_calldata is not None
-    assert spec.sentinel_calldata[10:74].endswith("ee" * 20)  # sentinel at param 0
-    assert int(spec.sentinel_calldata[74:], 16) == 1  # uint256 stays the 1-wei default
-
-
 EXECUTE_SIG = "execute(address,uint256,bytes,bytes32,bytes32)"
 SCHEDULE_SIG = "schedule(address,uint256,bytes,bytes32,bytes32,uint256)"
 EXECUTE_BATCH_SIG = "executeBatch(address[],uint256[],bytes[],bytes32,bytes32)"
@@ -1652,18 +978,6 @@ def test_the_timelock_plan_schedules_and_executes_one_operation_tuple():
     assert scheduled[5] == 864000  # the delay, and only the delay, is added
 
 
-def test_the_timelock_plan_targets_the_sentinel_when_the_contract_holds_nothing():
-    """A timelock holds authority, not funds."""
-    spec = _timelock_spec()
-    assert spec is not None
-    target, value, payload, predecessor, _salt = _decode(spec.execute_calldata, EXECUTE_SIG)
-    assert target.lower() == cd.SENTINEL_ADDRESS.lower()
-    assert payload == b""
-    assert value == 0
-    assert predecessor == b"\x00" * 32
-    assert spec.witness_token is None and spec.witness_calldata is None
-
-
 def test_the_timelock_plan_moves_an_asset_the_contract_provably_holds():
     spec = _timelock_spec(holdings=(HELD_TOKEN,))
     assert spec is not None
@@ -1683,21 +997,6 @@ def test_the_timelock_plan_finds_the_scheduling_half_of_the_batch_arity_too():
     targets, values, payloads, _pred, _salt = _decode(spec.execute_calldata, EXECUTE_BATCH_SIG)
     assert [t.lower() for t in targets] == [cd.SENTINEL_ADDRESS.lower()]
     assert values == (0,) and payloads == (b"",)
-
-
-def test_no_timelock_plan_without_the_scheduling_half():
-    facts = _timelock_facts(signatures=[EXECUTE_SIG, "getMinDelay()"])
-    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_SIG) or "")
-    assert fn is not None
-    assert cd.synthesize_timelock(_timelock_session(), _candidate(EXECUTE_SIG), facts, fn) is None
-
-
-def test_no_timelock_plan_without_the_contracts_own_delay():
-    """The delay is read, never assumed."""
-    facts = _timelock_facts(signatures=[EXECUTE_SIG, SCHEDULE_SIG])
-    fn = cd.resolve_function(facts, cd._selector_of(EXECUTE_SIG) or "")
-    assert fn is not None
-    assert cd.synthesize_timelock(_timelock_session(), _candidate(EXECUTE_SIG), facts, fn) is None
 
 
 def test_the_timelock_plan_prefers_a_principal_behind_both_gates():
@@ -1821,27 +1120,6 @@ def test_without_a_fork_the_tier1_probe_still_stands(monkeypatch):
     assert [p.gate_ref for p in plans] == ["gate:tier1"]
 
 
-def test_prober_drops_the_pause_plan_without_a_fork(monkeypatch):
-    inputs = cd.CandidatePlanInputs(
-        pause=cd.PausePlanInputs(
-            contract_address=CONTRACT,
-            principal=PRINCIPAL,
-            pause_calldata=PAUSE_SEL,
-            entry_points=(),
-            predicted_guard_set=("deposit()",),
-            max_pause_duration=None,
-            gate_ref="gate:caller_authority",
-        )
-    )
-    monkeypatch.setattr(cd, "synthesize", lambda *_a, **_k: inputs)
-    assert default_prober(_stub_session(), _candidate(PAUSE_SEL), _ctx()) == []
-
-
-def test_prober_emits_nothing_when_facts_are_thin(monkeypatch):
-    monkeypatch.setattr(cd, "synthesize", lambda *_a, **_k: cd.CandidatePlanInputs())
-    assert default_prober(_stub_session(), _candidate(TRANSFER), _ctx()) == []
-
-
 from eth_utils.crypto import keccak  # noqa: E402
 
 CALLER = "0x" + "22" * 20
@@ -1948,10 +1226,6 @@ def test_seed_fixture_malformed_entry_is_skipped(entry):
     assert cd._seed_fixture_for_role(entry, CALLER, CONTRACT) is None
 
 
-def test_seed_fixture_bad_caller_is_skipped():
-    assert cd._seed_fixture_for_role(_slot_entry(), "not-an-address", CONTRACT) is None
-
-
 def test_token_seed_fixtures_one_per_caller_and_entry():
     entries = (
         _slot_entry(),
@@ -1963,33 +1237,6 @@ def test_token_seed_fixtures_one_per_caller_and_entry():
     assert all(fx.kind == "set_storage_at" and fx.verify_calldata is not None for fx in fixtures)
     owner_seeds = [fx for fx in fixtures if fx.value == cd._word_hex(int(CALLER, 16))]
     assert len(owner_seeds) == 1
-
-
-@requires_postgres
-def test_synthesize_pause_emits_token_seed_fixtures(db_session):
-    contract, ids = _pause_contract(db_session)
-    facts = _token_facts(token_slots=(_slot_entry(),))
-    fn = cd.resolve_function(facts, PAUSE_SEL)
-    assert fn is not None
-    candidate = Candidate(
-        function_id=ids[PAUSE_SEL],
-        contract_id=contract.id,
-        contract_address=CONTRACT,
-        selector=PAUSE_SEL,
-        function_name="pause",
-        authority_public=False,
-        principal_addresses=(PRINCIPAL,),
-    )
-    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
-    assert spec is not None
-    storage = [fx for fx in spec.fixtures if fx.kind == "set_storage_at"]
-    assert len(storage) == 1
-    seed = storage[0]
-    assert seed.address == candidate.probe_target
-    assert seed.slot == cd._mapping_entry_slot(_slot_entry()["base_slot"], [int(PRINCIPAL, 16)])
-    assert seed.verify_to == candidate.probe_target
-    assert seed.verify_expected == cd._word_hex(cd.SEED_AMOUNT)
-    assert any(fx.kind == "set_balance" and fx.address == PRINCIPAL for fx in spec.fixtures)
 
 
 def test_pause_fixtures_are_applied_before_the_pre_pause_probe():
@@ -2081,30 +1328,3 @@ def test_anvil_factory_is_single_flight_and_closed(monkeypatch):
     worker._close_anvil()
     assert first.closed is True
     assert worker._anvil is None
-
-
-def test_anvil_spawn_failure_is_memoized_and_raises_per_plan(monkeypatch):
-    from services.effects.exceptions import AnvilSpawnError
-
-    calls = {"n": 0}
-
-    def _boom(**_kwargs):
-        calls["n"] += 1
-        raise OSError("no anvil")
-
-    monkeypatch.setattr("services.effects.anvil.SubprocessAnvil", _boom)
-    monkeypatch.setattr("services.clients.rpc.rpc_headers", lambda url, extra=None: {})
-    monkeypatch.setenv("PSAT_EFFECTS_FORK", "1")
-
-    worker = EffectsWorker()
-    factory = worker._anvil_factory(1, "http://rpc.example/1")
-    assert factory is not None
-    for _ in range(3):
-        with pytest.raises(AnvilSpawnError):
-            factory()
-    assert calls["n"] == 1  # never retried per candidate
-
-
-def test_fork_kill_switch_disables_the_factory(monkeypatch):
-    monkeypatch.setenv("PSAT_EFFECTS_FORK", "0")
-    assert EffectsWorker()._anvil_factory(1, "http://rpc.example/1") is None

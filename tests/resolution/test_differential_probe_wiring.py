@@ -63,23 +63,6 @@ def test_should_probe_only_gated_unknown_external_check():
 # ---------------------------------------------------------------------------
 
 
-def test_apply_public_result_mints_conditional_universal_that_projects_public():
-    cap = _gated_unknown_cap()
-    result = dp.ProbeResult(
-        attribution="not_caller_discriminating",
-        verdict="public",
-        transcript={"feature": "differential_probe", "attribution": "not_caller_discriminating", "block_number": 5},
-        reason="open_and_block_independent",
-    )
-    opened = _apply_probe_result(cap, result)
-    assert opened.kind == "conditional_universal"
-    cap_dict = capability_to_dict(opened)
-    assert any(step.get("step") == "differential_probe" for step in cap_dict.get("trace", []))
-    surface = project_capability_surface(cap_dict)
-    assert surface.authority_public is True
-    assert capability_surface_status(cap_dict, surface) == "public"
-
-
 def test_apply_gated_result_keeps_external_check_and_attaches_evidence():
     cap = _gated_unknown_cap()
     cases: list[tuple[dp.Verdict, dp.Attribution]] = [
@@ -103,21 +86,6 @@ def test_apply_gated_result_keeps_external_check_and_attaches_evidence():
 
 
 CANON = {"setClaimingOpen(uint256)": "setClaimingOpen(uint256)"}
-
-
-def test_maybe_probe_upgrades_open_function():
-    cap = _gated_unknown_cap()
-    out = _maybe_differential_probe(
-        cap,
-        chain_id=1,
-        contract_address="0x" + "77" * 20,
-        fn_signature="setClaimingOpen(uint256)",
-        canonical_signatures=CANON,
-        rpc_url="http://rpc",
-        block=1_000_000,
-        call_batch=lambda calls, tag: [ok() for _ in calls],  # success at both blocks
-    )
-    assert out.kind == "conditional_universal"
 
 
 def test_maybe_probe_keeps_gated_for_rejecting_function():

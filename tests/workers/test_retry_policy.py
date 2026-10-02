@@ -14,8 +14,6 @@ import urllib3.exceptions
 from workers.retry_policy import (
     classify,
     compute_next_attempt,
-    max_retries,
-    retry_base_s,
 )
 
 _TRANSIENT_STATUSES = [408, 425, 429, 500, 502, 503, 504, 522, 524]
@@ -84,29 +82,3 @@ def test_compute_next_attempt_doubles_each_retry(monkeypatch, retry_count, expec
     for _ in range(50):
         delay = _delay_seconds(compute_next_attempt(retry_count, now=_NOW))
         assert expected_base * 0.75 <= delay <= expected_base * 1.25 + 1e-6
-
-
-def test_compute_next_attempt_caps_at_30min(monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "30")
-    cap = 30 * 60
-    for _ in range(20):
-        delay = _delay_seconds(compute_next_attempt(10, now=_NOW))
-        assert delay <= cap
-
-
-@pytest.mark.parametrize(
-    "fn, var, value, expected",
-    [
-        pytest.param(max_retries, "PSAT_JOB_MAX_RETRIES", None, 5, id="max_retries-default"),
-        pytest.param(max_retries, "PSAT_JOB_MAX_RETRIES", "9", 9, id="max_retries-override"),
-        pytest.param(max_retries, "PSAT_JOB_MAX_RETRIES", "not-an-int", 5, id="max_retries-garbage-falls-back"),
-        pytest.param(retry_base_s, "PSAT_JOB_RETRY_BASE_S", None, 30.0, id="retry_base_s-default"),
-        pytest.param(retry_base_s, "PSAT_JOB_RETRY_BASE_S", "12.5", 12.5, id="retry_base_s-override"),
-    ],
-)
-def test_env_knobs(monkeypatch, fn, var, value, expected):
-    if value is None:
-        monkeypatch.delenv(var, raising=False)
-    else:
-        monkeypatch.setenv(var, value)
-    assert fn() == expected

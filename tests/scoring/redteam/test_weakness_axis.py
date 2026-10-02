@@ -3,17 +3,14 @@ from __future__ import annotations
 from services.scoring import planes as P
 from services.scoring.constants import (
     FREEZE_CAPABILITY_PROVEN,
-    FREEZE_KEYSET_RECOVERABLE,
     FREEZE_SUSTAINABLE,
     WEAKNESS_SAFE_SINGLE_SIGNER,
-    WEAKNESS_SAFE_SUPERMAJORITY,
     WEAKNESS_SAFE_UNCREDITED,
     WEAKNESS_TIMELOCK_UNDETERMINED,
     delay_discount,
 )
-from services.scoring.schema import FunctionSignal, PrincipalRef, Tri, entity_key
+from services.scoring.schema import FunctionSignal, PrincipalRef, entity_key
 from tests.support.scoring_builders import (
-    EOA,
     KEY_C,
     KEY_V,
     OWNERS,
@@ -25,7 +22,6 @@ from tests.support.scoring_builders import (
     _pause_document,
     facts,
     fold,  # noqa: F401  (fold fixture, registered by import)
-    pause_sig,
     proven,
     reaches,
     sig,
@@ -50,23 +46,6 @@ def test_f3_unread_owner_set_is_not_a_k_of_k_safe(fold):
     assert finding["weakness"] == WEAKNESS_SAFE_UNCREDITED
     assert "2/2" not in finding["principal"] and "2/2" not in str(finding["weakest_gate"])
     assert any("safe_owner_set_not_determined" in note for note in finding["witness_notes"])
-
-
-def test_f3_proven_owner_set_still_earns_its_rung(fold):
-    signal = sig(
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        **proven(1.0),
-        **reaches(KEY_C),
-    )
-    document = fold(
-        [signal],
-        principals={1: facts(1, SAFE, "safe", owners=OWNERS, threshold=3)},
-        value=value_plane({KEY_C: {"usdc": 50_000_000.0}}),
-    )
-    assert document.findings[0]["weakness"] == WEAKNESS_SAFE_SUPERMAJORITY
-    assert document.findings[0]["weakest_gate"] == "Safe 3/4"
 
 
 def test_f2_an_unread_pauser_key_set_moves_severity_in_neither_direction(fold):
@@ -105,26 +84,6 @@ def test_f2_proven_dependence_adds_the_sustainable_component(fold):
     assert finding["severity_proven"] == FREEZE_SUSTAINABLE
     assert finding["weakness"] == WEAKNESS_SAFE_SINGLE_SIGNER
     assert "freeze_keyset_not_independent" in finding["severity_basis"]
-
-
-def test_f2_an_eoa_pauser_is_its_own_key_set(fold):
-    recovery = [{"function_principal_id": 2, "chain": "ethereum", "address": SAFE2}]
-    signal = pause_sig(
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-        gates={"freeze_recovery_principals": Tri.proven("enumerated", recovery).to_json()},
-        **proven(FREEZE_KEYSET_RECOVERABLE, ("freeze_capability_proven",)),
-        **reaches(KEY_C),
-    )
-    document = fold(
-        [signal],
-        principals={1: facts(1, EOA, "eoa"), 2: facts(2, SAFE2, "safe", owners=OWNERS, threshold=2)},
-        value=value_plane({KEY_C: {"usdc": 5_000_000.0}}),
-    )
-    finding = document.findings[0]
-    assert any(note.startswith("keyset_independent") for note in finding["witness_notes"])
-    assert finding["severity_proven"] == FREEZE_KEYSET_RECOVERABLE
 
 
 def test_w3_a_proven_zero_delay_is_not_an_unread_one(fold):

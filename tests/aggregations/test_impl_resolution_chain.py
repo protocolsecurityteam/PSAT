@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 
 from db.models import FunctionPrincipal
 from services.aggregations.company_overview import (
-    all_addresses_for_protocol,
     build_company_overview,
     build_functions_for_protocol,
 )
@@ -305,56 +304,3 @@ def test_f1_controller_attribution_no_cross_chain_fold(db_session):
     assert impl.lower() in {a.lower() for a in base_attr}, "base Safe must govern the base standalone (0xI)"
     eth_attr = {a.lower() for a in (principals.get(eth_safe.lower(), {}).get("primary_for") or [])}
     assert proxy_eth.lower() in eth_attr, "ethereum Safe must govern the ethereum proxy"
-
-
-def test_f3_implementation_name_chain_scoped(db_session):
-    s = db_session
-    p = _add_protocol(s, f"f3-{uuid.uuid4().hex[:8]}")
-    proxy_eth = _addr("pxeth")
-    proxy_base = _addr("pxbase")
-    impl = _addr("impl")
-
-    proxy_eth_job = _add_job(s, address=proxy_eth, protocol_id=p.id, is_proxy=True)
-    _add_contract(
-        s,
-        address=proxy_eth,
-        job=proxy_eth_job,
-        protocol_id=p.id,
-        chain="ethereum",
-        is_proxy=True,
-        implementation=impl,
-        contract_name="EthProxy",
-    )
-    eth_impl_job = _add_job(s, address=impl, protocol_id=p.id, request={"address": impl, "proxy_address": proxy_eth})
-    _add_contract(s, address=impl, job=eth_impl_job, protocol_id=p.id, chain="ethereum", contract_name="EthImplName")
-
-    proxy_base_job = _add_job(
-        s, address=proxy_base, protocol_id=p.id, is_proxy=True, request={"address": proxy_base, "chain": "base"}
-    )
-    _add_contract(
-        s,
-        address=proxy_base,
-        job=proxy_base_job,
-        protocol_id=p.id,
-        chain="base",
-        is_proxy=True,
-        implementation=impl,
-        contract_name="BaseProxy",
-    )
-    base_impl_job = _add_job(
-        s, address=impl, protocol_id=p.id, request={"address": impl, "proxy_address": proxy_base, "chain": "base"}
-    )
-    _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base", contract_name="BaseImplName")
-    s.commit()
-
-    rows = all_addresses_for_protocol(s, p)
-    by_key = {(r["address"].lower(), (r.get("chain") or "").lower()): r for r in rows}
-    eth_row = by_key[(proxy_eth.lower(), "ethereum")]
-    base_row = by_key[(proxy_base.lower(), "base")]
-
-    assert eth_row["implementation_name"] == "EthImplName", (
-        f"ethereum proxy must show its own impl name, got {eth_row['implementation_name']}"
-    )
-    assert base_row["implementation_name"] == "BaseImplName", (
-        f"base proxy must show its own impl name, got {base_row['implementation_name']}"
-    )

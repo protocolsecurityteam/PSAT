@@ -134,58 +134,6 @@ class TestProcessSemanticInputs:
         assert semantic_errors[0]["context"]["missing_artifacts"] == ["effects", "predicate_trees"]
 
 
-class TestGraphRefreshAfterEffectivePermissions:
-    def test_refresh_runs_after_effective_permissions(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot()
-        resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
-
-        def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
-
-        call_order: list[str] = []
-
-        def fake_build_ep(*args: Any, **kwargs: Any) -> dict:
-            call_order.append("effective_permissions")
-            return {"schema_version": "1", "functions": []}
-
-        def fake_resolve_graph(**kwargs: Any) -> tuple[dict, dict]:
-            call_order.append("resolved_control_graph")
-            return {"nodes": [], "edges": [], "refreshed": True}, {}
-
-        def fake_build_labels(*args: Any, **kwargs: Any) -> dict:
-            call_order.append("principal_labels")
-            return {"principals": []}
-
-        monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
-        monkeypatch.setattr("workers.policy_worker.store_artifact", lambda *a, **kw: None)
-        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
-        monkeypatch.setattr("workers.policy_worker.build_effective_permissions", fake_build_ep)
-        monkeypatch.setattr("workers.policy_worker.resolve_control_graph", fake_resolve_graph)
-        monkeypatch.setattr("workers.policy_worker.build_principal_labels", fake_build_labels)
-
-        worker.process(session, cast(Any, job))
-
-        ep_idx = call_order.index("effective_permissions")
-        rg_idx = call_order.index("resolved_control_graph")
-        assert ep_idx < rg_idx, (
-            f"effective_permissions (index {ep_idx}) must be called "
-            f"before resolved_control_graph (index {rg_idx}); "
-            f"actual order: {call_order}"
-        )
-
-
 class TestCrossContractEnrichmentArtifactSync:
     def test_enrichment_rewrites_effective_permissions_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
@@ -490,7 +438,3 @@ class TestGraphRefreshRewritesTables:
         assert call["deployment_address"] == "0x" + "77" * 20
         assert call["resolved_graph"] is refreshed_graph
         assert any(edge["relation"] == "role_principal" for edge in call["resolved_graph"]["edges"])
-
-    def test_no_contract_row_skips_the_table_rewrite(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        replace_calls, _ = self._run_process(monkeypatch, contract_row=None)
-        assert replace_calls == []

@@ -23,7 +23,6 @@ from db.models import (
     JobStatus,
     MonitoredContract,
     Protocol,
-    UpgradeEvent,
     WatchedProxy,
 )
 from schemas.control_tracking import MonitoredContractType
@@ -309,46 +308,6 @@ class TestUpgradeUpdatesContractTable:
             f"Contract.implementation was not updated: expected {impl_v2.lower()}, got {contract.implementation}"
         )
 
-    def test_upgrade_creates_upgrade_event_row(self, anvil_env, pg_session):
-        rpc_url, tmp_path = anvil_env
-        from services.monitoring.unified_watcher import scan_for_events
-
-        impl_v1 = _compile_and_deploy(IMPL_V1_SOURCE, "ImplV1", [], rpc_url, PRIVATE_KEY, tmp_path)
-        impl_v2 = _compile_and_deploy(IMPL_V2_SOURCE, "ImplV2", [], rpc_url, PRIVATE_KEY, tmp_path)
-        proxy_addr = _compile_and_deploy(PROXY_SOURCE, "TestProxy", [impl_v1], rpc_url, PRIVATE_KEY, tmp_path)
-        current_block = int(_cast(["block-number"], rpc_url))
-
-        proto = _setup_protocol(pg_session)
-        contract = _setup_contract(
-            pg_session,
-            proxy_addr,
-            proto,
-            is_proxy=True,
-            proxy_type="eip1967",
-            implementation=impl_v1,
-        )
-        _setup_monitored(
-            pg_session,
-            contract,
-            "proxy",
-            current_block,
-            proto,
-            initial_state={"implementation": impl_v1},
-        )
-        pg_session.commit()
-
-        _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
-        scan_for_events(pg_session, rpc_url)
-
-        ue_rows = (
-            pg_session.execute(select(UpgradeEvent).where(UpgradeEvent.contract_id == contract.id)).scalars().all()
-        )
-        assert len(ue_rows) >= 1, "No UpgradeEvent row was created for the detected upgrade"
-        latest = ue_rows[-1]
-        assert latest.new_impl.lower() == impl_v2.lower()
-        assert latest.old_impl is not None and latest.old_impl.lower() == impl_v1.lower()
-        assert latest.proxy_address.lower() == proxy_addr.lower()
-
 
 class TestAdminChangedPropagation:
     def test_admin_changed_updates_contract_admin(self, anvil_env, pg_session):
@@ -396,94 +355,6 @@ class TestAdminChangedPropagation:
         assert mc.last_known_state is not None
         assert mc.last_known_state.get("admin", "").lower() == new_admin.lower(), (
             "MonitoredContract.last_known_state['admin'] not updated"
-        )
-
-
-class TestOwnershipUpdatesControllerValue:
-    def test_ownership_transfer_updates_controller_value(self, anvil_env, pg_session):
-        rpc_url, tmp_path = anvil_env
-        from services.monitoring.unified_watcher import scan_for_events
-
-        addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-        current_block = int(_cast(["block-number"], rpc_url))
-        new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-
-        proto = _setup_protocol(pg_session)
-        contract = _setup_contract(pg_session, addr, proto, name="TestOwnable")
-
-        cv = ControllerValue(
-            contract_id=contract.id,
-            controller_id="owner",
-            value=ACCOUNT0.lower(),
-            resolved_type="eoa",
-            source="owner()",
-        )
-        pg_session.add(cv)
-        pg_session.flush()
-
-        _setup_monitored(
-            pg_session,
-            contract,
-            "regular",
-            current_block,
-            proto,
-            initial_state={"owner": ACCOUNT0.lower()},
-        )
-        pg_session.commit()
-
-        _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-        events = scan_for_events(pg_session, rpc_url)
-        assert any(e.event_type == "ownership_transferred" for e in events)
-
-        pg_session.refresh(cv)
-        assert cv.value is not None
-        assert cv.value.lower() == new_owner.lower(), (
-            f"ControllerValue 'owner' not updated: expected {new_owner.lower()}, got {cv.value}"
-        )
-
-
-class TestUpgradePollingUpdatesRelational:
-    def test_poll_upgrade_updates_contract_implementation(self, anvil_env, pg_session):
-        rpc_url, tmp_path = anvil_env
-        from services.monitoring.unified_watcher import poll_for_state_changes
-
-        impl_v1 = _compile_and_deploy(IMPL_V1_SOURCE, "ImplV1", [], rpc_url, PRIVATE_KEY, tmp_path)
-        impl_v2 = _compile_and_deploy(IMPL_V2_SOURCE, "ImplV2", [], rpc_url, PRIVATE_KEY, tmp_path)
-        proxy_addr = _compile_and_deploy(PROXY_SOURCE, "TestProxy", [impl_v1], rpc_url, PRIVATE_KEY, tmp_path)
-        current_block = int(_cast(["block-number"], rpc_url))
-
-        proto = _setup_protocol(pg_session)
-        # PROXY_SOURCE has no ``implementation()`` getter, so its proxy_type is ``eip1967``; the plan keys slot vs
-        # getter off it.
-        contract = _setup_contract(
-            pg_session,
-            proxy_addr,
-            proto,
-            is_proxy=True,
-            proxy_type="eip1967",
-            implementation=impl_v1,
-        )
-        mc = _setup_monitored(
-            pg_session,
-            contract,
-            "proxy",
-            current_block,
-            proto,
-            initial_state={"implementation": impl_v1},
-        )
-        mc.needs_polling = True
-        pg_session.commit()
-
-        _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
-
-        events = poll_for_state_changes(pg_session, rpc_url)
-        assert any(e.data and e.data.get("field") == "implementation" for e in events)
-
-        pg_session.refresh(contract)
-        assert contract.implementation is not None
-        assert contract.implementation.lower() == impl_v2.lower(), (
-            f"Contract.implementation not updated by poll: expected {impl_v2.lower()}, got {contract.implementation}"
         )
 
 

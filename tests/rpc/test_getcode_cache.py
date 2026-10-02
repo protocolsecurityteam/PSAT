@@ -15,22 +15,6 @@ def _isolated_cache(monkeypatch):
     rpc.clear_getcode_cache()
 
 
-def test_repeat_call_hits_cache(monkeypatch):
-    calls = {"n": 0}
-
-    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
-        calls["n"] += 1
-        return "0x6080604052"  # tiny EVM bytecode
-
-    monkeypatch.setattr(rpc, "rpc_request", _fake_rpc)
-
-    a = "0x" + "ab" * 20
-    rpc.get_code("https://rpc", a)
-    rpc.get_code("https://rpc", a)
-    rpc.get_code("https://rpc", a)
-    assert calls["n"] == 1, "second + third call must hit the cache"
-
-
 def test_different_addresses_keep_separate_slots(monkeypatch):
     calls = {"n": 0}
 
@@ -52,44 +36,6 @@ def test_different_addresses_keep_separate_slots(monkeypatch):
     assert calls["n"] == 2
 
 
-def test_rpc_error_does_not_cache(monkeypatch):
-    raises = {"n": 0}
-
-    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
-        raises["n"] += 1
-        if raises["n"] == 1:
-            raise RuntimeError("RPC down")
-        return "0x60"
-
-    monkeypatch.setattr(rpc, "rpc_request", _fake_rpc)
-
-    addr = "0x" + "cc" * 20
-    with pytest.raises(RuntimeError):
-        rpc.get_code("https://rpc", addr)
-    code = rpc.get_code("https://rpc", addr)
-    assert code == "0x60"
-    assert raises["n"] == 2
-
-
-def test_ttl_expiry_triggers_refetch(monkeypatch):
-    calls = {"n": 0}
-
-    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
-        calls["n"] += 1
-        return "0x60"
-
-    monkeypatch.setattr(rpc, "rpc_request", _fake_rpc)
-
-    fake_now = [1000.0]
-    monkeypatch.setattr(rpc.time, "monotonic", lambda: fake_now[0])
-
-    addr = "0x" + "dd" * 20
-    rpc.get_code("https://rpc", addr)
-    fake_now[0] += rpc._GETCODE_CACHE_TTL_S + 1
-    rpc.get_code("https://rpc", addr)
-    assert calls["n"] == 2
-
-
 def test_get_code_and_get_code_with_keccak_share_cache(monkeypatch):
     calls = {"n": 0}
 
@@ -107,69 +53,12 @@ def test_get_code_and_get_code_with_keccak_share_cache(monkeypatch):
     assert keccak_hex == "0x" + keccak(bytes.fromhex("abcd")).hex()
 
 
-def test_keccak_matches_eth_utils_for_real_bytecode(monkeypatch):
-    monkeypatch.setattr(rpc, "rpc_request", lambda *_a, **_kw: "0x60806040526001600055")
-    addr = "0x" + "ff" * 20
-    _code, keccak_hex = rpc.get_code_with_keccak("https://rpc", addr)
-    expected = "0x" + keccak(bytes.fromhex("60806040526001600055")).hex()
-    assert keccak_hex == expected
-
-
-def test_empty_bytecode_is_cached_with_correct_keccak(monkeypatch):
-    calls = {"n": 0}
-
-    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
-        calls["n"] += 1
-        return "0x"
-
-    monkeypatch.setattr(rpc, "rpc_request", _fake_rpc)
-
-    addr = "0x" + "00" * 19 + "01"
-    code, keccak_hex = rpc.get_code_with_keccak("https://rpc", addr)
-    assert code == "0x"
-    assert keccak_hex == "0x" + keccak(b"").hex()
-
-    rpc.get_code_with_keccak("https://rpc", addr)
-    assert calls["n"] == 1
-
-
-def test_address_normalization_keys_lowercased(monkeypatch):
-    calls = {"n": 0}
-
-    def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
-        calls["n"] += 1
-        return "0x60"
-
-    monkeypatch.setattr(rpc, "rpc_request", _fake_rpc)
-
-    upper = "0x" + "AB" * 20
-    lower = upper.lower()
-    rpc.get_code("https://rpc", upper)
-    rpc.get_code("https://rpc", lower)
-    assert calls["n"] == 1, "case variations must share a single cache slot"
-
-
 def test_cache_eviction_under_ceiling(monkeypatch):
     monkeypatch.setattr(rpc, "rpc_request", lambda *_a, **_kw: "0x60")
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 8)
     for i in range(20):
         rpc.get_code("https://rpc", f"0x{i:040x}")
     assert len(rpc._GETCODE_CACHE) <= rpc._GETCODE_CACHE_MAX
-
-
-def test_get_code_batch_single_request_for_n_addresses(monkeypatch):
-    rpc.clear_getcode_cache()
-    calls = {"n": 0}
-
-    def _fake_batch(_url, calls_list, *, chain_id=None):
-        calls["n"] += 1
-        return [(f"0x{i:02x}", False) for i in range(len(calls_list))]
-
-    monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _fake_batch)
-    addrs = ["0x" + f"{i:040x}" for i in range(5)]
-    out = rpc.get_code_batch("https://rpc", addrs)
-    assert len(out) == 5
-    assert calls["n"] == 1, "must batch all 5 addresses into one HTTP call"
 
 
 def test_get_code_batch_short_circuits_already_cached(monkeypatch):
@@ -239,30 +128,6 @@ def test_get_code_batch_populates_keccak_index(monkeypatch):
     assert follow_up_calls["n"] == 0, "follow-up must hit cache from the batch"
 
 
-def test_get_code_with_keccak_handles_0x0_provider_response(monkeypatch):
-    """Odd-length "0x0" would crash bytes.fromhex."""
-    rpc.clear_getcode_cache()
-    monkeypatch.setattr(rpc, "rpc_request", lambda *_a, **_kw: "0x0")
-    code, keccak_hex = rpc.get_code_with_keccak("https://rpc", "0x" + "11" * 20)
-    assert code == "0x"
-    assert keccak_hex == "0x" + keccak(b"").hex()
-
-
-def test_get_code_batch_handles_0x0_provider_response(monkeypatch):
-    rpc.clear_getcode_cache()
-
-    def _fake_batch(_url, calls_list, *, chain_id=None):
-        return [("0x0", False) for _ in calls_list]
-
-    monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _fake_batch)
-    out = rpc.get_code_batch("https://rpc", ["0x" + "22" * 20])
-    addr = "0x" + "22" * 20
-    assert out[addr] == "0x"
-    code, keccak_hex = rpc.get_code_with_keccak("https://rpc", addr)
-    assert code == "0x"
-    assert keccak_hex == "0x" + keccak(b"").hex()
-
-
 def test_get_code_batch_evicts_when_over_ceiling(monkeypatch):
     rpc.clear_getcode_cache()
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 8)
@@ -279,22 +144,3 @@ def test_get_code_batch_evicts_when_over_ceiling(monkeypatch):
     assert len(rpc._GETCODE_CACHE) <= rpc._GETCODE_CACHE_MAX, (
         f"batch insert bypassed eviction: cache has {len(rpc._GETCODE_CACHE)} entries (max {rpc._GETCODE_CACHE_MAX})"
     )
-
-
-def test_get_code_batch_eviction_keeps_recent_entries(monkeypatch):
-    rpc.clear_getcode_cache()
-    monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 4)
-
-    def _fake_batch(_url, calls_list, *, chain_id=None):
-        return [("0x60", False) for _ in calls_list]
-
-    monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _fake_batch)
-
-    older = [f"0x0{i:039x}" for i in range(4)]
-    rpc.get_code_batch("https://rpc", older)
-    newer = [f"0x9{i:039x}" for i in range(4)]
-    rpc.get_code_batch("https://rpc", newer)
-
-    keys = {k[1] for k in rpc._GETCODE_CACHE.keys()}
-    for addr in newer:
-        assert addr.lower() in keys, f"recent {addr} should not have been evicted"

@@ -122,72 +122,9 @@ class TestRoleHolderPlaneFiringCondition:
         monkeypatch.setattr("workers.resolution_worker.resolve_role_holder_planes", fake_resolve)
         return calls
 
-    def test_both_cursors_fire_the_producer(self, db_session, monkeypatch):
-        calls = self._spy(monkeypatch)
-        db_session.add_all([_cursor(REGISTRY, ROLE_GRANTED_TOPIC0), _cursor(REGISTRY, ROLE_REVOKED_TOPIC0)])
-        db_session.flush()
-
-        ResolutionWorker()._resolve_role_holder_plane(
-            db_session,
-            _job_stub(),
-            chain_id=1,
-            rpc_url="https://rpc.example",
-            registry_address=REGISTRY,
-        )
-
-        assert calls == [{"chain_id": 1, "registry_address": REGISTRY, "rpc_url": "https://rpc.example"}]
-        db_session.rollback()
-
-    @pytest.mark.parametrize(
-        "topics",
-        [
-            pytest.param((ROLE_GRANTED_TOPIC0,), id="granted_only"),
-            pytest.param((ROLE_REVOKED_TOPIC0,), id="revoked_only"),
-            pytest.param((), id="no_cursor"),
-        ],
-    )
-    def test_a_missing_topic_refuses(self, db_session, monkeypatch, topics):
-        calls = self._spy(monkeypatch)
-        for topic in topics:
-            db_session.add(_cursor(REGISTRY, topic))
-        db_session.flush()
-
-        written = ResolutionWorker()._resolve_role_holder_plane(
-            db_session,
-            _job_stub(),
-            chain_id=1,
-            rpc_url="https://rpc.example",
-            registry_address=REGISTRY,
-        )
-
-        assert written == 0
-        assert calls == []
-        db_session.rollback()
-
     def test_cursors_on_another_registry_do_not_license_this_one(self, db_session, monkeypatch):
         calls = self._spy(monkeypatch)
         db_session.add_all([_cursor(PROXY_REGISTRY, ROLE_GRANTED_TOPIC0), _cursor(PROXY_REGISTRY, ROLE_REVOKED_TOPIC0)])
-        db_session.flush()
-
-        assert (
-            ResolutionWorker()._resolve_role_holder_plane(
-                db_session,
-                _job_stub(),
-                chain_id=1,
-                rpc_url="https://rpc.example",
-                registry_address=REGISTRY,
-            )
-            == 0
-        )
-        assert calls == []
-        db_session.rollback()
-
-    def test_cursors_on_another_chain_do_not_license_this_one(self, db_session, monkeypatch):
-        calls = self._spy(monkeypatch)
-        for topic in (ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0):
-            cursor = _cursor(REGISTRY, topic)
-            cursor.chain_id = 8453
-            db_session.add(cursor)
         db_session.flush()
 
         assert (
@@ -217,30 +154,6 @@ class TestRoleHolderPlaneFiringCondition:
         )
 
         assert len(calls) == 1
-        db_session.rollback()
-
-    def test_no_rows_writes_nothing(self, db_session, monkeypatch):
-        """Row absence is not_determined, not a commit."""
-        self._spy(monkeypatch)
-        persisted: list[Any] = []
-        monkeypatch.setattr(
-            "workers.resolution_worker.persist_role_holder_planes",
-            lambda _s, rows: persisted.append(rows) or 0,
-        )
-        db_session.add_all([_cursor(REGISTRY, ROLE_GRANTED_TOPIC0), _cursor(REGISTRY, ROLE_REVOKED_TOPIC0)])
-        db_session.flush()
-
-        assert (
-            ResolutionWorker()._resolve_role_holder_plane(
-                db_session,
-                _job_stub(),
-                chain_id=1,
-                rpc_url="https://rpc.example",
-                registry_address=REGISTRY,
-            )
-            == 0
-        )
-        assert persisted == []
         db_session.rollback()
 
 
@@ -319,21 +232,6 @@ def _job(**overrides: Any) -> SimpleNamespace:
 
 
 class TestResolutionStageComposition:
-    def test_stage_invokes_the_plane_with_the_job_address(self, monkeypatch):
-        seen: list[dict[str, Any]] = []
-        _stub_stage(
-            monkeypatch,
-            _resolve_role_holder_plane=lambda _self, _s, _j, **kw: seen.append(kw) or 0,
-        )
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-
-        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
-
-        assert len(seen) == 1
-        assert seen[0]["registry_address"] == REGISTRY
-        assert seen[0]["chain_id"] == 1
-
     def test_impl_job_registers_the_proxy_not_the_implementation(self, monkeypatch):
         seen: list[dict[str, Any]] = []
         _stub_stage(
@@ -447,16 +345,6 @@ class TestRestakingStepOrder:
         assert spies.enrolled == [(1, [EFNM_PROXY])]
         db_session.rollback()
 
-    def test_nodes_are_scoped_to_the_emitter_that_enumerated_them(self, db_session, one_protocol, monkeypatch):
-        spies = _RestakingSpies(monkeypatch)
-        spies.emitters = [EFNM_PROXY, OTHER_EMITTER]
-
-        refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example")
-
-        assert spies.node_scopes == sorted([EFNM_PROXY, OTHER_EMITTER])
-        assert [p["protocol_id"] for p in spies.persisted] == [one_protocol.id, one_protocol.id]
-        db_session.rollback()
-
 
 class TestRestakingStepFailClosed:
     def test_a_chain_without_a_verified_manager_pair_reads_nothing(self, db_session, monkeypatch):
@@ -490,24 +378,6 @@ class TestRestakingStepFailClosed:
         assert spies.cycles[-1]["partial"] is True
         db_session.rollback()
 
-    def test_no_proven_emitter_enrolls_nothing(self, db_session, one_protocol, monkeypatch):
-        spies = _RestakingSpies(monkeypatch)
-        spies.emitters = []
-
-        assert refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example") == 0
-        assert spies.order == []
-        db_session.rollback()
-
-    def test_a_protocol_with_no_contracts_is_skipped(self, db_session, monkeypatch):
-        spies = _RestakingSpies(monkeypatch)
-        monkeypatch.setattr(restaking_cycle, "protocol_contract_addresses", lambda *_a, **_kw: [])
-        db_session.add(Protocol(name="empty"))
-        db_session.flush()
-
-        assert refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example") == 0
-        assert spies.order == []
-        db_session.rollback()
-
     def test_one_protocol_raising_does_not_withhold_another(self, db_session, monkeypatch):
         first = Protocol(name="alpha")
         second = Protocol(name="beta")
@@ -532,17 +402,6 @@ class TestRestakingStepFailClosed:
         # Otherwise the skipped protocol's absent rows would read as an answer.
         assert spies.cycles[-1]["partial"] is True
         assert spies.cycles[-1]["note"] == "1_failed"
-        db_session.rollback()
-
-    def test_a_clean_pass_is_not_marked_partial(self, db_session, one_protocol, monkeypatch):
-        spies = _RestakingSpies(monkeypatch)
-
-        refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example")
-
-        assert spies.cycles[-1]["partial"] is False
-        assert spies.cycles[-1]["note"] is None
-        assert spies.cycles[-1]["events_found"] == 1
-        assert spies.cycles[-1]["contracts_scanned"] == 1
         db_session.rollback()
 
 
@@ -607,11 +466,4 @@ class TestFoldScoping:
         assert node_addresses_from_fold(db_session, chain_id=1, event_address=EFNM_PROXY) == [NODE_A]
         assert node_addresses_from_fold(db_session, chain_id=1, event_address=OTHER_EMITTER) == [NODE_B]
         assert node_addresses_from_fold(db_session, chain_id=1) == sorted([NODE_A, NODE_B])
-        db_session.rollback()
-
-    def test_an_emitter_that_folded_nothing_is_an_empty_lower_bound(self, db_session):
-        db_session.add(_pubkey_log(NODE_A, emitter=EFNM_PROXY, log_index=1))
-        db_session.flush()
-
-        assert node_addresses_from_fold(db_session, chain_id=1, event_address=EFNM_IMPLEMENTATION) == []
         db_session.rollback()

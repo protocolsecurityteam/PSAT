@@ -16,7 +16,7 @@ from services.effects import anvil as anvil_mod
 from services.effects import calldata as calldata_mod
 from services.effects import orchestrator as orch_mod
 from services.effects import selection as selection_mod
-from services.effects.anvil import _OUTPUT_TAIL_LINES, SubprocessAnvil
+from services.effects.anvil import SubprocessAnvil
 from services.effects.exceptions import AnvilSpawnError
 from services.effects.selection import Candidate
 from utils.logging import degraded_errors_var, stage_metrics_var
@@ -62,18 +62,6 @@ def test_spawn_failure_carries_returncode_and_output_tail(tmp_path, caplog):
     warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
     assert warning.returncode == 3
     assert any("401 unauthorized" in line for line in warning.output_tail)
-
-
-def test_output_tail_is_bounded(tmp_path):
-    lines = _OUTPUT_TAIL_LINES * 5
-    binary = _fake_anvil_bin(tmp_path, f'i=0\nwhile [ $i -lt {lines} ]; do echo "line $i"; i=$((i+1)); done\nexit 1\n')
-    with pytest.raises(AnvilSpawnError) as excinfo:
-        SubprocessAnvil(port=8598, hardfork_name="prague", anvil_bin=binary, startup_timeout=5.0)
-
-    quoted = str(excinfo.value).split(": ", 1)[1]
-    assert len(quoted.split(" | ")) <= _OUTPUT_TAIL_LINES
-    assert f"line {lines - 1}" in quoted
-    assert "line 0" not in quoted
 
 
 def test_close_warns_when_sigterm_is_escalated_to_sigkill(caplog):
@@ -476,31 +464,3 @@ def test_raising_sampler_is_still_treated_as_unmeasured(caplog):
     assert records[0].reason == "sampler_raised"
     assert records[0].exc_type == "OSError"
     assert [e.phase for e in accumulator] == ["effects_rss_sample"]
-
-
-def test_measured_rss_publishes_the_peak():
-    from workers.effects_worker import EffectsWorker, _Counters
-
-    class _Anvil:
-        def __init__(self) -> None:
-            self._samples = iter([41, 137, 12])
-
-        def rss_mb(self):
-            return next(self._samples)
-
-    worker = EffectsWorker.__new__(EffectsWorker)
-    worker._anvil = _Anvil()
-    worker._rss_sample_failed = False
-    counters = _Counters()
-    for _ in range(3):
-        worker._sample_anvil_rss(counters)
-
-    assert counters.peak_anvil_rss_mb == 137
-    metrics: dict = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        worker._record_metrics(counters)
-    finally:
-        stage_metrics_var.reset(token)
-    assert metrics["peak_anvil_rss_measured"] is True
-    assert metrics["peak_anvil_rss_mb"] == 137

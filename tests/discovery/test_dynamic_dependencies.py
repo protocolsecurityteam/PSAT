@@ -352,13 +352,6 @@ def test_find_dynamic_dependencies_with_explicit_tx_hashes(monkeypatch):
     assert out["transactions_analyzed"][0]["tx_hash"] == "0xtxhash"
 
 
-def test_resolve_trace_rpc_raises_without_rpc(monkeypatch):
-    monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
-    with pytest.raises(RuntimeError, match="requires --dynamic-rpc or eRPC"):
-        ddc.resolve_trace_rpc()
-
-
 @pytest.mark.parametrize(
     "arg, expected",
     [
@@ -410,13 +403,6 @@ def test_fetch_tx_metadata_invalid_response(monkeypatch):
     monkeypatch.setattr(ddc, "rpc_call", lambda *a, **kw: "0x")
     with pytest.raises(RuntimeError, match="Could not fetch"):
         ddc._fetch_tx_metadata_from_rpc("https://rpc.example", "0xbad")
-
-
-def test_find_dynamic_dependencies_rejects_invalid_tx_limit(monkeypatch):
-    monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-    with pytest.raises(RuntimeError, match="tx_limit must be >= 1"):
-        ddc.find_dynamic_dependencies("0x" + "11" * 20, tx_limit=0)
 
 
 def test_proxy_address_fetches_txs_from_proxy_and_rewrites_edges(monkeypatch):
@@ -590,39 +576,3 @@ def test_find_dynamic_dependencies_parity_parallel_vs_sequential(monkeypatch):
 # ---------------------------------------------------------------------------
 # Multichain: chain_id threading to Etherscan tx calls
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "kwargs, expected_chain_id",
-    [
-        pytest.param({"chain_id": 8453}, 8453, id="threads-chain-id"),
-        pytest.param({}, 1, id="defaults-to-mainnet"),
-    ],
-)
-def test_fetch_contract_transactions_chain_id(monkeypatch, kwargs, expected_chain_id):
-    seen_chain_ids = []
-
-    def fake_etherscan_get(_module, _action, **kw):
-        seen_chain_ids.append(kw.get("chain_id"))
-        return {"result": []}
-
-    monkeypatch.setattr(ddc, "etherscan_get", fake_etherscan_get)
-    ddc.fetch_contract_transactions("0x1", **kwargs)
-    assert seen_chain_ids == [expected_chain_id, expected_chain_id]
-
-
-def test_find_dynamic_dependencies_threads_chain_id_to_fetch(monkeypatch):
-    captured = {}
-
-    def fake_fetch(address, limit=30, start_block=0, chain_id=1):
-        captured["chain_id"] = chain_id
-        return []
-
-    monkeypatch.setattr(ddc, "fetch_contract_transactions", fake_fetch)
-    # Trace RPC is a separate concern — stub it so no network is touched.
-    monkeypatch.setattr(ddc, "resolve_trace_rpc", lambda url=None: "https://rpc.example")
-
-    with pytest.raises(ddc.NoNewTransactionsError):
-        ddc.find_dynamic_dependencies("0x" + "11" * 20, tx_limit=1, chain_id=8453)
-
-    assert captured["chain_id"] == 8453

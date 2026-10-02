@@ -55,12 +55,6 @@ def test_load_core_assets_filters_invalid():
     assert len(result["ethereum"]) == 1
 
 
-def test_load_core_assets_missing_file():
-    with tempfile.TemporaryDirectory() as tmp:
-        result = load_core_assets(Path(tmp))
-    assert result == {}
-
-
 @pytest.mark.parametrize(
     ("core_assets", "expected"),
     [

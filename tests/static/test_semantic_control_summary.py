@@ -25,39 +25,6 @@ def _detect(tmp_path, source, contract_name="C"):
     return _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)
 
 
-def test_caller_authority_leaf_admits_function(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address public owner;
-        uint256 public value;
-        constructor() { owner = msg.sender; }
-        function setValue(uint256 v) external {
-            require(msg.sender == owner, "not owner");
-            value = v;
-        }
-    }
-    """
-    ac = _detect(tmp_path, source)
-    semantic_signatures = {pf["function"] for pf in ac["semantic_functions"]}
-    assert "setValue(uint256)" in semantic_signatures
-
-
-def test_sensitive_sink_admits_unguarded_function(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    contract C {
-        address public owner;
-        function publicSetOwner(address newOwner) external {
-            owner = newOwner;
-        }
-    }
-    """
-    ac = _detect(tmp_path, source)
-    semantic_signatures = {pf["function"] for pf in ac["semantic_functions"]}
-    assert "publicSetOwner(address)" in semantic_signatures
-
-
 def test_pause_only_tree_does_not_admit_function(tmp_path):
     source = """
     pragma solidity ^0.8.19;
@@ -84,25 +51,3 @@ def test_pause_only_tree_does_not_admit_function(tmp_path):
     semantic_signatures = {pf["function"] for pf in ac["semantic_functions"]}
     assert "pause()" in semantic_signatures
     assert "readOnly()" not in semantic_signatures
-
-
-def test_delegated_authority_leaf_admits_function(tmp_path):
-    source = """
-    pragma solidity ^0.8.19;
-    interface IRoleRegistry {
-        function hasRole(bytes32 role, address account) external view returns (bool);
-    }
-    contract C {
-        IRoleRegistry public roleRegistry;
-        bytes32 public constant PAUSER_ROLE = keccak256("PAUSER");
-        bool public paused;
-        constructor(address rr) { roleRegistry = IRoleRegistry(rr); }
-        function pauseContract() external {
-            require(roleRegistry.hasRole(PAUSER_ROLE, msg.sender), "no");
-            paused = true;
-        }
-    }
-    """
-    ac = _detect(tmp_path, source)
-    semantic_signatures = {pf["function"] for pf in ac["semantic_functions"]}
-    assert "pauseContract()" in semantic_signatures

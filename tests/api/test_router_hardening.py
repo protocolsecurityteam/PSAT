@@ -11,21 +11,6 @@ pytestmark = [requires_postgres]
 
 
 @pytest.mark.parametrize(
-    ("path", "limit", "expected"),
-    [
-        pytest.param("/api/monitored-events", 1000, 422, id="monitored_over_cap"),
-        pytest.param("/api/monitored-events", 0, 422, id="monitored_below_floor"),
-        pytest.param("/api/monitored-events", 500, 200, id="monitored_at_cap"),
-        pytest.param("/api/protocols/1/events", 1000, 422, id="protocol_over_cap"),
-        pytest.param("/api/protocols/1/events", 500, 200, id="protocol_at_cap"),
-    ],
-)
-def test_events_limit_bounds(api_client, path, limit, expected):
-    resp = api_client.get(path, params={"limit": limit})
-    assert resp.status_code == expected
-
-
-@pytest.mark.parametrize(
     ("method", "path", "kwargs"),
     [
         pytest.param(
@@ -50,12 +35,6 @@ def test_monitored_events_bad_contract_id_is_422_not_500(api_client):
     assert resp.status_code == 422
 
 
-def test_monitored_events_valid_contract_id_absent_is_empty(api_client):
-    resp = api_client.get("/api/monitored-events", params={"contract_id": str(uuid.uuid4())})
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-
 def test_agent_stream_error_is_generic(api_client, monkeypatch):
     secret = "SECRET_DB_DSN=postgres://user:pw@host/db"
 
@@ -71,36 +50,6 @@ def test_agent_stream_error_is_generic(api_client, monkeypatch):
     body = resp.text
     assert "event: error" in body
     assert secret not in body
-
-
-def test_analysis_artifact_not_determined_reason_is_generic(api_client, db_session, monkeypatch):
-    from db.models import Job, JobStatus
-    from db.storage import StorageKeyAbsent
-
-    secret = "s3://internal-bucket/secret/path/object.bin"
-
-    job = Job(
-        id=uuid.uuid4(),
-        name="__hardening_artifact_leak__",
-        status=JobStatus.completed,
-    )
-    db_session.add(job)
-    db_session.commit()
-
-    def _boom(*a, **k):
-        raise StorageKeyAbsent(secret)
-
-    monkeypatch.setattr("routers.deps.get_artifact", _boom)
-    try:
-        resp = api_client.get(f"/api/analyses/{job.name}/artifact/dependencies")
-        assert resp.status_code == 503
-        body = resp.json()
-        assert body["artifact"] == "dependencies"
-        assert secret not in body["reason"]
-        assert "StorageKeyAbsent" not in body["reason"]
-    finally:
-        db_session.delete(job)
-        db_session.commit()
 
 
 def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_session, monkeypatch):

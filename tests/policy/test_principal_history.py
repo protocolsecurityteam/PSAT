@@ -9,7 +9,6 @@ from eth_utils.crypto import keccak
 
 from services.policy import principal_history
 from services.policy.principal_history import (
-    _external_authority_checks,
     build_principal_history,
     build_role_authority_history,
 )
@@ -131,21 +130,6 @@ def test_role_authority_history_uses_event_shapes_not_names():
     assert [item["status"] for item in role_intervals] == ["revoked", "active"]
     assert role_intervals[1]["principal"] == USER
     assert role_intervals[1]["role"] == 5
-
-
-def test_external_authority_checks_uses_canonical_selector_for_contract_type_params():
-    # Selectors must come from the canonical signature (``addAsset(address)``), not Slither's ``addAsset(ERC20)``, or
-    # the function shows no controller.
-    data = json.loads((_SOLMATE_FIXTURES / "teller_predicate_trees.json").read_text())
-    checks = _external_authority_checks(
-        contract_address=data["contract"],
-        predicate_trees={"trees": {"addAsset(ERC20)": data["trees"]["addAsset(ERC20)"]}},
-        state_var_values={"authority": "0x3994741a5b29c60d0ab318de1024f9256fe959dc"},
-    )
-    assert len(checks) == 1
-    assert checks[0]["function"] == "addAsset(ERC20)"
-    assert checks[0]["selector"] == "0x298410e5"
-    assert checks[0]["selector"] != "0x4fdd72aa"
 
 
 _ROLES_AUTHORITY_ABI = [

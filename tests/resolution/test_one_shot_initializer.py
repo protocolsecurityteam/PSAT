@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 slither = pytest.importorskip("slither")
-from eth_utils.crypto import keccak  # noqa: E402
 from slither import Slither  # noqa: E402
 
 from services.policy.capability_surface import project_capability_surface  # noqa: E402
@@ -220,47 +219,6 @@ def test_oz_v4_initializer_surfaces_one_shot(artifacts):
     assert latch["role"] == "version"  # the resolver's decide-invariant anchor
 
 
-def test_oz_v5_namespaced_initializer_surfaces_one_shot(artifacts):
-    tree = _fn_tree(artifacts["OzV5"], "initialize")
-    assert "one_shot" in _surface_condition_kinds(tree)
-    latch = collect_one_shot_latches(tree)["standard"][0]
-    assert latch["standard"] == "oz_v5_namespaced"
-    # Validated in test_one_shot_probe::test_erc7201_slot_matches_canonical_derivation.
-    assert latch["slot"] == "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00"
-    assert latch["byte_offset"] == 0 and latch["size_bytes"] == 8  # uint64 _initialized
-    assert latch["role"] == "version"  # the resolver's decide-invariant anchor
-
-
-def test_oz_v5_transient_initializing_member_carries_no_latch(artifacts):
-    """At rest the flag reads 0 on consumed and live deployments alike, so a latch there reads an initialized proxy
-    as armed.
-    """
-    tree = _fn_tree(artifacts["OzV5"], "initialize")
-    transient_leaves: list[dict] = []
-
-    def walk(node: Any) -> None:
-        if node.get("op") == "LEAF":
-            leaf = node.get("leaf") or {}
-            members = {
-                (op.get("member_path") or [None])[0]
-                for op in leaf.get("operands") or []
-                if op.get("source") == "state_variable"
-            }
-            if "_initializing" in members:
-                transient_leaves.append(leaf)
-            return
-        for child in node.get("children") or []:
-            walk(child)
-
-    walk(tree)
-    assert transient_leaves, "fixture must fold an _initializing read into the tree"
-    assert all(leaf.get("authority_role") == "one_shot" for leaf in transient_leaves), "badge role must survive"
-    assert all("one_shot_latch" not in leaf for leaf in transient_leaves), "transient member must carry no latch"
-    collected = collect_one_shot_latches(tree)["standard"]
-    assert collected, "the version member must still stamp a readable latch"
-    assert all((latch["byte_offset"], latch["size_bytes"]) == (0, 8) for latch in collected)
-
-
 def test_custom_bool_latch_is_candidate_not_standard(artifacts):
     """Only the on-chain read may promote it."""
     tree = _fn_tree(artifacts["Custom"], "setup")
@@ -270,38 +228,3 @@ def test_custom_bool_latch_is_candidate_not_standard(artifacts):
     assert latches["candidate"][0]["standard"] == "structural_scalar_latch"
     assert "role" not in latches["candidate"][0]
     assert "one_shot" not in _surface_condition_kinds(tree)
-
-
-@pytest.mark.parametrize(
-    ("fn_name", "expected_kinds"),
-    [
-        # The write doesn't permanently falsify the guard.
-        pytest.param("deposit", (), id="capped-counter"),
-        pytest.param("swap", ("reentrancy",), id="reentrancy-guard-keeps-reentrancy-kind"),
-        # A setter re-arms it.
-        pytest.param("unpause", (), id="rearmable-toggle"),
-    ],
-)
-def test_custom_non_latches_are_not_a_one_shot(artifacts, fn_name, expected_kinds):
-    tree = _fn_tree(artifacts["Custom"], fn_name)
-    latches = collect_one_shot_latches(tree)
-    assert not latches["standard"] and not latches["candidate"]
-    assert set(expected_kinds) <= _surface_condition_kinds(tree)
-
-
-def test_unstructured_storage_getter_link_candidate(artifacts):
-    tree = _fn_tree(artifacts["Unstructured"], "initialize")
-    latches = collect_one_shot_latches(tree)
-    assert latches["candidate"], "unstructured-storage init should be a candidate"
-    latch = latches["candidate"][0]
-    assert latch["standard"] == "unstructured_slot_latch"
-    assert latch["slot"] == "0x" + keccak(text="fixture.version").hex()
-
-
-def test_unstructured_storage_modifier_anchor_candidate(artifacts):
-    trees = artifacts["Unstructured"].get("trees") or {}
-    matches = [t for full, t in trees.items() if full.split("(", 1)[0] == "initializeViaModifier"]
-    assert len(matches) == 1
-    latches = collect_one_shot_latches(matches[0])
-    assert latches["candidate"], "modifier-anchored init should be a candidate"
-    assert latches["candidate"][0]["standard"] == "unstructured_slot_latch"

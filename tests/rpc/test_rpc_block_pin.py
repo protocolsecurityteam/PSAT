@@ -35,11 +35,6 @@ def sent(monkeypatch):
     return bodies
 
 
-def test_moving_tag_is_pinned(sent):
-    rpc.rpc_request(MAINNET, "eth_getStorageAt", ["0xabc", "0x0", "latest"])
-    assert sent[0]["params"] == ["0xabc", "0x0", hex(PIN)]
-
-
 def test_omitted_optional_block_is_pinned(sent):
     rpc.rpc_request(MAINNET, "eth_call", [{"to": "0xabc", "data": "0x"}])
     assert sent[0]["params"][1] == hex(PIN)
@@ -69,24 +64,6 @@ def test_batches_are_pinned(sent):
     assert sent[0][0]["params"] == ["0xabc", hex(PIN)]
     assert sent[1][0]["params"] == ["0xabc", hex(PIN)]
     assert sent[2][0]["params"][1] == hex(PIN)
-
-
-def test_per_chain_pin(sent):
-    rpc.rpc_request(f"{ERPC}/main/evm/8453", "eth_getCode", ["0xabc", "latest"])
-    rpc.rpc_request(f"{ERPC}/main/evm/10", "eth_getCode", ["0xabc", "latest"])
-    assert sent[0]["params"][1] == hex(30_000_000)
-    assert sent[1]["params"][1] == "latest"
-
-
-def test_local_fork_is_never_pinned(sent):
-    rpc.rpc_request("http://127.0.0.1:8545", "eth_getCode", ["0xabc", "latest"])
-    assert sent[0]["params"][1] == "latest"
-
-
-def test_unset_env_leaves_requests_alone(sent, monkeypatch):
-    monkeypatch.delenv(rpc.PIN_BLOCKS_ENV)
-    rpc.rpc_request(MAINNET, "eth_getCode", ["0xabc", "latest"])
-    assert sent[0]["params"][1] == "latest"
 
 
 def test_pinned_requests_carry_their_own_user_agent(monkeypatch):

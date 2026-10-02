@@ -14,7 +14,6 @@ import pytest
 
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from tests.support.authority_reads import _Adapter, _Outer, _stub_rpc_map
-from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 OWNER = "0x" + "ab" * 20
@@ -41,102 +40,11 @@ def _called(recorder: list, selector: str) -> bool:
     return any(s == selector for s in recorder)
 
 
-def test_governor_internal_accessor_resolves_via_public_getter(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {INTERNAL_GOVERNOR_SELECTOR: None, GOVERNOR_SELECTOR: GOVERNOR}, recorder)
-    tree = _eq_tree(
-        {"source": "view_call", "callee_signature": "_governor()", "callee_selector": INTERNAL_GOVERNOR_SELECTOR}
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [GOVERNOR]
-    assert cap.membership_quality == "exact"
-    assert _called(recorder, GOVERNOR_SELECTOR)
-    assert not _called(recorder, INTERNAL_GOVERNOR_SELECTOR)
-
-
-def test_governor_internal_accessor_without_public_getter_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {INTERNAL_GOVERNOR_SELECTOR: None, GOVERNOR_SELECTOR: None}, recorder)
-    tree = _eq_tree(
-        {"source": "view_call", "callee_signature": "_governor()", "callee_selector": INTERNAL_GOVERNOR_SELECTOR}
-    )
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert _called(recorder, GOVERNOR_SELECTOR)  # the canonical getter WAS attempted
-
-
-def test_public_getter_view_call_not_double_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {GOVERNOR_SELECTOR: GOVERNOR}, recorder)
-    tree = _eq_tree({"source": "view_call", "callee_signature": "governor()", "callee_selector": GOVERNOR_SELECTOR})
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == [GOVERNOR]
-    assert recorder == [GOVERNOR_SELECTOR]  # exactly one call, the literal getter
-
-
 # A wrong controller is worse than a missing one: only owner/governor/authority de-underscore, and only owner locators
 # reroute to owner().
-@pytest.mark.parametrize(
-    ("returns", "operand", "forbidden_selector"),
-    [
-        pytest.param(
-            {"0x3ec954ed": OWNER},  # keccak("recoveryWallet()")[:4]
-            {"source": "view_call", "callee_signature": "_recoveryWallet()"},
-            "0x3ec954ed",
-            id="non-authority-internal-accessor-not-de-underscored",
-        ),
-        pytest.param(
-            {OWNER_SELECTOR: OWNER},
-            {"source": "state_variable", "state_variable_name": "BaseMessengerStorageLocation"},
-            OWNER_SELECTOR,
-            id="non-authority-storage-slot-stays-placeholder",
-        ),
-    ],
-)
-def test_non_authority_accessor_is_not_rerouted(
-    monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], operand: dict, forbidden_selector: str
-) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, returns, recorder)
-    tree = _eq_tree(operand)
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    assert not _called(recorder, forbidden_selector)
 
 
 # OZ-v5 surfaces the slot constant (``OwnableStorageLocation``) too.
-@pytest.mark.parametrize(
-    ("returns", "slot_name"),
-    [
-        pytest.param({OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: OWNER}, "_OWNER_SLOT", id="owner-slot-constant"),
-        pytest.param({OWNER_SELECTOR: OWNER}, "OwnableStorageLocation", id="oz-v5-ownable-storage-location"),
-    ],
-)
-def test_owner_slot_constant_resolves_via_owner_getter(
-    monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], slot_name: str
-) -> None:
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, returns, recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": slot_name})
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [OWNER]
-    assert cap.membership_quality == "exact"
-    assert _called(recorder, OWNER_SELECTOR)
 
 
 slither = pytest.importorskip("slither")

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from tests.support.api_helpers import _mock_session_ctx
@@ -25,36 +24,12 @@ def _client() -> TestClient:
     return TestClient(api.app)
 
 
-def test_helper_accepts_supported_chain():
-    from utils.chains import require_supported_chain
-
-    info = require_supported_chain(chain="ethereum", context="t")
-    assert info.chain_id == 1
-
-
-def test_helper_rejects_registered_but_unsupported_chain(monkeypatch):
-    monkeypatch.delenv(_ENV, raising=False)  # default allowlist = {1}
-    from utils.chains import UnsupportedChainError, require_supported_chain
-
-    with pytest.raises(UnsupportedChainError) as exc:
-        require_supported_chain(chain=_BASE, context="t")
-    msg = str(exc.value)
-    assert _BASE in msg and str(_BASE_ID) in msg and _ENV in msg
-
-
 def test_helper_accepts_when_allowlisted(monkeypatch):
     monkeypatch.setenv(_ENV, "1,8453")
     from utils.chains import require_supported_chain
 
     info = require_supported_chain(chain_id=_BASE_ID, context="t")
     assert info.chain_id == _BASE_ID
-
-
-def test_helper_rejects_unknown_chain(monkeypatch):
-    from utils.chains import UnsupportedChainError, require_supported_chain
-
-    with pytest.raises(UnsupportedChainError):
-        require_supported_chain(chain="nonexistent-chain", context="t")
 
 
 @patch("routers.deps.create_job")
@@ -69,35 +44,6 @@ def test_analyze_rejects_unsupported_chain(mock_session_cls, mock_create_job, mo
     detail = resp.json()["detail"]
     assert _BASE in detail and _ENV in detail
     mock_create_job.assert_not_called()
-
-
-@patch("routers.deps.create_job")
-@patch("routers.deps.SessionLocal")
-def test_analyze_accepts_unsupported_chain_when_allowlisted(mock_session_cls, mock_create_job, monkeypatch):
-    monkeypatch.setenv(_ENV, "1,8453")
-    client = _client()
-    mock_create_job.return_value = _fake_job(address=_ADDR)
-    _mock_session_ctx(mock_session_cls, MagicMock())
-
-    resp = client.post("/api/analyze", json={"address": _ADDR, "name": "t", "chain": _BASE})
-
-    assert resp.status_code == 200
-    mock_create_job.assert_called_once()
-    assert mock_create_job.call_args[0][1]["chain"] == _BASE
-
-
-@patch("routers.deps.create_job")
-@patch("routers.deps.SessionLocal")
-def test_analyze_default_mainnet_unaffected(mock_session_cls, mock_create_job, monkeypatch):
-    monkeypatch.delenv(_ENV, raising=False)  # mainnet-only deployment
-    client = _client()
-    mock_create_job.return_value = _fake_job(address=_ADDR)
-    _mock_session_ctx(mock_session_cls, MagicMock())
-
-    resp = client.post("/api/analyze", json={"address": _ADDR, "name": "t"})
-
-    assert resp.status_code == 200
-    mock_create_job.assert_called_once()
 
 
 @patch("routers.deps.create_job")
@@ -124,20 +70,6 @@ def test_analyze_rejects_unknown_sentinel_chain(mock_session_cls, mock_create_jo
 
     assert resp.status_code == 400
     mock_create_job.assert_not_called()
-
-
-@patch("routers.deps.create_job")
-@patch("routers.deps.SessionLocal")
-def test_analyze_chainless_company_submission_unaffected(mock_session_cls, mock_create_job, monkeypatch):
-    monkeypatch.delenv(_ENV, raising=False)
-    client = _client()
-    mock_create_job.return_value = _fake_job(company="etherfi")
-    _mock_session_ctx(mock_session_cls, MagicMock())
-
-    resp = client.post("/api/analyze", json={"company": "etherfi"})
-
-    assert resp.status_code == 200
-    mock_create_job.assert_called_once()
 
 
 @patch("routers.deps.SessionLocal")

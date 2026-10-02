@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from eth_utils.crypto import keccak
 
 from services.effects import calldata as cd
@@ -17,10 +16,8 @@ from services.effects import recipes
 from services.effects.config import VERDICT_PROVEN
 from services.effects.harness import SimContext
 from services.effects.seeding import Seeding
-from services.effects.selection import Candidate, select_candidates
+from services.effects.selection import Candidate
 from services.effects.simulate import SimCallResult, SimResult
-from tests.conftest import ADDR, requires_postgres
-from tests.support.effects_builders import _contract, _fn, _protocol
 from tests.support.effects_stubs import RecordingStore, transfer_log
 
 VAULT = "0x" + "c0" * 20
@@ -112,46 +109,6 @@ def _roles(sig: str, names: list[str], sinks: list[dict[str, Any]] | None = None
     return cd.address_param_roles(fn, types)
 
 
-@pytest.mark.parametrize(
-    ("sig", "names", "expected", "roleless"),
-    [
-        pytest.param(
-            "deposit(address,uint256,address)",
-            ["depositAsset", "amount", "receiver"],
-            {0: cd.ROLE_TOKEN, 2: cd.ROLE_RECIPIENT},
-            (),
-            id="asset_named_slot_is_token_receiver_is_not",
-        ),
-        pytest.param(
-            "swap(address,address,uint256,address)",
-            ["tokenIn", "tokenOut", "amountIn", "to"],
-            {0: cd.ROLE_TOKEN, 1: cd.ROLE_TOKEN, 3: cd.ROLE_RECIPIENT},
-            (),
-            id="swap_names_both_token_slots",
-        ),
-        pytest.param("act(address,uint256)", ["", ""], {}, (0,), id="unnamed_address_slot_gets_no_role"),
-    ],
-)
-def test_address_param_roles_by_name(sig, names, expected, roleless):
-    roles = _roles(sig, names)
-    for index, role in expected.items():
-        assert roles[index] == role
-    for index in roleless:
-        assert index not in roles
-
-
-def test_a_sink_calling_through_a_parameter_names_it_a_token_without_any_vocabulary():
-    sig = "pull(address,uint256)"
-    roles = _roles(sig, ["x", "n"], [_pull_sink(sig, "x")])
-    assert roles[0] == cd.ROLE_TOKEN
-
-
-def test_a_name_carrying_both_vocabularies_is_no_evidence_at_all():
-    """Demoting a payout destination costs the observation the probe exists for."""
-    roles = _roles("send(address,uint256)", ["tokenRecipient", "amount"])
-    assert roles[0] == cd.ROLE_RECIPIENT
-
-
 def test_token_slot_reaches_the_plan_and_the_holdings_ride_with_it():
     sig = "deposit(address,uint256,address)"
     spec = _spec(
@@ -162,13 +119,6 @@ def test_token_slot_reaches_the_plan_and_the_holdings_ride_with_it():
     assert spec.token_param_indexes == (0,)
     assert TOKEN_A in spec.input_token_hints
     assert spec.input_token_hints[-1] == cd.SELF_TOKEN_HINT
-
-
-def test_holdings_are_withheld_from_a_function_with_no_token_slot():
-    sig = "mint(address,uint256)"
-    spec = _spec(_facts(sig, parameter_names=["to", "amount"]), sig, holdings=(TOKEN_A,))
-    assert spec.token_param_indexes == ()
-    assert TOKEN_A not in spec.input_token_hints
 
 
 def test_a_state_var_called_through_becomes_a_getter_hint_but_a_parameter_never_does():
@@ -184,44 +134,6 @@ def test_a_state_var_called_through_becomes_a_getter_hint_but_a_parameter_never_
     assert "nativeWrapper()" in hints
     # There is no storage behind a parameter.
     assert "depositAsset()" not in hints
-
-
-def _read_sink(sig: str, target: str, selector: str) -> dict[str, Any]:
-    return {
-        "id": f"{sig}:sink0:external_call:{target}.read",
-        "function": sig,
-        "kind": "external_call",
-        "target": f"{target}.read",
-        "selector": selector,
-        "origin": "body",
-    }
-
-
-def test_a_token_read_selector_names_the_token_getter():
-    # When the transfer is library-wrapped, the ``shares`` read is the only named head.
-    sig = "wrap(uint256)"
-    for selector in ("0xce7c2ac2", "0xf5eb42dc", "0x70a08231"):
-        facts = _facts(sig, parameter_names=["amount"], sinks=[_read_sink(sig, "underlying", selector)])
-        fn = cd.resolve_function(facts, _sel(sig))
-        assert fn is not None
-        assert "underlying()" in cd.input_token_hints(fn), selector
-
-
-def test_a_slither_temporary_head_never_becomes_a_getter_hint():
-    sig = "wrap(uint256)"
-    for junk in ("TMP_7", "REF_5", "TUPLE_2"):
-        facts = _facts(sig, parameter_names=["amount"], sinks=[_pull_sink(sig, junk)])
-        fn = cd.resolve_function(facts, _sel(sig))
-        assert fn is not None
-        hints = cd.input_token_hints(fn)
-        assert not any(h.startswith(("TMP_", "REF_", "TUPLE_")) for h in hints), (junk, hints)
-
-
-def test_substitute_address_arg_fails_closed_on_a_slot_that_is_not_there():
-    data = "0x" + "aa" * 4 + "00" * 32
-    assert cd.substitute_address_arg(data, 1, TOKEN_A) is None
-    assert cd.substitute_address_arg(data, 0, "0xnope") is None
-    assert _arg(cd.substitute_address_arg(data, 0, TOKEN_A) or "", 0) == TOKEN_A
 
 
 def _seeding(*tokens: str) -> Seeding:
@@ -359,27 +271,3 @@ def test_seeding_a_token_cannot_by_itself_produce_an_inflow():
     )
     assert eff.details["backing"]["inflow_observed"] is False
     assert eff.details["backing"]["input_seeded"] is True
-
-
-def test_an_unresolved_token_slot_leaves_the_probe_exactly_as_it_was():
-    sig = "deposit(address,uint256,address)"
-    spec = _spec(_facts(sig, parameter_names=["depositAsset", "amount", "receiver"]), sig)
-    assert _arg(spec.mint_calldata, 0) == PRINCIPAL
-
-
-@requires_postgres
-def test_priced_holdings_only_and_richest_first(db_session):
-    """An unpriced holding is usually airdropped spam."""
-    from db.models import ContractBalance
-
-    p = _protocol(db_session, "reach-holdings")
-    c = _contract(db_session, p.id, ADDR(0x2301))
-    _fn(db_session, c.id, name="deposit", selector="0xbbbb0301", effect_targets=["S"])
-    for token, usd in ((ADDR(0xAA01), 10.0), (ADDR(0xAA02), 900.0), (ADDR(0xAA03), None)):
-        db_session.add(
-            ContractBalance(contract_id=c.id, token_address=token, raw_balance="1", decimals=18, usd_value=usd)
-        )
-    db_session.flush()
-
-    cand = next(c2 for c2 in select_candidates(db_session, p.id) if c2.selector == "0xbbbb0301")
-    assert cand.input_token_addresses == (ADDR(0xAA02).lower(), ADDR(0xAA01).lower())

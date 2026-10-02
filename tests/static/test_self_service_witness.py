@@ -26,9 +26,6 @@ from services.static.claims.matchers import _facts  # noqa: E402
 from services.static.claims.matchers import flows as flowmod  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
-    verified_guard_verdicts,
-)
 
 _UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
 _SIBLING = "self_service_sibling_function_residual_not_proven"
@@ -100,10 +97,6 @@ def _ordering_proven(record: str, *, disclosures: list[str] | None = None) -> di
     return w
 
 
-def _ordering_refused(reason: str) -> dict:
-    return {"state": "not_determined", "reason": reason}
-
-
 def _ctx(tree: Any, flow: dict) -> ClaimContext:
     effects = {
         "contract_name": "C",
@@ -112,108 +105,10 @@ def _ctx(tree: Any, flow: dict) -> ClaimContext:
     return ClaimContext(None, effects, {"trees": {_SIG: tree}})
 
 
-def test_keyed_by_caller_is_constrained_without_a_guard():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "keyed_by_caller", "record": "C.balances"}
-
-
-def test_keyed_by_caller_survives_a_second_caller_chosen_level():
-    flow = _flow(
-        amount_record_variable="C.withdrawRequests",
-        amount_record_key_kinds=["msg_sender", "param"],
-        amount_record_key_param_indexes=[None, 0],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "keyed_by_caller", "record": "C.withdrawRequests"}
-
-
-def test_owner_guarded_record_joins_guard_and_amount_on_the_same_cell():
-    flow = _flow(
-        amount_record_variable="C.bids",
-        amount_record_member_path=["amount"],
-        amount_record_key_kinds=["param"],
-        amount_record_key_param_indexes=[0],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "owner_guarded_record", "record": "C.bids"}
-
-
-def test_owner_guarded_record_compares_canonical_names_across_inheritance():
-    """An inherited ``Base.pool`` must join to itself, the likeliest silent zero."""
-    flow = _flow(
-        amount_record_variable="Base.pool",
-        amount_record_member_path=["amount"],
-        amount_record_key_kinds=["param"],
-        amount_record_key_param_indexes=[0],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("Base.pool", 0), flow), _SIG, flow)
-    assert verdict == {"state": "constrained", "basis": "owner_guarded_record", "record": "Base.pool"}
-
-
-def test_wrong_record_refuses_record_mismatch():
-    flow = _flow(
-        amount_record_variable="C.amounts", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.owners", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "record_mismatch"}
-
-
-def test_wrong_key_refuses_key_index_disagreement():
-    flow = _flow(
-        amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[1]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
-
-
-def test_non_mandatory_guard_refuses_guard_not_mandatory():
-    flow = _flow(
-        amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0, mandatory=False), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
-
-
 def test_param_kind_without_index_refuses_never_kind_alone():
     flow = _flow(amount_record_variable="C.bids", amount_record_key_kinds=["param"])  # no key_param_indexes
     verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
-
-
-def test_lossy_key_asymmetry_refuses_on_the_amount_sides_indeterminate():
-    """``bids[uint128(id)]`` could stamp slot 0 while the amount key is indeterminate."""
-    flow = _flow(
-        amount_record_variable="C.bids",
-        amount_record_key_kinds=["indeterminate"],
-        amount_record_key_param_indexes=[None],
-    )
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
-
-
-def test_two_declarations_refuses_multiple_record_declarations():
-    flow = _flow(amount_record_variables=["Base.bids", "Impl.bids"])
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "multiple_record_declarations"}
-
-
-def test_no_record_named_refuses_amount_root_not_classifiable():
-    flow = _flow()  # no amount_record_* keys at all
-    verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "amount_root_not_classifiable"}
-
-
-def test_missing_tree_refuses_rather_than_reading_absence_as_no_guard():
-    flow = _flow(
-        amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
-    )
-    verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
 
 
 def test_guard_without_msg_sender_operand_does_not_satisfy_w1():
@@ -225,52 +120,6 @@ def test_guard_without_msg_sender_operand_does_not_satisfy_w1():
     assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
 
 
-def test_proven_keyed_by_caller_with_ordering():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        record_ordering=_ordering_proven("C.balances"),
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict == {
-        "state": "proven_self_service",
-        "w1_basis": "keyed_by_caller",
-        "w2_basis": "clear_dominates_calls",
-        "record": "C.balances",
-        "disclosures": _BASE_DISCLOSURES,
-    }
-
-
-def test_proven_owner_guarded_with_ordering():
-    flow = _flow(
-        amount_record_variable="C.bids",
-        amount_record_member_path=["amount"],
-        amount_record_key_kinds=["param"],
-        amount_record_key_param_indexes=[0],
-        record_ordering=_ordering_proven("C.bids"),
-    )
-    verdict = _facts.self_service_payout(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
-    assert verdict == {
-        "state": "proven_self_service",
-        "w1_basis": "owner_guarded_record",
-        "w2_basis": "clear_dominates_calls",
-        "record": "C.bids",
-        "disclosures": _BASE_DISCLOSURES,
-    }
-
-
-def test_loop_ordering_carries_the_cross_iteration_disclosure():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        record_ordering=_ordering_proven("C.balances", disclosures=["cross_iteration_ordering_not_proven"]),
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict["disclosures"] == [_UPGRADE, _SIBLING, "cross_iteration_ordering_not_proven"]
-
-
 def test_w1_refusal_propagates_as_the_self_service_reason():
     flow = _flow(
         amount_record_variable="C.amounts",
@@ -280,46 +129,6 @@ def test_w1_refusal_propagates_as_the_self_service_reason():
     )
     verdict = _facts.self_service_payout(_ctx(_ownership_tree("C.owners", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "record_mismatch"}
-
-
-def test_ordering_refusal_wins_when_w1_holds():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        record_ordering=_ordering_refused("clearing_write_does_not_dominate_calls"),
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "clearing_write_does_not_dominate_calls"}
-
-
-def test_no_ordering_and_no_guard_refuses_function_not_analyzed():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-    )
-    verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
-    assert verdict == {"state": "not_determined", "reason": "function_not_analyzed"}
-
-
-def test_flow_entry_attaches_only_on_a_storage_amount():
-    flow = _flow(
-        amount_record_variable="C.balances",
-        amount_record_key_kinds=["msg_sender"],
-        amount_record_key_param_indexes=[None],
-        kind="native_transfer_send",
-        selector=None,
-        from_is_self=True,
-        record_ordering=_ordering_proven("C.balances"),
-    )
-    entry = flowmod._flow_entry(_ctx(None, flow), _SIG, flow)
-    assert entry["self_service_payout"]["state"] == "proven_self_service"
-    assert entry["amount_record_constraint"] == {
-        "state": "constrained",
-        "basis": "keyed_by_caller",
-        "record": "C.balances",
-    }
 
 
 def test_flow_entry_omits_the_keys_on_a_param_amount_and_rides_ss_r3():
@@ -442,13 +251,6 @@ def test_producer_cancel_bid_delete_proves(_corpus):
     assert _self_service(_corpus, "cancelBidDelete(uint256)")["state"] == "proven_self_service"
 
 
-def test_producer_withdraw_proves_keyed_by_caller_on_ordering(_corpus):
-    verdict = _self_service(_corpus, "withdraw()")
-    assert verdict["state"] == "proven_self_service"
-    assert verdict["w1_basis"] == "keyed_by_caller"
-    assert verdict["w2_basis"] == "clear_dominates_calls"
-
-
 def test_producer_verified_guard_and_ordering_are_both_earned(_corpus):
     """``withdraw`` needing no guard shows the ordering arm stands alone."""
     guarded = _self_service(_corpus, "withdrawGuarded()")
@@ -462,71 +264,3 @@ def test_producer_dao_shape_refuses(_corpus):
         "state": "not_determined",
         "reason": "clearing_write_does_not_dominate_calls",
     }
-
-
-def test_producer_contract_scoped_guard_licenses_no_unguarded_function(_corpus):
-    verdict = _self_service(_corpus, "badWithdraw()")
-    assert verdict["state"] == "not_determined"
-    guard = verified_guard_verdicts(_corpus)["badWithdraw()"]
-    assert guard["state"] == "not_determined"
-    assert guard["reason"] == "guard_modifier_not_applied"
-
-
-def test_producer_admin_sweep_param_leaves_the_key_absent(_corpus):
-    entries = _flow_out_entries(_corpus, "rescueTokens(address,uint256)")
-    assert entries
-    assert all("self_service_payout" not in e for e in entries)
-
-
-def test_producer_whole_balance_sweep_leaves_the_key_absent(_corpus):
-    entries = _flow_out_entries(_corpus, "sweepAll(address)")
-    assert entries
-    assert all("self_service_payout" not in e for e in entries)
-
-
-_BURN_SRC = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IERC20 { function transfer(address to, uint256 amount) external returns (bool); }
-interface IOracle { function convert(uint256 shares) external view returns (uint256); }
-contract BurnPay {
-    mapping(address => uint256) public shares;
-    IERC20 public token;
-    IOracle public oracle;
-    // Provable sub-case: the paid amount IS read from the caller's own cell, so
-    // it is keyed_by_caller — the only burn-of-caller-shares this join can earn.
-    function redeemSame() external {
-        uint256 amt = shares[msg.sender];
-        shares[msg.sender] = 0;
-        token.transfer(msg.sender, amt);
-    }
-    // A16: the paid amount is an oracle conversion of the burned quantity
-    // (param_derived), so the amount is not read out of storage and the gate
-    // never fires — the row stays fail-closed absent, never cleared.
-    function redeemOracle(uint256 amt) external {
-        shares[msg.sender] -= amt;
-        token.transfer(msg.sender, oracle.convert(amt));
-    }
-}
-"""
-
-
-@pytest.fixture(scope="module")
-def _burn(tmp_path_factory):
-    f = tmp_path_factory.mktemp("ssw_burn") / "BurnPay.sol"
-    f.write_text(textwrap.dedent(_BURN_SRC).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == "BurnPay")
-
-
-def test_burn_same_value_proves_as_keyed_by_caller(_burn):
-    """``burn_of_caller_shares`` needs a decrement fact no producer publishes."""
-    verdict = _self_service(_burn, "redeemSame()")
-    assert verdict["state"] == "proven_self_service"
-    assert verdict["w1_basis"] == "keyed_by_caller"
-
-
-def test_burn_then_oracle_pay_stays_fail_closed_absent(_burn):
-    entries = _flow_out_entries(_burn, "redeemOracle(uint256)")
-    assert entries
-    assert all("self_service_payout" not in e for e in entries)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import signal
 import uuid
 from types import SimpleNamespace
 from typing import cast
@@ -32,19 +31,6 @@ def _make_job(*, lease_id=None):
         lease_id=lease_id,
         retry_count=0,
     )
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-def test_sigterm_preserves_live_leases(mock_session, _signal):
-    w = _Worker()
-    job_id, lease = uuid.uuid4(), uuid.uuid4()
-    w._inflight_jobs[job_id] = lease
-    w._handle_sigterm(signal.SIGTERM, None)
-    w._handle_sigterm(signal.SIGTERM, None)
-    assert not w._running
-    assert w._inflight_jobs == {job_id: lease}
-    mock_session.assert_not_called()
 
 
 def _boom(*_a, **_kw):

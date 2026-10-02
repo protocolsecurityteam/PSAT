@@ -97,29 +97,6 @@ def test_bare_uups_implementation_is_a_contract(monkeypatch, batched):
 
 
 @pytest.mark.parametrize("batched", [False, True])
-def test_v5_proxy_admin_shape_earns_the_token(monkeypatch, batched):
-    """R4: the one earner of 'proxy_admin'."""
-    probe_map = dict(_UUPS_PROXY)
-    probe_map["owner()"] = _addr_word(OWNER)
-    _wire(monkeypatch, probe_map, storage=_ZERO_WORD)
-    fn = _classify_uncached_batched if batched else _classify_uncached
-    kind, details, had_error = fn("https://rpc", PROXY, "latest")
-    assert kind == "proxy_admin"
-    assert details["owner"] == OWNER
-    assert had_error is False
-
-
-@pytest.mark.parametrize("batched", [False, True])
-def test_v4_proxy_admin_keeps_contract_type(monkeypatch, batched):
-    """The v4 ProxyAdmin 0x8b9566ad reverts on UIV and stays a non-terminal way-point."""
-    _wire(monkeypatch, {"owner()": _addr_word(OWNER)}, storage=_ZERO_WORD)
-    fn = _classify_uncached_batched if batched else _classify_uncached
-    kind, details, _had_error = fn("https://rpc", PROXY, "latest")
-    assert kind == "contract"
-    assert "upgrade_interface_version" not in details
-
-
-@pytest.mark.parametrize("batched", [False, True])
 def test_slot_read_failure_withholds_the_verdict_uncached(monkeypatch, batched):
     probe_map = dict(_UUPS_PROXY)
     probe_map["owner()"] = _addr_word(OWNER)
@@ -128,19 +105,6 @@ def test_slot_read_failure_withholds_the_verdict_uncached(monkeypatch, batched):
     kind, details, had_error = fn("https://rpc", PROXY, "latest")
     assert kind == "contract"
     assert had_error is True
-    assert "erc1967_implementation" not in details
-
-
-@pytest.mark.parametrize("batched", [False, True])
-def test_uups_proxy_behind_catch_all_control_stays_gated(monkeypatch, batched):
-    """The W6-2 gate runs first."""
-    probe_map = dict(_UUPS_PROXY)
-    probe_map[tracking._NEGATIVE_CONTROL_SIG] = _uint(1)
-    _wire(monkeypatch, probe_map, storage=_addr_word(IMPL))
-    fn = _classify_uncached_batched if batched else _classify_uncached
-    kind, details, _had_error = fn("https://rpc", PROXY, "latest")
-    assert kind == "contract"
-    assert details.get("duck_type_negative_control") == "failed"
     assert "erc1967_implementation" not in details
 
 

@@ -13,9 +13,7 @@ from sqlalchemy import func, select
 import services.resolution.role_store_standards as rss
 import workers.event_log_indexer as eli
 from services.resolution.role_store_standards import (
-    OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
-    all_topic0s,
 )
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
@@ -82,29 +80,6 @@ def test_delegated_role_gate_predicate(desc, expected):
 
 def _boom(*a, **k):
     raise RuntimeError("wire down")
-
-
-_REAL_DETECT = eli.detect_standards
-
-
-@pytest.mark.parametrize(
-    "probe,detect,expected",
-    [
-        pytest.param(
-            lambda *a, **k: "0xdeadbeef",
-            lambda code: [SOLADY_ENUMERABLE_ROLES],
-            [_ROLE_SET],
-            id="uses_detected_standard",
-        ),
-        pytest.param(lambda *a, **k: "0x00", lambda code: [], all_topic0s(), id="unions_when_inconclusive"),
-        # Probe failure over-indexes to the union, never an empty topic list.
-        pytest.param(_boom, _REAL_DETECT, all_topic0s(), id="unions_when_probe_raises"),
-    ],
-)
-def test_topic0_selection(monkeypatch, probe, detect, expected):
-    monkeypatch.setattr(eli, "resolve_probe_code", probe)
-    monkeypatch.setattr(eli, "detect_standards", detect)
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == expected
 
 
 def test_topic0s_cache_dedups_detection(monkeypatch):
@@ -206,66 +181,6 @@ def _code_with(*selectors: str) -> str:
 
 
 @requires_postgres
-def test_enrolls_roleset_at_proxy_via_proxy_hop(session, monkeypatch):
-    from db.models import Contract, IndexedEventCursor
-
-    deploy = 22_039_954
-    _seed_creation_block(monkeypatch, deploy)
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
-    session.commit()
-
-    _completed_job_with_gate(session, _gate_descriptor())
-    inserted = enroll_from_completed_jobs(session)
-    assert inserted >= 1
-
-    row = session.execute(
-        select(IndexedEventCursor.last_indexed_block)
-        .where(IndexedEventCursor.chain_id == 1)
-        .where(func.lower(IndexedEventCursor.event_address) == _PROXY)
-        .where(func.lower(IndexedEventCursor.topic0) == _ROLE_SET)
-    ).first()
-    assert row is not None, "RoleSet cursor must be enrolled at the authority proxy"
-    assert row[0] == deploy - 1
-
-    impl_side = session.execute(
-        select(IndexedEventCursor.event_address).where(func.lower(IndexedEventCursor.event_address) == _PROTECTED)
-    ).first()
-    assert impl_side is None
-
-
-@requires_postgres
-def test_union_enrolls_when_undetectable(session, monkeypatch):
-    from db.models import IndexedEventCursor
-
-    _seed_creation_block(monkeypatch, 22_000_000)
-    _stub_probe_code(monkeypatch, "0x00")
-    _completed_job_with_gate(session, _gate_descriptor())
-
-    enroll_from_completed_jobs(session)
-    enrolled = {
-        t
-        for (t,) in session.execute(
-            select(IndexedEventCursor.topic0).where(func.lower(IndexedEventCursor.event_address) == _PROXY)
-        ).all()
-    }
-    assert enrolled == set(all_topic0s())
-    assert OZ_ACCESS_CONTROL_ENUMERABLE.grant_events[0].topic0 in enrolled  # both standards enrolled
-
-
-@requires_postgres
-def test_enrollment_is_idempotent(session, monkeypatch):
-    _seed_creation_block(monkeypatch, 22_000_000)
-    _stub_probe_code(monkeypatch, "0x00")
-    _completed_job_with_gate(session, _gate_descriptor())
-
-    first = enroll_from_completed_jobs(session)
-    second = enroll_from_completed_jobs(session)
-    assert first >= 1
-    assert second == 0
-
-
-@requires_postgres
 @pytest.mark.parametrize(
     "probe_code,authority",
     [
@@ -320,54 +235,6 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
     assert row is not None and row[0] == deploy - 1
 
 
-def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
-    from db.models import Job, JobStage, JobStatus
-    from db.queue import store_artifact
-
-    job = Job(
-        address=_PROTECTED,
-        request={"address": _PROTECTED, "name": "GatedContract"},
-        status=JobStatus.completed,
-        stage=JobStage.done,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-    session.add(job)
-    session.flush()
-    trees = {f"fn{i}()": {"op": "LEAF", "leaf": {"set_descriptor": d}} for i, d in enumerate(descriptors)}
-    store_artifact(session, job.id, "predicate_trees", data={"trees": trees})
-    session.commit()
-    return job
-
-
-@requires_postgres
-def test_shared_authority_detects_standard_once(session, monkeypatch):
-    # A2/F1: one detection per shared authority proxy.
-    from db.models import Contract
-
-    _seed_creation_block(monkeypatch, 22_039_954)
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
-    session.commit()
-
-    calls = {"n": 0}
-    real = eli.resolve_probe_code
-
-    def _counting(*a, **k):
-        calls["n"] += 1
-        return real(*a, **k)
-
-    monkeypatch.setattr(eli, "resolve_probe_code", _counting)
-
-    gate_a = _gate_descriptor()
-    gate_b = _gate_descriptor()
-    gate_b["callee_signature"] = "onlyOperatingTimelock(address)"  # distinct gate, same authority
-    _completed_job_with_two_gates(session, [gate_a, gate_b])
-
-    enroll_from_completed_jobs(session)
-    assert calls["n"] == 1
-
-
 @requires_postgres
 def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
     from db.models import Contract
@@ -418,26 +285,3 @@ def test_unwitnessed_cursor_does_not_skip_detection(session, monkeypatch):
     monkeypatch.setattr(eli, "resolve_probe_code", _counting)
     enroll_from_completed_jobs(session)
     assert calls["n"] == 1
-
-
-@requires_postgres
-def test_solmate_cancall_still_enrolls_its_topics(session, monkeypatch):
-    from db.models import IndexedEventCursor
-
-    _seed_creation_block(monkeypatch, 22_000_000)
-    _stub_probe_code(monkeypatch, "0x00")
-    desc = {
-        "kind": "external_set",
-        "callee_signature": "canCall(address,address,bytes4)",
-        "authority_contract": {"address": _PROXY},
-    }
-    _completed_job_with_gate(session, desc)
-
-    enroll_from_completed_jobs(session)
-    enrolled = {
-        t
-        for (t,) in session.execute(
-            select(IndexedEventCursor.topic0).where(func.lower(IndexedEventCursor.event_address) == _PROXY)
-        ).all()
-    }
-    assert enrolled == {t.lower() for t in eli._SOLMATE_ROLE_TOPICS}

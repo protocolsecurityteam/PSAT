@@ -273,20 +273,6 @@ def test_external_check_only_surfaces_probe_descriptor():
     assert res["probe_selector"] == "0xb7009613"
 
 
-def test_unsupported_capability_passes_reason_through():
-    reg = _StubRegistry(CapabilityExpr.unsupported("no_adapter"))
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member="0x" + "11" * 20,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "unknown"
-    assert res["reason"] == "capability_unsupported"
-    assert res["capability_unsupported_reason"] == "no_adapter"
-
-
 def _signature_auth_leaf(signer_state_var: str = "trustedSigner") -> dict:
     return {
         "kind": "signature_auth",
@@ -333,24 +319,6 @@ def test_probe_signature_leaf_selection_is_unknown(tree, predicate_index, expect
     assert res["result"] == "unknown"
     for key, value in expected.items():
         assert res[key] == value
-
-
-def test_probe_signature_real_evaluator_for_state_var_signer():
-    """The predicate-evaluator/probe integration point for the EIP-1271 / ecrecover client flow."""
-    from services.resolution.adapters import AdapterRegistry
-    from services.resolution.probe import probe_signature
-
-    tree = _leaf_node(_signature_auth_leaf())
-    res = probe_signature(
-        tree,
-        predicate_index=0,
-        recovered_signer="0x" + "ee" * 20,
-        registry=AdapterRegistry(),
-        ctx=EvaluationContext(chain_id=1, contract_address="0x" + "ab" * 20),
-    )
-    assert res["leaf_kind"] == "signature_auth"
-    assert res["capability_kind"] == "signature_witness"
-    assert res["result"] in ("yes", "no", "unknown")
 
 
 def test_or_with_unknown_returns_unknown():

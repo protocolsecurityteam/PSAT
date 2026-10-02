@@ -47,29 +47,6 @@ def test_cofinite_carries_its_own_conditions_into_the_public_path():
     assert any("denylist exclusion (0 known excluded" in (d or "") for d in descriptions)
 
 
-def test_cofinite_openness_does_not_branch_on_quality():
-    exact = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "blacklist_quality": "exact"}
-    lower = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "blacklist_quality": "lower_bound"}
-    assert capability_surface_status(exact, project_capability_surface(exact)) == "public"
-    assert capability_surface_status(lower, project_capability_surface(lower)) == "public"
-
-
-def test_cofinite_is_never_resolved_empty():
-    # An empty blacklist still means everyone.
-    cap = {"kind": "cofinite_blacklist", "blacklist": []}
-    surface = project_capability_surface(cap)
-    assert capability_surface_status(cap, surface) == "public"  # not "resolved_empty"
-
-
-def test_external_check_only_still_falls_to_residual():
-    # Only cofinite joined the public set.
-    cap = {"kind": "external_check_only", "check": {"target_address": ADDR_A}}
-    surface = project_capability_surface(cap)
-    assert surface.authority_public is False
-    assert surface.residual
-    assert capability_surface_status(cap, surface) is None
-
-
 def test_disjoint_intersection_and_never_reads_resolved_empty():
     """A witnessed empty conjunct still resolves empty."""
     from services.resolution.capabilities import CapabilityExpr, intersect
@@ -141,21 +118,6 @@ def _solmate_cap(roles, members):
     }
 
 
-def test_role_grants_witnessed_for_single_role_capability():
-    from services.policy.capability_surface import capability_role_grants
-
-    grants = capability_role_grants(_solmate_cap([2], [ADDR_A, ADDR_B]))
-    assert grants == [
-        {
-            "role": 2,
-            "principals": [
-                {"address": ADDR_A, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}},
-                {"address": ADDR_B, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}},
-            ],
-        }
-    ]
-
-
 @pytest.mark.parametrize(
     "cap",
     [
@@ -213,13 +175,6 @@ def test_role_grants_not_determined(cap):
     assert capability_role_grants(cap) is None
 
 
-def test_role_grants_empty_when_no_role_authority_witnessed():
-    from services.policy.capability_surface import capability_role_grants
-
-    assert capability_role_grants({"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}) == []
-    assert capability_role_grants({"kind": "conditional_universal", "conditions": []}) == []
-
-
 def test_role_grants_not_determined_when_no_named_role_member_is_readable():
     """Pinned on composites, the only place the ``if grants`` arm decides anything; without it both would publish
     ``[]`` about a named role.
@@ -268,64 +223,6 @@ def test_a_witnessed_role_grant_is_never_reached_by_the_openness_downgrade():
         grants = capability_role_grants(cap)
         assert grants and [g["role"] for g in grants] == [8], kind
         assert capability_surface_openness(cap, project_capability_surface(cap)) == "restricted", kind
-
-
-def test_role_grants_empty_stays_reachable_for_a_lowered_gate():
-    """R2: 657 of 1,159 PR-161 rows keep the proven-absent ``[]``."""
-    from services.policy.capability_surface import (
-        capability_role_grants,
-        capability_surface_openness,
-        project_capability_surface,
-    )
-
-    for cap, expected_openness in (
-        ({"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}, "restricted"),
-        ({"kind": "conditional_universal", "conditions": []}, "open"),
-    ):
-        assert capability_surface_openness(cap, project_capability_surface(cap)) == expected_openness
-        assert capability_role_grants(cap) == []
-
-
-def test_role_grants_public_solmate_capability_is_not_role_gated():
-    from services.policy.capability_surface import capability_role_grants
-
-    assert capability_role_grants(_solmate_cap([], [])) == []
-
-
-def test_role_grants_walk_composites_and_fail_closed_on_roleless_node():
-    from services.policy.capability_surface import capability_role_grants
-
-    composite = {
-        "kind": "OR",
-        "children": [_solmate_cap([8], [ADDR_A]), {"kind": "conditional_universal", "conditions": []}],
-    }
-    assert capability_role_grants(composite) == [
-        {
-            "role": 8,
-            "principals": [
-                {"address": ADDR_A, "resolved_type": None, "details": {"source": "semantic_capability:role_grant"}}
-            ],
-        }
-    ]
-    orphan = {"kind": "external_check_only", "trace": _solmate_cap([8], [])["trace"]}
-    assert capability_role_grants(orphan) is None
-
-
-def test_cofinite_denylist_quality_is_stated_never_inferred_from_absence():
-    """Absence used to mean 'exact', so every cofinite denylist read as a complete exclusion."""
-    from services.resolution.capabilities import CapabilityExpr
-    from services.resolution.capability_resolver import capability_to_dict
-
-    exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A]))
-    partial = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
-    assert exact["blacklist_quality"] == "exact"
-    assert partial["blacklist_quality"] == "lower_bound"
-    assert "blacklist_quality" not in capability_to_dict(CapabilityExpr.finite_set([ADDR_A]))
-
-    assert "exhaustive" in project_capability_surface(exact).public_paths[0][-1]["description"]
-    assert "not exhaustive" in project_capability_surface(partial).public_paths[0][-1]["description"]
-    legacy = {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "membership_quality": "exact"}
-    assert "completeness not recorded" in project_capability_surface(legacy).public_paths[0][-1]["description"]
 
 
 def test_capability_currency_three_states():

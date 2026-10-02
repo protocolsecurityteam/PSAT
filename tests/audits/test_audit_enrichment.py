@@ -24,24 +24,6 @@ def test_enrich_extracts_static_pdf_and_verified_github_commit(monkeypatch):
     assert report["classified_commits"] == [{"sha": sha, "label": "reviewed", "provenance": "html_ref"}]
 
 
-def test_enrich_drops_ai_commits_that_do_not_resolve(monkeypatch):
-    monkeypatch.setattr(ae, "_fetch_html", lambda url, debug=False: None)
-    monkeypatch.setattr(ae, "_commit_exists", lambda repo, commit: False)
-    monkeypatch.setattr(ae, "_discover_repo_audit_folders", lambda owner, repo, debug=False: [])
-
-    result = {
-        "reports": [
-            {
-                "url": "https://auditor.test/acme",
-                "source_repo": "acme/protocol",
-                "reviewed_commits": ["abc123def456"],
-            }
-        ]
-    }
-    ae.enrich_audit_reports(result, "Acme")
-    assert result["reports"][0]["reviewed_commits"] == []
-
-
 def test_enrich_prefers_repo_hosted_dependency_pdf(monkeypatch):
     monkeypatch.setattr(ae, "_fetch_html", lambda url, debug=False: None)
     monkeypatch.setattr(

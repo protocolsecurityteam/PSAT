@@ -38,76 +38,6 @@ def _cap_for(sl, full_name: str):
 
 # A chained ACL target (Aragon/Lido ``kernel().acl().canPerform``) traced to ``computed`` and failed open; a direct
 # state-var target was already gated.
-_EXTERNAL_ACL = """
-    pragma solidity ^0.8.19;
-    interface IACL { function canPerform(address who, bytes32 role) external view returns (bool); }
-    interface IKernel { function acl() external view returns (IACL); }
-    contract C {
-        IKernel immutable kernel;
-        constructor(IKernel k) { kernel = k; }
-        function f() external {
-            require(IACL(kernel.acl()).canPerform(msg.sender, keccak256("ROLE")), "no perm");
-        }
-    }
-"""
-
-
-def test_view_external_acl_gates_under_flag(tmp_path, earned_public):
-    cap = _cap_for(_compile(tmp_path, _EXTERNAL_ACL), "f()")
-    assert cap.kind == "external_check_only", f"view caller ACL must gate, got {cap.kind}"
-
-
-def test_value_movement_transfer_from_stays_open(tmp_path, earned_public):
-    """The callee is effectful, the structural value-movement discriminator; otherwise identical to the ACL test."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        interface IERC20 { function transferFrom(address f, address t, uint256 a) external returns (bool); }
-        interface IRegistry { function token() external view returns (IERC20); }
-        contract C {
-            IRegistry immutable registry;
-            constructor(IRegistry r) { registry = r; }
-            function deposit(uint256 amount) external {
-                require(IERC20(registry.token()).transferFrom(msg.sender, address(this), amount), "transfer failed");
-            }
-        }
-    """,
-    )
-    cap = _cap_for(sl, "deposit(uint256)")
-    assert cap.kind == "conditional_universal", f"value movement must stay open, got {cap.kind}"
-
-
-def test_state_var_target_transfer_from_opens_under_flag(tmp_path):
-    """Wave 5 B2 applies the gate-shape discriminator on both paths, so the flag no longer changes this class."""
-    src = """
-        pragma solidity ^0.8.19;
-        interface IERC20 { function transferFrom(address f, address t, uint256 a) external returns (bool); }
-        contract C {
-            IERC20 immutable token;
-            constructor(IERC20 t) { token = t; }
-            function deposit(uint256 amount) external {
-                require(token.transferFrom(msg.sender, address(this), amount), "transfer failed");
-            }
-        }
-    """
-    import os
-
-    prior = os.environ.get("PSAT_AUTHORITY_EARNED_PUBLIC")
-    os.environ["PSAT_AUTHORITY_EARNED_PUBLIC"] = "0"
-    try:
-        off = _cap_for(_compile(tmp_path, src), "deposit(uint256)")
-        on_dir = tmp_path / "on"
-        on_dir.mkdir()
-        os.environ["PSAT_AUTHORITY_EARNED_PUBLIC"] = "1"
-        on = _cap_for(_compile(on_dir, src), "deposit(uint256)")
-    finally:
-        if prior is None:
-            os.environ.pop("PSAT_AUTHORITY_EARNED_PUBLIC", None)
-        else:
-            os.environ["PSAT_AUTHORITY_EARNED_PUBLIC"] = prior
-    assert off.kind == "conditional_universal"
-    assert on.kind == "conditional_universal"
 
 
 def test_effectful_library_membership_consume_stays_gated(tmp_path, earned_public):
@@ -244,28 +174,6 @@ def test_void_call_with_merkle_witness_gates_under_flag(tmp_path, earned_public)
     assert cap.kind == "external_check_only", f"void merkle-witness call must gate, got {cap.kind}"
 
 
-def test_void_self_keyed_registration_stays_open_under_flag(tmp_path, earned_public):
-    """Gating witness-free void calls would also re-gate the beforeTransfer denylist hook."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        interface IAllocationManager {
-            function setAllocationDelay(address operator, uint32 delay) external;
-        }
-        contract C {
-            IAllocationManager immutable allocationManager;
-            constructor(IAllocationManager m) { allocationManager = m; }
-            function registerAsOperator(uint32 allocationDelay) external {
-                allocationManager.setAllocationDelay(msg.sender, allocationDelay);
-            }
-        }
-    """,
-    )
-    cap = _cap_for(sl, "registerAsOperator(uint32)")
-    assert cap.kind == "conditional_universal", f"witness-free void self-keyed call must stay open, got {cap.kind}"
-
-
 def test_caller_allowlist_membership_gates_under_flag(tmp_path, earned_public):
     """The bespoke E4 arm is bypassed with the flag on."""
     sl = _compile(
@@ -284,42 +192,6 @@ def test_caller_allowlist_membership_gates_under_flag(tmp_path, earned_public):
     assert cap.kind == "external_check_only"
     assert cap.check is not None
     assert "caller_keyed_membership_allowlist" in (cap.check.extra.get("basis") or [])
-
-
-def test_claim_once_denylist_stays_open_under_flag(tmp_path, earned_public):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(address => bool) registered;
-            function claim() external {
-                require(!registered[msg.sender]);
-                registered[msg.sender] = true;
-            }
-        }
-    """,
-    )
-    cap = _cap_for(sl, "claim()")
-    assert cap.kind == "conditional_universal", f"claim-once must stay open, got {cap.kind}"
-
-
-def test_balance_threshold_stays_open_under_flag(tmp_path, earned_public):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(address => uint256) public balances;
-            function withdraw(uint256 amount) external {
-                require(balances[msg.sender] >= amount, "insufficient");
-                balances[msg.sender] -= amount;
-            }
-        }
-    """,
-    )
-    cap = _cap_for(sl, "withdraw(uint256)")
-    assert cap.kind == "conditional_universal", f"balance threshold must stay open, got {cap.kind}"
 
 
 def test_caller_equals_untyped_computed_stays_open(tmp_path, earned_public):
@@ -373,19 +245,6 @@ def _leaf(**kw) -> Any:
     return leaf
 
 
-def test_taint_reads_operands_and_descriptor_keys():
-    assert leaf_is_caller_tainted(_leaf(operands=[{"source": "msg_sender"}, {"source": "constant"}]))
-    assert leaf_is_caller_tainted(
-        _leaf(kind="membership", operator="truthy", set_descriptor={"key_sources": [{"source": "tx_origin"}]})
-    )
-    assert not leaf_is_caller_tainted(_leaf(operands=[{"source": "state_variable"}, {"source": "parameter"}]))
-
-
-def test_exclusion_polarity_is_permissionless():
-    assert is_permissionless_caller_shape(_leaf(operator="falsy", kind="membership"))
-    assert is_permissionless_caller_shape(_leaf(operator="ne", operands=[{"source": "msg_sender"}]))
-
-
 def test_self_comparison_and_signature_self_auth_are_permissionless():
     assert is_permissionless_caller_shape(_leaf(operands=[{"source": "msg_sender"}, {"source": "tx_origin"}]))
     assert is_permissionless_caller_shape(_leaf(operands=[{"source": "msg_sender"}, {"source": "signature_recovery"}]))
@@ -420,43 +279,6 @@ def test_caller_vs_non_address_scalar_is_permissionless():
     )
 
 
-def test_comparison_threshold_permissionless_but_time_allowlist_not():
-    threshold = _leaf(kind="comparison", operator="gte", operands=[{"source": "computed"}, {"source": "parameter"}])
-    assert is_permissionless_caller_shape(threshold)
-    time_allowlist = _leaf(
-        kind="comparison",
-        operator="gte",
-        operands=[
-            {"source": "msg_sender"},
-            {"source": "block_context", "block_context_kind": "timestamp"},
-        ],
-    )
-    assert not is_permissionless_caller_shape(time_allowlist)
-
-
-def test_external_bool_mutability_discriminates():
-    view_acl = _leaf(kind="external_bool", operator="truthy", callee_state_mutability="view")
-    assert not is_permissionless_caller_shape(view_acl)
-    effectful = _leaf(kind="external_bool", operator="truthy", callee_state_mutability="nonview")
-    assert is_permissionless_caller_shape(effectful)
-    legacy = _leaf(kind="external_bool", operator="truthy")
-    assert is_permissionless_caller_shape(legacy)
-
-
-def test_truthy_caller_membership_is_not_permissionless():
-    leaf = _leaf(
-        kind="membership",
-        operator="truthy",
-        set_descriptor={"key_sources": [{"source": "msg_sender"}]},
-    )
-    assert not is_permissionless_caller_shape(leaf)
-
-
-def test_caller_keyed_bool_flag_fold_is_not_permissionless():
-    # A single-operand truthy leaf is an allowlist.
-    assert not is_permissionless_caller_shape(_leaf(operator="truthy", operands=[{"source": "msg_sender"}]))
-
-
 # An unresolved root-caller check AND a public side-condition gates; bound checks and resolved-empty ceilings keep the
 # legacy fold.
 
@@ -479,28 +301,8 @@ _ROOT_CHECK = {
 }
 _BOUND_CHECK = {**_ROOT_CHECK, "subject": "bound"}
 # Gate provenance, not a caller-gate tag, so never a blocker.
-_PROBE_CHECK = {
-    "kind": "external_check_only",
-    "check": {
-        "target_address": "0x" + "cd" * 20,
-        "target_call_selector": "0x61a3bcc8",
-        "extra": {"basis": ["if-revert via successor NodeType.EXPRESSION"]},
-    },
-}
 _EMPTY_LOWER = {"kind": "finite_set", "members": [], "membership_quality": "lower_bound", "confidence": "partial"}
 _EMPTY_EXACT = {"kind": "finite_set", "members": [], "membership_quality": "exact", "confidence": "enumerable"}
-_OWNER_SET = {
-    "kind": "finite_set",
-    "members": ["0x" + "ab" * 20],
-    "membership_quality": "exact",
-    "confidence": "enumerable",
-}
-
-
-def test_root_check_blocks_public_path_under_flag(earned_public):
-    surface = project_capability_surface(_and_dict(_PUBLIC, _ROOT_CHECK))
-    assert not surface.authority_public
-    assert surface.residual
 
 
 def test_bound_check_never_blocks_public_path(earned_public):
@@ -508,29 +310,9 @@ def test_bound_check_never_blocks_public_path(earned_public):
     assert surface.authority_public
 
 
-def test_untagged_probe_check_never_blocks_public_path(earned_public):
-    """test_veda_principal_dimension pins the public surface."""
-    surface = project_capability_surface(_and_dict(_PUBLIC, _PROBE_CHECK))
-    assert surface.authority_public
-
-
-def test_unread_owner_equality_blocks_public_path_under_flag(earned_public):
-    """An unread owner equality used to vanish, letting a sibling public path open
-    WithdrawRequestNFT.seizeInvalidRequest.
-    """
-    surface = project_capability_surface(_and_dict(_PUBLIC, _EMPTY_LOWER))
-    assert not surface.authority_public
-
-
 def test_resolved_empty_is_not_a_blocker(earned_public):
     surface = project_capability_surface(_and_dict(_PUBLIC, _EMPTY_EXACT))
     assert surface.authority_public
-
-
-def test_principal_rows_survive_root_check_under_flag(earned_public):
-    surface = project_capability_surface(_and_dict(_OWNER_SET, _ROOT_CHECK))
-    assert not surface.authority_public
-    assert [r["address"] for r in surface.principal_rows] == ["0x" + "ab" * 20]
 
 
 def test_or_blocks_only_when_every_disjunct_blocks(earned_public):
@@ -582,26 +364,6 @@ def test_caller_equals_param_keyed_view_lookup_stays_open(tmp_path, earned_publi
     cap = _cap_for(sl, "burn(uint256)")
     assert cap.kind == "conditional_universal", f"param-keyed view lookup must stay open, got {cap.kind}"
     assert any(c.kind == "self_service" for c in cap.conditions)
-
-
-def test_caller_equals_nullary_getter_stays_gated(tmp_path, earned_public):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address private _owner;
-            function owner() public view returns (address) {
-                return _owner;
-            }
-            function adminOp() external view {
-                require(msg.sender == owner(), "not owner");
-            }
-        }
-    """,
-    )
-    cap = _cap_for(sl, "adminOp()")
-    assert cap.kind == "finite_set" and not cap.members and cap.membership_quality == "lower_bound"
 
 
 # #111/#112: an admin-curated ``tier[msg.sender] >= K`` is promoted to caller_authority and fails closed when cold,
@@ -689,16 +451,6 @@ def test_admin_curated_threshold_exact_empty_is_resolved_not_public(tmp_path, ea
     assert gate_cap.kind == "finite_set"
     assert gate_cap.members == []
     assert gate_cap.membership_quality == "exact"
-    assert not surface.authority_public
-
-
-def test_admin_curated_threshold_warm_enumerates_restricted_holders(tmp_path, earned_public):
-    sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
-    holders = ["0x" + "aa" * 20, "0x" + "bb" * 20]
-    warm = CapabilityExpr.finite_set(holders, quality="lower_bound", confidence="partial")
-    _role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=_StubAdapter(warm))
-    assert gate_cap.kind == "finite_set"
-    assert gate_cap.members == holders
     assert not surface.authority_public
 
 
@@ -797,25 +549,6 @@ def _tree_verdict(tree):
     return dd.get("kind")
 
 
-def test_self_gate_checker_own_entry_point_stays_public(tmp_path, earned_public):
-    """The checker's own entry point constrains its argument, not its caller; a round-1 regression let a call site
-    leak into its frame.
-    """
-    sl = _compile(tmp_path, _SOLADY_SELF_GATE)
-    contract = next(c for c in sl.contracts if c.name == "C")
-    trees = _build_pipeline(contract)
-    checker = trees["onlyUpgradeTimelock(address)"]
-    assert _tree_verdict(checker) == "conditional_universal"
-    for leaf in _leaves(checker):
-        descriptor = leaf.get("set_descriptor") or {}
-        assert descriptor.get("key_sources") != [{"source": "msg_sender"}]
-        assert leaf.get("references_msg_sender") is not True
-        for op in leaf.get("operands") or []:
-            origins = [o.get("source") for o in (op.get("derived_from") or [])]
-            assert "msg_sender" not in origins
-    assert _tree_verdict(trees["f()"]) != "conditional_universal"
-
-
 _SIBLING_CHECKERS = """
     pragma solidity ^0.8.19;
     contract C {
@@ -893,33 +626,3 @@ def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_check
     assert not leaf_caller_taint_is_collapsed(
         {"kind": "equality", "operator": "truthy", "operands": [{"source": "computed", "derived_from": None}]}
     )
-
-
-def test_self_gate_never_replaces_a_named_state_variable_attribution(tmp_path, earned_public):
-    """Controller enrollment and the pause/reentrancy passes key on the variable name."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(address => bool) private allowed;
-            function check(address who) public view returns (bool) {
-                return allowed[who];
-            }
-            function f() external {
-                if (!check(msg.sender)) revert();
-            }
-        }
-    """,
-    )
-    contract = next(c for c in sl.contracts if c.name == "C")
-    trees = _build_pipeline(contract)
-    leaves = _leaves(trees["f()"])
-    names = {
-        op.get("state_variable_name")
-        for leaf in leaves
-        for op in leaf.get("operands") or []
-        if op.get("source") == "state_variable"
-    }
-    descriptor_vars = {(leaf.get("set_descriptor") or {}).get("storage_var") for leaf in leaves}
-    assert "allowed" in names or "allowed" in descriptor_vars

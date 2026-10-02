@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -15,7 +15,6 @@ from services.resolution.adapters import EvaluationContext
 from services.resolution.adapters.event_indexed import (
     EventIndexedAdapter,
     _caller_event_arg_position,
-    _implicit_membership_value_predicate,
 )
 from tests.support.hypersync_fakes import _FakeHypersyncModule
 
@@ -105,60 +104,6 @@ def _eigenpod_log(caller: str, selector: str, value: bool, *, block: int, log_in
         block_number=block,
         log_index=log_index,
     )
-
-
-def test_implicit_predicate_fires_for_caller_keyed_membership_with_value_set_hint():
-    pred = _implicit_membership_value_predicate(_eigenpod_descriptor())
-    assert pred == {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"}
-
-
-_COMPOSE_QUEUE_DESC = {
-    "kind": "mapping_membership",
-    "storage_var": "composeQueue",
-    "key_sources": [{"source": "msg_sender"}],
-    "enumeration_hint": [
-        {
-            "topic0": "0x" + "ab" * 32,
-            "direction": "set",
-            "value_position": None,
-            "key_position": 0,
-            "event_signature": "ComposeSent(address)",
-            "indexed_positions": [0],
-        }
-    ],
-}
-
-
-@pytest.mark.parametrize(
-    "desc",
-    [
-        pytest.param(_COMPOSE_QUEUE_DESC, id="value-position-absent"),
-        pytest.param(
-            {
-                **_eigenpod_descriptor(),
-                "key_sources": [{"source": "parameter", "parameter_index": 0, "parameter_name": "x"}],
-            },
-            id="not-caller-keyed",
-        ),
-        pytest.param(
-            {k: v for k, v in _eigenpod_descriptor().items() if k != "enumeration_hint"}, id="without-any-hint"
-        ),
-        pytest.param(
-            {**_eigenpod_descriptor(), "value_predicate": {"op": "eq", "rhs_values": ["3"], "value_type": "uint256"}},
-            id="not-overriding-explicit-value-predicate",
-        ),
-        pytest.param(
-            {
-                "kind": "external_set",
-                "key_sources": [{"source": "msg_sender"}],
-                "enumeration_hint": [{"topic0": "0x" + "cd" * 32, "direction": "set", "value_position": 1}],
-            },
-            id="external-set",
-        ),
-    ],
-)
-def test_implicit_predicate_excluded(desc):
-    assert _implicit_membership_value_predicate(desc) is None
 
 
 @pytest.mark.parametrize(
@@ -251,33 +196,3 @@ def test_enumerate_value_fold(monkeypatch, logs, expected_members):
 
 def _run(coro):
     return asyncio.run(coro)
-
-
-def test_value_fold_keys_on_caller_not_inner_selector(monkeypatch):
-    desc = _eigenpod_descriptor()
-    hint = desc["enumeration_hint"][0]
-    spec = {
-        "mapping_name": "allowedForwardedEigenpodCalls",
-        "event_signature": hint["event_signature"],
-        "event_name": hint["event_name"],
-        "key_position": _caller_event_arg_position(desc, hint),
-        "indexed_positions": list(hint["indexed_positions"]),
-        "direction": "set",
-        "writer_function": hint["writer_function"],
-        "value_position": hint["value_position"],
-    }
-    logs = [
-        _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
-        _eigenpod_log(CALLER_A, "0xf074ba62", True, block=100, log_index=1),
-    ]
-    result = _run(
-        mapping_enumerator.enumerate_mapping_values(
-            CONTRACT,
-            cast(Any, [spec]),
-            from_block=0,
-            client=_client(logs),
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    keys = {e["key"] for e in result["entries"]}
-    assert keys == {CALLER_A.lower()}

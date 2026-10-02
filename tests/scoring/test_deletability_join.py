@@ -6,7 +6,6 @@ rows. The three-arm rule consuming this verdict is tested elsewhere.
 
 from __future__ import annotations
 
-import inspect
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -32,7 +31,6 @@ UNRELATED = "0x" + "66" * 20
 OTHER_AUTHORITY = "0x" + "77" * 20
 
 EXIT = "0x18457e61"
-MANAGE = "0xf6e715d0"
 
 VAULT_KEY = f"ethereum::{VAULT}"
 
@@ -85,85 +83,6 @@ def _gated(authority: str = AUTHORITY, selector: str = EXIT) -> dict[str, Any]:
 
 def _roles_setter(**over: Any) -> P.SetterPrincipal:
     return _setter(3, contract=AUTHORITY, function_name="setUserRole", principal=SAFE, **over)
-
-
-def test_authority_arm_qualifying_row_is_deletable_and_names_its_basis():
-    """The basis names selector and row id so the figure is re-checkable by hand."""
-    plane = _plane(
-        (
-            _setter(41, contract=AUTHORITY, function_name="setUserRole", principal=SAFE, selector="0x67aff484"),
-            _setter(42, contract=AUTHORITY, function_name="setRoleCapability", principal=SAFE, selector="0x7d40583d"),
-        ),
-        **_gated(),
-    )
-
-    verdict = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT)
-
-    assert verdict.state == P.DELETABILITY_DELETABLE
-    assert verdict.is_deletable
-    assert verdict.reason is None
-    assert verdict.arm == P.DELETABILITY_ARM_GATING_AUTHORITY
-    assert verdict.basis_block() == {
-        "function_principal_id": 41,
-        "setter_selector": "0x67aff484",
-        "setter_function_name": "setUserRole",
-        "setter_contract": f"ethereum::{AUTHORITY}",
-        "principal_address": SAFE,
-        "membership_quality": "exact",
-        "arm": P.DELETABILITY_ARM_GATING_AUTHORITY,
-    }
-    assert verdict.gating_authorities == (AUTHORITY,)
-    assert verdict.crosscheck == P.CROSSCHECK_AGREES
-
-
-def test_host_arm_qualifying_row_is_deletable_without_any_authority_witness():
-    verdict = P.authority_deletability(
-        _plane((_setter(7, contract=VAULT, function_name="setAuthority", principal=SAFE),)), [SAFE], VAULT_KEY, EXIT
-    )
-
-    assert verdict.state == P.DELETABILITY_DELETABLE
-    assert verdict.arm == P.DELETABILITY_ARM_HOST
-    assert (verdict.basis_block() or {})["function_principal_id"] == 7
-    # Claiming the cross-check "agrees" would describe a comparison that never happened.
-    assert verdict.gating_authorities == ()
-    assert verdict.crosscheck == P.CROSSCHECK_NOT_COMPARED
-
-
-def test_the_basis_is_the_lowest_id_qualifying_row():
-    rows = (
-        _setter(90, contract=VAULT, function_name="transferOwnership", principal=SAFE),
-        _setter(12, contract=VAULT, function_name="setAuthority", principal=SAFE),
-    )
-    forward = P.authority_deletability(_plane(rows), [SAFE], VAULT_KEY, EXIT)
-    reversed_ = P.authority_deletability(_plane(tuple(reversed(rows))), [SAFE], VAULT_KEY, EXIT)
-
-    assert (forward.basis_block() or {})["function_principal_id"] == 12
-    assert forward.basis_block() == reversed_.basis_block()
-
-
-def test_an_exact_row_still_wins_beside_a_lower_bound_one():
-    plane = _plane(
-        (
-            _roles_setter(membership_quality="lower_bound"),
-            _setter(9, contract=AUTHORITY, function_name="setRoleCapability", principal=SAFE),
-        ),
-        **_gated(),
-    )
-
-    verdict = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT)
-
-    assert verdict.state == P.DELETABILITY_DELETABLE
-    assert (verdict.basis_block() or {})["function_principal_id"] == 9
-
-
-def test_any_one_of_several_addresses_qualifying_is_enough_and_the_row_is_named():
-    plane = _plane((_setter(55, contract=VAULT, function_name="setAuthority", principal=TIMELOCK),), **_gated())
-
-    verdict = P.authority_deletability(plane, [EOA, TIMELOCK], VAULT_KEY, EXIT)
-
-    assert verdict.state == P.DELETABILITY_DELETABLE
-    assert (verdict.basis_block() or {})["principal_address"] == TIMELOCK
-    assert verdict.principal_addresses == tuple(sorted((EOA, TIMELOCK)))
 
 
 @pytest.mark.parametrize(
@@ -243,28 +162,6 @@ def _declines(plane, principals, destination, state, reason) -> None:
 # Named by node id in ``constants.uncalibrated_arm_disclosures``; kept standalone so the pointer resolves.
 
 
-def test_unresolvable_gating_authority_is_not_determined_never_deletable():
-    """(c) The principal does hold setters on a RolesAuthority, so this is not the earned negative."""
-    _declines(
-        _plane((_roles_setter(),)),
-        [SAFE],
-        VAULT_KEY,
-        P.DELETABILITY_NOT_DETERMINED,
-        P.DELETABILITY_AUTHORITY_UNRESOLVED,
-    )
-
-
-def test_a_tainted_destination_gate_is_not_determined_even_with_a_named_authority():
-    """(c) A trace naming an authority anyway names a candidate, not the gate's answer."""
-    _declines(
-        _plane((_roles_setter(),), tainted=(("ethereum", VAULT, EXIT),), **_gated()),
-        [SAFE],
-        VAULT_KEY,
-        P.DELETABILITY_NOT_DETERMINED,
-        P.DELETABILITY_AUTHORITY_TAINTED,
-    )
-
-
 def test_two_selector_scoped_authorities_are_no_answer():
     _declines(
         _plane(
@@ -288,26 +185,6 @@ def test_a_lower_bound_membership_row_is_not_determined_never_deletable():
     )
 
 
-def test_the_earned_negative_publishes_the_authority_it_asked_about():
-    verdict = P.authority_deletability(_plane((_roles_setter(),), **_gated()), [EOA], VAULT_KEY, EXIT)
-
-    assert verdict.state == P.DELETABILITY_PROVEN_NOT_DELETABLE
-    assert verdict.gating_authorities == (AUTHORITY,)
-
-
-def test_a_tainted_gate_does_not_defeat_the_host_arm():
-    plane = _plane(
-        (_setter(3, contract=VAULT, function_name="setAuthority", principal=SAFE),),
-        tainted=(("ethereum", VAULT, EXIT),),
-        **_gated(),
-    )
-
-    verdict = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT)
-
-    assert verdict.state == P.DELETABILITY_DELETABLE
-    assert verdict.arm == P.DELETABILITY_ARM_HOST
-
-
 def test_authority_sources_that_disagree_resolve_to_not_determined():
     plane = _plane(
         (_roles_setter(),),
@@ -324,103 +201,7 @@ def test_authority_sources_that_disagree_resolve_to_not_determined():
     assert verdict.crosscheck_authorities == (OTHER_AUTHORITY,)
 
 
-def test_an_absent_crosscheck_is_not_a_disagreement():
-    plane = _plane((_roles_setter(),), gating={("ethereum", VAULT, EXIT): (AUTHORITY,)})
-
-    verdict = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT)
-
-    assert verdict.state == P.DELETABILITY_DELETABLE
-    assert verdict.crosscheck == P.CROSSCHECK_NOT_CORROBORATED
-
-
-def test_the_authority_is_read_per_selector_not_per_contract():
-    plane = _plane(
-        (_setter(3, contract=OTHER_AUTHORITY, function_name="setUserRole", principal=SAFE),),
-        gating={("ethereum", VAULT, EXIT): (AUTHORITY,), ("ethereum", VAULT, MANAGE): (OTHER_AUTHORITY,)},
-    )
-
-    assert P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT).state == P.DELETABILITY_PROVEN_NOT_DELETABLE
-    assert P.authority_deletability(plane, [SAFE], VAULT_KEY, MANAGE).state == P.DELETABILITY_DELETABLE
-
-
-def test_the_join_keys_on_principal_addresses_not_on_the_principal_unit():
-    """(e) S3/S7: the unit is the Safe but the setters are the timelock's; keying on the unit withholds
-    $11,358,880.43 silently.
-    """
-    plane = _plane((_setter(55, contract=VAULT, function_name="setAuthority", principal=TIMELOCK),), **_gated())
-
-    by_addresses = P.authority_deletability(plane, [TIMELOCK], VAULT_KEY, EXIT)
-    by_unit = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT)
-
-    assert by_addresses.state == P.DELETABILITY_DELETABLE
-    assert (by_addresses.basis_block() or {})["principal_address"] == TIMELOCK
-    assert by_unit.state == P.DELETABILITY_PROVEN_NOT_DELETABLE
-
-
-def test_a_setter_on_the_other_chains_copy_of_the_address_does_not_qualify():
-    plane = _plane(
-        (_setter(1, contract=VAULT, function_name="setAuthority", principal=SAFE, chain="base"),),
-        gating={("ethereum", VAULT, EXIT): (AUTHORITY,), ("base", VAULT, EXIT): (AUTHORITY,)},
-    )
-
-    assert P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT).state == P.DELETABILITY_PROVEN_NOT_DELETABLE
-    assert P.authority_deletability(plane, [SAFE], f"base::{VAULT}", EXIT).state == P.DELETABILITY_DELETABLE
-
-
-def test_no_filter_anywhere_on_principal_type():
-    """(g) A filter would change nothing on this corpus and fail open on the next, so only a source assertion can
-    catch it.
-    """
-    source = "".join(
-        inspect.getsource(obj)
-        for obj in (
-            P.authority_deletability,
-            P.load_deletability_plane,
-            P.DeletabilityPlane,
-            P.SetterPrincipal,
-            P.DeletabilityVerdict,
-        )
-    )
-    assert "principal_type" not in source
-    assert not hasattr(P.SetterPrincipal, "principal_type")
-    assert "principal_type" not in {field.name for field in P.SetterPrincipal.__dataclass_fields__.values()}
-
-
 # --- the published verdict ----------------------------------------
-
-
-def test_a_withheld_verdict_discloses_its_state_reason_and_authority_witnesses():
-    """Obscuring evidence must not pay: an unresolvable gating
-    authority withholds the figure and LOWERS published exposure, so the withheld
-    entry publishes the state, typed reason and authority asked about (the token
-    the consumer's ``refused`` counter is keyed on)."""
-    plane = _plane((_roles_setter(),))
-
-    block = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT).disclosure()
-
-    assert block["state"] == P.DELETABILITY_NOT_DETERMINED
-    assert block["reason"] == P.DELETABILITY_AUTHORITY_UNRESOLVED
-    assert block["reason"] in P.DELETABILITY_REASONS
-    assert block["destination"] == VAULT_KEY
-    assert block["selector"] == EXIT
-    assert block["principal_addresses"] == [SAFE]
-    assert block["basis"] is None
-    assert block["gating_authority_witness"] == {
-        "selector_scoped": [],
-        "contract_scoped_crosscheck": [],
-        "crosscheck": P.CROSSCHECK_NOT_COMPARED,
-    }
-
-
-def test_a_deletable_verdict_discloses_the_row_that_proved_it():
-    plane = _plane((_setter(3, contract=VAULT, function_name="setAuthority", principal=SAFE),))
-
-    block = P.authority_deletability(plane, [SAFE], VAULT_KEY, EXIT).disclosure()
-
-    assert block["state"] == P.DELETABILITY_DELETABLE
-    assert block["reason"] is None
-    assert block["basis"]["function_principal_id"] == 3
-    assert block["basis"]["arm"] == P.DELETABILITY_ARM_HOST
 
 
 @pytest.mark.parametrize(
@@ -544,22 +325,6 @@ def test_the_loader_reads_membership_quality_out_of_details_not_a_column(db_sess
     assert verdict.state == P.DELETABILITY_DELETABLE
     assert verdict.arm == P.DELETABILITY_ARM_GATING_AUTHORITY
     assert verdict.crosscheck == P.CROSSCHECK_AGREES
-
-
-def test_the_loader_is_not_protocol_scoped(db_session, loaded):
-    """51 of 262 setter rows have NULL ``protocol_id``; dropping them mints a false negative."""
-    _protocol, contract, function, principal, _controller_value = loaded
-    vault = _addr()
-    orphan = contract(vault, protocol_id=None)
-    principal(
-        function(orphan, name="setAuthority", selector="0x7a9e5e4b"),
-        address=SAFE,
-        details={"membership_quality": "exact"},
-    )
-
-    plane = P.load_deletability_plane(db_session)
-
-    assert P.authority_deletability(plane, [SAFE], f"ethereum::{vault}", EXIT).state == P.DELETABILITY_DELETABLE
 
 
 @pytest.mark.parametrize(

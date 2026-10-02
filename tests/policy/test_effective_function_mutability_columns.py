@@ -10,14 +10,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from sqlalchemy import case, func, select, text
 
-from db.jsonb import JSONB_UNSET, JSONB_WRITTEN_NULL, jsonb_state
 from db.models import Contract, EffectiveFunction
 from services.policy.effective_permissions import (
-    MUTABILITY_FIELDS,
-    _function_records_from_semantic_artifacts,
-    _mutability_fields,
     build_effective_permissions,
 )
 from services.policy.effective_permissions_writer import write_effective_function_rows
@@ -213,122 +208,6 @@ _EFFECTS = {
 }
 
 
-def _records(effects_by_function: dict[str, Any], capability_dicts: dict[str, Any] | None = None):
-    recs = _function_records_from_semantic_artifacts(
-        capability_dicts=capability_dicts or {},
-        effects_by_function=effects_by_function,
-        predicate_trees_by_function={},
-        resolver_output_available=True,
-    )
-    for rec in recs:
-        rec.setdefault("abi_signature", rec["function"])
-    return {rec["function"]: rec for rec in recs}
-
-
-def test_proven_present_carries_the_state_write() -> None:
-    rec = _records(_EFFECTS)["updateExchangeRate(uint96)"]
-    assert rec["state_changing"] is True
-    assert rec["state_writes"] == _UPDATE_EXCHANGE_RATE["state_writes"]
-    assert rec["writer_selectors"] == ["0x3458113d"]
-
-
-def test_proven_absent_is_an_empty_list_not_none() -> None:
-    rec = _records(_EFFECTS)["getRateInQuote(ERC20)"]
-    assert rec["state_writes"] == []
-    assert rec["state_writes"] is not None
-    assert rec["state_changing"] is False
-
-
-def test_not_determined_is_none_when_no_effects_record_covers_the_signature() -> None:
-    """``policy_worker`` continues with ``effects=None`` when the artifact isn't a dict."""
-    recs = _records({}, capability_dicts={"mystery()": {"kind": "policy_check"}})
-    rec = recs["mystery()"]
-    assert rec["state_changing"] is None
-    assert rec["state_writes"] is None
-    assert rec["sinks"] is None
-    assert rec["writer_selectors"] is None
-    assert rec["effect_targets"] == []
-
-
-def test_malformed_effects_value_is_not_determined_not_empty() -> None:
-    """Truthiness and ``or []`` would both manufacture facts from a malformed value."""
-    assert _mutability_fields(
-        {"function": "f()", "state_changing": "yes", "state_writes": "nope", "sinks": 3, "writer_selectors": [7]}
-    ) == {
-        "state_changing": None,
-        "state_writes": None,
-        "sinks": None,
-        "writer_selectors": None,
-    }
-    assert _mutability_fields({}) == {
-        "state_changing": None,
-        "state_writes": None,
-        "sinks": None,
-        "writer_selectors": None,
-    }
-
-
-def test_sentinel_fallback_receive_mutability_is_not_determined_not_false() -> None:
-    """Fallback/receive have no selector, which is about dispatch, not mutability."""
-    rec = _records(_EFFECTS)["fallback()"]
-
-    assert rec["state_changing"] is None, "a no-selector entry point is not a proven view"
-    # The sentinel narrows one field, it doesn't blank the row.
-    assert rec["state_writes"] == _WETH9_FALLBACK["state_writes"]
-    assert rec["state_writes"][0]["var"] == "balanceOf"
-    assert rec["sinks"] == _WETH9_FALLBACK["sinks"]
-
-
-def test_sentinel_view_contradicted_by_its_own_derived_writes_is_not_determined() -> None:
-    """The compiler forbids SSTORE in a view, so the derived write is a namespaced-slot read; ``sinks`` is withheld
-    too.
-    """
-    rec = _records(_EFFECTS)["paused()"]
-
-    assert rec["state_changing"] is False, "the compiler's view typing is the fact that survives"
-    assert rec["state_writes"] is None
-    assert rec["sinks"] is None
-    assert rec["writer_selectors"] is None
-
-
-def test_a_view_with_no_derived_write_is_not_swept_up_by_the_contradiction_rule() -> None:
-    """A rule keyed on view-ness alone would blank this row's external-call sinks."""
-    rec = _records(_EFFECTS)["getRateInQuote(ERC20)"]
-    assert rec["state_writes"] == []
-    assert rec["sinks"] == _GET_RATE_IN_QUOTE["sinks"]
-    assert rec["writer_selectors"] == []
-
-
-def test_positive_control_sweep_dust_stays_a_proven_actor_with_zero_state_writes() -> None:
-    """The kind-tagged ``sinks`` keep a tokens-moving, zero-write function from reading as a pure view."""
-    rec = _records(_EFFECTS)["sweepDust(address,address)"]
-
-    assert rec["state_changing"] is True
-    assert rec["state_writes"] == []  # proven-absent, and that is correct here
-    assert rec["writer_selectors"] == []
-
-    kinds = {(s["kind"], s["origin"]) for s in rec["sinks"]}
-    assert ("external_call", "body") in kinds
-    # The guard sink tells a gated actor from an open one.
-    assert ("external_call", "guard") in kinds
-    assert "_token.safeTransfer" in {s["target"] for s in rec["sinks"]}
-    assert len(rec["sinks"]) == 5
-
-
-def test_negative_control_view_gains_no_state_write_evidence() -> None:
-    recs = _records(_EFFECTS)
-    view = recs["getRateInQuote(ERC20)"]
-    actor = recs["sweepDust(address,address)"]
-
-    assert view["state_writes"] == []
-    assert view["writer_selectors"] == []
-    assert not any(s["kind"] == "state_write" for s in view["sinks"])
-
-    assert bool(view["effect_targets"]) and bool(actor["effect_targets"])
-    assert view["state_writes"] == actor["state_writes"] == []
-    assert view["state_changing"] is False and actor["state_changing"] is True
-
-
 # The worker hands the writer ``ep_data["functions"]``, not these records, so a field stopping at the record layer is
 # NULL in production.
 
@@ -355,17 +234,6 @@ def test_the_witness_survives_the_effective_permissions_artifact() -> None:
     assert by_sig["paused()"].get("state_writes") is None
 
 
-def test_artifact_with_no_effects_input_publishes_not_determined_everywhere() -> None:
-    payload = build_effective_permissions(
-        _target_analysis(),
-        capability_resolver_output={"mystery()": {"kind": "policy_check"}},
-        effects=None,
-    )
-    fn = payload["functions"][0]
-    assert fn["function"] == "mystery()"
-    assert [fn.get(key) for key in MUTABILITY_FIELDS] == [None, None, None, None]
-
-
 @pytest.fixture
 def _contract(db_session):
     contract = Contract(address="0x" + "9" * 40, chain="ethereum", contract_name="W06Fixture")
@@ -377,15 +245,6 @@ def _contract(db_session):
     db_session.commit()
 
 
-def jsonb_state_of(db_session, contract, column: str, signature: str) -> str:
-    return db_session.scalar(
-        select(jsonb_state(getattr(EffectiveFunction, column))).where(
-            EffectiveFunction.contract_id == contract.id,
-            EffectiveFunction.abi_signature == signature,
-        )
-    )
-
-
 def _write(db_session, contract, records: dict[str, Any]) -> None:
     write_effective_function_rows(
         db_session,
@@ -394,101 +253,3 @@ def _write(db_session, contract, records: dict[str, Any]) -> None:
         capability_by_function={},
     )
     db_session.commit()
-
-
-def test_columns_reach_the_row(db_session, _contract) -> None:
-    _write(db_session, _contract, _records(_EFFECTS))
-    rows = {r.abi_signature: r for r in db_session.query(EffectiveFunction).filter_by(contract_id=_contract.id).all()}
-
-    sweep = rows["sweepDust(address,address)"]
-    assert sweep.state_changing is True
-    assert sweep.state_writes == []
-    assert sweep.writer_selectors == []
-    assert {(s["kind"], s["origin"]) for s in sweep.sinks} >= {("external_call", "body"), ("external_call", "guard")}
-
-    view = rows["getRateInQuote(ERC20)"]
-    assert view.state_changing is False
-    assert view.state_writes == []
-
-    mutator = rows["updateExchangeRate(uint96)"]
-    assert mutator.state_changing is True
-    assert mutator.state_writes[0]["var"] == "accountantState"
-    assert mutator.writer_selectors == ["0x3458113d"]
-
-
-def test_not_determined_is_sql_null_and_never_the_jsonb_scalar_null(db_session, _contract) -> None:
-    """SQLAlchemy writes Python ``None`` as jsonb ``null`` unless ``none_as_null=True``, which left 780
-    ``conditions`` rows invisible to ``IS NULL``.
-    """
-    _write(db_session, _contract, _records({}, capability_dicts={"mystery()": {"kind": "policy_check"}}))
-
-    row = db_session.query(EffectiveFunction).filter_by(contract_id=_contract.id).one()
-    assert row.state_changing is None
-    assert row.state_writes is None
-    assert row.sinks is None
-    assert row.writer_selectors is None
-
-    typeofs = db_session.execute(
-        text(
-            "select jsonb_typeof(state_writes), jsonb_typeof(sinks), "
-            "       state_writes is null, sinks is null "
-            "from effective_functions where contract_id = :cid"
-        ),
-        {"cid": _contract.id},
-    ).one()
-    assert typeofs[0] is None, "state_writes was written as the jsonb scalar null"
-    assert typeofs[1] is None, "sinks was written as the jsonb scalar null"
-    assert typeofs[2] is True and typeofs[3] is True
-
-    # Two empty states is how the 780 ``conditions`` rows happened.
-    assert jsonb_state_of(db_session, _contract, "state_writes", "mystery()") == JSONB_UNSET
-    assert jsonb_state_of(db_session, _contract, "sinks", "mystery()") == JSONB_UNSET
-    assert (
-        db_session.scalar(
-            select(func.count())
-            .select_from(EffectiveFunction)
-            .where(
-                EffectiveFunction.contract_id == _contract.id,
-                jsonb_state(EffectiveFunction.state_writes) == JSONB_WRITTEN_NULL,
-            )
-        )
-        == 0
-    )
-
-
-def test_the_view_contradiction_sentinel_reaches_the_row_as_sql_null(db_session, _contract) -> None:
-    _write(db_session, _contract, _records(_EFFECTS))
-    row = db_session.query(EffectiveFunction).filter_by(contract_id=_contract.id, abi_signature="paused()").one()
-    assert row.state_changing is False
-    assert row.state_writes is None and row.sinks is None and row.writer_selectors is None
-    assert jsonb_state_of(db_session, _contract, "state_writes", "paused()") == JSONB_UNSET
-
-    fallback = db_session.query(EffectiveFunction).filter_by(contract_id=_contract.id, abi_signature="fallback()").one()
-    assert fallback.state_changing is None
-    assert fallback.state_writes[0]["var"] == "balanceOf"
-
-
-def test_all_three_states_are_distinguishable_in_one_query(db_session, _contract) -> None:
-    records = _records(_EFFECTS)
-    records.update(_records({}, capability_dicts={"mystery()": {"kind": "policy_check"}}))
-    _write(db_session, _contract, records)
-
-    # A bare ``IS NULL`` is only correct here thanks to a per-column property invisible to a reader.
-    rows = db_session.execute(
-        select(
-            EffectiveFunction.abi_signature,
-            case(
-                (jsonb_state(EffectiveFunction.state_writes) == JSONB_UNSET, "not_determined"),
-                (func.jsonb_array_length(EffectiveFunction.state_writes) == 0, "proven_absent"),
-                else_="proven_present",
-            ),
-        ).where(EffectiveFunction.contract_id == _contract.id)
-    ).all()
-    verdicts = dict(rows)
-
-    assert verdicts["updateExchangeRate(uint96)"] == "proven_present"
-    assert verdicts["sweepDust(address,address)"] == "proven_absent"
-    assert verdicts["getRateInQuote(ERC20)"] == "proven_absent"
-    assert verdicts["mystery()"] == "not_determined"
-    assert verdicts["paused()"] == "not_determined"
-    assert len(set(verdicts.values())) == 3

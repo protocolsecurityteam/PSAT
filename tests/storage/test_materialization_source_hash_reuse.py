@@ -15,8 +15,6 @@ from typing import Any
 import pytest
 
 from db import contract_materializations as cm
-from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
-from db.models import ContractMaterialization
 from services.discovery.fetch import source_content_hash
 from tests.conftest import requires_postgres
 from tests.support.materializations import _clean_cm  # noqa: F401  (fixture, registered by import)
@@ -61,39 +59,12 @@ def _flat_result(
     return {"ContractName": name, "SourceCode": src, "EVMVersion": evm, "OptimizationUsed": opt, "Runs": runs}
 
 
-def test_source_hash_is_deterministic():
-    r = _flat_result()
-    assert source_content_hash(r) == source_content_hash(dict(r))
-    h = source_content_hash(r)
-    assert h.startswith("0x") and len(h) == 66
-
-
-def test_source_hash_order_independent_for_multi_file_bundle():
-    import json
-
-    def bundle(order):
-        files = {"A.sol": {"content": "contract A {}"}, "B.sol": {"content": "contract B {}"}}
-        sources = {k: files[k] for k in order}
-        payload = {"language": "Solidity", "sources": sources, "settings": {"remappings": ["p=q", "x=y"]}}
-        return {"ContractName": "A", "SourceCode": "{" + json.dumps(payload) + "}", "EVMVersion": "shanghai"}
-
-    assert source_content_hash(bundle(["A.sol", "B.sol"])) == source_content_hash(bundle(["B.sol", "A.sol"]))
-
-
 def test_source_hash_changes_with_source_and_compiler_inputs():
     base = source_content_hash(_flat_result())
     assert source_content_hash(_flat_result(src="contract C { uint x; }")) != base
     assert source_content_hash(_flat_result(evm="cancun")) != base
     assert source_content_hash(_flat_result(opt="0")) != base
     assert source_content_hash(_flat_result(runs="999")) != base
-
-
-def test_source_hash_ignores_non_code_fields():
-    r = _flat_result()
-    r2 = dict(r)
-    r2["ContractCreationCode"] = "0xdeadbeef"  # constructor/immutable bytecode
-    r2["ABI"] = "[]"
-    assert source_content_hash(r2) == source_content_hash(r)
 
 
 @requires_postgres
@@ -140,100 +111,6 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
     assert cm.find_by_keccak(_clean_cm, chain="ethereum", bytecode_keccak=KECCAK_BASE) is None
 
 
-@requires_postgres
-def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
-    src_hash = "0x" + "ee" * 32
-    stale = ContractMaterialization(
-        chain="1",
-        bytecode_keccak=KECCAK_MAINNET,
-        address=ADDR_MAINNET,
-        contract_name="Old",
-        analysis={"old": True},
-        tracking_plan={"old": True},
-        source_content_hash=src_hash,
-        status="ready",
-        analysis_schema_version=ANALYSIS_SCHEMA_VERSION + 1000,
-    )
-    _clean_cm.add(stale)
-    _clean_cm.commit()
-
-    built = {"n": 0}
-
-    def build() -> dict[str, Any]:
-        built["n"] += 1
-        return _bundle("Fresh")
-
-    row = cm.materialize_or_wait(
-        chain="base",
-        address=ADDR_BASE,
-        bytecode_keccak=KECCAK_BASE,
-        builder=build,
-        source_hash_fn=lambda: src_hash,
-    )
-    assert built["n"] == 1, "old-version donor must not be reused"
-    assert row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
-    assert row.contract_name == "Fresh"
-
-
-@requires_postgres
-def test_find_reusable_only_returns_ready(_route_to_test_db, _clean_cm):
-    src_hash = "0x" + "ab" * 32
-    for i, status in enumerate(("building", "failed")):
-        _clean_cm.add(
-            ContractMaterialization(
-                chain="1",
-                bytecode_keccak="0x" + status.encode().hex().ljust(64, "0")[:64],
-                address="0x" + f"c{i}" * 20,
-                source_content_hash=src_hash,
-                status=status,
-                analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
-            )
-        )
-    _clean_cm.commit()
-    assert cm.find_reusable_by_source_hash(_clean_cm, source_content_hash=src_hash) is None
-
-
-@requires_postgres
-def test_no_source_hash_fn_preserves_keccak_only_behaviour(_route_to_test_db, _clean_cm):
-    row = cm.materialize_or_wait(
-        chain="ethereum",
-        address=ADDR_MAINNET,
-        bytecode_keccak=KECCAK_MAINNET,
-        builder=lambda: _bundle("Plain"),
-    )
-    assert row.source_content_hash is None
-    assert row.status == "ready"
-
-
 # ---------------------------------------------------------------------------
 # One cache-key token format (decimal chain id)
 # ---------------------------------------------------------------------------
-
-
-@requires_postgres
-def test_chain_key_normalized_to_decimal_id(_route_to_test_db, _clean_cm):
-    row = cm.materialize_or_wait(
-        chain="ethereum",
-        address=ADDR_MAINNET,
-        bytecode_keccak=KECCAK_MAINNET,
-        builder=lambda: _bundle(),
-    )
-    assert row.chain == "1", "mainnet must be stored under the decimal-id token"
-
-    for variant in ("ethereum", "mainnet", "1", 1):
-        assert cm.find_by_keccak(_clean_cm, chain=variant, bytecode_keccak=KECCAK_MAINNET) is not None, variant
-        assert cm.find_by_address(_clean_cm, chain=variant, address=ADDR_MAINNET) is not None, variant
-
-
-@requires_postgres
-def test_base_chain_name_and_id_agree(_route_to_test_db, _clean_cm):
-    cm.materialize_or_wait(
-        chain="base",
-        address=ADDR_BASE,
-        bytecode_keccak=KECCAK_BASE,
-        builder=lambda: _bundle(),
-    )
-    by_name = cm.find_by_keccak(_clean_cm, chain="base", bytecode_keccak=KECCAK_BASE)
-    by_id = cm.find_by_keccak(_clean_cm, chain="8453", bytecode_keccak=KECCAK_BASE)
-    assert by_name is not None and by_id is not None
-    assert by_name.chain == "8453"

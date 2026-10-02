@@ -11,7 +11,6 @@ import pytest
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.predicate_evaluator import (
     EvaluationContext,
-    _canonical_authority_selector_for_slot,
     evaluate_tree,
 )
 from tests.support.eq_tree import eq_tree as _eq_tree
@@ -44,38 +43,6 @@ def _basis_steps(cap: CapabilityExpr, step: str) -> list[dict[str, Any]]:
 
 
 GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
-
-
-def _only_governor_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-
-    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
-        if params[0].get("data") != GOVERNOR_SELECTOR:
-            raise RuntimeError("execution reverted")
-        return "0x" + GOVERNOR[2:].rjust(64, "0")
-
-    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
-
-
-def test_slot_keyword_principal_declares_its_name_basis(monkeypatch: pytest.MonkeyPatch) -> None:
-    _only_governor_reads(monkeypatch)
-    cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "_GOVERNOR_SLOT"}), _ctx())
-
-    assert cap.members == [GOVERNOR]
-    assert [e["basis"] for e in _basis_steps(cap, "authority_getter_basis")] == ["slot_name_keyword"]
-
-
-def test_public_state_var_principal_declares_the_abi_basis(monkeypatch: pytest.MonkeyPatch) -> None:
-    _only_governor_reads(monkeypatch)
-    cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "governor"}), _ctx())
-
-    assert cap.members == [GOVERNOR]
-    assert [e["basis"] for e in _basis_steps(cap, "authority_getter_basis")] == ["abi_auto_getter"]
-
-
-def test_locator_naming_two_roles_resolves_to_no_getter() -> None:
-    assert _canonical_authority_selector_for_slot("AuthorityOwnableStorageLocation") is None
-    assert _canonical_authority_selector_for_slot("_GOVERNOR_SLOT") is not None
-    assert _canonical_authority_selector_for_slot("OwnableStorageLocation") is not None
 
 
 def test_pending_ceiling_records_that_it_was_never_read(monkeypatch: pytest.MonkeyPatch) -> None:

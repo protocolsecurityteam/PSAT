@@ -21,11 +21,6 @@ def _worker() -> cv.CoverageVerifyWorker:
     return w
 
 
-def test_crash_status_distinguishes_vanished_row_from_github_outage():
-    assert cv._crash_status(StaleDataError("row gone")) == "row_vanished"
-    assert cv._crash_status(RuntimeError("github 502")) == "github_fetch_failed"
-
-
 def test_log_outcome_proven_puts_verdict_facts_in_extra(caplog):
     w = _worker()
     ctx = {

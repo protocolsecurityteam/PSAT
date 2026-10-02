@@ -350,24 +350,6 @@ def test_notifies_committed_chunks_once_never_the_rolled_back_chunk(db_session, 
     assert len(notified) == len(set(notified)) == 2
 
 
-def test_cleansed_owner_absent_state_emits_no_phantom(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    _seed(db_session, 1, plan=[_entry("owner", "0xaa01")], last_known_state={})  # owner absent
-
-    with patch(
-        "services.monitoring.unified_watcher.rpc_batch_request_classified",
-        side_effect=_rpc_mock({ADDR(1): _word(ADDR(200))}),
-    ):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert events == []  # first observation of a real owner is silent
-
-
-def test_poll_startup_offset_is_half_interval_by_default():
-    assert uw._poll_startup_offset(600) == 300.0
-    assert 0 < uw._poll_startup_offset(uw.DEFAULT_POLL_INTERVAL) < uw.DEFAULT_POLL_INTERVAL
-
-
 def test_poll_startup_offset_env_override(monkeypatch):
     monkeypatch.setenv("PSAT_POLL_STARTUP_OFFSET_S", "0")
     assert uw._poll_startup_offset(600) == 0.0

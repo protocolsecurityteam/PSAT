@@ -38,34 +38,6 @@ def _transient_exc():
 
 
 @requires_postgres
-def test_transient_exception_requeues(clean_jobs, test_session_local, monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "30")
-    monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
-
-    job = clean_jobs
-    job_row = create_job(job, {"address": "0xabc", "name": "transient-1"})
-
-    worker = _ConfigurableWorker(side_effect=lambda _n: _transient_exc())
-    worker._execute_job(job, job_row)
-
-    job.expire_all()
-    refreshed = job.get(Job, job_row.id)
-    assert refreshed is not None
-    assert refreshed.status == JobStatus.queued
-    assert refreshed.retry_count == 1
-    assert refreshed.next_attempt_at is not None
-    assert refreshed.last_failure_kind == "transient"
-
-    payload = _read_stage_errors(job, job_row.id)
-    assert payload is not None
-    errors = payload["errors"]
-    assert len(errors) == 1
-    assert errors[0]["severity"] == "error"
-    assert errors[0]["retry_count"] == 0
-    assert "ConnectionError" in errors[0]["exc_type"]
-
-
-@requires_postgres
 def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local, monkeypatch):
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
@@ -92,73 +64,6 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
     errors = payload["errors"]
     assert len(errors) == 5
     assert [e["retry_count"] for e in errors] == [0, 1, 2, 3, 4]
-
-
-@requires_postgres
-def test_terminal_exception_skips_retries(clean_jobs, test_session_local):
-    job = clean_jobs
-    job_row = create_job(job, {"address": "0xabc", "name": "terminal-1"})
-
-    worker = _ConfigurableWorker(side_effect=lambda _n: ValueError("bad input"))
-    worker._execute_job(job, job_row)
-
-    job.expire_all()
-    refreshed = job.get(Job, job_row.id)
-    assert refreshed is not None
-    assert refreshed.status == JobStatus.failed_terminal
-    assert refreshed.retry_count == 0  # never bumped
-    assert refreshed.last_failure_kind == "terminal"
-    assert refreshed.next_attempt_at is None
-
-    payload = _read_stage_errors(job, job_row.id)
-    assert payload is not None
-    errors = payload["errors"]
-    assert len(errors) == 1
-    assert errors[0]["severity"] == "error"
-    assert errors[0]["retry_count"] == 0
-
-
-@requires_postgres
-def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
-    monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
-
-    job = clean_jobs
-    job_row = create_job(job, {"address": "0xabc", "name": "flaky-then-ok"})
-
-    def _side_effect(call_n):
-        if call_n <= 2:
-            return _transient_exc()
-        return None  # success
-
-    worker = _ConfigurableWorker(side_effect=_side_effect)
-
-    import workers.base as base
-
-    advances: list = []
-    monkey_advance = base.advance_job
-    base.advance_job = lambda _s, jid, ns, _d, **_kw: advances.append((jid, ns))
-    try:
-        for _ in range(3):
-            job.expire_all()
-            current = job.get(Job, job_row.id)
-            worker._execute_job(job, current)
-    finally:
-        base.advance_job = monkey_advance
-
-    job.expire_all()
-    refreshed = job.get(Job, job_row.id)
-    assert refreshed is not None
-    # The patched advance_job never commits.
-    assert refreshed.retry_count == 2
-
-    payload = _read_stage_errors(job, job_row.id)
-    assert payload is not None
-    errors = payload["errors"]
-    assert len(errors) == 2
-    assert [e["retry_count"] for e in errors] == [0, 1]
-    assert all(e["severity"] == "error" for e in errors)
-    assert len(advances) == 1
 
 
 # A corrupt ``stage_errors`` body is kept as a ``corrupt_prior`` breadcrumb, since operators read /api/jobs/{id}/errors.

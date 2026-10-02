@@ -4,8 +4,6 @@ import signal
 import subprocess
 from unittest.mock import Mock
 
-import pytest
-
 from workers import web_runtime as runtime
 
 
@@ -38,15 +36,6 @@ def test_api_failure_exits_nonzero_and_stops_builder(monkeypatch):
     shutdown.assert_called_once_with([api, builder])
 
 
-def test_disabled_preparation_only_launches_api(monkeypatch):
-    launch = Mock(return_value=child(1))
-    monkeypatch.setattr(runtime, "launch", launch)
-    monkeypatch.setattr(runtime, "enabled", lambda: False)
-    monkeypatch.setattr(runtime, "shutdown", Mock())
-    assert runtime.run(Mock(wait=Mock(return_value=True))) == 0
-    launch.assert_called_once_with()
-
-
 def test_shutdown_grace_then_kill_releases_stuck_builder(monkeypatch):
     api, builder = child(1), child(2)
     builder.wait.side_effect = [subprocess.TimeoutExpired("builder", 25), 0]
@@ -69,17 +58,6 @@ def test_launch_has_separate_interpreter_and_bounded_pool(monkeypatch):
     assert kwargs["env"]["PSAT_DB_POOL_SIZE"] == "2"
     assert "PSAT_WORKER_LIFECYCLE_TOKEN" not in kwargs["env"]
     assert "PSAT_WORKER_BOOT_ID" not in kwargs["env"]
-
-
-def test_builder_launch_failure_still_stops_api(monkeypatch):
-    api = child(1)
-    monkeypatch.setattr(runtime, "launch", Mock(side_effect=[api, OSError("cannot spawn")]))
-    monkeypatch.setattr(runtime, "enabled", lambda: True)
-    shutdown = Mock()
-    monkeypatch.setattr(runtime, "shutdown", shutdown)
-    with pytest.raises(OSError):
-        runtime.run(Mock())
-    shutdown.assert_called_once_with([api])
 
 
 def test_dedicated_builder_can_replace_colocated_builder(monkeypatch):

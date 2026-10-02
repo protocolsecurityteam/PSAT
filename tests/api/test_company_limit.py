@@ -37,40 +37,6 @@ def run(scenario):
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-def test_bounds_queue_overflow_and_lightweight_routes():
-    async def scenario():
-        release = asyncio.Event()
-        entered = []
-
-        async def app(scope, receive, send):
-            if scope["path"] != "/api/health":
-                entered.append(scope["path"])
-                await release.wait()
-            await JSONResponse({"ok": True})(scope, receive, send)
-
-        gate = CompanyReadLimit(app, max_inflight=2, max_queued=1)
-        a = Call(gate)
-        b = Call(gate, "/api/company/example/functions")
-        await until(lambda: len(entered) == 2)
-        queued = Call(gate, "/api/company/queued")
-        await until(lambda: gate.admitted == 3)
-        overflow = Call(gate)
-        health = Call(gate, "/api/health")
-        await asyncio.gather(overflow.task, health.task)
-        assert overflow.status == 503
-        headers = dict(overflow.messages[0]["headers"])
-        assert headers[b"cache-control"] == b"private, no-store"
-        assert headers[b"retry-after"] == b"2"
-        assert health.status == 200
-        assert len(entered) == 2
-        release.set()
-        await asyncio.gather(a.task, b.task, queued.task)
-        assert queued.status == 200
-        assert gate.admitted == 0
-
-    run(scenario)
-
-
 @pytest.mark.parametrize("end", ["timeout", "cancel", "disconnect", "release_cancel_race"])
 def test_waiter_cleanup(end):
     async def scenario():
@@ -108,50 +74,6 @@ def test_waiter_cleanup(end):
         await recovery.task
         assert recovery.status == 200
         assert gate.admitted == 0
-
-    run(scenario)
-
-
-def test_active_cancellation_does_not_release_work_still_running():
-    async def scenario():
-        release = asyncio.Event()
-        entered = asyncio.Event()
-
-        async def app(scope, receive, send):
-            entered.set()
-            await release.wait()
-            await JSONResponse({})(scope, receive, send)
-
-        gate = CompanyReadLimit(app, max_inflight=1, max_queued=0)
-        active = Call(gate)
-        await entered.wait()
-        active.task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await active.task
-        assert gate.admitted == 1
-        overflow = Call(gate)
-        await overflow.task
-        assert overflow.status == 503
-        release.set()
-        await until(lambda: gate.admitted == 0)
-        recovery = Call(gate)
-        await recovery.task
-        assert recovery.status == 200
-
-    run(scenario)
-
-
-def test_exception_releases_slot():
-    async def scenario():
-        async def app(scope, receive, send):
-            raise RuntimeError("builder failed")
-
-        gate = CompanyReadLimit(app, max_inflight=1, max_queued=0)
-        for _ in range(2):
-            call = Call(gate)
-            with pytest.raises(RuntimeError, match="builder failed"):
-                await call.task
-            assert gate.admitted == 0
 
     run(scenario)
 

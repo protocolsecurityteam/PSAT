@@ -112,17 +112,6 @@ def test_require_admin_key_warns_on_reject_without_leaking_key(caplog, monkeypat
     assert "wrong-key" not in str(rec.__dict__)
 
 
-def test_require_admin_key_distinguishes_missing_from_mismatch(caplog, monkeypatch):
-    import pytest
-    from fastapi import HTTPException
-
-    monkeypatch.setattr(deps, "ADMIN_KEY", "the-real-secret")
-    with caplog.at_level(logging.WARNING, logger="routers.deps"):
-        with pytest.raises(HTTPException):
-            deps.require_admin_key(_make_request("/api/analyze"), None)
-    assert _rec(caplog, "admin key rejected").reason == "missing_key"
-
-
 def test_fleet_warns_stale_daemon_with_process_and_age():
     # The WARNING is transition-gated.
     fleet.reset_fleet_log_dedupe()

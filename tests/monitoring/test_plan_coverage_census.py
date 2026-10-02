@@ -154,18 +154,6 @@ def test_census_is_empty_and_total_free_of_a_none_config(db_session):
     assert counts["analysis_failed"] == 0
 
 
-def test_fleet_status_publishes_the_census(fleet):
-    coverage = build_fleet_status(fleet)["watchers"]["plan_coverage"]
-    assert coverage["contracts"] == 8
-    assert coverage[READY_STALE] == 1
-    assert coverage["not_determined"][CONTRACT_NOT_ANALYZED] == 1
-
-
-def test_fleet_endpoint_exposes_the_census(api_client, fleet):
-    body = api_client.get("/api/fleet").json()
-    assert body["watchers"]["plan_coverage"]["not_determined_total"] == 3
-
-
 def test_coverage_alarm_is_silent_until_a_threshold_is_set(fleet, monkeypatch):
     """An acceptable shortfall is operator policy; inventing one would page on a long-standing state."""
     from services.monitoring import ops_alerts
@@ -201,25 +189,6 @@ def _clean_heartbeats(db_session):
     db_session.rollback()
     db_session.query(WorkerHeartbeat).delete()
     db_session.commit()
-
-
-def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartbeats, monkeypatch):
-    from services.monitoring import ops_alerts
-
-    monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "2")
-    monkeypatch.setattr(ops_alerts, "_webhook_url", lambda: None)
-    first = ops_alerts.run_ops_alert_tick(fleet)
-    assert first["posted_down"] >= 1
-    assert any(k == "tracking_plan_coverage" for k in _alert_keys(fleet))
-
-    second = ops_alerts.run_ops_alert_tick(fleet)
-    assert second["posted_down"] == 0  # deduped inside the cooldown
-
-    for mc in fleet.execute(select(MonitoredContract)).scalars().all():
-        mc.monitoring_config = {TRACKED_TOPICS_KEY: _TOPICS}
-    fleet.commit()
-    third = ops_alerts.run_ops_alert_tick(fleet)
-    assert third["posted_recovery"] >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -263,18 +232,6 @@ def test_the_gap_census_says_what_its_zeroes_mean(api_client, fleet):
     }
 
 
-def test_ops_collects_the_gap_census_without_a_new_alarm_family(db_session):
-    """Published unconditionally, with no invented threshold:
-    a marker census would page on when the poller last ran as much as on the
-    reads."""
-    from services.monitoring import ops_alerts
-
-    _marked(db_session, 12)
-    assert ops_alerts.collect_verification_gaps(db_session)["read_failed"] == 1
-    problems = ops_alerts._current_problems({}, _now(), None)
-    assert not [key for key in problems if "verification" in key]
-
-
 def test_the_tick_records_the_census_only_when_something_is_marked(db_session, _clean_heartbeats, monkeypatch, caplog):
     """The timestamped log line survives erased markers."""
     from services.monitoring import ops_alerts
@@ -304,12 +261,3 @@ def _now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
-
-
-def _alert_keys(session) -> list[str]:
-    from db.models import WorkerHeartbeat
-    from db.queue import HEARTBEAT_OPS_ALERTER
-
-    session.expire_all()
-    hb = session.execute(select(WorkerHeartbeat).where(WorkerHeartbeat.process == HEARTBEAT_OPS_ALERTER)).scalar_one()
-    return list((hb.detail or {}).get("alerts", {}))

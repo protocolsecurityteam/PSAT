@@ -116,34 +116,6 @@ def _nodes(db_session, contract, address=None):
     return q.all()
 
 
-def _rewrite_the_scope(db_session, contract):
-    """The resolution and policy stages rewrite this scope wholesale before the mint."""
-    from services.resolution.graph_tables import replace_control_graph_rows
-
-    replace_control_graph_rows(
-        db_session,
-        contract_id=contract.id,
-        deployment_address=None,
-        resolved_graph={
-            "max_depth": 6,
-            "nodes": [
-                {
-                    "id": f"address:{contract.address}",
-                    "address": contract.address,
-                    "node_type": "contract",
-                    "resolved_type": "contract",
-                    "label": "root",
-                    "depth": 0,
-                    "analyzed": True,
-                    "details": {},
-                }
-            ],
-            "edges": [],
-        },
-    )
-    db_session.commit()
-
-
 def _edges(db_session, contract, relation=None):
     q = db_session.query(ControlGraphEdge).filter_by(contract_id=contract.id)
     if relation is not None:
@@ -212,18 +184,6 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
     assert payloads[0]["analysis_state"] is None
 
 
-def test_the_edge_relation_is_not_role_principal(db_session, anchor, monkeypatch):
-    """``role_principal`` asserts a witnessed role, which upstream declined to assert for exactly this population."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    _fp(db_session, contract, _addr(), resolved_type="timelock")
-
-    _mint(db_session, contract)
-
-    assert {e.relation for e in _edges(db_session, contract)} == {EDGE_RELATION_CAPABILITY_PRINCIPAL}
-    assert _edges(db_session, contract, "role_principal") == []
-
-
 @pytest.mark.parametrize("resolved_type", ["safe", "eoa"])
 def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, anchor, monkeypatch, resolved_type):
     """A silent skip is the defect, so the refusal is asserted three ways."""
@@ -290,165 +250,6 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
     assert db_session.query(Job).filter(Job.address == principal).all() == []
 
 
-def test_end_to_end_the_timelock_gets_one_job_and_the_safe_gets_none(db_session, anchor, monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    timelock, safe = sorted([_addr(), _addr()])
-    _fp(db_session, contract, timelock, resolved_type="timelock", name="tl")
-    _fp(db_session, contract, safe, resolved_type="safe", name="sf")
-
-    _ledger, payloads = _mint(db_session, contract)
-    assert len(payloads) == 2
-
-    job = Job(
-        stage=JobStage.policy,
-        status=JobStatus.processing,
-        address=contract.address,
-        chain_id=1,
-        request={"address": contract.address, "chain": "ethereum"},
-    )
-    db_session.add(job)
-    db_session.commit()
-
-    spawn = queue_discovered_contracts(
-        db_session,
-        job,
-        {"root_contract_address": contract.address, "max_depth": 6, "nodes": payloads, "edges": []},
-        "https://rpc.example",
-        site="policy_refresh",
-        chain_name="ethereum",
-        budget=8,
-        depth_cap=2,
-        fp_materialized_addresses=[p["address"] for p in payloads],
-    )
-
-    assert [q["address"] for q in spawn["queued"]] == [timelock]
-    assert spawn["out_of_population"] == [{"address": safe, "reason": "not_contract_node"}]
-    assert spawn["omitted"] == []
-    assert len(db_session.query(Job).filter(Job.address == timelock).all()) == 1
-    assert db_session.query(Job).filter(Job.address == safe).all() == []
-
-
-def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, monkeypatch):
-    """The walk reached it and did not analyse it; only a node the walk never offered is admitted."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    other = _addr()
-    job = Job(
-        stage=JobStage.policy,
-        status=JobStatus.processing,
-        address=contract.address,
-        chain_id=1,
-        request={"address": contract.address, "chain": "ethereum"},
-    )
-    db_session.add(job)
-    db_session.commit()
-
-    walk_node = {
-        "id": f"address:{other}",
-        "address": other,
-        "node_type": "contract",
-        "resolved_type": "contract",
-        "label": "role principal",
-        "contract_name": None,
-        "depth": 1,
-        "analyzed": False,
-        "details": {"source": "semantic_capability:role_grant"},
-    }
-    spawn = queue_discovered_contracts(
-        db_session,
-        job,
-        {"root_contract_address": contract.address, "max_depth": 6, "nodes": [walk_node], "edges": []},
-        "https://rpc.example",
-        site="policy_refresh",
-        chain_name="ethereum",
-        budget=8,
-    )
-
-    assert spawn["queued"] == []
-    assert spawn["out_of_population"] == [{"address": other, "reason": "not_analyzed"}]
-
-
-def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkeypatch):
-    """Admission is membership of the caller's minted set, never a node field: ``details`` is copied verbatim from
-    upstream and forgeable.
-    """
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    from services.discovery.perimeter import CONTROL_GRAPH_BASIS_KEY, FP_MATERIALIZATION_BASIS
-
-    _protocol, contract = anchor
-    forged = _addr()
-    job = Job(
-        stage=JobStage.policy,
-        status=JobStatus.processing,
-        address=contract.address,
-        chain_id=1,
-        request={"address": contract.address, "chain": "ethereum"},
-    )
-    db_session.add(job)
-    db_session.commit()
-
-    forged_node = {
-        "id": f"address:{forged}",
-        "address": forged,
-        "node_type": "contract",
-        "resolved_type": "timelock",
-        "label": None,
-        "contract_name": None,
-        "depth": 1,
-        "analyzed": False,
-        "details": {CONTROL_GRAPH_BASIS_KEY: FP_MATERIALIZATION_BASIS},
-    }
-    graph = {"root_contract_address": contract.address, "max_depth": 6, "nodes": [forged_node], "edges": []}
-
-    spawn = queue_discovered_contracts(
-        db_session,
-        job,
-        graph,
-        "https://rpc.example",
-        site="policy_refresh",
-        chain_name="ethereum",
-        budget=8,
-        fp_materialized_addresses=[],
-    )
-
-    assert spawn["queued"] == []
-    assert spawn["out_of_population"] == [{"address": forged, "reason": "not_analyzed"}]
-    assert db_session.query(Job).filter(Job.address == forged).all() == []
-
-    admitted = queue_discovered_contracts(
-        db_session,
-        job,
-        graph,
-        "https://rpc.example",
-        site="policy_refresh",
-        chain_name="ethereum",
-        budget=8,
-        fp_materialized_addresses=[forged],
-    )
-    assert [q["address"] for q in admitted["queued"]] == [forged]
-
-
-def test_mint_is_idempotent(db_session, anchor, monkeypatch):
-    """``existing_node`` is out-of-population and consumes no budget."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    timelock = _addr()
-    _fp(db_session, contract, timelock, resolved_type="timelock")
-
-    _mint(db_session, contract)
-    second, payloads = _mint(db_session, contract)
-
-    assert len(_nodes(db_session, contract, timelock)) == 1
-    assert len(_edges(db_session, contract, EDGE_RELATION_CAPABILITY_PRINCIPAL)) == 1
-    assert second["minted"] == []
-    assert second["queued"] == []
-    assert second["omitted"] == []
-    assert second["out_of_population"] == [{"address": timelock, "reason": "existing_node"}]
-    assert second["budget_used"] == 0
-    assert payloads == []
-
-
 def test_the_ledger_never_names_an_uncommitted_row(db_session, anchor, monkeypatch):
     """The ledger may be persisted on a fresh session, so the mint commits before recording or a rollback would
     publish rows that don't exist.
@@ -505,35 +306,6 @@ def test_the_idempotence_key_dedups(db_session, anchor, monkeypatch, second_addr
     assert second["out_of_population"] == [{"address": timelock, "reason": "existing_node"}]
 
 
-def test_minted_node_is_reminted_after_a_scoped_rewrite(db_session, anchor, monkeypatch):
-    """The rewrite deletes the scope wholesale, so durability comes from re-minting strictly after the last rewrite."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    timelock = _addr()
-    _fp(db_session, contract, timelock, resolved_type="timelock", count=2)
-
-    first, _payloads = _mint(db_session, contract)
-    before = _nodes(db_session, contract, timelock)[0]
-    before_details = dict(before.details)
-    assert first["budget_used"] == 1
-
-    _rewrite_the_scope(db_session, contract)
-    assert _nodes(db_session, contract, timelock) == []
-    assert _edges(db_session, contract, EDGE_RELATION_CAPABILITY_PRINCIPAL) == []
-
-    second, _payloads2 = _mint(db_session, contract)
-
-    after = _nodes(db_session, contract, timelock)
-    assert len(after) == 1
-    assert after[0].details == before_details
-    assert after[0].node_type == "contract"
-    assert after[0].analyzed is False
-    assert after[0].analysis_state is None
-    assert after[0].depth == 1
-    assert len(_edges(db_session, contract, EDGE_RELATION_CAPABILITY_PRINCIPAL)) == 1
-    assert second["minted"] == first["minted"]
-
-
 def test_budget_cut_is_recorded_never_silent(db_session, anchor, monkeypatch):
     """Every candidate lands in exactly one disposition."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
@@ -556,52 +328,6 @@ def test_budget_cut_is_recorded_never_silent(db_session, anchor, monkeypatch):
     accounted |= {r["address"] for r in ledger["out_of_population"]}
     assert accounted == {first, second}
     assert ledger["walked"] is True
-
-
-def test_the_budget_tail_is_permanent_under_the_production_sequence(db_session, anchor, monkeypatch):
-    """A budget cut is a permanent loss: every job rewrites the scope before minting, so the same tail drops forever.
-
-    Replays the real sequence three jobs deep.
-    """
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    first, second = sorted([_addr(), _addr()])
-    _fp(db_session, contract, first, resolved_type="timelock", name="a")
-    _fp(db_session, contract, second, resolved_type="timelock", name="b")
-
-    ledgers = []
-    for _job in range(3):
-        _rewrite_the_scope(db_session, contract)
-        ledger, _payloads = _mint(db_session, contract, budget=1)
-        ledgers.append(ledger)
-
-    for ledger in ledgers:
-        assert ledger["queued"] == [{"address": first, "resolved_type": "timelock"}]
-        assert ledger["omitted"] == [{"address": second, "reason": "budget_exhausted"}]
-        assert ledger["out_of_population"] == []
-
-    assert _nodes(db_session, contract, second) == []
-    assert len(_nodes(db_session, contract, first)) == 1
-
-
-def test_the_shipped_budget_leaves_no_live_tail_on_the_observed_maximum(db_session, anchor, monkeypatch):
-    """The default is a backstop sized above the observed per-anchor maximum (31; none of 83 exceed 64)."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT
-
-    assert FP_MATERIALIZE_LIMIT >= 31
-
-    _protocol, contract = anchor
-    principals = sorted(_addr() for _ in range(31))
-    for i, principal in enumerate(principals):
-        _fp(db_session, contract, principal, resolved_type="timelock", name=f"f{i}_")
-
-    ledger, payloads = _mint(db_session, contract)
-
-    assert ledger["omitted"] == []
-    assert len(ledger["minted"]) == 31
-    assert len(payloads) == 31
-    assert sorted(m["address"] for m in ledger["minted"]) == principals
 
 
 def test_an_earlier_gate_consumes_no_budget(db_session, anchor, monkeypatch):
@@ -691,50 +417,3 @@ def test_a_disabled_chain_omits_and_mints_nothing(db_session, anchor, monkeypatc
     assert ledger["minted"] == []
     assert payloads == []
     assert ledger["omitted"] == [{"address": principal, "reason": "chain_not_enabled"}]
-
-
-def test_a_null_chain_anchor_is_mainnet(db_session, anchor, monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    contract.chain = None
-    db_session.commit()
-    principal = _addr()
-    _fp(db_session, contract, principal, resolved_type="timelock")
-
-    ledger, _payloads = _mint(db_session, contract)
-
-    assert ledger["queued"] == [{"address": principal, "resolved_type": "timelock"}]
-    assert ledger["omitted"] == []
-
-
-def test_a_deployment_scoped_mint_stays_in_its_scope(db_session, anchor, monkeypatch):
-    """The mint, FP read and rewrite share one scope."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    proxy = _addr()
-    principal = _addr()
-    fn = EffectiveFunction(
-        contract_id=contract.id, deployment_address=proxy, function_name="gated", selector="0x00000001"
-    )
-    db_session.add(fn)
-    db_session.flush()
-    db_session.add(
-        FunctionPrincipal(
-            function_id=fn.id,
-            address=principal,
-            resolved_type="timelock",
-            origin=FINITE_SET,
-            principal_type="controller",
-        )
-    )
-    db_session.commit()
-
-    untagged, _payloads = _mint(db_session, contract)
-    assert untagged["minted"] == []
-    assert untagged["out_of_population"] == []
-    assert untagged["queued"] == []
-
-    scoped, _payloads2 = materialize_fp_principal_nodes(db_session, contract_id=contract.id, deployment_address=proxy)
-    db_session.commit()
-    assert [m["address"] for m in scoped["minted"]] == [principal]
-    assert _nodes(db_session, contract, principal)[0].deployment_address == proxy

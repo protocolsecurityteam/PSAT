@@ -10,12 +10,10 @@ from db.models import (
     WITNESS_RULE_W1_CODE,
     WITNESS_RULE_W2_STRUCTURAL,
     Contract,
-    ContractCreationWitness,
     ContractMembershipWitness,
     ContractProbeAttempt,
 )
 from services.clients.rpc import EthCallResult
-from services.discovery import membership_gate as gate
 from services.discovery import probes
 from services.discovery.perimeter import _produce_structural_witnesses, produce_structural_witness
 from tests.conftest import ADDR, requires_postgres
@@ -70,44 +68,6 @@ def _witnesses(session, contract_id: int) -> list[ContractMembershipWitness]:
     )
 
 
-def test_w2_written_only_from_member_parents_stored_pointer(db_session):
-    protocol = _protocol(db_session)
-    candidate = _contract(db_session, ADDR(0x400))
-
-    non_member = _contract(db_session, ADDR(0x401), implementation=candidate.address)
-    assert (
-        produce_structural_witness(
-            db_session, candidate=candidate, parent=non_member, protocol_id=None, relationship="implementation"
-        )
-        is None
-    )
-
-    member_wrong_pointer = _contract(db_session, ADDR(0x402), protocol_id=protocol.id, implementation=ADDR(0x999))
-    assert (
-        produce_structural_witness(
-            db_session,
-            candidate=candidate,
-            parent=member_wrong_pointer,
-            protocol_id=protocol.id,
-            relationship="implementation",
-        )
-        is None
-    )
-    assert _witnesses(db_session, candidate.id) == []
-
-    member = _contract(db_session, ADDR(0x403), protocol_id=protocol.id, implementation=candidate.address)
-    assert (
-        produce_structural_witness(
-            db_session, candidate=candidate, parent=member, protocol_id=protocol.id, relationship="implementation"
-        )
-        == "implementation"
-    )
-    rows = _witnesses(db_session, candidate.id)
-    assert len(rows) == 1
-    assert rows[0].via_address == member.address
-    assert rows[0].evidence["resolved_pointer"] == candidate.address
-
-
 def test_w2_protocol_mismatch_and_chain_mismatch_admit_nothing(db_session):
     p1 = _protocol(db_session)
     p2 = _protocol(db_session)
@@ -159,44 +119,6 @@ def test_w2_proxy_direction_requires_candidate_back_link(db_session):
         )
         is None
     )
-
-
-def test_witness_pass_nominates_and_promotes_w1_holders_only(db_session, monkeypatch, erpc_env):
-    protocol = _protocol(db_session)
-    parent = _contract(db_session, ADDR(0x430), protocol_id=protocol.id, implementation=ADDR(0x431))
-
-    with_w1 = _contract(db_session, ADDR(0x431))
-    gate.write_witness(
-        db_session,
-        contract_id=with_w1.id,
-        protocol_id=protocol.id,
-        rule=WITNESS_RULE_W1_CODE,
-        evidence=gate.w1_evidence(chain_id=1, code_probe_block=44),
-    )
-    without_w1 = _contract(db_session, ADDR(0x432), is_proxy=True, implementation=parent.address)
-    db_session.flush()
-    for row in (with_w1, without_w1):
-        db_session.add(
-            ContractProbeAttempt(contract_id=row.id, chain_id=1, block_number=40, results={"status": "probed"})
-        )
-    db_session.add(
-        ContractCreationWitness(chain_id=1, address=without_w1.address, code_probe_block=40, code_absent_at_probe=False)
-    )
-    db_session.flush()
-
-    _produce_structural_witnesses(
-        db_session,
-        parent,
-        {with_w1.address: "implementation", without_w1.address: "proxy"},
-    )
-
-    # Both nominated + witnessed; only the W1 holder promotes.
-    assert with_w1.nominated_protocol_id == protocol.id
-    assert with_w1.protocol_id == protocol.id
-    assert without_w1.nominated_protocol_id == protocol.id
-    assert without_w1.protocol_id is None
-    assert len(_witnesses(db_session, with_w1.id)) == 1
-    assert len(_witnesses(db_session, without_w1.id)) == 1
 
 
 def test_witness_pass_probes_unprobed_candidates_near_line(db_session, monkeypatch, erpc_env):

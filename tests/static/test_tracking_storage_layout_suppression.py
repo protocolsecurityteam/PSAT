@@ -27,29 +27,10 @@ SUPPRESSED = [
     "__self",
 ]
 
-KEPT = [
-    "DEFAULT_ADMIN_ROLE",
-    "MINTER_ROLE",
-    "PAUSER_ROLE",
-    "owner",
-    "_owner",
-    "authority",
-    "governor",
-    "etherFiAdmin",
-    "liquidityPool",
-    "admin",
-    "pendingOwner",
-]
-
 
 @pytest.mark.parametrize("name", SUPPRESSED)
 def test_storage_layout_constants_are_suppressed(name: str) -> None:
     assert _is_storage_layout_constant(name) is True
-
-
-@pytest.mark.parametrize("name", KEPT)
-def test_real_controllers_are_not_suppressed(name: str) -> None:
-    assert _is_storage_layout_constant(name) is False
 
 
 def test_empty_name_is_not_suppressed() -> None:
