@@ -107,8 +107,8 @@ class LogPage:
     """One accepted response over a contiguous block range.
 
     ``stats`` holds one record per accepted request behind the page (one for ``iter_pages``). ``rejected`` counts the
-    requests refused or discarded since the previous page; ``rejected_span`` is the narrowest range the upstream itself
-    refused among them (a size limit, a query timeout), ``None`` when it refused none.
+    requests refused or discarded since the previous page; ``rejected_span`` is the narrowest range the upstream refused
+    for its size (a size or log-count limit, a query timeout), ``None`` when it refused none that way.
     """
 
     from_block: int
@@ -244,9 +244,10 @@ class RpcEventLogFetcher:
             lo, hi, split_by_ceiling = pending.pop()
             raw_logs = self._request_range(address_filter, topic_filter, lo, hi, below_floor=split_by_ceiling)
             span = hi - lo + 1
-            if raw_logs is _REJECTED:
+            if raw_logs is _REJECTED or raw_logs is _REFUSED_FOR_SIZE:
                 rejected += 1
-                rejected_span = span if rejected_span is None else min(rejected_span, span)
+                if raw_logs is _REFUSED_FOR_SIZE:
+                    rejected_span = span if rejected_span is None else min(rejected_span, span)
                 pending.extend((a, b, split_by_ceiling) for a, b in _halves(lo, hi)[::-1])
                 continue
             # A page at the cap is indistinguishable from a truncated one, so bisect it like an error. The ``is not
@@ -331,8 +332,10 @@ class RpcEventLogFetcher:
         *,
         below_floor: bool = False,
     ) -> Any:
-        """The response for one range, or ``_REJECTED`` when the range must be bisected. ``below_floor`` lets a refusal
-        bisect under ``min_bisect_span``, down to one block."""
+        """The response for one range, or ``_REJECTED`` / ``_REFUSED_FOR_SIZE`` when it must be bisected.
+
+        ``below_floor`` lets a refusal bisect under ``min_bisect_span``, down to one block.
+        """
         log_filter: dict[str, Any] = {"topics": topic_filter, "fromBlock": hex(lo), "toBlock": hex(hi)}
         # Omit the key rather than send null: absence is the spec's "any emitter", explicit null isn't.
         if address_filter is not None:
@@ -363,7 +366,7 @@ class RpcEventLogFetcher:
                     "exc_type": type(exc).__name__,
                 },
             )
-            return _REJECTED
+            return _REFUSED_FOR_SIZE if _is_size_refusal(exc) else _REJECTED
 
     def _decode_page(self, raw_logs: Any) -> list[FetchedEventLog]:
         out: list[FetchedEventLog] = []
@@ -469,6 +472,19 @@ class RpcEventLogFetcher:
 
 
 _REJECTED: Any = object()
+_REFUSED_FOR_SIZE: Any = object()
+
+# How upstreams word a refusal of the range itself: eRPC's too-large class and size limits, a log-count limit, and
+# HyperRPC's query timeout on a wide range. Anything else (an outage, a transient internal error) still bisects but
+# says nothing about how wide the next request may be.
+_SIZE_REFUSAL_MARKERS = ("timed out", "timeout", "too large", "toolarge", "limit exceeded", "-32005", "-32012", "range")
+
+
+def _is_size_refusal(exc: BaseException) -> bool:
+    if isinstance(exc, RpcClientTimeout):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _SIZE_REFUSAL_MARKERS)
 
 
 def _halves(lo: int, hi: int) -> list[tuple[int, int]]:

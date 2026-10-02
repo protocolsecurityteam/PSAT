@@ -11,6 +11,7 @@ import logging
 import math
 import weakref
 from threading import Event
+from typing import cast
 
 import pytest
 from sqlalchemy import delete, event, func, select, text, update
@@ -359,6 +360,50 @@ def test_a_query_timeout_caps_the_next_visit_below_the_refused_span(db_session, 
     # Two refusals in all, then one request per capped span.
     assert len(sim.getlogs) == 2 + math.ceil((_TARGET - _SEED) / 125_000)
     assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == 20
+    # The limit served this backlog; a later one starts from density again.
+    assert _cursor(db_session).request_span_limit is None
+
+
+def test_a_transient_upstream_error_bisects_but_sets_no_span_limit(db_session, sim):
+    failed: list[int] = []
+
+    def flaky(_chain, lo, hi):
+        if not failed:
+            failed.append(hi - lo + 1)
+            return "{'code': -32000, 'message': 'upstream unavailable'}"
+        return None
+
+    sim.refuse = flaky
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
+    _enroll(db_session, seed=_SEED)
+    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=50_000)
+
+    _scan(db_session, limits=limits, max_windows_per_cursor=1)
+
+    assert failed == [500_000]
+    assert _cursor(db_session).request_span_limit is None
+
+
+def test_a_persisted_span_limit_never_falls_below_the_bisect_floor(db_session, sim):
+    sim.refuse = lambda _chain, lo, hi: _QUERY_TIMED_OUT if hi - lo + 1 > 3_000 else None
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
+    _enroll(db_session, seed=_SEED)
+    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=50_000)
+    fetchers, heads, hashes = _fetchers()
+    cast(RpcEventLogFetcher, fetchers[1]).min_bisect_span = 1_000
+
+    scan_enrolled_events(
+        db_session,
+        fetchers=fetchers,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        page_limits=limits,
+        max_windows_per_cursor=1,
+    )
+
+    # Bisection reached 3,000-block pages, but the next visit's limit stays at the floor.
+    assert sim.getlogs[-1]["to"] - sim.getlogs[-1]["from"] + 1 <= 3_000
+    assert _cursor(db_session).request_span_limit == 10_000
 
 
 def test_the_page_names_only_the_narrowest_span_the_upstream_refused(sim):

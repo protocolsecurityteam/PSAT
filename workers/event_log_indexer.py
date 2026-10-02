@@ -1142,14 +1142,17 @@ def run_plan(
                         if density is not None:
                             cursor.recent_logs_per_block = density
                         if refused_limit is not None:
+                            # Persisted no lower than the bisect floor: a split below it says more about one dense
+                            # stretch than about the cursor's next visit.
+                            floored = max(refused_limit, settings.MIN_REQUEST_SPAN_LIMIT)
                             stored = cursor.request_span_limit
-                            cursor.request_span_limit = (
-                                refused_limit if stored is None else min(int(stored), refused_limit)
-                            )
+                            cursor.request_span_limit = floored if stored is None else min(int(stored), floored)
                     # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the
                     # evaluated block is judged by position, and only a reorg rewind resets the flag.
                     if int(cursor.last_indexed_block or 0) >= target:
                         cursor.backfill_complete = True
+                        # The limit served this backlog; the next one starts from density again.
+                        cursor.request_span_limit = None
                         members_at_target += 1
                         if cursor.last_indexed_block_hash is None:
                             cursor.last_indexed_block_hash = stamp(int(cursor.last_indexed_block))

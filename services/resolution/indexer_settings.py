@@ -36,6 +36,8 @@ TARGET_PAGE_LOGS = int(os.getenv("PSAT_EVENT_INDEXER_TARGET_PAGE_LOGS", "25000")
 INITIAL_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_INITIAL_SPAN", "50000"))
 # Memory ceiling: a larger page is discarded and bisected, down to one block.
 MAX_PAGE_LOGS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_PAGE_LOGS", "100000"))
+# The lowest request span persisted after an upstream size refusal (the fetcher's bisect floor); one backlog's limit.
+MIN_REQUEST_SPAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_MIN_REQUEST_SPAN_LIMIT", "10000"))
 # Above eRPC's 30 s maxTimeout so the client receives eRPC's verdict. Only safe with the ceiling above.
 GETLOGS_TIMEOUT_S = float(os.getenv("PSAT_EVENT_INDEXER_GETLOGS_TIMEOUT_S", "35"))
 
