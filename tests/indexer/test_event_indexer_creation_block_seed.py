@@ -11,6 +11,7 @@ from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.indexer_stubs import _DeterministicBlockHash
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers.event_log_indexer import (
     enroll_event_cursor,
     scan_enrolled_events,
@@ -37,11 +38,11 @@ _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
 
 
-class _RecordingFetcher:
+class _RecordingFetcher(OnePagePerFetch):
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
 
-    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None) -> list[FetchedEventLog]:
         self.from_blocks.append(from_block)
         return []
 

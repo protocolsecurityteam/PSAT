@@ -61,7 +61,7 @@ def sim(monkeypatch):
 
 def _fetchers():
     base = dataclasses.replace(chain_by_id(8453), hypersync_url="https://base.hypersync.xyz")
-    return indexer._build_indexer_fetchers(chains=(chain_by_id(1), base), engine="paged")
+    return indexer._build_indexer_fetchers(chains=(chain_by_id(1), base))
 
 
 def _enroll(session) -> None:
@@ -82,7 +82,7 @@ def _enroll(session) -> None:
 def _scan(session):
     fetchers = _fetchers()
     return scan_enrolled_events(
-        session, fetchers=fetchers[0], head_fetchers=fetchers[1], block_hash_fetchers=fetchers[2], engine="paged"
+        session, fetchers=fetchers[0], head_fetchers=fetchers[1], block_hash_fetchers=fetchers[2]
     )
 
 
@@ -432,7 +432,6 @@ def test_a_stall_stays_visible_in_progress_published_mid_pass(db_session, sim):
         fetchers=fetchers[0],
         head_fetchers=fetchers[1],
         block_hash_fetchers=fetchers[2],
-        engine="paged",
         on_commit=published.append,
     )
 
@@ -457,7 +456,6 @@ def test_a_stall_recovered_through_the_warm_batch_clears(db_session, sim):
             fetchers=fetchers[0],
             head_fetchers=fetchers[1],
             block_hash_fetchers=fetchers[2],
-            engine="paged",
             scan_mode="warm",
         )
 

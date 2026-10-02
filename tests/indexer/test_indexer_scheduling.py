@@ -42,7 +42,7 @@ def sim(monkeypatch):
 
 def _fetchers():
     base = dataclasses.replace(chain_by_id(8453), hypersync_url="https://base.hypersync.xyz")
-    return indexer._build_indexer_fetchers(chains=(chain_by_id(1), base), engine="paged")
+    return indexer._build_indexer_fetchers(chains=(chain_by_id(1), base))
 
 
 def _enroll(session, addr: str, *, seed: int, basis: str = ENROLLMENT_BASIS_PREDICATE_HINT, chain_id: int = 1):
@@ -74,7 +74,6 @@ def _scan(session, fetchers, **kwargs) -> ScanSummary:
         fetchers=fetchers[0],
         head_fetchers=fetchers[1],
         block_hash_fetchers=fetchers[2],
-        engine="paged",
         **kwargs,
     )
 
@@ -240,7 +239,7 @@ def test_shutdown_joins_both_scan_threads_before_returning(monkeypatch):
 
     threading.Thread(target=request_stop, daemon=True).start()
     indexer.run_event_log_indexer_loop(
-        fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0.05, stop_event=stop, engine="paged"
+        fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0.05, stop_event=stop
     )
     returned = time.monotonic()
 
@@ -292,7 +291,6 @@ def test_warm_cursors_keep_up_with_a_moving_head_while_a_cold_fetch_blocks(db_se
             block_hash_fetchers=fetchers[2],
             interval=interval,
             stop_event=stop,
-            engine="paged",
         ),
     )
     loop.start()

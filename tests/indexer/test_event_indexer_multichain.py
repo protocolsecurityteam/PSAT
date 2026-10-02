@@ -15,6 +15,7 @@ from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.indexer_stubs import _DeterministicBlockHash
+from tests.support.one_page_fetch import OnePagePerFetch
 from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES
 from utils.chains import ChainInfo, chain_by_id
 from workers.event_log_indexer import (
@@ -148,11 +149,11 @@ def test_enroll_stamps_cursor_with_jobs_chain(session, monkeypatch):
     assert all(r[1] == deploy - 1 for r in rows)
 
 
-class _EmptyFetcher:
+class _EmptyFetcher(OnePagePerFetch):
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
 
-    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None) -> list[FetchedEventLog]:
         self.from_blocks.append(from_block)
         return []
 

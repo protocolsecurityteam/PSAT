@@ -14,6 +14,7 @@ from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.indexer_stubs import _DeterministicBlockHash
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events
 
 _MAX_SAFE_SPAN = 10_000
@@ -25,12 +26,12 @@ _AUTHORITY = "0x" + "39" * 20  # stand-in Solmate RolesAuthority
 _TOPIC = "0x" + "ab" * 32  # stand-in RoleCapabilityUpdated topic
 
 
-class _RangeCappedFetcher:
+class _RangeCappedFetcher(OnePagePerFetch):
     def __init__(self) -> None:
         self.requested_spans: list[int] = []
 
     def fetch_logs(
-        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int
+        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int, window_stats=None
     ) -> list[FetchedEventLog]:
         span = to_block - from_block + 1
         self.requested_spans.append(span)

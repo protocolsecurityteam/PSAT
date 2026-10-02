@@ -35,6 +35,7 @@ from services.resolution.repos.event_logs_rpc import (
     default_result_cap,
 )
 from tests.conftest import requires_postgres
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers.event_log_indexer import (
     _ALL_ROLE_STORE_TOPIC0S,
     PageLimits,
@@ -463,7 +464,7 @@ def test_unreadable_page_is_not_recorded_as_zero_logs(monkeypatch, payload):
 @pytest.mark.parametrize("payload", [None, {}])
 def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monkeypatch, payload):
 
-    class _BadFetcher:
+    class _BadFetcher(OnePagePerFetch):
         def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None):
             if window_stats is not None:
                 window_stats.append(
@@ -558,7 +559,7 @@ def test_fetch_without_accumulator_is_byte_identical(monkeypatch):
 # The indexer records what its pages returned
 
 
-class _StatsFetcher:
+class _StatsFetcher(OnePagePerFetch):
     def __init__(self, count: int, cap: int | None) -> None:
         self.count = count
         self.cap = cap
@@ -571,8 +572,8 @@ class _StatsFetcher:
         return []
 
 
-class _StatelessFetcher:
-    def fetch_logs(self, *, event_address, topics, from_block, to_block):
+class _StatelessFetcher(OnePagePerFetch):
+    def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None):
         return []
 
 

@@ -15,6 +15,7 @@ from services.clients.rpc import RpcClientTimeout
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, RpcEventLogFetcher
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events
 
 _CONFIRMATIONS = 12
@@ -23,12 +24,12 @@ _TOPIC_A = "0x" + "aa" * 32
 _TOPIC_B = "0x" + "bb" * 32
 
 
-class _RecordingMultiTopicFetcher:
+class _RecordingMultiTopicFetcher(OnePagePerFetch):
     def __init__(self, density: int = 100) -> None:
         self.density = density
         self.calls: list[tuple[tuple[str, ...], int, int]] = []
 
-    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None) -> list[FetchedEventLog]:
         self.calls.append((tuple(sorted(topics)), from_block, to_block))
         out: list[FetchedEventLog] = []
         first = ((from_block + self.density - 1) // self.density) * self.density
@@ -48,11 +49,11 @@ class _RecordingMultiTopicFetcher:
         return out
 
 
-class _EmptyFetcher:
+class _EmptyFetcher(OnePagePerFetch):
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
 
-    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
+    def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None) -> list[FetchedEventLog]:
         self.calls.append((from_block, to_block))
         return []
 

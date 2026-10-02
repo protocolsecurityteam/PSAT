@@ -34,6 +34,7 @@ from db.queue import store_artifact
 from services.resolution import indexer_scheduler
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL, requires_postgres
+from tests.support.one_page_fetch import OnePagePerFetch
 from tests.support.witness_wire import stub_seed_witness
 from workers import event_log_indexer as eli
 
@@ -47,8 +48,8 @@ _SEED = _CREATION - 1
 _TARGET = _SEED + 100
 
 
-class _OnePage:
-    def fetch_logs(self, *, event_address, topics, from_block, to_block):
+class _OnePage(OnePagePerFetch):
+    def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None):
         block = _SEED + 50
         return [
             FetchedEventLog(

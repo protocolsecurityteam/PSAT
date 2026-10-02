@@ -1,9 +1,9 @@
-"""Offline differential: the legacy and paged engines index one simulated history to the same rows, cursors and
-reconciliation marks.
+"""End to end: the indexer stores exactly the simulated history, with every cursor caught up, stamped and graded, and
+exactly the reconciliation marks that history implies.
 
-Both runs drive the real ``scan_enrolled_events`` (warm sweep, then cold pass, as the daemon does) with only
+The run drives the real ``scan_enrolled_events`` (warm sweep, then cold pass, as the daemon does) with only
 ``rpc_request`` stubbed. Sizes are scaled down from production: the upstream rejects responses over 7,000 logs (the
-50k-style limit), one range is served whole up to 10,000 (the merged 150k-style page), and the paged ceiling and target
+50k-style limit), one range is served whole up to 10,000 (the merged 150k-style page), and the page ceiling and target
 are 6,500 and 1,600. The fixture covers sparse and dense addresses, a 6,000-log single block, staggered topics,
 a sibling enrolled late, a client timeout, a fringe reorg under a moving head, a shutdown between pages, and a Base
 group. It runs with the result cap unset and set.
@@ -13,15 +13,16 @@ from __future__ import annotations
 
 import dataclasses
 from threading import Event
-from typing import Any
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import select
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
 from db.models import (
     ENROLLMENT_BASIS_PREDICATE_HINT,
     FIRST_INDEXED_BASIS_CREATION,
+    WINDOW_STATS_CONTINUOUS,
+    WINDOW_STATS_NOT_DETERMINED,
     IndexedEventCursor,
     IndexedEventLog,
     IndexerWork,
@@ -143,7 +144,7 @@ def _caught_up(session, heads: dict[int, int]) -> bool:
     return all(complete and last >= targets[chain] for chain, last, complete in rows)
 
 
-def _run_to_completion(session, engine: str, fetchers, heads: dict[int, int], stop: Event | None = None) -> None:
+def _run_to_completion(session, fetchers, heads: dict[int, int], stop: Event | None = None) -> None:
     for _ in range(300):
         for mode in ("warm", "cold"):
             scan_enrolled_events(
@@ -151,7 +152,6 @@ def _run_to_completion(session, engine: str, fetchers, heads: dict[int, int], st
                 fetchers=fetchers[0],
                 head_fetchers=fetchers[1],
                 block_hash_fetchers=fetchers[2],
-                engine=engine,
                 scan_mode=mode,
                 page_limits=PAGED_LIMITS,
                 stop_event=stop,
@@ -163,54 +163,55 @@ def _run_to_completion(session, engine: str, fetchers, heads: dict[int, int], st
             continue
         if _caught_up(session, heads):
             return
-    raise AssertionError(f"{engine} engine never caught up")
+    raise AssertionError("the indexer never caught up")
 
 
-def _snapshot(session) -> dict[str, Any]:
+def _stored_rows(session) -> list[tuple]:
     session.expire_all()
-    log_columns = [c for c in IndexedEventLog.__table__.columns if c.name != "detected_at"]
-    rows = session.execute(
-        select(*log_columns).order_by(
-            IndexedEventLog.chain_id,
-            IndexedEventLog.event_address,
-            IndexedEventLog.topic0,
-            IndexedEventLog.block_number,
-            IndexedEventLog.log_index,
-        )
-    ).all()
-    excluded = {
-        "last_run_at",
-        "last_advanced_at",
-        "recent_logs_per_block",
-        "request_span_limit",
-        "max_window_log_count",
-    }
-    cursor_columns = [c for c in IndexedEventCursor.__table__.columns if c.name not in excluded]
-    cursors = session.execute(
-        select(*cursor_columns).order_by(
-            IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0
-        )
-    ).all()
-    max_counts = dict(
-        session.execute(
+    return [
+        tuple(row)
+        for row in session.execute(
             select(
-                IndexedEventCursor.event_address + ":" + IndexedEventCursor.topic0,
-                IndexedEventCursor.max_window_log_count,
+                IndexedEventLog.chain_id,
+                IndexedEventLog.event_address,
+                IndexedEventLog.topic0,
+                IndexedEventLog.block_number,
+                IndexedEventLog.log_index,
+                IndexedEventLog.tx_hash,
+                IndexedEventLog.block_hash,
+                IndexedEventLog.transaction_index,
+                IndexedEventLog.topics,
+                IndexedEventLog.data_words,
+                IndexedEventLog.data_hex,
             )
         ).all()
-    )
-    work = set(session.execute(select(IndexerWork.kind, IndexerWork.key).where(IndexerWork.dirty)).all())
-    return {"rows": rows, "cursors": cursors, "max_counts": max_counts, "work": work}
+    ]
 
 
-def _expected_rows(sim: SimChain, heads: dict[int, int]) -> set[tuple[int, str, str, int, int]]:
+def _expected_rows(sim: SimChain, heads: dict[int, int]) -> list[tuple]:
     targets = _targets(heads)
-    out = set()
-    for chain_id, addr, t, seed, position in [*ENROLMENT, LATE_SIBLING]:
-        lane = sim.lanes[(chain_id, addr)]
-        for log in lane.between(position + 1, targets[chain_id]):
-            if log.topics[0] == t:
-                out.add((chain_id, addr, t, log.block, log.log_index))
+    out = []
+    for chain_id, addr, t, _seed, position in [*ENROLMENT, LATE_SIBLING]:
+        for log in sim.lanes[(chain_id, addr)].between(position + 1, targets[chain_id]):
+            if log.topics[0] != t:
+                continue
+            raw = sim.raw(chain_id, log)
+            body = log.data[2:]
+            out.append(
+                (
+                    chain_id,
+                    addr,
+                    t,
+                    log.block,
+                    log.log_index,
+                    bytes.fromhex(raw["transactionHash"][2:]),
+                    bytes.fromhex(raw["blockHash"][2:]),
+                    log.tx_index,
+                    list(log.topics),
+                    ["0x" + body[i : i + 64] for i in range(0, len(body), 64)],
+                    None,
+                )
+            )
     return out
 
 
@@ -220,12 +221,12 @@ def _wipe(session) -> None:
     session.commit()
 
 
-def _scenario(session, monkeypatch, engine: str) -> tuple[dict[str, Any], SimChain]:
+def _scenario(session, monkeypatch) -> SimChain:
     _wipe(session)
     sim = build_chain()
     monkeypatch.setattr(event_logs_rpc, "rpc_request", sim.rpc_request)
     base = dataclasses.replace(chain_by_id(BASE), hypersync_url="https://base.hypersync.xyz")
-    fetchers = _build_indexer_fetchers(chains=(chain_by_id(MAINNET), base), engine=engine)
+    fetchers = _build_indexer_fetchers(chains=(chain_by_id(MAINNET), base))
     _enroll(session, ENROLMENT)
 
     # Phase 1: backfill, with a shutdown delivered during the fourth eth_getLogs.
@@ -240,12 +241,12 @@ def _scenario(session, monkeypatch, engine: str) -> tuple[dict[str, Any], SimCha
                 stop.set()
 
     sim.before_request = sigterm_on_fourth
-    _run_to_completion(session, engine, fetchers, HEAD_1, stop)
+    _run_to_completion(session, fetchers, HEAD_1, stop)
     sim.before_request = None
 
     # Phase 2: a sibling topic enrolled late at an address whose topics are warm.
     _enroll(session, [LATE_SIBLING])
-    _run_to_completion(session, engine, fetchers, HEAD_1)
+    _run_to_completion(session, fetchers, HEAD_1)
 
     # Phase 3: the head moves and the fringe every mainnet stamp sits on is reorged.
     sim.heads.update(HEAD_2)
@@ -254,14 +255,14 @@ def _scenario(session, monkeypatch, engine: str) -> tuple[dict[str, Any], SimCha
         MAINNET, lambda log: log.address == SPARSE and REORG_FROM <= log.block <= 1_999_988 and log.tx_index == 3
     )
     sim.add_many(MAINNET, _every(SPARSE, TA1, 1_999_987, 1_999_987, 1, 4, tag=1))
-    _run_to_completion(session, engine, fetchers, HEAD_2)
-    return _snapshot(session), sim
+    _run_to_completion(session, fetchers, HEAD_2)
+    return sim
 
 
 # The set cap sits above every floor-sized span (a span at the floor that reaches the cap can never be proven whole) and
-# below the merged page, so both engines take the cap's bisect path.
+# below the merged page, so the run takes the cap's bisect path.
 @pytest.mark.parametrize("cap", [None, "8500"], ids=["cap-unset", "cap-set"])
-def test_legacy_and_paged_engines_index_identically(db_session, monkeypatch, cap):
+def test_the_indexer_stores_exactly_the_simulated_history(db_session, monkeypatch, cap):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
     if cap is None:
@@ -269,45 +270,43 @@ def test_legacy_and_paged_engines_index_identically(db_session, monkeypatch, cap
     else:
         monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", cap)
 
-    legacy, legacy_sim = _scenario(db_session, monkeypatch, "legacy")
-    paged, paged_sim = _scenario(db_session, monkeypatch, "paged")
+    sim = _scenario(db_session, monkeypatch)
 
-    # Absolute correctness first, so a defect shared by both engines can't pass as parity.
-    stored = {(r.chain_id, r.event_address, r.topic0, r.block_number, r.log_index) for r in legacy["rows"]}
-    assert stored == _expected_rows(legacy_sim, HEAD_2)
-    assert len(legacy["rows"]) == len(stored)
+    stored = _stored_rows(db_session)
+    expected = _expected_rows(sim, HEAD_2)
+    assert len(stored) == len(set(map(repr, stored)))
+    assert sorted(stored, key=repr) == sorted(expected, key=repr)
+    assert sum(1 for r in stored if r[3] == BIG_BLOCK_NUMBER) == 6_000
 
-    assert paged["rows"] == legacy["rows"]
-    assert paged["cursors"] == legacy["cursors"]
-    assert paged["work"] == legacy["work"]
-    for key, legacy_max in legacy["max_counts"].items():
-        paged_max = paged["max_counts"][key]
-        assert (paged_max is None) == (legacy_max is None)
-        assert paged_max is None or paged_max <= legacy_max, key
+    targets = _targets(HEAD_2)
+    seeds = {(c, a, t): (seed, position) for c, a, t, seed, position in [*ENROLMENT, LATE_SIBLING]}
+    cursors = db_session.execute(select(IndexedEventCursor)).scalars().all()
+    assert {(c.chain_id, c.event_address, c.topic0) for c in cursors} == set(seeds)
+    ceiling = PAGED_LIMITS.max_page_logs or 0
+    for c in cursors:
+        key = (c.chain_id, c.event_address, c.topic0)
+        target = targets[c.chain_id]
+        assert c.last_indexed_block == target and c.backfill_complete, key
+        assert c.last_indexed_block_hash == bytes.fromhex(sim.block_hash(c.chain_id, target)[2:]), key
+        assert (c.first_indexed_block, c.enrolled_seed_block) == seeds[key], key
+        assert c.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION, key
+        assert c.enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT, key
+        assert c.request_span_limit is None, key
+        assert c.max_window_log_count is not None and c.max_window_log_count <= ceiling, key
+        if cap is None:
+            assert (c.window_stats_basis, c.window_stats_cap) == (WINDOW_STATS_NOT_DETERMINED, None), key
+        else:
+            assert (c.window_stats_basis, c.window_stats_cap) == (WINDOW_STATS_CONTINUOUS, int(cap)), key
+
+    # Every mainnet address was rewound under the reorged fringe; Base only gained rows.
+    work = set(db_session.execute(select(IndexerWork.kind, IndexerWork.key).where(IndexerWork.dirty)).all())
+    assert work == {
+        ("reconcile", str(MAINNET)),
+        ("reconcile", str(BASE)),
+        *{("reorg", f"{MAINNET}:{addr}") for addr in (SPARSE, DENSE, BIG_BLOCK, STAGGERED)},
+    }
 
     # The fixture really exercised what it claims to.
-    targets = _targets(HEAD_2)
-    assert all(c.last_indexed_block == targets[c.chain_id] and c.backfill_complete for c in paged["cursors"])
-    assert {("reorg", f"{MAINNET}:{addr}") for addr in (SPARSE, DENSE, BIG_BLOCK, STAGGERED)} <= paged["work"]
-    assert ("reconcile", str(BASE)) in paged["work"]
-    big = [r for r in paged["rows"] if r.block_number == BIG_BLOCK_NUMBER]
-    assert len(big) == 6_000
-    # Legacy accepted the merged page whole; the paged engine's ceiling split it.
-    ceiling = PAGED_LIMITS.max_page_logs or 0
-    assert any(DENSE in r["addresses"] and (r["served"] or 0) > ceiling for r in legacy_sim.getlogs)
-    assert any(DENSE in r["addresses"] and (r["served"] or 0) > ceiling for r in paged_sim.getlogs)
-    assert any(r["served"] is None for r in legacy_sim.getlogs)  # upstream rejections happened
-    assert max(v for v in paged["max_counts"].values() if v is not None) <= PAGED_LIMITS.max_page_logs
-    expected_basis = "continuous_from_first_indexed_block" if cap else "not_determined"
-    assert {c.window_stats_basis for c in paged["cursors"]} == {expected_basis}
-
-    if cap is None:
-        # The comparison isn't vacuous: an engine that dropped one topic's rows and a flag would be caught.
-        db_session.execute(delete(IndexedEventLog).where(IndexedEventLog.topic0 == TD3))
-        db_session.execute(
-            update(IndexedEventCursor).where(IndexedEventCursor.topic0 == TD2).values(backfill_complete=False)
-        )
-        db_session.commit()
-        tampered = _snapshot(db_session)
-        assert tampered["rows"] != paged["rows"]
-        assert tampered["cursors"] != paged["cursors"]
+    assert any(DENSE in r["addresses"] and (r["served"] or 0) > ceiling for r in sim.getlogs)
+    assert any(r["served"] is None for r in sim.getlogs)
+    assert sim.pending_timeouts == []
