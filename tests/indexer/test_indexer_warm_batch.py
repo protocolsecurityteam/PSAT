@@ -91,18 +91,17 @@ def _enroll(session) -> None:
     session.commit()
 
 
-def _fetchers(engine: str):
+def _fetchers():
     base = dataclasses.replace(chain_by_id(BASE), hypersync_url="https://base.hypersync.xyz")
-    return _build_indexer_fetchers(chains=(chain_by_id(MAINNET), base), engine=engine)
+    return _build_indexer_fetchers(chains=(chain_by_id(MAINNET), base))
 
 
-def _scan(session, fetchers, engine: str, mode: Literal["all", "warm", "cold"]):
+def _scan(session, fetchers, mode: Literal["all", "warm", "cold"]):
     return scan_enrolled_events(
         session,
         fetchers=fetchers[0],
         head_fetchers=fetchers[1],
         block_hash_fetchers=fetchers[2],
-        engine=engine,
         scan_mode=mode,
     )
 
@@ -133,11 +132,10 @@ def _run(session, monkeypatch, mode: str):
     session.commit()
     sim = _build()
     monkeypatch.setattr(event_logs_rpc, "rpc_request", sim.rpc_request)
-    engine = "legacy" if mode == "legacy" else "paged"
     monkeypatch.setattr(indexer_settings, "WARM_BATCH_ADDRESSES", 1 if mode == "single" else 50)
-    fetchers = _fetchers(engine)
+    fetchers = _fetchers()
     _enroll(session)
-    _scan(session, fetchers, engine, "all")
+    _scan(session, fetchers, "all")
     failing = {"on": False}
 
     def flaky(method, params):
@@ -156,22 +154,37 @@ def _run(session, monkeypatch, mode: str):
             sim.remove(MAINNET, lambda log: log.address == address(0x61) and target - 5 <= log.block <= target)
             sim.add(MAINNET, SimLog(address(0x61), (topic(1),), "0x", target - 2, 0, 77, tag=1))
         before = len(sim.getlogs)
-        _scan(session, fetchers, engine, "warm")
+        _scan(session, fetchers, "warm")
         sweeps.append(sim.getlogs[before:])
-    _scan(session, fetchers, engine, "all")
+    _scan(session, fetchers, "all")
     return _snapshot(session), sim, sweeps
 
 
-def test_batched_warm_sweep_matches_per_address_and_legacy_sweeps(db_session, monkeypatch):
+def _expected_rows(sim: SimChain) -> set[tuple[int, str, str, int, int]]:
+    return {
+        (chain, addr, t, log.block, log.log_index)
+        for chain, groups in GROUPS.items()
+        for addr, topics in groups.items()
+        for t in topics
+        for log in sim.lanes[(chain, addr)].between(
+            START[chain] - _depth(chain) - 299, sim.heads[chain] - _depth(chain)
+        )
+        if log.topics[0] == t
+    }
+
+
+def test_batched_warm_sweep_matches_per_address_sweeps(db_session, monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     monkeypatch.delenv("PSAT_GETLOGS_RESULT_CAP", raising=False)
     batched, sim, sweeps = _run(db_session, monkeypatch, "batched")
     single, _, _ = _run(db_session, monkeypatch, "single")
-    legacy, _, _ = _run(db_session, monkeypatch, "legacy")
 
-    assert batched[0] == single[0] == legacy[0]
-    assert batched[1] == single[1] == legacy[1]
-    assert batched[2] == single[2] == legacy[2]
+    stored = {(r.chain_id, r.event_address, r.topic0, r.block_number, r.log_index) for r in batched[0]}
+    assert stored == _expected_rows(sim)
+    assert len(batched[0]) == len(stored)
+    assert batched[0] == single[0]
+    assert batched[1] == single[1]
+    assert batched[2] == single[2]
     assert ("reorg", f"{MAINNET}:{address(0x61)}") in batched[2]
     # Batches really carried several addresses; the flaky group and the reorged fringe went single.
     assert any(len(r["addresses"]) > 1 for sweep in sweeps for r in sweep)
@@ -194,13 +207,13 @@ def test_warm_sweep_requests_at_most_one_getlogs_per_fifty_groups_per_chain(db_s
             enroll_event_cursor(db_session, chain_id=chain, event_address=addr, topic0=topic(1), start_block=seed)
     db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
-    fetchers = _fetchers("paged")
+    fetchers = _fetchers()
 
     for _sweep in range(5):
         for chain in START:
             sim.heads[chain] += STEP[chain]
         before = len(sim.getlogs)
-        summary = _scan(db_session, fetchers, "paged", "warm")
+        summary = _scan(db_session, fetchers, "warm")
         requests = sim.getlogs[before:]
         for chain, n in counts.items():
             assert len([r for r in requests if r["chain_id"] == chain]) <= math.ceil(n / 50)
@@ -219,7 +232,7 @@ def test_an_address_array_rejection_splits_the_batch(db_session, monkeypatch):
     db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
 
-    summary = _scan(db_session, _fetchers("paged"), "paged", "warm")
+    summary = _scan(db_session, _fetchers(), "warm")
 
     assert summary.failed_groups == 0
     served = [r for r in sim.getlogs if r["served"] is not None]
@@ -263,11 +276,11 @@ def test_concurrent_sweeps_lock_in_canonical_order_without_deadlock(db_session, 
         lambda _c, _cur, statement, *_a: locks.append(statement) if "FOR UPDATE" in statement else None,
     )
     results: list = []
-    fetchers = _fetchers("paged")
+    fetchers = _fetchers()
 
     def sweep() -> None:
         with Session(engine, expire_on_commit=False) as session:
-            results.append(_scan(session, fetchers, "paged", "warm"))
+            results.append(_scan(session, fetchers, "warm"))
 
     # Two sweeps over the same groups, fetching together, then locking overlapping batches.
     monkeypatch.setattr(indexer_settings, "WARM_BATCH_ADDRESSES", 4)
@@ -305,7 +318,7 @@ def test_a_group_lagging_past_the_batch_limit_is_swept_alone(db_session, monkeyp
     db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
     db_session.commit()
 
-    _scan(db_session, _fetchers("paged"), "paged", "warm")
+    _scan(db_session, _fetchers(), "warm")
 
     assert sorted(len(r["addresses"]) for r in sim.getlogs) == [1, 2]
     assert [r["addresses"] for r in sim.getlogs if len(r["addresses"]) == 1] == [[far]]

@@ -96,6 +96,8 @@ def drain_enrollment(
         except Exception as exc:
             deferred += 1
             session.rollback()
+            # A verdict cached by the rolled-back work has no witness row; a later source must witness again.
+            caches.witnesses.clear()
             finish(session, claim, success=False)
             logger.warning(
                 "indexer enrollment deferred",
@@ -106,13 +108,20 @@ def drain_enrollment(
                 },
             )
     rewitnessed = 0
+
+    def count_rewitness() -> None:
+        nonlocal rewitnessed
+        rewitnessed += 1
+
     if stop_event is None or not stop_event.is_set():
         try:
-            rewitnessed = rewitness_due_floors(
+            # Counted per commit, so a step that fails partway reports what it completed.
+            rewitness_due_floors(
                 session,
                 budget=indexer_settings.FLOOR_WITNESS_RETRY_BUDGET if witness_budget is None else witness_budget,
                 caches=caches,
                 stop_event=stop_event,
+                on_attempt=count_rewitness,
             )
         except Exception as exc:
             session.rollback()

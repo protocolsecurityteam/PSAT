@@ -12,6 +12,7 @@ from db.models import IndexedEventCursor, IndexedEventLog, IndexerWork, Job
 from db.queue.jobs import create_job
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat
 from tests.conftest import requires_postgres
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers import event_log_indexer as indexer
 
 pytestmark = requires_postgres
@@ -31,7 +32,7 @@ def make_log(block, topic=TOPICS[0], number=0):
     )
 
 
-class Fetcher:
+class Fetcher(OnePagePerFetch):
     def __init__(self, logs):
         self.logs = logs
         self.calls = []

@@ -55,4 +55,3 @@ def test_new_knobs_have_their_documented_defaults():
     assert indexer_settings.GROUP_BUDGET_S == 30
     assert indexer_settings.PASS_BUDGET_S == 120
     assert indexer_settings.GETLOGS_TIMEOUT_S == 35
-    assert indexer_settings.ENGINE == "paged"

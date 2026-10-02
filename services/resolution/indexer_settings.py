@@ -7,9 +7,6 @@ import os
 INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
 CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
 
-# ``paged`` streams bounded pages with no transaction held during RPC; ``legacy`` is the whole-window engine.
-ENGINE = os.getenv("PSAT_EVENT_INDEXER_ENGINE", "paged").strip().lower() or "paged"
-
 # Widest block range one page may request. Wide because HyperRPC bills per request regardless of range.
 MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500000"))
 # Secondary limits behind the time budgets: pages per group visit and per pass.

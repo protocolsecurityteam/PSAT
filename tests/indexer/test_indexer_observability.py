@@ -9,6 +9,7 @@ from sqlalchemy import update
 from db.models import IndexedEventCursor
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import requires_postgres
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers.event_log_indexer import ScanSummary, enroll_event_cursor, scan_enrolled_events
 
 pytestmark = requires_postgres
@@ -18,7 +19,7 @@ _HEAD = 100_012
 _TARGET = 100_000
 
 
-class _SparseFetcher:
+class _SparseFetcher(OnePagePerFetch):
     def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None):
         return [
             FetchedEventLog(
@@ -155,7 +156,6 @@ def test_the_cold_pass_line_reports_the_table_triad_not_just_the_groups_it_visit
             block_hash_fetchers={1: _Head()},
             interval=0.05,
             stop_event=stop,
-            engine="paged",
         )
     finally:
         timer.cancel()

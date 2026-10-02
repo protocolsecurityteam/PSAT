@@ -54,9 +54,9 @@ def sim(monkeypatch):
     return chain
 
 
-def _fetchers(engine: str = "paged"):
+def _fetchers():
     base = dataclasses.replace(chain_by_id(8453), hypersync_url="https://base.hypersync.xyz")
-    return _build_indexer_fetchers(chains=(chain_by_id(1), base), engine=engine)
+    return _build_indexer_fetchers(chains=(chain_by_id(1), base))
 
 
 def _enroll(session, addr: str = _ADDR, topics=(_T1,), *, seed: int = _SEED, chain_id: int = 1) -> None:
@@ -81,14 +81,13 @@ def _uniform(addr: str, t: str, *, lo: int, hi: int, every: int, tx_base: int = 
     ]
 
 
-def _scan(session, *, limits: PageLimits | None = None, engine: str = "paged", **kwargs):
-    fetchers, heads, hashes = _fetchers(engine)
+def _scan(session, *, limits: PageLimits | None = None, **kwargs):
+    fetchers, heads, hashes = _fetchers()
     return scan_enrolled_events(
         session,
         fetchers=fetchers,
         head_fetchers=heads,
         block_hash_fetchers=hashes,
-        engine=engine,
         page_limits=limits,
         **kwargs,
     )
@@ -131,27 +130,26 @@ def _cursor(session, t: str = _T1, addr: str = _ADDR) -> IndexedEventCursor:
 # Transactions around RPC, rewind order, target hash timing, shutdown, topic narrowing
 
 
-@pytest.mark.parametrize("engine", ["paged", "legacy"])
-def test_no_transaction_is_open_during_any_rpc(db_session, sim, engine):
+def test_no_transaction_is_open_during_any_rpc(db_session, sim):
     sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=500))
     _enroll(db_session, topics=(_T1, _T2))
     seen: list[tuple[str, bool]] = []
     sim.before_request = lambda method, _params: seen.append((method, db_session.in_transaction()))
 
-    _drain(db_session, engine=engine, limits=PageLimits(max_block_span=100_000))
+    _drain(db_session, limits=PageLimits(max_block_span=100_000))
     # A reorg under the stamped fringe: the check, the rewind hash and the refetch all go over the wire.
     db_session.execute(update(IndexedEventCursor).values(last_indexed_block_hash=b"\x01" * 32))
     db_session.commit()
-    _scan(db_session, engine=engine)
+    _scan(db_session)
 
     methods = {method for method, _open in seen}
     assert {"eth_getLogs", "eth_getBlockByNumber", "eth_blockNumber"} <= methods
-    open_during = [method for method, in_transaction in seen if in_transaction]
-    if engine == "paged":
-        assert open_during == []
-    else:
-        # Control: the legacy engine holds its FOR UPDATE across the fetch, which is what the probe must catch.
-        assert "eth_getLogs" in open_during
+    assert [method for method, in_transaction in seen if in_transaction] == []
+    # Control: the probe does see a transaction left open across a request.
+    db_session.execute(select(1))
+    sim.rpc_request("http://unit.test", "eth_blockNumber", [], chain_id=1)
+    db_session.rollback()
+    assert seen[-1] == ("eth_blockNumber", True)
 
 
 def test_rewind_flushes_the_cursor_decrease_before_the_delete_in_the_first_write(db_session, sim):
@@ -263,7 +261,7 @@ def test_sibling_topic_narrowing_skips_at_target_siblings(db_session, sim):
 
 
 def _mark_advanced(session, t: str = _T1, addr: str = _ADDR) -> None:
-    """A cursor that has advanced before but whose page density is unknown (e.g. written by the legacy engine)."""
+    """A cursor that has advanced before but whose page density is unknown (e.g. written before densities were kept)."""
     session.execute(
         update(IndexedEventCursor)
         .where(IndexedEventCursor.event_address == addr, IndexedEventCursor.topic0 == t)
@@ -572,18 +570,11 @@ def test_single_block_over_the_ceiling_is_committed_alone(db_session, sim, caplo
     assert _cursor(db_session).max_window_log_count == 1_200
 
 
-def test_getlogs_timeout_is_set_only_on_the_paged_indexer_fetcher(sim):
-    paged, _, _ = _fetchers("paged")
-    legacy, _, _ = _fetchers("legacy")
-    assert isinstance(paged[1], RpcEventLogFetcher) and paged[1].timeout == 35
-    assert isinstance(legacy[1], RpcEventLogFetcher) and legacy[1].timeout is None
+def test_getlogs_timeout_is_set_only_on_the_indexer_fetcher(sim):
+    fetchers, _, _ = _fetchers()
+    assert isinstance(fetchers[1], RpcEventLogFetcher) and fetchers[1].timeout == 35
     # The live watcher's construction keeps rpc_request's default.
     assert RpcEventLogFetcher("http://stub", max_block_range=10_000, min_bisect_span=1_000, chain_id=1).timeout is None
-
-
-def test_unknown_engine_is_refused(db_session, sim):
-    with pytest.raises(ValueError, match="unknown event indexer engine"):
-        _scan(db_session, engine="turbo")
 
 
 def test_each_page_folds_its_count_only_into_the_cursors_it_advanced(db_session, sim):
@@ -621,9 +612,6 @@ class _GappyFetcher:
     def __init__(self, mode: str) -> None:
         self.mode = mode
 
-    def fetch_logs(self, *, event_address, topics, from_block, to_block):
-        raise AssertionError("the paged engine streams pages")
-
     def iter_pages(self, *, event_address, topics, from_block, to_block, max_page_logs=None):
         if self.mode == "empty":
             return
@@ -648,7 +636,6 @@ def test_pages_must_cover_the_range_without_gaps(db_session, sim, mode):
         fetchers={1: _GappyFetcher(mode)},
         head_fetchers=fetchers[1],
         block_hash_fetchers=fetchers[2],
-        engine="paged",
     )
 
     assert summary.failed_groups == 1
@@ -739,9 +726,6 @@ class _TrackedPages:
         self.refs: list[weakref.ref] = []
         self.alive_at_request: list[int] = []
 
-    def fetch_logs(self, *, event_address, topics, from_block, to_block):
-        raise AssertionError("the paged engine streams pages")
-
     def iter_pages(self, *, event_address, topics, from_block, to_block, max_page_logs=None):
         lo = from_block
         while lo <= to_block:
@@ -777,7 +761,6 @@ def test_the_engine_releases_each_page_before_requesting_the_next(db_session, si
         fetchers={1: pages},
         head_fetchers=fetchers[1],
         block_hash_fetchers=fetchers[2],
-        engine="paged",
         page_limits=PageLimits(max_block_span=500_000, initial_span=500_000),
     )
 

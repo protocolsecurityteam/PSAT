@@ -12,6 +12,7 @@ from db.models import ENROLLMENT_BASIS_PREDICATE_HINT, FIRST_INDEXED_BASIS_CREAT
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import requires_postgres
+from tests.support.one_page_fetch import OnePagePerFetch
 from workers.event_log_indexer import PageLimits, index_event_group_steps
 
 pytestmark = requires_postgres
@@ -23,9 +24,9 @@ _WARM_AT = 1_000
 _TARGET = 5_000
 
 
-class _EmptyFetcher:
+class _EmptyFetcher(OnePagePerFetch):
     def fetch_logs(
-        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int
+        self, *, event_address: str | Sequence[str], topics, from_block: int, to_block: int, window_stats=None
     ) -> list[FetchedEventLog]:
         return []
 
