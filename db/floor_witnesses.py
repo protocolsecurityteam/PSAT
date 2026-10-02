@@ -4,7 +4,7 @@ live-scan floors.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -33,6 +33,11 @@ RETRY_CAP_S = 86_400
 _RETRY_MAX_EXPONENT = 8
 
 
+class StoredWitness(NamedTuple):
+    outcome: str
+    attempts: int
+
+
 def retry_delay_s(prior_attempts: int) -> int:
     """Seconds until the next retry after a failure that follows ``prior_attempts`` consecutive ones."""
     return min(RETRY_BASE_S * 2 ** min(max(0, prior_attempts), _RETRY_MAX_EXPONENT), RETRY_CAP_S)
@@ -46,9 +51,9 @@ def record_floor_witness(
     outcome: WitnessOutcome,
     first_indexed_block: int | None = None,
     seed_block: int | None = None,
-) -> int | None:
-    """Upsert one witness result; returns the row's consecutive failure count, or ``None`` when the row kept a decided
-    verdict.
+) -> StoredWitness:
+    """Upsert one witness result; returns the row as stored afterwards, ``(outcome, attempts)``. A stored outcome other
+    than the one recorded means the row kept its earlier verdict.
 
     A decided row (proven or prior incarnation) is never replaced by a failure. A prior-incarnation result replaces
     anything, since it disproves the number. A proof replaces anything except a prior-incarnation verdict about the
@@ -98,9 +103,13 @@ def record_floor_witness(
         table.c.attempts, table.c.outcome
     )
     row = session.execute(stmt).first()
-    if row is None or row[1] != WITNESS_FAILED:
-        return None
-    return int(row[0])
+    if row is None:
+        row = session.execute(
+            select(table.c.attempts, table.c.outcome)
+            .where(table.c.chain_id == chain_id)
+            .where(table.c.address == address.lower())
+        ).one()
+    return StoredWitness(outcome=str(row[1]), attempts=int(row[0]))
 
 
 def read_floor_witness(session: Session, *, chain_id: int, address: str) -> tuple[int | None, str] | None:

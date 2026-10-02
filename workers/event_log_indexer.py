@@ -389,16 +389,23 @@ def _witness_seed_block(
             addr,
             extra={"address": addr, "chain_id": chain_id, "seed": seed, "exc_type": type(exc).__name__},
         )
-    cache[key] = graded
     if session is not None:
-        failures = record_floor_witness(
+        stored = record_floor_witness(
             session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0], seed_block=seed
         )
-        if failures is not None and failures >= settings.FLOOR_WITNESS_FAILURE_ALERT:
+        if outcome == WITNESS_PROVEN and stored.outcome != WITNESS_PROVEN:
+            # The address's record keeps a prior incarnation of this seed; a cursor enrolled now can't claim it.
+            graded = (None, BASIS_NOT_DETERMINED)
+            logger.info(
+                "seed proof refused: a prior incarnation of this seed is on record",
+                extra={"address": addr, "chain_id": chain_id, "seed": seed},
+            )
+        if stored.outcome == WITNESS_FAILED and stored.attempts >= settings.FLOOR_WITNESS_FAILURE_ALERT:
             logger.warning(
                 "floor witness keeps failing; live scans at this address defer and its cursors stay ineligible",
-                extra={"address": addr, "chain_id": chain_id, "seed": seed, "attempts": failures},
+                extra={"address": addr, "chain_id": chain_id, "seed": seed, "attempts": stored.attempts},
             )
+    cache[key] = graded
     return graded
 
 

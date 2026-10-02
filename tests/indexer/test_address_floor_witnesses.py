@@ -230,7 +230,7 @@ def test_failures_back_off_exponentially_up_to_a_day(db_session):
     for attempt, delay in enumerate(expected, start=1):
         assert record_floor_witness(
             db_session, chain_id=1, address=_ADDR, outcome=WITNESS_FAILED, seed_block=_SEED
-        ) == (attempt)
+        ) == ("failed", attempt)
         row = _row(db_session)
         assert (row.outcome, row.attempts, row.seed_block, row.basis) == ("failed", attempt, _SEED, "not_determined")
         assert _seconds_until_retry(db_session) == pytest.approx(delay, abs=5)
@@ -239,10 +239,9 @@ def test_failures_back_off_exponentially_up_to_a_day(db_session):
 def test_proof_resets_the_retry_state(db_session):
     for _ in range(3):
         record_floor_witness(db_session, chain_id=1, address=_ADDR, outcome=WITNESS_FAILED, seed_block=_SEED)
-    assert (
-        record_floor_witness(db_session, chain_id=1, address=_ADDR, outcome=WITNESS_PROVEN, first_indexed_block=_SEED)
-        is None
-    )
+    assert record_floor_witness(
+        db_session, chain_id=1, address=_ADDR, outcome=WITNESS_PROVEN, first_indexed_block=_SEED
+    ) == ("proven", 0)
     row = _row(db_session)
     assert (row.outcome, row.attempts, row.next_attempt_at, row.seed_block, row.first_indexed_block) == (
         "proven",
@@ -257,8 +256,8 @@ def test_failure_leaves_decided_rows_untouched(db_session):
     record_floor_witness(db_session, chain_id=1, address=_ADDR, outcome=WITNESS_PROVEN, first_indexed_block=_SEED)
     record_floor_witness(db_session, chain_id=1, address=_OTHER, outcome=WITNESS_PRIOR_INCARNATION, seed_block=_SEED)
     before = {(r.address, r.outcome, r.attempts, r.witnessed_at) for r in (_row(db_session), _row(db_session, _OTHER))}
-    for address in (_ADDR, _OTHER):
-        assert record_floor_witness(db_session, chain_id=1, address=address, outcome=WITNESS_FAILED) is None
+    for address, kept in ((_ADDR, "proven"), (_OTHER, "prior_incarnation")):
+        assert record_floor_witness(db_session, chain_id=1, address=address, outcome=WITNESS_FAILED) == (kept, 0)
     after = {(r.address, r.outcome, r.attempts, r.witnessed_at) for r in (_row(db_session), _row(db_session, _OTHER))}
     assert after == before
 
@@ -366,3 +365,26 @@ def _columns(connection, table: str) -> set[str]:
             text("SELECT column_name FROM information_schema.columns WHERE table_name = :t"), {"t": table}
         )
     }
+
+
+def test_a_refused_proof_leaves_the_new_cursor_without_a_witnessed_start(db_session, wire):
+    """A prior incarnation of the seed is on record, and a later read finds no logs below it: the row keeps its verdict,
+    and the cursor enrolled now must not claim the seed either, or it could back an exact answer the floor refuses."""
+    from db.models import cursor_permits_exactness
+
+    record_floor_witness(db_session, chain_id=1, address=_ADDR, outcome=WITNESS_PRIOR_INCARNATION, seed_block=_SEED)
+    wire()
+    caches = EnrollmentCaches()
+    assert _enroll_witnessed(
+        db_session,
+        chain_id=1,
+        address=_ADDR,
+        topic0=_TOPIC,
+        seed_cache=caches.seeds,
+        witness_cache=caches.witnesses,
+        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+    )
+    cursor = db_session.execute(select(IndexedEventCursor)).scalar_one()
+    assert (cursor.first_indexed_block, cursor.first_indexed_block_basis) == (None, "not_determined")
+    assert not cursor_permits_exactness(cursor.enrollment_basis, cursor.first_indexed_block_basis)
+    assert _row(db_session).outcome == "prior_incarnation"
