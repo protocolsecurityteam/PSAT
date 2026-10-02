@@ -1810,10 +1810,11 @@ def rewitness_due_floors(
     budget: int = settings.FLOOR_WITNESS_RETRY_BUDGET,
     caches: EnrollmentCaches | None = None,
     stop_event: Event | None = None,
+    on_attempt: Callable[[], None] | None = None,
 ) -> int:
     """Re-attempt up to ``budget`` due floor witnesses, then hand newly proven floors to the cursors enrolled at them;
-    returns addresses attempted. Nothing is due once every witness is proven or a prior incarnation, so steady state
-    makes no external call.
+    returns addresses attempted, and calls ``on_attempt`` as each one commits. Nothing is due once every witness is
+    proven or a prior incarnation, so steady state makes no external call.
     """
     caches = caches if caches is not None else EnrollmentCaches()
     attempted = 0
@@ -1833,6 +1834,8 @@ def rewitness_due_floors(
                 # Live scans deferred on this floor rerun on the mark, even where no cursor is upgraded.
                 mark_dirty(session, "reconcile", str(chain_id))
         session.commit()
+        if on_attempt is not None:
+            on_attempt()
     apply_proven_floors(session)
     session.commit()
     return attempted

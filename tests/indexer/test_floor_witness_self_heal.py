@@ -328,6 +328,31 @@ def test_enrolment_drain_runs_the_retry_step_and_reports_it(db_session, wire):
     assert _row(db_session, _A).outcome == "proven"
 
 
+def test_a_retry_step_that_fails_partway_reports_the_retries_it_completed(db_session, wire, monkeypatch):
+    import workers.event_log_indexer as eli
+
+    for address in (_A, _B, _C):
+        enroll_event_cursor(db_session, chain_id=1, event_address=address, topic0=_T1, start_block=_SEED)
+    db_session.commit()
+    real_witness = eli._witness_seed_block
+    witnessed: list[str] = []
+
+    def fail_third(address, *args, **kwargs):
+        witnessed.append(address)
+        if len(witnessed) == 3:
+            raise RuntimeError("database went away mid-step")
+        return real_witness(address, *args, **kwargs)
+
+    monkeypatch.setattr(eli, "_witness_seed_block", fail_third)
+    reported: list[int] = []
+
+    indexer_scheduler.drain_enrollment(db_session, on_rewitness=reported.append)
+
+    assert reported == [2]
+    assert [_row(db_session, a).outcome for a in (_A, _B)] == ["proven", "proven"]
+    assert _maybe_row(db_session, _C) is None
+
+
 def _hinting_job(session, address: str, topic0: str) -> Job:
     job = Job(
         address=address, chain_id=1, request={"address": address}, status=JobStatus.completed, stage=JobStage.done
