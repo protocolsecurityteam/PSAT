@@ -2013,6 +2013,16 @@ class EnrollmentCaches:
     role_topics: dict[tuple[int, str], list[str]] = field(default_factory=dict)
 
 
+def _record_seed_unknown(session: Session, *, chain_id: int, address: str) -> None:
+    """A floor witness that couldn't start because the creation block is unknown: a failure, with backoff."""
+    stored = record_floor_witness(session, chain_id=chain_id, address=address, outcome=WITNESS_FAILED)
+    if stored.outcome == WITNESS_FAILED and stored.attempts >= settings.FLOOR_WITNESS_FAILURE_ALERT:
+        logger.warning(
+            "floor witness keeps failing; live scans at this address defer and its cursors stay ineligible",
+            extra={"address": address.lower(), "chain_id": chain_id, "seed": None, "attempts": stored.attempts},
+        )
+
+
 def _floor_witness_candidates(session: Session, *, limit: int | None) -> list[tuple[int, str]]:
     """``(chain_id, address)`` pairs whose floor witness is due: cursored addresses never witnessed, then undecided
     rows whose backoff has elapsed, oldest due first. Prior-incarnation verdicts are evidence and never come back.
@@ -2129,7 +2139,7 @@ def rewitness_due_floors(
         attempted += 1
         seed = _seed_block(address, caches.seeds, chain_id=chain_id)
         if seed is None:
-            record_floor_witness(session, chain_id=chain_id, address=address, outcome=WITNESS_FAILED)
+            _record_seed_unknown(session, chain_id=chain_id, address=address)
         else:
             caches.witnesses.pop((chain_id, address), None)
             _witness_seed_block(address, seed, caches.witnesses, chain_id=chain_id, session=session)
@@ -2295,7 +2305,6 @@ def _witness_unenrolled_address(
     address: str,
     seed_cache: dict[tuple[int, str], int | None],
     witness_cache: dict[tuple[int, str], tuple[int | None, str]],
-    pending: set[tuple[int, str]] | None,
     progress: Callable[[], None] | None,
 ) -> None:
     """Record the deploy-floor witness for an address whose tracked topics are all skipped, once: an address with a
@@ -2306,10 +2315,10 @@ def _witness_unenrolled_address(
         progress()
     seed = _seed_block(address, seed_cache, chain_id=chain_id)
     if seed is None:
-        if pending is not None:
-            pending.add((chain_id, address.lower()))
-        return
-    _witness_seed_block(address, seed, witness_cache, chain_id=chain_id, session=session)
+        # Recorded as a failed witness, so the retry step owns it with its backoff rather than every pass re-asking.
+        _record_seed_unknown(session, chain_id=chain_id, address=address)
+    else:
+        _witness_seed_block(address, seed, witness_cache, chain_id=chain_id, session=session)
     if progress is not None:
         progress()
 
@@ -2401,7 +2410,6 @@ def enroll_from_tracked_topics(
                     address=address,
                     seed_cache=seed_cache,
                     witness_cache=witness_cache,
-                    pending=pending,
                     progress=progress,
                 )
             continue

@@ -182,13 +182,25 @@ def test_a_skipped_address_keeps_a_witnessed_floor_without_any_cursor(db_session
     clear_scan_floor_cache()
 
 
-def test_an_unresolvable_creation_block_leaves_the_skipped_source_pending(db_session, monkeypatch):
+def test_an_unresolvable_creation_block_records_a_failed_witness_for_the_retry_step(db_session, monkeypatch):
+    from db.models import AddressFloorWitness
+
     stub_seed_witness(monkeypatch, creation_block=None)
     _monitored(db_session, [_spec(_ACTIVITY, "activity")])
     pending: set[tuple[int, str]] = set()
     enroll_from_tracked_topics(db_session, pending=pending, caches=EnrollmentCaches())
-    assert pending == {(1, _ADDR)}
-    assert read_floor_witness(db_session, chain_id=1, address=_ADDR) is None
+    assert pending == set()
+    row = db_session.execute(select(AddressFloorWitness).where(AddressFloorWitness.address == _ADDR)).scalar_one()
+    assert (row.outcome, row.seed_block, row.attempts, row.next_attempt_at is not None) == ("failed", None, 1, True)
+    # The row now exists, so later passes leave the address to the retry step's backoff.
+    enroll_from_tracked_topics(db_session, caches=EnrollmentCaches())
+    db_session.expire_all()
+    assert (
+        db_session.execute(select(AddressFloorWitness).where(AddressFloorWitness.address == _ADDR))
+        .scalar_one()
+        .attempts
+        == 1
+    )
 
 
 def test_restaking_pubkey_linked_still_enrols_and_feeds_the_fold(db_session, monkeypatch):

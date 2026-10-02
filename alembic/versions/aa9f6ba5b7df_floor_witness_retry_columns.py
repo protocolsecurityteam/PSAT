@@ -3,9 +3,9 @@
 Revision ID: aa9f6ba5b7df
 Revises: ea1a393444b5
 
-Existing witness rows: a proven floor becomes ``proven`` at its own block; a ``not_determined`` row can only have come
-from witnessed cursors disagreeing, so it becomes ``cursor_conflict`` and is due for a retry now. None of the new
-columns is a watched trigger column.
+Existing witness rows: a proven floor becomes ``proven`` at its own block. A ``not_determined`` row doesn't record why
+(witnessed cursors disagreeing, a failed read, or logs below the seed), so it becomes ``cursor_conflict`` and is due
+for a retry now; the retry settles it. None of the new columns is a watched trigger column.
 """
 
 from __future__ import annotations
