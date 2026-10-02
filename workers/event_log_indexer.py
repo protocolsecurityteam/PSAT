@@ -2718,8 +2718,20 @@ def run_event_log_indexer_loop(
                 claims=claims,
             )
 
-        def log_pass(summary: ScanSummary, status: str, enrolled: int, scan_mode: str) -> None:
-            # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is visible.
+        def table_triad(session: Session) -> tuple[int, int] | None:
+            try:
+                return _cursor_progress(session)
+            except Exception:
+                session.rollback()
+                logger.exception("event log indexer cursor-progress count failed")
+                return None
+
+        def log_pass(
+            summary: ScanSummary, status: str, enrolled: int, scan_mode: str, triad: tuple[int, int] | None
+        ) -> None:
+            # Unconditional per-pass INFO with the cursor triad read from the table (as the heartbeat reports it), so a
+            # cold backfill scanning empty windows is visible. The pass's own count covers only the groups it visited.
+            caught_up, total = triad if triad is not None else (None, None)
             logger.info(
                 "event log indexer pass complete",
                 extra={
@@ -2727,9 +2739,12 @@ def run_event_log_indexer_loop(
                     "enrolled": enrolled,
                     "inserted": summary.inserted,
                     "windows_scanned": summary.windows_scanned,
-                    "caught_up_cursors": summary.caught_up_cursors,
-                    "total_cursors": summary.total_cursors,
-                    "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
+                    "caught_up_cursors": caught_up,
+                    "total_cursors": total,
+                    "pending_cursors": max(0, total - caught_up)
+                    if total is not None and caught_up is not None
+                    else None,
+                    "visited_caught_up_cursors": summary.caught_up_cursors,
                     "budget_exhausted": summary.budget_exhausted,
                     "failed_groups": summary.failed_groups,
                     "status": status,
@@ -2743,6 +2758,7 @@ def run_event_log_indexer_loop(
                     enrolled = 0
                     summary = ScanSummary()
                     status = "running"
+                    triad: tuple[int, int] | None = None
                     try:
                         with SessionLocal() as session:
                             enrolled = enroll(session)
@@ -2750,11 +2766,12 @@ def run_event_log_indexer_loop(
                                 summary = scan(session, "cold")
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
+                            triad = table_triad(session)
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
                     status = _heartbeat_status_for_pass(status, summary)
-                    log_pass(summary, status, enrolled, "cold")
+                    log_pass(summary, status, enrolled, "cold", triad)
                     publish_pass("cold", summary, status, enrolled)
                     # Only unfinished history uses the short pause.
                     stop_event.wait(DEFAULT_BACKFILL_BUSY_INTERVAL_S if summary.budget_exhausted else interval)
@@ -2782,6 +2799,7 @@ def run_event_log_indexer_loop(
                     enrolled = 0
                     summary = ScanSummary()
                     status = "running"
+                    triad = None
                     try:
                         with SessionLocal() as session:
                             enrolled = enroll(session)
@@ -2807,11 +2825,12 @@ def run_event_log_indexer_loop(
                                 )
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
+                            triad = table_triad(session)
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
                     status = _heartbeat_status_for_pass(status, summary)
-                    log_pass(summary, status, enrolled, "all")
+                    log_pass(summary, status, enrolled, "all", triad)
                     publish_pass("cold", summary, status, enrolled)
                     backfill_wait = (
                         min(DEFAULT_BACKFILL_BUSY_INTERVAL_S, max(0.0, next_warm_at - time.monotonic()))
