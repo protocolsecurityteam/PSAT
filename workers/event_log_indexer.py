@@ -30,7 +30,6 @@ from db.floor_witnesses import (
 from db.models import (
     CURSOR_BASIS_NOT_DETERMINED,
     ENROLLMENT_BASIS_PREDICATE_HINT,
-    ENROLLMENT_BASIS_RETIRING,
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
@@ -437,7 +436,7 @@ def _upgrade_to_predicate_hint(session: Session, *, chain_id: int, address: str,
         .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
         .where(IndexedEventCursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION)
         .where(IndexedEventCursor.enrollment_basis.is_not(None))
-        .where(IndexedEventCursor.enrollment_basis.not_in([*eligible, ENROLLMENT_BASIS_RETIRING]))
+        .where(IndexedEventCursor.enrollment_basis.not_in(eligible))
         .values(enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT)
         .execution_options(synchronize_session=False)
     )
@@ -2190,7 +2189,7 @@ def completed_jobs_query(limit: int | None = None):
 
 
 def hint_targets_for_job(session: Session, job: Job) -> Iterator[HintTarget]:
-    """Every (chain, address, topics) the job's predicate trees enrol, resolved exactly as enrolment resolves them."""
+    """Every (chain, address, topics) enrolment the job's predicate trees ask for."""
     artifact = get_artifact(session, job.id, "predicate_trees")
     if not isinstance(artifact, dict):
         return
