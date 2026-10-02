@@ -523,3 +523,15 @@ def test_unresolved_checks_are_listed_and_apply_needs_them_acknowledged(db_sessi
         ).scalar_one()
         == 0
     )
+
+
+def test_a_retiring_cursor_a_gate_now_blocks_is_reported_as_stuck(db_session):
+    _scene(db_session)
+    db_session.execute(
+        update(IndexedEventCursor).where(IndexedEventCursor.topic0 == _A).values(enrollment_basis="retiring")
+    )
+    _job(db_session, {"f()": _leaf({"enumeration_hint": [{"topic0": _A, "event_address": _X}]})})
+    db_session.commit()
+    verdicts = retire.plan_retirement(db_session, abi_lookup=_Abis({_X: _abi([])}))
+    db_session.rollback()
+    assert retire._summary(verdicts, applied=False)["stuck_retiring_cursors"] == [f"1:{_X}:{_A}"]

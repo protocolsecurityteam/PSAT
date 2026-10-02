@@ -286,7 +286,7 @@ def plan_retirement(
 ) -> list[CursorVerdict]:
     """Every cursor in scope with its gate evidence. Read-only.
 
-    ``unresolved_checks`` receives the external checks whose target address no controller value names: gate 5′ can't
+    ``unresolved_checks`` receives the external checks whose target address no controller value names: gate 5 can't
     place them, so they are shown rather than assumed harmless.
     """
     query = select(
@@ -572,6 +572,13 @@ def _summary(verdicts: Sequence[CursorVerdict], *, applied: bool) -> dict[str, A
         "retirable_rows": sum(v.rows for v in retirable),
         "retirable_addresses": sorted({f"{v.chain_id}:{v.address}" for v in retirable}),
         "blocked_by_gate": dict(blocked),
+        # Left ``retiring`` by an interrupted apply and now blocked by a gate: never eligible, partly deleted. Delete
+        # the cursor and its rows by hand so the source that now wants it enrols it afresh.
+        "stuck_retiring_cursors": sorted(
+            f"{v.chain_id}:{v.address}:{v.topic0}"
+            for v in verdicts
+            if v.enrollment_basis == ENROLLMENT_BASIS_RETIRING and not v.retirable
+        ),
     }
 
 

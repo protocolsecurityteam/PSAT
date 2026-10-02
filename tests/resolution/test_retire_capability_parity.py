@@ -46,6 +46,18 @@ _EXCHANGE_RATE = "0x" + "e2" * 32
 _CALLER = "0x" + "c4" * 20
 
 
+@pytest.fixture(autouse=True)
+def _no_wire(monkeypatch):
+    """Keep the resolver's bytecode probes (``rpc.get_code`` for adapter selector checks) off the wire; the probe
+    failure is the path an unreachable RPC already takes. The materializer's own call is stubbed per test."""
+    import services.clients.rpc as rpc
+
+    def _no_rpc(*_a, **_k):
+        raise RuntimeError("offline: resolver wire stubbed")
+
+    monkeypatch.setattr(rpc, "rpc_request", _no_rpc)
+
+
 @pytest.fixture
 def session():
     if not _can_connect():
@@ -441,7 +453,7 @@ def test_retire_keeps_rows_a_bool_check_materializes_from_and_drops_only_void_ch
     assert {(v.address, v.topic0) for v in retired} == {(_HOOK, _TRANSFER)}
     assert _resolve_all(session, {}, [root]) == before
 
-    # Had gate 5′ let the bool-check target's rows go, the published caller set would shrink.
+    # Had gate 5 let the bool-check target's rows go, the published caller set would shrink.
     session.execute(delete(IndexedEventLog).where(IndexedEventLog.event_address == _REGISTRY))
     session.commit()
     stripped = _resolve_all(session, {}, [root])
