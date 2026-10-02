@@ -127,6 +127,13 @@ def fold_role_candidates(rows: Iterable[Any]) -> dict[str, dict[str, bool]]:
     return state
 
 
+def _role_topic(row: Any) -> str | None:
+    topics = list(getattr(row, "topics", None) or [])
+    if len(topics) <= _ROLE_TOPIC_INDEX:
+        return None
+    return _normalize_word(topics[_ROLE_TOPIC_INDEX])
+
+
 def resolve_role_name(
     role_hash: str, candidate_names: Iterable[str], *, has_role_answered: bool
 ) -> tuple[str | None, str]:
@@ -323,9 +330,16 @@ def resolve_role_holder_planes(
             )
         ).scalars()
     )
-    undecodable = sum(1 for row in repo_rows if getattr(row, "data_hex", None) is not None)
+    undecodable_rows = [row for row in repo_rows if getattr(row, "data_hex", None) is not None]
+    undecodable = len(undecodable_rows)
     folded = fold_role_candidates(row for row in repo_rows if getattr(row, "data_hex", None) is None)
-    if not folded:
+    # An undecodable row's role topic still names a role this registry emitted; its account is not taken as a candidate.
+    undecodable_roles = {
+        role_hash
+        for role_hash in (_role_topic(row) for row in undecodable_rows)
+        if role_hash is not None and role_hash not in folded
+    }
+    if not folded and not undecodable_roles:
         return []
 
     bounds = _cursor_bounds(session, chain_id=chain_id, registry_address=registry_address)
@@ -334,7 +348,7 @@ def resolve_role_holder_planes(
     def withhold_all() -> list[dict[str, Any]]:
         """No read happened, so the zero-word convention has nothing to stand on."""
         out = []
-        for role_hash in sorted(folded):
+        for role_hash in sorted(set(folded) | undecodable_roles):
             name, basis = resolve_role_name(role_hash, names, has_role_answered=False)
             out.append(
                 _withheld_row(

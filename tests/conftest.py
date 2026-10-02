@@ -492,6 +492,25 @@ def _stub_safe_protection_head_read(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_indexer_witness_wire(monkeypatch):
+    """Keep the offline suite hermetic against the indexer's floor-witness retries.
+
+    Every enrolment drain ends with ``rewitness_due_floors``, which re-runs the seed
+    lookup (Etherscan) and the three-read witness (RPC) for any cursored address with
+    no witness row or a due failure. That read is unconditional on such fixtures.
+    Raising here reproduces the outage path the code already takes (seed unknown or
+    witness failed -> a ``failed`` row with backoff), so nothing dials out. Tests that
+    drive enrolment or the witness patch these bindings in the test body, which runs
+    after this fixture."""
+
+    def _no_wire(*a, **k):
+        raise RuntimeError("offline: indexer witness wire stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("workers.event_log_indexer.rpc_request", _no_wire)
+    monkeypatch.setattr("workers.event_log_indexer.get_contract_creation_block", _no_wire)
+
+
+@pytest.fixture(autouse=True)
 def _stub_role_store_wire(monkeypatch):
     """Keep the offline suite hermetic against the role-store wire reads.
 

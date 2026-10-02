@@ -11,6 +11,7 @@ import logging
 import math
 import weakref
 from threading import Event
+from typing import cast
 
 import pytest
 from sqlalchemy import delete, event, func, select, text, update
@@ -261,14 +262,37 @@ def test_sibling_topic_narrowing_skips_at_target_siblings(db_session, sim):
 # Page sizing, the memory ceiling, the timeout
 
 
+def _mark_advanced(session, t: str = _T1, addr: str = _ADDR) -> None:
+    """A cursor that has advanced before but whose page density is unknown (e.g. written by the legacy engine)."""
+    session.execute(
+        update(IndexedEventCursor)
+        .where(IndexedEventCursor.event_address == addr, IndexedEventCursor.topic0 == t)
+        .values(last_advanced_at=func.now(), recent_logs_per_block=None)
+    )
+    session.commit()
+
+
 def test_span_doubles_while_pages_come_back_sparse(db_session, sim):
     sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_SEED + 200_000, every=1_000))
     _enroll(db_session, seed=_SEED)
+    _mark_advanced(db_session)
     limits = PageLimits(max_block_span=100_000, initial_span=10_000, target_page_logs=2_000, max_page_logs=50_000)
 
     _scan(db_session, limits=limits, max_windows_per_cursor=6)
 
     assert [r["to"] - r["from"] + 1 for r in sim.getlogs] == [10_000, 20_000, 40_000, 80_000, 100_000, 100_000]
+
+
+def test_a_never_advanced_sparse_group_needs_one_page_per_widest_span(db_session, sim):
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=10_000))
+    _enroll(db_session, seed=_SEED)
+    limits = PageLimits(max_block_span=100_000, initial_span=10_000, target_page_logs=2_000, max_page_logs=50_000)
+
+    _drain(db_session, limits=limits)
+
+    spans = [r["to"] - r["from"] + 1 for r in sim.getlogs]
+    assert spans == [100_000] * math.ceil((_TARGET - _SEED) / 100_000)
+    assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == 100
 
 
 def test_span_converges_to_the_target_page(db_session, sim):
@@ -281,6 +305,7 @@ def test_span_converges_to_the_target_page(db_session, sim):
         ],
     )
     _enroll(db_session)
+    _mark_advanced(db_session)
     limits = PageLimits(max_block_span=500_000, initial_span=2_000, target_page_logs=2_000, max_page_logs=50_000)
 
     _scan(db_session, limits=limits, max_windows_per_cursor=4)
@@ -311,6 +336,179 @@ def test_dense_request_count_is_bounded_by_logs_over_target_plus_ramp(db_session
     dense_requests = [r for r in sim.getlogs if r["from"] <= _SEED + 10_000]
     assert len(dense_requests) <= math.ceil(len(dense) / target_logs) + ramp
     assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == len(dense)
+
+
+_QUERY_TIMED_OUT = "{'code': -32603, 'message': 'Internal error: Query timed out'}"
+
+
+def test_a_query_timeout_caps_the_next_visit_below_the_refused_span(db_session, sim):
+    refuse_over = 150_000
+    sim.refuse = lambda _chain, lo, hi: _QUERY_TIMED_OUT if hi - lo + 1 > refuse_over else None
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
+    _enroll(db_session, seed=_SEED)
+    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=50_000)
+
+    _scan(db_session, limits=limits, max_windows_per_cursor=2)
+    first_visit = len(sim.getlogs)
+    assert [r["to"] - r["from"] + 1 for r in sim.getlogs] == [500_000, 250_000, 125_000, 125_000]
+    assert _cursor(db_session).request_span_limit == 125_000
+
+    _drain(db_session, limits=limits)
+    later = sim.getlogs[first_visit:]
+    assert later[0]["to"] - later[0]["from"] + 1 <= refuse_over
+    assert all(r["to"] - r["from"] + 1 <= 125_000 for r in later)
+    # Two refusals in all, then one request per capped span.
+    assert len(sim.getlogs) == 2 + math.ceil((_TARGET - _SEED) / 125_000)
+    assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == 20
+    # The limit served this backlog; a later one starts from density again.
+    assert _cursor(db_session).request_span_limit is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "{'code': -32000, 'message': 'upstream unavailable'}",
+        "{'code': -32005, 'message': 'rate limit exceeded'}",
+        "{'code': -32000, 'message': 'requested block range is not synced yet'}",
+    ],
+    ids=["outage", "rate_limit", "not_synced"],
+)
+def test_a_transient_upstream_error_bisects_but_sets_no_span_limit(db_session, sim, error):
+    failed: list[int] = []
+
+    def flaky(_chain, lo, hi):
+        if not failed:
+            failed.append(hi - lo + 1)
+            return error
+        return None
+
+    sim.refuse = flaky
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
+    _enroll(db_session, seed=_SEED)
+    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=50_000)
+
+    _scan(db_session, limits=limits, max_windows_per_cursor=1)
+
+    assert failed == [500_000]
+    assert _cursor(db_session).request_span_limit is None
+
+
+def test_a_persisted_span_limit_never_falls_below_the_bisect_floor(db_session, sim):
+    sim.refuse = lambda _chain, lo, hi: _QUERY_TIMED_OUT if hi - lo + 1 > 3_000 else None
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
+    _enroll(db_session, seed=_SEED)
+    limits = PageLimits(max_block_span=20_000, initial_span=20_000, target_page_logs=2_000, max_page_logs=50_000)
+    fetchers, heads, hashes = _fetchers()
+    cast(RpcEventLogFetcher, fetchers[1]).min_bisect_span = 1_000
+
+    scan_enrolled_events(
+        db_session,
+        fetchers=fetchers,
+        head_fetchers=heads,
+        block_hash_fetchers=hashes,
+        page_limits=limits,
+        max_windows_per_cursor=12,
+    )
+
+    # Bisection reached pages under 3,000 blocks, but neither the rest of the visit nor the next one shrinks below the
+    # floor: each later chunk is requested at 10,000 blocks.
+    spans = [r["to"] - r["from"] + 1 for r in sim.getlogs]
+    assert min(spans) <= 3_000
+    first_accepted = next(i for i, r in enumerate(sim.getlogs) if r["served"] is not None)
+    assert 10_000 in spans[first_accepted + 1 :]
+    assert _cursor(db_session).request_span_limit == 10_000
+
+
+def test_the_page_names_only_the_narrowest_span_the_upstream_refused(sim):
+    sim.refuse = lambda _chain, lo, hi: _QUERY_TIMED_OUT if hi - lo + 1 > 40_000 else None
+    sim.add(1, SimLog(address=_ADDR, topics=(_T1,), data="0x", block=_SEED + 5, tx_index=0, log_index=0))
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=1_000)
+    pages = list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=_SEED + 1, to_block=_SEED + 100_000))
+    assert [(p.to_block - p.from_block + 1, p.rejected, p.rejected_span) for p in pages] == [
+        (25_000, 2, 50_000),
+        (25_000, 0, None),
+        (25_000, 1, 50_000),
+        (25_000, 0, None),
+    ]
+
+
+def test_a_local_ceiling_discard_is_not_an_upstream_refusal(sim):
+    sim.add_many(
+        1,
+        [
+            SimLog(address=_ADDR, topics=(_T1,), data="0x", block=_SEED + 1 + i, tx_index=0, log_index=0)
+            for i in range(8)
+        ],
+    )
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1)
+    pages = list(
+        fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=_SEED + 1, to_block=_SEED + 8, max_page_logs=4)
+    )
+    assert pages[0].rejected == 1 and pages[0].rejected_span is None
+
+
+def _merged_wide_range_sim(
+    sim, *, lo: int, hi: int, logs: int, refuse_over: int, error: str = "Limit exceeded: More than {n} logs returned"
+) -> None:
+    """The upstream serves exactly ``[lo, hi]`` whole (an aggregator merging its split sub-requests) but refuses any
+    other request holding more than ``refuse_over`` logs."""
+    every = (hi - lo + 1) // logs
+    sim.add_many(1, _uniform(_ADDR, _T1, lo=lo, hi=lo + every * (logs - 1), every=every))
+    lane = sim.lanes[(1, _ADDR)]
+
+    def refuse(_chain, a, b):
+        if (a, b) == (lo, hi) or len(lane.between(a, b)) <= refuse_over:
+            return None
+        return "{'code': -32005, 'message': '" + error.format(n=refuse_over) + "'}"
+
+    sim.refuse = refuse
+
+
+def test_a_refusal_below_the_floor_after_a_ceiling_split_keeps_bisecting(sim):
+    lo, hi = _SEED + 1, _SEED + 20_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi, logs=3_000, refuse_over=600)
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=10_000)
+
+    pages = list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=lo, to_block=hi, max_page_logs=1_000))
+
+    # The whole range came back over the ceiling, its 10,000-block halves were refused at the floor, and the
+    # bisection went on below it rather than failing the group on every pass.
+    assert pages[0].from_block == lo and pages[-1].to_block == hi
+    assert all(a.to_block + 1 == b.from_block for a, b in zip(pages, pages[1:]))
+    assert sum(len(p.logs) for p in pages) == 3_000
+    assert max(p.to_block - p.from_block + 1 for p in pages) < 10_000
+
+
+def test_a_non_size_error_below_the_floor_raises_even_after_a_ceiling_split(sim):
+    lo, hi = _SEED + 1, _SEED + 20_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi, logs=3_000, refuse_over=600, error="upstream unavailable")
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=10_000)
+    with pytest.raises(RuntimeError, match="upstream unavailable"):
+        list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=lo, to_block=hi, max_page_logs=1_000))
+    # Only the wide request and one ceiling-split half: an outage isn't chased down to single blocks.
+    assert [r["to"] - r["from"] + 1 for r in sim.getlogs] == [20_000, 10_000]
+
+
+def test_a_refusal_at_the_floor_without_a_ceiling_split_still_raises(sim):
+    lo, hi = _SEED + 1, _SEED + 10_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi + 10_000, logs=3_000, refuse_over=600)
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=10_000)
+    with pytest.raises(RuntimeError, match="Limit exceeded"):
+        list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=lo, to_block=hi, max_page_logs=1_000))
+
+
+def test_the_engine_completes_a_group_whose_upstream_refuses_split_halves(db_session, sim):
+    lo, hi = _SEED + 1, _SEED + 20_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi, logs=3_000, refuse_over=600)
+    _enroll(db_session, seed=_SEED)
+    db_session.execute(update(IndexedEventCursor).values(request_span_limit=20_000))
+    db_session.commit()
+    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=1_000)
+
+    _drain(db_session, limits=limits)
+
+    assert db_session.scalar(select(func.count()).select_from(IndexedEventLog)) == 3_000
+    assert _cursor(db_session).last_indexed_block == _TARGET
 
 
 def test_over_ceiling_page_is_discarded_and_bisected_with_no_writes(db_session, sim):
@@ -401,7 +599,9 @@ def test_each_page_folds_its_count_only_into_the_cursors_it_advanced(db_session,
     sim.add_many(1, _uniform(_ADDR, _T2, lo=_SEED + 5_001, hi=_SEED + 60_000, every=1_000, tx_base=9))
     _enroll(db_session, topics=(_T1, _T2))
     db_session.execute(
-        update(IndexedEventCursor).where(IndexedEventCursor.topic0 == _T2).values(last_indexed_block=_SEED + 5_000)
+        update(IndexedEventCursor)
+        .where(IndexedEventCursor.topic0 == _T2)
+        .values(last_indexed_block=_SEED + 5_000, last_advanced_at=func.now())
     )
     db_session.commit()
     limits = PageLimits(max_block_span=500_000, initial_span=5_000, target_page_logs=50_000, max_page_logs=50_000)

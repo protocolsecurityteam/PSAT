@@ -178,7 +178,13 @@ def _snapshot(session) -> dict[str, Any]:
             IndexedEventLog.log_index,
         )
     ).all()
-    excluded = {"last_run_at", "last_advanced_at", "recent_logs_per_block", "max_window_log_count"}
+    excluded = {
+        "last_run_at",
+        "last_advanced_at",
+        "recent_logs_per_block",
+        "request_span_limit",
+        "max_window_log_count",
+    }
     cursor_columns = [c for c in IndexedEventCursor.__table__.columns if c.name not in excluded]
     cursors = session.execute(
         select(*cursor_columns).order_by(

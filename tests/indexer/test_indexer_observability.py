@@ -106,3 +106,64 @@ def test_warm_sweep_reports_the_largest_remaining_lag_per_chain(db_session):
     )
 
     assert summary.warm_max_lag_blocks == {1: 50}
+
+
+def test_the_cold_pass_line_reports_the_table_triad_not_just_the_groups_it_visited(db_session, monkeypatch):
+    import threading
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import workers.event_log_indexer as indexer
+    from services.resolution import indexer_scheduler
+    from tests.conftest import DATABASE_URL
+
+    for index in range(2):
+        enroll_event_cursor(
+            db_session, chain_id=1, event_address=f"0x{0xE600 + index:040x}", topic0=_TOPIC, start_block=_TARGET
+        )
+    db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
+    enroll_event_cursor(
+        db_session, chain_id=1, event_address=f"0x{0xE6FF:040x}", topic0=_TOPIC, start_block=_TARGET - 5
+    )
+    db_session.commit()
+
+    engine = create_engine(DATABASE_URL)
+    monkeypatch.setattr(indexer, "SessionLocal", sessionmaker(bind=engine, expire_on_commit=False))
+    monkeypatch.setattr(indexer_scheduler, "drain_enrollment", lambda _s, **_k: 0)
+    monkeypatch.setattr(indexer_scheduler, "drain_reconciliation", lambda _s, **_k: (0, 0))
+    monkeypatch.setattr(indexer, "record_heartbeat", lambda *_a, **_k: None)
+    stop = threading.Event()
+    cold_passes: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.getMessage() == "event log indexer pass complete" and getattr(record, "scan_mode", "") == "cold":
+                cold_passes.append(record)
+                stop.set()
+
+    handler = _Capture()
+    indexer.logger.addHandler(handler)
+    level = indexer.logger.level
+    indexer.logger.setLevel(logging.INFO)
+    timer = threading.Timer(30, stop.set)
+    timer.start()
+    try:
+        indexer.run_event_log_indexer_loop(
+            fetchers={1: _SparseFetcher()},
+            head_fetchers={1: _Head()},
+            block_hash_fetchers={1: _Head()},
+            interval=0.05,
+            stop_event=stop,
+            engine="paged",
+        )
+    finally:
+        timer.cancel()
+        indexer.logger.removeHandler(handler)
+        indexer.logger.setLevel(level)
+        engine.dispose()
+
+    assert cold_passes, "no cold pass completed"
+    record = cold_passes[0]
+    assert getattr(record, "visited_caught_up_cursors") == 1
+    assert tuple(getattr(record, f) for f in ("caught_up_cursors", "total_cursors", "pending_cursors")) == (3, 3, 0)

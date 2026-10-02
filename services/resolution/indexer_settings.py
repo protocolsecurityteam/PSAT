@@ -36,6 +36,8 @@ TARGET_PAGE_LOGS = int(os.getenv("PSAT_EVENT_INDEXER_TARGET_PAGE_LOGS", "25000")
 INITIAL_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_INITIAL_SPAN", "50000"))
 # Memory ceiling: a larger page is discarded and bisected, down to one block.
 MAX_PAGE_LOGS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_PAGE_LOGS", "100000"))
+# The lowest request span persisted after an upstream size refusal (the fetcher's bisect floor); one backlog's limit.
+MIN_REQUEST_SPAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_MIN_REQUEST_SPAN_LIMIT", "10000"))
 # Above eRPC's 30 s maxTimeout so the client receives eRPC's verdict. Only safe with the ceiling above.
 GETLOGS_TIMEOUT_S = float(os.getenv("PSAT_EVENT_INDEXER_GETLOGS_TIMEOUT_S", "35"))
 
@@ -46,3 +48,9 @@ WARM_BATCH_MAX_LAG = int(os.getenv("PSAT_EVENT_INDEXER_WARM_BATCH_MAX_LAG", "100
 
 GROUP_BUDGET_S = float(os.getenv("PSAT_EVENT_INDEXER_GROUP_BUDGET_S", "30"))
 PASS_BUDGET_S = float(os.getenv("PSAT_EVENT_INDEXER_PASS_BUDGET_S", "120"))
+
+# Addresses whose floor witness is re-attempted per enrolment pass (each costs one Etherscan lookup and three RPC
+# reads). Steady state, with every witness decided, costs nothing.
+FLOOR_WITNESS_RETRY_BUDGET = int(os.getenv("PSAT_FLOOR_WITNESS_RETRY_BUDGET", "10"))
+# Consecutive floor-witness failures after which each retry logs a WARNING; the retry backoff bounds how often.
+FLOOR_WITNESS_FAILURE_ALERT = 5

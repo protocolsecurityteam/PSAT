@@ -107,7 +107,8 @@ class LogPage:
     """One accepted response over a contiguous block range.
 
     ``stats`` holds one record per accepted request behind the page (one for ``iter_pages``). ``rejected`` counts the
-    requests refused or discarded since the previous page.
+    requests refused or discarded since the previous page; ``rejected_span`` is the narrowest range the upstream refused
+    for its size (a size or log-count limit, a query timeout), ``None`` when it refused none that way.
     """
 
     from_block: int
@@ -115,6 +116,7 @@ class LogPage:
     logs: list[FetchedEventLog]
     stats: tuple[FetchWindowStat, ...]
     rejected: int = 0
+    rejected_span: int | None = None
 
     @property
     def returned_log_count(self) -> int | None:
@@ -233,15 +235,20 @@ class RpcEventLogFetcher:
             end = min(to_block, start + self.max_block_range - 1)
             windows.append((start, end))
             start = end + 1
-        pending = windows[::-1]
+        # Each range carries whether a ceiling split produced it: such a range may sit below the bisect floor without
+        # the upstream ever having refused that size, so a refusal there keeps bisecting down to one block.
+        pending = [(lo, hi, False) for lo, hi in windows[::-1]]
         rejected = 0
+        rejected_span: int | None = None
         while pending:
-            lo, hi = pending.pop()
-            raw_logs = self._request_range(address_filter, topic_filter, lo, hi)
+            lo, hi, split_by_ceiling = pending.pop()
+            raw_logs = self._request_range(address_filter, topic_filter, lo, hi, below_floor=split_by_ceiling)
             span = hi - lo + 1
-            if raw_logs is _REJECTED:
+            if raw_logs is _REJECTED or raw_logs is _REFUSED_FOR_SIZE:
                 rejected += 1
-                pending.extend(_halves(lo, hi)[::-1])
+                if raw_logs is _REFUSED_FOR_SIZE:
+                    rejected_span = span if rejected_span is None else min(rejected_span, span)
+                pending.extend((a, b, split_by_ceiling) for a, b in _halves(lo, hi)[::-1])
                 continue
             # A page at the cap is indistinguishable from a truncated one, so bisect it like an error. The ``is not
             # None`` guard matters: ``>=`` against None raises TypeError, which would escape the bisect.
@@ -268,7 +275,7 @@ class RpcEventLogFetcher:
                 )
                 raw_logs = None
                 rejected += 1
-                pending.extend(_halves(lo, hi)[::-1])
+                pending.extend((a, b, split_by_ceiling) for a, b in _halves(lo, hi)[::-1])
                 continue
             if max_page_logs is not None and count is not None and count > max_page_logs:
                 if span > 1:
@@ -285,7 +292,7 @@ class RpcEventLogFetcher:
                     )
                     raw_logs = None
                     rejected += 1
-                    pending.extend(_halves(lo, hi)[::-1])
+                    pending.extend((a, b, True) for a, b in _halves(lo, hi)[::-1])
                     continue
                 # Blocks are atomic, so one block over the ceiling is taken whole; memory is bounded by it instead.
                 logger.warning(
@@ -305,18 +312,31 @@ class RpcEventLogFetcher:
                 if self.strict
                 else self._decode_page(raw_logs)
             )
-            page = LogPage(from_block=lo, to_block=hi, logs=logs, stats=(stat,), rejected=rejected)
+            page = LogPage(
+                from_block=lo, to_block=hi, logs=logs, stats=(stat,), rejected=rejected, rejected_span=rejected_span
+            )
             logs = []
             raw_logs = None
             yield page
             # Drop this frame's reference so the consumer's release frees the page before the next request.
             page = None
             rejected = 0
+            rejected_span = None
 
     def _request_range(
-        self, address_filter: str | list[str] | None, topic_filter: list[list[str] | None], lo: int, hi: int
+        self,
+        address_filter: str | list[str] | None,
+        topic_filter: list[list[str] | None],
+        lo: int,
+        hi: int,
+        *,
+        below_floor: bool = False,
     ) -> Any:
-        """The response for one range, or ``_REJECTED`` when the range must be bisected."""
+        """The response for one range, or ``_REJECTED`` / ``_REFUSED_FOR_SIZE`` when it must be bisected.
+
+        ``below_floor`` lets a size refusal bisect under ``min_bisect_span``, down to one block; any other error there
+        is raised.
+        """
         log_filter: dict[str, Any] = {"topics": topic_filter, "fromBlock": hex(lo), "toBlock": hex(hi)}
         # Omit the key rather than send null: absence is the spec's "any emitter", explicit null isn't.
         if address_filter is not None:
@@ -335,7 +355,7 @@ class RpcEventLogFetcher:
         except RuntimeError as exc:
             # Upstream cap or timeout: halve; at the floor it's a real error.
             span = hi - lo + 1
-            if span <= self.min_bisect_span:
+            if span <= (1 if below_floor and _is_size_refusal(exc) else self.min_bisect_span):
                 raise
             logger.debug(
                 "eth_getLogs window rejected; bisecting",
@@ -347,7 +367,7 @@ class RpcEventLogFetcher:
                     "exc_type": type(exc).__name__,
                 },
             )
-            return _REJECTED
+            return _REFUSED_FOR_SIZE if _is_size_refusal(exc) else _REJECTED
 
     def _decode_page(self, raw_logs: Any) -> list[FetchedEventLog]:
         out: list[FetchedEventLog] = []
@@ -453,6 +473,19 @@ class RpcEventLogFetcher:
 
 
 _REJECTED: Any = object()
+_REFUSED_FOR_SIZE: Any = object()
+
+# How upstreams word a refusal of the range itself: eRPC's too-large class, a log-count limit ("More than N logs
+# returned"), a response-size limit, and HyperRPC's query timeout on a wide range. Anything else (an outage, a rate
+# limit, a block not yet synced) still bisects above the floor but says nothing about how wide a request may be.
+_SIZE_REFUSAL_MARKERS = ("timed out", "timeout", "too large", "toolarge", "more than", "response size", "-32012")
+
+
+def _is_size_refusal(exc: BaseException) -> bool:
+    if isinstance(exc, RpcClientTimeout):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _SIZE_REFUSAL_MARKERS)
 
 
 def _halves(lo: int, hi: int) -> list[tuple[int, int]]:

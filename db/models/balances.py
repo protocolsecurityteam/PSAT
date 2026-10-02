@@ -537,6 +537,12 @@ class IndexedEventCursor(Base):
     # (sizes the next page).
     last_advanced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recent_logs_per_block: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The block the cursor was seeded at, whatever its witness said. A later witness proving this same seed is the only
+    # evidence that may set ``first_indexed_block`` after enrolment. NULL on cursors enrolled before the column.
+    enrolled_seed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Operational only, never evidence: the widest range the next page may request, lowered when the upstream refuses
+    # one (a size limit or a query timeout) so later visits don't start at a span it already refused.
+    request_span_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 def exactness_eligible_cursor_clause():
@@ -564,6 +570,19 @@ def cursor_permits_exactness(enrollment_basis: str | None, first_indexed_block_b
 # ``creation_block_minus_one``; ``not_determined`` means a witness was attempted and did not prove the floor. No row
 # means none was ever attempted.
 FLOOR_WITNESS_BASES = (FIRST_INDEXED_BASIS_CREATION, CURSOR_BASIS_NOT_DETERMINED)
+# Why a row holds the basis it does. ``prior_incarnation`` (logs at or below the seed) is evidence and final;
+# ``failed`` and ``cursor_conflict`` are undecided and retried after ``next_attempt_at``.
+FLOOR_WITNESS_PROVEN = "proven"
+FLOOR_WITNESS_PRIOR_INCARNATION = "prior_incarnation"
+FLOOR_WITNESS_FAILED = "failed"
+FLOOR_WITNESS_CURSOR_CONFLICT = "cursor_conflict"
+FLOOR_WITNESS_OUTCOMES = (
+    FLOOR_WITNESS_PROVEN,
+    FLOOR_WITNESS_PRIOR_INCARNATION,
+    FLOOR_WITNESS_FAILED,
+    FLOOR_WITNESS_CURSOR_CONFLICT,
+)
+FLOOR_WITNESS_RETRYABLE = (FLOOR_WITNESS_FAILED, FLOOR_WITNESS_CURSOR_CONFLICT)
 
 
 class AddressFloorWitness(Base):
@@ -574,11 +593,31 @@ class AddressFloorWitness(Base):
     first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     basis: Mapped[str] = mapped_column(String(32), nullable=False)
     witnessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(24), nullable=False)
+    # The seed the outcome is about (creation block - 1); a prior-incarnation verdict refutes this number only.
+    seed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Consecutive undecided attempts, driving the retry backoff.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
             f"basis IN ('{FIRST_INDEXED_BASIS_CREATION}', '{CURSOR_BASIS_NOT_DETERMINED}')",
             name="ck_address_floor_witnesses_basis",
+        ),
+        CheckConstraint(
+            "outcome IN (" + ", ".join(f"'{o}'" for o in FLOOR_WITNESS_OUTCOMES) + ")",
+            name="ck_address_floor_witnesses_outcome",
+        ),
+        CheckConstraint(
+            f"(outcome = '{FLOOR_WITNESS_PROVEN}') = (basis = '{FIRST_INDEXED_BASIS_CREATION}')",
+            name="ck_address_floor_witnesses_proven_iff_creation",
+        ),
+        CheckConstraint(
+            "(outcome IN ("
+            + ", ".join(f"'{o}'" for o in FLOOR_WITNESS_RETRYABLE)
+            + ")) = (next_attempt_at IS NOT NULL)",
+            name="ck_address_floor_witnesses_retry_iff_undecided",
         ),
         CheckConstraint(
             f"(basis = '{FIRST_INDEXED_BASIS_CREATION}') = (first_indexed_block IS NOT NULL)",

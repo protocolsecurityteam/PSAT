@@ -55,8 +55,9 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # commit. ``test_allow_list_entries_still_present`` fails when an entry stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "services/resolution/indexer_scheduler.py": {
-        87: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
-        152: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
+        100: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
+        119: "Indexer daemon has no job accumulator; a failed witness retry pass leaves every candidate due.",
+        180: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
         # Boot-time chain-enable sweep in main(): no job is claimed yet, so no

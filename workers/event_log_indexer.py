@@ -15,7 +15,7 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import Table, delete, func, select, update
+from sqlalchemy import Table, delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,7 @@ from db.floor_witnesses import (
     WITNESS_PRIOR_INCARNATION,
     WITNESS_PROVEN,
     WitnessOutcome,
+    read_floor_witness,
     record_floor_witness,
 )
 from db.models import (
@@ -32,8 +33,11 @@ from db.models import (
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
+    FLOOR_WITNESS_PROVEN,
+    FLOOR_WITNESS_RETRYABLE,
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_NOT_DETERMINED,
+    AddressFloorWitness,
     Contract,
     ControllerValue,
     IndexedEventCursor,
@@ -48,8 +52,10 @@ from db.models import (
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
+from services.monitoring.event_topics import WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
+from services.resolution.indexer_work import mark_dirty
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, MalformedLogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
@@ -296,6 +302,7 @@ def enroll_event_cursor(
             event_address=event_address.lower(),
             topic0=topic0.lower(),
             last_indexed_block=start_block,
+            enrolled_seed_block=start_block,
             first_indexed_block=first_indexed_block,
             first_indexed_block_basis=first_indexed_block_basis or BASIS_NOT_DETERMINED,
             enrollment_basis=enrollment_basis or BASIS_NOT_DETERMINED,
@@ -382,9 +389,23 @@ def _witness_seed_block(
             addr,
             extra={"address": addr, "chain_id": chain_id, "seed": seed, "exc_type": type(exc).__name__},
         )
-    cache[key] = graded
     if session is not None:
-        record_floor_witness(session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0])
+        stored = record_floor_witness(
+            session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0], seed_block=seed
+        )
+        if outcome == WITNESS_PROVEN and stored.outcome != WITNESS_PROVEN:
+            # The address's record keeps a prior incarnation of this seed; a cursor enrolled now can't claim it.
+            graded = (None, BASIS_NOT_DETERMINED)
+            logger.info(
+                "seed proof refused: a prior incarnation of this seed is on record",
+                extra={"address": addr, "chain_id": chain_id, "seed": seed},
+            )
+        if stored.outcome == WITNESS_FAILED and stored.attempts >= settings.FLOOR_WITNESS_FAILURE_ALERT:
+            logger.warning(
+                "floor witness keeps failing; live scans at this address defer and its cursors stay ineligible",
+                extra={"address": addr, "chain_id": chain_id, "seed": seed, "attempts": stored.attempts},
+            )
+    cache[key] = graded
     return graded
 
 
@@ -425,6 +446,22 @@ def _upgrade_to_predicate_hint(session: Session, *, chain_id: int, address: str,
             "cursor enrollment basis upgraded to predicate_tree_hint",
             extra={"chain_id": chain_id, "event_address": address.lower(), "topic0": topic0.lower()},
         )
+    return upgraded
+
+
+def _upgrade_alone(
+    session: Session, *, chain_id: int, address: str, topic0: str, commit: Callable[[], None] | None = None
+) -> bool:
+    """Run one basis upgrade in a transaction of its own.
+
+    The upgrade locks the cursor row and its trigger then takes the chain's reconciliation row, the order an indexer
+    page write takes them in. Holding anything from earlier enrolment work (a cursor insert's or another upgrade's
+    reconciliation row) while waiting on a cursor the indexer has locked would deadlock with that write.
+    """
+    finish = commit if commit is not None else session.commit
+    finish()
+    upgraded = _upgrade_to_predicate_hint(session, chain_id=chain_id, address=address, topic0=topic0)
+    finish()
     return upgraded
 
 
@@ -686,6 +723,8 @@ class _Member:
     last: int
     block_hash: bytes | None
     logs_per_block: float | None
+    advanced: bool = True
+    span_limit: int | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -756,6 +795,8 @@ def plan_group(
             IndexedEventCursor.last_indexed_block,
             IndexedEventCursor.last_indexed_block_hash,
             IndexedEventCursor.recent_logs_per_block,
+            IndexedEventCursor.last_advanced_at,
+            IndexedEventCursor.request_span_limit,
         )
         .where(IndexedEventCursor.chain_id == chain_id)
         .where(func.lower(IndexedEventCursor.event_address).in_(list(wanted)))
@@ -769,8 +810,10 @@ def plan_group(
             last=int(last or 0),
             block_hash=block_hash,
             logs_per_block=density,
+            advanced=advanced_at is not None,
+            span_limit=int(span_limit) if span_limit else None,
         )
-        for address, topic0, last, block_hash, density in rows
+        for address, topic0, last, block_hash, density, advanced_at, span_limit in rows
     )
     rewinds: dict[str, _Rewind] = {}
     for member in members:
@@ -829,12 +872,25 @@ def _page_density(page: LogPage) -> float | None:
     return count / (page.to_block - page.from_block + 1)
 
 
-def _initial_span(densities: Sequence[float | None], limits: PageLimits) -> int:
+def _initial_span(densities: Sequence[float | None], limits: PageLimits, *, never_advanced: bool = False) -> int:
+    """Size the first page from the densest member. A group that never advanced starts at the widest span: the page
+    ceiling and the upstream bisect protect a dense start, while a sparse history then costs one page per span."""
     max_span = max(1, limits.max_block_span)
     known = [d for d in densities if d is not None and d > 0]
     if known:
         return max(1, min(max_span, int(limits.target_page_logs / max(known))))
+    if never_advanced:
+        return max_span
     return max(1, min(limits.initial_span, max_span))
+
+
+def _refused_span_limit(page: LogPage) -> int | None:
+    """Half the narrowest range the upstream refused for its size on the way to ``page`` (the size bisection then had
+    served), never below ``MIN_REQUEST_SPAN_LIMIT``: a refusal deep inside one dense stretch would otherwise shrink
+    every later request of the visit to a few blocks."""
+    if page.rejected_span is None:
+        return None
+    return max(page.rejected_span // 2, settings.MIN_REQUEST_SPAN_LIMIT)
 
 
 def _next_span(page: LogPage, limits: PageLimits) -> int:
@@ -1001,7 +1057,11 @@ def run_plan(
         if position[member.key] >= target and stamped is None:
             hash_at(position[member.key])
     frontier = min(pos for pos in position.values() if pos < target)
-    span = _initial_span([m.logs_per_block for m in plan.members if position[m.key] < target], limits)
+    active = [m for m in plan.members if position[m.key] < target]
+    span_limit = min((m.span_limit for m in active if m.span_limit is not None), default=None)
+    span = _initial_span([m.logs_per_block for m in active], limits, never_advanced=not any(m.advanced for m in active))
+    if span_limit is not None:
+        span = min(span, span_limit)
     single_address = plan.addresses[0] if len(plan.addresses) == 1 else None
     rewind_pending = bool(plan.rewinds)
     pages = 0
@@ -1038,6 +1098,9 @@ def run_plan(
             expected_from = page.to_block + 1
             logs = sorted(page.logs, key=lambda log: log.block_number)
             density = _page_density(page)
+            refused_limit = _refused_span_limit(page)
+            if refused_limit is not None:
+                span_limit = refused_limit if span_limit is None else min(span_limit, refused_limit)
             prefixes = _write_prefixes(logs, page.to_block, max_rows=write_max_rows, max_bytes=write_max_bytes)
             logger.debug(
                 "event indexer page",
@@ -1050,6 +1113,7 @@ def run_plan(
                     "topics": len(topics),
                     "returned_log_count": page.returned_log_count,
                     "rejected": page.rejected,
+                    "rejected_span": page.rejected_span,
                     "prefixes": len(prefixes),
                 },
             )
@@ -1078,10 +1142,17 @@ def run_plan(
                         cursor.last_advanced_at = func.now()
                         if density is not None:
                             cursor.recent_logs_per_block = density
+                        if refused_limit is not None:
+                            stored = cursor.request_span_limit
+                            cursor.request_span_limit = (
+                                refused_limit if stored is None else min(int(stored), refused_limit)
+                            )
                     # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the
                     # evaluated block is judged by position, and only a reorg rewind resets the flag.
                     if int(cursor.last_indexed_block or 0) >= target:
                         cursor.backfill_complete = True
+                        # The limit served this backlog; the next one starts from density again.
+                        cursor.request_span_limit = None
                         members_at_target += 1
                         if cursor.last_indexed_block_hash is None:
                             cursor.last_indexed_block_hash = stamp(int(cursor.last_indexed_block))
@@ -1101,6 +1172,8 @@ def run_plan(
                 )
             pages += 1
             span = _next_span(page, limits)
+            if span_limit is not None:
+                span = min(span, span_limit)
             # Release this page before the next request so at most one page is resident.
             page = None
             logs = []
@@ -1894,15 +1967,18 @@ def _enroll_witnessed(
     enrollment_basis: str,
     pending: set[tuple[int, str]] | None = None,
     progress: Callable[[], None] | None = None,
+    upgrade_existing: bool = True,
 ) -> bool:
     """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing.
 
     A predicate-hint enrolment that finds the cursor already present upgrades its basis (see
-    ``_upgrade_to_predicate_hint``), so the enrolment order never decides eligibility.
+    ``_upgrade_to_predicate_hint``), so the enrolment order never decides eligibility. The upgrade commits the
+    session's open work first (through ``progress`` when given); a caller keeping inserts atomic upgrades beforehand and
+    passes ``upgrade_existing=False``.
     """
     if _cursor_exists(session, chain_id, address, topic0):
-        if enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT:
-            _upgrade_to_predicate_hint(session, chain_id=chain_id, address=address, topic0=topic0)
+        if enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT and upgrade_existing:
+            _upgrade_alone(session, chain_id=chain_id, address=address, topic0=topic0, commit=progress)
         return False
     if progress is not None:
         progress()
@@ -1936,6 +2012,213 @@ class EnrollmentCaches:
     role_topics: dict[tuple[int, str], list[str]] = field(default_factory=dict)
 
 
+def _record_seed_unknown(session: Session, *, chain_id: int, address: str) -> None:
+    """A floor witness that couldn't start because the creation block is unknown: a failure, with backoff."""
+    stored = record_floor_witness(session, chain_id=chain_id, address=address, outcome=WITNESS_FAILED)
+    if stored.outcome == WITNESS_FAILED and stored.attempts >= settings.FLOOR_WITNESS_FAILURE_ALERT:
+        logger.warning(
+            "floor witness keeps failing; live scans at this address defer and its cursors stay ineligible",
+            extra={"address": address.lower(), "chain_id": chain_id, "seed": None, "attempts": stored.attempts},
+        )
+
+
+def _floor_witness_candidates(session: Session, *, limit: int | None) -> list[tuple[int, str]]:
+    """``(chain_id, address)`` pairs whose floor witness is due: cursored addresses never witnessed, then undecided
+    rows whose backoff has elapsed, oldest due first. Prior-incarnation verdicts are evidence and never come back.
+    """
+    chains = sorted(supported_chain_ids())
+    if not chains or (limit is not None and limit <= 0):
+        return []
+    cursor_address = func.lower(IndexedEventCursor.event_address)
+    never = (
+        select(IndexedEventCursor.chain_id, cursor_address)
+        .outerjoin(
+            AddressFloorWitness,
+            (AddressFloorWitness.chain_id == IndexedEventCursor.chain_id)
+            & (AddressFloorWitness.address == cursor_address),
+        )
+        .where(AddressFloorWitness.address.is_(None))
+        .where(IndexedEventCursor.chain_id.in_(chains))
+        .where(cursor_address != _ZERO_ADDRESS)
+        .group_by(IndexedEventCursor.chain_id, cursor_address)
+        .order_by(IndexedEventCursor.chain_id, cursor_address)
+    )
+    if limit is not None:
+        never = never.limit(limit)
+    out = [(int(chain_id), str(address)) for chain_id, address in session.execute(never)]
+    if limit is not None and len(out) >= limit:
+        return out
+    retry = (
+        select(AddressFloorWitness.chain_id, AddressFloorWitness.address)
+        .where(AddressFloorWitness.outcome.in_(FLOOR_WITNESS_RETRYABLE))
+        .where(AddressFloorWitness.next_attempt_at <= func.now())
+        .where(AddressFloorWitness.chain_id.in_(chains))
+        .order_by(AddressFloorWitness.next_attempt_at, AddressFloorWitness.chain_id, AddressFloorWitness.address)
+    )
+    if limit is not None:
+        retry = retry.limit(limit - len(out))
+    out.extend((int(chain_id), str(address)) for chain_id, address in session.execute(retry))
+    return out
+
+
+def apply_proven_floors(session: Session) -> int:
+    """Give unwitnessed cursors the proven floor of their address, only where the cursor was enrolled at exactly the
+    proven seed; returns cursors upgraded.
+
+    A cursor seeded elsewhere, or before seeds were recorded, can't show it covers the floor and is left alone. The
+    upgraded columns aren't watched by the change trigger, so the chain is marked for reconciliation here, after the
+    cursor row locks (the indexer's page writes take the same two locks in that order).
+    """
+    proven = (
+        select(AddressFloorWitness.seed_block)
+        .where(AddressFloorWitness.chain_id == IndexedEventCursor.chain_id)
+        .where(AddressFloorWitness.address == func.lower(IndexedEventCursor.event_address))
+        .where(AddressFloorWitness.outcome == FLOOR_WITNESS_PROVEN)
+        .where(AddressFloorWitness.seed_block == IndexedEventCursor.enrolled_seed_block)
+        .where(AddressFloorWitness.first_indexed_block == AddressFloorWitness.seed_block)
+        .exists()
+    )
+    eligible = (
+        (IndexedEventCursor.first_indexed_block_basis == CURSOR_BASIS_NOT_DETERMINED)
+        & IndexedEventCursor.enrolled_seed_block.is_not(None)
+        & proven
+    )
+    # Row locks in the indexer's canonical order before any update, so this never waits on a group it partly holds.
+    locked = session.execute(
+        select(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
+        .where(eligible)
+        .order_by(IndexedEventCursor.chain_id, func.lower(IndexedEventCursor.event_address), IndexedEventCursor.topic0)
+        .with_for_update()
+    ).all()
+    if not locked:
+        return 0
+    upgraded = session.execute(
+        update(IndexedEventCursor)
+        .where(
+            tuple_(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0).in_(
+                [tuple(row) for row in locked]
+            )
+        )
+        .where(eligible)
+        .values(
+            first_indexed_block=IndexedEventCursor.enrolled_seed_block,
+            first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
+        )
+        .returning(IndexedEventCursor.chain_id, IndexedEventCursor.event_address, IndexedEventCursor.topic0)
+        .execution_options(synchronize_session=False)
+    ).all()
+    for chain_id in sorted({int(row[0]) for row in upgraded}):
+        mark_dirty(session, "reconcile", str(chain_id))
+    for chain_id, address, topic0 in upgraded:
+        logger.info(
+            "cursor lower bound proven by a later floor witness of its enrolled seed",
+            extra={"chain_id": chain_id, "event_address": address, "topic0": topic0},
+        )
+    return len(upgraded)
+
+
+def rewitness_due_floors(
+    session: Session,
+    *,
+    budget: int = settings.FLOOR_WITNESS_RETRY_BUDGET,
+    caches: EnrollmentCaches | None = None,
+    stop_event: Event | None = None,
+) -> int:
+    """Re-attempt up to ``budget`` due floor witnesses, then hand newly proven floors to the cursors enrolled at them;
+    returns addresses attempted. Nothing is due once every witness is proven or a prior incarnation, so steady state
+    makes no external call.
+    """
+    caches = caches if caches is not None else EnrollmentCaches()
+    attempted = 0
+    candidates = _floor_witness_candidates(session, limit=budget)
+    _end_transaction(session)
+    for chain_id, address in candidates:
+        if stop_event is not None and stop_event.is_set():
+            break
+        attempted += 1
+        seed = _seed_block(address, caches.seeds, chain_id=chain_id)
+        if seed is None:
+            _record_seed_unknown(session, chain_id=chain_id, address=address)
+        else:
+            caches.witnesses.pop((chain_id, address), None)
+            _witness_seed_block(address, seed, caches.witnesses, chain_id=chain_id, session=session)
+        session.commit()
+    apply_proven_floors(session)
+    session.commit()
+    return attempted
+
+
+def floor_witness_summary(session: Session) -> dict[str, Any]:
+    """Heartbeat counts: witnesses due now, and rows by outcome."""
+    by_outcome = {
+        str(outcome): int(count)
+        for outcome, count in session.execute(
+            select(AddressFloorWitness.outcome, func.count()).group_by(AddressFloorWitness.outcome)
+        )
+    }
+    return {"due": len(_floor_witness_candidates(session, limit=None)), "by_outcome": by_outcome}
+
+
+@dataclass(frozen=True)
+class HintTarget:
+    """One enrolment a predicate tree asks for: ``topics`` at ``address``, or, for a delegated role gate
+    (``kind == "role_store"``), the role-store topics detected at ``address`` (``topics`` is then ``None``)."""
+
+    kind: Literal["hint", "solmate", "role_store"]
+    chain_id: int
+    address: str
+    topics: tuple[str, ...] | None
+
+
+def job_chain(job: Job) -> int | None:
+    """The job's own chain (``Job.chain_id``, else derived from its request), never a default."""
+    if isinstance(job.chain_id, int):
+        return job.chain_id
+    return derive_job_chain_id(job.request.get("chain") if isinstance(job.request, dict) else None, job.address)
+
+
+def completed_jobs_query(limit: int | None = None):
+    query = (
+        select(Job)
+        .where(Job.status == JobStatus.completed)
+        .where(Job.request["effects_resume_work_id"].astext.is_(None))
+        .where(Job.address.isnot(None))
+        .order_by(Job.updated_at.desc())
+    )
+    return query if limit is None else query.limit(limit)
+
+
+def hint_targets_for_job(session: Session, job: Job) -> Iterator[HintTarget]:
+    """Every (chain, address, topics) enrolment the job's predicate trees ask for."""
+    artifact = get_artifact(session, job.id, "predicate_trees")
+    if not isinstance(artifact, dict):
+        return
+    job_chain_id = job_chain(job)
+    if job_chain_id is None:
+        # Defensive; the query filter guarantees an id.
+        return
+    values = _state_var_values_for_job(session, job)
+    for descriptor in _descriptors_from_artifact(artifact):
+        for hint in descriptor.get("enumeration_hint") or []:
+            topic0 = hint.get("topic0")
+            if not isinstance(topic0, str) or not topic0.startswith("0x"):
+                continue
+            address = _event_address_for_descriptor(descriptor, hint, job, values)
+            if _is_enrollable_event_address(address):
+                yield HintTarget("hint", job_chain_id, address, (topic0,))
+        if _is_solmate_cancall_descriptor(descriptor):
+            # The authority from ``authority_contract`` only, never job.address (it doesn't emit these events). Skip
+            # until resolved.
+            authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
+            if _is_enrollable_event_address(authority):
+                yield HintTarget("solmate", job_chain_id, authority, tuple(_SOLMATE_ROLE_TOPICS))
+        elif _is_delegated_role_gate_descriptor(descriptor):
+            # Enrol at the authority proxy, where delegatecall emits RoleSet. Skip until resolved.
+            authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
+            if _is_enrollable_event_address(authority):
+                yield HintTarget("role_store", job_chain_id, authority, None)
+
+
 def enroll_from_completed_jobs(
     session: Session,
     *,
@@ -1946,14 +2229,7 @@ def enroll_from_completed_jobs(
     commit: bool = True,
     caches: EnrollmentCaches | None = None,
 ) -> int:
-    query = (
-        select(Job)
-        .where(Job.status == JobStatus.completed)
-        .where(Job.request["effects_resume_work_id"].astext.is_(None))
-        .where(Job.address.isnot(None))
-        .order_by(Job.updated_at.desc())
-        .limit(limit)
-    )
+    query = completed_jobs_query(limit)
     if job_id is not None:
         query = query.where(Job.id == job_id)
     jobs = session.execute(query).scalars()
@@ -1963,84 +2239,87 @@ def enroll_from_completed_jobs(
     witness_cache = caches.witnesses
     role_store_topic_cache = caches.role_topics
     for job in jobs:
-        artifact = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(artifact, dict):
-            continue
-        # Stamp the job's own chain (``Job.chain_id``, else derived from its request), never a default.
-        job_chain_id = (
-            job.chain_id
-            if isinstance(job.chain_id, int)
-            else derive_job_chain_id(job.request.get("chain") if isinstance(job.request, dict) else None, job.address)
-        )
-        if job_chain_id is None:
-            # Defensive; the query filter guarantees an id.
-            continue
-        values = _state_var_values_for_job(session, job)
-        for descriptor in _descriptors_from_artifact(artifact):
-            for hint in descriptor.get("enumeration_hint") or []:
-                topic0 = hint.get("topic0")
-                if not isinstance(topic0, str) or not topic0.startswith("0x"):
-                    continue
-                address = _event_address_for_descriptor(descriptor, hint, job, values)
-                if not _is_enrollable_event_address(address):
-                    continue
+        for target in hint_targets_for_job(session, job):
+            chain_id, address = target.chain_id, target.address
+            if target.topics is not None:
                 # Unknown creation block: enrol on a later pass.
+                for topic0 in target.topics:
+                    if _enroll_witnessed(
+                        session,
+                        chain_id=chain_id,
+                        address=address,
+                        topic0=topic0,
+                        seed_cache=seed_cache,
+                        witness_cache=witness_cache,
+                        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
+                        pending=pending,
+                        progress=progress,
+                    ):
+                        inserted += 1
+                continue
+            if _authority_has_role_store_cursor(session, chain_id, address):
+                continue
+            role_topics = _role_store_topic0s(session, address, chain_id, role_store_topic_cache)
+            for topic0 in role_topics:
+                if _cursor_exists(session, chain_id, address, topic0):
+                    _upgrade_alone(session, chain_id=chain_id, address=address, topic0=topic0, commit=progress)
+            # Commit all topics atomically; caches keep external reads before the first insert.
+            if progress is not None:
+                progress()
+            for topic0 in role_topics:
                 if _enroll_witnessed(
                     session,
-                    chain_id=job_chain_id,
+                    chain_id=chain_id,
                     address=address,
                     topic0=topic0,
                     seed_cache=seed_cache,
                     witness_cache=witness_cache,
                     enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
                     pending=pending,
-                    progress=progress,
+                    upgrade_existing=False,
                 ):
                     inserted += 1
-            if _is_solmate_cancall_descriptor(descriptor):
-                # The authority from ``authority_contract`` only, never job.address (it doesn't emit these events). Skip
-                # until resolved.
-                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                if _is_enrollable_event_address(authority):
-                    for topic0 in _SOLMATE_ROLE_TOPICS:
-                        if _enroll_witnessed(
-                            session,
-                            chain_id=job_chain_id,
-                            address=authority,
-                            topic0=topic0,
-                            seed_cache=seed_cache,
-                            witness_cache=witness_cache,
-                            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
-                            pending=pending,
-                            progress=progress,
-                        ):
-                            inserted += 1
-            elif _is_delegated_role_gate_descriptor(descriptor):
-                # Enrol at the authority proxy, where delegatecall emits RoleSet. Skip until resolved.
-                authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
-                    session, job_chain_id, authority
-                ):
-                    # Commit all topics atomically; caches keep external reads before the first insert.
-                    if progress is not None:
-                        progress()
-                    for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
-                        if _enroll_witnessed(
-                            session,
-                            chain_id=job_chain_id,
-                            address=authority,
-                            topic0=topic0,
-                            seed_cache=seed_cache,
-                            witness_cache=witness_cache,
-                            enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
-                            pending=pending,
-                        ):
-                            inserted += 1
-                    if progress is not None:
-                        progress()
+            if progress is not None:
+                progress()
     if commit:
         session.commit()
     return inserted
+
+
+# Tracked-topic tiers whose rows no reader turns into output: nothing folds them, no fixed-topic reader names them, and
+# the watcher publishes nothing for them. Their monitoring is unaffected.
+_TRACKED_TIERS_NOT_INDEXED = frozenset({WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT})
+
+
+def tracked_spec_enrols(spec: Mapping[str, Any]) -> bool:
+    """Whether a ``tracked_topics`` spec is indexed: everything but an ``activity`` or ``hint`` stamp, so an unstamped
+    or unknown tier keeps its cursor."""
+    return spec.get("witness_tier") not in _TRACKED_TIERS_NOT_INDEXED
+
+
+def _witness_unenrolled_address(
+    session: Session,
+    *,
+    chain_id: int,
+    address: str,
+    seed_cache: dict[tuple[int, str], int | None],
+    witness_cache: dict[tuple[int, str], tuple[int | None, str]],
+    progress: Callable[[], None] | None,
+) -> None:
+    """Record the deploy-floor witness for an address whose tracked topics are all skipped, once: an address with a
+    witness row costs one lookup and no external call."""
+    if read_floor_witness(session, chain_id=chain_id, address=address) is not None:
+        return
+    if progress is not None:
+        progress()
+    seed = _seed_block(address, seed_cache, chain_id=chain_id)
+    if seed is None:
+        # Recorded as a failed witness, so the retry step owns it with its backoff rather than every pass re-asking.
+        _record_seed_unknown(session, chain_id=chain_id, address=address)
+    else:
+        _witness_seed_block(address, seed, witness_cache, chain_id=chain_id, session=session)
+    if progress is not None:
+        progress()
 
 
 def enroll_from_tracked_topics(
@@ -2063,6 +2342,9 @@ def enroll_from_tracked_topics(
     Only ``topic0`` is read, not ``effect_tags.writes[]`` (a union over emitters that misattributes writes). These
     cursors therefore carry no variable attribution (``enrollment_basis = tracked_topics_asserted``), which the
     resolution gate keys on: they gather evidence but license nothing.
+
+    ``activity`` and ``hint`` specs are not enrolled (:func:`tracked_spec_enrols`); an address left with only those
+    still gets its floor witness recorded.
     """
     query = (
         select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
@@ -2103,9 +2385,15 @@ def enroll_from_tracked_topics(
             continue
         seen: set[str] = set()
         wanted: list[str] = []
+        skipped_tier = False
         for spec in specs:
             topic0 = spec.get("topic0") if isinstance(spec, dict) else None
             if not isinstance(topic0, str) or not topic0.lower().startswith("0x") or len(topic0) != 66:
+                continue
+            # Skipped before the dedupe and the budget, so a skipped topic neither shadows a self-describing spec for
+            # the same topic0 nor spends a pass's enrolment budget.
+            if not tracked_spec_enrols(spec):
+                skipped_tier = True
                 continue
             if topic0.lower() in seen:
                 continue
@@ -2114,6 +2402,15 @@ def enroll_from_tracked_topics(
         # Fully enrolled addresses cost no budget or RPC, so passes advance through the fleet.
         pending_topics = [t for t in wanted if not _cursor_exists(session, chain_id, address, t)]
         if not pending_topics:
+            if skipped_tier:
+                _witness_unenrolled_address(
+                    session,
+                    chain_id=chain_id,
+                    address=address,
+                    seed_cache=seed_cache,
+                    witness_cache=witness_cache,
+                    progress=progress,
+                )
             continue
         worked += 1
         for topic0 in pending_topics:
@@ -2334,6 +2631,8 @@ def run_event_log_indexer_loop(
             # The last completed pass's stalls per lane, so a pass in progress doesn't read as healthy.
             "stalled": {"cold": 0, "warm": 0},
             "triad": (0, 0),
+            "floor_witnesses": {"due": 0, "by_outcome": {}},
+            "floor_witnesses_retried": 0,
             "reconcile": (0, 0),
             "last_beat": 0.0,
         }
@@ -2350,6 +2649,8 @@ def run_event_log_indexer_loop(
                     max(published["stalled"][lane], published[lane].stalled_cursors) for lane in ("cold", "warm")
                 )
                 caught_up_cursors, total_cursors = published["triad"]
+                floor_witnesses = dict(published["floor_witnesses"])
+                floor_witnesses_retried = published["floor_witnesses_retried"]
                 reenqueued, drift_reenqueued = published["reconcile"]
                 published["last_beat"] = time.monotonic()
             status = (
@@ -2380,6 +2681,9 @@ def run_event_log_indexer_loop(
                     "role_drift_reenqueued_last_pass": drift_reenqueued,
                     "warm_max_lag_blocks": {str(chain): lag for chain, lag in sorted(warm_max_lag_blocks.items())},
                     "stalled_cursors": stalled_cursors,
+                    "floor_witnesses_due": floor_witnesses.get("due", 0),
+                    "floor_witnesses_retried_last_pass": floor_witnesses_retried,
+                    "floor_witnesses_by_outcome": floor_witnesses.get("by_outcome", {}),
                 },
             )
 
@@ -2407,8 +2711,15 @@ def run_event_log_indexer_loop(
             with log_timed_phase(logger, "indexer_enroll", record_metric=False) as ph:
                 from services.resolution.indexer_scheduler import drain_enrollment
 
+                def rewitnessed(count: int) -> None:
+                    with state_lock:
+                        published["floor_witnesses_retried"] = count
+
                 enrolled = drain_enrollment(
-                    session, tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT, stop_event=stop_event
+                    session,
+                    tracked_limit=DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT,
+                    stop_event=stop_event,
+                    on_rewitness=rewitnessed,
                 )
                 ph["enrolled"] = enrolled
             return enrolled
@@ -2426,8 +2737,20 @@ def run_event_log_indexer_loop(
                 claims=claims,
             )
 
-        def log_pass(summary: ScanSummary, status: str, enrolled: int, scan_mode: str) -> None:
-            # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is visible.
+        def table_triad(session: Session) -> tuple[int, int] | None:
+            try:
+                return _cursor_progress(session)
+            except Exception:
+                session.rollback()
+                logger.exception("event log indexer cursor-progress count failed")
+                return None
+
+        def log_pass(
+            summary: ScanSummary, status: str, enrolled: int, scan_mode: str, triad: tuple[int, int] | None
+        ) -> None:
+            # Unconditional per-pass INFO with the cursor triad read from the table (as the heartbeat reports it), so a
+            # cold backfill scanning empty windows is visible. The pass's own count covers only the groups it visited.
+            caught_up, total = triad if triad is not None else (None, None)
             logger.info(
                 "event log indexer pass complete",
                 extra={
@@ -2435,9 +2758,12 @@ def run_event_log_indexer_loop(
                     "enrolled": enrolled,
                     "inserted": summary.inserted,
                     "windows_scanned": summary.windows_scanned,
-                    "caught_up_cursors": summary.caught_up_cursors,
-                    "total_cursors": summary.total_cursors,
-                    "pending_cursors": max(0, summary.total_cursors - summary.caught_up_cursors),
+                    "caught_up_cursors": caught_up,
+                    "total_cursors": total,
+                    "pending_cursors": max(0, total - caught_up)
+                    if total is not None and caught_up is not None
+                    else None,
+                    "visited_caught_up_cursors": summary.caught_up_cursors,
                     "budget_exhausted": summary.budget_exhausted,
                     "failed_groups": summary.failed_groups,
                     "status": status,
@@ -2451,6 +2777,7 @@ def run_event_log_indexer_loop(
                     enrolled = 0
                     summary = ScanSummary()
                     status = "running"
+                    triad: tuple[int, int] | None = None
                     try:
                         with SessionLocal() as session:
                             enrolled = enroll(session)
@@ -2458,11 +2785,12 @@ def run_event_log_indexer_loop(
                                 summary = scan(session, "cold")
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
+                            triad = table_triad(session)
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
                     status = _heartbeat_status_for_pass(status, summary)
-                    log_pass(summary, status, enrolled, "cold")
+                    log_pass(summary, status, enrolled, "cold", triad)
                     publish_pass("cold", summary, status, enrolled)
                     # Only unfinished history uses the short pause.
                     stop_event.wait(DEFAULT_BACKFILL_BUSY_INTERVAL_S if summary.budget_exhausted else interval)
@@ -2490,6 +2818,7 @@ def run_event_log_indexer_loop(
                     enrolled = 0
                     summary = ScanSummary()
                     status = "running"
+                    triad = None
                     try:
                         with SessionLocal() as session:
                             enrolled = enroll(session)
@@ -2515,11 +2844,12 @@ def run_event_log_indexer_loop(
                                 )
                                 ph["windows_scanned"] = summary.windows_scanned
                                 ph["inserted"] = summary.inserted
+                            triad = table_triad(session)
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
                     status = _heartbeat_status_for_pass(status, summary)
-                    log_pass(summary, status, enrolled, "all")
+                    log_pass(summary, status, enrolled, "all", triad)
                     publish_pass("cold", summary, status, enrolled)
                     backfill_wait = (
                         min(DEFAULT_BACKFILL_BUSY_INTERVAL_S, max(0.0, next_warm_at - time.monotonic()))
@@ -2560,13 +2890,17 @@ def run_event_log_indexer_loop(
                 # Read the triad from the table independently of the scan threads, in its own session so a failure
                 # doesn't blank the heartbeat.
                 triad = (0, 0)
+                witnesses: dict[str, Any] | None = None
                 try:
                     with SessionLocal() as session:
                         triad = _cursor_progress(session)
+                        witnesses = floor_witness_summary(session)
                 except Exception:
                     logger.exception("event log indexer cursor-progress count failed")
                 with state_lock:
                     published["triad"] = triad
+                    if witnesses is not None:
+                        published["floor_witnesses"] = witnesses
                     published["reconcile"] = (reenqueued, drift_reenqueued)
                 beat()
                 stop_event.wait(interval)
