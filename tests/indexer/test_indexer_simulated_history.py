@@ -37,6 +37,7 @@ pytestmark = requires_postgres
 MAINNET, BASE = 1, 8453
 HEAD_1 = {MAINNET: 2_000_000, BASE: 30_000_000}
 HEAD_2 = {MAINNET: 2_000_600, BASE: 30_000_400}
+HEAD_3 = {MAINNET: 2_001_200, BASE: 30_000_800}
 REORG_FROM = 1_999_985
 
 SPARSE, DENSE, BIG_BLOCK, STAGGERED, ON_BASE = (address(0xA000 + i) for i in range(5))
@@ -78,8 +79,8 @@ def _every(addr: str, t: str, lo: int, hi: int, step: int, slot: int, tag: int =
 
 def build_chain() -> SimChain:
     sim = SimChain(heads=HEAD_1, reject_over=7_000)
-    sim.add_many(MAINNET, _every(SPARSE, TA1, 1_200_100, 2_000_600, 997, 1))
-    sim.add_many(MAINNET, _every(SPARSE, TA2, 1_200_300, 2_000_600, 4_001, 2))
+    sim.add_many(MAINNET, _every(SPARSE, TA1, 1_200_100, 2_001_200, 997, 1))
+    sim.add_many(MAINNET, _every(SPARSE, TA2, 1_200_300, 2_001_200, 4_001, 2))
     # Fringe logs the reorg replaces.
     sim.add_many(MAINNET, _every(SPARSE, TA1, 1_999_986, 1_999_988, 1, 3))
     sim.add_many(MAINNET, _every(DENSE, TB1, 1_000_001, 1_200_000, 80, 10))
@@ -92,7 +93,7 @@ def build_chain() -> SimChain:
     ]
     sim.add_many(MAINNET, burst)
     sim.merges.append(MergeRange(MAINNET, DENSE, 1_010_000, 1_019_999, 10_000))
-    sim.add_many(MAINNET, _every(BIG_BLOCK, TC, 1_400_001, 2_000_600, 5_000, 30))
+    sim.add_many(MAINNET, _every(BIG_BLOCK, TC, 1_400_001, 2_001_200, 5_000, 30))
     sim.add_many(
         MAINNET,
         [
@@ -107,12 +108,14 @@ def build_chain() -> SimChain:
             for i in range(6_000)
         ],
     )
-    sim.add_many(MAINNET, _every(STAGGERED, TD1, 1_300_001, 2_000_600, 1_000, 40))
-    sim.add_many(MAINNET, _every(STAGGERED, TD2, 1_300_001, 2_000_600, 1_400, 41))
-    sim.add_many(MAINNET, _every(STAGGERED, TD3, 1_300_001, 2_000_600, 600, 42))
+    sim.add_many(MAINNET, _every(STAGGERED, TD1, 1_300_001, 2_001_200, 1_000, 40))
+    sim.add_many(MAINNET, _every(STAGGERED, TD2, 1_300_001, 2_001_200, 1_400, 41))
+    sim.add_many(MAINNET, _every(STAGGERED, TD3, 1_300_001, 2_001_200, 600, 42))
     sim.add_many(MAINNET, _every(STAGGERED, TD1, 1_999_984, 1_999_988, 1, 43))
-    sim.add_many(BASE, _every(ON_BASE, TE1, 29_500_001, 30_000_400, 1_000, 50))
-    sim.add_many(BASE, _every(ON_BASE, TE2, 29_500_001, 30_000_400, 1_000, 51))
+    # A topic only another address is enrolled for; a batched request carries it here too.
+    sim.add_many(MAINNET, _every(STAGGERED, TA1, 1_300_001, 2_001_200, 700, 44))
+    sim.add_many(BASE, _every(ON_BASE, TE1, 29_500_001, 30_000_800, 1_000, 50))
+    sim.add_many(BASE, _every(ON_BASE, TE2, 29_500_001, 30_000_800, 1_000, 51))
     sim.pending_timeouts.append((MAINNET, STAGGERED))
     return sim
 
@@ -256,6 +259,10 @@ def _scenario(session, monkeypatch) -> SimChain:
     )
     sim.add_many(MAINNET, _every(SPARSE, TA1, 1_999_987, 1_999_987, 1, 4, tag=1))
     _run_to_completion(session, fetchers, HEAD_2)
+
+    # Phase 4: the head moves again with no reorg, so warm groups advance in batched requests.
+    sim.heads.update(HEAD_3)
+    _run_to_completion(session, fetchers, HEAD_3)
     return sim
 
 
@@ -273,12 +280,12 @@ def test_the_indexer_stores_exactly_the_simulated_history(db_session, monkeypatc
     sim = _scenario(db_session, monkeypatch)
 
     stored = _stored_rows(db_session)
-    expected = _expected_rows(sim, HEAD_2)
+    expected = _expected_rows(sim, HEAD_3)
     assert len(stored) == len(set(map(repr, stored)))
     assert sorted(stored, key=repr) == sorted(expected, key=repr)
     assert sum(1 for r in stored if r[3] == BIG_BLOCK_NUMBER) == 6_000
 
-    targets = _targets(HEAD_2)
+    targets = _targets(HEAD_3)
     seeds = {(c, a, t): (seed, position) for c, a, t, seed, position in [*ENROLMENT, LATE_SIBLING]}
     cursors = db_session.execute(select(IndexedEventCursor)).scalars().all()
     assert {(c.chain_id, c.event_address, c.topic0) for c in cursors} == set(seeds)
@@ -310,3 +317,4 @@ def test_the_indexer_stores_exactly_the_simulated_history(db_session, monkeypatc
     assert any(DENSE in r["addresses"] and (r["served"] or 0) > ceiling for r in sim.getlogs)
     assert any(r["served"] is None for r in sim.getlogs)
     assert sim.pending_timeouts == []
+    assert any(r["chain_id"] == MAINNET and len(r["addresses"]) > 1 for r in sim.getlogs)
