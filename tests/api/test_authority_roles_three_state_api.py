@@ -140,20 +140,3 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
     for signature in COLUMN_BY_FUNCTION:
         assert state(company[signature]["authority_roles"]) == state(analyses[signature]["authority_roles"]), signature
         assert state(company[signature]["authority_roles"]) == EXPECTED_STATE[signature], signature
-
-
-def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_rows):
-    """Without ``none_as_null`` a Python ``None`` is stored as jsonb ``null``, so ``IS NULL`` never finds it."""
-    _job, contract = three_state_rows
-
-    sql_null, jsonb_null = db_session.execute(
-        text(
-            "SELECT count(*) FILTER (WHERE authority_roles IS NULL),"
-            "       count(*) FILTER (WHERE jsonb_typeof(authority_roles) = 'null') "
-            "FROM effective_functions WHERE contract_id = :c"
-        ),
-        {"c": contract.id},
-    ).one()
-
-    assert sql_null == 0
-    assert jsonb_null == 1

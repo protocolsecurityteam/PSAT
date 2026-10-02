@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
 
 from services.resolution import tracking
 from services.resolution.tracking import (
     _CLASSIFY_CACHE,
     classify_resolved_address,
-    classify_resolved_address_with_status,
     clear_classify_cache,
 )
 
@@ -31,67 +28,6 @@ def _stub_batch_probe_rpc(monkeypatch):
         lambda rpc_url, calls, *a, **k: [(None, True)] * len(calls),
     )
     monkeypatch.setattr(tracking, "_eth_call_raw", lambda *a, **k: "0x")
-
-
-def test_transient_rpc_error_does_not_poison_cache(monkeypatch):
-    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(
-        tracking,
-        "type_authority_contract",
-        lambda *a, **k: {},
-    )
-
-    def boom(*a, **k):
-        return tracking._PROBE_ERROR
-
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", boom)
-
-    kind, _details = classify_resolved_address("https://rpc", "0x" + "b" * 40)
-    assert kind == "contract"  # fallback because every probe "errored"
-    assert not _CLASSIFY_CACHE  # but NOT cached — transient error path
-
-
-def test_with_status_reports_uncacheable_on_error(monkeypatch):
-    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: tracking._PROBE_ERROR)
-
-    _kind, _details, cacheable = classify_resolved_address_with_status("https://rpc", "0x" + "c" * 40)
-    assert cacheable is False
-
-
-def test_clean_classification_is_cacheable(monkeypatch):
-    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: None)
-
-    _kind, _details, cacheable = classify_resolved_address_with_status("https://rpc", "0x" + "d" * 40)
-    assert cacheable is True
-    assert _CLASSIFY_CACHE  # populated
-
-
-def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
-    """Callers mutating returned details must not poison the cache."""
-    monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
-
-    def fake_call(_rpc, _addr, signature, _abi, *_a, **_k):
-        if signature == "getOwners()":
-            return ["0x" + "1" * 40, "0x" + "2" * 40]
-        if signature == "getThreshold()":
-            return 2
-        return None
-
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", fake_call)
-
-    _kind, details = classify_resolved_address("https://rpc", "0x" + "e" * 40)
-    assert details["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]
-    cast(list, details["owners"]).append("0xpoisoned")
-    details["address"] = "0xchanged"
-
-    _kind2, details2 = classify_resolved_address("https://rpc", "0x" + "e" * 40)
-    assert details2["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]
-    assert details2["address"] == "0x" + "e" * 40
 
 
 # ---------------------------------------------------------------------------

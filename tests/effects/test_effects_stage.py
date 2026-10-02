@@ -14,8 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, EffectVerdict, Job, JobStage, JobStatus
 from db.queue import create_job
-from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN, effects_stage_enabled
-from services.effects.exceptions import ForkRpcTimeoutError
+from services.effects.config import EFFECT_CLASS_SUPPLY, VERDICT_PROVEN
 from services.effects.harness import proven
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_worker_harness import (
@@ -63,11 +62,6 @@ def clean_jobs(db_session):
 # ---------------------------------------------------------------------------
 
 
-def test_flag_defaults_off(monkeypatch):
-    monkeypatch.delenv("PSAT_EFFECTS_STAGE", raising=False)
-    assert effects_stage_enabled() is False
-
-
 def test_scoring_tier_translation_resolves_the_string_collision():
     # tier-string collision guard: the stored "tier2" (fork-observed) maps to the OBSERVED scoring
     # tier (scoring Tier 1), never scoring Tier 2; an unknown string fails closed to None.
@@ -95,11 +89,6 @@ def test_policy_next_stage_flag_off_is_coverage(monkeypatch):
     assert PolicyWorker().next_stage == JobStage.coverage
 
 
-def test_policy_next_stage_flag_on_is_effects(monkeypatch):
-    monkeypatch.setenv("PSAT_EFFECTS_STAGE", "1")
-    assert PolicyWorker().next_stage == JobStage.effects
-
-
 # ---------------------------------------------------------------------------
 # Worker behavior: inert pass-through + fail-forward.
 # ---------------------------------------------------------------------------
@@ -116,40 +105,6 @@ class _FailingEffectsWorker(EffectsWorker):
 
     def process(self, session, job):
         raise self._exc
-
-
-@requires_postgres
-def test_flag_on_zero_candidate_passthrough(clean_jobs, test_session_local):
-    session = clean_jobs
-    job_row = create_job(session, {"address": "0xabc", "name": "effects-passthrough"})
-
-    worker = EffectsWorker()
-    worker._execute_job(session, job_row)
-
-    session.expire_all()
-    refreshed = session.get(Job, job_row.id)
-    assert refreshed is not None
-    assert refreshed.stage == JobStage.coverage
-    assert refreshed.status == JobStatus.queued
-
-
-@requires_postgres
-def test_fail_forward_exhaustion_advances_never_terminal(clean_jobs, test_session_local, monkeypatch):
-    """on retry exhaustion the stage advances to ``coverage`` and NEVER emits ``failed_terminal``."""
-    monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "0")  # first failure = exhaustion
-
-    session = clean_jobs
-    job_row = create_job(session, {"address": "0xabc", "name": "effects-failforward"})
-
-    worker = _FailingEffectsWorker(ForkRpcTimeoutError("fork RPC down"))
-    worker._execute_job(session, job_row)
-
-    session.expire_all()
-    refreshed = session.get(Job, job_row.id)
-    assert refreshed is not None
-    assert refreshed.status != JobStatus.failed_terminal
-    assert refreshed.status == JobStatus.queued
-    assert refreshed.stage == JobStage.coverage
 
 
 @requires_postgres

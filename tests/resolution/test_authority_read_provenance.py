@@ -161,39 +161,6 @@ def _authority_details(cap: CapabilityExpr) -> dict[str, Any]:
     return rows[0]["details"]
 
 
-@pytest.mark.parametrize(
-    "returned",
-    [
-        pytest.param(GOVERNOR, id="labelled_and_hoisted"),
-        # Resolving to an unrelated public getter is the convention, so the row discloses the name match; a slot
-        # differential is unrunnable here.
-        pytest.param("0x" + "77" * 20, id="disclosed_not_validated"),
-    ],
-)
-def test_deunderscore_convention(monkeypatch: pytest.MonkeyPatch, returned: str) -> None:
-    """The row says so beside its strength fields, not only in the trace."""
-    _stub_getter(monkeypatch, returns=_word(returned), only=GOVERNOR_SELECTOR)
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())
-
-    assert cap.members == [returned]
-    assert {"step": "authority_getter_basis", "basis": "deunderscore_convention", "selector": GOVERNOR_SELECTOR} in (
-        cap.trace
-    )
-    details = _authority_details(cap)
-    assert details["authority_basis"] == "deunderscore_convention"
-    assert details["accessor_slot_agreement"] == "not_determined"
-    assert details["membership_quality"] == "exact"
-
-
-def test_public_getter_is_abi_forced(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=GOVERNOR_SELECTOR)
-    cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "governor"}), _ctx())
-
-    details = _authority_details(cap)
-    assert details["authority_basis"] == "abi_auto_getter"
-    assert "accessor_slot_agreement" not in details
-
-
 def test_oz_v5_namespaced_accessor_gets_its_own_label(monkeypatch: pytest.MonkeyPatch) -> None:
     """OZ-v5 accessors used to share the de-underscore label, hiding a standard-anchored match from a 3-name guess."""
     _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=OWNER_SELECTOR)

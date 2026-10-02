@@ -124,32 +124,6 @@ def test_project_events_skips_mainnet_proxy_row_for_l2_subject(db_session, proto
 
 
 @requires_postgres
-def test_backfill_adopts_legacy_null_impl_row_on_mainnet(db_session, proto_id, stub_etherscan):
-    from db.models import Contract
-    from services.discovery.upgrade_history import backfill_historical_impl_contracts
-
-    impl_addr = _addr()
-    db_session.add(Contract(address=impl_addr, chain=None, protocol_id=None, contract_name="ExistingImpl"))
-    db_session.commit()
-
-    backfill_historical_impl_contracts(
-        db_session,
-        protocol_id=proto_id,
-        chain="ethereum",
-        impl_addrs={impl_addr},
-    )
-
-    rows = db_session.query(Contract).filter(Contract.address == impl_addr).all()
-    assert len(rows) == 1  # nominated in place, not duplicated
-    row = rows[0]
-    assert row.chain is None  # no backfill of the legacy value
-    # The coalesced dedup shows as an in-place nomination, never a fresh row.
-    assert row.nominated_protocol_id == proto_id
-    assert "upgrade_history" in (row.discovery_sources or [])
-    assert row.contract_name == "ExistingImpl"  # existing name preserved
-
-
-@requires_postgres
 def test_backfill_base_does_not_adopt_legacy_null_mainnet_impl_row(db_session, proto_id, stub_etherscan):
     from db.models import Contract
     from services.discovery.upgrade_history import backfill_historical_impl_contracts

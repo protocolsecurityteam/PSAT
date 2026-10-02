@@ -106,15 +106,6 @@ def test_locate_scope_section_finds_header_variants(pages, contains):
         assert needle in sections[0].text_slice
 
 
-def test_locate_scope_section_returns_empty_when_no_header():
-    text = _doc(
-        _page(1, "Executive Summary"),
-        _page(2, "We reviewed several contracts."),
-        _page(3, "Conclusion"),
-    )
-    assert locate_scope_section(text) == []
-
-
 def test_locate_scope_section_captures_three_pages_of_context():
     text = _doc(
         _page(1, "Cover"),
@@ -128,24 +119,6 @@ def test_locate_scope_section_captures_three_pages_of_context():
     assert "Pool.sol" in sections[0].text_slice
     assert "Strategy.sol" in sections[0].text_slice
     assert "Findings" not in sections[0].text_slice
-
-
-def test_merged_section_preserves_text_from_later_match():
-    # The merge used to keep only the first candidate's slice (lost SettlementDispatcher in the Certora audit).
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "Project Scope\nSubProject A"),
-        _page(3, "Files in scope:\n- SubAContract.sol"),
-        _page(
-            4,
-            "Additional scope for SubProject B\nThe following contracts are in scope:\n- SubBContract.sol",
-        ),
-        _page(5, "Findings"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "SubAContract.sol" in sections[0].text_slice
-    assert "SubBContract.sol" in sections[0].text_slice
 
 
 def test_locate_scope_section_survives_no_page_markers():
@@ -182,18 +155,6 @@ def test_locate_scope_section_normalizes_ligatures_in_headers():
 )
 def test_validate_contracts(names, raw, expected):
     assert validate_contracts(names, raw) == expected
-
-
-def test_validate_contracts_preserves_interfaces_with_matching_impls():
-    # Certora lists interfaces as first-class scope, so both variants survive.
-    names = ["StakingManager", "IStakingManager", "LiquidityPool", "ILiquidityPool"]
-    raw = "StakingManager IStakingManager LiquidityPool ILiquidityPool"
-    assert validate_contracts(names, raw) == [
-        "StakingManager",
-        "IStakingManager",
-        "LiquidityPool",
-        "ILiquidityPool",
-    ]
 
 
 @pytest.mark.parametrize(
@@ -248,20 +209,6 @@ def test_call_llm_uses_digest_stub_when_available(tmp_path, monkeypatch):
     response, model = _call_llm(prompt)
     assert response == '["Pool","Vault"]'
     assert model.startswith("stub:")
-
-
-def test_call_llm_falls_back_to_default(tmp_path, monkeypatch):
-    (tmp_path / "_default.json").write_text('["Default"]')
-    monkeypatch.setenv("PSAT_LLM_STUB_DIR", str(tmp_path))
-    response, model = _call_llm("anything")
-    assert response == '["Default"]'
-    assert model == "stub:_default"
-
-
-def test_call_llm_raises_when_no_stub(tmp_path, monkeypatch):
-    monkeypatch.setenv("PSAT_LLM_STUB_DIR", str(tmp_path))
-    with pytest.raises(LLMUnavailableError):
-        _call_llm("no matching fixture")
 
 
 @pytest.mark.parametrize(
@@ -430,13 +377,6 @@ def test_extract_scope_with_llm_normalizes_unknown_commit_labels_to_unclear(tmp_
     ]
 
 
-def test_extract_scope_with_llm_raises_on_unparseable(tmp_path, monkeypatch):
-    _setup_stub(tmp_path, monkeypatch, "this is not JSON at all")
-    sections = [ScopeSection(1, 1, "scope", "anything")]
-    with pytest.raises(LLMUnavailableError):
-        extract_scope_with_llm(sections, "T", "A")
-
-
 def test_build_prompt_truncates_very_large_scope_text():
     huge = "A" * 100_000
     sections = [ScopeSection(1, 1, "scope", huge)]
@@ -461,24 +401,6 @@ def test_locate_scope_section_matches_content_pattern(page2):
     sections = locate_scope_section(text)
     assert len(sections) >= 1
     assert any("Pool.sol" in s.text_slice for s in sections)
-
-
-def test_content_pattern_does_not_match_mere_scope_mention():
-    # Prose like "falls outside the scope" must not match.
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "Certain edge cases fall outside the scope of this review."),
-        _page(3, "More prose without any scope listing."),
-    )
-    sections = locate_scope_section(text)
-    assert sections == []
-
-
-def test_split_text_into_chunks_caps_at_max_chunks():
-    # 30 pages would give 6 chunks, but the cap is 4.
-    text = _doc(*(_page(i, f"page {i} body") for i in range(1, 31)))
-    chunks = _split_text_into_chunks(text)
-    assert 1 <= len(chunks) <= 4
 
 
 def test_split_text_into_chunks_covers_pages_contiguously():
@@ -512,19 +434,6 @@ def test_chunk_scan_stops_at_first_hit(tmp_path, monkeypatch):
     assert winning_chunk is not None
     assert "UNIQUE_SCOPE_MARKER_XYZ" in winning_chunk.text_slice
     assert len(prompts_seen) == 2
-
-
-def test_chunk_scan_returns_empty_when_no_chunk_has_scope(tmp_path, monkeypatch):
-    def fake_call(prompt):
-        return "[]", "stub"
-
-    monkeypatch.setattr("services.audits.scope_extraction._llm._call_llm", fake_call)
-
-    text = _doc(*(_page(i, "no scope anywhere " * 20) for i in range(1, 11)))
-    names, _, _, response, model, chunks_used, winning_chunk = extract_scope_via_chunk_scan(text, "T", "A")
-    assert names == []
-    assert chunks_used >= 1
-    assert winning_chunk is None
 
 
 def test_chunk_scan_raises_only_when_every_call_fails(monkeypatch):

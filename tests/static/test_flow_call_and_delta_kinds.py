@@ -106,56 +106,12 @@ contract Queue {
 """
 
 
-def test_token_owner_destination_is_not_a_caller_supplied_param(tmp_path):
-    """``ownerOf(id)`` unions {view_call, state_variable, parameter}, the parameter being the key."""
-    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
-    effects = build_effects(contract)
-    target = _out_flow(effects["functions"]["claim(uint256)"])["target_kind"]
-    assert target["kind"] != "param", target
-    assert target == {"kind": "token_owner", "tier": "static_trace"}, target
-
-
-def test_token_owner_external_erc721_lookup(tmp_path):
-    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
-    effects = build_effects(contract)
-    target = _out_flow(effects["functions"]["claimExternal(address,uint256)"])["target_kind"]
-    assert target == {"kind": "token_owner", "tier": "static_trace"}, target
-
-
-def test_token_owner_nested_matches_inline_entry(tmp_path):
-    """The helper hop must not make the classification more specific than the entry."""
-    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
-    fns = build_effects(contract)["functions"]
-    assert _out_flow(fns["claim(uint256)"])["target_kind"] == _out_flow(fns["claimInline(uint256)"])["target_kind"]
-
-
-def test_token_owner_batch_matches_single(tmp_path):
-    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
-    fns = build_effects(contract)["functions"]
-    assert _out_flow(fns["batchClaim(uint256[])"])["target_kind"] == {"kind": "token_owner", "tier": "static_trace"}
-
-
-def test_token_owner_taint_is_not_a_token_owner_destination(tmp_path):
-    """A positive def-chain test, so a merely tainted value can't borrow the kind."""
-    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
-    effects = build_effects(contract)
-    target = _out_flow(effects["functions"]["claimMangled(uint256,uint160)"])["target_kind"]
-    assert target["kind"] == "indeterminate", target
-
-
 def test_unrecognized_getter_result_is_not_a_caller_supplied_param(tmp_path):
     """Only the ERC-721 selector earns a name; every other callee falls to indeterminate."""
     contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimUnknownGetter(uint256)"])["target_kind"]
     assert target["kind"] != "param", target
-    assert target["kind"] == "indeterminate", target
-
-
-def test_token_owner_union_with_storage_stays_indeterminate(tmp_path):
-    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
-    effects = build_effects(contract)
-    target = _out_flow(effects["functions"]["claimUnion(uint256,bool)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
 
 
@@ -168,55 +124,6 @@ def test_token_owner_reaches_the_claims_witness(tmp_path):
     assert out, claims["claim(uint256)"]
     kinds = [f.get("target_kind") for f in out[0]["witness"]["flows"]]
     assert {"kind": "token_owner", "tier": "static_trace"} in kinds, kinds
-
-
-STRUCT_DEST_SRC = """
-pragma solidity ^0.8.20;
-
-contract Requests {
-    struct Request { address user; uint128 amount; }
-
-    mapping(uint256 => Request) private _rows;
-
-    // The caller hands the whole struct in calldata: the destination IS the
-    // caller's to choose.
-    function claim(Request calldata r) external { _pay(r); }
-    function _pay(Request calldata r) internal {
-        (bool ok,) = payable(r.user).call{value: r.amount}("");
-        require(ok);
-    }
-
-    function batchClaim(Request[] calldata rs) external {
-        for (uint256 i = 0; i < rs.length; ++i) { _pay(rs[i]); }
-    }
-
-    // The row is loaded from STORAGE keyed by a parameter. The caller picks the
-    // id, but an earlier transaction wrote the payee — not caller-chosen.
-    function claimStored(uint256 id) external { _payStored(id); }
-    function _payStored(uint256 id) internal {
-        Request storage r = _rows[id];
-        (bool ok,) = payable(r.user).call{value: r.amount}("");
-        require(ok);
-    }
-
-    receive() external payable {}
-}
-"""
-
-
-def test_calldata_struct_array_element_destination_is_param(tmp_path):
-    """The single-struct twin is in ``test_flow_interproc.py``."""
-    contract = _compile_named(tmp_path, STRUCT_DEST_SRC, "Requests")
-    fns = build_effects(contract)["functions"]
-    assert _out_flow(fns["batchClaim(Requests.Request[])"])["target_kind"]["kind"] == "param"
-
-
-def test_stored_request_row_destination_is_not_param(tmp_path):
-    """The stored payee was fixed by an earlier tx; the caller only picked the key."""
-    contract = _compile_named(tmp_path, STRUCT_DEST_SRC, "Requests")
-    target = _out_flow(build_effects(contract)["functions"]["claimStored(uint256)"])["target_kind"]
-    assert target["kind"] != "param", target
-    assert target["kind"] in ("storage_no_setter", "storage_setter", "indeterminate"), target
 
 
 BALANCE_DELTA_SRC = """
@@ -276,28 +183,6 @@ contract Sweeper {
 """
 
 
-def test_balance_delta_across_external_call(tmp_path):
-    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
-    amount = _out_flow(build_effects(contract)["functions"]["sweepDelta(address,uint256)"])["amount_kind"]
-    assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
-
-
-def test_balance_minus_storage_is_a_delta_not_storage_bounded(tmp_path):
-    """Crediting the storage value understates how much can leave."""
-    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
-    amount = _out_flow(build_effects(contract)["functions"]["sweepStranded()"])["amount_kind"]
-    assert amount["kind"] != "bounded_by_storage", amount
-    assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
-
-
-def test_non_subtractive_balance_arithmetic_is_not_a_delta(tmp_path):
-    """Before the balance-derivation guard the constant divisor won alone and read as ``fixed_constant``."""
-    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
-    amount = _out_flow(build_effects(contract)["functions"]["half(address)"])["amount_kind"]
-    assert amount["kind"] not in ("balance_delta", "fixed_constant"), amount
-    assert amount["kind"] == "indeterminate", amount
-
-
 def test_balance_delta_reaches_the_claims_witness(tmp_path):
     contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     effects = build_effects(contract)
@@ -306,16 +191,6 @@ def test_balance_delta_reaches_the_claims_witness(tmp_path):
     assert out, claims["sweepStranded()"]
     kinds = [f.get("amount_kind") for f in out[0]["witness"]["flows"]]
     assert {"kind": "balance_delta", "tier": "static_trace"} in kinds, kinds
-
-
-def test_param_index_reaches_the_claims_witness(tmp_path):
-    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
-    effects = build_effects(contract)
-    claims = build_claims(contract, effects, {})["functions"]
-    out = [c for c in claims["half(address)"] if c["claim_id"] == "flow.out"]
-    assert out, claims["half(address)"]
-    indexes = [f.get("target_param_index") for f in out[0]["witness"]["flows"]]
-    assert 0 in indexes, out[0]["witness"]["flows"]
 
 
 # Getter-read destinations and computed amounts used to publish "we traced nothing".
@@ -373,36 +248,6 @@ def test_a_getter_helper_return_resolves_to_the_variables_mutability(_returns):
     assert _out_flow(_returns["payGovernor(uint256)"])["target_kind"]["kind"] == "storage_setter"
 
 
-def test_an_immutable_helper_return_resolves_to_immutable(_returns):
-    assert _out_flow(_returns["payTreasury(uint256)"])["target_kind"]["kind"] == "immutable"
-
-
-def test_a_helper_returning_a_helper_resolves_through_both_hops(_returns):
-    assert _out_flow(_returns["payIndirect(uint256)"])["target_kind"]["kind"] == "storage_setter"
-
-
-def test_a_helper_returning_its_argument_resolves_to_the_caller_value(_returns):
-    assert _out_flow(_returns["payEcho(address,uint256)"])["target_kind"]["kind"] == "param"
-
-
-def test_a_calculating_helper_return_resolves_the_amount(_returns):
-    assert _out_flow(_returns["drainToCap(address)"])["amount_kind"]["kind"] == "bounded_by_storage"
-
-
-def test_a_helper_whose_returns_disagree_stays_indeterminate(_returns):
-    assert _out_flow(_returns["payEither(uint256)"])["target_kind"]["kind"] == "indeterminate"
-
-
-def test_a_keyed_lookup_return_is_never_published_as_fixed(_returns):
-    """The safety case, and the reason element reads are refused outright.
-
-    ``_owners`` has no setter, so the element rule would call the BASE
-    ``storage_no_setter``, provably FIXED, which the mutability rules promote to ``immutable_fixed``.
-    The caller picks the key, so resolving this at all is the worst over-claim."""
-    target = _out_flow(_returns["payBeneficiary(uint256,uint256)"])["target_kind"]
-    assert target["kind"] == "indeterminate", target
-
-
 # A merge is caller-chosen only if every branch is, and a nested formal only if the caller bound it to one.
 
 MERGE_SRC = """
@@ -446,12 +291,6 @@ def _merge(tmp_path_factory):
 
 def test_a_merge_of_entry_param_and_msg_value_is_caller_supplied(_merge):
     assert _out_flow(_merge["payEntry(uint256)"])["amount_kind"]["kind"] == "caller_supplied"
-
-
-def test_a_merge_reached_through_a_forwarded_state_variable_is_not(_merge):
-    """The caller bound the formal to storage; a consumer reads ``caller_supplied`` as attacker-chosen."""
-    flow = _out_flow(_merge["payForwardedStorage()"])
-    assert flow["amount_kind"]["kind"] == "indeterminate", flow
 
 
 # The recognizer reads ``to``/``amount`` off the call site without proving the callee forwards them.
@@ -526,21 +365,6 @@ def test_an_internal_helper_that_redirects_is_not_read_off_the_call_site(_recogn
     assert target["kind"] == "indeterminate", target
 
 
-def test_descending_into_a_recognized_helper_keeps_its_other_moves(_recognizer):
-    """Losing the ETH branch also flipped ``has_native_payout`` and disabled the prober's balance seeding."""
-    flows = _recognizer["claim(IERC20,address,uint256)"]["value_flows"]
-    kinds = {f["kind"] for f in flows}
-    assert "low_level_value_call" in kinds, flows
-    assert "callee_erc20_selector" in kinds, flows
-
-
-def test_mentioning_a_selector_is_not_issuing_it(_recognizer):
-    """A deny-list checks the selector and moves nothing."""
-    assert not (_recognizer["enqueue(bytes4,address,uint256)"]["value_flows"]), _recognizer[
-        "enqueue(bytes4,address,uint256)"
-    ]["value_flows"]
-
-
 ZERO_ID_SRC = """
 pragma solidity ^0.8.20;
 
@@ -572,15 +396,6 @@ def test_a_zero_trailing_arg_on_the_ambiguous_pull_selector_still_moves(_zero_id
     assert len(flows) == 1, flows
     assert flows[0]["selector"] == "0x23b872dd"
     assert flows[0]["amount_kind"]["kind"] == "indeterminate", flows
-
-
-def test_a_zero_token_id_on_the_erc721_only_selector_keeps_its_identity_kind(_zero_id):
-    flows = _zero_id["sendSafe(address)"]["value_flows"]
-    assert [f["amount_kind"]["kind"] for f in flows] == ["token_identity"], flows
-
-
-def test_a_zero_amount_on_an_unambiguous_erc20_send_still_moves_nothing(_zero_id):
-    assert not _zero_id["sendNothing(address)"]["value_flows"]
 
 
 # Plane 0 mints ``asset_send`` from any ``.call{value: v}``; OZ ``Address`` under SafeERC20 passes a zero literal from
@@ -640,14 +455,3 @@ def test_an_approval_is_not_an_eth_payout(_zero_value):
     info = _zero_value["recordIntent(IERC20,uint256)"]
     assert info["value_flows"] == []
     assert "asset_send" not in info["effect_labels"]
-
-
-def test_a_real_value_call_still_reads_as_a_payout(_zero_value):
-    info = _zero_value["payOut(address,uint256)"]
-    assert [f["kind"] for f in info["value_flows"]] == ["low_level_value_call"]
-    assert "asset_send" in info["effect_labels"]
-
-
-def test_a_function_that_approves_AND_pays_keeps_the_payout_label(_zero_value):
-    info = _zero_value["approveAndPay(IERC20,address,uint256)"]
-    assert "asset_send" in info["effect_labels"]

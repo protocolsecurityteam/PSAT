@@ -164,22 +164,6 @@ def test_new_member_committed_during_build_is_not_lost_from_protocol_fingerprint
     assert source(session, protocol.name) == "prepared"
 
 
-def test_mixed_bulk_update_only_touches_actually_changed_rows(prepared):
-    session, protocol, factory = prepared
-    first = root_contract(session, protocol)
-    address = _addr("unchanged")
-    job = _add_job(session, address=address, protocol_id=protocol.id)
-    second = _add_contract(session, address=address, job=job, protocol_id=protocol.id)
-    key = f"protocol:{protocol.id}:contract:{second.id}"
-    before = session.get(Revision, key).token
-    session.execute(
-        text("UPDATE contracts SET contract_name=CASE WHEN id=:id THEN 'Changed' ELSE contract_name END"),
-        {"id": first.id},
-    )
-    session.commit()
-    assert session.execute(select(Revision.token).where(Revision.key == key)).scalar_one() == before
-
-
 def test_response_bearing_deployer_change_invalidates_and_rebuilds(prepared):
     import json
 

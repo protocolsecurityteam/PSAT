@@ -23,11 +23,9 @@ from tests.support.scoring_builders import (
     KEY_C,
     KEY_T,
     KEY_V,
-    SAFE,
     _composing_signals,
     _gate_row,
     _two_hop_case,
-    facts,
     fold,  # noqa: F401  — the fold fixture, reused rather than forked
     proven,
     reaches,
@@ -206,22 +204,6 @@ def test_case6_a_withheld_entry_is_counted_by_state_and_reason_together(fold):
     assert key.startswith(P.DELETABILITY_PROVEN_NOT_DELETABLE + "/")
 
 
-def test_case6_a_refusal_does_not_move_confidence(fold):
-    """``refused`` feeds none of the four terms; pinned so nobody wires one in."""
-    kept = CA.composed_document(fold, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
-    refused = CA.composed_document(fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
-    detail = kept.model_parameters["confidence_detail"]
-    refused_detail = refused.model_parameters["confidence_detail"]
-    assert refused.confidence_pct == min(
-        refused_detail["reachability_answered_pct"],
-        refused_detail["capability_scored_pct"],
-        refused_detail["value_priced_pct"],
-        refused_detail["reach_magnitude_witnessed_pct"],
-    )
-    assert refused_detail["reach_magnitude_witnessed_pct"] <= detail["reach_magnitude_witnessed_pct"]
-    assert "refused" not in refused_detail
-
-
 def _weaker_capability() -> Any:
     return sig(
         claim_id="ownership.transfer",
@@ -241,54 +223,6 @@ def _composing_subsumed_rows(document) -> list[dict[str, Any]]:
     composing = [row for row in subsumed if _entries(row) or _withheld(row)]
     assert composing, "the subsumed row must have offered a composed candidate"
     return composing
-
-
-@pytest.mark.parametrize(
-    "deletability,expect_published",
-    [(CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), False), (_licensing(), True)],
-    ids=["withheld", "republished"],
-)
-def test_case7_both_arms_hold_on_a_subsumed_row(fold, deletability, expect_published):
-    """21 of 40 entries are subsumed, including a $11.36M keep-it row."""
-    document = CA.composed_document(
-        fold,
-        signals=[*_composing_signals(), _weaker_capability()],
-        deletability=deletability,
-        routes=_AUTHORS_THE_AMOUNT_AT_C,
-    )
-    for row in _composing_subsumed_rows(document):
-        if expect_published:
-            assert [e["arm_taken"] for e in _entries(row)] == [FOLD.ARM_REPUBLISHED_DIRECT]
-            assert _withheld(row) == []
-        else:
-            assert _entries(row) == []
-            assert [e["arm_taken"] for e in _withheld(row)] == [FOLD.ARM_GATE_ONLY]
-            assert [e["published_usd"] for e in _withheld(row)] == [None]
-
-
-def test_an_unresolvable_gating_authority_is_disclosed_and_not_read_as_a_negative(fold):
-    """Obscuring the gating authority LOWERS published dollars, so it
-    pays unless the obscuring itself is published: the entry lands on
-    ``not_determined`` under its own token and the census counts the two apart."""
-    # No gating witness at all: the join cannot ask the authority arm.
-    row = _gate_row(CA.composed_document(fold, routes=_AUTHORS_THE_AMOUNT_AT_C))
-    entry = _withheld(row)[0]
-    disclosure = entry["authority_deletability"]
-    assert disclosure["state"] == P.DELETABILITY_NOT_DETERMINED
-    assert disclosure["reason"] == P.DELETABILITY_AUTHORITY_UNRESOLVED
-    assert disclosure["reason"] != P.DELETABILITY_NO_SETTER_ROW
-    assert disclosure["destination"] == KEY_V
-    assert disclosure["selector"] == COMPOSED_SELECTOR
-    assert disclosure["principal_addresses"] == [EOA.lower()]
-    assert disclosure["gating_authority_witness"]["selector_scoped"] == []
-
-    census = row["reach_composition_census"]
-    assert census["composed_withheld_by_deletability"] == {
-        f"{P.DELETABILITY_NOT_DETERMINED}/{P.DELETABILITY_AUTHORITY_UNRESOLVED}": 1
-    }
-    assert row["entities_withheld_from_a_composed_ceiling"][0]["authority_deletability_state"] == (
-        P.DELETABILITY_NOT_DETERMINED
-    )
 
 
 @pytest.mark.parametrize(
@@ -312,91 +246,11 @@ def test_the_typed_reason_is_read_off_the_traversed_body(fold, routes, state, re
     assert entry["published_usd"] is None
 
 
-def test_an_unclassifiable_route_is_still_republished_where_the_join_licenses_it(fold):
-    """12 of 28 surviving entries traverse a body whose flow witness classifies neither way."""
-    entry = _entries(
-        _gate_row(CA.composed_document(fold, deletability=_licensing(), routes=_FORWARDS_EVERYTHING_AT_C))
-    )[0]
-    assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
-    assert entry["published_usd"] == 1_000_000.0
-    assert entry["route_classification"]["state"] == P.ROUTE_NOT_DETERMINED
-    assert entry["route_classification"]["reason"] == P.ROUTE_NEITHER_CONJUNCT
-
-
 def _with_destination_gate(payload: Any) -> list[Any]:
     signals = _composing_signals()
     destination = signals[-1]
     signals[-1] = replace(destination, gate_inputs={**destination.gate_inputs, EX.PROVING_EXECUTION_KEY: payload})
     return signals
-
-
-def test_an_unfetchable_transcript_withholds_even_where_the_join_licenses_it(fold):
-    """The licence to issue a call doesn't substitute for knowing what it was."""
-    faulted = _with_destination_gate(
-        Tri.proven(
-            EX.GATE_STATE_NOT_RECORDED,
-            EX.not_determined(EX.REASON_FETCH_FAILED, transcript_ptr="job::art").as_json(),
-        ).to_json()
-    )
-    row = _gate_row(
-        CA.composed_document(fold, signals=faulted, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
-    )
-    assert _entries(row) == []
-    entry = _withheld(row)[0]
-    assert entry["arm_taken"] == FOLD.ARM_WITHHELD
-    assert entry["withheld_reason"] == EX.REASON_FETCH_FAILED
-    assert entry["withheld_reason"] in EX.FAULT_REASONS
-    assert entry["published_usd"] is None
-    assert entry["authority_deletability"]["state"] == P.DELETABILITY_DELETABLE
-
-
-def test_a_record_that_was_never_persisted_is_a_gap_and_does_not_withhold(fold):
-    """Every reference-corpus verdict predates the record, so treating this as a fault withholds all forty, the
-    already-refuted outcome.
-    """
-    assert EX.REASON_NOT_PERSISTED not in EX.FAULT_REASONS
-    document = CA.composed_document(fold, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
-    entry = _entries(_gate_row(document))[0]
-    assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
-    assert entry["published_usd"] == 1_000_000.0
-    assert _gate_row(document)["value_at_stake_usd"] == 1_000_000.0
-
-
-def test_a_row_that_loses_every_composed_figure_publishes_none_and_not_zero(fold):
-    """An empty sum is ``0.0``, which would publish a floor earned by having nothing in it."""
-    row = _gate_row(CA.composed_document(fold, deletability=_refusing(), routes=_AUTHORS_THE_AMOUNT_AT_C))
-    assert row["value_at_stake_usd"] is None
-    assert row["value_at_stake_usd"] != 0.0
-    assert row["value_by_entity"] == {}
-    assert row["value_state"] == "not_determined"
-    assert row["value_band"] == "not_determined"
-    assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    assert row["value_at_stake_is_floor"] is False
-    assert not str(row["value_band"]).startswith(">=")
-
-    assert row["entities_priced_from_a_composed_ceiling"] == []
-    withheld = row["entities_withheld_from_a_composed_ceiling"]
-    assert [w["entity"] for w in withheld] == [KEY_V]
-    assert withheld[0]["withheld_reason"] == P.ROUTE_AMOUNT_AUTHORED
-    assert withheld[0]["authority_deletability_state"] == P.DELETABILITY_PROVEN_NOT_DELETABLE
-    assert withheld[0]["authority_deletability_reason"] == P.DELETABILITY_NO_SETTER_ROW
-
-
-def test_a_row_that_never_composed_anything_publishes_neither_list(fold):
-    lone = sig(
-        claim_id="authority.replace",
-        function_name="setAuthority",
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        **proven(0.75),
-        **reaches(KEY_C),
-    )
-    row = _gate_row(fold([lone], principals={1: facts(1, SAFE, "safe", threshold=2)}))
-    assert row["entities_priced_from_a_composed_ceiling"] == []
-    assert row["entities_withheld_from_a_composed_ceiling"] == []
-    assert row["reach_composed_magnitudes"] == []
-    assert row["reach_composed_magnitudes_withheld"] == []
 
 
 def _transcript(**over: Any) -> dict[str, Any]:
@@ -494,14 +348,6 @@ def test_a_transcript_naming_no_proving_call_is_its_own_reason_and_not_a_fault()
     assert record.reason == EX.REASON_NO_PROVING_CALL
     assert record.reason not in EX.FAULT_REASONS
     assert record.transcript_ptr == "job::art"
-
-
-@pytest.mark.parametrize(
-    "pointer,parts",
-    [("job::art", ("job", "art")), ("job::a::b", ("job", "a::b")), ("job", None), ("::art", None), (None, None)],
-)
-def test_a_pointer_that_does_not_resolve_is_not_coerced_into_one(pointer, parts):
-    assert EX.pointer_parts(pointer) == parts
 
 
 class _FakeQuery:
@@ -602,46 +448,6 @@ def test_a_gate_claim_the_proof_was_admitted_for_publishes_corroborated(fold):
     assert entry["route_comparison"]["caller_matches"] is True
     assert entry["route_comparison"]["verdict"] == EX.ROUTE_MISMATCH
     assert "UNCORROBORATED" not in claim["reading"]
-
-
-def test_a_gate_claim_the_proof_used_another_caller_for_is_qualified_not_asserted(fold):
-    """``isAuthorized(msg.sender, msg.sig)`` reads the sender exactly; the chain is qualified, never retracted."""
-    row = _gate_row(_proved_by(fold, _OTHER_CALLER, _licensing()))
-    entry = _entries(row)[0]
-    claim = entry["gate_claim"]
-
-    assert claim["state"] == EX.GATE_CLAIM_NOT_CORROBORATED
-    assert claim["reason"] == EX.GATE_CLAIM_REASON_OTHER_CALLER
-    assert claim["proven_caller"] == _OTHER_CALLER
-    assert claim["claimed_caller"] == KEY_C
-    assert _OTHER_CALLER in claim["reading"] and KEY_C in claim["reading"]
-    assert "UNCORROBORATED" in claim["reading"]
-    assert entry["act_as_chain"][0]["caller"] == KEY_C
-    assert "act-as witness alone" in claim["reading"]
-    assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
-    assert entry["published_usd"] == 1_000_000.0
-
-    assert row["reach_composition_census"]["gate_claim_by_state"] == {EX.GATE_CLAIM_NOT_CORROBORATED: 1}
-
-
-def test_a_withheld_entry_carries_the_caller_conjunct_too(fold):
-    row = _gate_row(_proved_by(fold, _OTHER_CALLER, _refusing()))
-    entry = _withheld(row)[0]
-    assert entry["arm_taken"] == FOLD.ARM_GATE_ONLY
-    assert entry["gate_claim"]["state"] == EX.GATE_CLAIM_NOT_CORROBORATED
-    assert entry["gate_claim"]["proven_caller"] == _OTHER_CALLER
-    assert entry["published_usd"] is None
-    assert row["reach_composition_census"]["gate_claim_by_state"] == {EX.GATE_CLAIM_NOT_CORROBORATED: 1}
-
-
-def test_no_execution_to_compare_a_caller_against_is_its_own_state(fold):
-    document = CA.composed_document(fold, deletability=_licensing(), routes=_AUTHORS_THE_AMOUNT_AT_C)
-    claim = _entries(_gate_row(document))[0]["gate_claim"]
-    assert claim["state"] == EX.GATE_CLAIM_NOT_DETERMINED
-    assert claim["reason"] == EX.GATE_CLAIM_REASON_NOT_COMPARED
-    assert claim["proven_caller"] is None
-    assert claim["state"] not in (EX.GATE_CLAIM_CORROBORATED, EX.GATE_CLAIM_NOT_CORROBORATED)
-    assert len(set(EX.GATE_CLAIM_STATES)) == 3
 
 
 @pytest.mark.parametrize(

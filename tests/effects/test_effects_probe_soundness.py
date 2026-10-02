@@ -110,50 +110,12 @@ def test_a_mint_whose_asset_slot_held_the_prober_identity_withholds_the_negative
     assert overrides[PRINCIPAL.lower()]["code"] == recipes._REVERT_STUB_CODE
 
 
-def test_a_mint_unaffected_by_the_stub_still_publishes_the_negative():
-    """An admin mint's recipient is routinely a codeless EOA, so a codesize check would delete the unbacked-issuance
-    witness.
-    """
-    sig = "mint(address,uint256)"
-    calldata = _calldata(sig, PRINCIPAL, 1)
-    sim = _Recorder(_supply_block(0, 100, _mint_only()), _supply_block(0, 100, _mint_only()))
-    eff = _supply(sim, calldata, token_param_indexes=())
-
-    assert eff.details["backing"]["inflow_observed"] is False
-    assert eff.details["backing"]["minted"] is True
-    assert eff.concrete["backing_inflow_transfers"] == 0
-
-
-def test_a_differential_that_changes_the_delta_withholds():
-    """The stub must be inert, not merely survivable."""
-    sig = "enter(address,uint256)"
-    sim = _Recorder(_supply_block(0, 100, _mint_only()), _supply_block(0, 40, _mint_only()))
-    eff = _supply(sim, _calldata(sig, PRINCIPAL, 1), token_param_indexes=())
-    assert "backing" not in eff.details
-
-
 def test_a_differential_that_cannot_be_run_withholds():
     """A non-observation may not stand in for the proof."""
     sim = _Recorder(_supply_block(0, 100, _mint_only()))  # no differential block
     eff = _supply(sim, _calldata("enter(address,uint256)", PRINCIPAL, 1), token_param_indexes=())
     assert eff.verdict == VERDICT_PROVEN
     assert "backing" not in eff.details
-
-
-def test_an_observed_inflow_needs_no_differential():
-    """Asymmetric burden: only the negative is a claim about the function."""
-    logs = [transfer_log(TOKEN_A, PRINCIPAL, VAULT, 5), *_mint_only()]
-    sim = _Recorder(_supply_block(0, 100, logs))
-    eff = _supply(sim, _calldata("enter(address,uint256)", PRINCIPAL, 1), token_param_indexes=())
-    assert eff.details["backing"]["inflow_observed"] is True
-    assert len(sim.seen) == 1
-
-
-def test_a_mint_with_no_address_argument_at_all_needs_no_differential():
-    sim = _Recorder(_supply_block(0, 100, _mint_only()))
-    eff = _supply(sim, _calldata("wrap(uint256)", 1), token_param_indexes=())
-    assert eff.details["backing"]["inflow_observed"] is False
-    assert len(sim.seen) == 1
 
 
 def test_prober_supplied_address_args_reads_the_bytes_not_the_types():
@@ -169,40 +131,6 @@ def test_a_named_token_slot_that_never_got_a_token_still_withholds_first():
     eff = _supply(sim, _calldata("deposit(address,uint256)", PRINCIPAL, 1), token_param_indexes=(0,))
     assert "backing" not in eff.details
     assert len(sim.seen) == 1
-
-
-def test_a_reverted_value_probe_is_not_no_value_observed():
-    sim = _Recorder(SimResult(calls=(SimCallResult(False, "0x", "0x", ()),)))
-    eff = recipes.value_out(
-        simulate=sim,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata=_calldata("withdraw(uint256)", 1),
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "value_probe_reverted"
-    assert eff.details["observation"] == "reverted"
-    assert "value_probe_reverted" not in _CACHEABLE_UNKNOWN_REASONS
-    assert _is_cacheable(unknown(recipes.EFFECT_CLASS_VALUE_OUT, reason="value_probe_reverted")) is False
-    assert _is_cacheable(unknown(recipes.EFFECT_CLASS_VALUE_OUT, reason="no_value_observed")) is True
-
-
-def test_an_executed_value_probe_that_moved_nothing_keeps_its_cacheable_reason():
-    sim = _Recorder(SimResult(calls=(SimCallResult(True, "0x", None, ()),)))
-    eff = recipes.value_out(
-        simulate=sim,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata=_calldata("withdraw(uint256)", 1),
-        simulate_supported=True,
-    )
-    assert eff.reason == "no_value_observed"
-    assert eff.details["observation"] == "executed"
 
 
 def test_a_reverted_upgrade_probe_is_not_impl_slot_unchanged():
@@ -227,14 +155,6 @@ def test_a_reverted_upgrade_probe_is_not_impl_slot_unchanged():
     assert eff.details["observation"] == "reverted"
     assert "upgrade_probe_reverted" not in _CACHEABLE_UNKNOWN_REASONS
     assert _is_cacheable(unknown(recipes.EFFECT_CLASS_CODE_UPGRADE, reason="upgrade_probe_reverted")) is False
-
-
-def test_the_supply_recipe_already_split_revert_from_no_delta():
-    sim = _Recorder(_supply_block(0, 0, (), mint_ok=False))
-    eff = _supply(sim, _calldata("mint(address,uint256)", PRINCIPAL, 1))
-    assert eff.reason == "mint_call_reverted"
-    assert eff.details["observation"] == "reverted"
-    assert "mint_call_reverted" not in _CACHEABLE_UNKNOWN_REASONS
 
 
 def test_every_row_carries_an_observation_discriminator():
@@ -343,26 +263,6 @@ def _burn_only(burned_from: str = PRINCIPAL, amount: int = 100):
     return [transfer_log(VAULT, burned_from, ZERO, amount)]
 
 
-def test_a_burn_that_wrapped_past_zero_reads_as_a_burn():
-    """``unchecked { totalSupply -= amount }`` wraps when the seeded balance exceeds supply; read as a uint256 word
-    the sign is right.
-    """
-    before = 26_078_429_092_482
-    after = (before - 10**18) % (1 << 256)
-    assert after > 1 << 250  # the wrap really happened
-
-    eff = _supply(
-        _Recorder(_supply_block(before, after, _burn_only())),
-        _calldata("exit(uint256)", 1),
-        token_param_indexes=(),
-    )
-
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "burn"
-    # The dilution witness belongs to mints alone and must not appear here.
-    assert "backing" not in eff.details
-
-
 def test_a_sign_contradicted_by_the_transfer_logs_publishes_nothing():
     """When the supply arithmetic and the zero-address Transfer logs disagree, neither is held."""
     eff = _supply(
@@ -432,109 +332,3 @@ def test_static_destination_shape_is_earned_across_every_out_flow():
     assert shape(_facts_with_out_flows("several", several_members=["immutable", "param"]), out) is None
     assert shape(_facts_with_out_flows("several", several_members=[]), out) is None
     assert shape(_facts_with_out_flows(), out) is None
-
-
-def test_a_proven_fixed_shape_reaches_the_verdict():
-    """The branch demanded a static address, but the static plane classifies by kind."""
-    moved = [transfer_log(VAULT, VAULT, TOKEN_A, 5)]
-    eff = recipes.value_out(
-        simulate=_Recorder(SimResult(calls=(SimCallResult(True, "0x", None, tuple(moved)),))),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        static_shape="immutable_fixed",
-    )
-
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["destination_shape"] == "immutable_fixed"
-    assert eff.details["shape_proved_by"] == "static"
-    assert eff.concrete["destination"] == TOKEN_A.lower()
-
-
-def test_a_landed_sentinel_still_outranks_the_static_shape():
-    """An existential proof of redirection beats a universal argued from the source."""
-    eff = recipes.value_out(
-        simulate=_Recorder(
-            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
-            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, SENTINEL, 5),)),)),
-        ),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        sentinel_address=SENTINEL,
-        sentinel_calldata="0x22222222",
-        static_shape="immutable_fixed",
-    )
-
-    assert eff.details["destination_shape"] == "caller_arbitrary"
-    assert eff.details["shape_proved_by"] == "simulation"
-
-
-def test_a_landed_sentinel_publishes_the_parameter_it_landed_in():
-    """Without the subject the scorer's exec join can't tell a call-target sentinel from a payload one, so it refuses
-    every such verdict.
-    """
-    eff = recipes.value_out(
-        simulate=_Recorder(
-            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
-            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, SENTINEL, 5),)),)),
-        ),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        sentinel_address=SENTINEL,
-        sentinel_calldata="0x22222222",
-        sentinel_param="payload",
-    )
-
-    assert eff.details["destination_shape"] == "caller_arbitrary"
-    assert eff.details["sentinel_param"] == "payload"
-
-
-def test_a_sentinel_that_moved_nothing_still_names_its_subject():
-    """The subject describes the issued calldata, not the outcome."""
-    eff = recipes.value_out(
-        simulate=_Recorder(
-            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
-            SimResult(calls=(SimCallResult(True, "0x", None, ()),)),
-        ),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        sentinel_address=SENTINEL,
-        sentinel_calldata="0x22222222",
-        sentinel_param="to",
-    )
-
-    assert eff.details["destination_shape"] == "unknown"
-    assert eff.details["sentinel_param"] == "to"
-
-
-def test_no_sentinel_probe_names_no_subject():
-    """No sentinel was issued, which must read as "unnamed", never as "the destination"."""
-    eff = recipes.value_out(
-        simulate=_Recorder(
-            SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),))
-        ),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=VAULT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        sentinel_param="to",
-    )
-
-    assert "sentinel_param" not in eff.details

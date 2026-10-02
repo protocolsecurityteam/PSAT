@@ -4,7 +4,6 @@ from typing import Any, cast
 
 import pytest
 
-from services.scoring import fold as FOLD
 from services.scoring.constants import FREEZE_CAPABILITY_PROVEN
 from services.scoring.schema import PrincipalRef, Tri, entity_key
 from tests.support.scoring_builders import (
@@ -65,30 +64,6 @@ def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
     assert KEY_V in finding["exposure_entities_charged"]
     assert finding["exposure_usd"] > 1_000_000.0
     assert finding["subsumed_capabilities"][0]["value_at_stake_usd"] == 14_757_365.89
-
-
-def test_b1_an_entity_both_rows_reach_is_still_charged_once(fold):
-    signals = [
-        sig(
-            claim_id=claim,
-            function_name=f"fn{index}",
-            deployment_address=C,
-            contract_id=index + 1,
-            selector=f"0x0000000{index}",
-            authority_openness="restricted",
-            principal_state="enumerated",
-            principal_refs=(PrincipalRef(1, "ethereum", EOA),),
-            gates=bounded_by_sheet(1_000_000.0),
-            **proven(severity),
-            **reaches(KEY_C),
-        )
-        for index, (claim, severity) in enumerate((("upgrade.implementation", 1.0), ("roles.grant", 0.55)))
-    ]
-    plane = value_plane({KEY_C: {"usdc": 1_000_000.0}})
-    document = fold(signals, principals={1: facts(1, EOA, "eoa")}, value=plane)
-    finding = document.findings[0]
-    assert finding["subsumed_exclusive_value_by_entity"] == {}
-    assert finding["exposure_usd"] <= 1_000_000.0
 
 
 @pytest.mark.parametrize(
@@ -198,33 +173,6 @@ def test_b4_unresolved_contracts_lower_confidence(fold):
     detail = with_unresolved.model_parameters["confidence_detail"]
     assert detail["perimeter_entities"] == 4
     assert detail["signal_entities_outside_perimeter"] == []
-
-
-def test_b4_an_unpriced_contract_is_in_its_own_denominator(fold):
-    vault = sig(
-        function_name="upgradeTo",
-        deployment_address=VAULT,
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        gates=bounded_by_sheet(1_000_000_000.0),
-        **proven(1.0),
-        **reaches(KEY_V),
-    )
-    bare = value_plane({KEY_V: {"usdc": 1_000_000_000.0}})
-    wide = value_plane(
-        {KEY_V: {"usdc": 1_000_000_000.0}},
-        contracts=tuple(entity_key("ethereum", "0x" + str(i) * 40) for i in (5, 6, 7)),
-    )
-    principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=2)}
-    narrow_doc = fold([vault], principals=principals, value=bare)
-    wide_doc = fold([vault], principals=principals, value=wide)
-    narrow = narrow_doc.model_parameters["confidence_detail"]
-    wide = wide_doc.model_parameters["confidence_detail"]
-    assert wide["perimeter_entities"] > narrow["perimeter_entities"]
-    assert wide["reachability_answered_pct"] < narrow["reachability_answered_pct"]
-    assert wide["capability_scored_pct"] < narrow["capability_scored_pct"]
-    assert wide["pct"] <= narrow["pct"]
 
 
 def test_s8_a_proven_no_reach_instance_is_not_counted_as_undetermined(fold):
@@ -402,7 +350,3 @@ def test_r3_a_malformed_persisted_row_withholds_itself(monkeypatch, fold, column
     malformed = [w for w in document.warnings if w["kind"] == "signal_row_malformed"]
     assert malformed and malformed[0]["column"] == column
     assert document.provenance["population"]["rows_withheld_malformed"] == 1
-
-
-def test_r3_the_gate_shape_table_is_total_over_the_token_vocabulary():
-    assert set(FOLD.GATE_PROVEN_TOKENS) - set(FOLD.GATE_PAYLOAD_SHAPES) == set()

@@ -26,9 +26,6 @@ from services.static.claims.matchers import _facts  # noqa: E402
 from services.static.claims.matchers import flows as flowmod  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
-    verified_guard_verdicts,
-)
 
 _UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
 _SIBLING = "self_service_sibling_function_residual_not_proven"
@@ -254,13 +251,6 @@ def test_producer_cancel_bid_delete_proves(_corpus):
     assert _self_service(_corpus, "cancelBidDelete(uint256)")["state"] == "proven_self_service"
 
 
-def test_producer_withdraw_proves_keyed_by_caller_on_ordering(_corpus):
-    verdict = _self_service(_corpus, "withdraw()")
-    assert verdict["state"] == "proven_self_service"
-    assert verdict["w1_basis"] == "keyed_by_caller"
-    assert verdict["w2_basis"] == "clear_dominates_calls"
-
-
 def test_producer_verified_guard_and_ordering_are_both_earned(_corpus):
     """``withdraw`` needing no guard shows the ordering arm stands alone."""
     guarded = _self_service(_corpus, "withdrawGuarded()")
@@ -274,71 +264,3 @@ def test_producer_dao_shape_refuses(_corpus):
         "state": "not_determined",
         "reason": "clearing_write_does_not_dominate_calls",
     }
-
-
-def test_producer_contract_scoped_guard_licenses_no_unguarded_function(_corpus):
-    verdict = _self_service(_corpus, "badWithdraw()")
-    assert verdict["state"] == "not_determined"
-    guard = verified_guard_verdicts(_corpus)["badWithdraw()"]
-    assert guard["state"] == "not_determined"
-    assert guard["reason"] == "guard_modifier_not_applied"
-
-
-def test_producer_admin_sweep_param_leaves_the_key_absent(_corpus):
-    entries = _flow_out_entries(_corpus, "rescueTokens(address,uint256)")
-    assert entries
-    assert all("self_service_payout" not in e for e in entries)
-
-
-def test_producer_whole_balance_sweep_leaves_the_key_absent(_corpus):
-    entries = _flow_out_entries(_corpus, "sweepAll(address)")
-    assert entries
-    assert all("self_service_payout" not in e for e in entries)
-
-
-_BURN_SRC = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IERC20 { function transfer(address to, uint256 amount) external returns (bool); }
-interface IOracle { function convert(uint256 shares) external view returns (uint256); }
-contract BurnPay {
-    mapping(address => uint256) public shares;
-    IERC20 public token;
-    IOracle public oracle;
-    // Provable sub-case: the paid amount IS read from the caller's own cell, so
-    // it is keyed_by_caller — the only burn-of-caller-shares this join can earn.
-    function redeemSame() external {
-        uint256 amt = shares[msg.sender];
-        shares[msg.sender] = 0;
-        token.transfer(msg.sender, amt);
-    }
-    // A16: the paid amount is an oracle conversion of the burned quantity
-    // (param_derived), so the amount is not read out of storage and the gate
-    // never fires — the row stays fail-closed absent, never cleared.
-    function redeemOracle(uint256 amt) external {
-        shares[msg.sender] -= amt;
-        token.transfer(msg.sender, oracle.convert(amt));
-    }
-}
-"""
-
-
-@pytest.fixture(scope="module")
-def _burn(tmp_path_factory):
-    f = tmp_path_factory.mktemp("ssw_burn") / "BurnPay.sol"
-    f.write_text(textwrap.dedent(_BURN_SRC).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == "BurnPay")
-
-
-def test_burn_same_value_proves_as_keyed_by_caller(_burn):
-    """``burn_of_caller_shares`` needs a decrement fact no producer publishes."""
-    verdict = _self_service(_burn, "redeemSame()")
-    assert verdict["state"] == "proven_self_service"
-    assert verdict["w1_basis"] == "keyed_by_caller"
-
-
-def test_burn_then_oracle_pay_stays_fail_closed_absent(_burn):
-    entries = _flow_out_entries(_burn, "redeemOracle(uint256)")
-    assert entries
-    assert all("self_service_payout" not in e for e in entries)

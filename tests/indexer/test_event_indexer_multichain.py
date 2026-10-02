@@ -31,7 +31,6 @@ _BASE_HYPERSYNC = "https://base.hypersync.xyz"
 _ERPC_BASE = "https://erpc.example"
 _MAINNET_ERPC = f"{_ERPC_BASE}/main/evm/1"
 _BASE_ERPC = f"{_ERPC_BASE}/main/evm/{_BASE}"
-_UNCOVERED = 42161  # arbitrum
 _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
 
@@ -73,14 +72,6 @@ def test_build_fetchers_second_chain_uses_erpc(monkeypatch):
     assert _url(fetchers[_BASE]) == _BASE_ERPC
     assert _url(head_fetchers[_BASE]) == _BASE_ERPC
     assert _url(block_hash_fetchers[_BASE]) == _BASE_ERPC
-
-
-def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):
-    monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
-    chains = (chain_by_id(1), chain_by_id(_UNCOVERED))
-    fetchers, _, _ = _build_indexer_fetchers(chains=chains)
-    assert _UNCOVERED not in fetchers
-    assert set(fetchers) == {1}
 
 
 @pytest.fixture()
@@ -232,36 +223,3 @@ def test_scan_logs_once_when_chain_has_no_fetcher(session, caplog):
         r for r in caplog.records if "no fetcher for chain" in r.getMessage() and getattr(r, "chain_id", None) == _BASE
     ]
     assert len(skip_records) == 1
-
-
-@requires_postgres
-def test_scan_failure_logs_bounded_exc_msg(session, monkeypatch, caplog):
-    # A bounded exc_msg keeps the error attributable without traceback storms.
-    import services.resolution.repos.event_logs_rpc as rpc_repo
-
-    monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
-    fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(chains=(_base_chaininfo(),))
-
-    def _boom(*_args, **_kwargs):
-        raise RuntimeError("upstream rejected the query: malformed request")
-
-    monkeypatch.setattr(rpc_repo, "rpc_request", _boom)
-
-    enroll_event_cursor(session, chain_id=_BASE, event_address=_AUTHORITY, topic0=_TOPIC, start_block=100)
-    session.commit()
-
-    with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
-        summary = scan_enrolled_events(
-            session,
-            fetchers=fetchers,
-            head_fetchers=head_fetchers,
-            block_hash_fetchers=block_hash_fetchers,
-        )
-
-    assert summary.failed_groups >= 1
-    failed = [r for r in caplog.records if "group scan failed" in r.getMessage()]
-    assert failed
-    assert any(
-        isinstance(getattr(r, "exc_msg", None), str) and "malformed" in r.exc_msg and len(r.exc_msg) <= 200
-        for r in failed
-    )

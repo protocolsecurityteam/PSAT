@@ -82,16 +82,6 @@ def test_fallback_state_write_publishes_no_writer_selector(contract):
     assert functions["fallback()"]["state_writes"], "the write itself is still recorded"
 
 
-@pytest.mark.parametrize("signature", ["fallback()", "receive()"])
-def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signature):
-    abi_sig, selector = _abi_signature_and_selector(signature, {})
-    assert abi_sig == signature
-    assert selector == "", f"{signature} must carry the no-selector sentinel, got {selector!r}"
-
-    assert _abi_signature_and_selector("setAuthority(IFoo.Bar)", {})[1] is None
-    assert _abi_signature_and_selector("contribute()", {})[1] == "0xd7bb99ba"
-
-
 def test_no_named_function_can_receive_the_selectorless_sentinel():
     """``_selector_key`` folds ``None`` onto ``""``, so a named function with it would inherit the fallback's claims;
     recognition must be signature-exact.

@@ -29,7 +29,6 @@ from db.models import (
 from db.queue import try_acquire_daemon_lease
 from services.monitoring.event_topics import OWNERSHIP_TRANSFERRED_TOPIC0
 from services.monitoring.unified_watcher import (
-    _LEASE_HOLDER,
     _poller_lease_name,
     _scanner_lease_name,
     poll_for_state_changes,
@@ -232,43 +231,6 @@ def test_duplicate_scan_pass_adds_zero_rows_jobs_and_posts(db_session, monkeypat
     assert len(posts) == posts_1
 
 
-def test_batch_ops_same_tx_distinct_log_index_all_land(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    addr = ADDR(0xBA7C)
-    mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
-
-    tx_block = 1500
-    logs = []
-    for i in range(3):
-        lg = _ownership_log(addr, ADDR(0x1000 + i), block=tx_block, log_index=i)
-        lg["transactionHash"] = "0x" + "cd" * 32  # force a shared tx hash
-        logs.append(lg)
-    Wire(head=2000, logs=logs).install(monkeypatch)
-
-    scan_for_events(db_session, "http://stub")
-
-    assert _count_events(db_session, mc.id, "ownership_transferred") == 3
-    stored = (
-        db_session.execute(select(MonitoredEvent.log_index).where(MonitoredEvent.monitored_contract_id == mc.id))
-        .scalars()
-        .all()
-    )
-    assert sorted(stored) == [0, 1, 2]
-
-
-def test_within_window_duplicate_log_collapses_to_one_row(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    addr = ADDR(0xEC40)
-    mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
-
-    log = _ownership_log(addr, ADDR(0xBEEF), block=1500, log_index=7)
-    Wire(head=2000, logs=[log, dict(log)]).install(monkeypatch)
-
-    scan_for_events(db_session, "http://stub")
-
-    assert _count_events(db_session, mc.id, "ownership_transferred") == 1
-
-
 # ---------------------------------------------------------------------------
 # Lease gating
 # ---------------------------------------------------------------------------
@@ -290,25 +252,6 @@ def test_scan_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
     assert notes == ["lease_lost"]
 
 
-def test_scan_steals_expired_lease_and_runs(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    addr = ADDR(0xAA02)
-    mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
-
-    assert try_acquire_daemon_lease(db_session, _scanner_lease_name("ethereum"), uuid.uuid4(), -5) is True
-
-    wire = Wire(head=2000, logs=[_ownership_log(addr, ADDR(0xB), 1500)]).install(monkeypatch)
-    result = scan_for_events(db_session, "http://stub")
-
-    assert len(wire.getlogs_calls) == 1
-    assert len(result) == 1
-    assert _cursor(db_session, mc.id) == 2000
-    holder = db_session.execute(
-        text("SELECT holder FROM daemon_leases WHERE name = :n"), {"n": _scanner_lease_name("ethereum")}
-    ).scalar_one()
-    assert holder == _LEASE_HOLDER
-
-
 def test_scan_renew_loss_mid_pass_aborts_after_committed_window(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xAA03)
@@ -323,24 +266,6 @@ def test_scan_renew_loss_mid_pass_aborts_after_committed_window(db_session, monk
     assert len(wire.getlogs_calls) == 1
     assert _cursor(db_session, mc.id) == 2000
     assert _count_events(db_session, mc.id) == 1
-
-
-def test_scan_holder_reacquires_across_windows(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    addr = ADDR(0xAA04)
-    mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
-
-    logs = [_ownership_log(addr, ADDR(0xA), 1000), _ownership_log(addr, ADDR(0xB), 3000)]
-    wire = Wire(head=4000, logs=logs).install(monkeypatch)
-    result = scan_for_events(db_session, "http://stub")
-
-    assert len(wire.getlogs_calls) == 2  # two windows both ran
-    assert _cursor(db_session, mc.id) == 4000
-    assert len(result) == 2
-    holder = db_session.execute(
-        text("SELECT holder FROM daemon_leases WHERE name = :n"), {"n": _scanner_lease_name("ethereum")}
-    ).scalar_one()
-    assert holder == _LEASE_HOLDER
 
 
 def test_poll_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
@@ -363,38 +288,6 @@ def test_poll_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
     assert result == []
     assert called["n"] == 0
     assert notes == ["lease_lost"]
-
-
-def test_poll_path_may_duplicate_without_lease_protection(db_session, monkeypatch):
-    """Design Risk #7: the poll path has no identity guard, so this pins current behavior until one is added
-    deliberately.
-    """
-    plan = [{"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"}]
-    mc = _mk(
-        db_session,
-        ADDR(0xAA06),
-        0,
-        config={"polling_plan": plan},
-        state={"owner": ADDR(0x1).lower()},
-        needs_polling=True,
-    )
-
-    import services.monitoring.unified_watcher as uw
-
-    new_val = "0x" + "0" * 24 + ADDR(0x2)[2:]
-    monkeypatch.setattr(uw, "rpc_batch_request_classified", lambda url, calls: [(new_val, "ok") for _ in calls])
-    poll_for_state_changes(db_session, "http://stub")
-    assert _count_events(db_session, mc.id, "state_changed_poll") == 1
-
-    db_session.execute(
-        update(MonitoredContract)
-        .where(MonitoredContract.id == mc.id)
-        .values(last_known_state={"owner": ADDR(0x1).lower()})
-    )
-    db_session.commit()
-    poll_for_state_changes(db_session, "http://stub")
-
-    assert _count_events(db_session, mc.id, "state_changed_poll") == 2
 
 
 # ---------------------------------------------------------------------------

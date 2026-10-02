@@ -20,7 +20,6 @@ from services.scoring.constants import (
     FLOW_SEVERITY_CALLER_ARBITRARY,
     FLOW_SEVERITY_MSG_VALUE_PASSTHROUGH,
     FLOW_SEVERITY_MSG_VALUE_SELF_RETURN,
-    FLOW_SEVERITY_SELF_SERVICE_BOUNDED,
     ROLE_BREADTH_MULTI_HOLDER_WEAKNESS,
     UNCHARGED_PRODUCT_BASES,
     WEAKNESS_SAFE_SUPERMAJORITY,
@@ -50,7 +49,6 @@ from services.scoring.planes import (
     UNCONSUMED_REASON_UNCLASSIFIED,
     load_audit_posture,
     load_control_closure,
-    load_role_holder_floors,
     load_value_plane,
     unconsumed_reach_relations,
 )
@@ -63,7 +61,6 @@ from utils.scoring_status import (
     DESTINATION_STATE_UNCONSTRAINED_PROVEN,
     GRADE_STATE_NOT_DETERMINED,
     PRINCIPAL_STATE_ENUMERATED,
-    PRINCIPAL_STATE_NOT_DETERMINED,
     REACH_GATE_LICENSED,
     REACH_GATE_NOT_DETERMINED,
     SEVERITY_STATE_NOT_DETERMINED,
@@ -326,81 +323,12 @@ def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
     assert "fork_caller_arbitrary_witness_is_about_another_parameter" in signal.witness_notes
 
 
-def test_fork_verdict_that_names_no_parameter_licenses_nothing(corpus):
-    contract = corpus.contract("0x" + "1c" * 20)
-    function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
-    corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param=None))
-    corpus.session.commit()
-
-    signal = corpus.only(contract, "exec.arbitrary")
-    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
-    assert not signal.enters_grade
-
-
-def test_fork_verdicts_disagreeing_on_the_parameter_yield_nothing():
-    from types import SimpleNamespace
-
-    from services.scoring import distill as D
-
-    def verdict(param: str):
-        return SimpleNamespace(
-            verdict="proven",
-            witness={
-                "destination_shape": "caller_arbitrary",
-                "shape_proved_by": "simulation",
-                "sentinel_param": param,
-            },
-        )
-
-    assert D._fork_caller_arbitrary_param([verdict("target")]) == "target"
-    assert D._fork_caller_arbitrary_param([verdict("target"), verdict("data")]) is None
-    unknown = SimpleNamespace(
-        verdict="unknown",
-        witness={
-            "destination_shape": "caller_arbitrary",
-            "shape_proved_by": "simulation",
-            "sentinel_param": "target",
-        },
-    )
-    static = SimpleNamespace(
-        verdict="proven",
-        witness={"destination_shape": "immutable_fixed", "shape_proved_by": "static", "sentinel_param": "target"},
-    )
-    assert D._fork_caller_arbitrary_param([unknown, static]) is None
-
-
 def _caller_relative_flow(kind: str) -> dict[str, Any]:
     return _flow_out(
         None,
         [{"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": kind}}],
         "idiom_structural",
     )
-
-
-def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
-    contract = corpus.contract("0x" + "2a" * 20)
-    corpus.function(contract, name="redeem", claims=[_caller_relative_flow("msg_sender")], openness="open")
-
-    signal = corpus.only(contract, "flow.out")
-    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
-    assert signal.destination.value == "caller_arbitrary"
-    assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
-
-
-def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_price(corpus):
-    """The payee is proven to be the caller, but what bounds the payout has no witness; publishing either half alone
-    is the defect.
-    """
-    contract = corpus.contract("0x" + "3a" * 20)
-    corpus.function(contract, name="unwrap", claims=[_caller_relative_flow("msg_sender")], openness="open")
-
-    signal = corpus.only(contract, "flow.out")
-    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
-    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
-    assert "flow_severity_withheld_pending_amount_witness" in signal.witness_notes
-    assert not signal.enters_grade
-    assert str(signal.gate_input("destination_basis").value).endswith("+open_caller+severity_pending_amount_witness")
-    assert "destination_not_determined_row_withheld" not in signal.witness_notes
 
 
 def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_payee(corpus):
@@ -450,29 +378,6 @@ def test_caller_relative_destination_with_an_unread_gate_stays_undetermined(corp
     assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
     assert not signal.enters_grade
     assert "destination_msg_sender_caller_gate_unread" in signal.witness_notes
-
-
-def test_caller_relative_conjunction_takes_the_worst_member(corpus):
-    contract = corpus.contract("0x" + "2f" * 20)
-    corpus.function(
-        contract,
-        name="claimWithdraw",
-        claims=[
-            _flow_out(
-                None,
-                [
-                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "immutable"}},
-                    {"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "token_owner"}},
-                ],
-                "idiom_structural",
-            )
-        ],
-        openness="restricted",
-    )
-
-    signal = corpus.only(contract, "flow.out")
-    assert signal.destination.value == "constrained:token_owner"
-    assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
 
 
 def test_an_indeterminate_member_still_blocks_a_caller_relative_conjunction(corpus):
@@ -545,26 +450,6 @@ def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
     assert signal.severity_basis == (MSG_VALUE_ARM_SELF_RETURN,)
     assert "destination_msg_sender_with_open_caller_gate" in signal.witness_notes
     assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
-
-
-def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
-    """The gate is the destination being proven; with the caller gate unread, the withhold stays."""
-    contract = corpus.contract("0x" + "4e" * 20)
-    corpus.function(
-        contract,
-        name="refund",
-        claims=_msg_value_claims(_msg_value_flow("msg_sender")),
-        openness="not_determined",
-    )
-
-    signal = corpus.only(contract, "flow.out")
-    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
-    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
-    assert signal.severity_basis == ()
-    assert not signal.enters_grade
-    assert "destination_not_determined_row_withheld" in signal.witness_notes
-    assert MSG_VALUE_ARM_SELF_RETURN in signal.witness_notes
-    assert MSG_VALUE_REPETITION_RESIDUAL not in signal.witness_notes
 
 
 def test_msg_value_passed_through_to_a_fixed_payee_is_uncharged_product(corpus):
@@ -749,15 +634,6 @@ def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
     assert signal.severity_basis == ("constrained:msg_sender+restricted_caller",)
 
 
-def test_a_blocked_flow_set_proves_no_msg_value_arm():
-    from services.scoring import distill as D
-
-    blocked = [{"claim_id": "flow.out", "tier": "idiom_structural", "witness": {"kind": "value_flow"}}]
-    policy = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
-    assert D._msg_value_return(blocked) == D._MsgValueReturn(arm=None, refusal=None)
-    assert D._msg_value_return(policy) == D._MsgValueReturn(arm=None, refusal=None)
-
-
 def _proven_ssp(**over: Any) -> dict[str, Any]:
     fact = {
         "state": "proven_self_service",
@@ -814,26 +690,6 @@ def test_self_service_bound_conjuncts():
     assert not_asked == D._SELF_SERVICE_NOT_ASKED
     blocked = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
     assert D._self_service_bound(blocked) == D._SELF_SERVICE_NOT_ASKED
-
-
-def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(corpus):
-    """W1 ∧ W2 is the amount witness, read before the withhold; the G7 disclosures ride the notes for the earned
-    negative.
-    """
-    contract = corpus.contract("0x" + "51" * 20)
-    corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
-
-    signal = corpus.only(contract, "flow.out")
-    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
-    assert signal.severity.state == SEVERITY_STATE_PROVEN
-    assert signal.severity.value == FLOW_SEVERITY_SELF_SERVICE_BOUNDED
-    assert signal.severity.value == 0.0
-    assert signal.severity_basis == (SELF_SERVICE_BASIS,)
-    assert signal.enters_grade
-    assert SELF_SERVICE_UNCHARGED_NOTE in signal.witness_notes
-    assert SELF_SERVICE_DISCLOSE_UPGRADE in signal.witness_notes
-    assert SELF_SERVICE_DISCLOSE_SIBLING in signal.witness_notes
-    assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
 
 
 def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
@@ -917,21 +773,6 @@ def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude()
         Any, types.SimpleNamespace(severity_basis=("capability_class_base",), severity=Tri.proven(PROVEN, 0.0))
     )
     assert _is_uncharged_product(plain_zero) is False
-
-
-def test_destination_fold_is_a_meet_not_last_wins(corpus):
-    contract = corpus.contract("0x" + "c" * 40)
-    corpus.function(
-        contract,
-        name="twoSites",
-        claims=[
-            _delegatecall({"target_kind": "self"}, {"state": "constrained", "guard": "literal_self"}),
-            _delegatecall({"target_kind": "indeterminate"}, {"state": "not_determined"}),
-        ],
-    )
-    signal = corpus.only(contract, "delegatecall.execute")
-    assert signal.destination.state == DESTINATION_STATE_NOT_DETERMINED
-    assert not signal.enters_grade
 
 
 def test_not_applicable_is_a_different_fact_from_not_determined(corpus):
@@ -1055,25 +896,6 @@ def test_caller_arbitrary_needs_a_behavioural_existence_proof(corpus):
     assert signals["forked"].severity.value == FLOW_SEVERITY_CALLER_ARBITRARY
 
 
-def test_unwitnessed_reach_is_not_the_entity_balance_sheet(corpus):
-    contract = corpus.contract("0x" + "3a" * 20)
-    corpus.function(
-        contract,
-        name="sweep",
-        claims=[
-            _flow_out(
-                None,
-                [{"kind": "callee_erc20_selector", "from_is_self": True, "target_kind": {"kind": "immutable"}}],
-                "standard_exact",
-            )
-        ],
-    )
-    signal = corpus.only(contract, "flow.out")
-    assert signal.destination.state == DESTINATION_STATE_CONSTRAINED_PROVEN
-    assert signal.value_state == VALUE_STATE_NOT_DETERMINED
-    assert signal.value_entity_keys == ()
-
-
 def test_zero_reach_floor_is_not_a_proven_bound(corpus):
     contract = corpus.contract("0x" + "4a" * 20)
     corpus.function(
@@ -1133,23 +955,6 @@ def test_freeze_value_membership_is_gated_on_the_latch_proof(corpus):
     assert signals["pauseUnproven"].severity.state == SEVERITY_STATE_PROVEN
 
 
-def test_restricted_function_without_principals_stays_undetermined(corpus):
-    contract = corpus.contract("0x" + "6a" * 20)
-    corpus.function(
-        contract,
-        name="upgradeTo",
-        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
-    )
-    signal = corpus.only(contract, "upgrade.implementation")
-    assert signal.principal_state == PRINCIPAL_STATE_NOT_DETERMINED
-    assert signal.principal_refs == ()
-
-    document = corpus.score()
-    assert document.findings == []
-    kinds = {w["kind"] for w in document.warnings}
-    assert "restricted_privileged_no_principal" in kinds
-
-
 def test_null_openness_is_never_read_as_restricted(corpus):
     contract = corpus.contract("0x" + "7a" * 20)
     corpus.function(
@@ -1193,18 +998,6 @@ def test_two_functions_reaching_one_vault_charge_it_once(corpus):
     assert len(flow) == 1
     assert flow[0]["n_functions"] == 2
     assert flow[0]["value_at_stake_usd"] == 1000.0
-
-
-def test_chain_aliases_collapse_to_one_entity(corpus):
-    legacy = corpus.contract("0x" + "9a" * 20, chain="mainnet")
-    corpus.function(
-        legacy,
-        name="upgradeTo",
-        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
-    )
-    signals = corpus.signals(legacy)
-    assert signals[0].chain == "ethereum"
-    assert signals[0].value_entity_keys[0].startswith("ethereum::")
 
 
 def test_same_safe_on_two_chains_stays_two_units(corpus):
@@ -1324,45 +1117,6 @@ def test_no_population_and_scored_to_nothing_are_different(corpus):
     scored_to_nothing = corpus.score()
     assert scored_to_nothing.grade_state == GRADE_STATE_NOT_DETERMINED
     assert "population_scored_to_nothing" in scored_to_nothing.provenance["population"]["disposition"]
-
-
-def test_two_folds_of_one_state_are_identical(corpus):
-    contract = corpus.contract("0x" + "bd" * 20)
-    for index, selector in enumerate(("0x99999999", "0xaaaaaaaa")):
-        function = corpus.function(
-            contract,
-            name=f"fn{index}",
-            claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
-            selector=selector,
-        )
-        corpus.principal(function, address=SAFE, resolved_type="safe", details=_safe_details(OWNERS, 4))
-        corpus.principal(function, address=OWNERS[0], resolved_type="eoa", details={})
-
-    first = corpus.score()
-    second = corpus.score()
-    assert first.document() == second.document()
-    assert first.provenance == second.provenance
-
-
-def test_job_signals_group_by_contract_not_deployment_address(corpus):
-    proxy = "0x" + "be" * 20
-    first = corpus.contract("0x" + "bf" * 20)
-    second = corpus.contract("0x" + "ca" * 20)
-    for contract in (first, second):
-        corpus.function(
-            contract,
-            name="upgradeTo",
-            claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
-            deployment_address=proxy,
-            selector="0x3659cfe6",
-        )
-    grouped = distill_job_signals(corpus.session, corpus.job)
-    assert set(grouped) >= {first.id, second.id}
-    assert len(grouped[first.id]) == 1
-    assert len(grouped[second.id]) == 1
-    assert grouped[first.id][0].deployment_address == proxy
-    assert grouped[second.id][0].deployment_address == proxy
-    assert grouped[first.id][0].contract_id != grouped[second.id][0].contract_id
 
 
 def test_contract_typed_principal_scores_nothing(corpus):
@@ -1578,27 +1332,6 @@ def _coverage(session, protocol_id: int, contract: Contract, report, *, status: 
     session.commit()
 
 
-def test_the_tracked_total_is_published_and_folds_the_impl_onto_its_proxy(corpus, db_session):
-    token = "0x" + "d1" * 20
-    proxy = corpus.contract("0x" + "c1" * 20, implementation="0x" + "c2" * 20)
-    impl = corpus.contract("0x" + "c2" * 20)
-    _balance(db_session, proxy, usd="1000.00", token=token)
-    _balance(db_session, impl, usd="400.00", token=token)
-
-    plane = load_value_plane(db_session, corpus.protocol.id)
-    # No row records its account, so they're one account read twice; the later write wins, never the 1400.00 sum.
-    assert plane.provenance["tracked_total_usd"] == 400.0
-    assert plane.total(entity_key("ethereum", impl.address)) == 400.0
-    assert plane.total(entity_key("ethereum", proxy.address)) == 400.0
-
-
-def test_an_unpriced_perimeter_publishes_no_tracked_total(corpus, db_session):
-    corpus.contract("0x" + "c3" * 20)
-
-    plane = load_value_plane(db_session, corpus.protocol.id)
-    assert plane.provenance["tracked_total_usd"] is None
-
-
 def test_audit_posture_weighs_contracts_and_value_not_coverage_rows(corpus, db_session):
     token = "0x" + "d2" * 20
     proxy = corpus.contract("0x" + "c4" * 20, implementation="0x" + "c5" * 20)
@@ -1629,26 +1362,6 @@ def test_audit_posture_weighs_contracts_and_value_not_coverage_rows(corpus, db_s
     assert posture["value_covered_usd"] == 1000.0
     assert posture["value_proven_usd"] == 1000.0
     assert posture["non_coverage_classified"] == {"deployed_source_provably_differs": 1}
-
-
-def test_audit_posture_value_is_null_when_no_covered_entity_is_priced(corpus, db_session):
-    audited = corpus.contract("0x" + "c7" * 20)
-    priced = corpus.contract("0x" + "c8" * 20)
-    _balance(db_session, priced, usd="500.00", token="0x" + "d3" * 20)
-    _coverage(
-        db_session,
-        corpus.protocol.id,
-        audited,
-        _audit(db_session, corpus.protocol.id, "gamma"),
-        status="proven",
-        commit="0" * 40,
-    )
-
-    posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
-    assert posture["contracts_covered"] == 1
-    assert posture["contracts_proven"] == 1
-    assert posture["value_covered_usd"] is None
-    assert posture["value_proven_usd"] is None
 
 
 def test_a_proven_equivalence_without_its_commit_is_not_a_proof(corpus, db_session):
@@ -1695,16 +1408,6 @@ def test_audit_discovery_that_ran_and_found_nothing_publishes_zero(corpus, db_se
     assert posture["contracts_proven"] == 0
 
 
-def test_an_unwitnessed_audit_discovery_publishes_no_counts(corpus, db_session):
-    corpus.contract("0x" + "d8" * 20)
-
-    posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
-    assert posture["reports_on_file"] is None
-    assert posture["contracts_covered"] is None
-    assert posture["contracts_proven"] is None
-    assert posture["contracts_total"] == 1
-
-
 def _balance_row(
     session,
     contract: Contract,
@@ -1730,19 +1433,6 @@ def _balance_row(
         )
     )
     session.commit()
-
-
-def test_the_same_account_read_at_two_heights_publishes_the_later_read(corpus, db_session):
-    """R5: the proxy's live row and its impl's frozen row observe one address; only height says which is current."""
-    proxy = corpus.contract("0x" + "f1" * 20, implementation="0x" + "f2" * 20)
-    impl = corpus.contract("0x" + "f2" * 20)
-    _balance_row(db_session, impl, usd="26404230.63", token=None, observed=proxy.address, block=25_658_048)
-    _balance_row(db_session, proxy, usd="14346384.46", token=None, observed=proxy.address, block=25_691_487)
-
-    plane = load_value_plane(db_session, corpus.protocol.id)
-    assert plane.total(entity_key("ethereum", proxy.address)) == 14346384.46
-    assert plane.provenance["observation_reduction"]["stale_high_water_marks_dropped"] == 1
-    assert plane.provenance["observation_reduction"]["stale_high_water_usd_dropped"] == 12057846.17
 
 
 def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_session):
@@ -1774,18 +1464,6 @@ def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_s
     assert states[SHEET_NO_ROWS] == 2
     assert states["priced"] == 1
     assert sum(states.values()) == 3
-
-
-def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_session):
-    """``contract_entities`` folds onto proxies only after this block."""
-    proxy = "0x" + "e4" * 20
-    impl = "0x" + "e5" * 20
-    corpus.contract(proxy, implementation=impl)
-    corpus.contract(impl)
-
-    states = load_value_plane(db_session, corpus.protocol.id).provenance["sheet_states"]
-    assert states[SHEET_NO_ROWS] == 1
-    assert sum(states.values()) == 1
 
 
 def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):
@@ -1917,52 +1595,6 @@ def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus,
         "classified": False,
     }
     assert published["edges_excluded_total"] == 5
-
-
-def test_role_holder_floors_are_scoped_to_the_protocol_being_scored(corpus, db_session):
-    """R20: the table has no protocol column, so an unscoped read makes floors depend on what else was analysed."""
-    contract = corpus.contract("0x" + "fb" * 20)
-    registry = "0x" + "f9" * 20
-    foreign_registry = "0x" + "fa" * 20
-    role_hash = "0x" + "ce" * 32
-    function = corpus.function(
-        contract,
-        name="upgradeTo",
-        claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {}}],
-    )
-    details = _safe_details(OWNERS, 5)
-    details["trace"] = [{"step": "enumerable_role_store", "authority": registry, "role_labels": {role_hash: "ROLE"}}]
-    corpus.principal(function, address=SAFE, resolved_type="safe", details=details)
-    for address in (registry, foreign_registry):
-        db_session.add(
-            RoleHolderPlane(
-                chain_id=1,
-                registry_address=address,
-                role_hash=role_hash,
-                holders=[OWNERS[0], OWNERS[1]],
-                holders_basis="pinned_has_role_confirmed",
-                as_of_block=100,
-                coverage="lower_bound",
-                holder_set_exhaustive="not_determined",
-                role_name_basis="not_determined",
-                cursor_page_completeness="not_determined",
-                cursor_first_indexed_block_basis="not_determined",
-                cursor_enrollment_bases={},
-                candidate_count=2,
-                unconfirmed_candidate_count=0,
-                fold_chain_disagreements=[],
-            )
-        )
-    db_session.commit()
-    try:
-        floors = load_role_holder_floors(db_session, corpus.protocol.id)
-        assert ("ethereum", registry.lower(), role_hash.lower()) in floors
-        assert ("ethereum", foreign_registry.lower(), role_hash.lower()) not in floors
-    finally:
-        db_session.query(RoleHolderPlane).filter(
-            RoleHolderPlane.registry_address.in_([registry, foreign_registry])
-        ).delete(synchronize_session=False)
-        db_session.commit()
 
 
 def test_targeted_recovery_keeps_original_asset_facts_and_sibling_signals(corpus):

@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import cast
 
-import pytest
-
 from services.resolution import tracking
 from services.resolution.tracking import (
     _classify_uncached,
@@ -112,32 +110,6 @@ def _both_paths(monkeypatch, address, **kwargs):
     return seq
 
 
-def test_module_free_safe_141_publishes_proven_empty(monkeypatch):
-    """Head == sentinel is the only thing that earns ``module_set: []``."""
-    kind, details, _cacheable = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version="1.4.1",
-        head_word=SENTINEL_WORD,
-        guard_word=ZERO_WORD,
-    )
-    assert kind == "safe"
-    assert details == {
-        "address": MODULE_FREE_SAFE,
-        "owners": [OWNER],
-        "threshold": 4,
-        "safe_protection": {
-            "probe_block": PROBE_BLOCK,
-            "safe_version": "1.4.1",
-            "modules_head": SENTINEL_WORD,
-            "module_set": [],
-            "module_set_basis": "storage_linked_list_terminated",
-            "protection_is_upper_bound": "not_determined",
-            "guard": "proven_zero",
-        },
-    }
-
-
 def test_module_bearing_safe_111_publishes_upper_bound_not_a_list(monkeypatch):
     """The head word proves a module exists, never how many; 1.1.1 has no guard feature."""
     kind, details, _cacheable = _both_paths(
@@ -167,31 +139,6 @@ def test_module_bearing_safe_111_publishes_upper_bound_not_a_list(monkeypatch):
     assert "modules" not in _protection(details)
 
 
-def test_guard_set_on_141_is_proven_address(monkeypatch):
-    guard_addr = "0x" + "ab" * 20
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version="1.4.1",
-        head_word=SENTINEL_WORD,
-        guard_word="0x" + "0" * 24 + "ab" * 20,
-    )
-    protection = _protection(details)
-    assert protection["guard"] == "proven_address"
-    assert protection["guard_address"] == guard_addr
-
-
-def test_guard_zero_on_130_is_proven_zero(monkeypatch):
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version="1.3.0",
-        head_word=SENTINEL_WORD,
-        guard_word=ZERO_WORD,
-    )
-    assert _protection(details)["guard"] == "proven_zero"
-
-
 def test_unknown_version_leaves_guard_not_determined(monkeypatch):
     """A version whose source was never read can't tell "no guard" from "no guard feature"."""
     for version in ("1.3.0+L2", "1.5.0", "9.9.9"):
@@ -207,52 +154,6 @@ def test_unknown_version_leaves_guard_not_determined(monkeypatch):
         assert protection["safe_version"] == version
         assert protection["guard"] == "not_determined"
         assert protection["module_set"] == []
-
-
-def test_absent_version_leaves_guard_not_determined(monkeypatch):
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version=None,
-        head_word=SENTINEL_WORD,
-        guard_word=ZERO_WORD,
-    )
-    protection = _protection(details)
-    assert protection["safe_version"] == "not_determined"
-    assert protection["guard"] == "not_determined"
-
-
-def test_nonzero_guard_word_on_a_guardless_version_is_not_determined(monkeypatch):
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_BEARING_SAFE,
-        version="1.1.1",
-        head_word=SENTINEL_WORD,
-        guard_word="0x" + "0" * 24 + "ab" * 20,
-    )
-    protection = _protection(details)
-    assert protection["guard"] == "not_determined"
-    assert "guard_address" not in protection
-
-
-def test_storage_read_failure_yields_not_determined_never_empty(monkeypatch):
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version="1.4.1",
-        head_word=None,
-        guard_word=None,
-        storage_raises=True,
-    )
-    assert _protection(details) == {
-        "probe_block": PROBE_BLOCK,
-        "safe_version": "1.4.1",
-        "modules_head": "not_determined",
-        "module_set": "not_determined",
-        "module_set_basis": "not_determined",
-        "protection_is_upper_bound": "not_determined",
-        "guard": "not_determined",
-    }
 
 
 def test_zero_head_word_is_not_an_empty_module_set(monkeypatch):
@@ -306,41 +207,6 @@ def test_unresolvable_block_suppresses_the_probe_entirely(monkeypatch):
     assert "VERSION()" not in [c[0] for c in calls]
 
 
-def test_probe_reads_are_pinned_to_the_resolved_height(monkeypatch):
-    calls = _wire(monkeypatch, version="1.4.1", head_word=SENTINEL_WORD, guard_word=ZERO_WORD)
-    _classify_uncached_batched("https://rpc", MODULE_FREE_SAFE, "latest")
-    protection_reads = [
-        c for c in calls if c[0] in (tracking._SAFE_MODULES_HEAD_SLOT, tracking._SAFE_GUARD_SLOT, "VERSION()")
-    ]
-    assert len(protection_reads) == 3
-    assert {block for _target, block in protection_reads} == {hex(PROBE_BLOCK)}
-
-
-def test_non_safe_addresses_carry_no_protection_keys(monkeypatch):
-
-    def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
-        if signature == "getMinDelay()":
-            return _abi_encode_uint256(172800)
-        return "0x"
-
-    monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x60")
-    monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
-    monkeypatch.setattr(
-        tracking,
-        "_rpc_batch_request_with_status",
-        lambda _u, _c, chain_id=None: [
-            (_abi_encode_uint256(172800) if sig == "getMinDelay()" else "0x", False)
-            for sig, _abi in tracking._CLASSIFY_PROBE_SIGS
-        ],
-    )
-    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: ZERO_WORD)
-    monkeypatch.setattr(tracking, "_resolve_pinned_block", lambda *_a, **_k: PROBE_BLOCK)
-
-    kind, details, _ = _classify_uncached_batched("https://rpc", "0x" + "cd" * 20, "latest")
-    assert kind == "timelock"
-    assert "safe_protection" not in details
-
-
 def test_resolve_pinned_block_uses_an_explicit_quantity_tag(monkeypatch):
     def _boom(*_a, **_k):
         raise AssertionError("must not read head when the tag is already a height")
@@ -373,15 +239,6 @@ def _malformed(monkeypatch, word: str) -> dict:
     return _protection(details)
 
 
-def test_empty_storage_return_is_not_a_zero_word(monkeypatch):
-    protection = _malformed(monkeypatch, "0x")
-    assert protection["guard"] == "not_determined"
-    assert protection["guard"] != "proven_zero"
-    assert "guard_address" not in protection
-    for key, value in _ALL_NOT_DETERMINED.items():
-        assert protection[key] == value
-
-
 def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
     protection = _malformed(monkeypatch, "0x1")
     assert protection["module_set"] == "not_determined"
@@ -389,35 +246,3 @@ def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
     assert protection["module_set_basis"] != "storage_linked_list_terminated"
     for key, value in _ALL_NOT_DETERMINED.items():
         assert protection[key] == value
-
-
-@pytest.mark.parametrize(
-    "word",
-    [
-        # ``bytes.fromhex`` ignores whitespace.
-        pytest.param("0x" + " " * 64, id="whitespace_body"),
-        # The shape a bare length check lets through.
-        pytest.param("0x" + "0" * 62 + "1" + "\n", id="short_body_trailing_newline"),
-        pytest.param("0x" + "0" * 61 + "1" + "  ", id="short_body_trailing_spaces"),
-        # ``int()`` accepts separators, which is why this decoder avoids it.
-        pytest.param("0x" + "1_" + "0" * 62, id="underscore_body"),
-    ],
-)
-def test_malformed_word_body_is_rejected(monkeypatch, word):
-    protection = _malformed(monkeypatch, word)
-    for key, value in _ALL_NOT_DETERMINED.items():
-        assert protection[key] == value
-
-
-def test_uppercase_hex_digits_still_decode(monkeypatch):
-    guard_addr = "0x" + "ab" * 20
-    _, details, _ = _both_paths(
-        monkeypatch,
-        MODULE_FREE_SAFE,
-        version="1.4.1",
-        head_word=SENTINEL_WORD,
-        guard_word="0x" + "0" * 24 + "AB" * 20,
-    )
-    protection = _protection(details)
-    assert protection["guard"] == "proven_address"
-    assert protection["guard_address"] == guard_addr

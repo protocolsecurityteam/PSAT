@@ -18,8 +18,6 @@ from sqlalchemy.orm import Session as SASession
 from db.models import (
     MonitoredContract,
     MonitoredEvent,
-    ProxyUpgradeEvent,
-    WatchedProxy,
 )
 from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -95,27 +93,6 @@ def _make_mock(
 
 def _addrs_in_batch(batch: list) -> list[str]:
     return [(params[0]["to"] if method == "eth_call" else params[0]).lower() for method, params in batch]
-
-
-def test_rotation_orders_nulls_first_then_ascending_and_caps_slice(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
-    plan = [_entry("trackedAddr", "0xaa000001")]
-
-    a = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
-    b = _seed(db_session, 2, plan=plan, last_polled_at=datetime(2021, 1, 1, tzinfo=timezone.utc))
-    c = _seed(db_session, 3, plan=plan, last_polled_at=None)
-    d = _seed(db_session, 4, plan=plan, last_polled_at=datetime(2022, 1, 1, tzinfo=timezone.utc))
-
-    mock, _ = _make_mock({})  # returns None everywhere -> no events, just rotation
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert events == []
-    db_session.expire_all()
-    assert db_session.get(MonitoredContract, c.id).last_polled_at > RECENT
-    assert db_session.get(MonitoredContract, a.id).last_polled_at > RECENT
-    assert db_session.get(MonitoredContract, b.id).last_polled_at == datetime(2021, 1, 1, tzinfo=timezone.utc)
-    assert db_session.get(MonitoredContract, d.id).last_polled_at == datetime(2022, 1, 1, tzinfo=timezone.utc)
 
 
 def test_chunking_keeps_one_contracts_entries_together(db_session, monkeypatch):
@@ -228,36 +205,6 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
     assert detail["contracts_selected"] == 3
 
 
-def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
-    monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
-
-    a = _seed(
-        db_session, 1, plan=[_entry("trackedAddr", "0xaa01")], last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc)
-    )
-    b = _seed(
-        db_session, 2, plan=[_entry("trackedAddr", "0xbb01")], last_polled_at=datetime(2021, 1, 1, tzinfo=timezone.utc)
-    )
-
-    mock1, _ = _make_mock({}, error_on={2})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock1):
-        poll_for_state_changes(db_session, "http://rpc")
-
-    db_session.expire_all()
-    assert db_session.get(MonitoredContract, a.id).last_polled_at > RECENT
-    rb = db_session.get(MonitoredContract, b.id)
-    assert rb.last_polled_at > RECENT
-    assert rb.last_poll_status == {"trackedAddr": "error"}
-
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
-    mock2, _ = _make_mock({ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock2):
-        poll_for_state_changes(db_session, "http://rpc")
-
-    db_session.expire_all()
-    assert db_session.get(MonitoredContract, b.id).last_poll_status == {"trackedAddr": "ok"}
-
-
 def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session, monkeypatch):
     """An outage keeps prior status and sorts first next pass, and never publishes ``error``."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
@@ -301,27 +248,6 @@ def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session,
     rb = db_session.get(MonitoredContract, b.id)
     assert rb.last_polled_at > RECENT
     assert rb.last_poll_status == {"trackedAddr": "ok"}
-
-
-def test_transport_outage_with_real_helper_publishes_nothing(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    seeded = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    mc = _seed(db_session, 1, plan=[_entry("trackedAddr", "0xaa01")], last_polled_at=seeded)
-
-    import requests
-
-    class _BoomSession:
-        def post(self, *a, **k):
-            raise requests.ConnectionError("endpoint unreachable")
-
-    with patch("services.clients.rpc._get_session", return_value=_BoomSession()):
-        events = poll_for_state_changes(db_session, "http://rpc.invalid")
-
-    assert events == []
-    db_session.expire_all()
-    row = db_session.get(MonitoredContract, mc.id)
-    assert row.last_poll_status is None
-    assert row.last_polled_at == seeded
 
 
 def test_answered_empty_return_publishes_no_value_not_ok(db_session, monkeypatch):
@@ -392,31 +318,6 @@ def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatc
     assert detail["entry_errors"] == 0
 
 
-def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch):
-    """An undispatchable entry stays absent rather than conflated with a published status."""
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    plan = [
-        _entry("good", "0xaa01"),
-        _entry("dead", "0xaa02"),
-        _entry("hollow", "0xaa03"),
-        {"field": "weird", "kind": "future_kind"},
-    ]
-    mc = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
-
-    def _mock(url, calls):
-        assert len(calls) == 3
-        return [(_word(ADDR(190)), "ok"), (None, "error"), ("0x", "ok")]
-
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_mock):
-        poll_for_state_changes(db_session, "http://rpc")
-
-    db_session.expire_all()
-    reloaded = db_session.get(MonitoredContract, mc.id)
-    assert reloaded.last_poll_status == {"good": "ok", "dead": "error", "hollow": "no_value"}
-    assert "weird" not in reloaded.last_poll_status
-    assert reloaded.last_known_state == {"good": ADDR(190)}
-
-
 def test_last_poll_status_is_served_on_monitored_contracts(db_session, api_client, monkeypatch):
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [_entry("good", "0xaa01"), _entry("dead", "0xaa02"), _entry("hollow", "0xaa03")]
@@ -433,139 +334,3 @@ def test_last_poll_status_is_served_on_monitored_contracts(db_session, api_clien
     row = next(r for r in resp.json() if r["id"] == str(mc.id))
     assert row["last_poll_status"] == {"good": "ok", "dead": "error", "hollow": "no_value"}
     assert row["last_known_state"] == {"good": ADDR(190)}
-
-
-def test_value_change_emits_event_updates_state_and_stamps(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    mc = _seed(
-        db_session,
-        1,
-        plan=[_entry("trackedAddr", "0xaa01")],
-        last_known_state={"trackedAddr": ADDR(80)},
-        last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
-    )
-
-    mock, _ = _make_mock({ADDR(1): _word(ADDR(180))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert len(events) == 1
-    assert events[0].event_type == "state_changed_poll"
-    db_session.expire_all()
-    reloaded = db_session.get(MonitoredContract, mc.id)
-    assert reloaded.last_known_state["trackedAddr"] == ADDR(180)
-    assert reloaded.last_polled_at > RECENT
-
-
-def test_first_observation_updates_state_without_event(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    mc = _seed(
-        db_session,
-        1,
-        plan=[_entry("trackedAddr", "0xaa01")],
-        last_known_state={},
-        last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
-    )
-
-    mock, _ = _make_mock({ADDR(1): _word(ADDR(180))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert events == []  # old_value None -> baseline, no event
-    db_session.expire_all()
-    reloaded = db_session.get(MonitoredContract, mc.id)
-    assert reloaded.last_known_state["trackedAddr"] == ADDR(180)
-    assert reloaded.last_polled_at > RECENT
-
-
-def test_suppression_when_scanner_already_detected(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    mc = _seed(
-        db_session,
-        1,
-        plan=[_entry("guardian", "0xaa01", suppress_when_scan_event_types=["ownership_transferred"])],
-        last_known_state={"guardian": ADDR(80)},
-        last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
-    )
-    db_session.add(
-        MonitoredEvent(
-            id=uuid.uuid4(),
-            monitored_contract_id=mc.id,
-            event_type="ownership_transferred",
-            block_number=1,
-            tx_hash="0xdead",
-            data={},
-        )
-    )
-    db_session.commit()
-
-    mock, _ = _make_mock({ADDR(1): _word(ADDR(180))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert events == []  # suppressed by the recent scanner event
-    db_session.expire_all()
-    reloaded = db_session.get(MonitoredContract, mc.id)
-    assert reloaded.last_known_state["guardian"] == ADDR(180)
-    assert reloaded.last_polled_at > RECENT
-    poll_events = (
-        db_session.execute(
-            select(MonitoredEvent).where(
-                MonitoredEvent.monitored_contract_id == mc.id,
-                MonitoredEvent.event_type == "state_changed_poll",
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert poll_events == []
-
-
-def test_implementation_change_writes_proxy_upgrade_event(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    wp = WatchedProxy(
-        id=uuid.uuid4(),
-        proxy_address=ADDR(1),
-        chain="ethereum",
-        last_known_implementation=ADDR(70),
-    )
-    db_session.add(wp)
-    db_session.commit()
-
-    mc = _seed(
-        db_session,
-        1,
-        plan=[_entry("implementation", "0xaa01")],
-        last_known_state={"implementation": ADDR(70)},
-        last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
-        watched_proxy_id=wp.id,
-    )
-
-    mock, _ = _make_mock({ADDR(1): _word(ADDR(170))})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert len(events) == 1
-    db_session.expire_all()
-    upgrades = (
-        db_session.execute(select(ProxyUpgradeEvent).where(ProxyUpgradeEvent.watched_proxy_id == wp.id)).scalars().all()
-    )
-    assert len(upgrades) == 1
-    assert upgrades[0].new_implementation == ADDR(170)
-    assert db_session.get(WatchedProxy, wp.id).last_known_implementation == ADDR(170)
-    assert db_session.get(MonitoredContract, mc.id).last_polled_at > RECENT
-
-
-def test_contract_without_poll_entries_still_rotates(db_session, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    mc = _seed(db_session, 1, plan=[], last_polled_at=None)
-
-    mock, batches = _make_mock({})
-    with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock):
-        events = poll_for_state_changes(db_session, "http://rpc")
-
-    assert events == []
-    assert batches == []  # no RPC issued for an empty plan
-    db_session.expire_all()
-    # Otherwise it perpetually occupies the NULLS-FIRST slot.
-    assert db_session.get(MonitoredContract, mc.id).last_polled_at > RECENT

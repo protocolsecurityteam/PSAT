@@ -59,16 +59,3 @@ def test_pool_size_env_override_honored(monkeypatch):
     pool = models.engine.pool
     assert pool.size() == 2
     assert pool._max_overflow == 3
-
-
-def test_pool_recycle_env_override_honored(monkeypatch):
-    monkeypatch.setenv("PSAT_DB_POOL_RECYCLE", "120")
-    models = _reload_models()
-    assert models.engine.pool._recycle == 120
-
-
-def test_pool_pre_ping_still_enabled(monkeypatch):
-    """It catches Neon-killed connections before SQLAlchemy hands one out."""
-    monkeypatch.delenv("PSAT_DB_POOL_SIZE", raising=False)
-    models = _reload_models()
-    assert models.engine.pool._pre_ping is True

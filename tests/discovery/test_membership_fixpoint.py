@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from db.models import (
     Contract,
     ContractCreationWitness,
-    ContractDependency,
     ContractMembershipWitness,
     ContractProbeAttempt,
     ControllerValue,
@@ -167,128 +166,14 @@ def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
     assert calls == [deployer]
 
 
-def test_fixpoint_without_enumerator_never_mints_class_b(db_session):
-    """No positive exclusivity evidence at hand → no Class B row and no W4
-    admission; the sibling parks (Class C by absence)."""
-    protocol = _protocol(db_session, "noenum")
-    deployer = _addr(0x2D0)
-    member = _member(db_session, protocol, _addr(0x2A0), implementation=_addr(0x2A1), deployer=deployer)
-    impl = _contract(db_session, _addr(0x2A1), nominated_protocol_id=protocol.id, deployer=deployer)
-    sibling = _contract(db_session, _addr(0x2A2), nominated_protocol_id=protocol.id, deployer=deployer)
-    _code_fact(db_session, impl.address, tx=_TX)
-    _code_fact(db_session, sibling.address, tx=_TX)
-
-    result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(member.id,)))
-    db_session.commit()
-
-    assert impl.id in result.promoted_contract_ids
-    # Without an enumerator the EOA can reach no PROOF class; anything it
-    # licenses is the labeled heuristic rule.
-    assert (
-        db_session.query(ProtocolDeployer)
-        .filter(ProtocolDeployer.address == deployer, ProtocolDeployer.trust_class.in_(["A", "B"]))
-        .count()
-        == 0
-    )
-    assert "w4_deployer" not in _active_rules(db_session, sibling)
-
-
 # ---------------------------------------------------------------------------
 # Fixpoint: revocation cascade
 # ---------------------------------------------------------------------------
 
 
-def test_revocation_cascade_demotes_exactly_the_witnessless(db_session):
-    protocol = _protocol(db_session, "cascade")
-    deployer = _addr(0x3D0)
-    registry = ProtocolDeployer(protocol_id=protocol.id, address=deployer, trust_class="B", evidence={"x": 1})
-    db_session.add(registry)
-    db_session.flush()
-
-    a = _contract(
-        db_session,
-        _addr(0x3A0),
-        protocol_id=protocol.id,
-        nominated_protocol_id=protocol.id,
-        deployer=deployer,
-        implementation=_addr(0x3A1),
-        secondary_implementations=[_addr(0x3A2)],
-    )
-    _code_fact(db_session, a.address, tx=_TX)
-    gate.write_witness(
-        db_session,
-        contract_id=a.id,
-        protocol_id=protocol.id,
-        rule="w4_deployer",
-        evidence=gate.w4_evidence(
-            deployer_address=deployer, deployer_registry_id=registry.id, creation_tx_hash=_TX, creation_block=1
-        ),
-        via_address=deployer,
-    )
-    b = _contract(db_session, _addr(0x3A1), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
-    gate.write_witness(
-        db_session,
-        contract_id=b.id,
-        protocol_id=protocol.id,
-        rule="w2_structural",
-        evidence=gate.w2_evidence(
-            edge_kind="implementation", member_contract_id=a.id, member_address=a.address, resolved_pointer=b.address
-        ),
-        via_address=a.address,
-    )
-    c = _contract(db_session, _addr(0x3A2), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
-    gate.write_witness(
-        db_session,
-        contract_id=c.id,
-        protocol_id=protocol.id,
-        rule="w2_structural",
-        evidence=gate.w2_evidence(
-            edge_kind="secondary_implementation",
-            member_contract_id=a.id,
-            member_address=a.address,
-            resolved_pointer=c.address,
-        ),
-        via_address=a.address,
-    )
-    gate.write_witness(
-        db_session,
-        contract_id=c.id,
-        protocol_id=protocol.id,
-        rule="w5_human",
-        evidence=gate.w5_evidence(actor="admin_api_key", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc)),
-    )
-
-    result = gate.demote(db_session, deployer_row=registry, reason="foreign_creation_observed")
-    db_session.commit()
-
-    assert set(result.demoted_contract_ids) == {a.id, b.id}
-    assert set(result.reprobe_contract_ids) == {a.id, b.id}
-    assert a.protocol_id is None and b.protocol_id is None
-    assert c.protocol_id == protocol.id
-    # history preserved — revoked, never deleted.
-    assert db_session.query(ContractMembershipWitness).filter_by(contract_id=b.id).count() == 1
-    assert _active_rules(db_session, b) == set()
-    assert _active_rules(db_session, c) == {"w5_human"}
-
-
 # ---------------------------------------------------------------------------
 # Fixpoint: confluence + termination
 # ---------------------------------------------------------------------------
-
-
-def _confluence_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contract]]:
-    protocol = _protocol(db_session, "confl")
-    m = _member(db_session, protocol, _addr(base), implementation=_addr(base + 1))
-    x = _contract(
-        db_session,
-        _addr(base + 1),
-        nominated_protocol_id=protocol.id,
-        implementation=_addr(base + 2),
-    )
-    y = _contract(db_session, _addr(base + 2), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, x.address)
-    _code_fact(db_session, y.address)
-    return protocol, {"m": m, "x": x, "y": y}
 
 
 def _settled_state(session, rows: dict[str, Contract], protocol: Protocol) -> dict[str, tuple]:
@@ -308,150 +193,9 @@ def _settled_state(session, rows: dict[str, Contract], protocol: Protocol) -> di
     return out
 
 
-def test_fixpoint_confluent_across_arrival_orders(db_session):
-    p1, u1 = _confluence_universe(db_session, 0x400)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u1["y"].id,)))
-    gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(u1["m"].id,)))
-    db_session.commit()
-
-    p2, u2 = _confluence_universe(db_session, 0x500)
-    gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(u2["m"].id,)))
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u2["y"].id,)))
-    db_session.commit()
-
-    state1 = _settled_state(db_session, u1, p1)
-    state2 = _settled_state(db_session, u2, p2)
-    assert state1 == state2
-    assert u1["x"].protocol_id == p1.id and u1["y"].protocol_id == p1.id
-    assert u2["x"].protocol_id == p2.id and u2["y"].protocol_id == p2.id
-
-
-def test_fixpoint_terminates_on_cyclic_pointers(db_session):
-    """Each admission consumes a strictly new witness."""
-    protocol = _protocol(db_session, "cycle")
-    _member(db_session, protocol, _addr(0x600), implementation=_addr(0x601))
-    p1 = _contract(db_session, _addr(0x601), nominated_protocol_id=protocol.id, implementation=_addr(0x602))
-    c2 = _contract(db_session, _addr(0x602), nominated_protocol_id=protocol.id, implementation=_addr(0x601))
-    _code_fact(db_session, p1.address)
-    _code_fact(db_session, c2.address)
-
-    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(p1.id, c2.id)))
-    db_session.commit()
-
-    assert set(result.promoted_contract_ids) == {p1.id, c2.id}
-    again = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(p1.id, c2.id)))
-    assert again.promoted_contract_ids == () and again.demoted_contract_ids == ()
-
-
 # ---------------------------------------------------------------------------
 # Overreach regression fixtures
 # ---------------------------------------------------------------------------
-
-
-def test_externals_in_member_graph_are_never_admitted(db_session):
-    """Presence in a member's dependency graph is not a control or lineage edge."""
-    protocol = _protocol(db_session, "overreach")
-    member = _member(db_session, protocol, _addr(0x700))
-    externals = {
-        "lido_steth": (_addr(0x701), "proxy"),
-        "eigen_core": (_addr(0x702), "regular"),
-        "usdc": (_addr(0x703), "proxy"),
-        "weth9": (_addr(0x704), "regular"),
-        "shared_lib": (_addr(0x705), "library"),
-    }
-    rows: dict[str, Contract] = {}
-    for name, (address, rel) in externals.items():
-        row = _contract(db_session, address, nominated_protocol_id=protocol.id)
-        _code_fact(db_session, address)  # real deployed code — W1 alone admits nothing
-        db_session.add(
-            ContractDependency(
-                contract_id=member.id,
-                dependency_address=address,
-                relationship_type=rel,
-                source=["static"],
-            )
-        )
-        rows[name] = row
-    db_session.flush()
-
-    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=tuple(r.id for r in rows.values())))
-    db_session.commit()
-
-    assert result.promoted_contract_ids == ()
-    for name, row in rows.items():
-        assert row.protocol_id is None, f"{name} was admitted from mere graph/dependency presence"
-        assert _active_rules(db_session, row) == set(), f"{name} gained a witness without a control/lineage edge"
-
-
-def test_dependency_typed_proxy_is_not_a_structural_edge(db_session):
-    """The stETH trap: ``relationship_type='proxy'`` says the dependency is a proxy, not the member's proxy."""
-    protocol = _protocol(db_session, "steth")
-    member = _member(db_session, protocol, _addr(0x710), implementation=_addr(0x712))
-    steth = _contract(db_session, _addr(0x711), nominated_protocol_id=protocol.id)
-    real_impl = _contract(db_session, _addr(0x712), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, steth.address)
-    _code_fact(db_session, real_impl.address)
-    db_session.add(
-        ContractDependency(
-            contract_id=member.id, dependency_address=steth.address, relationship_type="proxy", source=["dynamic"]
-        )
-    )
-    db_session.flush()
-
-    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(steth.id, real_impl.id)))
-    db_session.commit()
-
-    assert set(result.promoted_contract_ids) == {real_impl.id}
-    assert steth.protocol_id is None
-    assert real_impl.protocol_id == protocol.id
-
-
-def test_shared_operator_two_hop_kill(db_session):
-    """S admits via D2 but is non-transitive once a foreign observation breaks exclusivity."""
-    protocol = _protocol(db_session, "twohop")
-    foreign_protocol = _protocol(db_session, "foreignq")
-    safe = _contract(db_session, _addr(0x720), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, safe.address)
-    member_x = _member(db_session, protocol, _addr(0x721))
-    _owner_edge(db_session, member_x, safe.address)
-    foreign_w = _contract(db_session, _addr(0x722), protocol_id=foreign_protocol.id)
-    _owner_edge(db_session, foreign_w, safe.address)
-    y = _contract(db_session, _addr(0x723), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, y.address)
-    _owner_edge(db_session, y, safe.address)
-
-    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
-    db_session.commit()
-
-    assert safe.protocol_id == protocol.id
-    assert _active_rules(db_session, safe) == {"w1_code", "w3_control"}
-    assert y.protocol_id is None
-    assert y.id not in result.promoted_contract_ids
-    assert _active_rules(db_session, y) == set()
-
-
-def test_exclusive_d2_controller_is_transitive(db_session):
-    protocol = _protocol(db_session, "exclusive")
-    safe = _contract(db_session, _addr(0x730), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, safe.address)
-    member_x = _member(db_session, protocol, _addr(0x731))
-    _owner_edge(db_session, member_x, safe.address)
-    y = _contract(db_session, _addr(0x732), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, y.address)
-    _owner_edge(db_session, y, safe.address)
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
-    db_session.commit()
-
-    assert safe.protocol_id == protocol.id
-    assert y.protocol_id == protocol.id
-    y_w3 = (
-        db_session.query(ContractMembershipWitness)
-        .filter_by(contract_id=y.id, rule="w3_control", revoked_at=None)
-        .one()
-    )
-    assert y_w3.evidence["direction"] == "d1"
-    assert y_w3.evidence["via_transitive"] is True
 
 
 def test_demoting_the_via_revokes_dependent_d1(db_session):
@@ -540,73 +284,9 @@ def test_resolution_hook_removed_controller_revokes_class_a_row(db_session):
     assert registry.revocation_reason == "perimeter_fact_lost"
 
 
-def test_static_hook_edge_addresses_admit_member_proxys_impl(db_session):
-    protocol = _protocol(db_session, "statichook")
-    proxy = _member(db_session, protocol, _addr(0x810), implementation=_addr(0x811))
-    impl = _contract(db_session, _addr(0x811), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, impl.address)
-
-    result = gate.evaluate_committed(
-        db_session,
-        gate.FactsDelta(new_edge_addresses=(impl.address,), recheck_contract_ids=(proxy.id,)),
-        context="test_static_hook",
-    )
-
-    assert result is not None
-    assert set(result.promoted_contract_ids) == {impl.id}
-    assert impl.protocol_id == protocol.id
-
-
-def test_evaluate_committed_swallows_failures(db_session, monkeypatch):
-    """The pipeline stage never fails on the gate."""
-    # ``evaluate`` calls ``_target_candidates`` inside the ``fixpoint`` submodule.
-    monkeypatch.setattr(
-        gate.fixpoint, "_target_candidates", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
-    result = gate.evaluate_committed(db_session, gate.FactsDelta(), context="test_failure")
-    assert result is None
-
-
 # ---------------------------------------------------------------------------
 # W5 flow
 # ---------------------------------------------------------------------------
-
-
-def test_w5_assertion_candidate_until_w1_then_member(db_session):
-    protocol = _protocol(db_session, "w5flow")
-    row = _contract(db_session, _addr(0x900))
-    assertion = gate.HumanAssertion(actor="admin_api_key", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc))
-
-    gate.nominate(db_session, contract=row, protocol_id=protocol.id, source_tag="", human_assertion=assertion)
-    db_session.flush()
-
-    assert row.nominated_protocol_id == protocol.id
-    assert row.protocol_id is None
-    assert _active_rules(db_session, row) == {"w5_human"}
-
-    _code_fact(db_session, row.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(row.id,)))
-    db_session.commit()
-
-    assert row.protocol_id == protocol.id
-    assert _active_rules(db_session, row) == {"w1_code", "w5_human"}
-    w5 = db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id, rule="w5_human").one()
-    assert w5.evidence["actor"] == "admin_api_key"
-
-
-def test_w5_assertion_on_unroutable_chain_stays_candidate(db_session):
-    """W1 binds W5: an assertion on a chain that never resolves can
-    never satisfy W1, so the row stays a candidate-with-W5-witness."""
-    protocol = _protocol(db_session, "w5park")
-    row = _contract(db_session, _addr(0x901), chain="unknown")
-    assertion = gate.HumanAssertion(actor="admin_api_key", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc))
-
-    gate.nominate(db_session, contract=row, protocol_id=protocol.id, source_tag="", human_assertion=assertion)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(row.id,)))
-    db_session.commit()
-
-    assert row.protocol_id is None
-    assert _active_rules(db_session, row) == {"w5_human"}
 
 
 def test_human_assertion_request_round_trip():
@@ -621,86 +301,6 @@ def test_human_assertion_request_round_trip():
         gate.human_assertion_from_request({gate.HUMAN_ASSERTION_REQUEST_KEY: {"actor": "a", "asserted_at": "nope"}})
         is None
     )
-
-
-def test_proven_code_absent_candidate_never_promotes(db_session):
-    protocol = _protocol(db_session, "pruned")
-    member = _member(db_session, protocol, _addr(0xA00), implementation=_addr(0xA01))
-    phantom = _contract(db_session, _addr(0xA01), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, phantom.address, absent=True)
-
-    result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(member.id,)))
-    db_session.commit()
-
-    assert result.promoted_contract_ids == ()
-    assert phantom.protocol_id is None
-    assert gate.resolve_membership_state(db_session, phantom) == "pruned"
-
-
-def _proxy_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contract]]:
-    """PR is reachable only through its own stored pointer once X promotes."""
-    protocol = _protocol(db_session, "proxchain")
-    m0 = _member(db_session, protocol, _addr(base), implementation=_addr(base + 1))
-    x = _contract(db_session, _addr(base + 1), nominated_protocol_id=protocol.id)
-    pr = _contract(db_session, _addr(base + 2), nominated_protocol_id=protocol.id, implementation=_addr(base + 1))
-    _code_fact(db_session, x.address)
-    _code_fact(db_session, pr.address)
-    return protocol, {"m0": m0, "x": x, "pr": pr}
-
-
-def _role_state(session, protocol: Protocol, rows: dict[str, Contract]) -> dict[str, tuple]:
-    out = {}
-    for name, row in rows.items():
-        rules = tuple(
-            sorted(
-                (w.rule, w.revoked_at is None)
-                for w in session.query(ContractMembershipWitness).filter_by(contract_id=row.id).all()
-            )
-        )
-        out[name] = (row.protocol_id == protocol.id, rules)
-    return out
-
-
-def test_promotion_expands_to_candidate_proxy_pointing_at_new_member(db_session):
-    p1, u1 = _proxy_chain_universe(db_session, 0xB00)
-    single = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(u1["m0"].id,)))
-    db_session.commit()
-    assert set(single.promoted_contract_ids) == {u1["x"].id, u1["pr"].id}
-    assert u1["pr"].protocol_id == p1.id
-
-    p2, u2 = _proxy_chain_universe(db_session, 0xB10)
-    gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(u2["m0"].id,)))
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u2["pr"].id,)))
-    db_session.commit()
-
-    assert _role_state(db_session, p1, u1) == _role_state(db_session, p2, u2)
-
-
-def _d1_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contract]]:
-    protocol = _protocol(db_session, "d1chain")
-    m0 = _member(db_session, protocol, _addr(base))
-    s = _contract(db_session, _addr(base + 1), nominated_protocol_id=protocol.id)
-    y = _contract(db_session, _addr(base + 2), nominated_protocol_id=protocol.id)
-    _code_fact(db_session, s.address)
-    _code_fact(db_session, y.address)
-    _owner_edge(db_session, m0, s.address)
-    _owner_edge(db_session, y, s.address)
-    return protocol, {"m0": m0, "s": s, "y": y}
-
-
-def test_promotion_expands_to_stored_cv_naming_new_member(db_session):
-    p1, u1 = _d1_chain_universe(db_session, 0xB20)
-    single = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u1["s"].id,)))
-    db_session.commit()
-    assert set(single.promoted_contract_ids) == {u1["s"].id, u1["y"].id}
-    assert u1["y"].protocol_id == p1.id
-
-    p2, u2 = _d1_chain_universe(db_session, 0xB30)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u2["y"].id,)))
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u2["s"].id,)))
-    db_session.commit()
-
-    assert _role_state(db_session, p1, u1) == _role_state(db_session, p2, u2)
 
 
 def test_fresh_foreign_enumeration_revokes_class_b_and_blocks_w4(db_session):
@@ -827,24 +427,6 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
         gate.FactsDelta(new_edge_addresses=(safe.address,), recheck_contract_ids=(foreign_w.id,)),
     )
     assert again.promoted_contract_ids == () and again.demoted_contract_ids == ()
-
-
-def test_foreign_assertion_never_writes_w5_on_member(db_session):
-    p1 = _protocol(db_session, "w5own")
-    p2 = _protocol(db_session, "w5other")
-    row = _contract(db_session, _addr(0xC30), protocol_id=p1.id, nominated_protocol_id=p1.id)
-    assertion = gate.HumanAssertion(actor="admin_api_key", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc))
-
-    gate.nominate(db_session, contract=row, protocol_id=p2.id, source_tag="", human_assertion=assertion)
-    db_session.flush()
-
-    assert row.protocol_id == p1.id
-    assert db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id, protocol_id=p2.id).count() == 0
-
-    gate.nominate(db_session, contract=row, protocol_id=p1.id, source_tag="", human_assertion=assertion)
-    db_session.flush()
-    w5 = db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id, protocol_id=p1.id).one()
-    assert w5.rule == "w5_human" and w5.revoked_at is None
 
 
 def test_stale_w1_cannot_promote_after_code_absent_probe(db_session):

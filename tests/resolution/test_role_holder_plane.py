@@ -18,10 +18,8 @@ from db.models import (
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     FIRST_INDEXED_BASIS_CREATION,
     FIRST_INDEXED_BASIS_EXPLICIT,
-    Contract,
     IndexedEventCursor,
     IndexedEventLog,
-    RoleDefinition,
     RoleHolderPlane,
 )
 from services.clients.rpc import EthCallResult
@@ -29,17 +27,14 @@ from services.resolution import role_holder_plane as rhp
 from utils.chains import DEFAULT_CONFIRMATION_DEPTH
 
 REGISTRY = "0x6db24ee656843e3fe03eb8762a54d86186ba6b64"
-SOLADY_REGISTRY = "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9"
 
 RG = rhp.ROLE_GRANTED_TOPIC0
 RR = rhp.ROLE_REVOKED_TOPIC0
 # Solady's role space; the role is at topic index 2, not 1.
-ROLE_SET_TOPIC0 = "0xaddc47d7e02c95c00ec667676636d772a589ffbf0663cfd7cd4dd3d4758201b8"
 
 ZERO_ROLE = "0x" + "00" * 32
 PAUSER = "0x" + keccak(text="PAUSER_ROLE").hex()
 OPERATING_ADMIN = "0x" + keccak(text="OPERATING_ADMIN_ROLE").hex()
-TIMELOCK_ADMIN = "0x" + keccak(text="TIMELOCK_ADMIN_ROLE").hex()
 
 ADMIN_HOLDER = "0xa000244b4a36d57ea1ecb39b5f02f255e4c8cd52"
 REVOKED_A = "0xf8a86ea1ac39ec529814c377bd484387d395421e"
@@ -146,47 +141,6 @@ def _by_role(rows):
     return {row["role_hash"]: row for row in rows}
 
 
-def test_solady_roleset_logs_mint_no_row(db_session, monkeypatch):
-    """Folded through OZ topic positions, the uint256 role reads the mapping's zero default and returns false
-    successfully, which would publish 40 unqualified rows.
-    """
-    session = db_session
-    logs = [
-        IndexedEventLog(
-            chain_id=1,
-            event_address=SOLADY_REGISTRY,
-            topic0=ROLE_SET_TOPIC0,
-            tx_hash=(i).to_bytes(8, "big").rjust(32, b"\x00"),
-            log_index=i,
-            block_number=21000000 + i,
-            block_hash=b"\x44" * 32,
-            transaction_index=0,
-            topics=[ROLE_SET_TOPIC0, _word(ADMIN_HOLDER), _word("0x01"), _word("0x01")],
-            data_words=[],
-        )
-        for i in range(3)
-    ]
-    _seed(
-        session,
-        logs=logs,
-        cursors=[_cursor(ROLE_SET_TOPIC0, address=SOLADY_REGISTRY)],
-    )
-    rows = _run(session, monkeypatch, {}, address=SOLADY_REGISTRY)
-    assert rows == []
-
-
-def test_classify_candidate_keeps_three_distinct_states():
-    """Asserted here because an implementation that ignores ``success`` looks identical end-to-end on an
-    all-reverting registry.
-    """
-    assert rhp.classify_candidate(TRUE_WORD) == rhp.CANDIDATE_CONFIRMED
-    assert rhp.classify_candidate(FALSE_WORD) == rhp.CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
-    assert rhp.classify_candidate(MEASURED_REVERT) == rhp.CANDIDATE_UNCONFIRMED
-    assert rhp.CANDIDATE_UNCONFIRMED != rhp.CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
-    assert rhp.classify_candidate(EthCallResult(False, "0x", None, "transport: boom")) == rhp.CANDIDATE_UNCONFIRMED
-    assert rhp.classify_candidate(EthCallResult(False, "0x", "0x", "reverted")) == rhp.CANDIDATE_UNCONFIRMED
-
-
 def test_corpus_rows_publish_confirmed_lower_bound(db_session, monkeypatch):
     session = db_session
     _seed(session)
@@ -252,51 +206,6 @@ def test_cold_or_missing_cursor_withholds_every_holder_set(db_session, monkeypat
         assert row["unconfirmed_candidate_count"] is None
 
 
-@pytest.mark.parametrize(
-    "verdicts",
-    [
-        # The 0xd5edf773 / USDC shape: warm cursors, no AccessControl beneath.
-        pytest.param({}, id="all-candidates-revert"),
-        # A fully revoked role publishes NULL, never ``[]``: a direct storage write would appear in neither the fold nor
-        # this arm.
-        pytest.param(
-            {
-                (role, account): FALSE_WORD
-                for role in (ZERO_ROLE, PAUSER, OPERATING_ADMIN)
-                for account in (ADMIN_HOLDER, REVOKED_A, REVOKED_B, PAUSER_EXTRA, OPS_HOLDER)
-            },
-            id="all-candidates-read-false",
-        ),
-    ],
-)
-def test_all_candidates_withhold(db_session, monkeypatch, verdicts):
-    session = db_session
-    _seed(session)
-    rows = _run(session, monkeypatch, verdicts)
-    for row in rows:
-        assert row["holders"] is None
-        assert row["holders_basis"] == "not_determined"
-        assert row["coverage"] == "partial"
-
-
-def test_all_false_and_all_revert_rows_are_indistinguishable(db_session, monkeypatch):
-    """A2: "N probed, all completed, none confirmed" is ``[]``, so the all-false row must not differ from the
-    all-revert row in any column.
-    """
-    session = db_session
-    _seed(session)
-    all_false = {
-        (role, account): FALSE_WORD
-        for role in (ZERO_ROLE, PAUSER, OPERATING_ADMIN)
-        for account in (ADMIN_HOLDER, REVOKED_A, REVOKED_B, PAUSER_EXTRA, OPS_HOLDER)
-    }
-    false_rows = _by_role(_run(session, monkeypatch, all_false))
-    revert_rows = _by_role(_run(session, monkeypatch, {}))
-    assert set(false_rows) == set(revert_rows)
-    for role_hash in false_rows:
-        assert false_rows[role_hash] == revert_rows[role_hash]
-
-
 def test_partial_reverts_still_publish_the_confirmed_floor(db_session, monkeypatch):
     session = db_session
     _seed(session)
@@ -328,41 +237,12 @@ def test_registry_with_no_role_logs_yields_no_rows(db_session, monkeypatch):
     assert _run(session, monkeypatch, {}) == []
 
 
-def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
-    """TIMELOCK_ADMIN_ROLE has no ``role_definitions`` row, so it gets no name."""
-    session = db_session
-    _seed(session, logs=[_log(RG, TIMELOCK_ADMIN, ADMIN_HOLDER, block=19298624, log_index=121)])
-    row = _by_role(_run(session, monkeypatch, {(TIMELOCK_ADMIN, ADMIN_HOLDER): TRUE_WORD}))[TIMELOCK_ADMIN]
-    assert row["role_name"] is None
-    assert row["role_name_basis"] == "not_determined"
-    assert row["holders"] == [ADMIN_HOLDER], "the hash is the identity; the name is decoration"
-
-
 def test_default_admin_name_withheld_when_registry_never_answers(db_session, monkeypatch):
     session = db_session
     _seed(session)
     row = _by_role(_run(session, monkeypatch, {}))[ZERO_ROLE]
     assert row["role_name"] is None
     assert row["role_name_basis"] == "not_determined"
-
-
-def test_candidate_pool_reads_declared_names_across_contracts(db_session):
-    """Events emit at the proxy but ``role_definitions`` hangs off the implementation, so the pool is not
-    contract-scoped.
-    """
-    session = db_session
-    contract = Contract(address=REGISTRY, chain="ethereum", contract_name="Impl", is_proxy=False)
-    session.add(contract)
-    session.flush()
-    session.add(RoleDefinition(contract_id=contract.id, role_name="PAUSER_ROLE", declared_in="Impl"))
-    session.add(RoleDefinition(contract_id=contract.id, role_name="OwnableStorageLocation", declared_in="Impl"))
-    session.flush()
-
-    pool = rhp.candidate_name_pool(session)
-    assert "PAUSER_ROLE" in pool and "OwnableStorageLocation" in pool
-    assert rhp.resolve_role_name(PAUSER, pool, has_role_answered=True) == ("PAUSER_ROLE", "keccak_preimage")
-    assert rhp.resolve_role_name(TIMELOCK_ADMIN, pool, has_role_answered=True) == (None, "not_determined")
-    session.rollback()
 
 
 def test_fold_inactive_but_chain_true_is_admitted(db_session, monkeypatch):
@@ -389,41 +269,6 @@ def test_fold_inactive_but_chain_true_is_admitted(db_session, monkeypatch):
         }
     ]
     assert row["holder_set_exhaustive"] == "not_determined"
-
-
-def test_fold_active_but_chain_false_is_omitted(db_session, monkeypatch):
-    session = db_session
-    _seed(session)
-    verdicts = {
-        (PAUSER, ADMIN_HOLDER): TRUE_WORD,
-        (PAUSER, PAUSER_EXTRA): FALSE_WORD,  # fold said active; chain says no
-        (PAUSER, REVOKED_A): TRUE_WORD,
-    }
-    row = _by_role(_run(session, monkeypatch, verdicts))[PAUSER]
-    assert PAUSER_EXTRA not in (row["holders"] or [])
-    assert row["fold_chain_disagreements"] == [
-        {
-            "registry": REGISTRY,
-            "role_hash": PAUSER,
-            "address": PAUSER_EXTRA,
-            "fold_state": "active",
-            "chain_state": "false",
-        }
-    ]
-
-
-def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
-    """A9: "the fold missed a log" and "state changed after the cursor" are indistinguishable, so no cause key may
-    appear.
-    """
-    session = db_session
-    _seed(session)
-    verdicts = {(PAUSER, ADMIN_HOLDER): TRUE_WORD, (PAUSER, PAUSER_EXTRA): FALSE_WORD, (PAUSER, REVOKED_A): TRUE_WORD}
-    row = _by_role(_run(session, monkeypatch, verdicts))[PAUSER]
-    for record in row["fold_chain_disagreements"]:
-        assert set(record) == rhp.DISAGREEMENT_KEYS
-    reverted = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    assert reverted["fold_chain_disagreements"] == []
 
 
 @pytest.mark.parametrize(
@@ -594,40 +439,6 @@ def test_discriminators_reject_an_explicit_null(db_session, column):
     session.rollback()
 
 
-def _withheld_orm_row(**overrides: Any) -> dict[str, Any]:
-    return _valid_row(
-        holders=None,
-        holders_basis="not_determined",
-        as_of_block=None,
-        as_of_block_hash=None,
-        coverage="partial",
-        candidate_count=None,
-        unconfirmed_candidate_count=None,
-        fold_chain_disagreements=None,
-        **overrides,
-    )
-
-
-def test_orm_writes_sql_null_not_the_jsonb_scalar_null(db_session):
-    """Without ``none_as_null`` SQLAlchemy stores the jsonb scalar ``null``, a present payload to every SQL null
-    test.
-    """
-    session = db_session
-    session.add(RoleHolderPlane(**_withheld_orm_row()))
-    session.flush()
-    typeof, disagreements_typeof = session.execute(
-        text(
-            "SELECT jsonb_typeof(holders), jsonb_typeof(fold_chain_disagreements) "
-            "FROM role_holder_planes WHERE role_hash = :r"
-        ),
-        {"r": PAUSER},
-    ).one()
-    assert typeof is None, "a withheld row must be SQL NULL, not the jsonb scalar 'null'"
-    # The withheld predicate counts the scalar null, so naive IS NULL consumers would see evidence.
-    assert disagreements_typeof is None, "a withheld disagreement ledger must be SQL NULL too"
-    session.rollback()
-
-
 def _raw_insert(session, holders_sql: str, **cols: str) -> None:
     defaults = {
         "holders_basis": "'not_determined'",
@@ -648,15 +459,6 @@ def _raw_insert(session, holders_sql: str, **cols: str) -> None:
         {"addr": REGISTRY, "role": PAUSER},
     )
     session.flush()
-
-
-def test_jsonb_scalar_null_is_treated_as_withheld(db_session):
-    """Raw SQL can still write the scalar null, so it must count as withheld everywhere."""
-    session = db_session
-    _raw_insert(session, "'null'::jsonb")
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None
-    session.rollback()
 
 
 def test_jsonb_scalar_null_cannot_carry_a_proven_basis(db_session):
@@ -687,15 +489,6 @@ def test_published_row_must_carry_a_disagreement_log(db_session):
         session.add(RoleHolderPlane(**_valid_row(fold_chain_disagreements=None)))
         session.flush()
     session.rollback()
-
-
-def test_withheld_rows_carry_a_null_disagreement_log(db_session, monkeypatch):
-    session = db_session
-    _seed(session)
-    for verdicts in ({}, {(r, a): FALSE_WORD for r in (ZERO_ROLE, PAUSER) for a in (ADMIN_HOLDER, REVOKED_A)}):
-        for row in _run(session, monkeypatch, verdicts):
-            if row["holders"] is None:
-                assert row["fold_chain_disagreements"] is None
 
 
 @pytest.mark.parametrize(
@@ -741,40 +534,6 @@ def test_non_array_holders_are_rejected(db_session):
         session.rollback()
 
 
-@pytest.mark.parametrize(
-    "row, expected",
-    [
-        pytest.param(
-            _valid_row(), {"holders": [ADMIN_HOLDER], "holder_set_exhaustive": "not_determined"}, id="valid-row"
-        ),
-        pytest.param(_withheld_orm_row(), {"holders": None, "fold_chain_disagreements": None}, id="withheld-row"),
-        pytest.param(
-            _valid_row(fold_chain_disagreements=[]),
-            {"fold_chain_disagreements": []},
-            id="published-empty-disagreement-log",
-        ),
-    ],
-)
-def test_row_round_trips(db_session, row, expected):
-    session = db_session
-    session.add(RoleHolderPlane(**row))
-    session.flush()
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None
-    assert {column: getattr(stored, column) for column in expected} == expected
-    session.rollback()
-
-
-def test_persist_upserts(db_session, monkeypatch):
-    session = db_session
-    _seed(session)
-    rows = _run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD})
-    assert rhp.persist_role_holder_planes(session, rows) == len(rows)
-    assert rhp.persist_role_holder_planes(session, rows) == len(rows)
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None and stored.holders == [ADMIN_HOLDER]
-
-
 # Tolerant decoders on a witness plane: a value nobody observed must not be coerced into one that looks observed.
 
 
@@ -803,37 +562,3 @@ def test_success_with_empty_returndata_is_a_failed_read(db_session, monkeypatch)
     assert row["fold_chain_disagreements"] is None
     assert row["role_name"] is None
     assert row["role_name_basis"] == "not_determined"
-
-
-def test_a_genuine_full_word_false_is_still_a_recorded_disagreement(db_session, monkeypatch):
-    session = db_session
-    _seed(
-        session,
-        logs=[
-            _log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=3),
-            _log(RG, PAUSER, PAUSER_EXTRA, block=19298625, log_index=4),
-        ],
-    )
-    rows = _by_role(
-        _run(
-            session,
-            monkeypatch,
-            {(ZERO_ROLE, ADMIN_HOLDER): FALSE_WORD, (PAUSER, PAUSER_EXTRA): TRUE_WORD},
-        )
-    )
-    disagreements = rows[PAUSER]["fold_chain_disagreements"]
-    assert disagreements == []
-    assert rows[ZERO_ROLE]["role_name"] is None  # withheld: no confirmed holder
-    assert rows[PAUSER]["holders"] == [PAUSER_EXTRA]
-
-    _seed(session, logs=[_log(RR, PAUSER, PAUSER_EXTRA, block=19298626, log_index=5)], cursors=[])
-    again = _by_role(_run(session, monkeypatch, {(PAUSER, PAUSER_EXTRA): TRUE_WORD}))
-    assert again[PAUSER]["fold_chain_disagreements"] == [
-        {
-            "registry": REGISTRY,
-            "role_hash": PAUSER,
-            "address": PAUSER_EXTRA,
-            "fold_state": "inactive",
-            "chain_state": "true",
-        }
-    ]

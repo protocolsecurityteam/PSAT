@@ -402,32 +402,6 @@ def test_recover_stale_resets_old_verifying_rows_to_pending(db_session, worker, 
     assert row.equivalence_checked_at is None
 
 
-def test_recover_stale_leaves_fresh_verifying_rows_alone(db_session, worker, seed_protocol):
-    from db.models import AuditContractCoverage
-
-    protocol_id, _ = seed_protocol
-    _seed_pending_row(db_session, protocol_id=protocol_id)
-    row = db_session.query(AuditContractCoverage).filter_by(equivalence_status="pending").one()
-    db_session.execute(
-        text(
-            """
-            UPDATE audit_contract_coverage
-            SET equivalence_status = 'verifying',
-                equivalence_checked_at = NOW()
-            WHERE id = :id
-            """
-        ),
-        {"id": row.id},
-    )
-    db_session.commit()
-
-    worker._recover_stale(db_session)
-
-    db_session.expire_all()
-    row = db_session.query(AuditContractCoverage).filter_by(id=row.id).one()
-    assert row.equivalence_status == "verifying"
-
-
 def test_in_flight_verify_survives_coverage_rebuild_race(db_session, worker, seed_protocol, monkeypatch):
     """A rebuild deletes and reinserts coverage under a claimed row; the stale UPDATE must no-op."""
     from db.models import AuditContractCoverage

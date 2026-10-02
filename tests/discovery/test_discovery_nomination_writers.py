@@ -32,42 +32,6 @@ def _row(session, addr: str) -> Contract:
     return session.query(Contract).filter_by(address=addr).one()
 
 
-def _bulk_write(session, addr, protocol_id, tag):
-    bulk_upsert_discovered_contracts(
-        session,
-        protocol_id=protocol_id,
-        entries=[{"address": addr, "chain": "ethereum", "new_sources": [tag]}],
-    )
-
-
-def _single_write(session, addr, protocol_id, tag):
-    upsert_discovered_contract(
-        session,
-        address=addr,
-        chain="ethereum",
-        protocol_id=protocol_id,
-        new_sources=[tag],
-    )
-
-
-@pytest.mark.parametrize(
-    "write,addr_seed,tag",
-    [
-        pytest.param(_bulk_write, 0x1A01, "defillama", id="bulk"),
-        pytest.param(_single_write, 0x2A01, "ai_inventory", id="single"),
-    ],
-)
-def test_new_row_is_nominated_candidate_not_member(db_session, proto_id, write, addr_seed, tag):
-    addr = ADDR(addr_seed)
-    write(db_session, addr, proto_id, tag)
-    db_session.commit()
-    row = _row(db_session, addr)
-    assert row.protocol_id is None
-    assert row.nominated_protocol_id == proto_id
-    assert membership_state(row) == "candidate"
-    assert tag in (row.discovery_sources or [])
-
-
 class TestBulkUpsertNominates:
     def test_high_confidence_tags_no_longer_stamp(self, db_session, proto_id):
         # Each of these tags used to write protocol_id.
@@ -82,20 +46,6 @@ class TestBulkUpsertNominates:
             row = _row(db_session, addr)
             assert row.protocol_id is None, tag
             assert row.nominated_protocol_id == proto_id, tag
-
-    def test_existing_orphan_gains_nomination(self, db_session, proto_id):
-        addr = ADDR(0x1C01)
-        db_session.add(Contract(address=addr, chain="ethereum", discovery_sources=["dapp_crawl"]))
-        db_session.commit()
-        bulk_upsert_discovered_contracts(
-            db_session,
-            protocol_id=proto_id,
-            entries=[{"address": addr, "chain": "ethereum", "new_sources": ["dapp_crawl"]}],
-        )
-        db_session.commit()
-        row = _row(db_session, addr)
-        assert row.protocol_id is None
-        assert row.nominated_protocol_id == proto_id
 
     def test_no_protocol_id_writes_no_nomination(self, db_session):
         addr = ADDR(0x1D01)

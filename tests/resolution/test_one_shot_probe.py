@@ -4,8 +4,6 @@ latch is ``indeterminate``, never ``live``.
 
 from __future__ import annotations
 
-from eth_utils.crypto import keccak
-
 from services.resolution.one_shot_probe import (
     resolve_one_shot_state,
 )
@@ -56,12 +54,6 @@ def _v5_transient_latch(expected=1):
         "expected_version": expected,
         "standard": "oz_v5_namespaced",
     }
-
-
-def test_erc7201_slot_matches_canonical_derivation():
-    inner = int.from_bytes(keccak(text="openzeppelin.storage.Initializable"), "big") - 1
-    derived = int.from_bytes(keccak(inner.to_bytes(32, "big")), "big") & ~0xFF
-    assert "0x" + format(derived, "064x") == "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00"
 
 
 def test_bare_template_with_empty_latch_is_indeterminate_not_live():

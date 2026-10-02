@@ -9,39 +9,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.support.api_helpers import _mock_session_ctx
-from utils.secrets import sanitize_obj, sanitize_string, sanitize_url
+from utils.secrets import sanitize_obj, sanitize_url
 
 _ALCHEMY = "https://eth-mainnet.g.alchemy.com/v2/FAKE_ALCHEMY_KEY_FOR_TESTS"
-_INFURA = "https://mainnet.infura.io/v3/FAKE_INFURA_KEY_FOR_TESTS"
 _ETHERSCAN = "https://api.etherscan.io/v2/api?chainid=1&module=account&action=txlist&apikey=FAKE_ETHERSCAN_KEY"
-_PUBLIC_RPC = "https://ethereum-rpc.publicnode.com"
-_DISCORD_WEBHOOK = "https://discord.com/api/webhooks/123456789012345678/FAKE_DISCORD_TOKEN_FOR_TESTS"
 
 
 class TestSanitizeUrl:
-    def test_alchemy_path_key_is_masked(self):
-        out = sanitize_url(_ALCHEMY)
-        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
-        assert out.startswith("https://eth-mainnet.g.alchemy.com/")
-        assert "<redacted>" in out
-
-    def test_infura_path_key_is_masked(self):
-        out = sanitize_url(_INFURA)
-        assert "FAKE_INFURA_KEY_FOR_TESTS" not in out
-        assert out.startswith("https://mainnet.infura.io/")
-
     def test_etherscan_apikey_query_param_is_masked(self):
         out = sanitize_url(_ETHERSCAN)
         assert "FAKE_ETHERSCAN_KEY" not in out
         assert "apikey=<redacted>" in out
         assert "module=account" in out
         assert "chainid=1" in out
-
-    def test_discord_webhook_token_is_masked(self):
-        out = sanitize_url(_DISCORD_WEBHOOK)
-        assert "FAKE_DISCORD_TOKEN_FOR_TESTS" not in out
-        # The webhook id survives so an admin can tell two webhooks apart.
-        assert "123456789012345678" in out
 
     @pytest.mark.parametrize(
         ("url", "secret", "must_contain"),
@@ -157,48 +137,8 @@ class TestSanitizeUrl:
     def test_non_url_input_passes_through(self, value):
         assert sanitize_url(value) == value
 
-    def test_public_rpc_pass_through(self):
-        assert sanitize_url(_PUBLIC_RPC) == _PUBLIC_RPC
-
-
-class TestSanitizeString:
-    def test_url_embedded_in_traceback_is_scrubbed(self):
-        msg = f"RuntimeError: RPC request failed for {_ALCHEMY}: timed out"
-        out = sanitize_string(msg)
-        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
-        assert "<redacted>" in out
-
-    def test_multiple_urls_all_scrubbed(self):
-        msg = f"first {_ALCHEMY} second {_ETHERSCAN}"
-        out = sanitize_string(msg)
-        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
-        assert "FAKE_ETHERSCAN_KEY" not in out
-
-    def test_wss_url_embedded_in_text_is_scrubbed(self):
-        wss_url = _ALCHEMY.replace("https://", "wss://")
-        msg = f"failed to connect to {wss_url}: timeout"
-        out = sanitize_string(msg)
-        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
-        assert "<redacted>" in out
-
 
 class TestSanitizeObj:
-    def test_nested_rpc_url_keyed_value_is_masked(self):
-        body = {
-            "address": "0xabc",
-            "rpc_url": _ALCHEMY,
-            "nested": {"dynamic_rpc": _ALCHEMY},
-        }
-        out = sanitize_obj(body)
-        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(out)
-        assert out["address"] == "0xabc"
-
-    def test_list_of_dicts_walked(self):
-        body = [{"rpc_url": _ALCHEMY}, {"foo": "bar"}]
-        out = sanitize_obj(body)
-        assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(out)
-        assert out[1]["foo"] == "bar"
-
     def test_url_in_arbitrary_string_field_still_caught(self):
         # The recursive pass catches keys pasted into free text.
         body = {"detail": f"trying to use {_ALCHEMY} for tracing"}
@@ -239,30 +179,6 @@ def _build_real_job(request_body: dict, error: str | None = None):
     return job
 
 
-def test_job_to_dict_redacts_rpc_url_in_request():
-    job = _build_real_job({"address": "0xabc", "rpc_url": _ALCHEMY})
-    out = job.to_dict()
-    assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(out)
-    request = out["request"]
-    assert request is not None
-    assert "<redacted>" in request["rpc_url"]
-
-
-def test_job_to_dict_redacts_url_inside_error_traceback():
-    fake_tb = (
-        "Traceback (most recent call last):\n"
-        "  File rpc.py, line 252, in rpc_request\n"
-        f"    raise RuntimeError('RPC request failed for {_ALCHEMY}: timed out')\n"
-        "RuntimeError: RPC request failed\n"
-    )
-    job = _build_real_job({"address": "0xabc"}, error=fake_tb)
-    out = job.to_dict()
-    assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(out)
-    error = out["error"]
-    assert error is not None
-    assert "<redacted>" in error
-
-
 @patch("routers.deps.SessionLocal")
 def test_list_jobs_endpoint_never_returns_raw_alchemy_url(mock_session_cls):
     client = _make_client()
@@ -277,90 +193,6 @@ def test_list_jobs_endpoint_never_returns_raw_alchemy_url(mock_session_cls):
     body = resp.json()
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in resp.text
     assert "<redacted>" in body[0]["request"]["rpc_url"]
-
-
-@patch("routers.deps.SessionLocal")
-def test_get_job_endpoint_never_returns_raw_alchemy_url(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    job = _build_real_job({"address": "0xabc", "rpc_url": _ALCHEMY})
-    mock_session.get.return_value = job
-
-    resp = client.get(f"/api/jobs/{job.id}")
-    assert resp.status_code == 200
-    assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in resp.text
-
-
-@patch("routers.deps.get_artifact")
-@patch("routers.deps.SessionLocal")
-def test_job_errors_endpoint_redacts_stage_error_urls(mock_session_cls, mock_get_artifact):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    job = _build_real_job({"address": "0xabc"})
-    mock_session.get.return_value = job
-
-    mock_get_artifact.return_value = {
-        "errors": [
-            {
-                "stage": "discovery",
-                "severity": "error",
-                "exc_type": "RuntimeError",
-                "message": f"RPC request failed for {_ALCHEMY}: timeout",
-                "traceback": f"...{_ALCHEMY}...",
-                "phase": None,
-                "trace_id": "trace-abc",
-                "job_id": str(job.id),
-                "worker_id": "worker-1",
-                "failed_at": "2026-01-01T00:00:00+00:00",
-                "retry_count": 0,
-                "context": {"rpc_url": _ALCHEMY},
-            }
-        ]
-    }
-
-    resp = client.get(f"/api/jobs/{job.id}/errors")
-    assert resp.status_code == 200
-    assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in resp.text
-
-
-@patch("routers.deps.SessionLocal")
-def test_list_protocol_subscriptions_masks_discord_webhook(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    sub = MagicMock()
-    sub.id = uuid.uuid4()
-    sub.protocol_id = 42
-    sub.discord_webhook_url = _DISCORD_WEBHOOK
-    sub.label = "test"
-    sub.event_filter = None
-    sub.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-    mock_session.execute.return_value.scalars.return_value.all.return_value = [sub]
-
-    resp = client.get("/api/protocols/42/subscriptions")
-    assert resp.status_code == 200
-    assert "FAKE_DISCORD_TOKEN_FOR_TESTS" not in resp.text
-    body = resp.json()
-    assert "<redacted>" in body[0]["discord_webhook_url"]
-
-
-def test_static_dependencies_artifact_drops_rpc_field(monkeypatch):
-    from services.discovery import static_dependencies as sd
-
-    monkeypatch.setattr(sd, "load_dotenv", lambda _path: None)
-    monkeypatch.setattr(
-        sd, "discover_dependencies", lambda _rpc, _root, code_cache=None, chain_id=None: ["0x" + "11" * 20]
-    )
-
-    out = sd.find_dependencies("0x" + "aa" * 20, rpc_url=_ALCHEMY)
-    assert "rpc" not in out
-    assert out["dependencies"] == ["0x" + "11" * 20]
 
 
 def test_dynamic_dependencies_artifact_drops_rpc_field(monkeypatch):

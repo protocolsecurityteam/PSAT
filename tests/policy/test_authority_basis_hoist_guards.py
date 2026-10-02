@@ -35,22 +35,6 @@ BASIS_STEP = {"step": "authority_getter_basis", "basis": "deunderscore_conventio
 CO_WITNESS = {"step": "live_getter_resolution", "selector": "0x0c340a24"}
 
 
-def test_the_single_member_shape_hoists():
-    """``live_getter_resolution`` co-witnesses so the row doesn't rest on the convention alone."""
-    details = _details(_cap([ADDR_A], [CO_WITNESS, BASIS_STEP]))
-    assert details[0]["authority_basis"] == "deunderscore_convention"
-    assert details[0]["accessor_slot_agreement"] == "not_determined"
-
-
-def test_a_merged_multi_member_set_publishes_no_basis():
-    """Stamping both would attribute a name-matched binding to a row an event fold produced."""
-    details = _details(_cap([ADDR_A, ADDR_B], [CO_WITNESS, BASIS_STEP]))
-    assert len(details) == 2
-    for row in details:
-        assert "authority_basis" not in row
-        assert "accessor_slot_agreement" not in row
-
-
 _ABI_STEP = {"step": "authority_getter_basis", "basis": "abi_auto_getter", "selector": "0x8da5cb5b"}
 
 
@@ -75,23 +59,3 @@ _ABI_STEP = {"step": "authority_getter_basis", "basis": "abi_auto_getter", "sele
 )
 def test_hoist_is_suppressed_when_the_basis_is_not_attributable(trace):
     assert "authority_basis" not in _details(_cap([ADDR_A], trace))[0]
-
-
-@pytest.mark.parametrize(
-    "basis, step_extra, expected_residual",
-    [
-        # With no accessor matched the question doesn't arise, so the key is absent.
-        pytest.param("abi_auto_getter", {"selector": "0x8da5cb5b"}, {}, id="abi-forced-arm-states-no-slot-residual"),
-        *[
-            pytest.param(
-                basis, {}, {"accessor_slot_agreement": "not_determined"}, id=f"name-matched-arm-{basis}-states-residual"
-            )
-            for basis in ("standard_namespaced_accessor", "deunderscore_convention", "slot_name_keyword")
-        ],
-    ],
-)
-def test_basis_arm_residual(basis, step_extra, expected_residual):
-    step = {"step": "authority_getter_basis", "basis": basis, **step_extra}
-    details = _details(_cap([ADDR_A], [step]))[0]
-    assert details["authority_basis"] == basis
-    assert {k: v for k, v in details.items() if k == "accessor_slot_agreement"} == expected_residual

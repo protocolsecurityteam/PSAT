@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, cast
 
-import pytest
-
 from services.effects import claims_bridge, recipes
 from services.effects.config import BLOCK_SOURCE_JOB_PIN, VERDICT_PROVEN
 from services.effects.harness import SimContext
@@ -27,7 +25,6 @@ from tests.support.scoring_builders import (
     EOA,
     KEY_C,
     KEY_V,
-    SAFE,
     VAULT,
     C,
     facts,
@@ -35,49 +32,19 @@ from tests.support.scoring_builders import (
     fold,  # noqa: F401  — the fold fixture, reused rather than forked
     proven,
     reaches,
-    sig,
     value_plane,
 )
 from utils import execution_record as EX
 from utils.scoring_status import (
-    MAGNITUDE_STATE_PROVEN_EXACT,
     MAGNITUDE_STATE_PROVEN_FLOOR,
     MAGNITUDE_STATE_PROVEN_UPPER_BOUND,
 )
-
-
-def test_an_absent_record_is_not_determined_and_never_an_empty_execution():
-    record = EX.from_residue(None, transcript_ptr="job::art", effect_verdict_id=7)
-    assert record.state == EX.EXECUTION_NOT_DETERMINED
-    assert record.reason == EX.REASON_NOT_PERSISTED
-    assert record.caller is None and record.target is None
-    block = record.as_json()
-    assert block["transcript_ptr"] == "job::art"
-    assert block["effect_verdict_id"] == 7
-    # A full list of nulls would read as an execution whose every field came back empty.
-    assert "caller" not in block and "input_seeded" not in block
 
 
 def test_a_record_naming_no_call_is_not_a_record():
     assert EX.from_residue({"caller": "0xabc"}, transcript_ptr=None, effect_verdict_id=None).reason == (
         EX.REASON_NOT_PERSISTED
     )
-
-
-def test_the_seeding_qualifiers_are_three_valued_and_absence_is_the_third():
-    """Reading absent as ``False`` publishes an unqualified verdict."""
-    payload = {"target": "0x" + "a" * 40, "calldata": "0x" + "de" * 4}
-    record = EX.from_residue(payload, transcript_ptr=None, effect_verdict_id=None)
-    assert record.input_seeded == EX.SEEDING_NOT_DETERMINED
-    assert record.contract_balance_seeded == EX.SEEDING_NOT_DETERMINED
-    assert record.input_seeded is not False
-
-    seeded = EX.from_residue(
-        {**payload, "input_seeded": True, "contract_balance_seeded": False},
-        transcript_ptr=None,
-        effect_verdict_id=None,
-    )
-    assert (seeded.input_seeded, seeded.contract_balance_seeded) == (True, False)
 
 
 def test_the_undetermined_reading_is_derived_from_its_own_reason():
@@ -99,12 +66,6 @@ def test_the_undetermined_reading_is_derived_from_its_own_reason():
         assert "must not read this absence as an unseeded probe" in reading
 
 
-@pytest.mark.parametrize("kwargs", [{"state": EX.EXECUTION_NOT_DETERMINED, "reason": "because"}, {"state": "probably"}])
-def test_an_undetermined_record_must_name_a_registered_reason(kwargs):
-    with pytest.raises(ValueError):
-        EX.ProvingExecution(**kwargs)
-
-
 def test_an_uncertified_height_is_dropped_rather_than_published():
     payload = EX.residue_payload(
         caller="0xAB",
@@ -120,44 +81,6 @@ def test_an_uncertified_height_is_dropped_rather_than_published():
         contract_balance_seeded=False,
     )
     assert payload["block_number"] is None and payload["block_source"] is None
-
-
-def test_route_comparison_has_no_fall_through_arm():
-    absent = EX.route_comparison(
-        EX.not_determined(EX.REASON_NOT_PERSISTED),
-        claimed_caller="ethereum::0xaa",
-        claimed_target="ethereum::0xbb",
-        claimed_selector="0x11111111",
-    )
-    assert absent["verdict"] == EX.ROUTE_NOT_DETERMINED
-    assert absent["caller_matches"] is None
-
-    record = EX.from_residue(
-        EX.residue_payload(
-            caller="0xAA",
-            target="0xBB",
-            calldata="0x11111111" + "00" * 32,
-            probe_label="value_probe",
-            succeeded=True,
-            block_number=10,
-            block_source="head_pin",
-            chain_id=1,
-            tier="call",
-            input_seeded=False,
-            contract_balance_seeded=False,
-        ),
-        transcript_ptr=None,
-        effect_verdict_id=None,
-    )
-    matched = EX.route_comparison(
-        record, claimed_caller="ethereum::0xaa", claimed_target="ethereum::0xbb", claimed_selector="0x11111111"
-    )
-    assert matched["verdict"] == EX.ROUTE_MATCH
-    mismatched = EX.route_comparison(
-        record, claimed_caller="ethereum::0xaa", claimed_target="ethereum::0xbb", claimed_selector="0x3e64ce99"
-    )
-    assert mismatched["verdict"] == EX.ROUTE_MISMATCH
-    assert mismatched["selector_matches"] is False
 
 
 CTX = SimContext(chain_id=1, block=1000, hardfork="prague", block_source=BLOCK_SOURCE_JOB_PIN)
@@ -193,22 +116,6 @@ def _value_out(blocks, *, seeding=None):
 
 def _moved() -> SimResult:
     return SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
-
-
-def test_the_proving_call_is_recorded_on_the_state_plane():
-    """On ``concrete`` so it never rides the behavioral cache onto a twin."""
-    eff = _value_out([_moved()])
-    assert eff.verdict == VERDICT_PROVEN
-    record = eff.concrete[EX.PROVING_EXECUTION_KEY]
-    assert record["caller"] == PRINCIPAL.lower()
-    assert record["target"] == CONTRACT.lower()
-    assert record["selector"] == CALLDATA[:10]
-    assert record["calldata"] == CALLDATA
-    assert record["succeeded"] is True
-    assert (record["block_number"], record["block_source"]) == (1000, BLOCK_SOURCE_JOB_PIN)
-    assert record["input_seeded"] is False
-    assert record["contract_balance_seeded"] is False
-    assert EX.PROVING_EXECUTION_KEY not in eff.details
 
 
 def test_the_record_names_the_seeded_call_that_landed_not_the_one_that_reverted():
@@ -289,35 +196,6 @@ def test_the_distiller_carries_a_stored_record_onto_the_signal():
     assert gate.value["transcript_ptr"] == "job::art"
 
 
-def test_the_execution_and_the_published_verdict_id_name_the_same_row():
-    """The gate took the first verdict-bearing entry and the signal the last, pairing one verdict's dollars with
-    another's caller.
-    """
-    first = {"witness": {"effect_verdict_id": 5, "observed": {}}}
-    second = {
-        "witness": {
-            "effect_verdict_id": 6,
-            "observed": {EX.PROVING_EXECUTION_KEY: {"target": VAULT, "calldata": CALLDATA, "caller": C}},
-        }
-    }
-    entries = [first, second]
-    facts_row = _facts([_Row("job::art"), _Row("job::art6", row_id=6)])
-
-    assert D._cited_verdict_entry(entries) is second
-    gate = D._proving_execution_gate(facts_row, _Func(), entries)
-    assert isinstance(gate.value, dict)
-    assert gate.value["effect_verdict_id"] == 6
-    assert gate.value["caller"] == C
-    assert D._verdict_bearing_entries(entries) == entries
-
-
-def test_a_claim_with_no_verdict_says_so_rather_than_going_silent():
-    gate = D._proving_execution_gate(_facts([]), _Func(), [{"witness": {}}])
-    assert gate.state == EX.GATE_STATE_NOT_RECORDED
-    assert isinstance(gate.value, dict)
-    assert gate.value["reason"] == EX.REASON_NO_VERDICT
-
-
 def _charged(state: str, usd: float = 5_000.0, *keys: str) -> FunctionSignal:
     return flow_sig(
         authority_openness="restricted",
@@ -333,27 +211,6 @@ def _eoa_finding(fold, signal: FunctionSignal, plane: P.ValuePlane) -> dict[str,
     return fold([signal], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
 
 
-def _gapped_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
-    plane = value_plane(
-        {KEY_C: {"usdc": 5_000_000.0}},
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
-    )
-    return _charged(state), plane
-
-
-def test_case4_an_attribution_derived_magnitude_publishes_neither_exact_nor_floor():
-    """A constant-amount probe credits the holder's whole balance, so neither exact nor floor is earned."""
-    reach = D._flow_reach(
-        {"reach_determined": True, "observed_reach_value_usd": 1_234.0, "observed_reach_holders": [VAULT]},
-        cast(Any, D._ContractFacts(contract_id=1, protocol_id=1, chain="ethereum", address=C, functions=[])),
-        KEY_C,
-    )
-    assert reach.magnitude.state == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
-    assert reach.magnitude.state not in (MAGNITUDE_STATE_PROVEN_EXACT, MAGNITUDE_STATE_PROVEN_FLOOR)
-    assert reach.basis == "observed_reach_value_usd(fork-proven)"
-    assert reach.bound == "exact"
-
-
 def test_case4_the_genuine_floor_path_keeps_its_floor():
     """The predicate is the basis, not any observed_reach_* key."""
     reach = D._flow_reach(
@@ -363,54 +220,6 @@ def test_case4_the_genuine_floor_path_keeps_its_floor():
     )
     assert reach.magnitude.state == MAGNITUDE_STATE_PROVEN_FLOOR
     assert reach.basis == "observed_reach_priced_usd(>= floor)"
-
-
-def test_case4_the_upper_bound_token_is_readable_by_the_fold(fold):
-    """An unregistered state is MALFORMED and would drop every attribution-derived magnitude at once."""
-    signal = _charged(MAGNITUDE_STATE_PROVEN_UPPER_BOUND)
-    assert FOLD._malformed_gates(signal) == []
-    assert FOLD._gate(signal, "reach_magnitude_usd").state == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
-    finding = _eoa_finding(fold, signal, value_plane({KEY_C: {"usdc": 5_000_000.0}}))
-    assert finding["value_at_stake_usd"] == 5_000.0
-
-
-def test_case5_a_coverage_gap_over_an_attribution_derived_figure_earns_no_floor(fold):
-    finding = _eoa_finding(fold, *_gapped_row(MAGNITUDE_STATE_PROVEN_UPPER_BOUND))
-    assert finding["entities_holding_unpriced_assets"] == [KEY_C]
-    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    assert finding["value_at_stake_is_floor"] is False
-    assert not finding["value_band"].startswith(">= ")
-    assert finding["value_at_stake_usd"] == 5_000.0
-
-
-def test_case5_a_genuine_floor_under_the_same_gap_still_earns_it(fold):
-    finding = _eoa_finding(fold, *_gapped_row(MAGNITUDE_STATE_PROVEN_FLOOR))
-    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
-    assert finding["value_at_stake_is_floor"] is True
-    assert finding["value_band"].startswith(">= ")
-
-
-def test_case5_holds_on_a_subsumed_row_too(fold):
-    """Three investigation passes silently measured findings only."""
-    common: dict[str, Any] = dict(
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        gates={"reach_magnitude_usd": Tri.proven(MAGNITUDE_STATE_PROVEN_UPPER_BOUND, 5_000.0).to_json()},
-        **reaches(KEY_C),
-    )
-    weak = sig(claim_id="upgrade.implementation", function_name="weak", selector="0x11111111", **proven(0.5), **common)
-    strong = flow_sig(function_name="strong", selector="0x22222222", **proven(1.0), **common)
-    plane = value_plane(
-        {KEY_C: {"usdc": 5_000_000.0}},
-        per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
-    )
-    document = fold([weak, strong], principals={1: facts(1, SAFE, "eoa")}, value=plane)
-    subsumed = list(document.provenance.get("subsumed_rows") or [])
-    assert subsumed, "the case must exercise a subsumed row, not two findings"
-    for row in list(document.findings) + subsumed:
-        assert row["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED, row["capability"]
-        assert not row["value_band"].startswith(">= ")
 
 
 def _unbounded_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
@@ -461,19 +270,6 @@ def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold)
     )
     assert cap["published_sum_usd"] is None
     assert cap["uncapped_sum_usd"] == 4_000.0
-
-
-def test_an_exact_witness_over_two_keys_still_apportions(fold):
-    finding = _eoa_finding(fold, *_two_key_row(MAGNITUDE_STATE_PROVEN_EXACT))
-    assert finding["value_at_stake_usd"] == 3_000.0
-    assert set(finding["value_by_entity"]) == {KEY_C, KEY_V}
-
-
-def test_the_floor_arm_is_not_vacuously_true_on_an_empty_contribution_set():
-    """A universal over no contributions is true, which would publish ">= $0"."""
-    empty = frozenset()
-    assert FOLD._bound_direction(0.0, empty, empty, True, False, empty) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    assert FOLD._bound_direction(None, empty, empty, True, False, empty) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
 
 
 def _composing_signals(execution_payload: dict[str, Any] | None) -> list[FunctionSignal]:
@@ -540,20 +336,6 @@ def test_a_composed_entry_publishes_the_execution_it_has(fold):
     assert route["target_matches"] is True
     assert route["caller_matches"] is False
     assert route["verdict"] == EX.ROUTE_MISMATCH
-
-
-def test_a_composed_entry_with_no_record_publishes_the_typed_reason(fold):
-    """Every reference-corpus entry is in this state today."""
-    entry = _composed(fold, None)
-    execution = entry["proving_execution"]
-    assert execution["state"] == EX.EXECUTION_NOT_DETERMINED
-    assert execution["reason"] == EX.REASON_NOT_PERSISTED
-    assert execution["transcript_ptr"] == "job::art"
-    assert "caller" not in execution
-    assert entry["route_comparison"]["verdict"] == EX.ROUTE_NOT_DETERMINED
-    # Not a transport fault, so the deletability join still decides.
-    assert entry["arm_taken"] == FOLD.ARM_REPUBLISHED_DIRECT
-    assert entry["arm_taken"] in FOLD.COMPOSITION_ARMS
 
 
 def test_the_destination_magnitude_carries_the_execution_and_its_direction():

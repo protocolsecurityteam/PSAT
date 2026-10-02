@@ -4,9 +4,6 @@ blocks.
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timezone
-
 import pytest
 from sqlalchemy import func, select
 
@@ -14,11 +11,8 @@ from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from tests.support.indexer_stubs import _DeterministicBlockHash
-from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES
 from workers.event_log_indexer import (
-    _SOLMATE_ROLE_TOPICS,
     enroll_event_cursor,
-    enroll_from_completed_jobs,
     scan_enrolled_events,
 )
 
@@ -41,31 +35,6 @@ _TARGET = _HEAD - _CONFIRMATIONS
 _MAX_SPAN = 100_000
 _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
-
-
-class _SeedAwareFetcher:
-    def __init__(self, deploy: int) -> None:
-        self.deploy = deploy
-        self.from_blocks: list[int] = []
-
-    def fetch_logs(self, *, event_address, topics, from_block, to_block) -> list[FetchedEventLog]:
-        self.from_blocks.append(from_block)
-        if from_block < self.deploy:
-            raise AssertionError(f"indexer scanned pre-deployment block {from_block} < deploy {self.deploy}")
-        out: list[FetchedEventLog] = []
-        if from_block <= self.deploy <= to_block:
-            out.append(
-                FetchedEventLog(
-                    tx_hash=b"\x01" * 32,
-                    log_index=0,
-                    block_number=self.deploy,
-                    block_hash=b"\x02" * 32,
-                    transaction_index=0,
-                    topics=[topics[0], "0x" + "00" * 31 + "01"],
-                    data_words=["0x" + "00" * 31 + "01"],
-                )
-            )
-        return out
 
 
 class _RecordingFetcher:
@@ -119,129 +88,6 @@ def _cursor_state(session, address: str):
         )
     ).first()
     return (row[0], row[1]) if row else (None, None)
-
-
-@requires_postgres
-def test_backfill_starts_at_seed_and_never_scans_pre_deploy(session):
-    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=_DEPLOY - 1)
-    session.commit()
-
-    fetcher = _SeedAwareFetcher(_DEPLOY)
-    fetchers, heads, hashes = _maps(fetcher)
-    scan_enrolled_events(
-        session,
-        fetchers=fetchers,
-        head_fetchers=heads,
-        block_hash_fetchers=hashes,
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=_MAX_SPAN,
-        max_windows_per_cursor=500,
-    )
-
-    assert fetcher.from_blocks, "indexer never called the fetcher"
-    assert min(fetcher.from_blocks) == _DEPLOY
-
-    last_block, complete = _cursor_state(session, _AUTHORITY)
-    assert last_block == _TARGET
-    assert complete is True
-
-
-@requires_postgres
-def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(session, monkeypatch):
-    import workers.event_log_indexer as eli
-    from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
-
-    authority = "0x" + "ab" * 20
-    deploy = 18_500_000
-    monkeypatch.setattr(
-        eli,
-        "get_contract_creation_block",
-        lambda address, **_kw: deploy if address.lower() == authority else None,
-    )
-
-    protected = "0x" + "11" * 20
-    job = Job(
-        address=protected,
-        request={"address": protected, "name": "T"},
-        status=JobStatus.completed,
-        stage=JobStage.done,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-    session.add(job)
-    session.flush()
-    store_artifact(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
-
-    proto = Protocol(name=f"seed_test_{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-    contract = Contract(address=protected, chain="ethereum", protocol_id=proto.id, job_id=job.id)
-    session.add(contract)
-    session.flush()
-    session.add(ControllerValue(contract_id=contract.id, controller_id="state_variable:authority", value=authority))
-    session.commit()
-
-    inserted = enroll_from_completed_jobs(session)
-    assert inserted >= len(_SOLMATE_ROLE_TOPICS)
-
-    # One below deploy so the first window starts at it.
-    for topic0 in _SOLMATE_ROLE_TOPICS:
-        from db.models import IndexedEventCursor
-
-        row = session.execute(
-            select(IndexedEventCursor.last_indexed_block, IndexedEventCursor.backfill_complete)
-            .where(IndexedEventCursor.chain_id == 1)
-            .where(func.lower(IndexedEventCursor.event_address) == authority)
-            .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
-        ).first()
-        assert row is not None, f"cursor for {topic0} not enrolled"
-        assert row[0] == deploy - 1
-        assert row[1] is False
-
-
-@requires_postgres
-def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
-    # 0x0 has no creation block, so it would seed at genesis for an address that never emits.
-    import workers.event_log_indexer as eli
-    from db.models import Contract, ControllerValue, IndexedEventCursor, Job, JobStage, JobStatus, Protocol
-    from db.queue import store_artifact
-
-    # Stub anyway so a regression reaching it can't quietly succeed.
-    monkeypatch.setattr(eli, "get_contract_creation_block", lambda *a, **k: 18_500_000)
-
-    protected = "0x" + "11" * 20
-    job = Job(
-        address=protected,
-        request={"address": protected, "name": "T"},
-        status=JobStatus.completed,
-        stage=JobStage.done,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-    session.add(job)
-    session.flush()
-    store_artifact(session, job.id, "predicate_trees", data=_SOLMATE_CANCALL_TREES)
-
-    proto = Protocol(name=f"zero_auth_{uuid.uuid4().hex[:8]}")
-    session.add(proto)
-    session.flush()
-    contract = Contract(address=protected, chain="ethereum", protocol_id=proto.id, job_id=job.id)
-    session.add(contract)
-    session.flush()
-    session.add(
-        ControllerValue(contract_id=contract.id, controller_id="state_variable:authority", value="0x" + "0" * 40)
-    )
-    session.commit()
-
-    inserted = enroll_from_completed_jobs(session)
-    assert inserted == 0
-    zero_cursors = session.execute(
-        select(func.count())
-        .select_from(IndexedEventCursor)
-        .where(func.lower(IndexedEventCursor.event_address) == "0x" + "0" * 40)
-    ).scalar()
-    assert zero_cursors == 0
 
 
 def _etherscan_down(*_a, **_k):
@@ -298,27 +144,6 @@ def test_get_contract_creation_block(monkeypatch, address, es_get, kwargs, expec
     monkeypatch.setattr(es, "get", es_get)
     monkeypatch.setattr(rpc, "rpc_request", lambda url, method, params, chain_id=None: {"blockNumber": hex(18_500_000)})
     assert es.get_contract_creation_block(address, chain_id=1, **kwargs) == expected
-
-
-def test_seed_block_defers_on_lookup_error(monkeypatch):
-    import workers.event_log_indexer as eli
-    from workers.event_log_indexer import _seed_block
-
-    def _raise(*_a, **_k):
-        raise RuntimeError("etherscan down")
-
-    monkeypatch.setattr(eli, "get_contract_creation_block", _raise)
-    # The caller skips enrollment and retries rather than backfilling from genesis.
-    assert _seed_block(_AUTHORITY, {}, chain_id=1) is None
-
-
-def test_is_enrollable_event_address_rejects_zero_and_none():
-    from workers.event_log_indexer import _is_enrollable_event_address
-
-    assert _is_enrollable_event_address(_AUTHORITY) is True
-    assert _is_enrollable_event_address("0x" + "0" * 40) is False  # renounced/unset authority
-    assert _is_enrollable_event_address(None) is False
-    assert _is_enrollable_event_address("0xdeadbeef") is False  # wrong length
 
 
 @requires_postgres

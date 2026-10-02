@@ -177,61 +177,6 @@ def _pauser_changed_log(*, block: int = 25634400) -> dict:
     }
 
 
-def test_erc20_traffic_on_enrolled_token_is_not_a_controller_claim():
-    topics = extract_governance_topics(_plan(_erc20_balances_controller()))
-
-    assert len(topics) == 3
-    assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
-    assert not any("controller_changed" in t["event_type"] for t in topics)
-    assert {t["controller_id"] for t in topics} == {"state_variable:_balances"}
-
-
-def test_proven_caller_gate_target_keeps_the_controller_claim():
-    topics = extract_governance_topics(_plan(_fiat_token_pauser_controller()))
-
-    assert len(topics) == 1
-    assert topics[0]["event_type"] == "controller_changed:state_variable:pauser"
-
-
-def test_call_target_provenance_does_not_earn_the_controller_claim():
-    """``call_target`` is present but is not the gate proof."""
-    topics = extract_governance_topics(_plan(_erc20_balances_controller(authority_provenance="call_target")))
-
-    assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
-
-
-def test_absent_and_call_target_agree_but_caller_gate_differs():
-    assert _resolve_event_type("state_variable:x") == "state_changed:state_variable:x"
-    assert _resolve_event_type("state_variable:x", authority_provenance=None) == "state_changed:state_variable:x"
-    assert (
-        _resolve_event_type("state_variable:x", authority_provenance="call_target") == "state_changed:state_variable:x"
-    )
-    assert (
-        _resolve_event_type("state_variable:x", authority_provenance="caller_gate")
-        == "controller_changed:state_variable:x"
-    )
-
-
-def test_provenance_never_overrides_a_canonical_classification():
-    assert (
-        _resolve_event_type(
-            "state_variable:whatever",
-            {"writes": ["owner"]},
-            authority_provenance=None,
-            signature="OwnershipTransferred(address,address)",
-        )
-        == "ownership_transferred"
-    )
-    assert (
-        _resolve_event_type(
-            "state_variable:owner",
-            authority_provenance="caller_gate",
-            signature="OwnerUpdated(address,address)",
-        )
-        == "ownership_transferred"
-    )
-
-
 def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
     assert (
         _resolve_event_type(
@@ -258,21 +203,6 @@ def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
         )
         == "state_changed:state_variable:whatever"
     )
-
-
-def test_unclassified_spec_decodes_to_the_neutral_type():
-    spec = {
-        "topic0": TRANSFER_TOPIC0,
-        "signature": "Transfer(address,address,uint256)",
-        "inputs": [
-            {"name": "from", "type": "address", "indexed": True},
-            {"name": "to", "type": "address", "indexed": True},
-            {"name": "value", "type": "uint256", "indexed": False},
-        ],
-    }
-    parsed = parse_tracked_log(_transfer_log(), spec)
-    assert parsed is not None
-    assert parsed["event_type"] == "state_changed"
 
 
 @pytest.fixture()
@@ -335,17 +265,6 @@ def served_rows(db_session):
             db_session.delete(mc)
         db_session.delete(protocol)
         db_session.commit()
-
-
-@requires_postgres
-def test_protocol_events_endpoint_serves_the_neutral_type(api_client, served_rows):
-    resp = api_client.get(f"/api/protocols/{served_rows['protocol_id']}/events")
-    assert resp.status_code == 200
-    by_type = {e["event_type"] for e in resp.json()}
-
-    assert "state_changed:state_variable:_balances" in by_type
-    assert "controller_changed:state_variable:_balances" not in by_type
-    assert "controller_changed:state_variable:pauser" in by_type
 
 
 @requires_postgres

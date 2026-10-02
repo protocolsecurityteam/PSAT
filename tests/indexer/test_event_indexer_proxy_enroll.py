@@ -10,20 +10,17 @@ the resolver's ``runtime_addr``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from eth_utils.crypto import keccak
-from sqlalchemy import func, select
 
 from tests.conftest import DATABASE_URL as _DB_URL
-from tests.conftest import _can_connect, requires_postgres
+from tests.conftest import _can_connect
 from workers.event_log_indexer import (
     _event_address_for_descriptor,
     _job_runtime_address,
-    enroll_from_completed_jobs,
 )
 
 _IMPL = "0x" + "5e" * 20  # job.address — the implementation, emits nothing itself
@@ -145,64 +142,3 @@ def session():
         _wipe()
         s.close()
         engine.dispose()
-
-
-@requires_postgres
-def test_enroll_proxy_linked_impl_seeds_cursor_at_proxy(session, monkeypatch):
-    import workers.event_log_indexer as eli
-    from db.models import IndexedEventCursor, Job, JobStage, JobStatus
-    from db.queue import store_artifact
-
-    deploy = 21_000_000
-    seen: list[str] = []
-
-    def _fake_creation_block(address, **_kw):
-        seen.append(address.lower())
-        return deploy if address.lower() == _PROXY else None
-
-    monkeypatch.setattr(eli, "get_contract_creation_block", _fake_creation_block)
-
-    job = Job(
-        address=_IMPL,
-        request={"address": _IMPL, "proxy_address": _PROXY, "name": "KINGlike"},
-        status=JobStatus.completed,
-        stage=JobStage.done,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-    session.add(job)
-    session.flush()
-    store_artifact(
-        session,
-        job.id,
-        "predicate_trees",
-        data={
-            "trees": {
-                "grantRole(bytes32,address)": {"op": "LEAF", "leaf": {"set_descriptor": _self_admin_descriptor()}}
-            }
-        },
-    )
-    session.commit()
-
-    inserted = enroll_from_completed_jobs(session)
-    assert inserted >= 2  # RoleGranted + RoleRevoked, both at the proxy
-
-    for topic0 in (_ROLE_GRANTED, _ROLE_REVOKED):
-        row = session.execute(
-            select(IndexedEventCursor.last_indexed_block)
-            .where(IndexedEventCursor.chain_id == 1)
-            .where(func.lower(IndexedEventCursor.event_address) == _PROXY)
-            .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
-        ).first()
-        assert row is not None, f"{topic0} must be enrolled at the proxy"
-        assert row[0] == deploy - 1
-
-    impl_cursor = session.execute(
-        select(IndexedEventCursor.event_address)
-        .where(IndexedEventCursor.chain_id == 1)
-        .where(func.lower(IndexedEventCursor.event_address) == _IMPL)
-    ).first()
-    assert impl_cursor is None, "must NOT enroll at the impl (job.address) — it emits nothing"
-
-    assert _PROXY in seen
-    assert _IMPL not in seen

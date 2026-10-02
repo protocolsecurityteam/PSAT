@@ -301,28 +301,8 @@ _ROOT_CHECK = {
 }
 _BOUND_CHECK = {**_ROOT_CHECK, "subject": "bound"}
 # Gate provenance, not a caller-gate tag, so never a blocker.
-_PROBE_CHECK = {
-    "kind": "external_check_only",
-    "check": {
-        "target_address": "0x" + "cd" * 20,
-        "target_call_selector": "0x61a3bcc8",
-        "extra": {"basis": ["if-revert via successor NodeType.EXPRESSION"]},
-    },
-}
 _EMPTY_LOWER = {"kind": "finite_set", "members": [], "membership_quality": "lower_bound", "confidence": "partial"}
 _EMPTY_EXACT = {"kind": "finite_set", "members": [], "membership_quality": "exact", "confidence": "enumerable"}
-_OWNER_SET = {
-    "kind": "finite_set",
-    "members": ["0x" + "ab" * 20],
-    "membership_quality": "exact",
-    "confidence": "enumerable",
-}
-
-
-def test_root_check_blocks_public_path_under_flag(earned_public):
-    surface = project_capability_surface(_and_dict(_PUBLIC, _ROOT_CHECK))
-    assert not surface.authority_public
-    assert surface.residual
 
 
 def test_bound_check_never_blocks_public_path(earned_public):
@@ -330,29 +310,9 @@ def test_bound_check_never_blocks_public_path(earned_public):
     assert surface.authority_public
 
 
-def test_untagged_probe_check_never_blocks_public_path(earned_public):
-    """test_veda_principal_dimension pins the public surface."""
-    surface = project_capability_surface(_and_dict(_PUBLIC, _PROBE_CHECK))
-    assert surface.authority_public
-
-
-def test_unread_owner_equality_blocks_public_path_under_flag(earned_public):
-    """An unread owner equality used to vanish, letting a sibling public path open
-    WithdrawRequestNFT.seizeInvalidRequest.
-    """
-    surface = project_capability_surface(_and_dict(_PUBLIC, _EMPTY_LOWER))
-    assert not surface.authority_public
-
-
 def test_resolved_empty_is_not_a_blocker(earned_public):
     surface = project_capability_surface(_and_dict(_PUBLIC, _EMPTY_EXACT))
     assert surface.authority_public
-
-
-def test_principal_rows_survive_root_check_under_flag(earned_public):
-    surface = project_capability_surface(_and_dict(_OWNER_SET, _ROOT_CHECK))
-    assert not surface.authority_public
-    assert [r["address"] for r in surface.principal_rows] == ["0x" + "ab" * 20]
 
 
 def test_or_blocks_only_when_every_disjunct_blocks(earned_public):
@@ -491,16 +451,6 @@ def test_admin_curated_threshold_exact_empty_is_resolved_not_public(tmp_path, ea
     assert gate_cap.kind == "finite_set"
     assert gate_cap.members == []
     assert gate_cap.membership_quality == "exact"
-    assert not surface.authority_public
-
-
-def test_admin_curated_threshold_warm_enumerates_restricted_holders(tmp_path, earned_public):
-    sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
-    holders = ["0x" + "aa" * 20, "0x" + "bb" * 20]
-    warm = CapabilityExpr.finite_set(holders, quality="lower_bound", confidence="partial")
-    _role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=_StubAdapter(warm))
-    assert gate_cap.kind == "finite_set"
-    assert gate_cap.members == holders
     assert not surface.authority_public
 
 

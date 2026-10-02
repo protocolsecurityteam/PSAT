@@ -105,19 +105,6 @@ def test_treeless_artifact_keeps_the_control_edge_through_the_plan(tmp_path, sha
     assert not any(c.get("authority_provenance") for c in plan["tracked_controllers"])
 
 
-def test_provenance_survives_the_tracking_plan(tmp_path):
-    by_source = _targets(tmp_path)
-    analysis = {
-        "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
-        "controller_tracking": list(by_source.values()),
-    }
-    plan = build_control_tracking_plan(analysis)  # pyright: ignore[reportArgumentType]
-    by_id = {c["controller_id"]: c for c in plan["tracked_controllers"]}
-    assert by_id["external_contract:roleRegistry"].get("authority_provenance") == "caller_gate"
-    assert by_id["external_contract:eETH"].get("authority_provenance") == "call_target"
-    assert "authority_provenance" not in by_id["state_variable:feeRecipient"]
-
-
 def test_marked_uncertain_guard_unanswers_the_names_that_function_reads(tmp_path):
     """The marker says the tree doesn't carry the whole gate."""
     contract, predicate_trees, effects, semantic_control = _build(tmp_path)

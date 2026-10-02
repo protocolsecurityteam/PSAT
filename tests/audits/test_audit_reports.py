@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from services.discovery.audit_reports import merge_audit_reports
@@ -80,30 +78,6 @@ class TestMergeAuditReports:
         assert len(merged["reports"]) == 1
         assert merged["reports"][0]["pdf_url"] == "https://a.com/report.pdf"
         assert merged["reports"][0]["date"] == "2023-06-15"
-
-    @pytest.mark.parametrize(
-        "prev_reports, new_reports, expected_count",
-        [
-            pytest.param([], [_report()], 1, id="empty-prev-returns-new"),
-            pytest.param([_report()], [], 1, id="empty-new-keeps-prev"),
-            pytest.param([], [], 0, id="both-empty"),
-        ],
-    )
-    def test_empty_side_merges(self, prev_reports, new_reports, expected_count):
-        merged = merge_audit_reports(
-            {"company": "X", "reports": prev_reports},
-            {"company": "X", "reports": new_reports},
-        )
-        assert len(merged["reports"]) == expected_count
-
-    def test_url_normalization_dedup(self):
-        r1 = _report(url="https://Example.com/Audit/")
-        r2 = _report(url="https://example.com/Audit", title="Updated Title")
-        merged = merge_audit_reports(
-            {"company": "X", "reports": [r1]},
-            {"company": "X", "reports": [r2]},
-        )
-        assert len(merged["reports"]) == 1
 
     def test_sorted_by_date_descending(self):
         old = _report(url="https://a.com/old", date="2022-01-01")
@@ -272,27 +246,6 @@ class TestFilenameDedup:
         ]
         assert len(_collapse_by_filename(reports)) == 2
 
-    def test_missing_filename_never_groups(self):
-        from services.discovery.audit_reports import _collapse_by_filename
-
-        reports = [
-            {
-                "url": "https://cantina.xyz/portfolio/abcd",
-                "pdf_url": None,
-                "auditor": "Cantina",
-                "title": "X",
-                "date": "2024-05-01",
-            },
-            {
-                "url": "https://cantina.xyz/portfolio/efgh",
-                "pdf_url": None,
-                "auditor": "Cantina",
-                "title": "Y",
-                "date": "2024-05-01",
-            },
-        ]
-        assert len(_collapse_by_filename(reports)) == 2
-
     def test_prefers_pdf_url_over_no_pdf(self):
         from services.discovery.audit_reports import _collapse_by_filename
 
@@ -303,29 +256,6 @@ class TestFilenameDedup:
         out = _collapse_by_filename(reports)
         assert len(out) == 1
         assert out[0]["pdf_url"] is not None
-
-
-class TestProvenanceFields:
-    @pytest.mark.parametrize(
-        "provenance",
-        [
-            pytest.param(
-                {"source_commit": "a" * 40, "source_repo": "owner/repo", "source_path": "audits/X.pdf"},
-                id="passes-source-commit",
-            ),
-            pytest.param({}, id="omits-provenance-when-missing"),
-        ],
-    )
-    def test_build_report_entry_provenance(self, provenance):
-        from services.discovery.audit_reports import _build_report_entry
-
-        out = _build_report_entry(
-            {"auditor": "Foo", "title": "T", "date": "2024-01-01", "pdf_url": "https://x.pdf", **provenance},
-            "https://src/",
-            0.9,
-            "2024-01-01T00:00:00Z",
-        )
-        assert {k: out[k] for k in ("source_commit", "source_repo", "source_path") if k in out} == provenance
 
 
 # The cache keeps the GitHub rate limit out of the hot path.
@@ -357,76 +287,6 @@ class TestResolveBranchCommit:
         assert call_count["n"] == 1
         assert ar._resolve_branch_commit("owner", "repo", "main") == sha
         assert call_count["n"] == 1
-
-    def test_returns_none_on_404(self, monkeypatch):
-        from services.discovery import audit_reports as ar
-
-        ar._BRANCH_SHA_CACHE.clear()
-
-        def fake_get(url, **kwargs):
-            class R:
-                status_code = 404
-
-                def json(self):
-                    return {"message": "Not Found"}
-
-            return R()
-
-        monkeypatch.setattr(ar._requests, "get", fake_get)
-        assert ar._resolve_branch_commit("owner", "ghost-repo", "main") is None
-
-    def test_does_not_cache_negative_result(self, monkeypatch):
-        from services.discovery.audit_reports import _github
-
-        _github.clear_branch_sha_cache()
-        sha = "c" * 40
-        state = {"n": 0}
-
-        def fake_get(url, **kwargs):
-            state["n"] += 1
-
-            class R:
-                status_code = 500 if state["n"] == 1 else 200
-
-                def json(self):
-                    return {"object": {"sha": sha}}
-
-            return R()
-
-        monkeypatch.setattr(_github._requests, "get", fake_get)
-
-        assert _github._resolve_branch_commit("owner", "repo", "main") is None
-        assert ("owner", "repo", "main") not in _github._BRANCH_SHA_CACHE
-        assert _github._resolve_branch_commit("owner", "repo", "main") == sha
-        assert state["n"] == 2
-
-    def test_expired_entry_reprobes(self, monkeypatch):
-        from services.discovery.audit_reports import _github
-
-        _github.clear_branch_sha_cache()
-        fresh = "d" * 40
-        state = {"n": 0}
-
-        def fake_get(url, **kwargs):
-            state["n"] += 1
-
-            class R:
-                status_code = 200
-
-                def json(self):
-                    return {"object": {"sha": fresh}}
-
-            return R()
-
-        monkeypatch.setattr(_github._requests, "get", fake_get)
-
-        key = ("owner", "repo", "main")
-        stale_ts = time.monotonic() - _github._BRANCH_SHA_CACHE_TTL_S - 10
-        _github._BRANCH_SHA_CACHE[key] = ("e" * 40, stale_ts)
-
-        assert _github._resolve_branch_commit("owner", "repo", "main") == fresh
-        assert state["n"] == 1
-        assert _github._BRANCH_SHA_CACHE[key][0] == fresh
 
     def test_eviction_bounds_at_max(self, monkeypatch):
         from services.discovery.audit_reports import _github

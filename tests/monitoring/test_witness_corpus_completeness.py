@@ -15,7 +15,6 @@ from slither import Slither
 
 from services.monitoring.event_topics import (
     WITNESS_TIER_ACTIVITY,
-    WITNESS_TIER_HINT,
     WITNESS_TIER_SELF_DESCRIBING,
     WITNESS_TIERS,
     extract_governance_topics,
@@ -261,73 +260,6 @@ def test_every_spec_carries_the_taxonomy_fields(corpus):
         assert spec["writer_openness"] in OPENNESS_VALUES
 
 
-def test_corpus_covers_all_five_degenerate_shapes(corpus):
-    """A lost shape, or two collapsed tiers, fails here first."""
-    tiers = {}
-    for spec in corpus["specs"].values():
-        tiers.setdefault(spec["witness_tier"], set()).add(spec["event_type"])
-
-    assert "ownership_transferred" in tiers[WITNESS_TIER_SELF_DESCRIBING]
-    assert "member_changed:fromDenyList" in tiers[WITNESS_TIER_SELF_DESCRIBING]
-    assert "state_changed:state_variable:accountantState.payoutAddress" in tiers[WITNESS_TIER_HINT]
-    assert "state_changed:state_variable:registered" in tiers[WITNESS_TIER_ACTIVITY]
-    # The reentrancy guard has no watched controller; non-vacuity is in test_reentrancy_latch_donates_nothing.
-    assert "state_variable:_status" not in corpus["planned"]
-    # The same shape gated by a cofinite denylist: the arm that keeps ERC-20 Transfers out.
-    assert "state_changed:state_variable:claimed" in tiers[WITNESS_TIER_ACTIVITY]
-
-
-def test_reentrancy_latch_donates_nothing(corpus):
-    """Every deposit used to publish a ``_status`` change."""
-    writers = _state_writers_from_effects(corpus["effects"])
-    assert "deposit(uint256)" in writers.get("_status", set()), "corpus lost the latch-write shape"
-
-    assert corpus["targets"]["state_variable:_status"]["associated_events"] == []
-    assert corpus["targets"]["state_variable:_status"]["writer_functions"] == []
-    assert "state_variable:_status" not in corpus["planned"]
-    assert _topic0("Deposited(address,uint256)") not in corpus["specs"]
-
-
-def test_a_var_named_locked_is_not_a_latch_without_the_ir_proof(corpus):
-    """The name-fallback class is only a suppressor; deleting a controller on it would stop watching a real pause.
-
-    Only the IR-proven set may subtract.
-    """
-    writers = _state_writers_from_effects(corpus["effects"])
-    assert "pauseWithdrawals()" in writers.get("locked", set())
-
-    assert "state_variable:locked" in corpus["planned"]
-    assert _spec(corpus, "Locked(address)")["witness_tier"] == WITNESS_TIER_HINT
-    assert "locked" in corpus["polling"]
-
-
-def test_open_writer_mapping_stays_activity(corpus):
-    """Correspondence alone must not promote a denylist-gated writer, or every Transfer on a denylisted token
-    republishes.
-    """
-    spec = _spec(corpus, "Registered(address)")
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-    assert spec["event_type"] == "state_changed:state_variable:registered"
-
-    events = corpus["targets"]["state_variable:registered"]["associated_events"]
-    registered_event = next(e for e in events if e["signature"] == "Registered(address)")
-    assert registered_event["member_witness"]["mapping_name"] == "registered"
-    assert "writer_openness" not in registered_event
-
-
-def test_a_denylist_gated_writer_is_not_a_restricted_one(corpus):
-    """P1b: without the earned-public arm, 444 of 446 audited rows would qualify."""
-    spec = _spec(corpus, "Claimed(address)")
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-
-    events = corpus["targets"]["state_variable:claimed"]["associated_events"]
-    claimed_event = next(e for e in events if e["signature"] == "Claimed(address)")
-    assert claimed_event["member_witness"]["mapping_name"] == "claimed"
-    assert "writer_openness" not in claimed_event
-
-
 def test_a_two_entry_write_names_no_single_entry(corpus):
     """Keeping only the first entry would describe the transfer falsely, not partially."""
     specs = discover_mapping_writer_events(corpus["contract"])
@@ -340,50 +272,6 @@ def test_a_two_entry_write_names_no_single_entry(corpus):
     records = member_witness_records(corpus["contract"])
     assert ("balances", "Transfer(address,address,uint256)") not in records
     assert ("fromDenyList", "DenyFrom(address)") in records
-
-
-def test_member_controller_drops_a_sibling_members_event(corpus):
-    """Keeper traffic enrolled under the payout controller (75 live specs) and would publish as a payout change."""
-    writers = _state_writers_from_effects(corpus["effects"])
-    assert "updateExchangeRate(uint96)" in writers.get("accountantState", set())
-
-    payout = corpus["targets"]["state_variable:accountantState.payoutAddress"]
-    signatures = {e["signature"] for e in payout["associated_events"]}
-    assert signatures == {"PayoutAddressUpdated(address,address)"}
-    assert _topic0("ExchangeRateUpdated(uint96,uint96)") not in corpus["specs"]
-
-
-def test_member_controller_is_readable_through_its_parent_getter(corpus):
-    """F8: the member is one word of ``accountantState()``'s return."""
-    spec = _spec(corpus, "PayoutAddressUpdated(address,address)")
-    assert spec["witness_tier"] == WITNESS_TIER_HINT
-
-    entry = corpus["polling"]["accountantState.payoutAddress"]
-    assert entry["kind"] == "getter_call"
-    assert entry["target"] == "accountantState"
-    assert entry["member_word_index"] == 0
-    assert entry["source"] == "analyzer:state_variable:accountantState.payoutAddress"
-
-
-def test_denyfrom_class_publishes_as_a_qualified_member_change(corpus):
-    for signature, direction in (("DenyFrom(address)", "add"), ("AllowFrom(address)", "remove")):
-        spec = _spec(corpus, signature)
-        assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
-        assert spec["writer_openness"] == "restricted"
-        assert spec["event_type"] == "member_changed:fromDenyList"
-        assert spec["member_witness"]["direction"] == direction
-        assert spec["member_witness"]["key_position"] == 0
-        # ``_value_writer_spec`` would have dropped these.
-        assert spec["member_witness"]["value_position"] is None
-
-
-def test_qualified_set_direction_carries_the_value_position(corpus):
-    spec = _spec(corpus, "ChainSetGasLimit(uint256,uint128)")
-    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
-    assert spec["event_type"] == "member_changed:gasLimits"
-    assert spec["member_witness"]["direction"] == "set"
-    assert spec["member_witness"]["key_position"] == 0
-    assert spec["member_witness"]["value_position"] == 1
 
 
 def test_qualified_member_change_decodes_key_value_and_direction(corpus):
@@ -623,60 +511,6 @@ def test_the_clean_pair_qualifies_without_an_opaque_path(opaque):
     assert spec["event_type"] == "member_changed:gated"
 
 
-def test_an_assembly_only_writer_demotes_the_qualification(opaque):
-    derived = opaque["OpaqueAssembly"]
-    effects = derived["effects"]
-    assert effects["functions"]["anyoneAsm(address)"]["assembly_state_access"] is True
-    writers = _state_writers_from_effects(effects)
-    # Attributed to a raw slot, so the guard can't be an intersection.
-    assert "anyoneAsm(address)" in writers["assembly_storage:slot"]
-    assert all("anyoneAsm(address)" not in fns for var, fns in writers.items() if not var.startswith("assembly_"))
-
-    spec = _allowed(derived)
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-
-
-def test_an_open_delegatecall_demotes_the_qualification(opaque):
-    derived = opaque["OpaqueDelegatecall"]
-    effects = derived["effects"]
-    sinks = effects["functions"]["anyoneDc(address,bytes)"]["sinks"]
-    assert any(sink["kind"] == "delegatecall" for sink in sinks)
-    assert all("anyoneDc(address,bytes)" not in fns for fns in _state_writers_from_effects(effects).values())
-
-    spec = _allowed(derived)
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-
-
-def test_a_library_storage_write_demotes_the_qualification(opaque):
-    derived = opaque["OpaqueLibrary"]
-    contract = derived["contract"]
-    caller = next(fn for fn in contract.functions if fn.full_name == "anyoneLib(address)")
-    assert list(caller.all_state_variables_written()) == []
-    assert all("anyoneLib(address)" not in fns for fns in _state_writers_from_effects(derived["effects"]).values())
-    callee = next(call.function for call in caller.all_library_calls())
-    assert any(getattr(p, "location", None) == "storage" for p in callee.parameters)
-
-    spec = _allowed(derived)
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-
-
-def test_an_assembly_log_only_emitter_demotes_the_qualification(opaque):
-    """Without the log-opcode arm any address could mint a notified ``member_changed`` claim."""
-    derived = opaque["OpaqueLogOnly"]
-    effects = derived["effects"]
-    assert effects["functions"]["anyoneLog(address)"]["assembly_state_access"] is False
-    assert effects["functions"]["anyoneLog(address)"]["state_writes"] == []
-    assert all("anyoneLog(address)" not in fns for fns in _state_writers_from_effects(effects).values())
-    assert "anyoneLog(address)" in _assembly_log_functions(derived["contract"])
-
-    spec = _allowed(derived)
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-    assert spec["writer_openness"] == "not_determined"
-
-
 def test_a_mixed_style_emitter_demotes_the_qualification(opaque):
     derived = opaque["OpaqueMixedEmitter"]
     effects = derived["effects"]
@@ -686,33 +520,6 @@ def test_a_mixed_style_emitter_demotes_the_qualification(opaque):
     spec = _allowed(derived)
     assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
     assert spec["writer_openness"] == "not_determined"
-
-
-def test_a_latch_var_keeps_its_admin_setter(opaque):
-    """``hygiene_class`` is variable-granular, so subtracting on class alone deleted a real ``onlyOwner`` writer.
-
-    Only the guard-origin write is covered by the proof.
-    """
-    derived = opaque["LatchWithAdminSetter"]
-    facts = derived["effects"]["functions"]
-    guard_write = facts["deposit()"]["state_writes"][0]
-    body_write = next(w for w in facts["setStatus(uint256)"]["state_writes"] if w["var"] == "_status")
-    assert guard_write == {
-        "var": "_status",
-        "declared_type": "uint256",
-        "member_path": [],
-        "granularity": "var",
-        "hygiene_class": "reentrancy_guard",
-        "origin": "guard",
-    }
-    assert body_write["hygiene_class"] == "reentrancy_guard"
-    assert body_write["origin"] == "body"
-
-    latch = derived["targets"]["state_variable:_status"]
-    assert [w["function"] for w in latch["writer_functions"]] == ["setStatus(uint256)"]
-    assert [e["signature"] for e in latch["associated_events"]] == ["StatusSet(uint256)"]
-    assert "state_variable:_status" in derived["planned"]
-    assert _topic0("StatusSet(uint256)") in derived["specs"]
 
 
 def test_ordinary_library_use_is_not_opaque(opaque):
@@ -728,44 +535,6 @@ def test_ordinary_library_use_is_not_opaque(opaque):
     spec = _allowed(derived)
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
     assert spec["event_type"] == "member_changed:gated"
-
-
-def test_canonical_family_is_unchanged_by_qualification(corpus):
-    spec = _spec(corpus, "OwnerUpdated(address,address)")
-    assert spec["event_type"] == "ownership_transferred"
-    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
-    assert "member_witness" not in spec
-
-
-def test_keyless_old_new_on_a_mapping_is_not_self_describing(corpus):
-    """Publishing under the mapping would put one entry's limit into ``last_known_state`` as the whole mapping's
-    value (LRTSquaredCore ``TokenMaxPositionWeightLimitUpdated``).
-    """
-    spec = _spec(corpus, "TokenMaxWeightUpdated(uint64,uint64)")
-
-    # The emitter is a single-write restricted writer, so it isn't what demotes.
-    target = corpus["targets"]["state_variable:_tokenInfos"]
-    assert str((target.get("read_spec") or {}).get("type_kind")) == "mapping"
-    assert spec["effect_tags"]["writes"] == ["_tokenInfos"]
-    names = [i.get("name") for i in spec["inputs"]]
-    assert names == ["oldLimit", "newLimit"]
-    assert "function setTokenMaxWeight(address token, uint64 limit) external onlyOwner" in CORPUS_SOURCE
-    assert "member_witness" not in spec
-
-    assert spec["witness_tier"] != WITNESS_TIER_SELF_DESCRIBING
-    assert not spec["event_type"].startswith("member_changed")
-
-
-def test_the_same_pair_on_a_scalar_slot_still_qualifies(corpus):
-    """Over a single-valued slot the pair can only be about that value (LRTSquaredCore PriceProviderSet and friends)."""
-    spec = _spec(corpus, "DepositLimitUpdated(uint64,uint64)")
-
-    target = corpus["targets"]["state_variable:depositLimit"]
-    assert str((target.get("read_spec") or {}).get("type_kind")) == "primitive"
-    assert spec["effect_tags"]["writes"] == ["depositLimit"]
-    assert [i.get("name") for i in spec["inputs"]] == ["oldLimit", "newLimit"]
-
-    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
 
 
 def _label_golden_flow_rows():

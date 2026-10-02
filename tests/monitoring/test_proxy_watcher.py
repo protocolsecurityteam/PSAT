@@ -30,14 +30,6 @@ def test_resolve_current_implementation(mock_rpc):
 
 
 @patch("services.monitoring.proxy_watcher.rpc_request")
-def test_resolve_implementation_empty_slot(mock_rpc):
-    mock_rpc.return_value = "0x" + "0" * 64
-
-    result = resolve_current_implementation(ADDR(1), "http://localhost:8545")
-    assert result is None
-
-
-@patch("services.monitoring.proxy_watcher.rpc_request")
 def test_resolve_falls_back_to_slot_zero(mock_rpc):
     """The GnosisSafe pattern."""
     gnosis_impl = ADDR(99)

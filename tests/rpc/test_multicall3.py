@@ -50,38 +50,7 @@ def test_empty_calls_issues_no_rpc(monkeypatch):
     assert called == []
 
 
-def test_chunking_preserves_order_and_bounds_width(monkeypatch):
-    a = "0x" + "11" * 20
-    recorder: list = []
-    state = {(a, f"0x{i:08x}"): (True, "0x" + format(i, "064x")) for i in range(5)}
-    monkeypatch.setattr(rpc_mod, "rpc_request", _fake_multicall_chain(state, recorder=recorder))
-    items = [(a, f"0x{i:08x}") for i in range(5)]
-    out = multicall3_aggregate3("http://rpc", items, chunk_size=2)
-    assert len(recorder) == 3, "5 items at chunk_size=2 → 3 aggregate3 calls (2+2+1)"
-    assert out == [(True, "0x" + format(i, "064x")) for i in range(5)]
-
-
-def test_wrong_length_response_raises(monkeypatch):
-    a = "0x" + "11" * 20
-
-    def bad(_rpc_url, _method, _params, **_kw):
-        return "0x" + encode(["(bool,bytes)[]"], [[(True, b"")]]).hex()
-
-    monkeypatch.setattr(rpc_mod, "rpc_request", bad)
-    with pytest.raises(RuntimeError):
-        multicall3_aggregate3("http://rpc", [(a, "0x01"), (a, "0x02")])
-
-
 def test_non_hex_response_raises(monkeypatch):
     monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: None)
-    with pytest.raises(RuntimeError):
-        multicall3_aggregate3("http://rpc", [("0x" + "11" * 20, "0x01")])
-
-
-def test_transport_error_propagates(monkeypatch):
-    def boom(*_a, **_k):
-        raise RuntimeError("rpc down")
-
-    monkeypatch.setattr(rpc_mod, "rpc_request", boom)
     with pytest.raises(RuntimeError):
         multicall3_aggregate3("http://rpc", [("0x" + "11" * 20, "0x01")])

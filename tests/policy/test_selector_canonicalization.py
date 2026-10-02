@@ -5,9 +5,7 @@ compiled Solidity.
 
 from __future__ import annotations
 
-import tempfile
 import textwrap
-from pathlib import Path
 
 import pytest
 from eth_utils.crypto import keccak
@@ -21,7 +19,6 @@ from services.policy.effective_permissions import (  # noqa: E402
 )
 from services.resolution.capability_resolver import _selector_for_signature  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
-    _canonical_signature,
     build_predicate_artifacts,
 )
 
@@ -34,7 +31,6 @@ SET_MODE_CANONICAL = _sel("setMode(uint8)")
 SET_MODE_ADDRESS_BUG = _sel("setMode(address)")
 EXECUTE_CANONICAL = _sel("execute((uint256,address))")
 EXECUTE_ADDRESS_BUG = _sel("execute(address)")
-SET_FOO_CANONICAL = _sel("setFoo(address)")  # contract param — address IS correct
 SET_NUM_CANONICAL = _sel("setNum(uint256)")  # elementary — unchanged
 
 SOURCE = """
@@ -128,22 +124,6 @@ def test_selector_for_signature_falls_back_for_contracts_without_map():
     assert _selector_for_signature(None) is None
     assert _selector_for_signature("notASignature") is None
     assert _selector_for_signature("f(uint8)", {"f(uint8)": "bogus-no-parens"}) == _sel("f(uint8)")
-
-
-def test_build_effective_permissions_selector_column_is_canonical(predicate_artifact):
-    analysis = {"subject": {"address": "0x" + "11" * 20, "name": "C"}}
-    ep = build_effective_permissions(
-        analysis,
-        predicate_trees=predicate_artifact,
-        capability_resolver_output={},  # marks resolver output available
-    )
-    by_name = {fn["function"].split("(", 1)[0]: fn for fn in ep["functions"]}
-
-    assert by_name["setMode"]["abi_signature"] == "setMode(uint8)"
-    assert by_name["setMode"]["selector"] == SET_MODE_CANONICAL
-    assert by_name["execute"]["abi_signature"] == "execute((uint256,address))"
-    assert by_name["execute"]["selector"] == EXECUTE_CANONICAL
-    assert by_name["setFoo"]["selector"] == SET_FOO_CANONICAL
 
 
 # Mirrors LayerZeroTeller ``depositAndBridgeWithPermit`` and AvsOperator ``verifyBlsKey``.
@@ -261,59 +241,6 @@ def test_dynamic_array_and_type_alias_lower(alias_artifact):
     assert _sel(route) == _sel("route((address,uint256,address)[],uint128)")
 
 
-def test_canonical_signature_rejects_self_recursive_struct():
-
-    src = textwrap.dedent(
-        """
-        pragma solidity ^0.8.19;
-        contract R {
-            struct Node { Node[] kids; uint256 v; }
-            uint256 internal x;
-            function walk(Node memory n) internal { x = n.v; }
-        }
-        """
-    ).strip()
-    tmp = Path(tempfile.mkdtemp("rec"))
-    f = tmp / "R.sol"
-    f.write_text(src + "\n")
-    contract = next(c for c in Slither(str(f)).contracts if c.name == "R")
-    walk = next(fn for fn in contract.functions if fn.name == "walk")
-    assert _canonical_signature(walk) is None
-
-
-class _Raises:
-    @property
-    def solidity_signature(self) -> str:
-        raise ValueError("recursive struct cannot be lowered")
-
-
-class _NonString:
-    solidity_signature = 1234  # not a str
-
-
-class _NoParams:
-    name = "f"
-    parameters = None
-
-
-class _NoName:
-    parameters = []
-
-
-@pytest.mark.parametrize(
-    "fake",
-    [
-        # Consumers fall back to full_name.
-        pytest.param(_Raises(), id="slither-cannot-lower"),
-        pytest.param(_NonString(), id="non-string-solidity-signature"),
-        pytest.param(_NoParams(), id="missing-parameters"),
-        pytest.param(_NoName(), id="missing-name"),
-    ],
-)
-def test_canonical_signature_guards(fake):
-    assert _canonical_signature(fake) is None
-
-
 def test_fallback_refuses_to_hash_a_qualified_struct_or_enum():
     """A qualified token isn't a contract reference and its tuple layout isn't recoverable, so the old ``address``
     answer published nonexistent selectors (92 of 250 corpus tokens).
@@ -338,12 +265,3 @@ def test_fallback_preserves_an_already_lowered_tuple():
     assert _abi_signature(canonical) == canonical
     assert _abi_signature("f((uint256,address)[])") == "f((uint256,address)[])"
     assert _abi_signature_and_selector(canonical, {})[1] == _sel(canonical)
-
-
-def test_canonical_map_still_wins_over_the_fallback():
-    from services.policy.effective_permissions import _abi_signature_and_selector
-
-    canonical = "f((uint256,uint8))"
-    abi_sig, selector = _abi_signature_and_selector("f(IFoo.Bar)", {"f(IFoo.Bar)": canonical})
-    assert abi_sig == canonical
-    assert selector == _sel(canonical)

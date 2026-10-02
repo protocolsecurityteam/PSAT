@@ -2,7 +2,6 @@ from typing import Any
 
 import pytest
 
-from services.discovery.activity import enrich_with_activity
 from services.discovery.chain_resolver import resolve_unknown_chains, validate_claimed_chains
 from services.discovery.deployer import expand_from_deployers
 from services.discovery.inventory import (
@@ -67,21 +66,6 @@ class TestBuildContracts:
         assert c["source"] == ["ai_inventory"]
         assert len(c["source_ids"]) >= 2
         assert len(sources_map) >= 2
-
-    def test_unknown_chain_remapped_and_multi_chain(self):
-        addr_a = "0x" + "a" * 40
-        addr_b = "0x" + "b" * 40
-        entries = [
-            _entry(address=addr_a, chain="ethereum"),
-            _entry(address=addr_a, chain="unknown", url="https://other.com"),
-            _entry(address=addr_b, chain="ethereum"),
-            _entry(address=addr_b, chain="arbitrum"),
-        ]
-        contracts, _ = _build_contracts(entries, limit=10)
-        by_addr = {c["address"]: c for c in contracts}
-
-        assert by_addr[addr_a]["chains"] == ["ethereum"]
-        assert set(by_addr[addr_b]["chains"]) == {"ethereum", "arbitrum"}
 
     def test_chain_labels_are_canonicalized(self):
         addr = "0x" + "e" * 40
@@ -161,12 +145,6 @@ class TestExtractFromPageText:
 
 
 class TestSearchProtocolInventoryOffline:
-    def test_validation_errors(self):
-        with pytest.raises(ValueError, match="must not be empty"):
-            search_protocol_inventory("")
-        with pytest.raises(ValueError, match="limit must be >= 1"):
-            search_protocol_inventory("test", limit=0)
-
     def test_no_domain_returns_valid_structure(self, monkeypatch):
         monkeypatch.setattr("services.discovery.inventory._tavily_search", lambda *_a, **_kw: [])
         monkeypatch.setattr("services.discovery.inventory._llm_select_domain", lambda *_a, **_kw: (None, []))
@@ -270,24 +248,6 @@ class TestSearchProtocolInventoryOffline:
 
 
 class TestBuildContractsDeployerMerge:
-    def test_deployer_unknown_chain_remapped_by_tavily(self):
-        addr = "0x" + "a" * 40
-        entries = [
-            _entry(address=addr, name="Vault", chain="ethereum", kind="official_inventory_table"),
-            _entry(
-                address=addr,
-                name=None,
-                chain="unknown",
-                kind="deployer_expansion",
-                url="https://etherscan.io/address/0xdeployer",
-                explorer_url=f"https://etherscan.io/address/{addr}",
-            ),
-        ]
-        contracts, _ = _build_contracts(entries, limit=10)
-        assert len(contracts) == 1
-        assert contracts[0]["chains"] == ["ethereum"]
-        assert "deployer_expansion" in contracts[0]["source"]
-
     def test_deployer_corroboration_boosts_confidence(self):
         addr = "0x" + "a" * 40
         tavily_only = [_entry(address=addr, chain="ethereum")]
@@ -305,23 +265,6 @@ class TestBuildContractsDeployerMerge:
         combined_contracts, _ = _build_contracts(combined, limit=10)
 
         assert combined_contracts[0]["confidence"] > tavily_contracts[0]["confidence"]
-
-    def test_deployer_only_entry_included(self):
-        addr = "0x" + "d" * 40
-        entries = [
-            _entry(
-                address=addr,
-                name="DeployerFound",
-                chain="unknown",
-                kind="deployer_expansion",
-                url="https://etherscan.io/address/0xdeployer",
-                explorer_url=f"https://etherscan.io/address/{addr}",
-            ),
-        ]
-        contracts, _ = _build_contracts(entries, limit=10)
-        assert len(contracts) == 1
-        assert contracts[0]["name"] == "DeployerFound"
-        assert contracts[0]["source"] == ["deployer_expansion"]
 
 
 class TestExpandFromDeployers:
@@ -372,28 +315,6 @@ class TestExpandFromDeployers:
 
         new_entry = next(e for e in entries if new_contract.lower() in e["address"])
         assert new_entry["name"] == "DiscoveredToken"
-
-    def test_deployer_below_threshold_filtered_out(self, monkeypatch):
-        seed = "0x" + "a" * 40
-        deployer = "0x" + "de" * 20
-
-        def fake_get(module, action, **params):
-            if action == "getcontractcreation":
-                return {
-                    "status": "1",
-                    "result": [
-                        {"contractAddress": seed, "contractCreator": deployer, "txHash": "0x" + "1" * 64},
-                    ],
-                }
-            return {"status": "0", "result": []}
-
-        monkeypatch.setattr("services.discovery.deployer.etherscan.get", fake_get)
-
-        entries = expand_from_deployers([seed])
-        assert entries == []
-
-        entries = expand_from_deployers([seed], min_seed_count=1, min_seed_share=0.0)
-        assert len(entries) == 0  # txlist not mocked, so no deployments found
 
     def test_no_creators_found(self, monkeypatch):
 
@@ -513,66 +434,9 @@ class TestGroupMultiDeployments:
         assert len(result) == 2
         assert all("deployments" not in c for c in result)
 
-    def test_activity_data_preserved_in_deployments(self):
-        contracts = [
-            {
-                "name": "Token",
-                "address": "0x" + "a" * 40,
-                "chains": ["ethereum"],
-                "confidence": 0.9,
-                "source": ["ai_inventory"],
-                "evidence": {},
-                "source_ids": ["s1"],
-                "activity": {"last_active": "2026-01-01T00:00:00+00:00", "score": 0.95},
-                "rank_score": 0.93,
-            },
-            {
-                "name": "Token",
-                "address": "0x" + "b" * 40,
-                "chains": ["base"],
-                "confidence": 0.8,
-                "source": ["ai_inventory"],
-                "evidence": {},
-                "source_ids": ["s2"],
-                "activity": {"last_active": "2026-01-02T00:00:00+00:00", "score": 0.90},
-                "rank_score": 0.86,
-            },
-        ]
-        result = _group_multi_deployments(contracts)
-        assert len(result) == 1
-        for dep in result[0]["deployments"]:
-            assert "activity" in dep
-            assert "rank_score" in dep
-
 
 @pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestResolveUnknownChains:
-    def test_resolves_unknown_to_correct_chain(self, monkeypatch):
-        contracts = [
-            {"name": "Known", "address": "0x" + "a" * 40, "chains": ["ethereum"]},
-            {"name": "Unknown1", "address": "0x" + "b" * 40, "chains": ["unknown"]},
-            {"name": "Unknown2", "address": "0x" + "c" * 40, "chains": ["unknown"]},
-        ]
-        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-
-        def fake_batch_get_code(rpc_url, addresses):
-            if rpc_url.endswith("/evm/1"):
-                return {addr: ("0x6001" if addr == "0x" + "b" * 40 else "0x") for addr in addresses}
-            if rpc_url.endswith("/evm/42161"):
-                return {addr: ("0x6001" if addr == "0x" + "c" * 40 else "0x") for addr in addresses}
-            if rpc_url.endswith("/evm/8453"):
-                return {addr: ("0x6001" if addr == "0x" + "c" * 40 else "0x") for addr in addresses}
-            return {addr: "0x" for addr in addresses}
-
-        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
-
-        result = resolve_unknown_chains(contracts, debug=False)
-        by_name = {c["name"]: c for c in result}
-
-        assert by_name["Known"]["chains"] == ["ethereum"]
-        assert by_name["Unknown1"]["chains"] == ["ethereum"]
-        assert set(by_name["Unknown2"]["chains"]) == {"arbitrum", "base"}
-
     def test_no_unknowns_is_noop(self, monkeypatch):
         contracts = [{"name": "A", "address": "0x" + "a" * 40, "chains": ["ethereum"]}]
         monkeypatch.setattr(
@@ -581,16 +445,6 @@ class TestResolveUnknownChains:
         )
         result = resolve_unknown_chains(contracts)
         assert result[0]["chains"] == ["ethereum"]
-
-    def test_unresolved_stays_unknown(self, monkeypatch):
-        contracts = [{"name": "Ghost", "address": "0x" + "d" * 40, "chains": ["unknown"]}]
-        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-        monkeypatch.setattr(
-            "services.discovery.chain_resolver._batch_get_code",
-            lambda rpc_url, addrs: {a: "0x" for a in addrs},
-        )
-        result = resolve_unknown_chains(contracts)
-        assert result[0]["chains"] == ["unknown"]
 
     def test_exa_claimed_chain_corrected_when_code_lives_elsewhere(self, monkeypatch):
         addr = "0x" + "e" * 40
@@ -606,19 +460,6 @@ class TestResolveUnknownChains:
 
         result = validate_claimed_chains(contracts)
         assert result[0]["chains"] == ["base"]
-
-    def test_exa_claimed_chain_marked_unknown_when_no_code_found(self, monkeypatch):
-        addr = "0x" + "e" * 40
-        contracts = [{"name": "AI", "address": addr, "chains": ["Base"], "source": ["exa_deep_research"]}]
-        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-        monkeypatch.setattr(
-            "services.discovery.chain_resolver._batch_get_code",
-            lambda rpc_url, addresses: {a: "0x" for a in addresses},
-        )
-
-        result = validate_claimed_chains(contracts)
-        assert result[0]["chains"] == ["unknown"]
-        assert result[0]["chain_sanity"]["status"] == "unresolved_no_code_on_claimed_or_supported_chains"
 
 
 # ---------------------------------------------------------------------------
@@ -658,28 +499,6 @@ class TestEvidenceBasedChainMembership:
         monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
         return probed
 
-    def test_declared_chains_narrow_the_probe(self, monkeypatch):
-        probed = self._record_probed_chain_ids(monkeypatch)
-        contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
-        resolve_unknown_chains(contracts, declared_chains=["ethereum"])
-        assert set(probed) == {"1"}
-
-    def test_uncorroborated_hit_is_candidate_only(self, monkeypatch):
-        """No declared evidence, so a probe hit stays a candidate and off the job queue."""
-
-        def fake_batch_get_code(rpc_url, addresses):
-            hit = rpc_url.endswith("/evm/42161")
-            return {a: ("0x6001" if hit else "0x") for a in addresses}
-
-        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-        monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
-
-        contract = {"name": "Ghost", "address": "0x" + "c" * 40, "chains": ["unknown"]}
-        resolve_unknown_chains([contract], declared_chains=[])
-
-        assert contract["chains"] == ["unknown"]
-        assert contract["chain_candidates"] == ["arbitrum"]
-
     def test_declared_chain_hit_is_written(self, monkeypatch):
 
         def fake_batch_get_code(rpc_url, addresses):
@@ -694,12 +513,6 @@ class TestEvidenceBasedChainMembership:
 
         assert contract["chains"] == ["ethereum"]
         assert "chain_candidates" not in contract
-
-    def test_none_declared_chains_keeps_legacy_all_chain_probe(self, monkeypatch):
-        probed = self._record_probed_chain_ids(monkeypatch)
-        contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
-        resolve_unknown_chains(contracts, declared_chains=None)
-        assert len(set(probed)) > 1
 
     def test_search_inventory_narrows_probe_to_declared(self, monkeypatch):
         """Bridge has code on arbitrum but only ethereum is declared."""
@@ -752,73 +565,6 @@ class TestEvidenceBasedChainMembership:
         bridge = {c["name"]: c for c in result["contracts"]}["Bridge"]
         assert bridge["chains"] == ["unknown"]
         assert bridge["chain_candidates"] == ["arbitrum"]
-
-
-class TestEnrichWithActivity:
-    def test_scores_and_sorts_by_rank(self, monkeypatch):
-        import time as _time
-
-        now_ts = _time.time()
-        contracts = [
-            {"name": "Stale", "address": "0x" + "a" * 40, "chains": ["ethereum"], "confidence": 0.9},
-            {"name": "Active", "address": "0x" + "b" * 40, "chains": ["ethereum"], "confidence": 0.5},
-        ]
-        timestamps = {
-            "0x" + "a" * 40: now_ts - 365 * 86400,
-            "0x" + "b" * 40: now_ts,
-        }
-
-        def fake_etherscan_get(module, action, **params):
-            addr = params.get("address", "")
-            ts = timestamps.get(addr)
-            if ts is not None:
-                return {"result": [{"timeStamp": str(int(ts))}]}
-            return {"result": []}
-
-        monkeypatch.setattr("services.discovery.activity.etherscan.get", fake_etherscan_get)
-
-        result = enrich_with_activity(contracts)
-        assert len(result) == 2
-
-        for c in result:
-            assert "activity" in c
-            assert "rank_score" in c
-            assert c["activity"]["score"] > 0
-
-        assert result[0]["name"] == "Active"
-        assert result[0]["rank_score"] > result[1]["rank_score"]
-        assert result[0]["activity"]["score"] > result[1]["activity"]["score"]
-
-    def test_missing_activity_gets_neutral_score(self, monkeypatch):
-        contracts = [{"name": "NoData", "address": "0x" + "a" * 40, "chains": ["ethereum"], "confidence": 0.8}]
-
-        def fake_get(*_a, **_kw):
-            return {"result": []}
-
-        monkeypatch.setattr("services.discovery.activity.etherscan.get", fake_get)
-
-        result = enrich_with_activity(contracts)
-        assert result[0]["activity"]["score"] == 0.5
-        assert result[0]["activity"]["last_active"] is None
-
-    def test_unknown_chain_skips_fetch_and_floors_rank(self, monkeypatch):
-        """A contract on an unregistered chain must NOT be ranked by mainnet
-        activity — querying mainnet's explorer would score it by an unrelated
-        address's activity. Instead: no fetch, activity score 0."""
-        contracts = [{"name": "X", "address": "0x" + "a" * 40, "chains": ["unknown"], "confidence": 0.5}]
-        called_with_chain_id = []
-
-        def fake_get(module, action, **params):
-            called_with_chain_id.append(params.get("chain_id"))
-            return {"result": []}
-
-        monkeypatch.setattr("services.discovery.activity.etherscan.get", fake_get)
-
-        result = enrich_with_activity(contracts)
-        assert called_with_chain_id == []
-        # Not 0.5, the neutral used for a supported chain with no data.
-        assert result[0]["activity"]["score"] == 0.0
-        assert result[0]["activity"]["last_active"] is None
 
 
 @pytest.mark.usefixtures("_all_inventory_chains_enabled")

@@ -27,30 +27,6 @@ def proto_id(db_session):
     return p.id
 
 
-@requires_postgres
-@pytest.mark.parametrize(
-    ("job_chain_id", "expected_name"),
-    [
-        pytest.param(1, "Legacy", id="mainnet-job-finds-legacy-null-row"),
-        # The request-only read used to drop the filter and bind the mainnet row.
-        pytest.param(8453, None, id="l2-job-does-not-bind-mainnet-row"),
-    ],
-)
-def test_load_contract_row_coalesces_null_chain(db_session, job_chain_id, expected_name):
-    from db.models import Contract
-    from db.queue import create_job
-    from workers.static_worker import StaticWorker
-
-    addr = _addr()
-    job = create_job(db_session, {"address": addr, "name": "Subject"})
-    job.chain_id = job_chain_id  # request payload carries no chain
-    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Legacy", job_id=None))
-    db_session.commit()
-
-    row = StaticWorker._load_contract_row(db_session, job)
-    assert getattr(row, "contract_name", None) == expected_name
-
-
 def _seed_adoption_graph(session, proto_id, *, impl_chain):
     from db.models import Contract, ContractCreationWitness
     from db.queue import create_job

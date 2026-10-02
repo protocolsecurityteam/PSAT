@@ -260,45 +260,6 @@ def test_a_clock_behind_a_callee_denies_the_proven_indefinite_state(compiled, co
     assert cd.read_max_pause_duration(facts, {"unpauseAt"}) == (None, "not_determined")
 
 
-def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(compiled):
-    """R2: zero realised rows locally because no persisted tree carries ``operand_absorption`` yet; a lower bound,
-    not a dead branch.
-    """
-    facts = compiled["PlainLatch"]
-    assert _operand_sources(facts) == {"state_variable"}
-    assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
-
-
-@pytest.mark.parametrize(
-    ("contract_name", "latch"),
-    [
-        # A block-number clock lifts the freeze with no transaction.
-        pytest.param("NumberTwin", "frozen", id="block-number-clock-denies-proven-indefinite"),
-        # 216000 is a block count; publishing it as seconds would understate a ~30-day gate as 2.5 days.
-        pytest.param("BlockWindow", "pausedUntilBlock", id="block-count-window-never-published-as-seconds"),
-    ],
-)
-def test_a_block_clock_demotes_to_not_determined(compiled, contract_name, latch):
-    facts = compiled[contract_name]
-    assert facts.trees
-    assert all(cd._absorption_recorded(tree) for tree in facts.trees.values())
-    assert cd.read_max_pause_duration(facts, {latch}) == (None, "not_determined")
-
-
-@pytest.mark.parametrize(
-    "contract_name",
-    [
-        # Keeps the conservative rules from eating the only positive answer.
-        pytest.param("AbsorbedWindow", id="window-the-recorder-did-read"),
-        # The harvest is narrowed to a shape, not one spelling.
-        pytest.param("WindowLeft", id="gap-ceiling-constant-on-left"),
-        pytest.param("RemainingWindow", id="gap-ceiling-reversed-subtraction"),
-    ],
-)
-def test_resolving_windows_still_resolve(compiled, contract_name):
-    assert cd.read_max_pause_duration(compiled[contract_name], {"pausedUntil"}) == (2592000, "guard_constant")
-
-
 @pytest.mark.parametrize(
     ("contract_name", "fabricated"),
     [

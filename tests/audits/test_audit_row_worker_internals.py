@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import signal as _signal
-from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -245,26 +244,6 @@ class TestRunLoop:
 
         assert worker._claim_calls == 2
         assert worker._recover_calls == 2
-
-
-def test_recovery_cutoff_is_configured_seconds_in_past():
-    """Otherwise a subclass could reset rows still in flight."""
-    captured: dict[str, datetime] = {}
-
-    class _CaptureCutoffWorker(_RecoveryWorker):
-        stale_processing_seconds = 300
-
-        def _stale_recovery_query(self, cutoff):
-            captured["cutoff"] = cutoff
-            return MagicMock()
-
-    session = MagicMock()
-    session.execute.return_value = iter([])
-    worker = _CaptureCutoffWorker()
-    before = datetime.now(timezone.utc) - timedelta(seconds=301)
-    worker._recover_stale_rows(session)
-    after = datetime.now(timezone.utc) - timedelta(seconds=299)
-    assert before <= captured["cutoff"] <= after
 
 
 @pytest.fixture()

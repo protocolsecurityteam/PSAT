@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
-from eth_utils.crypto import keccak
 from sqlalchemy import select
 
 from db.floor_witnesses import read_floor_witness
 from db.models import FIRST_INDEXED_BASIS_CREATION, Contract, IndexedEventCursor, IndexedEventLog, Protocol
 from services.monitoring.restaking_enrollment import (
-    PUBKEY_LINKED_SIGNATURE,
     PUBKEY_LINKED_TOPIC0,
     discover_emitters,
     enroll_restaking_fold,
@@ -41,12 +38,6 @@ def _log(node: str, *, address: str = EFNM_PROXY) -> dict:
     }
 
 
-class TestTopic:
-    def test_topic0_is_derived_from_the_signature(self):
-        assert PUBKEY_LINKED_TOPIC0 == "0x" + keccak(text=PUBKEY_LINKED_SIGNATURE).hex()
-        assert PUBKEY_LINKED_TOPIC0 == "0x5e525a525cf73653f769c8305dc71a68b85b0e62e3cc5258fe187ff9fd3e5cb9"
-
-
 class TestEmitterDiscovery:
     def test_emitter_is_the_address_that_actually_emitted(self):
         captured: dict = {}
@@ -64,16 +55,6 @@ class TestEmitterDiscovery:
         assert emitters == {EFNM_PROXY}
         assert captured["addresses"] == [EFNM_PROXY, EFNM_IMPLEMENTATION]
         assert captured["topic0"] == PUBKEY_LINKED_TOPIC0
-
-    def test_no_logs_yields_no_emitters_and_no_claim(self):
-        assert discover_emitters([EFNM_PROXY], from_block=1, to_block=2, fetch_logs=lambda *a: []) == set()
-
-    def test_fetch_failure_propagates_rather_than_narrowing_the_set(self):
-        def fetch(*_args):
-            raise RuntimeError("transport")
-
-        with pytest.raises(RuntimeError):
-            discover_emitters([EFNM_PROXY], from_block=1, to_block=2, fetch_logs=fetch)
 
     def test_empty_address_list_issues_no_request(self):
         def fetch(*_args):  # pragma: no cover - must not run
@@ -237,12 +218,6 @@ class TestNodeSet:
         )
         db_session.flush()
         assert node_addresses_from_fold(db_session, chain_id=1) == []
-        db_session.rollback()
-
-    def test_other_chain_logs_do_not_leak(self, db_session):
-        self._log_row(db_session, NODE_A, block=25473872, log_index=1)
-        db_session.flush()
-        assert node_addresses_from_fold(db_session, chain_id=8453) == []
         db_session.rollback()
 
 

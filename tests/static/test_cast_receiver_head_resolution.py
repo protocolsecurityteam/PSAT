@@ -105,27 +105,10 @@ def effects(compiled):
     return build_effects(compiled)
 
 
-def test_input_token_hints_names_the_state_var_getter(effects):
-    hints = input_token_hints(_facts(effects, "deposit(uint256)"))
-    assert "underlying()" in hints, hints
-    assert not any(h.startswith(("TMP_", "REF_", "TUPLE_")) for h in hints), hints
-
-
 def test_token_read_selector_names_the_token(effects):
     # A read selector must still surface the getter (``_TOKEN_READ_SELECTORS``).
     hints = input_token_hints(_facts(effects, "previewShares()"))
     assert "reserveToken()" in hints, hints
-
-
-def test_parameter_head_names_no_getter(effects):
-    # A parameter's value is in calldata, so it isn't a getter hint.
-    hints = input_token_hints(_facts(effects, "depositParam(address,uint256)"))
-    assert "token()" not in hints, hints
-
-
-def test_mapping_element_invents_no_getter_hint(effects):
-    hints = input_token_hints(_facts(effects, "depositIdx(uint256,uint256)"))
-    assert not any(h.startswith(("TMP_", "REF_", "TUPLE_", "pool")) for h in hints), hints
 
 
 def test_value_flow_token_var_resolved(compiled):

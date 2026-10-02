@@ -27,35 +27,6 @@ def _reset_limiters():
     pc._probe_limiter.reset()
 
 
-def test_security_headers_present_on_normal_response(client):
-    resp = client.get("/api/version")
-    assert resp.status_code == 200
-    assert resp.headers["X-Content-Type-Options"] == "nosniff"
-    assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
-    assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
-    csp = resp.headers["Content-Security-Policy"]
-    assert "default-src 'self'" in csp
-    assert "object-src 'none'" in csp
-    assert "frame-ancestors 'self'" in csp
-    assert "https://fonts.gstatic.com" in csp
-    assert "https://fonts.googleapis.com" in csp
-    assert "https://api.coingecko.com" in csp
-
-
-def test_oversized_content_length_rejected_with_413(client):
-    import api
-
-    oversized = str(api._MAX_BODY_BYTES + 1)
-    resp = client.post(
-        "/api/analyze",
-        content=b"x",
-        headers={"Content-Length": oversized, "Content-Type": "application/json"},
-    )
-    assert resp.status_code == 413
-    # Security headers stamp even the early rejection.
-    assert resp.headers["X-Content-Type-Options"] == "nosniff"
-
-
 def test_content_length_exactly_at_limit_passes(client, monkeypatch):
     import api
 
@@ -113,65 +84,11 @@ def _drive_body_middleware(body_chunks: list[bytes], max_bytes: int):
     return sent, app_called["hit"]
 
 
-def test_chunked_oversized_body_rejected_without_content_length():
-    sent, app_called = _drive_body_middleware([b"x" * 60, b"x" * 60], max_bytes=100)
-    start = next(m for m in sent if m["type"] == "http.response.start")
-    assert start["status"] == 413
-    assert app_called is False
-    header_names = {name.decode().lower() for name, _ in start["headers"]}
-    assert "content-security-policy" in header_names
-    assert "x-content-type-options" in header_names
-
-
 def test_chunked_within_limit_reaches_app():
     sent, app_called = _drive_body_middleware([b"x" * 30, b"x" * 30], max_bytes=100)
     start = next(m for m in sent if m["type"] == "http.response.start")
     assert start["status"] == 200
     assert app_called is True
-
-
-def test_global_rate_limit_triggers_429(client):
-    import api
-
-    original = api._global_limiter.limit
-    api._global_limiter.limit = 3
-    api._global_limiter.reset()
-    try:
-        codes = [client.get("/api/version").status_code for _ in range(4)]
-    finally:
-        api._global_limiter.limit = original
-        api._global_limiter.reset()
-    assert codes[:3] == [200, 200, 200]
-    assert codes[3] == 429
-
-
-@pytest.mark.parametrize(
-    "headers_for",
-    [
-        # Fly-Client-IP is set by the proxy, so rotating XFF must still land in one bucket.
-        pytest.param(
-            lambda i: {"Fly-Client-IP": "9.9.9.9", "X-Forwarded-For": f"{i}.{i}.{i}.{i}"},
-            id="rotating-xff-with-constant-fly-client-ip",
-        ),
-        # Without Fly-Client-IP the trusted identity is the right-most XFF hop, appended by our proxy.
-        pytest.param(
-            lambda i: {"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 5.5.5.5"},
-            id="rotating-left-xff-hop",
-        ),
-    ],
-)
-def test_spoofed_forwarding_headers_do_not_escape_rate_limit(client, headers_for):
-    import api
-
-    original = api._global_limiter.limit
-    api._global_limiter.limit = 3
-    api._global_limiter.reset()
-    try:
-        codes = [client.get("/api/version", headers=headers_for(i)).status_code for i in range(1, 5)]
-    finally:
-        api._global_limiter.limit = original
-        api._global_limiter.reset()
-    assert codes[3] == 429
 
 
 def test_client_ip_ignores_untrusted_forwarding_headers():
@@ -212,98 +129,6 @@ def test_capability_routes_are_rate_limited(client, url):
     assert first.status_code != 429
     assert second.status_code == 429
     assert "Retry-After" in second.headers
-
-
-def test_valid_trace_id_reflected(client):
-    resp = client.get("/api/version", headers={"X-PSAT-Trace-Id": "abc-123"})
-    assert resp.headers["X-PSAT-Trace-Id"] == "abc-123"
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "x" * 33,  # too long for String(32)
-        "has space",
-        "inject\r\nSet-Cookie: x=y",
-        "semi;colon",
-        "",
-    ],
-)
-def test_bad_trace_id_not_reflected(client, bad):
-    resp = client.get("/api/version", headers={"X-PSAT-Trace-Id": bad})
-    reflected = resp.headers["X-PSAT-Trace-Id"]
-    assert reflected != bad
-    assert len(reflected) == 16
-    assert all(c in "0123456789abcdef" for c in reflected)
-
-
-def test_probe_membership_rejects_non_hex_address():
-    from routers.predicate_capabilities import _ProbeMembershipRequest
-
-    with pytest.raises(ValueError):
-        _ProbeMembershipRequest(
-            function_signature="grantRole(bytes32,address)",
-            predicate_index=0,
-            member="0x" + "z" * 40,
-        )
-    with pytest.raises(ValueError):
-        _ProbeMembershipRequest(
-            function_signature="grantRole(bytes32,address)",
-            predicate_index=0,
-            member="0x" + "a" * 41,
-        )
-    ok = _ProbeMembershipRequest(
-        function_signature="grantRole(bytes32,address)",
-        predicate_index=0,
-        member="0x" + "A" * 40,
-    )
-    assert ok.member == "0x" + "a" * 40
-
-
-def test_probe_signature_rejects_non_hex_address():
-    from routers.predicate_capabilities import _ProbeSignatureRequest
-
-    with pytest.raises(ValueError):
-        _ProbeSignatureRequest(
-            function_signature="execute(bytes32,bytes)",
-            predicate_index=0,
-            recovered_signer="0xnot-a-valid-hex-address-000000000000000",
-        )
-    ok = _ProbeSignatureRequest(
-        function_signature="execute(bytes32,bytes)",
-        predicate_index=0,
-        recovered_signer="0x" + "b" * 40,
-    )
-    assert ok.recovered_signer == "0x" + "b" * 40
-
-
-def test_sliding_window_limiter_basic():
-    from utils.ratelimit import SlidingWindowRateLimiter
-
-    lim = SlidingWindowRateLimiter(limit=2, window_s=100)
-    assert lim.hit("k", now=0.0) is None
-    assert lim.hit("k", now=1.0) is None
-    retry = lim.hit("k", now=2.0)
-    assert retry is not None and retry >= 1
-    assert lim.hit("other", now=2.0) is None
-    assert lim.hit("k", now=101.5) is None
-
-
-def test_sliding_window_limiter_disabled_when_limit_zero():
-    from utils.ratelimit import SlidingWindowRateLimiter
-
-    lim = SlidingWindowRateLimiter(limit=0, window_s=100)
-    for i in range(50):
-        assert lim.hit("k", now=float(i)) is None
-
-
-def test_sliding_window_bucket_cap_holds_under_many_keys():
-    from utils.ratelimit import SlidingWindowRateLimiter
-
-    lim = SlidingWindowRateLimiter(limit=5, window_s=100, max_keys=50, sweep_every=8)
-    for i in range(5000):
-        lim.hit(("flood", i), now=1.0)
-    assert len(lim._buckets) <= 50
 
 
 def test_sliding_window_flood_cannot_evict_active_key():

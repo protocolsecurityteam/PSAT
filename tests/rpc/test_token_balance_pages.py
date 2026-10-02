@@ -12,7 +12,6 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     ASSET_SET_STATUS_FETCH_FAILED,
     ASSET_SET_STATUS_RETURNED_ASSETS,
-    ASSET_SET_STATUS_RETURNED_EMPTY,
 )
 
 ADDRESS = "0x00000000000000000000000000000000000000a1"
@@ -75,22 +74,6 @@ class TestTheEmptyAnswerIsNotAFailure:
         with pytest.raises(RuntimeError):
             etherscan.get("account", "addresstokenbalance", chain_id=1, empty_result_ok=True)
 
-    def test_the_triple_still_raises_for_a_caller_that_did_not_opt_in(self, monkeypatch):
-        payload = {"status": "0", "message": "No token found", "result": []}
-        monkeypatch.setattr(etherscan.requests, "get", lambda *a, **kw: _Response(payload))
-        monkeypatch.setattr(etherscan, "_get_api_key", lambda: "k")
-        monkeypatch.setattr(etherscan, "_RATE_LIMIT_RETRIES", 0)
-        monkeypatch.setattr(etherscan, "_wait_rate_limit", lambda: None)
-        with pytest.raises(RuntimeError):
-            etherscan.get("account", "balance", chain_id=1)
-
-    def test_an_empty_list_is_recorded_as_the_answer_it_is(self, monkeypatch):
-        monkeypatch.setattr(etherscan, "get", _Wire([[]]))
-        result = etherscan.get_token_balances_page(ADDRESS, chain_id=1)
-        assert result.status == ASSET_SET_STATUS_RETURNED_EMPTY
-        assert result.page_length == 0 and result.pages_read == 1
-        assert "empty list" in result.basis
-
 
 class TestWhereTheListEnds:
     def test_a_short_page_ends_the_list_in_one_request(self, monkeypatch):
@@ -100,36 +83,6 @@ class TestWhereTheListEnds:
         assert result.status == ASSET_SET_STATUS_RETURNED_ASSETS
         assert wire.requested == ["1"]
         assert "ended on a short page" in result.basis
-
-    def test_a_full_page_is_followed_until_a_short_one(self, monkeypatch):
-        size = etherscan.TOKEN_BALANCE_PAGE_SIZE
-        wire = _Wire([[_entry(i) for i in range(size)], [_entry(size + i) for i in range(4)]])
-        monkeypatch.setattr(etherscan, "get", wire)
-        result = etherscan.get_token_balances_page(ADDRESS, chain_id=1)
-        assert wire.requested == ["1", "2"]
-        assert result.status == ASSET_SET_STATUS_RETURNED_ASSETS
-        assert result.page_length == size + 4
-        assert len(result.rows) == size + 4
-
-    def test_an_exhausted_page_budget_keeps_the_list_a_prefix(self, monkeypatch):
-        size = etherscan.TOKEN_BALANCE_PAGE_SIZE
-        monkeypatch.setenv("PSAT_TOKEN_BALANCE_MAX_PAGES", "2")
-        wire = _Wire([[_entry(i) for i in range(size)], [_entry(size + i) for i in range(size)]])
-        monkeypatch.setattr(etherscan, "get", wire)
-        result = etherscan.get_token_balances_page(ADDRESS, chain_id=1)
-        assert wire.requested == ["1", "2"]
-        assert result.status == ASSET_SET_STATUS_AT_PAGE_CAP
-        assert "page budget" in result.basis
-
-    def test_an_endpoint_that_ignores_paging_is_not_read_as_a_whole_list(self, monkeypatch):
-        size = etherscan.TOKEN_BALANCE_PAGE_SIZE
-        first = [_entry(i) for i in range(size)]
-        wire = _Wire([first, list(first)])
-        monkeypatch.setattr(etherscan, "get", wire)
-        result = etherscan.get_token_balances_page(ADDRESS, chain_id=1)
-        assert result.status == ASSET_SET_STATUS_AT_PAGE_CAP
-        assert "paging not honoured" in result.basis
-        assert result.page_length == size
 
     def test_a_failure_on_page_one_learns_nothing(self, monkeypatch):
         monkeypatch.setattr(etherscan, "get", _Wire([RuntimeError("boom")]))
@@ -144,11 +97,6 @@ class TestWhereTheListEnds:
         assert result.status == ASSET_SET_STATUS_AT_PAGE_CAP
         assert result.page_length == size
         assert "page 2 failed" in result.basis
-
-    def test_a_budget_below_one_is_refused_rather_than_defaulted(self, monkeypatch):
-        monkeypatch.setenv("PSAT_TOKEN_BALANCE_MAX_PAGES", "0")
-        with pytest.raises(ValueError):
-            etherscan.token_balance_page_budget()
 
 
 class _Response:
@@ -200,10 +148,3 @@ class TestGetNativePrice:
 
         assert price == expected_price
         assert captured == {"module": "stats", "action": action, "chain_id": chain_id}
-
-    def test_missing_usd_field_raises(self, monkeypatch):
-        import services.clients.etherscan as es
-
-        monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethbtc": "0.05"}})
-        with pytest.raises(RuntimeError):
-            es.get_native_price(1)

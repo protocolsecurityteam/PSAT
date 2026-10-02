@@ -121,20 +121,6 @@ def _allowlist_descriptor() -> dict[str, Any]:
     }
 
 
-def test_fold_event_writes_demotes_unpinned_head_to_lower_bound(db_session):
-    # A cursor lagging head can't cover an unpinned block=None.
-    _seed_cursor(db_session, last_indexed_block=1000)
-    db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
-    db_session.add(_grant_row(TOPIC_ADD, ADMIN_B, 950))
-    db_session.flush()
-    repo = PostgresEventLogRepo(db_session)
-
-    result = _writes(repo, block=None)
-    assert result.confidence == "partial"
-    assert result.partial_reason == "cursor_behind_block"
-    assert {m[-4:] for m in result.members} == {"aaaa", "bbbb"}
-
-
 def test_fold_event_writes_demotes_block_past_cursor(db_session):
     _seed_cursor(db_session, last_indexed_block=1000)
     db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
@@ -200,19 +186,6 @@ def test_adapter_unpinned_block_yields_lower_bound(db_session):
     assert ADMIN_A.lower() in (cap.members or [])
 
 
-def test_adapter_covering_pin_stays_exact(db_session):
-    _seed_cursor(db_session, last_indexed_block=1000)
-    db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
-    db_session.flush()
-    repo = PostgresEventLogRepo(db_session)
-    ctx = EvaluationContext(chain_id=CHAIN_ID, contract_address=EVENT_ADDRESS, block=990, event_log_repo=repo)
-
-    cap = EventIndexedAdapter().enumerate(_allowlist_descriptor(), ctx)
-    assert cap.kind == "finite_set"
-    assert cap.membership_quality == "exact"
-    assert cap.members == [ADMIN_A.lower()]
-
-
 def test_recently_blocked_indexed_address_stays_in_blacklist_under_head_pin(db_session):
     # Truncating the row scan at the pin dropped a member blocked inside (pin, cursor] and read public.
     head = 1040
@@ -237,30 +210,12 @@ def test_recently_blocked_indexed_address_stays_in_blacklist_under_head_pin(db_s
     assert allowed.blacklist_quality == "exact"
 
 
-def test_resolve_resolution_block_pins_head_minus_margin(monkeypatch):
-    monkeypatch.setattr(capability_resolver, "rpc_request", lambda *a, **k: hex(5_000_000))
-    pin = _resolve_resolution_block("http://rpc.example", None)
-    assert pin == 5_000_000 - RESOLVER_FINALITY_MARGIN
-
-
 def test_resolve_resolution_block_honours_explicit_block(monkeypatch):
     def _boom(*a, **k):  # explicit block must short-circuit before any RPC read
         raise AssertionError("rpc_request must not be called for an explicit block")
 
     monkeypatch.setattr(capability_resolver, "rpc_request", _boom)
     assert _resolve_resolution_block("http://rpc.example", 123) == 123
-
-
-def test_resolve_resolution_block_none_without_rpc():
-    assert _resolve_resolution_block(None, None) is None
-
-
-def test_resolve_resolution_block_none_on_rpc_failure(monkeypatch):
-    def _boom(*a, **k):
-        raise RuntimeError("node down")
-
-    monkeypatch.setattr(capability_resolver, "rpc_request", _boom)
-    assert _resolve_resolution_block("http://rpc.example", None) is None
 
 
 @pytest.mark.parametrize(

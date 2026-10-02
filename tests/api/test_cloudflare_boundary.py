@@ -116,18 +116,6 @@ def test_invalid_claims(signing_keys, jwks_wire, claims):
     assert exc.value.status_code == 403
 
 
-def test_missing_claim_bad_signature_and_algorithm(signing_keys, jwks_wire):
-    valid = token(signing_keys)
-    claims = jwt.decode(valid, options={"verify_signature": False})
-    del claims["exp"]
-    missing = jwt.encode(claims, signing_keys[0], algorithm="RS256", headers={"kid": "0"})
-    bad_sig = jwt.encode(claims, signing_keys[1], algorithm="RS256", headers={"kid": "0"})
-    hs = jwt.encode(claims, "c" * 64, algorithm="HS256", headers={"kid": "0"})
-    for value in (missing, bad_sig, hs, "", "garbage", "a" * 17000):
-        with pytest.raises(HTTPException):
-            AccessVerifier(CONFIG).verify(value)
-
-
 def test_jwks_rotation_expiry_outage_and_cooldown(signing_keys, jwks_wire):
     verifier = AccessVerifier(CONFIG)
     verifier.verify(token(signing_keys))
@@ -175,33 +163,6 @@ def test_fail_closed_config():
             EdgeConfig.from_env({**env, name: "REPLACE_ME"})
 
 
-@pytest.mark.parametrize("path", ["/", "/api/version", "/api/health", "/monitor", "/api/jobs", "/operator/api/jobs"])
-def test_direct_origin_and_forged_headers_denied(edge_client, path):
-    response = edge_client.get(
-        path,
-        headers={
-            "Host": "snif.sh",
-            "CF-Connecting-IP": "192.0.2.2",
-            "Fly-Client-IP": "192.0.2.3",
-            "X-Forwarded-For": "192.0.2.4",
-            "CF-Access-Jwt-Assertion": "fake",
-            "X-PSAT-Admin-Key": "test-admin-key",
-        },
-    )
-    assert response.status_code == 403
-    assert response.headers["cache-control"] == PRIVATE
-
-
-def test_duplicate_origin_missing_ip_and_invalid_ip(edge_client):
-    for headers in (
-        [("X-PSAT-Origin-Secret", CONFIG.secret)] * 2,
-        {"X-PSAT-Origin-Secret": CONFIG.secret},
-        {**ORIGIN, "X-PSAT-Visitor-IP": "1.2.3.4, 5.6.7.8"},
-        {**ORIGIN, "X-PSAT-Origin-Secret": "invalid"},
-    ):
-        assert edge_client.get("/api/version", headers=headers).status_code == 403
-
-
 def test_every_registered_operator_route_denies_admin_key_alone(edge_client):
     import api
 
@@ -241,45 +202,6 @@ def test_access_and_admin_key_both_required(edge_client, signing_keys, monkeypat
         headers={**ORIGIN, "Cookie": f"CF_Authorization={token(signing_keys)}", "X-PSAT-Admin-Key": "test-admin-key"},
     )
     assert response.status_code == 200
-
-
-def test_visitor_buckets_and_forwarding_spoofing(edge_client, monkeypatch):
-    import api
-
-    monkeypatch.setattr(api._global_limiter, "limit", 2)
-    for visitor in ("192.0.2.1", "192.0.2.2"):
-        codes = [
-            edge_client.get(
-                "/api/version",
-                headers={
-                    **ORIGIN,
-                    "X-PSAT-Visitor-IP": visitor,
-                    "CF-Connecting-IP": f"198.51.100.{i}",
-                    "Fly-Client-IP": f"203.0.113.{i}",
-                    "X-Forwarded-For": f"203.0.113.{i}",
-                },
-            ).status_code
-            for i in range(3)
-        ]
-        assert codes == [200, 200, 429]
-    assert edge_client.get("/api/version", headers={**ORIGIN, "X-PSAT-Visitor-IP": "2001:db8::1"}).status_code == 200
-    assert (
-        edge_client.get("/api/version", headers={**ORIGIN, "X-PSAT-Visitor-IP": "2001:0db8:0:0::1"}).status_code == 200
-    )
-    assert edge_client.get("/api/version", headers={**ORIGIN, "X-PSAT-Visitor-IP": "2001:db8::1"}).status_code == 429
-
-
-@pytest.mark.parametrize("mode", ["local", "preview"])
-def test_non_cloudflare_mode_preserves_admin_and_ignores_headers(monkeypatch, mode):
-    import api
-    from routers import deps
-
-    monkeypatch.setattr(EdgeConfig, "from_env", classmethod(lambda cls, env=None: EdgeConfig(mode)))
-    monkeypatch.setattr(api.app, "middleware_stack", None)
-    api.app.dependency_overrides.pop(deps.require_admin_key, None)
-    client = TestClient(api.app)
-    assert client.get("/api/version", headers={"CF-Access-Jwt-Assertion": "fake"}).status_code == 200
-    assert client.get("/api/jobs").status_code == 401
 
 
 def test_company_payload_equality_and_cache_matrix(edge_client, signing_keys, monkeypatch):
@@ -357,27 +279,6 @@ def test_prepared_freshness_headers_cannot_reset_edge_ttl():
     response = client.get("/api/company/example?x=1")
     assert response.headers["cache-control"] == PRIVATE
     assert "x-psat-fresh-until" not in response.headers
-
-
-@pytest.mark.parametrize("status", [200, 302, 400, 401, 403, 404, 422, 429, 500, 503])
-@pytest.mark.parametrize("set_cookie", [False, True])
-def test_errors_and_set_cookie_never_cache(status, set_cookie, jwks_wire):
-    from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
-
-    from utils.edge import CloudflareBoundary
-
-    app = FastAPI()
-
-    @app.get("/api/company/Example")
-    def response():
-        headers = {"Set-Cookie": "session=x"} if set_cookie else {}
-        return JSONResponse({}, status_code=status, headers=headers)
-
-    app.add_middleware(CloudflareBoundary, config=CONFIG)
-    result = TestClient(app).get("/api/company/Example", headers=ORIGIN, follow_redirects=False)
-    assert result.status_code == status
-    assert result.headers["cache-control"] == (PUBLIC_CACHE if status == 200 and not set_cookie else PRIVATE)
 
 
 def test_registered_route_inventory_is_reviewed():

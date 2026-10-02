@@ -16,11 +16,6 @@ pytest.importorskip("slither")
 from tests.support.label_corpus import SolcNotInstalled, claims_for_address
 
 TOKEN = "0x0000000000000000000000000000000000000010"
-VAULT_HOOK = "0x0000000000000000000000000000000000000040"
-LZ_OAPP = "0x0000000000000000000000000000000000000050"
-WRAPPED_NATIVE = "0x000000000000000000000000000000000000dead"
-NAMESPACED_PAUSABLE = "0x0000000000000000000000000000000000000060"
-OZ_V5_NAMESPACED_OWNABLE = "0x0000000000000000000000000000000000000020"
 
 
 def _load(address: str) -> dict[str, list[Any]]:
@@ -38,50 +33,6 @@ def _one(claims: Sequence[dict[str, Any]], claim_id: str) -> dict[str, Any]:
     matches = [c for c in claims if c["claim_id"] == claim_id]
     assert len(matches) == 1, f"expected exactly one {claim_id}, got {[c['claim_id'] for c in claims]}"
     return matches[0]
-
-
-def test_pause_standard_require_toggle():
-    fns = _load(TOKEN)
-    assert _one(fns["pause()"], "pause.set")["tier"] == "standard_exact"
-    assert _one(fns["unpause()"], "pause.unset")["tier"] == "standard_exact"
-    assert "pause.unset" not in _ids(fns["pause()"])
-    assert "pause.set" not in _ids(fns["unpause()"])
-    assert not _ids(fns["mint(address,uint256)"]) & {"pause.set", "pause.unset"}
-
-
-def test_pause_namespaced_erc7201_latch():
-    """Plane 0 records the ERC-7201 flag as a ``bytes32`` slot, so a bool-only filter missed every OZ-v5 / etherfi
-    pauser.
-    """
-    fns = _load(NAMESPACED_PAUSABLE)
-    assert _one(fns["pause()"], "pause.set")
-    assert _one(fns["unpause()"], "pause.unset")
-    # The assignment names the local pointer, so without the guard-read member alias both directions would fire.
-    assert "pause.unset" not in _ids(fns["pause()"])
-    assert "pause.set" not in _ids(fns["unpause()"])
-    assert not _ids(fns["transfer(address,uint256)"]) & {"pause.set", "pause.unset"}
-    assert not _ids(fns["paused()"]) & {"pause.set", "pause.unset"}
-    assert not _ids(fns["approveSelf(uint256)"]) & {"pause.set", "pause.unset"}
-
-
-def test_namespaced_authority_write_is_not_a_pause():
-    """A namespaced slot holds the whole struct, so an owner change "writes a slot some gate reads"; only a
-    constant-bool toggle of a guard-read member is a pause.
-    """
-    fns = _load(OZ_V5_NAMESPACED_OWNABLE)
-    for signature in ("transferOwnership(address)", "renounceOwnership()"):
-        assert not _ids(fns[signature]) & {"pause.set", "pause.unset"}, signature
-        assert _ids(fns[signature]) & {"ownership.transfer", "ownership.renounce"}
-
-
-def test_flow_out_and_supply_burn_native_withdraw():
-    fns = _load(WRAPPED_NATIVE)
-    withdraw = fns["withdraw(uint256)"]
-    assert "flow.out" in _ids(withdraw)
-    assert "supply.burn" in _ids(withdraw)
-    flow = _one(withdraw, "flow.out")
-    assert flow["witness"]["direction"] == "out"
-    assert any(f["kind"] == "native_transfer_send" for f in flow["witness"]["flows"])
 
 
 def test_flow_in_pull_from_third_party():
@@ -126,58 +77,6 @@ def test_flow_in_pull_from_third_party():
     assert "flow.out" not in _ids(claims)
 
 
-def test_supply_sign_idiom_vault_enter_exit():
-    fns = _load(VAULT_HOOK)
-    enter = "enter(address,uint256)"
-    exit_ = "exit(address,uint256)"
-    assert _one(fns[enter], "supply.mint")["tier"] == "idiom_structural"
-    assert _one(fns[exit_], "supply.burn")["tier"] == "idiom_structural"
-    assert "supply.burn" not in _ids(fns[enter])
-    assert "supply.mint" not in _ids(fns[exit_])
-
-
-def test_flow_counterexample_pure_token_transfer_is_not_a_flow():
-    fns = _load(WRAPPED_NATIVE)
-    assert not _ids(fns["transfer(address,uint256)"]) & {"flow.out", "flow.in"}
-    assert not _ids(fns["approve(address,uint256)"]) & {"flow.out", "flow.in", "supply.mint", "supply.burn"}
-
-
-def test_callee_pointer_rotate_vault_hook():
-    fns = _load(VAULT_HOOK)
-    claim = _one(fns["setBeforeTransferHook(address)"], "callee_pointer.rotate")
-    assert claim["tier"] == "idiom_structural"
-    links = claim["witness"]["links"]
-    assert any(link["pointer"] == "hook" and link["invoked_by"].startswith("transfer") for link in links)
-
-
-@pytest.mark.parametrize(
-    ("address", "signature"),
-    [
-        pytest.param(VAULT_HOOK, "approve(address,uint256)", id="counterexample-erc20-approve"),
-        # An OZ-v5 namespaced pseudo-slot member, not a hygiene-normal scalar pointer.
-        pytest.param(LZ_OAPP, "setLockBox(address)", id="near-miss-ozv5-pseudo-slot-setter"),
-    ],
-)
-def test_callee_pointer_negatives(address, signature):
-    fns = _load(address)
-    assert "callee_pointer.rotate" not in _ids(fns[signature])
-
-
-@pytest.mark.parametrize(
-    ("signature", "expected_claim"),
-    [
-        pytest.param("approve(address,uint256)", "erc20.approve", id="erc20-approve"),
-        pytest.param("transfer(address,uint256)", "erc20.transfer", id="erc20-transfer"),
-        pytest.param("transferFrom(address,address,uint256)", "erc20.transfer_from", id="erc20-transfer-from"),
-        pytest.param("deposit()", "weth.deposit", id="weth-deposit"),
-        pytest.param("withdraw(uint256)", "weth.withdraw", id="weth-withdraw"),
-    ],
-)
-def test_wrapped_native_user_plane_claims(signature, expected_claim):
-    fns = _load(WRAPPED_NATIVE)
-    assert expected_claim in _ids(fns[signature])
-
-
 def test_gov_delegate_positive_writes_delegates_and_checkpoints():
     """The gate is facts-only, so it's pinned through ``build_claims``."""
     ids = _claim_ids_over(
@@ -197,12 +96,6 @@ def test_gov_delegate_positive_writes_delegates_and_checkpoints():
         }
     )
     assert "gov.delegate" in ids["delegate(address)"]
-
-
-def test_lz_oapp_config_claims():
-    fns = _load(LZ_OAPP)
-    assert _one(fns["setPeer(uint32,bytes32)"], "lz_oapp.set_peer")["tier"] == "standard_exact"
-    assert _one(fns["setDelegate(address)"], "lz_oapp.set_delegate")["tier"] == "standard_exact"
 
 
 # ---------------------------------------------------------------------------

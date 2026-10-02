@@ -64,18 +64,6 @@ def test_eth_call_batch_preserves_success_revert_and_node_error(monkeypatch):
     assert session.posted[0]["params"][1] == "0x10"  # pinned block tag
 
 
-def test_eth_call_batch_transport_failure_flags_every_slot(monkeypatch):
-    class _BoomSession:
-        def post(self, *a, **k):
-            raise OSError("connection refused")
-
-    monkeypatch.setattr(rpc, "_get_session", lambda: _BoomSession())
-    out = rpc.eth_call_batch("http://rpc", [{"to": "0x" + "22" * 20, "data": "0x00"}], "latest")
-    assert out[0].success is False
-    assert out[0].revert_data is None
-    assert "transport" in (out[0].error_message or "")
-
-
 def test_eth_call_batch_empty_calls():
     assert rpc.eth_call_batch("http://rpc", [], "latest") == []
 

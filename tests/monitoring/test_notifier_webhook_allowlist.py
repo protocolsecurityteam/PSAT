@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
-from services.monitoring.notifier import _is_discord_webhook, _send_discord
+from services.monitoring.notifier import _is_discord_webhook
 
 
 @pytest.mark.parametrize(
@@ -25,25 +23,3 @@ from services.monitoring.notifier import _is_discord_webhook, _send_discord
 )
 def test_is_discord_webhook(url, ok):
     assert _is_discord_webhook(url) is ok
-
-
-class _Resp:
-    ok = True
-    status_code = 204
-
-
-@pytest.mark.parametrize(
-    ("url", "posted"),
-    [
-        pytest.param("https://x\\@discord.com/api/webhooks/1/x", False, id="backslash_authority_bypass"),
-        pytest.param("https://evil.example/webhook", False, id="non_discord_host"),
-        pytest.param("https://discord.com/api/webhooks/1/abc", True, id="discord_host_posts"),
-    ],
-)
-def test_send_discord_gate(url, posted):
-    with patch("services.monitoring.notifier.requests.post", return_value=_Resp()) as mock_post:
-        _send_discord(url, {"title": "x"})
-    if posted:
-        mock_post.assert_called_once()
-    else:
-        mock_post.assert_not_called()

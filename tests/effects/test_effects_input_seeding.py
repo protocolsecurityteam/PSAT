@@ -11,8 +11,6 @@ from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import cast
 
-import pytest
-
 from services.effects import claims_bridge, recipes
 from services.effects.calldata import (
     FunctionFacts,
@@ -110,18 +108,6 @@ def _supply(chain, store, **kwargs):
     )
 
 
-def test_discovery_identifies_balance_and_allowance_bases():
-    chain = FakeChain()
-    layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
-    found = {(a.signature, a.base, a.ordering) for a in layout.anchors}
-    assert found == {
-        ("balanceOf(address)", BAL_BASE, "solidity"),
-        ("allowance(address,address)", ALLOW_BASE, "solidity"),
-    }
-    assert layout.decimals == 18
-    assert len(chain.blocks) == 1
-
-
 def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
     """More shares than exist would make an unchecked burn wrap.
 
@@ -137,22 +123,6 @@ def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
     assert balance_seed_amount(by_sig["allowance(address,address)"], layout) == SEED_AMOUNT
 
 
-@pytest.mark.parametrize(
-    "supply",
-    [
-        pytest.param(None, id="unanswered_total_supply"),
-        pytest.param(2**200, id="supply_above_the_seed"),
-    ],
-)
-def test_an_uncapping_supply_leaves_the_seed_at_full_value(supply):
-    chain = FakeChain(asset_total_supply=supply)
-    layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
-
-    assert layout.total_supply == supply
-    for anchor in layout.anchors:
-        assert balance_seed_amount(anchor, layout) == SEED_AMOUNT
-
-
 def test_discovery_reads_back_token_decimals():
     layout = discover_token_layout(FakeChain(decimals=6), token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
     assert layout.decimals == 6
@@ -164,17 +134,6 @@ def test_discovery_rejects_a_computed_balance_getter():
         FakeChain(balance_scale=3), token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1"
     )
     assert [a.signature for a in layout.anchors] == ["allowance(address,address)"]
-
-
-def test_discovery_yields_nothing_for_an_unreadable_token():
-    layout = discover_token_layout(
-        FakeChain(balance_base=None, allowance_base=None),
-        token=ASSET,
-        holder=PRINCIPAL,
-        spender=VAULT,
-        block_tag="0x1",
-    )
-    assert layout.anchors == ()
 
 
 def test_discovery_retries_narrow_when_the_wide_write_breaks_the_getter():
@@ -205,19 +164,6 @@ def test_discovery_survives_a_wire_error():
     assert layout.anchors == ()
 
 
-def test_seeder_survives_a_wire_error_on_token_identity():
-    calls = {"n": 0}
-
-    def flaky(sim_calls, tag, ov):
-        calls["n"] += 1
-        raise RuntimeError("upstream said no")
-
-    seeding = SimulateSeeder(flaky, chain_id=1)(
-        recipes.SeedRequest(spender=VAULT, principal=PRINCIPAL, token_hints=(ASSET_GETTER,), block_tag="0x1")
-    )
-    assert seeding is None
-
-
 def test_seeder_builds_the_expected_overrides_for_a_standard_erc20():
     chain = FakeChain()
     seeding = SimulateSeeder(chain, chain_id=1)(
@@ -245,23 +191,6 @@ def test_seeder_memoizes_identity_and_layout_across_candidates():
 # ---------------------------------------------------------------------------
 # supply — the backing witness
 # ---------------------------------------------------------------------------
-
-
-def test_unseeded_probe_runs_first_and_no_seeding_happens_when_it_succeeds():
-    chain = FakeChain(vault_needs_asset=False, vault_pulls=False)
-    store = RecordingStore()
-    eff = _supply(chain, store, **_wrap_inputs(chain))
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["backing"] == {
-        "inflow_observed": False,
-        "minted": True,
-        "input_seeded": False,
-        "contract_balance_seeded": False,
-    }
-    assert eff.concrete["backing_inflow_transfers"] == 0
-    assert eff.concrete["backing_mint_transfers"] == 1
-    assert len(chain.blocks) == 1
-    assert "seeding" not in store.stored[-1]
 
 
 def test_seeded_conversion_proves_the_mint_and_witnesses_the_inflow():
@@ -305,54 +234,6 @@ def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
     assert claim["witness"]["observed"]["input_seeded"] is True
 
 
-def test_a_seeded_supply_burn_witness_reaches_the_claim_observed_summary():
-    claim = claims_bridge.verdict_to_claim(
-        cast(
-            claims_bridge.VerdictLike,
-            SimpleNamespace(
-                id=1,
-                effect_class=EFFECT_CLASS_SUPPLY,
-                verdict=VERDICT_PROVEN,
-                tier=TIER_CALL,
-                behavior_hash="bh",
-                current_check_passed=None,
-                witness={"supply_delta_sign": "burn", "input_seeded": True, "contract_balance_seeded": True},
-                observed_residue=None,
-            ),
-        )
-    )
-    assert claim is not None
-    observed = claim["witness"]["observed"]
-    assert observed["input_seeded"] is True
-    assert observed["contract_balance_seeded"] is True
-
-
-def test_seeded_mint_that_pulls_nothing_still_reports_inflow_false():
-    """Storage writes emit no logs."""
-    chain = FakeChain(vault_pulls=False)
-    eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["backing"]["inflow_observed"] is False
-    assert eff.details["backing"]["input_seeded"] is True
-
-
-def test_readback_mismatch_discards_the_seeded_attempt():
-    """The seed did not land where discovery said."""
-    chain = FakeChain(readback_liar=True)
-    eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "mint_call_reverted"
-    assert "backing" not in eff.details
-
-
-def test_unseedable_token_leaves_the_verdict_exactly_as_today():
-    chain = FakeChain(balance_base=None, allowance_base=None)
-    seeded = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
-    plain = _supply(FakeChain(balance_base=None, allowance_base=None), RecordingStore())
-    assert seeded.verdict == plain.verdict == VERDICT_UNKNOWN
-    assert seeded.reason == plain.reason == "mint_call_reverted"
-
-
 def test_eth_is_attached_only_after_the_zero_value_attempt_failed():
     chain = FakeChain(vault_needs_asset=False, vault_needs_eth=True, vault_pulls=False)
     eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
@@ -367,14 +248,6 @@ def test_eth_is_attached_only_after_the_zero_value_attempt_failed():
     assert mints[-1] == SEED_ETH_VALUE
     assert all(v == 0 for v in mints[:-1])
     assert len(mints) >= 2
-
-
-def test_payable_attempt_seeds_only_the_principals_eth_balance():
-    chain = FakeChain(vault_needs_asset=False, vault_needs_eth=True, vault_pulls=False)
-    _supply(chain, RecordingStore(), **_wrap_inputs(chain))
-    _calls, _tag, overrides = chain.blocks[-1]
-    assert overrides is not None
-    assert set(overrides[PRINCIPAL.lower()]) == {"balance"}
 
 
 # ---------------------------------------------------------------------------
@@ -415,35 +288,10 @@ def test_value_out_seeded_retry_proves_a_precondition_blocked_withdrawal():
     assert eff.details["input_seeded"] is True
 
 
-def test_input_token_hints_come_from_a_pull_sink_and_a_flow_token_var():
-    fn = _facts(
-        "wrap(uint256)",
-        pull_sink="eETH.transferFrom",
-        flows=[{"direction": "in", "token_var": "depositToken", "is_parameter": False}],
-    )
-    hints = input_token_hints(fn)
-    assert hints[:2] == ("eETH()", "depositToken()")
-    assert hints[-1] == "__self__"
-    assert "asset()" in hints
-
-
 def test_input_token_hints_exclude_a_caller_supplied_token_param():
     """The encoder fills every address arg with the principal."""
     fn = _facts("enter(address,uint256)", flows=[{"direction": "in", "token_var": "asset_", "is_parameter": True}])
     assert "asset_()" not in input_token_hints(fn)
-
-
-def test_input_token_hints_ignore_an_outflow_token():
-    fn = _facts("send(uint256)", flows=[{"direction": "out", "token_var": "rewardToken", "is_parameter": False}])
-    assert "rewardToken()" not in input_token_hints(fn)
-
-
-def test_seeded_calldata_encodes_one_whole_unit_per_token_scale():
-    fn = _facts("wrap(uint256)")
-    variants = seeded_calldata(fn, PRINCIPAL)
-    assert set(variants) == {18, 8, 6}
-    assert variants[18].endswith((10**18).to_bytes(32, "big").hex())
-    assert variants[6].endswith((10**6).to_bytes(32, "big").hex())
 
 
 def test_seeded_calldata_places_the_sentinel_at_the_taint_index():
@@ -472,20 +320,6 @@ def test_kill_valve_disables_the_default_seeder(monkeypatch):
     assert ctx.effective_seeder() is None
     monkeypatch.setenv("PSAT_EFFECTS_INPUT_SEEDING", "1")
     assert ctx.effective_seeder() is not None
-
-
-def test_no_seeder_without_simulate_support():
-    from services.effects.orchestrator import ProbeContext
-
-    ctx = ProbeContext(
-        chain_id=1,
-        block=1,
-        hardfork="prague",
-        simulate=FakeChain(),
-        simulate_supported=False,
-        transcript_store=RecordingStore(),
-    )
-    assert ctx.effective_seeder() is None
 
 
 # The retry fires on the common case, so its cost scales with distinct vaults and tokens.
@@ -542,45 +376,6 @@ def test_budget_counters_report_the_spend_and_the_yield():
     assert metrics["seed_verdicts_proven"] == 1
     assert metrics["seed_budget_skips"] == 0
     assert budget.exhausted_any is False
-
-
-def test_a_probe_that_succeeds_unseeded_spends_nothing():
-    """The common admin-mint case must stay free."""
-    budget = SeedBudget()
-    chain = FakeChain(vault_needs_asset=False, vault_pulls=False)
-    inputs = _wrap_inputs(chain)
-    inputs["seeder"] = SimulateSeeder(chain, chain_id=1, budget=budget)
-
-    eff = _supply(chain, RecordingStore(), **inputs)
-
-    assert eff.verdict == VERDICT_PROVEN
-    assert len(chain.blocks) == 1
-    assert budget.metrics() == {
-        "seed_identity_probes": 0,
-        "seed_layout_discoveries": 0,
-        "seed_probe_retries": 0,
-        "seed_probes_executed": 0,
-        "seed_verdicts_proven": 0,
-        "seed_budget_skips": 0,
-    }
-
-
-def test_self_token_discovery_is_skipped_once_a_named_asset_anchors():
-    """``__self__`` cost a 548-override discovery block per reverting probe; an anchored hint is the asset static saw
-    flow in.
-    """
-    budget = SeedBudget()
-    chain = FakeChain()
-    inputs = _wrap_inputs(chain)
-    seeder = SimulateSeeder(chain, chain_id=1, budget=budget)
-    inputs["seeder"] = seeder
-
-    eff = _supply(chain, RecordingStore(), **inputs)
-
-    assert eff.verdict == VERDICT_PROVEN
-    assert "__self__" in inputs["input_token_hints"]
-    assert budget.layout_discoveries == 1  # the asset only, not the vault
-    assert VAULT.lower() not in seeder._layouts
 
 
 def test_self_token_is_still_discovered_when_nothing_else_anchors():

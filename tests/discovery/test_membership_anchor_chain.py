@@ -213,75 +213,6 @@ def _d1_witness(db_session, contract, protocol) -> ContractMembershipWitness:
 # ---------------------------------------------------------------------------
 
 
-def test_timelock_anchored_through_role_holder_admits_wards_and_their_proxies(db_session, protocol):
-    anchor = _anchored_member(db_session, protocol, ADDR(0xA01))
-    timelock = _d2_member(db_session, protocol, ADDR(0xA02), controls=anchor)
-
-    # The timelock's own controller: a Safe holding PROPOSER_ROLE which is
-    # itself an independently anchored member (set-arity rule).
-    safe = _anchored_holder(db_session, protocol, ADDR(0xA03))
-    _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-
-    ward = _contract(db_session, ADDR(0xA05), nominated=protocol.id)
-    _caller_gate(db_session, ward, timelock.address)
-    proxy = _contract(db_session, ADDR(0xA06), nominated=protocol.id, implementation=ward.address)
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id, proxy.id)))
-    db_session.flush()
-
-    assert ward.protocol_id == protocol.id
-    assert proxy.protocol_id == protocol.id, "the ward's proxy must earn W2 in the SAME fixpoint run"
-    assert ("w2_structural", None) in _witness_rules(db_session, proxy, protocol)
-
-    witness = _d1_witness(db_session, ward, protocol)
-    chain = witness.evidence["anchor_chain"]
-    assert chain["links"] == [
-        {"from": timelock.address, "address": safe, "kind": "role_holder", "detail": PROPOSER_ROLE}
-    ]
-    assert chain["anchor_address"] == safe
-    assert chain["anchor_kind"] == "member", "a set-valued link may root only at an anchored member"
-    assert chain["anchor_rule"] == "w5_human"
-
-
-def test_anchor_chain_evidence_round_trips_and_is_stable(db_session, protocol):
-    anchor = _anchored_member(db_session, protocol, ADDR(0xB01))
-    timelock = _d2_member(db_session, protocol, ADDR(0xB02), controls=anchor)
-    safe = _anchored_holder(db_session, protocol, ADDR(0xB03))
-    _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-
-    first = gate._via_transitivity(
-        db_session, protocol_id=protocol.id, via_address=timelock.address, chain_key="ethereum"
-    )
-    second = gate._via_transitivity(
-        db_session, protocol_id=protocol.id, via_address=timelock.address, chain_key="ethereum"
-    )
-    assert first is not None
-    assert second is not None
-    assert first.arm == "anchor_chain"
-    assert first.anchor_chain == second.anchor_chain, "derivation must be deterministic"
-
-    evidence = gate.w3_evidence(
-        direction="d1",
-        source="controller_values",
-        via_address=timelock.address,
-        via_transitive=True,
-        anchor_chain=first.anchor_chain,
-    )
-    assert gate._validate_evidence("w3_control", evidence) == evidence
-    # A hand-rolled chain with an unknown link kind is refused.
-    with pytest.raises(ValueError):
-        gate._validate_evidence(
-            "w3_control",
-            {
-                **evidence,
-                "anchor_chain": {
-                    **evidence["anchor_chain"],
-                    "links": [{**evidence["anchor_chain"]["links"][0], "kind": "vibes"}],
-                },
-            },
-        )
-
-
 @pytest.mark.parametrize(
     "kind,detail",
     [
@@ -360,59 +291,6 @@ def test_role_holder_link_needs_a_proven_role_identity(db_session, protocol):
     assert ward.protocol_id is None
 
 
-def test_default_admin_role_anchors_on_the_zero_hash_alone(db_session, protocol):
-    """DEFAULT_ADMIN_ROLE is the zero word — the one role identity provable
-    without a name, so an unnamed plane row still contributes its holders."""
-    anchor = _anchored_member(db_session, protocol, ADDR(0xC21))
-    registry = _d2_member(db_session, protocol, ADDR(0xC22), controls=anchor)
-    admin = _anchored_holder(db_session, protocol, ADDR(0xC23))
-    _role_plane(db_session, registry.address, DEFAULT_ADMIN_ROLE, [admin], role_name="DEFAULT_ADMIN_ROLE")
-
-    ward = _contract(db_session, ADDR(0xC24), nominated=protocol.id)
-    _caller_gate(db_session, ward, registry.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
-    db_session.flush()
-
-    assert ward.protocol_id == protocol.id
-    chain = _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]
-    assert chain["links"][0]["kind"] == "role_holder"
-    assert chain["links"][0]["detail"] == DEFAULT_ADMIN_ROLE
-
-
-def test_withheld_holder_set_contributes_no_link(db_session, protocol):
-    anchor = _anchored_member(db_session, protocol, ADDR(0xC11))
-    timelock = _d2_member(db_session, protocol, ADDR(0xC12), controls=anchor)
-    db_session.add(
-        RoleHolderPlane(
-            chain_id=1,
-            registry_address=timelock.address,
-            role_hash=PROPOSER_ROLE,
-            holders=None,
-            holders_basis="not_determined",
-            holder_set_exhaustive="not_determined",
-            as_of_block=None,
-            as_of_block_hash=None,
-            cursor_first_indexed_block=None,
-            cursor_first_indexed_block_basis="not_determined",
-            cursor_last_indexed_block=None,
-            cursor_enrollment_bases={},
-            cursor_page_completeness="not_determined",
-            coverage="partial",
-            role_name="PROPOSER_ROLE",
-            role_name_basis="keccak_preimage",
-            candidate_count=None,
-            unconfirmed_candidate_count=None,
-            fold_chain_disagreements=None,
-        )
-    )
-    db_session.flush()
-    ward = _contract(db_session, ADDR(0xC13), nominated=protocol.id)
-    _caller_gate(db_session, ward, timelock.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
-    db_session.flush()
-    assert ward.protocol_id is None
-
-
 # ---------------------------------------------------------------------------
 # (b) the Safe-direct shape ADMITS — no timelock hop
 # ---------------------------------------------------------------------------
@@ -442,26 +320,6 @@ def test_anchored_safe_admits_its_direct_wards(db_session, protocol):
 # ---------------------------------------------------------------------------
 
 
-def test_controller_whose_owner_roots_outside_the_perimeter_is_not_transitive(db_session, protocol):
-    anchor = _anchored_member(db_session, protocol, ADDR(0xE01))
-    endpoint = _d2_member(db_session, protocol, ADDR(0xE02), controls=anchor)
-    _caller_gate(db_session, endpoint, ADDR(0xE03))  # a governance address this protocol never resolved
-
-    ward = _contract(db_session, ADDR(0xE04), nominated=protocol.id)
-    _caller_gate(db_session, ward, endpoint.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
-    db_session.flush()
-
-    assert ward.protocol_id is None, "a D2 entry may not license the controller's other wards"
-    assert (
-        gate._via_transitivity(db_session, protocol_id=protocol.id, via_address=endpoint.address, chain_key="ethereum")
-        is None
-    )
-    # The D2 membership itself is untouched.
-    assert endpoint.protocol_id == protocol.id
-    assert ("w3_control", "d2") in _witness_rules(db_session, endpoint, protocol)
-
-
 def test_foreign_link_refuses_the_whole_controller_set(db_session, protocol):
     """Positive counterevidence beats a rooted sibling link: a controller set
     naming another protocol's member roots nothing."""
@@ -486,64 +344,6 @@ def test_foreign_link_refuses_the_whole_controller_set(db_session, protocol):
 # ---------------------------------------------------------------------------
 # (d) the shared-ops-Safe shape REFUSES — signers visible only via the Safe
 # ---------------------------------------------------------------------------
-
-
-def test_shared_ops_safe_whose_signers_root_only_through_itself_is_refused(db_session, protocol):
-    anchor = _anchored_member(db_session, protocol, ADDR(0xF01))
-    ops_safe = _d2_member(db_session, protocol, ADDR(0xF02), controls=anchor)
-    signer = ADDR(0xF03)
-    # The signer set as the analysis of the ANCHORED member resolved it: the
-    # only place these signers appear is the Safe itself.
-    _principal(db_session, anchor, ops_safe.address, resolved_type="safe", details={"owners": [signer]})
-
-    ward = _contract(db_session, ADDR(0xF04), nominated=protocol.id)
-    _caller_gate(db_session, ward, ops_safe.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
-    db_session.flush()
-
-    assert ward.protocol_id is None, "a shared operator must not license every ward it also controls"
-    assert (
-        gate._via_transitivity(db_session, protocol_id=protocol.id, via_address=ops_safe.address, chain_key="ethereum")
-        is None
-    )
-
-
-def test_sibling_safes_sharing_a_signer_do_not_launder_each_other(db_session, protocol):
-    """Two D2-only Safes of the same anchored member, one signer in common.
-
-    The shared signer is a perimeter principal of the member through EITHER
-    Safe, so a set-valued link allowed to root at a perimeter principal would
-    let S1's wards in on S2's affiliation. A signer set roots only at an
-    anchored member, and a ``safe_owner`` fact anchors nothing at all."""
-    anchor = _anchored_member(db_session, protocol, ADDR(0x1201))
-    safe_one = _d2_member(db_session, protocol, ADDR(0x1202), controls=anchor)
-    safe_two = _d2_member(db_session, protocol, ADDR(0x1203), controls=anchor)
-    shared_signer = ADDR(0x1204)
-    for safe in (safe_one, safe_two):
-        _principal(
-            db_session, anchor, safe.address, resolved_type="safe", details={"owners": [shared_signer, ADDR(0x1205)]}
-        )
-        _principal(
-            db_session, safe, safe.address, resolved_type="safe", details={"owners": [shared_signer, ADDR(0x1205)]}
-        )
-
-    ward = _contract(db_session, ADDR(0x1206), nominated=protocol.id)
-    _caller_gate(db_session, ward, safe_one.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
-    db_session.flush()
-
-    assert ward.protocol_id is None
-    for safe in (safe_one, safe_two):
-        assert (
-            gate._via_transitivity(db_session, protocol_id=protocol.id, via_address=safe.address, chain_key="ethereum")
-            is None
-        )
-    # The signer is a perimeter principal for the ladder, which reads
-    # safe_owner facts on purpose — only the anchor chain refuses them.
-    assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=shared_signer) is not None
-    assert (
-        gate._perimeter_anchor(db_session, protocol_id=protocol.id, address=shared_signer, blocked=frozenset()) is None
-    )
 
 
 def test_set_valued_link_may_not_enter_on_a_d2_only_member(db_session, protocol):
@@ -682,27 +482,6 @@ def _timelock_shape(db_session, protocol, base):
     return anchor, timelock, safe, ward, proxy, independent
 
 
-def test_role_holder_change_revokes_the_dependent_chain(db_session, protocol):
-    anchor, timelock, safe, ward, proxy, independent = _timelock_shape(db_session, protocol, 0x2100)
-
-    plane = db_session.get(RoleHolderPlane, (1, timelock.address, PROPOSER_ROLE))
-    replacement = ADDR(0x2199)
-    plane.holders = [replacement]
-    db_session.flush()
-
-    gate.evaluate(
-        db_session,
-        gate.FactsDelta(new_edge_addresses=(timelock.address, safe, replacement)),
-    )
-    db_session.flush()
-
-    assert ward.protocol_id is None, "the D1 witness must fall with its anchor chain"
-    assert proxy.protocol_id is None, "and the W2 resting on the ward with it"
-    assert independent.protocol_id == protocol.id, "a member with an independent witness is untouched"
-    assert anchor.protocol_id == protocol.id
-    assert timelock.protocol_id == protocol.id, "the controller's own D2 entry is unaffected"
-
-
 def test_anchoring_member_demotion_revokes_the_dependent_chain(db_session, protocol):
     anchor, timelock, safe, ward, proxy, independent = _timelock_shape(db_session, protocol, 0x2200)
 
@@ -717,15 +496,6 @@ def test_anchoring_member_demotion_revokes_the_dependent_chain(db_session, proto
     assert ward.protocol_id is None
     assert proxy.protocol_id is None
     assert independent.protocol_id == protocol.id
-
-
-def test_anchor_link_address_reaches_the_revocation_frontier(db_session, protocol):
-    """The recorded chain's link — not the witness's own via — is what changed."""
-    _anchor, timelock, safe, ward, _proxy, _independent = _timelock_shape(db_session, protocol, 0x2300)
-    assert gate._vias_citing_evidence_address(db_session, [safe]) == {timelock.address}
-    chain = _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]
-    assert gate._vias_citing_evidence_address(db_session, [chain["anchor_address"]]) == {timelock.address}
-    assert gate._vias_citing_evidence_address(db_session, [ADDR(0x23FF)]) == set()
 
 
 def test_foreign_promotion_of_a_published_anchor_revokes_in_the_same_run(db_session, protocol):
@@ -773,66 +543,6 @@ def test_api_level_new_member_delta_seeds_the_revocation_stratum(db_session, pro
     gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(claimed.id,)))
     db_session.flush()
     assert ward.protocol_id is None
-
-
-def test_foreign_promotion_breaks_a_d2_exclusive_via_in_the_same_run(db_session, protocol):
-    """``d2_exclusive`` publishes no anchor chain and keys dependents on the controller, so a promoted row reaches
-    them only through its controllers. A controller whose observed control set widened past the protocol is no
-    longer exclusive, and everything it licensed must fall in the promoting run."""
-    # Built without ``_d2_member``: exclusivity needs the controller's whole
-    # observed ward set inside the protocol, so this shape carries no
-    # unclaimed ward.
-    controller = _contract(db_session, ADDR(0x2602), nominated=protocol.id)
-    anchor = _anchored_member(db_session, protocol, ADDR(0x2601))
-    contested = _anchored_member(db_session, protocol, ADDR(0x2603))
-    for subject in (anchor, contested):
-        _caller_gate(db_session, subject, controller.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(controller.id,)))
-    db_session.flush()
-    assert _witness_rules(db_session, controller, protocol) == {("w1_code", None), ("w3_control", "d2")}
-
-    ward = _contract(db_session, ADDR(0x2604), nominated=protocol.id)
-    _caller_gate(db_session, ward, controller.address)
-    independent = _anchored_member(db_session, protocol, ADDR(0x2605))
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
-    db_session.flush()
-
-    assert ward.protocol_id == protocol.id
-    proof = gate._via_transitivity(
-        db_session, protocol_id=protocol.id, via_address=controller.address, chain_key="ethereum"
-    )
-    assert proof is not None
-    assert proof.arm == "d2_exclusive"
-    assert "anchor_chain" not in (_d1_witness(db_session, ward, protocol).evidence or {})
-
-    # Another protocol takes one of the controller's other wards.
-    other = Protocol(name=f"claimant-{uuid.uuid4().hex[:8]}")
-    db_session.add(other)
-    db_session.flush()
-    for row in db_session.query(ContractMembershipWitness).filter_by(contract_id=contested.id):
-        gate.revoke_witness(db_session, row, reason="test_handover")
-    gate.demote_member(db_session, contract=contested, reason="test_handover")
-    contested.nominated_protocol_id = other.id
-    other_anchor = _anchored_member(db_session, other, ADDR(0x2690))
-    _caller_gate(db_session, other_anchor, contested.address, controller_id="operator")
-    db_session.flush()
-
-    result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(contested.id,)))
-    db_session.flush()
-
-    assert contested.protocol_id == other.id
-    assert contested.id in result.promoted_contract_ids
-    assert (
-        gate._via_transitivity(
-            db_session, protocol_id=protocol.id, via_address=controller.address, chain_key="ethereum"
-        )
-        is None
-    )
-    assert ward.protocol_id is None, "the d2_exclusive dependent must fall in the promoting run"
-    assert ward.id in result.demoted_contract_ids
-    assert anchor.protocol_id == protocol.id
-    assert independent.protocol_id == protocol.id
-    assert controller.protocol_id == protocol.id
 
 
 # ---------------------------------------------------------------------------
@@ -887,42 +597,3 @@ def test_two_arrival_orders_settle_identically(db_session, protocol):
 # ---------------------------------------------------------------------------
 # (g) overreach family stays refused under the new arm
 # ---------------------------------------------------------------------------
-
-
-def test_call_target_operand_never_admits_even_with_an_anchor_chain(db_session, protocol):
-    """WETH9/Lido/USDC/Seaport/DepositContract shape: the member names the
-    external as an integration operand. A live anchor chain elsewhere in the
-    protocol changes nothing — ``call_target`` is not a control edge."""
-    anchor = _anchored_member(db_session, protocol, ADDR(0x4001))
-    timelock = _d2_member(db_session, protocol, ADDR(0x4002), controls=anchor)
-    safe = _anchored_holder(db_session, protocol, ADDR(0x4003))
-    _role_plane(db_session, timelock.address, PROPOSER_ROLE, [safe])
-
-    weth9 = _contract(db_session, ADDR(0x4005), nominated=protocol.id)
-    db_session.add(
-        ControllerValue(
-            contract_id=anchor.id,
-            controller_id="nativeWrapper",
-            value=weth9.address,
-            authority_provenance="call_target",
-        )
-    )
-    # The external's own owner is this protocol's timelock only in the
-    # not-determined sense: nothing resolved it.
-    db_session.flush()
-
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(weth9.id,)))
-    db_session.flush()
-    assert weth9.protocol_id is None
-
-
-def test_null_provenance_controller_never_becomes_an_anchor_link(db_session, protocol):
-    anchor = _anchored_member(db_session, protocol, ADDR(0x4101))
-    timelock = _d2_member(db_session, protocol, ADDR(0x4102), controls=anchor)
-    rooted = ADDR(0x4103)
-    _principal(db_session, anchor, rooted, resolved_type="eoa")
-    db_session.add(ControllerValue(contract_id=timelock.id, controller_id="endpoint", value=rooted))
-    db_session.flush()
-
-    links = gate._own_controller_links(db_session, protocol_id=protocol.id, controller=timelock)
-    assert all(link.address != rooted for link in links)

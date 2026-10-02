@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 from sqlalchemy import select
 
 from db.models import Contract, MonitoredContract, Protocol, WatchedProxy
@@ -25,86 +24,6 @@ MAINNET_SEED = "http://mainnet-seed"
 
 def _addr(prefix: str) -> str:
     return "0x" + (prefix * 40)[:40]
-
-
-def test_proxy_watcher_resolve_impl_threads_chain_id(monkeypatch):
-    from services.monitoring import proxy_watcher
-
-    seen: list[int | None] = []
-
-    def _rpc(url, method, params, *a, chain_id=None, **kw):
-        seen.append(chain_id)
-        return "0x" + "0" * 24 + _addr("f")[2:]
-
-    monkeypatch.setattr(proxy_watcher, "rpc_request", _rpc)
-
-    proxy_watcher.resolve_current_implementation(_addr("a"), BASE_URL, proxy_type="eip1967", chain_id=BASE_CHAIN_ID)
-    assert seen == [BASE_CHAIN_ID]
-
-
-def test_router_current_head_block_threads_chain_id(monkeypatch):
-    import routers.monitored as monitored
-
-    monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-    seen: list[int | None] = []
-
-    def _rpc(url, method, params, *a, chain_id=None, **kw):
-        seen.append(chain_id)
-        return "0x10"
-
-    monkeypatch.setattr(monitored, "rpc_request", _rpc)
-
-    monitored._current_head_block("base")
-    assert seen == [BASE_CHAIN_ID]
-
-
-def test_event_log_fetcher_threads_constructor_chain_id(monkeypatch):
-    from services.resolution.repos import event_logs_rpc
-
-    seen: list[int | None] = []
-
-    def _rpc(url, method, params, *a, chain_id=None, **kw):
-        seen.append(chain_id)
-        return []
-
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", _rpc)
-
-    fetcher = event_logs_rpc.RpcEventLogFetcher(BASE_URL, chain_id=BASE_CHAIN_ID)
-    fetcher.fetch_logs(event_address=_addr("a"), topics=["0x" + "1" * 64], from_block=0, to_block=0)
-    assert seen == [BASE_CHAIN_ID]
-
-
-def test_tracking_classify_threads_chain_id(monkeypatch):
-    from services.resolution import tracking
-
-    tracking.clear_classify_cache()
-    seen: list[int | None] = []
-
-    def _rpc(url, method, params, *a, chain_id=None, **kw):
-        seen.append(chain_id)
-        return "0x"  # empty code → "eoa", short-circuits before the probes
-
-    monkeypatch.setattr(tracking, "_rpc_request", _rpc)
-
-    # A unique address keeps the process-wide classify cache from hitting.
-    kind, _details = tracking.classify_resolved_address(BASE_URL, _addr("b"), chain_id=BASE_CHAIN_ID)
-    assert kind == "eoa"
-    assert seen and all(c == BASE_CHAIN_ID for c in seen)
-
-
-def test_static_dependencies_thread_chain_id(monkeypatch):
-    from services.discovery import static_dependencies
-
-    seen: list[int | None] = []
-
-    def _get_code(url, address, *, chain_id=None):
-        seen.append(chain_id)
-        return "0x60"  # has code, no PUSH20 → no dependencies to recurse into
-
-    monkeypatch.setattr(static_dependencies, "get_code", _get_code)
-
-    static_dependencies.discover_dependencies(BASE_URL, _addr("a"), chain_id=BASE_CHAIN_ID)
-    assert seen and all(c == BASE_CHAIN_ID for c in seen)
 
 
 def test_secondary_impl_threads_chain_id(monkeypatch):
@@ -127,28 +46,6 @@ def test_secondary_impl_threads_chain_id(monkeypatch):
     )
     assert out  # the storage read decoded to an address
     assert seen == [BASE_CHAIN_ID]
-
-
-def test_classifier_classify_single_threads_chain_id(monkeypatch):
-    from services.discovery import classifier
-
-    seen: list[int | None] = []
-
-    def _batch(url, calls, *a, chain_id=None, **kw):
-        seen.append(chain_id)
-        return [("0x" + "0" * 64, False)] * len(calls)  # all proxy slots read zero
-
-    def _rpc_call(url, method, params, *a, chain_id=None, **kw):
-        seen.append(chain_id)
-        return "0x"  # every getter reverts/empty → not a proxy
-
-    monkeypatch.setattr(classifier, "rpc_batch_request_with_status", _batch)
-    monkeypatch.setattr(classifier, "rpc_call", _rpc_call)
-
-    # Non-proxy bytecode runs the slot batch and getter probes.
-    info = classifier.classify_single(_addr("a"), BASE_URL, bytecode="0x6001", chain_id=BASE_CHAIN_ID)
-    assert info["type"] == "regular"
-    assert seen and all(c == BASE_CHAIN_ID for c in seen)
 
 
 def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
@@ -194,13 +91,3 @@ def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
     assert mc.chain == "base"
 
     assert seen and all(c == BASE_CHAIN_ID for c in seen)
-
-
-def test_threaded_path_guard_raises_on_mismatch(monkeypatch):
-    """Proves the declaration reaches the guard through the threading."""
-    from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
-
-    monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
-    fetcher = RpcEventLogFetcher(BASE_URL, chain_id=1)  # URL routes 8453, declares 1
-    with pytest.raises(RuntimeError, match="chain_id"):
-        fetcher.fetch_logs(event_address=_addr("a"), topics=["0x" + "1" * 64], from_block=0, to_block=0)

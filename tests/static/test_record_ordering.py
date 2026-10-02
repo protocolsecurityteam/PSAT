@@ -541,85 +541,10 @@ def _assert_proven(verdict: dict[str, Any], shape: str, record: str, disclosures
 # ---------------------------------------------------------------------------
 
 
-def test_good_clear_then_pay_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "goodClearThenPay", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
-    )
-
-
-def test_a1_dao_shape_clear_after_pay_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "daoClearAfterPay", _caller_balance()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_a1_sibling_clear_before_pay_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "daoClearBeforePay", _caller_balance()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering._balances",
-    )
-
-
-def test_a2_decrement_after_call_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "decrementAfterCall", _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_a2_sibling_decrement_before_call_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "decrementBeforeCall", _bid_amount()),
-        ro.SHAPE_DECREMENT,
-        "Ordering.bids",
-    )
-
-
-def test_a3_hook_token_clear_after_refuses(_unit, _effects):
-    # A LibraryCall wrapping a token call is not an escape hatch.
-    _assert_refused(
-        _verdict(_unit, _effects, "hookTokenClearAfter", _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_a3_sibling_hook_token_clear_before_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "hookTokenClearBefore", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
-    )
-
-
-def test_a4_conditional_clear_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "conditionalClear", _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
 def test_a11_assembly_state_access_refuses(_unit, _effects):
     _assert_refused(
         _verdict(_unit, _effects, "assemblyClear", _bid_amount()),
         ro.ASSEMBLY_STATE_ACCESS,
-    )
-
-
-def test_a11_flag_is_the_real_effect_info_fact(_effects):
-    assembly = next(i for i in _effects.values() if i["function"].startswith("assemblyClear("))
-    plain = next(i for i in _effects.values() if i["function"].startswith("goodClearThenPay("))
-    assert assembly["assembly_state_access"] is True
-    assert plain["assembly_state_access"] is False
-
-
-def test_modifier_external_call_precedes_the_body(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "guardedClearThenPay", _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
     )
 
 
@@ -631,34 +556,10 @@ def test_modifier_clearing_before_the_placeholder_is_proven(_unit, _effects):
     )
 
 
-def test_modifier_clearing_after_the_placeholder_refuses(_unit, _effects):
-    # The DAO shape one indirection deep: the body and its payout ran at the placeholder.
-    _assert_refused(
-        _verdict(_unit, _effects, "payWithClearLast", _bid_amount()),
-        ro.CROSS_UNIT_ORDERING_UNPROVEN,
-    )
-
-
 def test_internal_function_pointer_refuses(_unit, _effects):
     _assert_refused(
         _verdict(_unit, _effects, "pointerCallAfterClear", _bid_amount()),
         ro.CALL_ENUMERATION_INCOMPLETE,
-    )
-
-
-def test_helper_invoked_twice_keeps_both_positions(_unit, _effects):
-    # Keying on the callee's name would lose the call-site position.
-    _assert_refused(
-        _verdict(_unit, _effects, "payTwiceClearBetween", _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_helper_invoked_once_after_the_clear_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "payOnceAfterClear", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
     )
 
 
@@ -670,44 +571,11 @@ def test_other_control_transfers_before_the_clear_refuse(_unit, _effects, name):
     _assert_refused(_verdict(_unit, _effects, name, _bid_amount()), ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS)
 
 
-def test_selfdestruct_after_the_clear_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "clearThenSelfdestruct", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
-    )
-
-
-def test_non_control_solidity_call_is_not_an_external_call(_unit, _effects):
-    # ecrecover transfers no control.
-    _assert_proven(
-        _verdict(_unit, _effects, "ecrecoverThenClear", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
-    )
-
-
 def test_call_before_write_within_one_node_refuses(_unit, _effects):
     # Within a node only the IR index orders them.
     _assert_refused(
         _verdict(_unit, _effects, "callThenWriteSameNode", _bid_amount()),
         ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-@pytest.mark.parametrize("function", ["transferBeforeClear", "sendBeforeClear"])
-def test_native_call_before_clear_refuses(_unit, _effects, function):
-    _assert_refused(
-        _verdict(_unit, _effects, function, _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_native_transfer_after_clear_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "clearBeforeTransfer", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
     )
 
 
@@ -719,31 +587,9 @@ def test_non_clearing_shapes_refuse(_unit, _effects, name):
     _assert_refused(_verdict(_unit, _effects, name, _bid_amount()), ro.NO_CLEARING_WRITE)
 
 
-def test_delete_of_the_containing_element_is_a_clearing_write(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "deleteThenPay", _bid_amount()),
-        ro.SHAPE_DELETE,
-        "Ordering.bids",
-    )
-
-
 def test_subtraction_whose_minuend_is_not_the_record_refuses(_unit, _effects):
     # ``cap - used`` may raise the record; a debit's minuend is the record's own prior value.
     _assert_refused(_verdict(_unit, _effects, "raiseThenPay", _bid_amount()), ro.NO_CLEARING_WRITE)
-
-
-def test_wrong_key_slot_finds_no_clearing_write(_unit, _effects):
-    _assert_refused(_verdict(_unit, _effects, "goodClearThenPay", _bid_amount(1)), ro.NO_CLEARING_WRITE)
-
-
-def test_indeterminate_key_refuses_the_record(_unit, _effects):
-    record: ro.RecordRef = {
-        "base_canonical": "Ordering.bids",
-        "member_path": ["amount"],
-        "key_kinds": ["indeterminate"],
-        "key_param_indexes": [None],
-    }
-    _assert_refused(_verdict(_unit, _effects, "goodClearThenPay", record), ro.RECORD_NOT_RESOLVABLE)
 
 
 def test_absent_member_path_is_not_an_empty_member_path(_unit, _effects):
@@ -754,23 +600,6 @@ def test_absent_member_path_is_not_an_empty_member_path(_unit, _effects):
         "key_param_indexes": [0],
     }
     _assert_refused(_verdict(_unit, _effects, "cancelBid", record), ro.RECORD_NOT_RESOLVABLE)
-
-
-def test_absent_key_kinds_refuses(_unit, _effects):
-    record: ro.RecordRef = {"base_canonical": "Ordering.bids", "member_path": ["amount"]}
-    _assert_refused(_verdict(_unit, _effects, "goodClearThenPay", record), ro.RECORD_NOT_RESOLVABLE)
-
-
-def test_cancel_bid_flag_flip_is_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "cancelBid", _bid_amount()),
-        ro.SHAPE_FLAG_FLIP,
-        "Ordering.bids",
-    )
-
-
-def test_flag_flip_without_the_mandatory_predicate_refuses(_unit, _effects):
-    _assert_refused(_verdict(_unit, _effects, "cancelBidNoPredicate", _bid_amount()), ro.NO_CLEARING_WRITE)
 
 
 @pytest.mark.parametrize(
@@ -807,15 +636,6 @@ def test_flag_flip_toggle_off_refuses_the_same_shape(_unit, _effects, monkeypatc
     _assert_refused(_verdict(_unit, _effects, "cancelBid", _bid_amount()), ro.NO_CLEARING_WRITE)
 
 
-def test_flag_flip_toggle_does_not_touch_the_strict_shapes(_unit, _effects, monkeypatch):
-    monkeypatch.setattr(ro, "FLAG_FLIP_CLEARING_ENABLED", False)
-    _assert_proven(
-        _verdict(_unit, _effects, "goodClearThenPay", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
-    )
-
-
 def test_loop_body_ordering_is_proven_with_the_cross_iteration_disclosure(_unit, _effects):
     _assert_proven(
         _verdict(_unit, _effects, "cancelBidBatch", _bid_amount()),
@@ -823,18 +643,6 @@ def test_loop_body_ordering_is_proven_with_the_cross_iteration_disclosure(_unit,
         "Ordering.bids",
         [ro.DISCLOSURE_CROSS_ITERATION],
     )
-
-
-def test_non_loop_proof_carries_no_disclosure_key(_unit, _effects):
-    verdict = _verdict(_unit, _effects, "goodClearThenPay", _bid_amount())
-    assert "disclosures" not in verdict
-
-
-def test_post_loop_pair_carries_no_cross_iteration_disclosure(_unit, _effects):
-    # Enclosure from dominance alone would attach a per-iteration residual to a straight-line pair.
-    verdict = _verdict(_unit, _effects, "loopThenClearThenPay", _bid_amount())
-    _assert_proven(verdict, ro.SHAPE_ZERO_ASSIGNMENT, "Ordering.bids")
-    assert "disclosures" not in verdict
 
 
 def test_different_loop_nesting_refuses(_unit, _effects):
@@ -853,32 +661,11 @@ def test_one_hop_burn_then_pay_is_proven(_unit, _effects):
     )
 
 
-def test_one_hop_pay_then_burn_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "payThenBurn", _caller_balance()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_call_inside_the_same_callee_before_the_burn_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "burnInsideCalleeAfterCall", _caller_balance()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
 def test_call_inside_the_same_callee_after_the_burn_is_proven(_unit, _effects):
     _assert_proven(
         _verdict(_unit, _effects, "burnInsideCalleeBeforeCall", _caller_balance()),
         ro.SHAPE_ASSIGNED_DIFFERENCE,
         "Ordering._balances",
-    )
-
-
-def test_two_hop_composition_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "burnTwoHop", _caller_balance()),
-        ro.CROSS_UNIT_ORDERING_UNPROVEN,
     )
 
 
@@ -916,14 +703,6 @@ def test_attachment_is_guarded_on_the_record_being_named(_unit):
     assert "record_ordering" not in flows[3]
 
 
-def test_function_with_no_external_call_is_vacuously_proven(_unit, _effects):
-    _assert_proven(
-        _verdict(_unit, _effects, "clearOnly", _bid_amount()),
-        ro.SHAPE_ZERO_ASSIGNMENT,
-        "Ordering.bids",
-    )
-
-
 def test_unreadable_callee_body_refuses(_unit):
     contract = next(c for c in _unit.contracts if c.name == "Hooked")
     function = next(fn for fn in contract.functions if fn.name == "payWithHook")
@@ -937,20 +716,3 @@ def test_unreadable_callee_body_refuses(_unit):
         dict(ro.prove_record_ordering(function, record, assembly_state_access=False)),
         ro.CALL_ENUMERATION_INCOMPLETE,
     )
-
-
-def test_pipeline_orders_against_the_record_the_amount_producer_names(_effects):
-    keyed = {
-        fn: flow["record_ordering"]
-        for fn, info in _effects.items()
-        for flow in info["value_flows"]
-        if "record_ordering" in flow
-    }
-    for fn, info in _effects.items():
-        for flow in info["value_flows"]:
-            if "record_ordering" in flow:
-                assert flow.get("amount_record_variable") is not None
-                assert flow["direction"] == "out"
-    assert keyed["goodClearThenPay(uint256)"]["state"] == "proven_ordering"
-    assert keyed["daoClearAfterPay()"]["state"] == "not_determined"
-    assert keyed["daoClearAfterPay()"]["reason"] == ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS

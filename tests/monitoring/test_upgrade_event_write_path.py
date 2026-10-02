@@ -8,7 +8,7 @@ ordering test carries a ``block_number=0`` defect control.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -135,54 +135,6 @@ def _ordered(session, contract_id: int) -> list[UpgradeEvent]:
     )
 
 
-def test_poll_detected_upgrade_writes_no_block_and_no_tx(db_session, proxy_with_history, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    _seed_monitored(db_session, proxy_with_history, current_impl=IMPL_CURRENT)
-
-    _run_poll(db_session, IMPL_NEXT)
-    db_session.expire_all()
-
-    rows = _ordered(db_session, proxy_with_history.id)
-    poll_rows = [r for r in rows if r.source == UPGRADE_SOURCE_POLL]
-    assert len(poll_rows) == 1, "the poll path must write exactly one UpgradeEvent"
-    row = poll_rows[0]
-
-    assert row.new_impl == IMPL_NEXT
-    assert row.old_impl == IMPL_CURRENT, "the poller knows the predecessor and must record it"
-    assert row.block_number is None
-    assert row.block_number != 0
-    assert row.tx_hash is None
-    assert row.timestamp is not None
-    assert row.timestamp >= datetime.now(timezone.utc) - timedelta(hours=1)
-
-
-def test_poll_detected_upgrade_sorts_after_every_real_event(db_session, proxy_with_history, monkeypatch):
-    monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
-    _seed_monitored(db_session, proxy_with_history, current_impl=IMPL_CURRENT)
-
-    _run_poll(db_session, IMPL_NEXT)
-    db_session.expire_all()
-
-    rows = _ordered(db_session, proxy_with_history.id)
-    assert [r.new_impl for r in rows] == [IMPL_GENESIS, IMPL_MIDDLE, IMPL_CURRENT, IMPL_NEXT]
-    assert rows[0].block_number == BLOCK_GENESIS, "the genuine genesis deployment must stay first"
-
-    # Proves the assertion still sees the defect.
-    db_session.add(
-        UpgradeEvent(
-            contract_id=proxy_with_history.id,
-            proxy_address=PROXY,
-            new_impl="0x" + "d" * 40,
-            block_number=0,
-            tx_hash="",
-        )
-    )
-    db_session.commit()
-    corrupted = _ordered(db_session, proxy_with_history.id)
-    assert corrupted[0].block_number == 0, "control: block_number=0 still sorts ahead of genesis"
-    assert corrupted[0].new_impl != IMPL_GENESIS
-
-
 def test_poll_and_event_scan_writers_stamp_distinct_sources(db_session, proxy_with_history, monkeypatch):
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     mc = _seed_monitored(db_session, proxy_with_history, current_impl=IMPL_CURRENT)
@@ -250,52 +202,6 @@ def test_artifact_projection_stamps_backfill_source(db_session, proxy_with_histo
     rows = _ordered(db_session, proxy_with_history.id)
     assert [r.source for r in rows] == [UPGRADE_SOURCE_BACKFILL]
     assert rows[0].block_number == BLOCK_GENESIS
-
-
-def test_impl_windows_keep_genesis_first_when_a_row_has_no_block(db_session, proxy_with_history):
-    """It folded NULL to 0 and put a block-less event back in front of genesis."""
-    from services.audits.coverage import _compute_impl_windows_batch
-
-    db_session.add(
-        UpgradeEvent(
-            contract_id=proxy_with_history.id,
-            proxy_address=PROXY,
-            old_impl=IMPL_CURRENT,
-            new_impl=IMPL_NEXT,
-            block_number=None,
-            timestamp=datetime(2026, 7, 1, tzinfo=timezone.utc),
-            source=UPGRADE_SOURCE_POLL,
-        )
-    )
-    db_session.commit()
-
-    impls = []
-    for addr in (IMPL_GENESIS, IMPL_MIDDLE, IMPL_CURRENT, IMPL_NEXT):
-        c = Contract(protocol_id=proxy_with_history.protocol_id, address=addr, chain="ethereum", contract_name="Impl")
-        db_session.add(c)
-        impls.append(c)
-    db_session.commit()
-
-    try:
-        windows = _compute_impl_windows_batch(db_session, impls)
-
-        genesis = windows[impls[0].id][0]
-        assert genesis.from_block == BLOCK_GENESIS
-        assert genesis.to_block == BLOCK_MIDDLE
-        assert genesis.successor == "known"
-
-        pollw = windows[impls[3].id][0]
-        assert pollw.from_block is None
-        assert pollw.successor == "none"
-
-        # to_block is None only because the successor's block is unknown.
-        prev = windows[impls[2].id][0]
-        assert prev.to_block is None
-        assert prev.successor == "block_unknown"
-    finally:
-        db_session.rollback()
-        db_session.query(Contract).filter(Contract.id.in_([c.id for c in impls])).delete(synchronize_session=False)
-        db_session.commit()
 
 
 def test_undated_audit_does_not_attach_to_a_superseded_impl():

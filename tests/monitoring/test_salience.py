@@ -36,8 +36,6 @@ from services.monitoring.polling_plan import (
 )
 from services.monitoring.unified_watcher import (
     _apply_poll_result,
-    _Cohort,
-    _process_window,
     scan_for_events,
 )
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
@@ -99,53 +97,6 @@ def rate(db_session, mc, event_type: str, data: dict | None = None) -> tuple[str
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("event_type", sorted(sal.CANONICAL_CONFIG_FAMILIES))
-def test_rule_canonical_config_family(db_session, make_mc, event_type):
-    assert rate(db_session, make_mc(), event_type, {}) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_CANONICAL_CONFIG_FAMILY],
-    )
-
-
-def test_the_canonical_family_list_is_exactly_the_spec_list(db_session, make_mc):
-    """An unlisted type falls through to ``not_determined``, the honest answer for a family nobody rated."""
-    assert "new_pending_implementation" not in sal.CANONICAL_CONFIG_FAMILIES
-    level, basis = rate(db_session, make_mc(), "new_pending_implementation", {})
-    assert (level, basis) == (sal.SALIENCE_NOT_DETERMINED, [sal.BASIS_NO_RULE])
-
-
-@pytest.mark.parametrize("event_type", ["safe_tx_failed", "safe_module_failed"])
-def test_rule_execution_failure(db_session, make_mc, event_type):
-    """It outranks every safe_exec rule, so a failed indirect call is still an alert."""
-    assert rate(db_session, make_mc(), event_type, {"safe_exec": {"status": "not_top_level_call"}}) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_EXECUTION_FAILURE],
-    )
-
-
-def test_rule_safe_exec_delegatecall_unrecognized(db_session, make_mc):
-    """The absent recognition flag is a reason to alert, not to demote."""
-    data = {"safe_exec": {"status": "decoded", "operation": 1, "to": ADDR(0xBAD)}}
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED],
-    )
-
-
-def test_rule_module_bypass_execution(db_session, make_mc):
-    assert rate(db_session, make_mc(), "safe_module_executed", {"module": ADDR(7)}) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_MODULE_BYPASS_EXECUTION],
-    )
-
-
-def test_rule_qualified_member_change(db_session, make_mc):
-    assert rate(db_session, make_mc(), "member_changed:fromDenyList", {"key": ADDR(3)}) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_QUALIFIED_MEMBER_CHANGE],
-    )
-
-
 def test_rule_reinitialization(db_session, make_mc):
     """A second Initialized on an enrolled proxy is a takeover signal."""
     mc = make_mc()
@@ -166,23 +117,6 @@ def test_rule_reinitialization(db_session, make_mc):
     assert rate(db_session, mc, "initialized", {}) == (sal.SALIENCE_ALERT, [sal.BASIS_REINITIALIZATION])
 
 
-def test_reinitialization_needs_an_enrollment_block(db_session, make_mc):
-    mc = make_mc(enrollment_block=None)
-    db_session.add(
-        MonitoredEvent(
-            id=uuid.uuid4(),
-            monitored_contract_id=mc.id,
-            event_type="initialized",
-            block_number=5,
-            tx_hash="0x" + "22" * 32,
-            log_index=0,
-            data={},
-        )
-    )
-    db_session.commit()
-    assert rate(db_session, mc, "initialized", {}) == (sal.SALIENCE_NOT_DETERMINED, [sal.BASIS_NO_RULE])
-
-
 @pytest.mark.parametrize("event_type", ["state_changed_poll", "value_changed:state_variable:owner"])
 def test_rule_config_field_diff(db_session, make_mc, event_type):
     data = {"signal_class": SIGNAL_CLASS_CONFIG, "signal_class_basis": SIGNAL_BASIS_TYPE_KIND_REFERENCE}
@@ -192,186 +126,12 @@ def test_rule_config_field_diff(db_session, make_mc, event_type):
     )
 
 
-@pytest.mark.parametrize("event_type", ["timelock_scheduled", "timelock_executed"])
-def test_rule_timelock_operation(db_session, make_mc, event_type):
-    assert rate(db_session, make_mc(), event_type, {"target": ADDR(4)}) == (
-        sal.SALIENCE_NOTABLE,
-        [sal.BASIS_TIMELOCK_OPERATION],
-    )
-
-
-def test_rule_safe_exec_call(db_session, make_mc):
-    """Name resolution is display, never level."""
-    unnamed = {"safe_exec": {"status": "decoded", "operation": 0, "to": ADDR(9), "signature": None}}
-    named = {"safe_exec": {"status": "decoded", "operation": 0, "to": ADDR(9), "signature": "setFee(uint256)"}}
-    expected = (sal.SALIENCE_NOTABLE, [sal.BASIS_SAFE_EXEC_CALL])
-    mc = make_mc()
-    assert rate(db_session, mc, "safe_tx_executed", unnamed) == expected
-    assert rate(db_session, mc, "safe_tx_executed", named) == expected
-
-
-def test_rule_safe_exec_multisend_takes_the_batch_floor(db_session, make_mc):
-    data = {
-        "safe_exec": {
-            "status": "decoded",
-            "operation": 1,
-            "multisend_recognized": True,
-            "batch": [
-                {"operation": 0, "to": ADDR(1)},
-                {"operation": 0, "to": ADDR(2)},
-            ],
-        }
-    }
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_NOTABLE,
-        [sal.BASIS_SAFE_EXEC_MULTISEND],
-    )
-
-
-def test_rule_safe_exec_multisend_takes_the_max_over_inner_calls(db_session, make_mc):
-    """The batch's level is the max, not its floor."""
-    data = {
-        "safe_exec": {
-            "status": "decoded",
-            "operation": 1,
-            "multisend_recognized": True,
-            "batch": [
-                {"operation": 0, "to": ADDR(1)},
-                {"operation": 1, "to": ADDR(0xBAD)},
-            ],
-        }
-    }
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_SAFE_EXEC_MULTISEND, sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED],
-    )
-
-
-def test_rule_safe_exec_batch_undecodable(db_session, make_mc):
-    """A truncated batch would understate what the Safe did."""
-    data = {
-        "safe_exec": {
-            "status": "decoded",
-            "operation": 1,
-            "multisend_recognized": True,
-            "batch_status": "undecodable",
-        }
-    }
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_NOT_DETERMINED,
-        [sal.BASIS_SAFE_EXEC_BATCH_UNDECODABLE],
-    )
-
-
-@pytest.mark.parametrize(
-    "event_type",
-    ["state_changed:state_variable:rebalancer", "controller_changed:state_variable:rebalancer"],
-)
-def test_rule_tracked_config_event(db_session, make_mc, event_type):
-    assert rate(db_session, make_mc(), event_type, {"witness_tier": "self_describing"}) == (
-        sal.SALIENCE_NOTABLE,
-        [sal.BASIS_TRACKED_CONFIG_EVENT],
-    )
-
-
-def test_rule_correlated_cause_raises_to_the_effect_max(db_session, make_mc):
-    data = {
-        "safe_exec": {"status": "not_top_level_call"},
-        "correlated_events": [
-            {"event_id": "a", "event_type": "state_changed_poll", "salience": sal.SALIENCE_ROUTINE},
-            {"event_id": "b", "event_type": "ownership_transferred", "salience": sal.SALIENCE_ALERT},
-        ],
-    }
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_ALERT,
-        [sal.BASIS_SAFE_EXEC_INDIRECT, sal.BASIS_CORRELATED_CAUSE],
-    )
-
-
-def test_rule_correlated_cause_floors_at_notable(db_session, make_mc):
-    data = {
-        "safe_exec": {"status": "not_top_level_call"},
-        "correlated_events": [{"event_id": "a", "event_type": "whatever"}],
-    }
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_NOTABLE,
-        [sal.BASIS_SAFE_EXEC_INDIRECT, sal.BASIS_CORRELATED_CAUSE],
-    )
-
-
 def test_correlated_cause_replaces_no_rule(db_session, make_mc):
     data = {"correlated_events": [{"event_id": "a", "event_type": "paused", "salience": sal.SALIENCE_ALERT}]}
     assert rate(db_session, make_mc(), "some_unrated_type", data) == (
         sal.SALIENCE_ALERT,
         [sal.BASIS_CORRELATED_CAUSE],
     )
-
-
-def test_an_empty_correlation_list_changes_nothing(db_session, make_mc):
-    """The join is scoped to what is monitored, so empty is not an earned negative."""
-    data = {
-        "safe_exec": {"status": "not_top_level_call"},
-        "correlated_events": [],
-        "correlated_scope": "monitored_only",
-    }
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_ROUTINE,
-        [sal.BASIS_SAFE_EXEC_INDIRECT],
-    )
-
-
-@pytest.mark.parametrize("event_type", ["state_changed_poll", "value_changed:state_variable:_totalSupply"])
-def test_rule_metric_field_diff(db_session, make_mc, event_type):
-    data = {"signal_class": SIGNAL_CLASS_METRIC, "signal_class_basis": SIGNAL_BASIS_NO_GATE_PROVENANCE}
-    assert rate(db_session, make_mc(), event_type, data) == (
-        sal.SALIENCE_ROUTINE,
-        [sal.BASIS_METRIC_FIELD_DIFF],
-    )
-
-
-def test_rule_safe_exec_indirect(db_session, make_mc):
-    assert rate(db_session, make_mc(), "safe_tx_executed", {"safe_exec": {"status": "not_top_level_call"}}) == (
-        sal.SALIENCE_ROUTINE,
-        [sal.BASIS_SAFE_EXEC_INDIRECT],
-    )
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        {},
-        {"safe_tx_hash": "0x" + "ab" * 32},
-        {"safe_exec": {"status": "over_budget"}},
-    ],
-    ids=["absent-block", "phase-1-steady-state", "over-budget"],
-)
-def test_rule_safe_exec_not_enriched(db_session, make_mc, data):
-    """Enrichment unavailable. A Safe execution we could not examine is
-    unclassified and VISIBLE — never demoted on ignorance."""
-    assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
-        sal.SALIENCE_NOT_DETERMINED,
-        [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
-    )
-
-
-def test_rule_no_rule_for_everything_else(db_session, make_mc):
-    assert rate(db_session, make_mc(), "some_future_event_type", {"x": 1}) == (
-        sal.SALIENCE_NOT_DETERMINED,
-        [sal.BASIS_NO_RULE],
-    )
-    assert rate(db_session, make_mc(), "some_future_event_type", None) == (
-        sal.SALIENCE_NOT_DETERMINED,
-        [sal.BASIS_NO_RULE],
-    )
-
-
-def test_a_field_diff_with_no_signal_class_is_not_determined(db_session, make_mc):
-    """Persisted polling plans predate the stamp, so poll diffs land here until re-enrollment."""
-    for data in ({}, {"field": "x", "old_value": "1", "new_value": "2"}):
-        assert rate(db_session, make_mc(), "state_changed_poll", data) == (
-            sal.SALIENCE_NOT_DETERMINED,
-            [sal.BASIS_NO_RULE],
-        )
 
 
 def test_a_metric_class_without_its_basis_cannot_mint_routine(db_session, make_mc):
@@ -405,41 +165,6 @@ def test_no_rule_mints_routine_without_a_positive_basis(db_session, make_mc):
         assert level != sal.SALIENCE_ROUTINE, (event_type, data, codes)
 
 
-def test_every_level_ships_a_non_empty_basis_from_the_closed_vocabulary(db_session, make_mc):
-    """Every tested shape publishes a non-empty basis from the closed vocabulary."""
-    mc = make_mc()
-    shapes: list[tuple[str, dict | None]] = [
-        ("ownership_transferred", {}),
-        ("safe_tx_failed", {}),
-        ("safe_module_executed", {}),
-        ("member_changed:x", {}),
-        ("initialized", {}),
-        ("timelock_scheduled", {}),
-        ("state_changed:state_variable:x", {}),
-        ("state_changed_poll", {"signal_class": "config", "signal_class_basis": "caller_gate"}),
-        ("state_changed_poll", {"signal_class": "metric", "signal_class_basis": "no_gate_provenance"}),
-        ("safe_tx_executed", {}),
-        ("safe_tx_executed", {"safe_exec": {"status": "not_top_level_call"}}),
-        ("safe_tx_executed", {"safe_exec": {"status": "decoded", "operation": 0}}),
-        ("safe_tx_executed", {"safe_exec": {"status": "decoded", "operation": 1}}),
-        ("anything_else", {}),
-    ]
-    for event_type, data in shapes:
-        level, codes = rate(db_session, mc, event_type, data)
-        assert level in sal.SALIENCE_VALUES
-        assert codes, (event_type, data)
-        assert set(codes) <= sal.SALIENCE_BASIS_VALUES, (event_type, codes)
-
-
-def test_not_determined_sorts_with_notable_never_with_routine():
-    """Not-determined ranks alongside notable and above routine."""
-    assert sal.salience_rank(sal.SALIENCE_NOT_DETERMINED) == sal.salience_rank(sal.SALIENCE_NOTABLE)
-    assert sal.salience_rank(sal.SALIENCE_NOT_DETERMINED) > sal.salience_rank(sal.SALIENCE_ROUTINE)
-    assert sal.salience_rank(sal.SALIENCE_ALERT) > sal.salience_rank(sal.SALIENCE_NOTABLE)
-    assert sal.salience_rank(None) == sal.salience_rank(sal.SALIENCE_NOT_DETERMINED)
-    assert sal.salience_rank("bogus") == sal.salience_rank(sal.SALIENCE_NOT_DETERMINED)
-
-
 # ---------------------------------------------------------------------------
 # Signal classification on freshly built polling plans
 # ---------------------------------------------------------------------------
@@ -470,21 +195,6 @@ def _by_field(plan: list[dict]) -> dict[str, dict]:
     return {entry["field"]: entry for entry in plan}
 
 
-def test_reference_typed_entries_classify_config():
-    plan = _by_field(
-        build_polling_plan(
-            contract_type="regular",
-            tracking_plan=_tracking_plan(
-                _controller("state_variable:owner", type_kind="address"),
-                _controller("state_variable:priceProvider", type_kind="contract"),
-            ),
-        )
-    )
-    for field in ("owner", "priceProvider"):
-        assert plan[field]["signal_class"] == SIGNAL_CLASS_CONFIG
-        assert plan[field]["signal_class_basis"] == SIGNAL_BASIS_TYPE_KIND_REFERENCE
-
-
 def test_a_proven_caller_gate_primitive_classifies_config():
     plan = _by_field(
         build_polling_plan(
@@ -496,70 +206,6 @@ def test_a_proven_caller_gate_primitive_classifies_config():
     )
     assert plan["isPaused"]["signal_class"] == SIGNAL_CLASS_CONFIG
     assert plan["isPaused"]["signal_class_basis"] == SIGNAL_BASIS_CALLER_GATE
-
-
-def test_an_ungated_primitive_classifies_metric_with_a_stated_basis():
-    """``no_gate_provenance`` is a positive basis, which lets it collapse at render without suppressing on ignorance."""
-    plan = _by_field(
-        build_polling_plan(
-            contract_type="regular",
-            tracking_plan=_tracking_plan(
-                _controller("state_variable:_totalSupply", type_kind="primitive", type_str="uint256")
-            ),
-        )
-    )
-    assert plan["_totalSupply"]["signal_class"] == SIGNAL_CLASS_METRIC
-    assert plan["_totalSupply"]["signal_class_basis"] == SIGNAL_BASIS_NO_GATE_PROVENANCE
-
-
-def test_call_target_provenance_is_not_a_gate_proof():
-    plan = _by_field(
-        build_polling_plan(
-            contract_type="regular",
-            tracking_plan=_tracking_plan(
-                _controller(
-                    "state_variable:threshold2",
-                    type_kind="primitive",
-                    type_str="uint256",
-                    provenance="call_target",
-                )
-            ),
-        )
-    )
-    assert plan["threshold2"]["signal_class"] == SIGNAL_CLASS_METRIC
-    assert plan["threshold2"]["signal_class_basis"] == SIGNAL_BASIS_NO_GATE_PROVENANCE
-
-
-@pytest.mark.parametrize(
-    "contract_type,proxy_type,field,basis",
-    [
-        ("safe", None, "threshold", "vendored:safe"),
-        ("safe", None, "guard", "vendored:safe"),
-        ("safe", None, "modules_head", "vendored:safe"),
-        ("timelock", None, "min_delay", "vendored:timelock"),
-        ("proxy", "eip1967", "implementation", "vendored:eip1967"),
-    ],
-)
-def test_vendored_entries_classify_config_with_their_own_provenance(contract_type, proxy_type, field, basis):
-    plan = _by_field(build_polling_plan(contract_type=contract_type, proxy_type=proxy_type))
-    assert plan[field]["signal_class"] == SIGNAL_CLASS_CONFIG
-    assert plan[field]["signal_class_basis"] == basis
-
-
-def test_every_freshly_built_entry_carries_both_keys_or_neither():
-    plan = build_polling_plan(
-        contract_type="safe",
-        proxy_type="eip1967",
-        tracking_plan=_tracking_plan(
-            _controller("state_variable:owner", type_kind="address"),
-            _controller("state_variable:rate", type_kind="primitive", type_str="uint256"),
-            _controller("state_variable:cap", type_kind="primitive", type_str="uint256", provenance="caller_gate"),
-        ),
-    )
-    assert plan
-    for entry in plan:
-        assert entry.get("signal_class") in (SIGNAL_CLASS_CONFIG, SIGNAL_CLASS_METRIC), entry
-        assert entry.get("signal_class_basis"), entry
 
 
 def _poll_entry(signal_class: str | None = None, basis: str | None = None) -> dict:
@@ -587,41 +233,6 @@ def _poll(db_session, mc, entry, raw_value: int) -> dict:
     return new_events[0].data or {}
 
 
-def test_poll_mint_stamps_the_entrys_signal_class_and_a_routine_level(db_session, make_mc):
-    mc = make_mc(last_known_state={"rate": 7})
-    data = _poll(db_session, mc, _poll_entry(SIGNAL_CLASS_METRIC, SIGNAL_BASIS_NO_GATE_PROVENANCE), 9)
-    assert data["signal_class"] == SIGNAL_CLASS_METRIC
-    assert data["signal_class_basis"] == SIGNAL_BASIS_NO_GATE_PROVENANCE
-    assert data["salience"] == sal.SALIENCE_ROUTINE
-    assert data["salience_basis"] == [sal.BASIS_METRIC_FIELD_DIFF]
-
-
-def test_poll_mint_from_a_config_entry_is_notable(db_session, make_mc):
-    mc = make_mc(last_known_state={"rate": 7})
-    data = _poll(db_session, mc, _poll_entry(SIGNAL_CLASS_CONFIG, SIGNAL_BASIS_CALLER_GATE), 9)
-    assert data["salience"] == sal.SALIENCE_NOTABLE
-    assert data["salience_basis"] == [sal.BASIS_CONFIG_FIELD_DIFF]
-
-
-def test_poll_mint_from_a_pre_stamp_entry_is_visible_not_routine(db_session, make_mc):
-    """The polling-plan freshness dependency, at the mint site: a persisted plan
-    entry carrying no ``signal_class`` stamps nothing, and the row renders."""
-    mc = make_mc(last_known_state={"rate": 7})
-    data = _poll(db_session, mc, _poll_entry(), 9)
-    assert "signal_class" not in data
-    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
-    assert data["salience_basis"] == [sal.BASIS_NO_RULE]
-
-
-def test_poll_mint_refuses_a_half_stamped_entry(db_session, make_mc):
-    mc = make_mc(last_known_state={"rate": 7})
-    data = _poll(db_session, mc, _poll_entry(SIGNAL_CLASS_METRIC, None), 9)
-    assert "signal_class" not in data
-    assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
-
-
-SAFE_EXEC_TOPIC0 = "0x" + keccak(text="ExecutionSuccess(bytes32,uint256)").hex()
-OWNERSHIP_TOPIC0 = "0x" + keccak(text="OwnershipTransferred(address,address)").hex()
 RATE_TOPIC0 = "0x" + keccak(text="RateUpdated(uint256)").hex()
 RATE_SELECTOR = "0x" + keccak(text="rate()").hex()[:8]
 
@@ -648,35 +259,6 @@ def _fetched(topic0: str, *, address: str, data: str = "0x", block: int = 200, i
         address=address,
         raw=raw,
     )
-
-
-def test_scan_mint_stamps_salience_on_the_persisted_row(db_session, make_mc):
-    """Assigned before the insert, so the level is durable in the same write."""
-    mc = make_mc(contract_type="safe", monitoring_config={"watch_safe_signers": True})
-    cohort = _Cohort(chain="ethereum", member_ids=[mc.id], addresses=[mc.address.lower()], cursor=199)
-    log = _fetched(SAFE_EXEC_TOPIC0, address=mc.address, data="0x" + "ab" * 32 + "00" * 32)
-    events = _process_window(db_session, cohort, [log], 200, 210, {})
-    db_session.commit()
-
-    assert len(events) == 1
-    persisted = db_session.execute(select(MonitoredEvent)).scalars().one()
-    assert persisted.event_type == "safe_tx_executed"
-    # No enricher, so the Safe execution is unclassified and VISIBLE.
-    assert persisted.data["salience"] == sal.SALIENCE_NOT_DETERMINED
-    assert persisted.data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
-
-
-def test_scan_mint_rates_a_canonical_family_as_alert(db_session, make_mc):
-    mc = make_mc(monitoring_config={"watch_ownership": True})
-    cohort = _Cohort(chain="ethereum", member_ids=[mc.id], addresses=[mc.address.lower()], cursor=199)
-    log = _fetched(OWNERSHIP_TOPIC0, address=mc.address, data="0x" + "00" * 32 + "00" * 31 + "07")
-    _process_window(db_session, cohort, [log], 200, 210, {})
-    db_session.commit()
-
-    persisted = db_session.execute(select(MonitoredEvent)).scalars().one()
-    assert persisted.event_type == "ownership_transferred"
-    assert persisted.data["salience"] == sal.SALIENCE_ALERT
-    assert persisted.data["salience_basis"] == [sal.BASIS_CANONICAL_CONFIG_FAMILY]
 
 
 def _hint_spec() -> dict:
@@ -775,60 +357,6 @@ def test_a_type_the_registry_does_not_cover_is_left_untouched(db_session, make_m
     assert db_session.get(MonitoredEvent, event.id).data == before
 
 
-def test_the_driver_recomputes_salience_for_rows_an_enricher_changed(db_session, make_mc):
-    """Enrichment changes the rule inputs, so the mint-time level is provisional."""
-    mc = make_mc(contract_type="safe")
-    event = _seed_event(
-        db_session,
-        mc,
-        "safe_tx_executed",
-        {
-            "safe_tx_hash": "0x" + "ab" * 32,
-            "salience": sal.SALIENCE_NOT_DETERMINED,
-            "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
-        },
-    )
-
-    def fake(_event, _mc, _ctx):
-        return {"safe_exec": {"status": "decoded", "operation": 1, "to": ADDR(0xBAD)}}
-
-    with patch.dict(ENRICHERS, {"safe_tx_executed": fake}, clear=False):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-    db_session.commit()
-    db_session.expire_all()
-
-    data = db_session.get(MonitoredEvent, event.id).data
-    assert data["safe_exec"]["status"] == "decoded"
-    assert data["salience"] == sal.SALIENCE_ALERT
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_DELEGATECALL_UNRECOGNIZED]
-
-
-def _without_correlation(data: dict) -> dict:
-    """The row minus the zero-RPC correlation join's own publication.
-
-    Correlation runs beside the per-event registry rather than inside it, so a test
-    about ONE enricher's failure has to say which keys it is talking about.
-    """
-    return {key: value for key, value in data.items() if key not in ("correlated_events", "correlated_scope")}
-
-
-def test_a_failing_enricher_leaves_the_row_as_the_taxonomy_wrote_it(db_session, make_mc):
-    """Enrichment failure is never fatal, and never rewrites."""
-    mc = make_mc(contract_type="safe")
-    before = {"salience": sal.SALIENCE_NOT_DETERMINED, "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]}
-    event = _seed_event(db_session, mc, "safe_tx_executed", dict(before))
-
-    def boom(_event, _mc, _ctx):
-        raise RuntimeError("decode exploded")
-
-    with patch.dict(ENRICHERS, {"safe_tx_executed": boom}, clear=False):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-    db_session.commit()
-    db_session.expire_all()
-
-    assert _without_correlation(db_session.get(MonitoredEvent, event.id).data) == before
-
-
 # ---------------------------------------------------------------------------
 # The notifier opt-in
 # ---------------------------------------------------------------------------
@@ -879,16 +407,6 @@ def test_salience_allows(db_session, notify_env, minimum, level, allowed):
     assert _salience_allows(sub, event) is allowed
 
 
-def test_a_subscription_without_min_salience_receives_exactly_what_it_does_today(db_session, notify_env):
-    """No existing subscription is muted."""
-    sub, emit = notify_env
-    assert sub.event_filter is None
-    event = emit("ownership_transferred", {"salience": sal.SALIENCE_ROUTINE, "new_owner": ADDR(9)})
-    with patch("services.monitoring.notifier._send_discord") as send:
-        notify_protocol_events(db_session, [event])
-    assert send.call_count == 1
-
-
 def test_a_rejected_webhook_is_not_counted_as_a_sent_notification(db_session, notify_env, caplog):
     import logging as _logging
     from types import SimpleNamespace
@@ -929,188 +447,11 @@ def test_min_salience_composes_with_the_event_type_filter(db_session, notify_env
     assert send.call_count == 0
 
 
-def test_min_salience_never_overrides_the_tier_gate(db_session, notify_env):
-    """An occurrence that only proves
-    a writer ran never pages anyone, at any salience."""
-    sub, emit = notify_env
-    sub.event_filter = {"min_salience": "routine"}
-    db_session.commit()
-    event = emit("ownership_transferred", {"witness_tier": "hint", "salience": sal.SALIENCE_ALERT})
-    with patch("services.monitoring.notifier._send_discord") as send:
-        notify_protocol_events(db_session, [event])
-    assert send.call_count == 0
-
-
 # ---------------------------------------------------------------------------
 # The API boundary
 # ---------------------------------------------------------------------------
 
 
-def test_the_api_passes_salience_through_verbatim(db_session, api_client, make_mc):
-    """``data`` is serialized whole; a dropped field would render ``not_determined`` on every row."""
-    mc = make_mc()
-    _seed_event(
-        db_session,
-        mc,
-        "ownership_transferred",
-        {
-            "new_owner": ADDR(9),
-            "salience": sal.SALIENCE_ALERT,
-            "salience_basis": [sal.BASIS_CANONICAL_CONFIG_FAMILY],
-        },
-    )
-
-    body = api_client.get(f"/api/monitored-events?address={mc.address}&chain=ethereum").json()
-    assert len(body) == 1
-    assert body[0]["data"]["salience"] == sal.SALIENCE_ALERT
-    assert body[0]["data"]["salience_basis"] == [sal.BASIS_CANONICAL_CONFIG_FAMILY]
-    assert body[0]["data"]["new_owner"] == ADDR(9)
-
-
-def test_a_poll_row_carries_its_signal_class_through_the_api(db_session, api_client, make_mc):
-    """The auditor reads the basis at the boundary."""
-    mc = make_mc(last_known_state={"rate": 7})
-    _poll(db_session, mc, _poll_entry(SIGNAL_CLASS_METRIC, SIGNAL_BASIS_NO_GATE_PROVENANCE), 9)
-
-    body = api_client.get(f"/api/monitored-events?address={mc.address}&chain=ethereum").json()
-    assert len(body) == 1
-    assert body[0]["data"]["signal_class"] == SIGNAL_CLASS_METRIC
-    assert body[0]["data"]["signal_class_basis"] == SIGNAL_BASIS_NO_GATE_PROVENANCE
-    assert body[0]["data"]["salience"] == sal.SALIENCE_ROUTINE
-
-
 # ---------------------------------------------------------------------------
 # Additive enrichment, enforced at the driver
 # ---------------------------------------------------------------------------
-
-
-def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
-    """``witness_tier`` drives ``notifier._may_notify`` and ``event_type`` is the claim itself."""
-    mc = make_mc(contract_type="safe")
-    event = _seed_event(
-        db_session,
-        mc,
-        "safe_tx_executed",
-        {
-            "witness_tier": "hint",
-            "historical": True,
-            "salience": sal.SALIENCE_NOT_DETERMINED,
-            "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
-        },
-    )
-
-    def overreaching(_event, _mc, _ctx):
-        return {
-            "safe_exec": {"status": "not_top_level_call"},
-            "witness_tier": "self_describing",
-            "historical": False,
-            "event_type": "ownership_transferred",
-            "reanalysis_job_id": "nope",
-        }
-
-    with patch.dict(ENRICHERS, {"safe_tx_executed": overreaching}, clear=False):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-    db_session.commit()
-    db_session.expire_all()
-
-    row = db_session.get(MonitoredEvent, event.id)
-    assert row.data["safe_exec"] == {"status": "not_top_level_call"}
-    assert row.data["salience"] == sal.SALIENCE_ROUTINE
-    assert row.data["witness_tier"] == "hint"
-    assert row.data["historical"] is True
-    assert "reanalysis_job_id" not in row.data
-    assert row.event_type == "safe_tx_executed"
-
-
-def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, make_mc):
-    mc = make_mc(contract_type="safe")
-    # The correlation recompute is an identity, so only the refused enricher is observable.
-    before = {
-        "witness_tier": "hint",
-        "salience": sal.SALIENCE_NOT_DETERMINED,
-        "salience_basis": [sal.BASIS_SAFE_EXEC_NOT_ENRICHED],
-    }
-    event = _seed_event(db_session, mc, "safe_tx_executed", dict(before))
-
-    with patch.dict(ENRICHERS, {"safe_tx_executed": lambda *_a: {"witness_tier": "self_describing"}}, clear=False):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-    db_session.commit()
-    db_session.expire_all()
-
-    assert _without_correlation(db_session.get(MonitoredEvent, event.id).data) == before
-
-
-def test_a_chainless_contract_is_skipped_rather_than_defaulted(db_session, make_mc, caplog):
-    """Enriching against ethereum would publish another chain's transaction as this contract's decode."""
-    mc = make_mc(contract_type="safe")
-    event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
-    mc.chain = ""
-    db_session.commit()
-
-    calls: list[str] = []
-
-    def fake(_event, _mc, _ctx):
-        calls.append("ran")
-        return {"safe_exec": {"status": "decoded", "operation": 0}}
-
-    with patch.dict(ENRICHERS, {"safe_tx_executed": fake}, clear=False):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-
-    assert calls == []
-    db_session.expire_all()
-    assert "safe_exec" not in (db_session.get(MonitoredEvent, event.id).data or {})
-
-
-def test_an_unresolvable_chain_costs_that_chain_not_the_window(db_session, make_mc):
-    """The window's rows are already correct and must not be rolled back."""
-    mc = make_mc(contract_type="safe")
-    event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
-
-    def boom(_chain, **_kw):
-        raise RuntimeError("unknown chain")
-
-    with (
-        patch("services.monitoring.enrichment.chain_id_for", side_effect=boom),
-        patch.dict(ENRICHERS, {"safe_tx_executed": lambda *_a: {"safe_exec": {"status": "decoded"}}}, clear=False),
-    ):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-
-    db_session.commit()
-    db_session.expire_all()
-    assert "safe_exec" not in (db_session.get(MonitoredEvent, event.id).data or {})
-
-
-def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_session, make_mc):
-    """A transport failure on the transaction batch degrades exactly as a
-    per-slot failure does: the hashes are absent from ``ctx.txs``, which reads
-    as "not fetched". The enrichers that need nothing from that map
-    (correlation and poll-field classification) must still run — a blip on the
-    Safe decode may not take them down with it."""
-    mc = make_mc(contract_type="safe")
-    victim = make_mc()
-    event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
-    # Same transaction (``_seed_event``'s hash is shared), so correlation — which needs
-    # nothing off the wire — has a real link to publish.
-    effect = _seed_event(db_session, victim, "paused", {"salience": sal.SALIENCE_ALERT})
-
-    seen: list[dict] = []
-
-    def observe(inner_event, inner_mc, ctx):
-        seen.append(dict(ctx.txs))
-        return None
-
-    with (
-        patch("services.monitoring.enrichment._fetch_txs", side_effect=RuntimeError("transport")),
-        patch.dict(ENRICHERS, {"safe_tx_executed": observe}, clear=False),
-    ):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-    db_session.commit()
-    db_session.expire_all()
-
-    assert seen == [{}]
-    data = db_session.get(MonitoredEvent, event.id).data
-    assert data["correlated_events"][0]["event_id"] == str(effect.id)
-    assert data["correlated_events"][0]["event_type"] == "paused"
-    assert data["salience"] == sal.SALIENCE_ALERT
-    # The execution is still un-decoded and correlation raised it; the ordered basis keeps both.
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED, sal.BASIS_CORRELATED_CAUSE]

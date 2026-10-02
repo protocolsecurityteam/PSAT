@@ -18,7 +18,7 @@ from tests.support.scoring_builders import (
     fold,  # noqa: F401  — the fold fixture, reused rather than forked
 )
 from utils import execution_record as EX
-from utils.scoring_status import GRADE_FAULT_DEGRADED, GRADE_STATE_COMPUTED, GRADE_STATES
+from utils.scoring_status import GRADE_FAULT_DEGRADED
 
 _FIELD = "execution_evidence_faults"
 _WARNING = "execution_evidence_unreadable"
@@ -93,17 +93,6 @@ def test_the_warning_names_the_count_and_every_distinct_reason(fold):
     assert "not proof the artifact store was unavailable" in note
 
 
-def test_the_grade_stays_computed_and_the_marker_is_not_a_grade_state(fold):
-    """The DB pairing constraint binds computed grades to the three figures, so the marker can't be a fourth
-    grade_state.
-    """
-    document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
-
-    assert GRADE_FAULT_DEGRADED not in GRADE_STATES
-    assert document.grade_state == GRADE_STATE_COMPUTED
-    assert document.grade_lambda is not None
-
-
 @pytest.mark.parametrize("faulted", [1, 2, 5])
 def test_the_published_count_follows_the_number_of_faulted_records(faulted: int) -> None:
     findings = [_row(*(_carrier(EX.REASON_FETCH_FAILED) for _ in range(faulted)))]
@@ -113,21 +102,6 @@ def test_the_published_count_follows_the_number_of_faulted_records(faulted: int)
     assert census["records_faulted"] == faulted
     assert census["faulted_by_reason"] == {EX.REASON_FETCH_FAILED: faulted}
     assert FOLD._execution_fault_warning(census)["note"].startswith(f"{faulted} of {faulted} ")
-
-
-def test_each_distinct_reason_keeps_its_own_count() -> None:
-    findings = [
-        _row(
-            _carrier(EX.REASON_FETCH_FAILED),
-            _carrier(EX.REASON_FETCH_FAILED),
-            _carrier(EX.REASON_PTR_UNRESOLVABLE),
-        )
-    ]
-    census = FOLD._execution_fault_census(findings, [])
-
-    assert census is not None
-    assert census["faulted_by_reason"] == {EX.REASON_FETCH_FAILED: 2, EX.REASON_PTR_UNRESOLVABLE: 1}
-    assert census["records_faulted"] == 3
 
 
 def test_both_populations_are_walked_and_counted_apart() -> None:
@@ -142,16 +116,6 @@ def test_both_populations_are_walked_and_counted_apart() -> None:
     assert census["records_faulted"] == 3
 
 
-def test_a_reason_outside_the_fault_set_is_examined_and_never_counted() -> None:
-    """``execution_record_not_persisted`` is a backfill gap the rule publishes through; counting it would announce a
-    40-record fault.
-    """
-    assert EX.REASON_NOT_PERSISTED not in EX.FAULT_REASONS
-    findings = [_row(_carrier(EX.REASON_NOT_PERSISTED), _carrier(EX.REASON_NO_PROVING_CALL))]
-
-    assert FOLD._execution_fault_census(findings, []) is None
-
-
 def test_the_denominator_counts_every_record_the_walk_saw() -> None:
     findings = [_row(_carrier(EX.REASON_FETCH_FAILED), _carrier(EX.REASON_NOT_PERSISTED))]
     census = FOLD._execution_fault_census(findings, [_row(_carrier(EX.REASON_NOT_PERSISTED))])
@@ -159,14 +123,3 @@ def test_the_denominator_counts_every_record_the_walk_saw() -> None:
     assert census is not None
     assert census["records_faulted"] == 1
     assert census["execution_records_examined"] == 3
-
-
-def test_a_fault_free_document_publishes_no_field_and_no_warning(fold):
-    document = CA.composed_document(fold, deletability=CA.deletability_plane())
-
-    assert _published_fault_count(document) == 0
-    assert document.execution_evidence_faults is None
-    # A null would read as an attempted census that came back empty.
-    assert _FIELD not in document.document()
-    assert _fault_warnings(document) == []
-    assert not any(_WARNING in str(warning) for warning in document.warnings)

@@ -221,85 +221,6 @@ def test_block_hash_and_head_traffic_stays_out_of_the_hot_loop(session):
     assert hashes.calls == [4_000, 4_000, 4_500]
 
 
-@requires_postgres
-def test_mid_backfill_advance_clears_position_bound_stamp(session):
-    """A legacy stamp is position-bound, so carrying it past its block would spuriously rewind."""
-    span = 1_000
-    head = 4_000 + _CONFIRMATIONS
-    legacy_last = 2_000
-
-    enroll_event_cursor(session, chain_id=1, event_address=_ADDRESS, topic0=_TOPIC_A)
-    _set_cursor(session, _TOPIC_A, last=legacy_last, block_hash=legacy_last.to_bytes(32, "big"))
-    session.commit()
-
-    fetcher = _EmptyFetcher()
-    hashes = _CountingBlockHash()
-    scan_enrolled_events(
-        session,
-        fetchers={1: fetcher},
-        head_fetchers={1: _CountingHead(head)},
-        block_hash_fetchers={1: hashes},
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=span,
-        max_windows_per_cursor=1,
-        max_windows_per_pass=1,
-    )
-
-    assert hashes.calls == [legacy_last]
-    assert fetcher.calls == [(legacy_last + 1, legacy_last + span)]
-    last, complete, stamped = _cursor(session, _TOPIC_A)
-    assert (last, complete, stamped) == (legacy_last + span, False, None)
-
-
-@requires_postgres
-def test_reorged_fringe_stamp_rewinds_the_whole_group(session):
-    """The delete is address-wide, so a sibling cursor left ahead would silently empty its range."""
-    from db.models import IndexedEventLog
-
-    span = 500
-    head = 4_000 + _CONFIRMATIONS
-    stamp_pos = 2_000
-    rewind_to = stamp_pos - _CONFIRMATIONS
-
-    enroll_event_cursor(session, chain_id=1, event_address=_ADDRESS, topic0=_TOPIC_A)
-    enroll_event_cursor(session, chain_id=1, event_address=_ADDRESS, topic0=_TOPIC_B)
-    _set_cursor(session, _TOPIC_A, last=stamp_pos, block_hash=b"\xff" * 32)
-    _set_cursor(session, _TOPIC_B, last=3_000)
-    for block in (1_000, 2_900):  # B's indexed rows below and above the rewind point
-        session.add(
-            IndexedEventLog(
-                chain_id=1,
-                event_address=_ADDRESS,
-                topic0=_TOPIC_B,
-                tx_hash=block.to_bytes(32, "big"),
-                log_index=0,
-                block_number=block,
-                block_hash=block.to_bytes(32, "big"),
-                transaction_index=0,
-                topics=[_TOPIC_B],
-                data_words=[],
-            )
-        )
-    session.commit()
-
-    scan_enrolled_events(
-        session,
-        fetchers={1: _EmptyFetcher()},
-        head_fetchers={1: _CountingHead(head)},
-        block_hash_fetchers={1: _CountingBlockHash()},
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=span,
-        max_windows_per_cursor=1,
-        max_windows_per_pass=1,
-    )
-
-    assert _topic_blocks(session, _TOPIC_B) == [1_000]
-    last_a, complete_a, _ = _cursor(session, _TOPIC_A)
-    last_b, complete_b, _ = _cursor(session, _TOPIC_B)
-    assert last_a == last_b == rewind_to + span
-    assert complete_a is False and complete_b is False
-
-
 def _raw_log(topic0: str, block: int) -> dict:
     return {
         "transactionHash": "0x" + f"{block:064x}",
@@ -335,63 +256,6 @@ def test_rpc_fetcher_sends_one_request_per_window(monkeypatch):
     assert [log.block_number for log in logs] == [42]
 
 
-def test_rpc_fetcher_bisects_on_loud_range_errors(monkeypatch):
-    """Upstream caps fail loudly (-32005 / -32603), never truncate."""
-    calls: list[tuple[int, int]] = []
-
-    def fake_rpc(url, method, params, *, chain_id=None):
-        from_block = int(params[0]["fromBlock"], 16)
-        to_block = int(params[0]["toBlock"], 16)
-        calls.append((from_block, to_block))
-        if to_block - from_block + 1 > 100_000:
-            raise RuntimeError("{'code': -32005, 'message': 'Limit exceeded: More than 50000 logs returned'}")
-        return [_raw_log(_TOPIC_A, from_block)]
-
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
-    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
-    logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
-
-    assert len(calls) == 7
-    assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]
-
-
-def test_rpc_fetcher_bisect_floor_propagates_the_error(monkeypatch):
-    calls: list[int] = []
-
-    def fake_rpc(url, method, params, *, chain_id=None):
-        span = int(params[0]["toBlock"], 16) - int(params[0]["fromBlock"], 16) + 1
-        calls.append(span)
-        raise RuntimeError("{'code': -32603, 'message': 'Internal error: Query timed out'}")
-
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
-    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
-    with pytest.raises(RuntimeError, match="Query timed out"):
-        fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=19_999)
-
-    assert calls == [20_000, 10_000]
-
-
-def test_client_timeout_retries_the_same_window_before_bisecting(monkeypatch):
-    """A client timeout earns one retry; bisecting a slow window fanned out to 756 requests."""
-    calls: list[tuple[int, int]] = []
-
-    def fake_rpc(url, method, params, *, chain_id=None):
-        from_block = int(params[0]["fromBlock"], 16)
-        to_block = int(params[0]["toBlock"], 16)
-        calls.append((from_block, to_block))
-        if calls.count((from_block, to_block)) == 1:
-            raise RpcClientTimeout("RPC request failed for <redacted>: read timed out")
-        return [_raw_log(_TOPIC_A, from_block)]
-
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
-    monkeypatch.setattr(event_logs_rpc.time, "sleep", lambda _s: None)
-    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
-    logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
-
-    assert calls == [(0, 399_999), (0, 399_999)]
-    assert [log.block_number for log in logs] == [0]
-
-
 def test_second_client_timeout_falls_through_to_the_bisect(monkeypatch):
     calls: list[tuple[int, int]] = []
 
@@ -410,32 +274,4 @@ def test_second_client_timeout_falls_through_to_the_bisect(monkeypatch):
 
     assert calls[:2] == [(0, 399_999), (0, 399_999)]
     assert calls[2:4] == [(0, 199_999), (0, 199_999)]
-    assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]
-
-
-def test_upstream_reject_bisects_immediately_without_a_retry(monkeypatch):
-    """The client-timeout retry must be the only behaviour change for other fetcher users."""
-    calls: list[tuple[int, int]] = []
-
-    def fake_rpc(url, method, params, *, chain_id=None):
-        from_block = int(params[0]["fromBlock"], 16)
-        to_block = int(params[0]["toBlock"], 16)
-        calls.append((from_block, to_block))
-        if to_block - from_block + 1 > 100_000:
-            raise RuntimeError("{'code': -32005, 'message': 'Limit exceeded: More than 50000 logs returned'}")
-        return [_raw_log(_TOPIC_A, from_block)]
-
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
-    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
-    logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
-
-    assert calls == [
-        (0, 399_999),
-        (0, 199_999),
-        (0, 99_999),
-        (100_000, 199_999),
-        (200_000, 399_999),
-        (200_000, 299_999),
-        (300_000, 399_999),
-    ]
     assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]

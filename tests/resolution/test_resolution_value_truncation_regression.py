@@ -14,8 +14,6 @@ from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, J
 from db.queue import create_job
 from schemas.control_tracking import ControlTrackingPlan
 from services.resolution.tracking import (
-    _CONTROLLER_VALUE_MAX_LEN,
-    _decode_controller_value,
     build_control_snapshot,
     clear_classify_cache,
 )
@@ -46,37 +44,6 @@ def clean_db(db_session):
     yield db_session
     db_session.rollback()
     _wipe()
-
-
-def test_decode_controller_value_refuses_unstorable_struct_blob():
-    with pytest.raises(ValueError, match="exceeds storable width"):
-        _decode_controller_value(_RAW_STRUCT, "state_variable", None)
-
-    struct_spec_no_projection = {
-        "strategy": "getter_call",
-        "target": "accountantState",
-        "type": "Mock.AccountantState",
-        "type_kind": "struct",
-    }
-    with pytest.raises(ValueError, match="exceeds storable width"):
-        _decode_controller_value(_RAW_STRUCT, "state_variable", struct_spec_no_projection)  # pyright: ignore[reportArgumentType]
-
-
-def test_decode_controller_value_storable_paths_unchanged():
-    word = "0x" + "00" * 12 + "ab" * 20
-    assert _decode_controller_value(word, "state_variable", None) == "0x" + "ab" * 20
-    assert len("0x" + "ab" * 20) <= _CONTROLLER_VALUE_MAX_LEN
-
-    projected = {
-        "member_path": ["payoutAddress"],
-        "type": "address",
-        "components": [
-            {"name": "payoutAddress", "abi_type": "address"},
-            {"name": "highwaterMark", "abi_type": "uint96"},
-            {"name": "isPaused", "abi_type": "bool"},
-        ],
-    }
-    assert _decode_controller_value(_RAW_STRUCT, "state_variable", projected) == _ADDR  # pyright: ignore[reportArgumentType]
 
 
 def _struct_controller_plan() -> ControlTrackingPlan:

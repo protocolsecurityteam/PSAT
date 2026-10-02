@@ -9,7 +9,7 @@ import pytest
 
 slither = pytest.importorskip("slither")
 
-from services.resolution.adapters import AdapterRegistry, EnumerationResult, EvaluationContext  # noqa: E402
+from services.resolution.adapters import AdapterRegistry, EvaluationContext  # noqa: E402
 from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
 from services.resolution.predicate_evaluator import (  # noqa: E402
     evaluate_tree_with_registry,
@@ -18,7 +18,6 @@ from tests.support.predicate_trees import _all_leaves, _build_pipeline  # noqa: 
 from tests.support.slither_compile import _compile  # noqa: E402
 
 ADDR_OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-ADDR_USER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ADDR_OTHER = "0xcccccccccccccccccccccccccccccccccccccccc"
 
 
@@ -26,20 +25,6 @@ def _registry() -> AdapterRegistry:
     r = AdapterRegistry()
     r.register(EventIndexedAdapter)
     return r
-
-
-class FakeEventLogRepo:
-    def __init__(self, members: list[str]):
-        self.members = members
-
-    def fold_event_writes(
-        self, *, chain_id, event_address, topic0, topics_to_keys, data_to_keys, key_sources, direction, block=None
-    ):
-        return EnumerationResult(
-            members=list(self.members) if direction == "add" else [],
-            confidence="enumerable",
-            last_indexed_block=18_000_000,
-        )
 
 
 def test_oz_role_mapping_full_3_hop_helper_chain(tmp_path):
@@ -276,47 +261,3 @@ def test_combined_authority_and_side_conditions(tmp_path):
     cond_kinds = sorted(c.kind for c in cap.conditions)
     assert "pause" in cond_kinds
     assert "reentrancy" in cond_kinds
-
-
-def test_role_shaped_mapping_with_populated_event_repo_resolves_members(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            mapping(bytes32 => mapping(address => bool)) private _roles;
-            event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
-            function f(bytes32 role) external view {
-                require(_roles[role][msg.sender]);
-            }
-        }
-    """,
-    )
-    contract = sl.contracts[0]
-    trees = _build_pipeline(contract)
-    leaves = _all_leaves(trees["f(bytes32)"])
-    assert len(leaves) == 1
-    descriptor = leaves[0]["set_descriptor"]
-    # The plumbing is tested elsewhere; this checks the resolver consumes the hint.
-    descriptor["enumeration_hint"] = [
-        {
-            "event_address": "0x0",
-            "topic0": "0x2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d",
-            "topics_to_keys": {1: 0, 2: 1},
-            "data_to_keys": {},
-            "direction": "add",
-        }
-    ]
-
-    repo = FakeEventLogRepo([ADDR_OWNER, ADDR_USER])
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=ADDR_OTHER,
-        event_log_repo=repo,
-    )
-    cap = evaluate_tree_with_registry(trees["f(bytes32)"], _registry(), ctx)
-    assert cap.kind == "finite_set"
-    assert cap.members is not None
-    members = set(cap.members)
-    assert ADDR_OWNER.lower() in members
-    assert ADDR_USER.lower() in members

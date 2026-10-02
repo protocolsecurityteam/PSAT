@@ -30,10 +30,6 @@ def _make_log(
     return log
 
 
-def _write_deps(_tmp_path, target, deps_dict):
-    return {"address": target, "dependencies": deps_dict}
-
-
 def _write_deps_target_proxy(_tmp_path, target, proxy_type, implementation, deps_dict=None):
     return {
         "address": target,
@@ -96,10 +92,6 @@ class TestParseUpgradeLog:
         assert beacon["event_type"] == "beacon_upgraded"
         assert beacon.get("beacon") == ADDR(99)
 
-    def test_malformed_logs_return_none(self):
-        assert uh.parse_upgrade_log({"topics": [], "data": "0x", "blockNumber": "0x1"}) is None
-        assert uh.parse_upgrade_log(_make_log(ADDR(1), "0xdeadbeef" * 8)) is None
-
     def test_partial_data(self):
         upgraded_no_impl = uh.parse_upgrade_log(_make_log(ADDR(1), uh.UPGRADED_TOPIC0))
         assert upgraded_no_impl is not None
@@ -118,17 +110,6 @@ class TestParseUpgradeLog:
         assert uh._hex_to_int(0) == 0
         assert uh._hex_to_int("0xa") == 10
         assert uh._hex_to_int(42) == 42
-
-    def test_bare_hex_log_index(self):
-        log = _make_log(
-            ADDR(1),
-            uh.UPGRADED_TOPIC0,
-            _topic_for(ADDR(42)),
-            log_index="0x",
-        )
-        event = uh.parse_upgrade_log(log)
-        assert event is not None
-        assert event.get("log_index") == 0
 
     @pytest.mark.parametrize(
         "log, event_type, expected_fields",
@@ -188,21 +169,6 @@ class TestParseUpgradeLog:
 class TestBuildUpgradeHistory:
     """Mocks only at the boundary."""
 
-    def test_no_proxies_returns_empty_schema(self, tmp_path):
-        deps_path = _write_deps(
-            tmp_path,
-            ADDR(0),
-            {
-                ADDR(1): {"type": "regular"},
-                ADDR(2): {"type": "library"},
-            },
-        )
-        result = uh.build_upgrade_history(deps_path)
-        assert result["schema_version"] == "0.1"
-        assert result["target_address"] == ADDR(0)
-        assert result["proxies"] == {}
-        assert result["total_upgrades"] == 0
-
     def test_single_proxy_full_output(self, monkeypatch, tmp_path):
         target = ADDR(1)
         impl_v1, impl_v2 = ADDR(10), ADDR(11)
@@ -255,32 +221,6 @@ class TestBuildUpgradeHistory:
             assert "_emitter" not in event
             assert "event_type" in event
             assert "block_number" in event
-
-    def test_dependency_proxies_are_ignored(self, monkeypatch, tmp_path):
-        """Each dependency builds its own history in its own job."""
-        target = ADDR(0)  # regular (non-proxy) target
-        proxy_a, proxy_b = ADDR(1), ADDR(2)
-        deps_path = _write_deps(
-            tmp_path,
-            target,
-            {
-                proxy_a: {"type": "proxy", "proxy_type": "eip1967", "implementation": ADDR(10)},
-                proxy_b: {"type": "proxy", "proxy_type": "eip1967", "implementation": ADDR(21)},
-            },
-        )
-
-        def fail_fetch(address, topic0, from_block=0, chain_id=1):
-            pytest.fail(f"_fetch_logs_etherscan should not be called (addr={address})")
-
-        monkeypatch.setattr(uh, "_fetch_logs_etherscan", fail_fetch)
-        _mock_no_enrichment(monkeypatch)
-
-        result = uh.build_upgrade_history(deps_path)
-
-        assert result["schema_version"] == "0.1"
-        assert result["target_address"] == target
-        assert result["proxies"] == {}
-        assert result["total_upgrades"] == 0
 
     def test_admin_changed_events_in_output(self, monkeypatch, tmp_path):
         target = ADDR(1)

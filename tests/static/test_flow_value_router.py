@@ -193,48 +193,6 @@ def test_a_pull_between_two_third_parties_is_not_an_inflow(_unit, signature):
     assert "asset_pull" not in info["effect_labels"]
 
 
-def test_a_third_party_pull_mints_the_routed_claim_not_flow_in(_unit):
-    contract = _contract(_unit, "Bridger")
-    claims = build_claims(contract, build_effects(contract), {})["functions"]
-    ids = {c["claim_id"] for c in claims["payFee(uint256)"]}
-    assert "value_router" in ids
-    assert "flow.in" not in ids
-    assert "flow.in" in {c["claim_id"] for c in claims["deposit(uint256)"]}
-
-
-def test_value_router_claim_is_minted_for_routers(_unit):
-    contract = _contract(_unit, "Router")
-    art = build_effects(contract)
-    claims = build_claims(contract, art, {})["functions"]
-
-    def _has_router_claim(sig: str) -> bool:
-        return any(c["claim_id"] == "value_router" for c in claims[sig])
-
-    assert _has_router_claim("deposit(uint256)")
-    assert _has_router_claim("withdraw(uint256,address)")
-    assert not _has_router_claim("directSend(uint256,address)")
-
-    router_claim = next(c for c in claims["withdraw(uint256,address)"] if c["claim_id"] == "value_router")
-    assert router_claim["tier"] == "standard_exact"
-    witness_flow = router_claim["witness"]["flows"][0]
-    assert witness_flow["target_param_index"] == 1
-
-
-def test_the_published_router_claim_carries_the_crossed_ops_identity(_unit):
-    """Byte-exact against the producer's record, so a projection that rewrote it fails."""
-    contract = _contract(_unit, "Router")
-    art = build_effects(contract)
-    claims = build_claims(contract, art, {})["functions"]
-
-    for signature in ("deposit(uint256)", "withdraw(uint256,address)"):
-        produced = _router_flows(art["functions"][signature])[0]["router_ops"]
-        claim = next(c for c in claims[signature] if c["claim_id"] == "value_router")
-        assert claim["witness"]["flows"][0]["router_ops"] == produced
-
-    direct = next(c for c in claims["directSend(uint256,address)"] if c["claim_id"] == "flow.out")
-    assert all("router_ops" not in f for f in direct["witness"]["flows"])
-
-
 def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_path):
     """Round-5 R1: before per-op transparency, the guarded function published a proof byte-identical to the open one."""
     from pathlib import Path

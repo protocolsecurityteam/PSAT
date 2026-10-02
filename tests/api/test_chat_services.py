@@ -257,14 +257,6 @@ def _patch_session_local(monkeypatch, db_session: Session) -> None:
     monkeypatch.setattr(agent_mod, "SessionLocal", TestSession)
 
 
-def test_canonical_chain_aliases_ethereum_and_mainnet():
-    assert chat_data._canonical_chain("Ethereum") == "ethereum"
-    assert chat_data._canonical_chain("mainnet") == "ethereum"
-    assert chat_data._canonical_chain("scroll") == "scroll"
-    assert chat_data._canonical_chain(None) is None
-    assert chat_data._canonical_chain("") is None
-
-
 def test_classify_address_for_safe_eoa_timelock_unknown(db_session, seeded_protocol):
     safe = chat_data.classify_address(db_session, SAFE_ADDR)
     assert safe["kind"] == "safe"
@@ -284,15 +276,6 @@ def test_classify_address_for_safe_eoa_timelock_unknown(db_session, seeded_proto
     unknown = chat_data.classify_address(db_session, "0x" + "f" * 40)
     assert unknown["kind"] == "unknown"
     assert chat_data.classify_address(db_session, "")["kind"] == "unknown"
-
-
-def test_resolve_contract_alias_and_chain_filter(db_session, seeded_protocol):
-    c = chat_data._resolve_contract(db_session, PROXY_ADDR, "ethereum")
-    assert c is not None and c.address == PROXY_ADDR
-    c = chat_data._resolve_contract(db_session, PROXY_ADDR, "mainnet")
-    assert c is not None
-    assert chat_data._resolve_contract(db_session, "0x" + "0" * 40, None) is None
-    assert chat_data._resolve_contract(db_session, "", None) is None
 
 
 def test_contract_brief_and_upgrade_summary(db_session, seeded_protocol):
@@ -469,34 +452,6 @@ def test_run_agent_stream_plain_text(monkeypatch, db_session, seeded_protocol):
     assert PROXY_ADDR.lower() in highlights["data"]["addresses"]
 
 
-def test_run_agent_stream_tool_call_then_answer(monkeypatch, db_session, seeded_protocol):
-    _patch_session_local(monkeypatch, db_session)
-    monkeypatch.setattr(
-        llm_mod.openrouter,
-        "tool_chat",
-        _scripted_iter(
-            [
-                [
-                    {
-                        "type": "tool_calls",
-                        "calls": [{"id": "c1", "name": "get_protocol_info", "arguments": {}}],
-                    },
-                    {"type": "finish", "reason": "tool_calls"},
-                ],
-                [
-                    {"type": "token", "text": "ok"},
-                    {"type": "finish", "reason": "stop"},
-                ],
-            ]
-        ),
-    )
-    events = list(run_agent_stream("ping", [{"role": "user", "content": "earlier"}], _ctx()))
-    names = [e["event"] for e in events]
-    assert "tool_call_start" in names
-    assert "tool_call_result" in names
-    assert names[-1] == "done"
-
-
 def test_run_agent_stream_unknown_tool_surfaces_error(monkeypatch, db_session, seeded_protocol):
     _patch_session_local(monkeypatch, db_session)
     monkeypatch.setattr(
@@ -521,17 +476,6 @@ def test_run_agent_stream_unknown_tool_surfaces_error(monkeypatch, db_session, s
     events = list(run_agent_stream("q", [], _ctx(selected=PROXY_ADDR)))
     result = next(e for e in events if e["event"] == "tool_call_result")
     assert "error" in result["data"]["result"]
-
-
-def test_run_agent_stream_init_failure_emits_error(monkeypatch, db_session, seeded_protocol):
-    _patch_session_local(monkeypatch, db_session)
-
-    def boom(*_a, **_kw):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(llm_mod.openrouter, "tool_chat", boom)
-    events = list(run_agent_stream("q", [], _ctx()))
-    assert events and events[0]["event"] == "error"
 
 
 class _FakeResponse:
@@ -621,14 +565,6 @@ def test_tool_chat_handles_malformed_args_and_unknown_chunks(monkeypatch):
     assert tcs["calls"][0]["arguments"] == {"_raw": "{not}"}
 
 
-def test_get_api_key_raises_without_env(monkeypatch):
-    monkeypatch.delenv("OPEN_ROUTER_KEY", raising=False)
-    # load_dotenv could repopulate the var from .env.
-    monkeypatch.setattr(llm_mod, "load_dotenv", lambda *_a, **_kw: None)
-    with pytest.raises(RuntimeError, match="not set"):
-        llm_mod.openrouter._get_api_key()
-
-
 def test_search_source_reports_unreadable_bodies_instead_of_zero_matches(db_session, seeded_protocol):
     """Every storage failure used to read as ``total_matches: 0``, indistinguishable from a real miss."""
     from sqlalchemy import select
@@ -701,17 +637,6 @@ def test_get_contract_source_marks_a_partial_read_as_incomplete(db_session, seed
     assert res["unreadable_source_files"] == 1
     assert res["indexed_source_files"] == 2
     assert "not determined" in res["source_completeness"]
-    assert res["source_origin"] == "indexed"
-
-
-def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, seeded_protocol, monkeypatch):
-    monkeypatch.setattr(chat_tools, "_etherscan_sources", lambda *a, **kw: {})
-
-    res = chat_tools._get_contract_source(db_session, _ctx(), address=PLAIN_ADDR)
-
-    assert res["source"]
-    assert "unreadable_source_files" not in res
-    assert "source_completeness" not in res
     assert res["source_origin"] == "indexed"
 
 

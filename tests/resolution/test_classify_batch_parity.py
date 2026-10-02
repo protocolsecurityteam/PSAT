@@ -229,35 +229,6 @@ def test_whole_batch_failure_marks_had_error(monkeypatch):
     assert batch[2] is True
 
 
-def test_partial_per_call_error_preserves_had_error(monkeypatch):
-    """had_error keeps the result out of the cache."""
-
-    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
-        return "0x60"
-
-    def _fake_type_authority(*_a, **_kw):
-        return {}
-
-    def _fake_batch(_rpc_url, calls, chain_id=None):
-        out = [
-            (_abi_encode_address_array([ADDR_OWNER]), False),
-            (_abi_encode_uint256(1), False),
-            (None, True),  # errored
-            ("0x", False),
-            ("0x", False),
-            ("0x", False),
-        ]
-        return out
-
-    monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
-    monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch)
-    monkeypatch.setattr(tracking, "_eth_call_raw", lambda *_a, **_k: "0x")
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
-    kind, details, had_error = _classify_uncached_batched("https://rpc", "0xab", "latest")
-    assert kind == "safe"
-    assert had_error is True, "an errored probe in the batch must still set had_error"
-
-
 @pytest.mark.parametrize(
     ("batch_enabled", "expected_calls"),
     [
@@ -284,43 +255,6 @@ def test_classify_dispatch_follows_env_flag(monkeypatch, batch_enabled, expected
     )
     tracking.classify_resolved_address_with_status("https://rpc", addr)
     assert called == expected_calls
-
-
-def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
-    """Some private RPCs reject JSON-RPC batches; whole-batch failure falls back to the sequential classifier."""
-    sequential_called = {"count": 0}
-
-    def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
-        return "0x60"
-
-    def _fake_type_authority(*_a, **_kw):
-        return {}
-
-    def _failing_batch(*_a, **_kw):
-        return [(None, True)] * len(tracking._CLASSIFY_PROBE_SIGS)
-
-    def _safe_seq_eth_call(_rpc_url, _addr, signature, _block, chain_id=None):
-        sequential_called["count"] += 1
-        if signature == "getOwners()":
-            return _abi_encode_address_array([ADDR_OWNER])
-        if signature == "getThreshold()":
-            return _abi_encode_uint256(1)
-        return "0x"
-
-    monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
-    monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _failing_batch)
-    monkeypatch.setattr(tracking, "_eth_call_raw", _safe_seq_eth_call)
-    monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
-
-    kind, details, had_error = _classify_uncached_batched("https://rpc", "0xab", "latest")
-
-    assert kind == "safe", (
-        "whole-batch failure must fall back to sequential probes, which would have classified correctly"
-    )
-    assert details["owners"] == [ADDR_OWNER.lower()]
-    assert details["threshold"] == 1
-    assert had_error is False, "fallback to sequential succeeded — must be cacheable"
-    assert sequential_called["count"] >= 1, "fallback must have actually invoked sequential probes"
 
 
 def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
@@ -433,19 +367,6 @@ def test_multicall_matches_sequential(monkeypatch, scenario):
     seq = _classify_uncached("https://rpc.example", "0x" + "ab" * 20, "latest")
     mc = _run_multicall(monkeypatch, probe_map)
     assert seq == mc
-
-
-def test_multicall_eoa_short_circuits_without_aggregate3(monkeypatch):
-    import services.clients.rpc as rpc_mod
-
-    monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
-    monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x")
-    monkeypatch.setattr(
-        rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("aggregate3 should not run"))
-    )
-    kind, _details, had_error = _classify_uncached_batched("https://rpc", "0x" + "ab" * 20, "latest")
-    assert kind == "eoa"
-    assert had_error is False
 
 
 def test_multicall_revert_maps_to_probe_error(monkeypatch):

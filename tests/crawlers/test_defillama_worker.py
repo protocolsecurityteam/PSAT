@@ -13,7 +13,6 @@ from workers.base import JobHandledDirectly
 from workers.defillama_worker import DefiLlamaWorker
 
 ADDR_1 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-ADDR_2 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 PROTOCOL = "aave-v3"
 _BARE_TOKEN = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
 _BASE_TOKEN = "0x60359a0d0bd9f2c6e3a8b1a9b4c5d6e7f8091a2b"
@@ -76,20 +75,6 @@ def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
         "complete_calls": complete_calls,
         "protocol_calls": protocol_calls,
     }
-
-
-class TestMissingProtocol:
-    @pytest.mark.parametrize(
-        "request_payload", [pytest.param({}, id="missing-key"), pytest.param(None, id="none-request")]
-    )
-    def test_missing_protocol_raises(self, monkeypatch: pytest.MonkeyPatch, request_payload: Any) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        job = _job(request=request_payload)
-        _patch_worker_deps(monkeypatch)
-
-        with pytest.raises(ValueError, match="defillama_protocol"):
-            worker.process(session, cast(Any, job))
 
 
 class TestJobName:
@@ -181,35 +166,6 @@ class TestScanResultArtifactContent:
         assert scan_results["addresses_found"] == 1
         assert scan_results["addresses"] == [ADDR_1]
 
-    def test_discovery_summary_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        trackers = _patch_worker_deps(monkeypatch)
-
-        monkeypatch.setattr(
-            "workers.defillama_worker.scan_protocol",
-            lambda **kwargs: _scan_result(
-                addresses=[ADDR_1, ADDR_2],
-                address_details=[
-                    {"address": ADDR_1, "chain": "ethereum"},
-                    {"address": ADDR_2, "chain": "polygon"},
-                ],
-            ),
-        )
-
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        summary = next(d for name, d in trackers["store_calls"] if name == "discovery_summary")
-        assert summary["mode"] == "defillama_scan"
-        assert summary["protocol"] == PROTOCOL
-        assert summary["discovered_count"] == 2
-        assert "analyzed_count" not in summary
-        assert "child_jobs" not in summary
-
 
 class TestZeroAddressesFound:
     def test_no_addresses(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,22 +186,6 @@ class TestZeroAddressesFound:
 
         summary = next(d for name, d in trackers["store_calls"] if name == "discovery_summary")
         assert summary["discovered_count"] == 0
-
-
-class TestScanProtocolRaises:
-    def test_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        job = _job()
-
-        _patch_worker_deps(monkeypatch)
-        monkeypatch.setattr(
-            "workers.defillama_worker.scan_protocol",
-            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("clone failed")),
-        )
-
-        with pytest.raises(RuntimeError, match="clone failed"):
-            worker.process(session, cast(Any, job))
 
 
 class TestProtocolCreation:

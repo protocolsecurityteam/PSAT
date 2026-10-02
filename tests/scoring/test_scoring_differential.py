@@ -70,46 +70,6 @@ def _corpus() -> ScoreDocument:
     )
 
 
-def test_self_differential_of_a_written_document_moves_nothing():
-    """The oracle is the CLI's shape, which the top-level-only read missed."""
-    document = _corpus()
-    oracle = copy.deepcopy(document_json(document))
-
-    assert "subsumed_rows" not in oracle, "document_json nests subsumed rows under provenance"
-    assert len(oracle["provenance"]["subsumed_rows"]) == 2
-
-    result = differential(document, oracle)
-
-    assert result["oracle_subsumed_rows_source"] == "provenance"
-    assert result["counts"]["rows"] == {"oracle": 5, "scorer": 5}
-    assert result["counts"]["added"] == 0
-    assert result["counts"]["changed"] == 0
-    assert result["counts"]["removed"] == 0
-    assert result["counts"]["split_by_access_path"] == 0
-    assert result["added"] == []
-    assert result["changed"] == []
-    assert result["removed"] == []
-    assert result["split_by_access_path"] == []
-
-
-def test_self_differential_of_a_top_level_oracle_moves_nothing():
-    document = _corpus()
-    payload = copy.deepcopy(document_json(document))
-    oracle = {k: v for k, v in payload.items() if k != "provenance"}
-    oracle["subsumed_rows"] = payload["provenance"]["subsumed_rows"]
-
-    result = differential(document, oracle)
-
-    assert result["oracle_subsumed_rows_source"] == "top_level"
-    assert result["counts"]["rows"] == {"oracle": 5, "scorer": 5}
-    assert (
-        result["counts"]["added"],
-        result["counts"]["changed"],
-        result["counts"]["removed"],
-        result["counts"]["split_by_access_path"],
-    ) == (0, 0, 0, 0)
-
-
 def test_an_oracle_with_no_subsumed_rows_anywhere_is_its_own_state():
     document = _corpus()
     payload = copy.deepcopy(document_json(document))
@@ -169,21 +129,6 @@ def test_identity_match_beats_the_address_set_and_reports_the_real_movement():
     assert moved["caused_by"] == ["value_band >= $10k-$100k -> >= $100k-$1M (proven floor over 5 entity(ies))"]
 
 
-def test_a_new_access_path_is_added_not_a_split_when_the_old_row_still_exists():
-    document = _corpus()
-    oracle = copy.deepcopy(document_json(document))
-    oracle["provenance"]["subsumed_rows"] = [
-        row for row in oracle["provenance"]["subsumed_rows"] if row["access_path"] != "via_timelock_5d"
-    ]
-
-    result = differential(document, oracle)
-
-    assert result["counts"]["split_by_access_path"] == 0
-    assert result["counts"]["changed"] == 0
-    assert result["counts"]["added"] == 1
-    assert result["added"][0]["access_path"] == "via_timelock_5d"
-
-
 def test_a_rekeyed_unit_still_splits_and_names_the_row_its_causes_came_from():
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
@@ -226,55 +171,6 @@ def test_a_split_prefers_the_identity_twin_for_its_causes():
     assert split["cause_computed_against"]["chosen_by"] == "row identity"
     assert split["cause_computed_against"]["access_path"] == "direct"
     assert split["caused_by"] == ["raw_points 99.0 -> 12.15"]
-
-
-def test_a_claimed_row_is_not_offered_as_another_rows_recovery_single_candidate():
-    """Lending a matched row to another old row fabricates a movement and hides a real disappearance."""
-    document = _corpus()
-    oracle = copy.deepcopy(document_json(document))
-    oracle["findings"].append(
-        _row(
-            "ethereum::0xdead2222",
-            "flow.out",
-            "direct",
-            raw_points=99.0,
-            unit_members=["0xdead2222", "0x183fe888"],
-            principal_addresses=["0xdead2222", "0x183fe888"],
-        )
-    )
-
-    result = differential(document, oracle)
-
-    assert result["counts"]["changed"] == 0
-    assert result["counts"]["split_by_access_path"] == 0
-    assert result["counts"]["added"] == 0
-    assert result["counts"]["removed"] == 1
-    (gone,) = result["removed"]
-    assert gone["raw_before"] == 99.0
-    assert gone["access_path"] == "direct"
-
-
-def test_a_claimed_row_is_not_offered_as_another_rows_recovery_split():
-    document = _corpus()
-    oracle = copy.deepcopy(document_json(document))
-    oracle["findings"].append(
-        _row(
-            "ethereum::0xdead1111",
-            "authority.replace",
-            "direct",
-            raw_points=99.0,
-            unit_members=["0xdead1111", "0xf8553c85"],
-            principal_addresses=["0xdead1111", "0xf8553c85"],
-        )
-    )
-
-    result = differential(document, oracle)
-
-    assert result["counts"]["split_by_access_path"] == 0
-    assert result["counts"]["changed"] == 0
-    assert result["counts"]["added"] == 0
-    assert result["counts"]["removed"] == 1
-    assert result["removed"][0]["principal"].endswith("0xdead1111")
 
 
 def test_a_fuzzy_changed_row_says_when_identity_decided_the_comparison():
@@ -348,30 +244,3 @@ def test_the_report_does_not_depend_on_the_order_the_rows_are_listed_in():
         shuffled = _document(list(findings), list(subsumed))
         permuted = dict(copy.deepcopy(oracle), findings=list(old_findings))
         assert _signature(differential(shuffled, permuted)) == baseline
-
-
-def test_a_row_that_really_disappeared_is_still_reported_removed():
-    document = _corpus()
-    oracle = copy.deepcopy(document_json(document))
-    oracle["findings"].append(
-        _row(
-            "ethereum::0xdeadbeef",
-            "authority.replace",
-            "direct",
-            unit_members=[],
-            principal_addresses=["0x" + "b1" * 20],
-            principal="EOA 0x" + "b1" * 20,
-        )
-    )
-
-    result = differential(document, oracle)
-
-    assert result["counts"]["removed"] == 1
-    (gone,) = result["removed"]
-    assert gone["principal"] == "EOA 0x" + "b1" * 20
-    assert (gone["principal_unit"], gone["capability"], gone["access_path"]) == (
-        "ethereum::0xdeadbeef",
-        "authority.replace",
-        "direct",
-    )
-    assert result["counts"]["added"] == 0

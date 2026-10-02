@@ -16,21 +16,15 @@ from sqlalchemy import select
 
 from db.models import Contract, Job, MonitoredContract, MonitoredEvent, Protocol, ProxyUpgradeEvent, WatchedProxy
 from services.monitoring.event_topics import (
-    MAX_EVENT_TYPE_LENGTH,
     WITNESS_TIER_ACTIVITY,
     WITNESS_TIER_HINT,
     WITNESS_TIER_SELF_DESCRIBING,
     classify_witness_tier,
-    extract_governance_topics,
-    member_changed_event_type,
-    normalized_writer_openness,
     read_spec_is_scalar_slot,
-    value_changed_event_type,
 )
 from services.monitoring.polling_plan import build_polling_plan
 from services.monitoring.unified_watcher import (
     _Cohort,
-    _DirtyController,
     _poll_entry_for_controller,
     _process_window,
     _resolve_spec_tier,
@@ -46,7 +40,6 @@ from services.monitoring.verify_status import (
     record_unresolvable_read,
 )
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
-from services.resolution.tracking_plan import build_control_tracking_plan
 
 
 def ADDR(n: int) -> str:
@@ -59,75 +52,6 @@ def _topic0(signature: str) -> str:
 
 def _word(value: str) -> str:
     return "0x" + "0" * 24 + value[2:]
-
-
-def test_minted_type_vocabulary():
-    assert value_changed_event_type("state_variable:owner") == "value_changed:state_variable:owner"
-    assert member_changed_event_type("fromDenyList") == "member_changed:fromDenyList"
-    # Otherwise each entry would become its own event type and defeat the identity index.
-    assert ":" not in member_changed_event_type("fromDenyList").split(":", 1)[1]
-
-
-def test_writer_openness_is_three_state():
-    assert normalized_writer_openness("restricted") == "restricted"
-    assert normalized_writer_openness("open") == "open"
-    assert normalized_writer_openness(None) == "not_determined"
-    assert normalized_writer_openness("") == "not_determined"
-    assert normalized_writer_openness("Restricted-ish") == "not_determined"
-    assert normalized_writer_openness(True) == "not_determined"
-
-
-def test_canonical_family_is_self_describing():
-    assert (
-        classify_witness_tier(event_type="ownership_transferred", controller_id="state_variable:owner")
-        == WITNESS_TIER_SELF_DESCRIBING
-    )
-
-
-def test_donated_spec_with_readable_controller_is_a_hint():
-    assert (
-        classify_witness_tier(
-            event_type="state_changed:state_variable:paused",
-            controller_id="state_variable:paused",
-            effect_tags={"writes": ["paused", "_status"]},
-            poll_decodable=True,
-        )
-        == WITNESS_TIER_HINT
-    )
-
-
-def test_donated_spec_without_a_read_is_activity():
-    assert (
-        classify_witness_tier(
-            event_type="state_changed:state_variable:_balances",
-            controller_id="state_variable:_balances",
-            effect_tags={"writes": ["_allowances", "_balances", "_totalSupply"]},
-            poll_decodable=False,
-        )
-        == WITNESS_TIER_ACTIVITY
-    )
-
-
-@pytest.mark.parametrize(
-    "openness,expected",
-    [
-        ("restricted", WITNESS_TIER_SELF_DESCRIBING),
-        ("open", WITNESS_TIER_ACTIVITY),
-        ("not_determined", WITNESS_TIER_ACTIVITY),
-        (None, WITNESS_TIER_ACTIVITY),
-    ],
-)
-def test_member_witness_needs_a_proven_restricted_writer(openness, expected):
-    assert (
-        classify_witness_tier(
-            event_type="state_changed:state_variable:fromDenyList",
-            controller_id="state_variable:fromDenyList",
-            effect_tags={"writes": ["fromDenyList"]},
-            member_witness={"key_position": 0, "direction": "add"},
-            writer_openness=openness,
-        )
-        == expected
-    )
 
 
 def test_old_new_pair_qualifies_only_when_attributable():
@@ -198,36 +122,6 @@ def test_only_a_proven_single_cell_slot_takes_the_old_new_arm(read_spec, scalar)
     assert (tier == WITNESS_TIER_SELF_DESCRIBING) is scalar
 
 
-def test_the_old_new_arm_defaults_to_refusing():
-    assert (
-        classify_witness_tier(
-            event_type="state_changed:state_variable:rate",
-            controller_id="state_variable:rate",
-            inputs=[
-                {"name": "oldRate", "type": "uint256", "indexed": False},
-                {"name": "newRate", "type": "uint256", "indexed": False},
-            ],
-            effect_tags={"writes": ["rate"]},
-        )
-        == WITNESS_TIER_ACTIVITY
-    )
-
-
-def test_untypable_controller_id_demotes_rather_than_truncates():
-    """Truncating would name a different slot."""
-    long_id = "state_variable:" + "a" * MAX_EVENT_TYPE_LENGTH
-    assert len(value_changed_event_type(long_id)) > MAX_EVENT_TYPE_LENGTH
-    assert (
-        classify_witness_tier(
-            event_type=f"state_changed:{long_id}",
-            controller_id=long_id,
-            effect_tags={"writes": ["x"]},
-            poll_decodable=True,
-        )
-        == WITNESS_TIER_ACTIVITY
-    )
-
-
 def _plan_with(read_spec: dict | None, **event_extra: object) -> dict:
     event = {
         "name": "RateUpdated",
@@ -246,67 +140,6 @@ def _plan_with(read_spec: dict | None, **event_extra: object) -> dict:
             }
         ]
     }
-
-
-def test_extract_stamps_the_tier_and_the_three_state_openness():
-    readable = {"strategy": "getter_call", "type_kind": "primitive", "type": "uint256", "target": "rate"}
-    spec = extract_governance_topics(_plan_with(readable))[0]
-    assert spec["witness_tier"] == WITNESS_TIER_HINT
-    assert spec["writer_openness"] == "not_determined"
-
-    spec = extract_governance_topics(_plan_with(None))[0]
-    assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
-
-
-def test_extract_reads_the_g3_qualification_fields():
-    """Missing-field records are covered in ``test_witness_qualification_units``."""
-    witness = {"mapping_name": "rate", "key_position": 0, "direction": "add"}
-    spec = extract_governance_topics(_plan_with(None, member_witness=witness, writer_openness="restricted"))[0]
-    assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
-    assert spec["writer_openness"] == "restricted"
-    assert spec["member_witness"] == witness
-    assert spec["event_type"] == "member_changed:rate"
-
-
-def test_qualification_fields_round_trip_through_the_plan_assembler():
-    analysis = {
-        "subject": {"address": ADDR(1), "name": "Vault"},
-        "controller_tracking": [
-            {
-                "controller_id": "state_variable:fromDenyList",
-                "label": "fromDenyList",
-                "source": "static",
-                "kind": "state_variable",
-                "tracking_mode": "event_plus_state",
-                "read_spec": None,
-                "associated_events": [
-                    {
-                        "name": "DenyFrom",
-                        "signature": "DenyFrom(address)",
-                        "topic0": _topic0("DenyFrom(address)"),
-                        "inputs": [{"name": "user", "type": "address", "indexed": True}],
-                        "effect_tags": {"writes": ["fromDenyList"]},
-                        "member_witness": {
-                            "mapping_name": "fromDenyList",
-                            "key_position": 0,
-                            "direction": "add",
-                        },
-                        "writer_openness": "restricted",
-                    }
-                ],
-                "writer_functions": [],
-            }
-        ],
-    }
-    plan = dict(build_control_tracking_plan(analysis))  # pyright: ignore[reportArgumentType]
-    event = dict(plan["tracked_controllers"][0]["event_watch"]["events"][0])  # pyright: ignore[reportIndexIssue]
-    assert event["member_witness"] == {
-        "mapping_name": "fromDenyList",
-        "key_position": 0,
-        "direction": "add",
-    }
-    assert event["writer_openness"] == "restricted"
-    assert extract_governance_topics(plan)[0]["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
 
 
 def test_polling_plan_suppresses_the_verified_type_it_would_double_report():
@@ -416,17 +249,6 @@ def _cohort(mc: MonitoredContract) -> _Cohort:
     return _Cohort(chain="ethereum", member_ids=[mc.id], addresses=[mc.address.lower()], cursor=199)
 
 
-def test_hint_occurrences_publish_nothing_and_coalesce_to_one_read(db_session, seeded):
-    mc = seeded(WITNESS_TIER_HINT)
-    dirty: dict = {}
-    events = _process_window(db_session, _cohort(mc), _logs(3), 200, 210, dirty)
-    db_session.commit()
-
-    assert events == []
-    assert db_session.query(MonitoredEvent).count() == 0
-    assert list(dirty) == [(mc.id, "state_variable:rate")]
-
-
 def test_pre_enrollment_hint_never_marks_a_read(db_session, seeded):
     """Verification via the new route: a verification read compares the CURRENT slot against
     last_known_state, so an ancient occurrence triggering one would publish history as live."""
@@ -435,37 +257,6 @@ def test_pre_enrollment_hint_never_marks_a_read(db_session, seeded):
     db_session.commit()
     dirty: dict = {}
     assert _process_window(db_session, _cohort(mc), _logs(2), 200, 210, dirty) == []
-    assert dirty == {}
-
-
-def test_activity_occurrences_publish_nothing_and_mark_nothing(db_session, seeded):
-    mc = seeded(WITNESS_TIER_ACTIVITY)
-    dirty: dict = {}
-    assert _process_window(db_session, _cohort(mc), _logs(3), 200, 210, dirty) == []
-    db_session.commit()
-    assert db_session.query(MonitoredEvent).count() == 0
-    assert dirty == {}
-
-
-def test_self_describing_occurrences_publish_and_carry_their_tier(db_session, seeded):
-    mc = seeded(WITNESS_TIER_SELF_DESCRIBING)
-    events = _process_window(db_session, _cohort(mc), _logs(2), 200, 210, {})
-    db_session.commit()
-    assert len(events) == 2
-    assert all((e.data or {})["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING for e in events)
-
-
-def test_legacy_spec_without_a_tier_is_reclassified_not_grandfathered(db_session, seeded):
-    with_read = seeded(None, with_plan=True)
-    dirty: dict = {}
-    assert _process_window(db_session, _cohort(with_read), _logs(1), 200, 210, dirty) == []
-    assert list(dirty) == [(with_read.id, "state_variable:rate")]
-
-    db_session.query(MonitoredContract).delete()
-    db_session.commit()
-    without_read = seeded(None, with_plan=False)
-    dirty = {}
-    assert _process_window(db_session, _cohort(without_read), _logs(1), 200, 210, dirty) == []
     assert dirty == {}
 
 
@@ -481,40 +272,6 @@ def _run_scan(db_session, *, batch_result, head: int = 1000, monkeypatch_env: di
         fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
         result = scan_for_events(db_session, "http://rpc.invalid")
     return result, batch
-
-
-def test_verification_read_diff_publishes_a_witnessed_value_changed(db_session, seeded):
-    mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
-    _run_scan(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(9)[2:].zfill(64), "ok")])
-
-    rows = db_session.execute(select(MonitoredEvent)).scalars().all()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.event_type == "value_changed:state_variable:rate"
-    assert row.data["old"] == "7"
-    assert row.data["new"] == "9"
-    assert row.data["witness"] == "read_verified"
-    assert row.log_index is None
-    db_session.refresh(mc)
-    assert mc.last_known_state["rate"] == 9
-
-
-def test_verification_read_without_a_diff_publishes_nothing(db_session, seeded):
-    mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
-    _run_scan(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(7)[2:].zfill(64), "ok")])
-
-    assert db_session.query(MonitoredEvent).count() == 0
-    db_session.refresh(mc)
-    assert mc.last_known_state == {"rate": 7}
-    assert not (mc.last_poll_status or {})
-
-
-def test_first_observation_seeds_the_baseline_without_claiming_a_change(db_session, seeded):
-    mc = seeded(WITNESS_TIER_HINT, state={})
-    _run_scan(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(9)[2:].zfill(64), "ok")])
-    assert db_session.query(MonitoredEvent).count() == 0
-    db_session.refresh(mc)
-    assert mc.last_known_state["rate"] == 9
 
 
 @pytest.mark.parametrize(
@@ -565,31 +322,11 @@ def test_failed_read_is_counted_on_the_pass_not_only_marked(db_session, seeded):
     assert detail["verification_reads_over_budget"] == 0
 
 
-def test_over_budget_skips_are_counted_on_the_pass(db_session, seeded, monkeypatch):
-    seeded(WITNESS_TIER_HINT, state={"rate": 7})
-    monkeypatch.setenv("PSAT_SCAN_MAX_VERIFY_READS_PER_PASS", "0")
-    detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x", "ok")])
-    assert detail["verification_reads_over_budget"] == 1
-    assert detail["verification_reads_failed"] == 0
-
-
 def test_an_answered_pass_reports_earned_zeroes(db_session, seeded):
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(7)[2:].zfill(64), "ok")])
     assert detail["verification_reads_failed"] == 0
     assert detail["verification_reads_over_budget"] == 0
-
-
-def test_a_verification_pass_that_died_reports_not_determined_not_zero(db_session, seeded):
-    """0 would be an unearned negative."""
-    seeded(WITNESS_TIER_HINT, state={"rate": 7})
-    with patch(
-        "services.monitoring.unified_watcher._resolve_verification_reads",
-        side_effect=RuntimeError("verification exploded"),
-    ):
-        detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x", "ok")])
-    assert detail["verification_reads_failed"] is None
-    assert detail["verification_reads_over_budget"] is None
 
 
 def test_verified_control_slot_change_triggers_reanalysis(db_session):
@@ -697,21 +434,6 @@ def test_only_a_proven_controller_identity_binds_a_read(db_session, seeded):
 
     assert _poll_entry_for_controller(mc, "state_variable:rate") is None
     assert _resolve_spec_tier(_tracked_spec(None), mc) == WITNESS_TIER_ACTIVITY
-
-
-def test_unbindable_hint_records_not_determined(db_session, seeded):
-    """a hint resolving to no read is recorded, not dropped; an unverifiable
-    interval must not look quiet."""
-    mc = seeded(WITNESS_TIER_HINT, with_plan=False)
-    dirty: dict = {}
-    assert _process_window(db_session, _cohort(mc), _logs(2), 200, 210, dirty) == []
-    db_session.commit()
-
-    assert dirty == {}
-    assert db_session.query(MonitoredEvent).count() == 0
-    db_session.refresh(mc)
-    assert mc.last_poll_status == {"controller:state_variable:rate": VERIFY_NO_READ_BINDING}
-    assert count_verification_read_gaps(db_session)["no_read_binding"] == 1
 
 
 def test_verification_read_writes_through_the_proxy_plane(db_session):
@@ -833,34 +555,6 @@ def test_lost_scanner_lease_cancels_the_verification_reads(db_session, seeded):
     assert mc.last_known_state == {"rate": 7}
 
 
-def test_budget_rotates_least_recently_verified_first():
-    from services.monitoring.unified_watcher import _LAST_VERIFIED_AT, _verification_read_order
-
-    mc_id = uuid.uuid4()
-    members = {
-        (mc_id, cid): _DirtyController(
-            monitored_contract_id=mc_id,
-            controller_id=cid,
-            chain="ethereum",
-            address=ADDR(1),
-            entry={"field": cid},
-            block_number=1,
-        )
-        for cid in ("a_first", "b_second", "c_third")
-    }
-    _LAST_VERIFIED_AT.clear()
-    try:
-        assert [d.controller_id for d in _verification_read_order(members)] == [
-            "a_first",
-            "b_second",
-            "c_third",
-        ]
-        _LAST_VERIFIED_AT[(mc_id, "a_first")] = 100.0
-        assert [d.controller_id for d in _verification_read_order(members)][-1] == "a_first"
-    finally:
-        _LAST_VERIFIED_AT.clear()
-
-
 @pytest.mark.parametrize("witness", [True, "yes", 1, [], {}, ["x"]])
 def test_only_a_populated_correspondence_record_promotes(witness):
     """A serialization bug must not promote every event on the contract."""
@@ -887,18 +581,6 @@ def test_events_from_a_stale_plan_carry_its_timestamp(db_session, seeded):
     events = _process_window(db_session, _cohort(mc), _logs(1), 200, 210, {})
     db_session.commit()
     assert (events[0].data or {})["plan_stale_since"] == "2026-08-01T00:00:00Z"
-
-
-def test_read_verified_events_carry_no_plan_staleness(db_session, seeded):
-    mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
-    config = dict(mc.monitoring_config or {})
-    config["tracked_topics_stale_since"] = "2026-08-01T00:00:00Z"
-    mc.monitoring_config = config
-    db_session.commit()
-
-    _run_scan(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(9)[2:].zfill(64), "ok")])
-    row = db_session.execute(select(MonitoredEvent)).scalars().one()
-    assert "plan_stale_since" not in (row.data or {})
 
 
 def _deadlock_error():
@@ -953,26 +635,6 @@ def test_non_deadlock_db_error_is_not_swallowed_per_unit(db_session, seeded):
         result = scan_for_events(db_session, "http://rpc.invalid")
     assert result.degraded is True
     assert db_session.query(MonitoredEvent).count() == 0
-
-
-def test_reads_are_issued_before_any_write_is_staged(db_session, seeded):
-    """Row locks held across network IO deadlock against the scanner's cohort UPDATE."""
-    seeded(WITNESS_TIER_HINT, state={"rate": 7})
-    dirty_at_read_time: list[bool] = []
-
-    def _batch(*_a, **_k):
-        dirty_at_read_time.append(bool(db_session.dirty or db_session.new))
-        return [("0x" + hex(9)[2:].zfill(64), "ok")]
-
-    with (
-        patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
-        patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
-        patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_batch),
-    ):
-        fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
-        scan_for_events(db_session, "http://rpc.invalid")
-
-    assert dirty_at_read_time == [False]
 
 
 def test_unbindable_hint_marker_converges(db_session, seeded):

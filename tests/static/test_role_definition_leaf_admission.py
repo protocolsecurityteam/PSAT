@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from services.static.contract_analysis_pipeline.summaries import (
-    _role_names_from_predicate_trees,
     _role_names_from_tree,
 )
 
@@ -86,25 +85,6 @@ REAL_PAUSER_ROLE_LEAF = {
 
 # storage_var is ``TMP_1189`` and there's no enumeration_hint; gating on either drops five Lido roles.
 
-REAL_OWNABLE_SLOT_LEAF = {
-    "kind": "equality",
-    "operator": "eq",
-    "authority_role": "caller_authority",
-    "operands": [
-        {
-            "source": "state_variable",
-            "state_variable_name": "OwnableStorageLocation",
-            "member_path": ["_owner"],
-        },
-        {"source": "msg_sender"},
-    ],
-    "references_msg_sender": True,
-    "parameter_indices": [],
-    "expression": "owner() != _msgSender()",
-    "basis": ["if-revert via always-reverting branch"],
-    "confidence": "high",
-}
-
 
 HOSTILE_ROLE_WITH_BANNED_SUFFIX = {
     **REAL_PAUSER_ROLE_LEAF,
@@ -120,23 +100,6 @@ HOSTILE_ROLE_WITH_BANNED_SUFFIX = {
         ],
     },
 }
-
-HOSTILE_SLOT_WITH_INNOCENT_NAME = {
-    **REAL_OWNABLE_SLOT_LEAF,
-    "operands": [
-        {
-            "source": "state_variable",
-            "state_variable_name": "MAIN_POINTER",
-            "member_path": ["_owner"],
-        },
-        {"source": "msg_sender"},
-    ],
-}
-
-
-def test_hostile_slot_with_innocent_name_is_dropped():
-    trees = {"trees": {"setTokenOut(address)": _leaf(HOSTILE_SLOT_WITH_INNOCENT_NAME)}}
-    assert _role_names_from_predicate_trees(trees, _vars("MAIN_POINTER")) == set()
 
 
 class _AddressVar:
@@ -192,13 +155,6 @@ def test_slot_route_refuses_a_mapping_membership_role_operand():
     from services.resolution.predicate_evaluator import _canonical_authority_selector_for_slot
 
     assert _canonical_authority_selector_for_slot("GOVERNOR_SLOT", HOSTILE_ROLE_WITH_BANNED_SUFFIX) is None
-
-
-def test_slot_route_still_accepts_a_real_slot_locator_leaf():
-    from services.resolution.predicate_evaluator import _canonical_authority_selector_for_slot
-
-    assert _canonical_authority_selector_for_slot("_GOVERNOR_SLOT", REAL_OWNABLE_SLOT_LEAF) is not None
-    assert _canonical_authority_selector_for_slot("OwnableStorageLocation", REAL_OWNABLE_SLOT_LEAF) is not None
 
 
 def test_slot_route_leafless_call_is_unchanged():

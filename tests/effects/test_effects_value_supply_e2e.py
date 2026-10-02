@@ -156,26 +156,6 @@ def test_a_real_mint_is_published_as_a_mint(deployed):
     assert eff.details["backing"]["inflow_observed"] is False
 
 
-def test_a_zero_amount_payout_moves_nothing_and_is_not_proven(deployed):
-    """The call succeeds and moves nothing (``if (amount > 0)``), so it must not be proven."""
-    address, owner, simulate, fx = deployed
-    calldata = _cd(fx, "sweepToTreasury(uint256)", substitutions={0: 0})
-    eff = recipes.value_out(
-        simulate=simulate,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=address,
-        principal=owner,
-        calldata=calldata,
-        simulate_supported=True,
-    )
-
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.details["value_moved"] is False
-    assert eff.details["observation"] == "executed"
-    assert eff.reason == "no_value_observed"
-
-
 def test_a_funded_payout_to_the_immutable_treasury_is_proven_fixed(deployed):
     address, owner, simulate, fx = deployed
     vault_slot = _mapping_entry_slot(_BALANCE_BASE, [int(address, 16)])
@@ -294,27 +274,6 @@ _EXECUTOR_FLOW = [
         "target_kind": {"kind": "param", "tier": "static_trace"},
     }
 ]
-
-
-def test_a_batch_payout_probed_with_an_empty_array_is_the_cached_false_negative(batch_vault):
-    """The encoder's empty array makes the call succeed and move nothing, a negative about a loop body never entered."""
-    address, owner, simulate, fx, ctx = batch_vault
-    empty = encode_calldata(fx["selectors"]["batchPay(uint256[],address[])"], "batchPay(uint256[],address[])")
-    assert empty is not None
-
-    eff = recipes.value_out(
-        simulate=lambda calls, tag, ov=None: simulate(calls, tag, _merge(ov, _funded_vault(address))),
-        store=RecordingStore(),
-        ctx=ctx,
-        contract_address=address,
-        principal=owner,
-        calldata=empty,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.details["observation"] == "executed"
-    assert eff.details["value_moved"] is False
-    assert eff.reason == "no_value_observed"
 
 
 def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):

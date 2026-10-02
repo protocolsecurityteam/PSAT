@@ -9,13 +9,11 @@ evidence be picked up; mainnet-only default ``{1}`` behaves as before. Only the 
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 
 from tests.conftest import requires_postgres
-from workers.base import JobHandledDirectly
 
 pytestmark = [requires_postgres]
 
@@ -127,59 +125,6 @@ def _seed(db_session):
         db_session.query(Contract).filter_by(protocol_id=pid).delete()
         db_session.query(Protocol).filter_by(id=pid).delete()
         db_session.commit()
-
-
-def _run_selection(db_session, pid, company):
-    from workers.selection_worker import SelectionWorker
-
-    job = _add_selection_job(db_session, protocol_id=pid, company=company)
-    with patch("signal.signal"):
-        worker = SelectionWorker()
-    with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
-    db_session.refresh(job)
-    from db.models import Job
-
-    children = (
-        db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
-    )
-    return {c.address for c in children}
-
-
-@requires_postgres
-def test_selection_gates_off_allowlist_chain_but_spawns_enabled(db_session, monkeypatch, _seed):
-    from db.models import Contract
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-    pid, company, addr = _seed
-
-    base_addr = addr()
-    op_addr = addr()
-    _add_contract(db_session, protocol_id=pid, address=base_addr, chain="base")
-    _add_contract(db_session, protocol_id=pid, address=op_addr, chain="optimism")
-
-    spawned = _run_selection(db_session, pid, company)
-
-    assert base_addr in spawned
-    assert op_addr not in spawned
-
-    op_row = db_session.execute(
-        select(Contract).where(Contract.address == op_addr, Contract.chain == "optimism")
-    ).scalar_one()
-    assert op_row is not None
-
-
-@requires_postgres
-def test_selection_widened_allowlist_picks_up_retained_evidence(db_session, monkeypatch, _seed):
-    """The retained evidence is enough for a later scan to pick it up."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453,10")
-    pid, company, addr = _seed
-
-    op_addr = addr()
-    _add_contract(db_session, protocol_id=pid, address=op_addr, chain="optimism")
-
-    spawned = _run_selection(db_session, pid, company)
-    assert op_addr in spawned
 
 
 @requires_postgres

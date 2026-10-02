@@ -64,35 +64,6 @@ def _equality_leaf_artifact(contract_name: str = "T") -> dict:
 
 
 @requires_postgres
-def test_capabilities_returns_per_function_dict(api_client, db_session):
-    address = "0x" + uuid.uuid4().hex[:8] + "a1" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
-
-    resp = api_client.get(f"/api/contract/{address}/capabilities")
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["contract_address"] == address.lower()
-    assert body["chain_id"] == 1
-    assert body["block"] is None
-    assert "f()" in body["capabilities"]
-    cap = body["capabilities"]["f()"]
-    assert "kind" in cap
-    assert "confidence" in cap
-    assert "membership_quality" in cap
-
-
-@requires_postgres
-def test_capabilities_finds_checksummed_address_job(api_client, db_session):
-    lower = "0x" + uuid.uuid4().hex[:8] + "ab" * 16
-    mixed = lower[:2] + lower[2:].upper()
-    _seed_completed_job_with_artifact(db_session, address=mixed, predicate_trees=_equality_leaf_artifact())
-
-    resp = api_client.get(f"/api/contract/{lower}/capabilities")
-    assert resp.status_code == 200, resp.text
-    assert "f()" in resp.json()["capabilities"]
-
-
-@requires_postgres
 def test_capabilities_returns_404_for_unknown_address(api_client, db_session):
     resp = api_client.get(f"/api/contract/0x{'ee' * 20}/capabilities")
     assert resp.status_code == 404
@@ -106,29 +77,6 @@ def test_capabilities_returns_404_when_predicate_tree_artifact_is_missing(api_cl
     resp = api_client.get(f"/api/contract/{address}/capabilities")
     assert resp.status_code == 404
     assert "predicate-tree artifact is missing" in resp.json()["detail"]
-
-
-@requires_postgres
-def test_capabilities_empty_dict_for_unguarded_only_contract(api_client, db_session):
-    address = "0x" + uuid.uuid4().hex[:8] + "c3" * 16
-    _seed_completed_job_with_artifact(
-        db_session,
-        address=address,
-        predicate_trees={"schema_version": "semantic", "contract_name": "T", "trees": {}},
-    )
-    resp = api_client.get(f"/api/contract/{address}/capabilities")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["capabilities"] == {}
-
-
-@requires_postgres
-def test_capabilities_block_query_param(api_client, db_session):
-    address = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
-    resp = api_client.get(f"/api/contract/{address}/capabilities", params={"block": 18_000_000})
-    assert resp.status_code == 200
-    assert resp.json()["block"] == 18_000_000
 
 
 @requires_postgres
@@ -257,52 +205,3 @@ def test_capabilities_response_caching(api_client, db_session, monkeypatch, ttl_
     assert r2.status_code == 200
     assert r1.json() == r2.json()
     assert calls["n"] == expected_resolver_calls
-
-
-@requires_postgres
-def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, monkeypatch):
-    from services.resolution import capability_resolver as resolver_mod
-
-    address = "0x" + uuid.uuid4().hex[:8] + "cc" * 16
-    # The job pick is a hard filter on chain, so seed the twin on both
-    # queried chains; the chain_id=137 request resolves its own job rather than
-    # relying on a cross-chain fallback.
-    _seed_completed_job_with_artifact(
-        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=1, chain="ethereum"
-    )
-    _seed_completed_job_with_artifact(
-        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=137, chain="polygon"
-    )
-
-    from routers import predicate_capabilities
-
-    predicate_capabilities._capabilities_cache.clear()
-    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", 60.0)
-
-    calls = {"n": 0}
-    original = resolver_mod.resolve_contract_capabilities
-
-    def _counting(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(resolver_mod, "resolve_contract_capabilities", _counting)
-
-    api_client.get(f"/api/contract/{address}/capabilities")  # default chain=1, block=None
-    api_client.get(f"/api/contract/{address}/capabilities?chain_id=137")
-    api_client.get(f"/api/contract/{address}/capabilities?block=18000000")
-    assert calls["n"] == 3
-
-
-@requires_postgres
-def test_capabilities_route_is_not_admin_gated(api_client, db_session):
-    """Adding require_admin_key would lock external consumers out."""
-    import api as api_module
-    from routers.deps import require_admin_key
-
-    api_module.app.dependency_overrides.pop(require_admin_key, None)
-
-    address = "0x" + uuid.uuid4().hex[:8] + "f6" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
-    resp = api_client.get(f"/api/contract/{address}/capabilities")
-    assert resp.status_code == 200

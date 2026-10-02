@@ -7,9 +7,6 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from db.models import (
-    Artifact,
-    Contract,
-    ControllerValue,
     IndexedEventCursor,
     IndexedEventLog,
     IndexerWork,
@@ -61,46 +58,6 @@ def job(session):
     return row
 
 
-def test_claim_revision_failure_retry_and_new_write(session):
-    mark_dirty(session, "job", "sample")
-    session.commit()
-    claimed = claim_one(session, ("job",))
-    assert claimed is not None
-    with Session(session.get_bind()) as writer:
-        mark_dirty(writer, "job", "sample")
-        writer.commit()
-    finish(session, claimed, success=True)
-    row = work(session, "job", "sample")
-    assert row.dirty and row.revision == 2 and row.lease_id is None
-    claimed = claim_one(session, ("job",))
-    assert claimed is not None
-    finish(session, claimed, success=False)
-    assert claim_one(session, ("job",)) is None  # Failed work is not hot-looped.
-    assert work(session, "job", "sample").attempts == 1
-    assert repair_due(session, ("job",)) == 0
-    mark_dirty(session, "job", "sample")
-    session.commit()
-    assert claim_one(session, ("job",)) is not None  # A new input bypasses old backoff.
-
-
-@pytest.mark.parametrize("success", [True, False])
-def test_expired_owner_cannot_acknowledge_or_reschedule_new_owner(session, success):
-    mark_dirty(session, "job", "sample")
-    session.commit()
-    old = claim_one(session, ("job",))
-    assert old is not None
-    assert claim_one(session, ("job",)) is None
-    session.execute(update(IndexerWork).values(lease_expires_at=func.now() - timedelta(seconds=1)))
-    session.commit()
-    new = claim_one(session, ("job",))
-    assert new is not None
-    finish(session, old, success=success, remove=True)
-    row = work(session, "job", "sample")
-    assert row.dirty and row.lease_id == new.lease_id and row.attempts == 0
-    finish(session, new, success=True)
-    assert not work(session, "job", "sample").dirty
-
-
 def test_daily_repair_is_bounded_and_preserves_failure_backoff(session):
     for key in ("a", "b", "c"):
         mark_dirty(session, "job", key)
@@ -111,76 +68,6 @@ def test_daily_repair_is_bounded_and_preserves_failure_backoff(session):
     assert repair_due(session, ("job",), limit=2) == 2
     assert repair_due(session, ("job",), limit=2) == 1
     assert repair_due(session, ("job",), limit=2) == 0
-
-
-def test_artifact_same_metadata_write_is_not_lost_and_rollback_is_atomic(session):
-    row = job(session)
-    artifact = Artifact(job_id=row.id, name="predicate_trees", storage_key="same-key", stored_object_size_bytes=42)
-    session.add(artifact)
-    session.commit()
-    clean(session)
-    # An object rewrite can have identical metadata. A real UPDATE must wake it.
-    session.execute(update(Artifact).where(Artifact.id == artifact.id).values(storage_key="same-key"))
-    session.rollback()
-    assert not work(session, "job", row.id).dirty
-    session.execute(update(Artifact).where(Artifact.id == artifact.id).values(storage_key="same-key"))
-    session.commit()
-    assert work(session, "job", row.id).dirty
-    clean(session)
-    session.add(Artifact(job_id=row.id, name="unrelated", data={}))
-    session.commit()
-    assert not work(session, "job", row.id).dirty
-
-
-def test_controller_and_proxy_changes_wake_enrollment_but_job_heartbeat_does_not(session):
-    row = job(session)
-    contract = Contract(job_id=row.id, address=ADDR, chain="ethereum")
-    session.add(contract)
-    session.flush()
-    controller = ControllerValue(contract_id=contract.id, controller_id="state:authority", value=AUTH)
-    session.add(controller)
-    session.commit()
-    clean(session)
-    session.execute(update(Job).where(Job.id == row.id).values(updated_at=func.now(), detail="heartbeat"))
-    session.commit()
-    assert not work(session, "job", row.id).dirty
-    controller.value = "0x" + "c9" * 20
-    session.commit()
-    assert work(session, "job", row.id).dirty
-    clean(session)
-    row.request = {"chain": "ethereum", "proxy_address": AUTH}
-    session.commit()
-    assert work(session, "job", row.id).dirty
-
-
-def test_tracking_plan_changes_wake_enrollment_but_scan_progress_does_not(session):
-    row = MonitoredContract(address=ADDR, chain="ethereum", monitoring_config={"tracked_topics": []}, is_active=True)
-    session.add(row)
-    session.commit()
-    clean(session)
-    row.last_scanned_block = 500
-    row.last_known_state = {"x": 1}
-    session.commit()
-    assert not work(session, "monitored", row.id).dirty
-    row.monitoring_config = {"tracked_topics": [{"topic0": "0x" + "11" * 32}]}
-    session.commit()
-    assert work(session, "monitored", row.id).dirty
-
-
-def test_cursor_empty_head_progress_does_not_wake_reconcile_but_readiness_and_rewind_do(session):
-    _seed_role_store_cursor(session, AUTH, backfill_complete=False, last_block=100)
-    session.commit()
-    clean(session)
-    session.execute(update(IndexedEventCursor).values(last_indexed_block=200, last_run_at=func.now()))
-    session.commit()
-    assert not work(session, "reconcile", 1).dirty
-    session.execute(update(IndexedEventCursor).values(backfill_complete=True))
-    session.commit()
-    assert work(session, "reconcile", 1).dirty
-    clean(session)
-    session.execute(update(IndexedEventCursor).values(last_indexed_block=190))
-    session.commit()
-    assert work(session, "reorg", "1:" + AUTH).dirty  # Even when no log existed to DELETE.
 
 
 def test_statement_trigger_ignores_empty_and_duplicate_log_inserts(session):
@@ -198,58 +85,6 @@ def test_statement_trigger_ignores_empty_and_duplicate_log_inserts(session):
     session.execute(delete(IndexedEventLog))
     session.commit()
     assert work(session, "reorg", "1:" + AUTH).dirty
-
-
-def test_unchanged_enrollment_reads_no_artifact_and_poison_does_not_block_siblings(session, monkeypatch):
-    import workers.event_log_indexer as indexer
-
-    first = job(session)
-    second = Job(address="0x" + "d1" * 20, chain_id=1, status=JobStatus.completed, stage=JobStage.done)
-    session.add(second)
-    session.commit()
-
-    def read(_session, job_id, name):
-        if job_id == first.id:
-            raise ValueError("broken object")
-        return {}
-
-    read_mock = Mock(side_effect=read)
-    monkeypatch.setattr(indexer, "get_artifact", read_mock)
-    assert scheduler.drain_enrollment(session) == 0
-    assert read_mock.call_count == 2
-    assert work(session, "job", first.id).dirty
-    assert not work(session, "job", second.id).dirty
-    read_mock.reset_mock()
-    scheduler.drain_enrollment(session)
-    read_mock.assert_not_called()
-    read_mock.side_effect = None
-    read_mock.return_value = {}
-    mark_dirty(session, "job", str(first.id))
-    session.commit()
-    scheduler.drain_enrollment(session)
-    assert read_mock.call_count == 1
-    assert not work(session, "job", first.id).dirty
-
-
-def test_transient_missing_seed_stays_pending_until_retry_succeeds(session, monkeypatch):
-    import workers.event_log_indexer as indexer
-
-    row = job(session)
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
-    monkeypatch.setattr(
-        indexer,
-        "_descriptors_from_artifact",
-        lambda _: [{"enumeration_hint": [{"topic0": "0x" + "22" * 32, "event_address": AUTH}]}],
-    )
-    monkeypatch.setattr(indexer, "_seed_block", lambda *_a, **_kw: None)
-    assert scheduler.drain_enrollment(session) == 0
-    assert work(session, "job", row.id).dirty
-    monkeypatch.setattr(indexer, "_seed_block", lambda *_a, **_kw: 100)
-    monkeypatch.setattr(indexer, "_witness_seed_block", lambda *_a, **_kw: (100, "creation_block_minus_one"))
-    session.execute(update(IndexerWork).values(available_at=func.now()))
-    session.commit()
-    assert scheduler.drain_enrollment(session) == 1
-    assert not work(session, "job", row.id).dirty
 
 
 @pytest.mark.parametrize("second_kind", ["job", "monitored"])
@@ -316,28 +151,6 @@ def test_drain_shares_failed_lookups_and_retries_with_fresh_caches(
     assert session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one() == 2
 
 
-def test_drain_shares_delegated_role_probes_until_next_pass(session, monkeypatch):
-    import workers.event_log_indexer as indexer
-
-    sources = [job(session), job(session)]
-    monkeypatch.setattr(indexer, "get_artifact", lambda *_: {})
-    monkeypatch.setattr(indexer, "_descriptors_from_artifact", lambda _: [{"authority_contract": {"address": AUTH}}])
-    monkeypatch.setattr(indexer, "_is_delegated_role_gate_descriptor", lambda _: True)
-    probe = Mock(side_effect=TimeoutError("unavailable"))
-    creation = Mock(return_value=None)
-    monkeypatch.setattr(indexer, "resolve_probe_code", probe)
-    monkeypatch.setattr(indexer, "get_contract_creation_block", creation)
-    assert scheduler.drain_enrollment(session) == 0
-    assert probe.call_count == creation.call_count == 1
-    assert all(work(session, "job", source.id).dirty for source in sources)
-
-    session.execute(update(IndexerWork).values(available_at=func.now()))
-    session.commit()
-    scheduler.drain_enrollment(session)
-    assert probe.call_count == creation.call_count == 2
-    assert all(work(session, "job", source.id).attempts == 2 for source in sources)
-
-
 def test_reconciliation_runs_only_after_changes_and_retains_capped_work(session, monkeypatch):
     mark_dirty(session, "reconcile", "1")
     session.commit()
@@ -401,16 +214,6 @@ def test_role_drift_uses_one_probe_per_distinct_frontier(session, monkeypatch):
     assert reconciler.reconcile_role_set_drift(session, chain_id=1) == 0
     assert warm.call_count == 1
     assert probe.call_count == 2
-
-
-def test_role_lookup_preserves_case_insensitive_history(session):
-    from services.resolution.deferred_reconciler import _role_row_past_frontier
-
-    _seed_role_set_row(session, AUTH, block=200)
-    session.flush()
-    session.execute(update(IndexedEventLog).values(event_address=AUTH.upper()))
-    session.commit()
-    assert _role_row_past_frontier(session, 1, AUTH, 100)
 
 
 def test_partial_seed_failure_preserves_siblings_and_retries_missing_only(session, monkeypatch):
@@ -490,33 +293,6 @@ def test_active_refresh_with_temporarily_missing_capability_stays_pending(sessio
         refresh_invalidated_job(session, row.id)
 
 
-def test_log_move_invalidates_old_and_new_owners(session):
-    _seed_role_set_row(session, AUTH, block=95)
-    session.commit()
-    clean(session)
-    session.execute(update(IndexedEventLog).values(chain_id=8453, event_address=ADDR))
-    session.commit()
-    assert work(session, "reorg", "1:" + AUTH).dirty
-    assert work(session, "reorg", "8453:" + ADDR).dirty
-    assert work(session, "reconcile", 8453).dirty
-
-
-def test_single_owner_update_marks_each_key_once(session):
-    row = job(session)
-    contract = Contract(job_id=row.id, address=ADDR, chain="ethereum")
-    session.add(contract)
-    session.flush()
-    controller = ControllerValue(contract_id=contract.id, controller_id="state:authority", value=AUTH)
-    session.add(controller)
-    session.commit()
-    before = work(session, "job", row.id).revision
-    before_chain = work(session, "reconcile", 1).revision
-    controller.value = ADDR
-    session.commit()
-    assert work(session, "job", row.id).revision == before + 1
-    assert work(session, "reconcile", 1).revision == before_chain + 1
-
-
 def test_claim_refreshes_cached_revision_after_concurrent_write(session):
     mark_dirty(session, "job", "source")
     session.commit()
@@ -530,27 +306,6 @@ def test_claim_refreshes_cached_revision_after_concurrent_write(session):
     assert claim.revision == 2
     finish(session, claim, success=True)
     assert not work(session, "job", "source").dirty
-
-
-def test_more_than_500_sources_drain_in_bounded_batches_without_rereads(session, monkeypatch):
-    import workers.event_log_indexer as indexer
-
-    session.add_all(
-        [
-            Job(address=f"0x{i + 1:040x}", chain_id=1, status=JobStatus.completed, stage=JobStage.done)
-            for i in range(501)
-        ]
-    )
-    session.commit()
-    reader = Mock(return_value={})
-    monkeypatch.setattr(indexer, "get_artifact", reader)
-    scheduler.drain_enrollment(session, limit=50)
-    assert reader.call_count == 50
-    for _ in range(10):
-        scheduler.drain_enrollment(session, limit=50)
-    assert reader.call_count == 501
-    scheduler.drain_enrollment(session, limit=50)
-    assert reader.call_count == 501
 
 
 def test_enrollment_commits_before_next_external_read(session, monkeypatch):

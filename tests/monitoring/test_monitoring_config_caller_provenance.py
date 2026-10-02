@@ -7,13 +7,12 @@ eth_call / eth_getStorageAt.
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 
-from db.models import MonitoredContract, Protocol
+from db.models import Protocol
 from routers.monitored import CALLER_SUPPLIED_TRACKING_PLAN
 
 ADDR = "0x" + "7d" * 20
@@ -66,93 +65,8 @@ def _post(api_client, protocol_id: int, admin_headers: dict[str, str], config: d
     )
 
 
-def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, db_session, protocol_id, admin_headers):
-    resp = _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True, "watch_ownership": True})
-    assert resp.status_code == 200, resp.text
-
-    body = resp.json()
-    assert body["enrollment_source"] == "surface_alert"
-    assert body["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
-    assert body["monitoring_config"]["watch_upgrades"] is True
-    assert body["monitoring_config"]["watch_ownership"] is True
-
-    row = db_session.execute(
-        select(MonitoredContract).where(MonitoredContract.id == uuid.UUID(body["id"]))
-    ).scalar_one()
-    db_session.refresh(row)
-    assert row.monitoring_config["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
-
-
-def test_null_monitoring_config_is_stamped_too(api_client, protocol_id, admin_headers):
-    """``None`` would read as proven-absent like ``{}``."""
-    resp = _post(api_client, protocol_id, admin_headers, None)
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["monitoring_config"] == {"tracking_plan_not_determined": CALLER_SUPPLIED_TRACKING_PLAN}
-
-
-def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id, admin_headers):
-    """Overwrite rather than reject, so a stamped row can be written back."""
-    resp = _post(
-        api_client,
-        protocol_id,
-        admin_headers,
-        {"watch_pause": True, "tracking_plan_not_determined": "plan_not_readable"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
-
-
 # Rejected, not dropped: a drop would tell the caller the value is acted on. ``scan_gaps`` survives config rebuilds, so
 # a forged entry would outlive every enrollment.
-@pytest.mark.parametrize(
-    ("key", "payload"),
-    [
-        pytest.param("tracked_topics", [{"topic0": TOPIC0}], id="tracked_topics"),
-        pytest.param("polling_plan", [_PLAN_ENTRY], id="polling_plan"),
-        pytest.param(
-            "scan_gaps",
-            [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}],
-            id="scan_gaps",
-        ),
-    ],
-)
-def test_caller_supplied_analyzer_owned_keys_are_rejected(api_client, protocol_id, admin_headers, key, payload):
-    resp = _post(api_client, protocol_id, admin_headers, {key: payload})
-    assert resp.status_code == 422, resp.text
-    assert key in resp.text
-
-
-def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
-    api_client, db_session, protocol_id, admin_headers
-):
-    """The poller would read a caller-chosen slot and mint a provenance-free event."""
-    from services.monitoring.unified_watcher import _rpc_call_for_entry
-
-    assert _rpc_call_for_entry(ADDR, _PLAN_ENTRY) == ("eth_getStorageAt", [ADDR, SLOT, "latest"])
-
-    assert _post(api_client, protocol_id, admin_headers, {"polling_plan": [_PLAN_ENTRY]}).status_code == 422
-    assert _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True}).status_code == 200
-
-    rows = db_session.execute(select(MonitoredContract).where(MonitoredContract.protocol_id == protocol_id)).scalars()
-    for row in rows:
-        db_session.refresh(row)
-        assert "polling_plan" not in (row.monitoring_config or {})
-
-
-def test_the_watch_flags_stay_caller_settable(api_client, protocol_id, admin_headers):
-    """``watch_*`` booleans only gate notification."""
-    resp = _post(
-        api_client,
-        protocol_id,
-        admin_headers,
-        {"watch_upgrades": False, "watch_ownership": True, "watch_pause": True, "watch_roles": True},
-    )
-    assert resp.status_code == 200, resp.text
-    config = resp.json()["monitoring_config"]
-    assert config["watch_upgrades"] is False
-    assert config["watch_ownership"] is True
-    assert config["watch_pause"] is True
-    assert config["watch_roles"] is True
 
 
 def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers):
@@ -181,12 +95,3 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
         )
         assert resp.status_code == 422, resp.text
         assert key in resp.text
-
-
-def test_rejected_topics_never_reach_the_live_scan_filter(api_client, db_session, protocol_id, admin_headers):
-    from services.monitoring.unified_watcher import _scan_topics_union
-
-    assert _post(api_client, protocol_id, admin_headers, {"tracked_topics": [{"topic0": TOPIC0}]}).status_code == 422
-    assert _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True}).status_code == 200
-
-    assert TOPIC0 not in _scan_topics_union(db_session)

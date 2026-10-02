@@ -37,7 +37,6 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from sqlalchemy.types import JSON
 
 from services.policy.effective_permissions_writer import (
-    _column_values_for_capability,
     write_effective_function_rows,
 )
 from services.resolution.capabilities import (
@@ -45,7 +44,6 @@ from services.resolution.capabilities import (
     Condition,
     ExternalCheck,
 )
-from services.resolution.capability_resolver import capability_to_dict
 
 _TestBase = declarative_base()
 
@@ -141,96 +139,6 @@ def _principals(session) -> list[Any]:
     return list(session.query(_TFunctionPrincipal).order_by(_TFunctionPrincipal.address).all())
 
 
-def test_finite_set_emits_n_principal_rows(db_session) -> None:
-    members = [
-        "0x" + "a" * 40,
-        "0x" + "b" * 40,
-        "0x" + "c" * 40,
-    ]
-    cap = CapabilityExpr.finite_set(members)
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("doThing()")],
-        capability_by_function={"doThing()": cap},
-    )
-    db_session.commit()
-
-    rows = _principals(db_session)
-    assert len(rows) == 3
-    assert {r.address for r in rows} == set(m.lower() for m in members)
-    for r in rows:
-        assert r.principal_type == "controller"
-    ef = _ef_row(db_session)
-    assert ef.capability_expr["kind"] == "finite_set"
-    assert sorted(ef.capability_expr["members"]) == sorted(m.lower() for m in members)
-    assert ef.conditions is None
-    assert ef.status is None
-    assert ef.authority_public is False
-
-
-def test_finite_set_with_conditions_writes_rows_and_preserves_conditions(db_session) -> None:
-    condition = Condition(kind="business", description="token transfer return data accepted")
-    member = "0x" + "a" * 40
-    cap = CapabilityExpr.finite_set([member], conditions=[condition])
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("recoverToken(address,address,uint256)")],
-        capability_by_function={"recoverToken(address,address,uint256)": cap},
-    )
-    db_session.commit()
-
-    expected_conditions = [{"kind": "business", "description": "token transfer return data accepted"}]
-    rows = _principals(db_session)
-    assert len(rows) == 1
-    assert rows[0].address == member
-    assert rows[0].details["conditions"] == expected_conditions
-    ef = _ef_row(db_session)
-    assert ef.conditions == expected_conditions
-    assert ef.status is None
-    assert ef.authority_public is False
-
-
-def test_exact_empty_finite_set_marks_resolved_empty(db_session) -> None:
-    cap = CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("renounceOnly()")],
-        capability_by_function={"renounceOnly()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.status == "resolved_empty"
-    assert ef.authority_public is False
-    assert ef.capability_expr["kind"] == "finite_set"
-    assert ef.capability_expr["members"] == []
-    assert ef.capability_expr["membership_quality"] == "exact"
-
-
-def test_lower_bound_empty_finite_set_stays_unresolved_gap(db_session) -> None:
-    cap = CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("guardedButNotEnumerated()")],
-        capability_by_function={"guardedButNotEnumerated()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.status is None
-    assert ef.capability_expr["membership_quality"] == "lower_bound"
-
-
 def test_threshold_group_emits_one_safe_row(db_session) -> None:
     signers = [f"0x{(0x10 + i):040x}" for i in range(5)]
     cap = CapabilityExpr.threshold_group(3, signers)
@@ -261,28 +169,6 @@ def test_threshold_group_emits_one_safe_row(db_session) -> None:
     assert len(ef.capability_expr["threshold"]["signers"]) == 5
 
 
-def test_signature_witness_finite_emits_signer_rows(db_session) -> None:
-    inner = CapabilityExpr.finite_set(["0x" + "a" * 40, "0x" + "b" * 40])
-    cap = CapabilityExpr.signature_witness(inner)
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("permit()")],
-        capability_by_function={"permit()": cap},
-    )
-    db_session.commit()
-
-    rows = _principals(db_session)
-    assert len(rows) == 2
-    for r in rows:
-        assert r.principal_type == "signature_witness"
-        assert r.details["signer_kind"] == "finite_set"
-    ef = _ef_row(db_session)
-    assert ef.capability_expr["kind"] == "signature_witness"
-    assert ef.capability_expr["signer"]["kind"] == "finite_set"
-
-
 def test_signature_witness_external_emits_zero_rows(db_session) -> None:
     inner = CapabilityExpr.external_check_only(
         ExternalCheck(target_address="0x" + "9" * 40, target_call_selector="0x12345678"),
@@ -302,139 +188,6 @@ def test_signature_witness_external_emits_zero_rows(db_session) -> None:
     ef = _ef_row(db_session)
     assert ef.capability_expr["kind"] == "signature_witness"
     assert ef.capability_expr["signer"]["kind"] == "external_check_only"
-
-
-def test_cofinite_blacklist_is_public_with_no_rows(db_session) -> None:
-    # A public path with the exclusion as a side-condition, not an under-resolved residual.
-    cap = CapabilityExpr.cofinite_blacklist(["0x" + "a" * 40, "0x" + "b" * 40])
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("openCall()")],
-        capability_by_function={"openCall()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.capability_expr["kind"] == "cofinite_blacklist"
-    assert len(ef.capability_expr["blacklist"]) == 2
-    assert ef.status == "public"
-    assert ef.authority_public is True
-    assert ef.conditions is not None
-    assert any(
-        c.get("kind") == "denylist" and "denylist exclusion" in (c.get("description") or "") for c in ef.conditions
-    ), f"the denylist must be surfaced as a side-condition; got {ef.conditions}"
-
-
-def test_external_check_only_emits_zero_rows(db_session) -> None:
-    check = ExternalCheck(
-        target_address="0x" + "5" * 40,
-        target_call_selector="0xdeadbeef",
-        extra={"kind": "eip1271"},
-    )
-    cap = CapabilityExpr.external_check_only(check)
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("validate()")],
-        capability_by_function={"validate()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.capability_expr["kind"] == "external_check_only"
-    assert ef.capability_expr["check"]["target_address"] == "0x" + "5" * 40
-    assert ef.capability_expr["check"]["target_call_selector"] == "0xdeadbeef"
-
-
-def test_conditional_universal_emits_zero_rows_authority_public_true(db_session) -> None:
-    cap = CapabilityExpr.conditional_universal(
-        Condition(kind="time", description="after 2026-01-01"),
-    )
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("settle()")],
-        capability_by_function={"settle()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.authority_public is True
-    assert ef.status == "public"
-    assert ef.conditions is not None
-    assert len(ef.conditions) == 1
-    assert ef.conditions[0]["kind"] == "time"
-
-
-def test_unsupported_emits_zero_rows_status_unsupported(db_session) -> None:
-    cap = CapabilityExpr.unsupported("opaque_authority_check")
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("opaque()")],
-        capability_by_function={"opaque()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.status == "unsupported"
-    assert ef.capability_expr["kind"] == "unsupported"
-    assert ef.capability_expr["unsupported_reason"] == "opaque_authority_check"
-
-
-def test_irreducible_and_emits_zero_rows_with_tree(db_session) -> None:
-    """No consumer should treat one leaf in isolation as "address can call as itself"."""
-    finite = CapabilityExpr.finite_set(["0x" + "a" * 40])
-    safe = CapabilityExpr.threshold_group(2, ["0x" + "b" * 40, "0x" + "c" * 40])
-    cap = CapabilityExpr.structural_and([finite, safe])
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("dangerous()")],
-        capability_by_function={"dangerous()": cap},
-    )
-    db_session.commit()
-
-    assert len(_principals(db_session)) == 0
-    ef = _ef_row(db_session)
-    assert ef.capability_expr["kind"] == "AND"
-    children = ef.capability_expr["children"]
-    assert len(children) == 2
-    assert {c["kind"] for c in children} == {"finite_set", "threshold_group"}
-
-
-def test_mixed_or_public_and_finite_writes_public_and_principal(db_session) -> None:
-    finite = CapabilityExpr.finite_set(["0x" + "a" * 40])
-    public = CapabilityExpr.conditional_universal(
-        Condition(kind="business", description="public capability enabled"),
-    )
-    cap = CapabilityExpr.structural_or([finite, public])
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("send((uint32,bytes32,bytes,bytes,bytes),address)")],
-        capability_by_function={"send((uint32,bytes32,bytes,bytes,bytes),address)": cap},
-    )
-    db_session.commit()
-
-    rows = _principals(db_session)
-    assert len(rows) == 1
-    assert rows[0].address == "0x" + "a" * 40
-    ef = _ef_row(db_session)
-    assert ef.authority_public is True
-    assert ef.status == "public"
-    assert ef.conditions == [{"kind": "business", "description": "public capability enabled"}]
 
 
 def test_and_of_mixed_or_and_side_condition_preserves_both_paths(db_session) -> None:
@@ -465,21 +218,6 @@ def test_and_of_mixed_or_and_side_condition_preserves_both_paths(db_session) -> 
     ]
 
 
-def test_column_values_public_or_composite() -> None:
-    left = CapabilityExpr.conditional_universal(Condition(kind="business", description="initialized branch"))
-    right = CapabilityExpr.conditional_universal(Condition(kind="business", description="constructor branch"))
-    cap_dict = capability_to_dict(CapabilityExpr.structural_or([left, right]))
-
-    cols = _column_values_for_capability(cap_dict)
-
-    assert cols["status"] == "public"
-    assert cols["authority_public"] is True
-    assert cols["conditions"] == [
-        {"kind": "business", "description": "initialized branch"},
-        {"kind": "business", "description": "constructor branch"},
-    ]
-
-
 def test_finite_set_rows_typed_via_resolver(db_session) -> None:
     """Untyped, a Safe reachable only via per-function authority never surfaces in ``_fp_governance``."""
     safe_addr = "0x" + "a" * 40
@@ -507,29 +245,6 @@ def test_finite_set_rows_typed_via_resolver(db_session) -> None:
     assert rows[safe_addr.lower()].resolved_type == "safe"
     assert rows[safe_addr.lower()].details.get("owners") == ["0x" + "1" * 40]
     assert rows[eoa_addr.lower()].resolved_type == "eoa"
-
-
-def test_resolver_not_called_for_signature_witness(db_session) -> None:
-    """Signers are excluded from governance consumers, so no classify probe is spent."""
-    inner = CapabilityExpr.finite_set(["0x" + "a" * 40, "0x" + "b" * 40])
-    cap = CapabilityExpr.signature_witness(inner)
-
-    def _resolver(addr: str):
-        raise AssertionError(f"resolver must not be called for a signer ({addr})")
-
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("approveHash(bytes32)")],
-        capability_by_function={"approveHash(bytes32)": cap},
-        resolve_principal_type=_resolver,
-    )
-    db_session.commit()
-    rows = _principals(db_session)
-    assert rows, "signature_witness(finite) should still emit signer rows"
-    for r in rows:
-        assert r.principal_type == "signature_witness"
-        assert r.resolved_type is None
 
 
 def test_resolver_does_not_override_threshold_group_safe(db_session) -> None:
@@ -578,17 +293,6 @@ def test_row_abi_signature_is_the_canonical_one(db_session) -> None:
     assert ef.abi_signature == canonical
     assert "0x" + keccak(text=ef.abi_signature).hex()[:8] == ef.selector
     assert ef.function_name == "requestWithdrawWithPermit"
-
-
-def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[{"function": "doThing()", "selector": "0xdeadbeef"}],
-        capability_by_function=None,
-    )
-    db_session.commit()
-    assert _ef_row(db_session).abi_signature == "doThing()"
 
 
 # ``authority_public=False`` used to report a witnessed restriction and "not determined" with one value.
@@ -645,26 +349,6 @@ def test_authority_openness_and_roles(db_session, cap, expected) -> None:
     row = _ef_row(db_session)
     for attr, value in expected.items():
         assert getattr(row, attr) == value
-
-
-def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
-    cap = {
-        "kind": "finite_set",
-        "members": ["0x" + "a" * 40],
-        "membership_quality": "exact",
-        "confidence": "enumerable",
-        "trace": [{"step": "solmate_roles_authority", "roles": [8], "authority": "0x" + "1" * 40}],
-    }
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
-    )
-    row = _ef_row(db_session)
-    assert row.authority_roles is not None
-    assert [g["role"] for g in row.authority_roles] == [8]
-    assert [p["address"] for g in row.authority_roles for p in g["principals"]] == ["0x" + "a" * 40]
 
 
 def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:

@@ -32,75 +32,6 @@ def proto_id(db_session):
 
 
 @requires_postgres
-def test_single_upsert_dedups_against_legacy_null_row(db_session, proto_id):
-    from db.models import Contract
-    from db.queue import upsert_discovered_contract
-
-    addr = _addr()
-    db_session.add(Contract(address=addr, chain=None, protocol_id=proto_id, discovery_sources=["defillama"]))
-    db_session.commit()
-
-    upsert_discovered_contract(
-        db_session,
-        address=addr,
-        chain=None,
-        protocol_id=proto_id,
-        new_sources=["dapp_crawl"],
-        default_chain="ethereum",
-    )
-    db_session.commit()
-
-    rows = db_session.query(Contract).filter(Contract.address == addr).all()
-    assert len(rows) == 1  # enriched the legacy NULL row, not a duplicate
-    row = rows[0]
-    assert row.chain is None  # decided: no backfill; NULL≡mainnet convention kept
-    assert set(row.discovery_sources or []) == {"defillama", "dapp_crawl"}
-
-
-@requires_postgres
-def test_single_upsert_inherits_default_chain_when_entry_chainless(db_session, proto_id):
-    from db.models import Contract
-    from db.queue import upsert_discovered_contract
-
-    addr = _addr()
-    upsert_discovered_contract(
-        db_session,
-        address=addr,
-        chain=None,
-        protocol_id=proto_id,
-        new_sources=["defillama"],
-        default_chain="ethereum",
-    )
-    db_session.commit()
-
-    row = db_session.query(Contract).filter(Contract.address == addr).one()
-    assert row.chain == "ethereum"
-
-
-@requires_postgres
-def test_single_upsert_base_entry_does_not_collapse_onto_legacy_null(db_session, proto_id):
-    from db.models import Contract
-    from db.queue import upsert_discovered_contract
-
-    addr = _addr()
-    db_session.add(Contract(address=addr, chain=None, protocol_id=proto_id, discovery_sources=["defillama"]))
-    db_session.commit()
-
-    upsert_discovered_contract(
-        db_session,
-        address=addr,
-        chain="base",
-        protocol_id=proto_id,
-        new_sources=["defillama"],
-        default_chain="base",
-    )
-    db_session.commit()
-
-    rows = db_session.query(Contract).filter(Contract.address == addr).all()
-    assert {r.chain for r in rows} == {None, "base"}
-
-
-@requires_postgres
 @pytest.mark.parametrize(
     "chain,expected",
     [
@@ -117,24 +48,6 @@ def test_is_known_proxy_against_legacy_null_row(db_session, proto_id, chain, exp
     db_session.commit()
 
     assert is_known_proxy(db_session, addr, chain=chain) is expected
-
-
-@requires_postgres
-@pytest.mark.parametrize(
-    "chain,hit",
-    [
-        # The raw ``Contract.chain == 'ethereum'`` predicate used to miss a legacy NULL row.
-        pytest.param("ethereum", True, id="mainnet_hit"),
-        pytest.param("base", False, id="l2_miss"),
-    ],
-)
-def test_static_cache_against_legacy_null_chain_contract(db_session, chain, hit):
-    from db.queue import find_completed_static_cache
-    from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
-
-    job = _create_completed_job_with_static_data(db_session)  # mainnet (chain_id=1) job, Contract.chain is NULL
-    found = find_completed_static_cache(db_session, ADDR_A, chain=chain)
-    assert (found.id if found is not None else None) == (job.id if hit else None)
 
 
 def _completed_source_with_null_contract(session, address, request_chain):

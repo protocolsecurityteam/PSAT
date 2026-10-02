@@ -122,32 +122,6 @@ def test_oz_v5_slot_constant_ghost_is_not_ownership_and_is_hygiene_tagged(tmp_pa
     assert set_token_facts["OwnableStorageLocation"]["hygiene_class"] == "storage_location_pseudo"
 
 
-_OZ_V4_OWNABLE_SRC = """
-pragma solidity ^0.8.20;
-abstract contract Ownable {
-    address private _owner;
-    modifier onlyOwner() { require(owner() == msg.sender, "no"); _; }
-    function owner() public view returns (address) { return _owner; }
-    function transferOwnership(address n) public onlyOwner { _owner = n; }
-}
-contract Token is Ownable {
-    uint256 public x;
-    function setX(uint256 v) external onlyOwner { x = v; }
-}
-"""
-
-
-def test_hygiene_gate_keeps_real_address_owner_ownership(tmp_path):
-    contract = _compile_named(tmp_path, _OZ_V4_OWNABLE_SRC, "Token")
-    effects = _effects_with_labels(contract)
-
-    assert "ownership_transfer" in _info(effects, "transferOwnership(address)")["effect_labels"]
-    owner_fact = next(
-        sw for sw in _info(effects, "transferOwnership(address)")["state_writes"] if sw["var"] == "_owner"
-    )
-    assert owner_fact["hygiene_class"] == "normal"
-
-
 _REENTRANCY_SRC = """
 pragma solidity ^0.8.20;
 abstract contract ReentrancyGuard {

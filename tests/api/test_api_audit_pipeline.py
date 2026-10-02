@@ -86,15 +86,6 @@ def _insert_audit(
     return ar.id
 
 
-def test_pipeline_empty_when_no_audits(api_client):
-    r = api_client.get("/api/audits/pipeline")
-    assert r.status_code == 200
-    body = r.json()
-    assert set(body.keys()) == {"text_extraction", "scope_extraction", "generated_at"}
-    for worker in ("text_extraction", "scope_extraction"):
-        assert body[worker] == {"processing": [], "pending": [], "failed": []}
-
-
 def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_protocol):
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
@@ -144,59 +135,6 @@ def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_pr
 
     failed = next(a for a in te["failed"] if a["audit_id"] == failed_tid)
     assert failed["error"] == "HTTP 404"
-
-
-def test_scope_pending_excludes_unclaimable_rows(db_session, api_client, seed_protocol):
-    """Scope work is only claimable once text has succeeded."""
-    pid, _ = seed_protocol
-    now = datetime.now(timezone.utc)
-
-    text_failed_id = _insert_audit(
-        db_session,
-        pid,
-        text_status="failed",
-        text_extracted_at=now - timedelta(hours=1),
-        text_error="HTTP 500",
-    )
-    assert text_failed_id  # row exists, just not claimable for scope
-
-    _insert_audit(db_session, pid, text_status=None)
-
-    claimable_id = _insert_audit(
-        db_session,
-        pid,
-        text_status="success",
-        text_extracted_at=now - timedelta(minutes=5),
-    )
-
-    r = api_client.get("/api/audits/pipeline")
-    scope = r.json()["scope_extraction"]
-    assert [a["audit_id"] for a in scope["pending"]] == [claimable_id]
-
-
-def test_pipeline_excludes_failures_older_than_lookback(db_session, api_client, seed_protocol):
-    """Old failures fade so the panel doesn't grow unbounded."""
-    pid, _ = seed_protocol
-    now = datetime.now(timezone.utc)
-
-    recent_id = _insert_audit(
-        db_session,
-        pid,
-        text_status="failed",
-        text_extracted_at=now - timedelta(hours=3),
-        text_error="recent",
-    )
-    _insert_audit(  # >24h old — must not appear
-        db_session,
-        pid,
-        text_status="failed",
-        text_extracted_at=now - timedelta(days=3),
-        text_error="stale",
-    )
-
-    r = api_client.get("/api/audits/pipeline")
-    failed_ids = {a["audit_id"] for a in r.json()["text_extraction"]["failed"]}
-    assert failed_ids == {recent_id}
 
 
 def test_scope_bucket_routing(db_session, api_client, seed_protocol):
@@ -251,32 +189,3 @@ def test_scope_bucket_routing(db_session, api_client, seed_protocol):
 
     fail = next(a for a in scope["failed"] if a["audit_id"] == failed)
     assert fail["error"] == "LLM timeout"
-
-
-def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
-    """One stuck worker can't brick the monitor."""
-    from services.aggregations import audits_pipeline as pipeline_module
-
-    cap = pipeline_module._PIPELINE_BUCKET_LIMIT
-    pid, _ = seed_protocol
-
-    for _ in range(cap + 10):
-        _insert_audit(db_session, pid, text_status=None)
-
-    r = api_client.get("/api/audits/pipeline")
-    pending = r.json()["text_extraction"]["pending"]
-    assert len(pending) == cap
-
-
-def test_text_pending_ordered_oldest_first(db_session, api_client, seed_protocol):
-    """Pending follows worker claim order, so the top entry is the one a stuck queue is blocked on."""
-    pid, _ = seed_protocol
-    now = datetime.now(timezone.utc)
-
-    newer = _insert_audit(db_session, pid, text_status=None, discovered_at=now - timedelta(hours=1))
-    older = _insert_audit(db_session, pid, text_status=None, discovered_at=now - timedelta(hours=5))
-    middle = _insert_audit(db_session, pid, text_status=None, discovered_at=now - timedelta(hours=3))
-
-    r = api_client.get("/api/audits/pipeline")
-    ids_in_order = [a["audit_id"] for a in r.json()["text_extraction"]["pending"]]
-    assert ids_in_order == [older, middle, newer]

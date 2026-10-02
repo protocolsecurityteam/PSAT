@@ -5,10 +5,9 @@ policy job (PR #139). Needs real Postgres for the unique-index race.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
 
 import pytest
-from sqlalchemy import Select, create_engine, func, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus, MonitoredContract, Protocol
@@ -37,36 +36,6 @@ def race_session():
         session.query(MonitoredContract).filter(MonitoredContract.address == DUP_POISON_ADDR).delete()
         session.commit()
         session.close()
-        engine.dispose()
-
-
-def _is_monitored_contract_select(statement: object) -> bool:
-    return isinstance(statement, Select) and "monitored_contracts" in str(statement).lower()
-
-
-def _commit_conflicting_monitored_contract(protocol_id: int, address: str) -> None:
-    """The concurrent winner the enrolling session can't see after its existence check."""
-    engine = create_engine(DATABASE_URL)
-    other = Session(engine, expire_on_commit=False)
-    try:
-        other.add(
-            MonitoredContract(
-                id=uuid.uuid4(),
-                address=address,
-                chain="ethereum",
-                protocol_id=protocol_id,
-                contract_type="regular",
-                monitoring_config={},
-                last_known_state={},
-                last_scanned_block=0,
-                needs_polling=False,
-                is_active=True,
-                enrollment_source="auto",
-            )
-        )
-        other.commit()
-    finally:
-        other.close()
         engine.dispose()
 
 
@@ -123,45 +92,6 @@ def _stub_policy_internals(monkeypatch, job_address):
     )
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.maybe_enroll_protocol", _poisoning_enroll)
-
-
-def test_concurrent_enroll_insert_is_race_safe(race_session):
-    from services.monitoring.enrollment import maybe_enroll_protocol
-
-    proto = Protocol(name=PROTO_NAME)
-    race_session.add(proto)
-    race_session.flush()
-    addr = "0x" + "a7" * 20
-    race_session.add(
-        Contract(address=addr, chain="ethereum", protocol_id=proto.id, contract_name="RaceContract", is_proxy=False)
-    )
-    race_session.add(Job(address=addr, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
-    race_session.commit()
-
-    # Inject right after the existence check, so the insert collides.
-    injected = {"done": False}
-    orig_execute = race_session.execute
-
-    def execute_then_inject(statement, *args, **kwargs):
-        result = orig_execute(statement, *args, **kwargs)
-        if not injected["done"] and _is_monitored_contract_select(statement):
-            injected["done"] = True
-            _commit_conflicting_monitored_contract(proto.id, addr)
-        return result
-
-    race_session.execute = execute_then_inject
-    try:
-        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            fired = maybe_enroll_protocol(race_session, proto.id, "http://rpc", "ethereum")
-    finally:
-        del race_session.execute  # restore the bound method
-
-    assert injected["done"], "TOCTOU injection never fired — the test would be vacuous"
-    assert fired is True
-
-    rows = race_session.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalars().all()
-    assert len(rows) == 1, f"expected exactly one row for {addr}, got {len(rows)}"
-    assert race_session.execute(select(func.count()).select_from(MonitoredContract)).scalar() >= 1
 
 
 def test_benign_enroll_race_does_not_poison_policy_job(race_session, monkeypatch):

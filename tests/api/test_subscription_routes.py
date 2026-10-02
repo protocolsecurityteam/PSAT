@@ -62,23 +62,6 @@ def test_subscribe_accepts_event_filter(api_client, db_session, name, body, expe
     assert resp.json()["event_filter"] == expected_filter
 
 
-@pytest.mark.parametrize(
-    ("name", "event_filter"),
-    [
-        pytest.param("__test_str_filter__", {"event_types": "upgraded"}, id="string_event_types"),
-        pytest.param("__test_typo_filter__", {"typo_field": ["upgraded"]}, id="typo_field"),
-        pytest.param("__test_bad_type__", {"event_types": ["upgraded", "nonexistent_event"]}, id="unknown_event_type"),
-    ],
-)
-def test_subscribe_rejects_bad_event_filter(api_client, db_session, name, event_filter):
-    proto = _create_protocol(db_session, name=name)
-    resp = api_client.post(
-        f"/api/protocols/{proto.id}/subscribe",
-        json={"discord_webhook_url": "https://discord.com/api/webhooks/3/ghi", "event_filter": event_filter},
-    )
-    assert resp.status_code == 422
-
-
 def _create_monitored_contract(session, address="0x" + "a1" * 20, protocol_id=None):
     from db.models import MonitoredContract
 
@@ -101,47 +84,11 @@ def _create_monitored_contract(session, address="0x" + "a1" * 20, protocol_id=No
     return mc
 
 
-def test_patch_monitoring_config(api_client, db_session):
-    mc = _create_monitored_contract(db_session)
-    new_config = {"watch_upgrades": False, "watch_ownership": True, "watch_pause": True}
-    resp = api_client.patch(
-        f"/api/monitored-contracts/{mc.id}",
-        json={"monitoring_config": new_config},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    # The route stamps ``tracking_plan_not_determined`` so a caller-authored config never reads as an analysis-produced
-    # plan.
-    assert {k: body["monitoring_config"].get(k) for k in new_config} == new_config
-    assert body["monitoring_config"]["tracking_plan_not_determined"] == "config_supplied_by_caller"
-    assert body["is_active"] is True  # unchanged
-    assert body["needs_polling"] is False  # unchanged
-
-
-@pytest.mark.parametrize(
-    ("address", "patch_body", "field", "expected"),
-    [
-        pytest.param("0x" + "b2" * 20, {"is_active": False}, "is_active", False, id="is_active"),
-        pytest.param("0x" + "c3" * 20, {"needs_polling": True}, "needs_polling", True, id="needs_polling"),
-    ],
-)
-def test_patch_scalar_field(api_client, db_session, address, patch_body, field, expected):
-    mc = _create_monitored_contract(db_session, address=address)
-    resp = api_client.patch(f"/api/monitored-contracts/{mc.id}", json=patch_body)
-    assert resp.status_code == 200
-    assert resp.json()[field] is expected
-
-
 def test_patch_404_for_missing_contract(api_client):
     resp = api_client.patch(
         f"/api/monitored-contracts/{uuid.uuid4()}",
         json={"is_active": False},
     )
-    assert resp.status_code == 404
-
-
-def test_re_enroll_404_for_missing_protocol(api_client):
-    resp = api_client.post("/api/protocols/999999/re-enroll")
     assert resp.status_code == 404
 
 

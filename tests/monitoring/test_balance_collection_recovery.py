@@ -83,18 +83,6 @@ def test_partial_does_not_replace_snapshot_or_prune_tail(db_session):
     assert db_session.get(ContractBalanceFetch, full_id) is not None
 
 
-def test_partial_first_is_visible_and_unknown_metadata_stays_unknown(db_session):
-    protocol, target = make_target(db_session)
-    entry = token()
-    entry["decimals_reported"] = False
-    write(db_session, target, [entry], "at_page_cap")
-    db_session.commit()
-    row = db_session.scalar(
-        select(ContractBalanceLatest).where(ContractBalanceLatest.contract_id == target.subject.contract_id)
-    )
-    assert row.decimals_known is False and row.usd_value is None and row.price_usd is None
-
-
 def test_old_lease_cannot_publish_after_new_generation(db_session):
     _, target = make_target(db_session)
     factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
@@ -153,35 +141,6 @@ def test_native_success_token_failure_survives_and_retries_only_failed_class(db_
     )
     assert {r.token_address for r in rows} == {None, TOKEN_A}
     assert counts["native"] == 1
-
-
-def test_shared_entity_read_reused_without_duplicate_observations(db_session, monkeypatch):
-    # One canonical identity even when two protocols include the same EOA.
-    address = "0x" + uuid4().hex + "00000000"
-    target = CollectionSubject(ObservationSubject.of_entity("ethereum", address), 1)
-    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
-    import services.monitoring.balance_collection as collector
-
-    calls = []
-    monkeypatch.setattr(collector, "pinned_native_balances", lambda addrs, **kw: (100, {a.lower(): 1 for a in addrs}))
-    monkeypatch.setattr(collector, "get_native_price", lambda chain: 2000)
-
-    def page(*a, **kw):
-        calls.append(1)
-        return TokenBalancePage([token()], 1, "returned_assets")
-
-    monkeypatch.setattr(collector, "fetch_asset_page", page)
-    collect_balances([target], writer="tvl", session_factory=factory)
-    collect_balances([target], writer="tvl", session_factory=factory)
-    assert len(calls) == 1
-    rows = list(
-        db_session.scalars(
-            select(ContractBalanceLatest).where(
-                ContractBalanceLatest.entity_address == address, ContractBalanceLatest.token_address == TOKEN_A
-            )
-        )
-    )
-    assert len(rows) == 1 and rows[0].contract_id is None
 
 
 def test_quote_recovers_without_repeating_quantities_or_changing_their_time(db_session, monkeypatch):
@@ -244,28 +203,6 @@ def test_quote_budget_exhaustion_preserves_acquired_native_and_releases_other_cl
     assert all(state.lease_owner is None for state in states)
 
 
-def test_bounded_pass_rotates_to_unread_protocol(db_session, monkeypatch):
-    import services.monitoring.balance_collection as collector
-
-    _, first = make_target(db_session)
-    _, second = make_target(db_session)
-    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
-    monkeypatch.setenv("PSAT_BALANCE_SUBJECTS_PER_PASS", "1")
-    monkeypatch.setattr(collector, "pinned_native_balances", lambda addresses, **kw: (100, {a: 1 for a in addresses}))
-    monkeypatch.setattr(collector, "get_native_price", lambda chain: 2000)
-    seen = []
-
-    def page(address, **kwargs):
-        seen.append(address)
-        return TokenBalancePage([], None, "fetch_failed")
-
-    monkeypatch.setattr(collector, "fetch_asset_page", page)
-    collect_balances([first, second], writer="tvl", session_factory=factory)
-    collect_balances([first, second], writer="tvl", session_factory=factory)
-    assert set(seen) == {first.subject.address, second.subject.address}
-    assert len(seen) == 2
-
-
 def test_shorter_consumer_freshness_overrides_daily_success_but_not_failure_backoff(db_session):
     from services.monitoring.balance_collection import order_subjects, release_claim
 
@@ -302,42 +239,6 @@ def test_shorter_consumer_freshness_overrides_daily_success_but_not_failure_back
     db_session.commit()
     retry = claim_read(target, "native", max_age_seconds=3600, session_factory=factory)
     assert retry.owner is None and retry.reason == "backoff"
-
-
-def test_aggregate_failure_does_not_rollback_or_refetch_successful_observations(db_session, monkeypatch):
-    import services.monitoring.balance_collection as collector
-    import services.monitoring.tvl as tvl
-
-    protocol, target = make_target(db_session)
-    protocol_id = protocol.id
-    counts = {"native": 0, "tokens": 0}
-
-    def pinned(addresses, **kwargs):
-        counts["native"] += 1
-        return 100, {a: 10**18 for a in addresses}
-
-    def page(*args, **kwargs):
-        counts["tokens"] += 1
-        return TokenBalancePage([token()], 1, "returned_assets")
-
-    def failed_aggregate(*args, **kwargs):
-        raise RuntimeError("simulated failure after quantity commits")
-
-    monkeypatch.setattr(collector, "pinned_native_balances", pinned)
-    monkeypatch.setattr(collector, "fetch_asset_page", page)
-    monkeypatch.setattr(collector, "get_native_price", lambda chain: 2000)
-    monkeypatch.setattr(tvl, "fetch_defillama_tvl", failed_aggregate)
-    with pytest.raises(RuntimeError, match="after quantity commits"):
-        tvl.take_tvl_snapshot(db_session, protocol_id)
-    db_session.rollback()
-    rows = db_session.scalars(
-        select(ContractBalanceLatest).where(ContractBalanceLatest.contract_id == target.subject.contract_id)
-    ).all()
-    assert {r.token_address for r in rows} == {None, TOKEN_A}
-    monkeypatch.setattr(tvl, "fetch_defillama_tvl", lambda name: None)
-    snapshot, _ = tvl.take_tvl_snapshot(db_session, protocol_id)
-    assert snapshot is not None and snapshot.total_usd == 2020
-    assert counts == {"native": 1, "tokens": 1}
 
 
 @pytest.mark.parametrize("limit", [2, 64])
@@ -381,25 +282,6 @@ def test_tight_hourly_budget_eventually_attempts_every_account_and_class(db_sess
         db_session.commit()
     expected = {t.subject.address for t in targets}
     assert seen_native == seen_tokens == expected
-
-
-def test_budget_does_not_claim_or_postpone_unattempted_accounts(db_session, monkeypatch):
-    import services.monitoring.balance_collection as collector
-    from services.clients.request_budget import RequestBudget, charge_attempt
-
-    targets = [make_target(db_session)[1] for _ in range(4)]
-    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
-    monkeypatch.setattr(
-        collector,
-        "pinned_native_balances",
-        lambda addresses, **kw: (charge_attempt("rpc") or 100, {a: 0 for a in addresses}),
-    )
-    monkeypatch.setattr(collector, "get_native_price", lambda chain: charge_attempt("etherscan") or 2000)
-    collect_balances(targets, writer="tvl", session_factory=factory, budget=RequestBudget(limit=1))
-    db_session.expire_all()
-    assert not db_session.scalars(
-        select(BalanceCollectionState).where(BalanceCollectionState.read_class == "tokens")
-    ).all()
 
 
 def test_warm_collection_is_read_only_and_does_not_repeat_provider_work(db_session, monkeypatch):

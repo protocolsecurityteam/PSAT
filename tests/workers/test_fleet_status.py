@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import time
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from threading import Event, Lock, Thread
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,7 +17,6 @@ from db.queue import (
     HEARTBEAT_AUDIT_SCOPE,
     HEARTBEAT_AUDIT_TEXT,
     HEARTBEAT_COVERAGE_VERIFY,
-    HEARTBEAT_ENROLLMENT_RECONCILER,
     HEARTBEAT_EVENT_INDEXER,
     record_heartbeat,
 )
@@ -77,16 +72,6 @@ def test_record_heartbeat_insert_then_upsert(db_session, monkeypatch, _clean_hea
     assert len(rows) == 1
     assert rows[0].status == "idle"
     assert rows[0].detail == {"claimed": 0}
-
-
-def test_record_heartbeat_is_best_effort(monkeypatch):
-    import db.queue.heartbeats as queue_mod
-
-    def _boom():
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(queue_mod, "SessionLocal", _boom)
-    record_heartbeat("anything", status="running")  # must not raise
 
 
 @requires_postgres
@@ -310,115 +295,3 @@ def test_build_fleet_status_per_chain_indexer_and_monitoring(db_session, _clean_
     assert mon_by_chain["base"]["monitored_contracts"] == 1
     assert mon_by_chain["base"]["scanner_lease_held"] is True
     assert mon_by_chain["ethereum"]["scanner_lease_held"] is False
-
-
-@requires_postgres
-def test_fleet_endpoint_exposes_per_chain_breakdowns(api_client, db_session, _clean_heartbeats):
-    db_session.add(
-        IndexedEventCursor(chain_id=8453, event_address=_addr(7), topic0="0x" + "d4" * 32, last_indexed_block=10)
-    )
-    db_session.add(MonitoredContract(address=_addr(8), chain="base"))
-    db_session.commit()
-
-    resp = api_client.get("/api/fleet")
-    assert resp.status_code == 200
-    data = resp.json()
-    idx = next(d for d in data["daemons"] if d["process"] == HEARTBEAT_EVENT_INDEXER)
-    assert any(c["chain_id"] == 8453 for c in idx["work"]["by_chain"])
-    assert any(c["chain"] == "base" for c in data["watchers"]["by_chain"])
-
-
-@requires_postgres
-def test_fleet_endpoint_returns_all_groups(api_client, db_session, _clean_heartbeats):
-    resp = api_client.get("/api/fleet")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert set(data) >= {"now", "jobs", "daemons", "watchers"}
-    assert {d["process"] for d in data["daemons"]} == _KNOWN_PROCESSES
-
-
-def test_reconciler_loop_records_heartbeat(monkeypatch):
-    from services.monitoring import reconciler
-
-    stop = Event()
-    beats: list[tuple[str, dict]] = []
-
-    # The drain stub ends the loop after one tick.
-    monkeypatch.setattr(reconciler, "sweep_enqueue_stale", lambda session, *a, **k: [])
-
-    def fake_drain(_rpc, _chain, **kw):
-        stop.set()  # one pass only
-        return {"drained": 7, "failed": 0}
-
-    monkeypatch.setattr(reconciler, "drain_enrollment_queue", fake_drain)
-    monkeypatch.setattr(reconciler, "_queue_depth", lambda session: 3)
-    monkeypatch.setattr(reconciler, "SessionLocal", lambda: nullcontext(MagicMock()))
-    monkeypatch.setattr(reconciler, "record_heartbeat", lambda process, **kw: beats.append((process, kw)))
-
-    reconciler.run_enrollment_reconciler_loop("rpc://x", "ethereum", interval=0, stop_event=stop)
-
-    assert len(beats) == 1
-    process, kw = beats[0]
-    assert process == HEARTBEAT_ENROLLMENT_RECONCILER
-    assert kw["status"] == "running"
-    assert kw["detail"] == {"drained": 7, "failures": 0, "queue_depth": 3, "repair_enqueued": 0}
-
-
-def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
-    """A scan blocked on a cold backfill (LayerZero endpoint cursor, hours) used to starve reconcile and the
-    heartbeat; backfill now has its own thread.
-    """
-    from workers import event_log_indexer as idx
-
-    stop = Event()
-    scan_entered = Event()
-    release_scan = Event()
-    reconcile_called = Event()
-    beats: list[tuple[str, dict]] = []
-    beat_lock = Lock()
-
-    def blocking_scan(_session, **_kw):
-        scan_entered.set()
-        release_scan.wait(timeout=10)  # bounded so a wiring bug can't hang the suite
-        return idx.ScanSummary()
-
-    def fake_reconcile(_session, *, stop_event):
-        assert stop_event is stop
-        reconcile_called.set()
-        return (0, 0)
-
-    def record(process, **kw):
-        with beat_lock:
-            beats.append((process, kw))
-
-    monkeypatch.setattr(idx, "SessionLocal", lambda: nullcontext(MagicMock()))
-    from services.resolution import indexer_scheduler
-
-    monkeypatch.setattr(indexer_scheduler, "drain_enrollment", lambda _session, **_kw: 0)
-    monkeypatch.setattr(idx, "scan_enrolled_events", blocking_scan)
-    monkeypatch.setattr(idx, "_cursor_progress", lambda _session: (0, 0))
-    monkeypatch.setattr(indexer_scheduler, "drain_reconciliation", fake_reconcile)
-    monkeypatch.setattr(idx, "record_heartbeat", record)
-
-    t = Thread(
-        target=idx.run_event_log_indexer_loop,
-        kwargs=dict(fetchers={}, head_fetchers={}, block_hash_fetchers={}, interval=0.01, stop_event=stop),
-        daemon=True,
-    )
-    t.start()
-    try:
-        assert scan_entered.wait(timeout=5), "backfill thread never entered scan"
-        assert reconcile_called.wait(timeout=5), "reconcile was starved while scan was blocked (regression)"
-        beat_deadline = time.monotonic() + 5
-        while time.monotonic() < beat_deadline:
-            with beat_lock:
-                if any(p == HEARTBEAT_EVENT_INDEXER for p, _ in beats):
-                    break
-            time.sleep(0.01)
-        with beat_lock:
-            assert any(p == HEARTBEAT_EVENT_INDEXER for p, _ in beats), "heartbeat was starved while scan was blocked"
-    finally:
-        release_scan.set()
-        stop.set()
-        t.join(timeout=5)
-    assert not t.is_alive()

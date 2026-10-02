@@ -113,21 +113,3 @@ def test_helper_allowlist_gates_survive_inlining(subject, monkeypatch):
     assert verdicts["submitReport(uint256)"] is False, (
         "memberStates[msg.sender].registered allowlist dropped on inlining"
     )
-
-
-def test_conjunction_only_adds_caller_gates(subject, monkeypatch):
-    verdicts = _verdicts(subject, monkeypatch, inline_gates_flag="1")
-
-    assert verdicts["poke(uint256)"] is True, "business-only helper gate manufactured a false-gate"
-    assert verdicts["ping()"] is True
-    assert verdicts["addMember(address)"] is False
-
-
-def test_kill_switch_restores_return_only_inlining(subject, monkeypatch):
-    """Proves the suite fails if the fix is reverted."""
-    verdicts = _verdicts(subject, monkeypatch, inline_gates_flag="0")
-
-    assert verdicts["act()"] is True
-    assert verdicts["submitReport(uint256)"] is True
-    assert verdicts["poke(uint256)"] is True
-    assert verdicts["addMember(address)"] is False

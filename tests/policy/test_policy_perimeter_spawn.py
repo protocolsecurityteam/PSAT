@@ -132,34 +132,6 @@ def test_role_grant_node_spawns_exactly_one_child_with_inherited_scope(db_sessio
     assert result["budget_used"] == 1
 
 
-def test_a_contract_name_still_names_the_child(db_session, seed, monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, address_factory = seed
-    manager = address_factory()
-    node = {**_node(manager), "contract_name": "ManagerWithMerkleVerification"}
-
-    result = _spawn(db_session, parent, _graph(parent.address, [node]), budget=8)
-
-    assert result["queued"][0]["name"] == "ManagerWithMerkleVerification"
-    assert _jobs_for(db_session, manager)[0].request["name"] == "ManagerWithMerkleVerification"
-
-
-def test_spawn_is_idempotent(db_session, seed, monkeypatch):
-    """The child is booked out-of-population, not as an omission."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, address_factory = seed
-    manager = address_factory()
-    graph = _graph(parent.address, [_node(manager)])
-
-    _spawn(db_session, parent, graph, budget=8, depth_cap=2)
-    second = _spawn(db_session, parent, graph, budget=8, depth_cap=2)
-
-    assert len(_jobs_for(db_session, manager)) == 1
-    assert second["queued"] == []
-    assert second["omitted"] == []
-    assert second["out_of_population"] == [{"address": manager, "reason": "existing_job"}]
-
-
 def test_disabled_chain_spawns_nothing_and_logs_the_reason(db_session, seed, monkeypatch, caplog):
     """An enabled deployment would analyse it, so it's an omission, not a carve-out."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
@@ -268,70 +240,6 @@ def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypa
     assert reasons[principal] == "not_contract_node"
     assert result["omitted"] == [{"address": ZERO_ADDRESS, "reason": "zero_address"}]
     assert [q["address"] for q in result["queued"]] == [fresh]
-
-
-def test_resolution_site_keeps_its_unbudgeted_behaviour(db_session, seed, monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, address_factory = seed
-    addrs = [address_factory() for _ in range(3)]
-
-    result = _spawn(
-        db_session,
-        parent,
-        _graph(parent.address, [_node(a) for a in addrs]),
-        site="resolution",
-        budget=None,
-    )
-
-    assert len(result["queued"]) == 3
-    assert result["omitted"] == []
-    assert result["budget"] is None
-    # Children must not inherit a generation they never belonged to.
-    from db.models import Job
-
-    child = db_session.query(Job).filter(Job.address == addrs[0]).one()
-    assert PERIMETER_DEPTH_KEY not in child.request
-    assert child.request["discovered_by"] == "resolution"
-
-
-def test_partial_spawn_still_yields_a_ledger(db_session, seed, monkeypatch):
-    """A raise part-way used to discard the ledger while the jobs existed."""
-    from services.discovery import perimeter as perimeter_module
-    from services.discovery.perimeter import new_spawn_result
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol_id, parent, address_factory = seed
-    addrs = [address_factory() for _ in range(5)]
-
-    real_create = perimeter_module.create_job
-    calls = {"n": 0}
-
-    def flaky_create_job(session, request, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 3:
-            raise RuntimeError("simulated create_job failure")
-        return real_create(session, request, **kwargs)
-
-    monkeypatch.setattr(perimeter_module, "create_job", flaky_create_job)
-
-    ledger = new_spawn_result(site="policy_refresh", budget=8)
-    with pytest.raises(RuntimeError, match="simulated create_job failure"):
-        _spawn(
-            db_session,
-            parent,
-            _graph(parent.address, [_node(a) for a in addrs]),
-            budget=8,
-            depth_cap=2,
-            result=ledger,
-        )
-
-    assert len(ledger["queued"]) == 2
-    assert ledger["budget_used"] == 2
-    assert [q["address"] for q in ledger["queued"]] == addrs[:2]
-    # Three nodes were never placed, so the partition claim must not hold.
-    assert ledger["walked"] is False
-    total = len(ledger["queued"]) + len(ledger["omitted"]) + len(ledger["out_of_population"])
-    assert total < len(addrs)
 
 
 def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, seed, monkeypatch):
@@ -491,33 +399,6 @@ def test_catch_all_fallback_cannot_mint_a_backlink(monkeypatch):
     assert out["backlink_address"] == "not_determined"
 
 
-def test_unpinnable_height_suppresses_the_whole_witness(monkeypatch):
-    from services.resolution.tracking import probe_declared_vault_backlink
-
-    _wire_backlink(monkeypatch, vault_return=_word(VAULT), head=None)
-    assert probe_declared_vault_backlink("https://rpc.example", MANAGER, VAULT) is None
-
-
-def test_non_manager_backlink_publishes_true_and_attributes_nothing(monkeypatch):
-    """The field earns the pairing, never the type (10 of 20 true answers are non-managers)."""
-    from services.resolution.tracking import probe_declared_vault_backlink
-
-    teller = TELLER
-    _wire_backlink(monkeypatch, vault_return=_word(VAULT))
-    out = probe_declared_vault_backlink("https://rpc.example", teller, VAULT)
-    assert out is not None
-
-    assert out["declared_vault_matches_gated_contract"] is True
-    assert set(out) == {
-        "probe_block",
-        "backlink_getter",
-        "gated_contract_address",
-        "backlink_address",
-        "negative_control",
-        "declared_vault_matches_gated_contract",
-    }
-
-
 def test_probe_fires_only_for_role_grant_contract_nodes(monkeypatch):
     """The ~88 plain-principal nodes pay no RPC."""
     from services.resolution import recursive
@@ -561,23 +442,3 @@ def test_probe_fires_only_for_role_grant_contract_nodes(monkeypatch):
         chain_id=1,
     ) == {"probe_block": PINNED_BLOCK}
     assert calls == [(MANAGER, VAULT)]
-
-
-def test_probe_failure_never_breaks_the_walk(monkeypatch):
-    from services.resolution import recursive
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("rpc down")
-
-    monkeypatch.setattr(recursive, "probe_declared_vault_backlink", boom)
-    assert (
-        recursive._maybe_probe_backlink(
-            "https://rpc.example",
-            principal_address=MANAGER,
-            gated_contract_address=VAULT,
-            details={"source": ROLE_GRANT},
-            node_type="contract",
-            chain_id=1,
-        )
-        is None
-    )

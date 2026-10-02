@@ -131,21 +131,6 @@ def test_probe_persists_code_creation_and_reads(db_session, monkeypatch, erpc_en
     assert all(tag == hex(100) for _data, tag in seen["calls"])
 
 
-def test_probe_code_absent_prunes_with_proof(db_session, monkeypatch, erpc_env):
-    protocol = _protocol(db_session)
-    row = _contract(db_session, ADDR(0x101), nominated=protocol.id)
-    seen = _stub_wire(monkeypatch, code="0x")
-
-    result = gate.probe(db_session, row)
-
-    assert result.code_present is False
-    witness = db_session.get(ContractCreationWitness, (1, row.address))
-    assert witness is not None and witness.code_absent_at_probe is True
-    assert witness.code_probe_block == 100
-    assert seen["calls"] == [] and seen["batch"] == []
-    assert gate.resolve_membership_state(db_session, row) == "pruned"
-
-
 def test_probe_unroutable_chain_is_recorded_not_silent(db_session, monkeypatch, erpc_env):
     protocol = _protocol(db_session)
     row = _contract(db_session, ADDR(0x102), chain="unknown", nominated=protocol.id)

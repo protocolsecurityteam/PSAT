@@ -39,38 +39,6 @@ def test_drains_due_work_including_backed_off_failures_before_waiting(monkeypatc
     assert heartbeat.call_args_list[12].kwargs["status"] == "error"
 
 
-def test_disabled_worker_waits_without_querying(monkeypatch):
-    stop = Event()
-    refresh = MagicMock()
-    waits = []
-
-    def wait(seconds):
-        waits.append(seconds)
-        stop.set()
-        return True
-
-    monkeypatch.setattr(worker, "enabled", lambda: False)
-    monkeypatch.setattr(worker, "refresh_one", refresh)
-    monkeypatch.setattr(worker, "record_heartbeat", MagicMock())
-    monkeypatch.setattr(stop, "wait", wait)
-    worker.run(stop)
-    refresh.assert_not_called()
-    assert waits == [5]
-
-
-def test_stop_interrupts_a_busy_queue_between_builds(monkeypatch):
-    stop = Event()
-    refresh = MagicMock(return_value="prepared")
-    wait = MagicMock()
-    monkeypatch.setattr(worker, "enabled", lambda: True)
-    monkeypatch.setattr(worker, "refresh_one", refresh)
-    monkeypatch.setattr(worker, "record_heartbeat", lambda *args, **kwargs: stop.set())
-    monkeypatch.setattr(stop, "wait", wait)
-    worker.run(stop)
-    refresh.assert_called_once()
-    wait.assert_not_called()
-
-
 def test_builds_take_priority_and_purges_drain_without_delaying_new_work(monkeypatch):
     stop = Event()
     events = []

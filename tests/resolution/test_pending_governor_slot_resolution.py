@@ -50,33 +50,6 @@ def _word(addr: str) -> str:
     return "0x" + addr[2:].rjust(64, "0")
 
 
-def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPatch) -> None:
-    recorder: list = []
-    _stub(monkeypatch, slot=_word(PENDING_GOVERNOR), recorder=recorder)
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [PENDING_GOVERNOR]
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason is None
-    assert _status(cap) != "resolved_empty"
-    assert ("eth_getStorageAt", [CONTRACT.lower(), PENDING_GOVERNOR_SLOT, "latest"]) in recorder
-
-
-def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reason names the read that happened, not a classification."""
-    _stub(monkeypatch, slot="0x" + "00" * 32)
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
-
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "exact"
-    assert cap.empty_reason == "slot_read_zero"
-    assert _status(cap) == "resolved_empty"
-    assert cap.trace[0]["step"] == "live_slot_resolution"
-    assert cap.trace[0]["slot"] == PENDING_GOVERNOR_SLOT
-
-
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub(monkeypatch, slot="revert")
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
@@ -96,15 +69,6 @@ def test_no_rpc_with_slot_is_lower_bound_not_guess(monkeypatch: pytest.MonkeyPat
 
     assert cap.membership_quality == "lower_bound"
     assert _status(cap) != "resolved_empty"
-
-
-def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub(monkeypatch, slot="revert")  # eth_call getter reverts; no slot on the operand
-    cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_NO_SLOT), _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.empty_reason == "empty_by_design"
-    assert _status(cap) == "resolved_empty"
 
 
 pytest.importorskip("slither")

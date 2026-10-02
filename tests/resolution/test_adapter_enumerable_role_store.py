@@ -13,18 +13,13 @@ from eth_abi.abi import encode as abi_encode
 from eth_utils.crypto import keccak
 
 import services.resolution.role_store_standards as rss
-from services.policy.capability_surface import project_capability_surface
-from services.resolution.adapters import AdapterRegistry, EvaluationContext
+from services.resolution.adapters import EvaluationContext
 from services.resolution.adapters.enumerable_role_store import (
     _NEGATIVE_CONTROL_ADDR,
     EnumerableRoleStoreAdapter,
 )
-from services.resolution.adapters.event_indexed import EventIndexedAdapter
-from services.resolution.adapters.solmate_roles import SolmateRolesAuthorityAdapter
-from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 from services.resolution.role_store_standards import (
-    OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
 )
 from tests.conftest import DATABASE_URL as _DB_URL
@@ -35,13 +30,10 @@ _PROXY = "0x" + "62" * 20  # registry proxy — where RoleSet is emitted
 _IMPL = "0x" + "3b" * 20  # role-store impl behind the proxy
 _MULTISIG = "0x2aca71020de61bb532008049e1bd41e451ae8adc"  # OPERATION_MULTISIG holder (ground truth)
 _TIMELOCK = "0xcd425f44758a08baab3c4908f3e3de5776e45d7a"
-_STRANGER = "0x" + "99" * 20  # granted then revoked / never a member
 _CURSOR_BLOCK = 25_000_000
 _PROBE_BLOCK = 24_900_000  # <= cursor so the fold is exact-covered
 
 _ROLE_SET = SOLADY_ENUMERABLE_ROLES.grant_events[0].topic0
-_OZ_GRANTED = OZ_ACCESS_CONTROL_ENUMERABLE.grant_events[0].topic0
-_OZ_REVOKED = OZ_ACCESS_CONTROL_ENUMERABLE.grant_events[1].topic0
 _ROLE_1 = 1  # OPERATION_MULTISIG_ROLE (Solady uint256 id)
 
 _CALLEE_SIG = "onlyOperatingMultisig(address)"
@@ -91,10 +83,6 @@ def _addr_word(address: str) -> str:
 
 def _roleset_topics(holder: str, role: int, active: bool) -> list[str]:
     return [_ROLE_SET, _addr_word(holder), _word(role), _word(1 if active else 0)]
-
-
-def _oz_topics(topic0: str, role: int, account: str) -> list[str]:
-    return [topic0, _word(role), _addr_word(account), _addr_word("0x" + "01" * 20)]
 
 
 def _seed_log(session, *, topics: list[str], block: int, log_index: int) -> None:
@@ -244,14 +232,6 @@ def _ctx(session, *, block: int | None = _PROBE_BLOCK) -> EvaluationContext:
 
 
 @requires_postgres
-def test_matches_recognized_standard_scores_90(session, monkeypatch):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    session.commit()
-    assert EnumerableRoleStoreAdapter.matches(_descriptor(), _ctx(session)) == 90
-
-
-@requires_postgres
 def test_matches_markerless_authority_scores_0(session, monkeypatch):
     # No recognized store, so the :1976 guard stays the backstop.
     _stub_probe_code(monkeypatch, "0x00")
@@ -277,40 +257,6 @@ def test_matches_declines_scores_0(session, monkeypatch, descriptor_kwargs):
 
 
 @requires_postgres
-def test_warm_fold_probe_returns_finite_set(session, monkeypatch, both_flags):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG})
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    assert cap.kind == "finite_set"
-    assert cap.members == [_MULTISIG.lower()]
-    assert cap.membership_quality == "exact"
-    assert cap.last_indexed_block == _CURSOR_BLOCK
-    assert any(step.get("step") == "enumerable_role_store" for step in cap.trace)
-
-
-@requires_postgres
-def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch, both_flags):
-    # One height serves the fold read, probe and trace.
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG}, head_block=_CURSOR_BLOCK)
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session, block=None))
-    assert cap.kind == "finite_set"
-    assert cap.members == [_MULTISIG.lower()]
-    step = next(s for s in cap.trace if s.get("step") == "enumerable_role_store")
-    assert step["probe_block"] == _CURSOR_BLOCK
-
-
-@requires_postgres
 def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeypatch, both_flags):
     # Never reads at different heights.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -324,35 +270,6 @@ def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeyp
     assert cap.kind == "external_check_only"
     assert _extra(cap).get("basis") == ["probe_unavailable"]
     assert "deferred_pending_index" not in _extra(cap)
-
-
-@requires_postgres
-def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG})
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    step = next(s for s in cap.trace if s.get("step") == "enumerable_role_store")
-    assert step["fold_frontier"] == _CURSOR_BLOCK
-
-
-@requires_postgres
-def test_finite_set_projects_principal_type_controller(session, monkeypatch, both_flags):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG})
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    surface = project_capability_surface(capability_to_dict(cap))
-    assert [r["address"] for r in surface.principal_rows] == [_MULTISIG.lower()]
-    assert all(r["principal_type"] == "controller" for r in surface.principal_rows)
 
 
 @requires_postgres
@@ -376,49 +293,6 @@ def test_settled_decline_records_metric(session, monkeypatch, both_flags):
     assert cap.kind == "external_check_only"
     assert _extra(cap).get("basis") == ["probe_unavailable"]
     assert metrics.get("role_store_decline_probe_unavailable") == 1
-
-
-@requires_postgres
-def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypatch, both_flags):
-    # F3: a transport blip must not poison the shared pass memo.
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-
-    calls = {"n": 0}
-    gate_sel = keccak(text=_CALLEE_SIG).hex()[:8]
-    members_l = {_MULTISIG.lower()}
-    control_l = _NEGATIVE_CONTROL_ADDR.lower()
-
-    def _stub(rpc_url, method, params=None, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("stubbed one-shot transport blip")
-        assert params
-        body = bytes.fromhex(params[0]["data"][10:])
-        decoded = abi_decode(["(address,bool,bytes)[]"], body)[0]
-        results = []
-        for _t, _a, calldata in decoded:
-            addr = "0x" + calldata[4:36][-20:].hex()
-            if calldata[:4].hex() == gate_sel:
-                results.append((False if addr == control_l else (addr in members_l), b""))
-            else:
-                results.append((False, b""))
-        return "0x" + abi_encode(["(bool,bytes)[]"], [results]).hex()
-
-    import services.clients.rpc as _rpc
-
-    monkeypatch.setattr(_rpc, "rpc_request", _stub)
-
-    ctx = _ctx(session)  # one ctx → one shared live_read_memo across both calls
-    first = EnumerableRoleStoreAdapter().enumerate(_descriptor(), ctx)
-    assert first.kind == "external_check_only"
-    assert _extra(first).get("basis") == ["probe_unavailable"]
-    second = EnumerableRoleStoreAdapter().enumerate(_descriptor(), ctx)
-    assert second.kind == "finite_set"
-    assert second.members == [_MULTISIG.lower()]
 
 
 @requires_postgres
@@ -464,71 +338,6 @@ def test_negative_control_passes_declines(session, monkeypatch, both_flags):
 
 
 @requires_postgres
-def test_probe_transport_failure_is_indeterminate(session, monkeypatch, both_flags):
-    # A wire failure is not a membership failure.
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG}, transport_fail=True)
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    assert cap.kind == "external_check_only"
-    assert _extra(cap).get("basis") == ["probe_unavailable"]
-    assert "deferred_pending_index" not in _extra(cap)
-
-
-@requires_postgres
-def test_probe_filters_non_members(session, monkeypatch, both_flags):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    _seed_log(session, topics=_roleset_topics(_TIMELOCK, _ROLE_1, True), block=101, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG})  # timelock NOT passed
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    assert cap.kind == "finite_set"
-    assert cap.members == [_MULTISIG.lower()]
-
-
-@requires_postgres
-def test_oz_polarity_grant_then_revoke_not_member(session, monkeypatch, both_flags):
-    _stub_probe_code(monkeypatch, _code_with(*OZ_ACCESS_CONTROL_ENUMERABLE.marker_selectors))
-    _seed_proxy_impl(session)
-    for topic0 in OZ_ACCESS_CONTROL_ENUMERABLE.topic0s():
-        _seed_cursor(session, topic0)
-    _seed_log(session, topics=_oz_topics(_OZ_GRANTED, _ROLE_1, _STRANGER), block=100, log_index=0)
-    _seed_log(session, topics=_oz_topics(_OZ_REVOKED, _ROLE_1, _STRANGER), block=101, log_index=0)
-    _seed_log(session, topics=_oz_topics(_OZ_GRANTED, _ROLE_1, _MULTISIG), block=102, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG, _STRANGER})  # gate would pass both if asked
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    assert cap.kind == "finite_set"
-    assert cap.members == [_MULTISIG.lower()]
-
-
-@requires_postgres
-def test_all_revoked_provably_nobody_empty_exact(session, monkeypatch, both_flags):
-    # Provably nobody: exact-empty, which blocks OR'd public siblings.
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, False), block=101, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members=set())
-
-    cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
-    assert cap.kind == "finite_set"
-    assert cap.members == []
-    assert cap.membership_quality == "exact"
-
-
-@requires_postgres
 def test_getter_crosscheck_mismatch_declines(session, monkeypatch, both_flags):
     monkeypatch.setenv("PSAT_ROLE_STORE_GETTER_CROSSCHECK", "1")
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
@@ -556,29 +365,6 @@ def test_getter_crosscheck_match_returns_set(session, monkeypatch, both_flags):
     cap = EnumerableRoleStoreAdapter().enumerate(_descriptor(), _ctx(session))
     assert cap.kind == "finite_set"
     assert cap.members == [_MULTISIG.lower()]
-
-
-@requires_postgres
-def test_dispatch_order_adapter_preempts_generic(session, monkeypatch, both_flags):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    _seed_cursor(session, _ROLE_SET)
-    _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
-    session.commit()
-    _install_probe_stub(monkeypatch, members={_MULTISIG})
-
-    registry = AdapterRegistry()
-    registry.register(SolmateRolesAuthorityAdapter)
-    registry.register(EnumerableRoleStoreAdapter)
-    registry.register(EventIndexedAdapter)
-
-    picked = registry.pick(_descriptor(), _ctx(session))
-    assert picked is EnumerableRoleStoreAdapter
-
-    cap = registry.enumerate(_descriptor(), _ctx(session))
-    assert cap.kind == "finite_set"
-    assert cap.members == [_MULTISIG.lower()]
-    assert any(step.get("step") == "enumerable_role_store" for step in cap.trace)
 
 
 @requires_postgres

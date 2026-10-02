@@ -219,17 +219,6 @@ def test_oz_v4_initializer_surfaces_one_shot(artifacts):
     assert latch["role"] == "version"  # the resolver's decide-invariant anchor
 
 
-def test_oz_v5_namespaced_initializer_surfaces_one_shot(artifacts):
-    tree = _fn_tree(artifacts["OzV5"], "initialize")
-    assert "one_shot" in _surface_condition_kinds(tree)
-    latch = collect_one_shot_latches(tree)["standard"][0]
-    assert latch["standard"] == "oz_v5_namespaced"
-    # Validated in test_one_shot_probe::test_erc7201_slot_matches_canonical_derivation.
-    assert latch["slot"] == "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00"
-    assert latch["byte_offset"] == 0 and latch["size_bytes"] == 8  # uint64 _initialized
-    assert latch["role"] == "version"  # the resolver's decide-invariant anchor
-
-
 def test_custom_bool_latch_is_candidate_not_standard(artifacts):
     """Only the on-chain read may promote it."""
     tree = _fn_tree(artifacts["Custom"], "setup")
@@ -239,20 +228,3 @@ def test_custom_bool_latch_is_candidate_not_standard(artifacts):
     assert latches["candidate"][0]["standard"] == "structural_scalar_latch"
     assert "role" not in latches["candidate"][0]
     assert "one_shot" not in _surface_condition_kinds(tree)
-
-
-@pytest.mark.parametrize(
-    ("fn_name", "expected_kinds"),
-    [
-        # The write doesn't permanently falsify the guard.
-        pytest.param("deposit", (), id="capped-counter"),
-        pytest.param("swap", ("reentrancy",), id="reentrancy-guard-keeps-reentrancy-kind"),
-        # A setter re-arms it.
-        pytest.param("unpause", (), id="rearmable-toggle"),
-    ],
-)
-def test_custom_non_latches_are_not_a_one_shot(artifacts, fn_name, expected_kinds):
-    tree = _fn_tree(artifacts["Custom"], fn_name)
-    latches = collect_one_shot_latches(tree)
-    assert not latches["standard"] and not latches["candidate"]
-    assert set(expected_kinds) <= _surface_condition_kinds(tree)

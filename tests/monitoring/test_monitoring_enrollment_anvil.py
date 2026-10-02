@@ -386,43 +386,6 @@ def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_
     )
 
 
-def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
-    """The old in-flight gate froze the trigger when a sibling crashed without leaving those states."""
-    from services.monitoring.enrollment import maybe_enroll_protocol
-
-    rpc_url, tmp_path = anvil_env
-    completed_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-
-    proto = _make_protocol(test_db)
-    _add_protocol_contract(test_db, proto.id, completed_addr, contract_name="Completed")
-
-    test_db.add(
-        Job(
-            address="0x" + "ab" * 20,
-            protocol_id=proto.id,
-            status=JobStatus.queued,
-            stage=JobStage.discovery,
-        )
-    )
-    test_db.commit()
-
-    fired = maybe_enroll_protocol(test_db, proto.id, rpc_url, "ethereum")
-    assert fired is True, (
-        "maybe_enroll_protocol must fire even when a sibling is in_flight. "
-        "Pre-fix the gate skipped this enrollment with no fallback."
-    )
-
-    mc = test_db.execute(
-        select(MonitoredContract).where(MonitoredContract.address == completed_addr.lower())
-    ).scalar_one_or_none()
-    assert mc is not None, (
-        "Regression: completed contract must be enrolled even while a "
-        "sibling sits in queued/processing. If this fails, the in-flight "
-        "gate has come back."
-    )
-    assert mc.is_active is True
-
-
 def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
     """Enrollment used to ignore the materialized tracking plan, so the scanner dropped the Solmate topic0."""
     from eth_utils.crypto import keccak

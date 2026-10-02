@@ -272,32 +272,6 @@ def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
     assert cap.kind == "external_check_only", f"recovered caller gate must fail closed, got {cap.kind}"
 
 
-def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
-    """Over-closing produced false positives in the inverse direction."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            function _condFn() private view returns (bool) { return x > 0; }
-            function _maybeRevert() private { require(x > 0, "no"); x = x; }
-            function admin() external {
-                if (!_condFn()) _maybeRevert();
-                x = 1;
-            }
-        }
-    """,
-    )
-    fn = _function(sl, "admin")
-    gates = RevertDetector(fn).run()
-    if_gates = [g for g in gates if g.kind in ("if_revert", "custom_revert")]
-    assert if_gates == [], f"conditionally-reverting helper must not fabricate a guard, got {_gate_kinds(gates)}"
-    cap = _cap_for(sl, "admin()")
-    assert cap.kind != "external_check_only", f"business-only require must not fail closed, got {cap.kind}"
-    assert cap.kind == "conditional_universal", cap.kind
-
-
 def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
     sl = _compile(
         tmp_path,

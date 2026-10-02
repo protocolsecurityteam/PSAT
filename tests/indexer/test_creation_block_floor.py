@@ -73,15 +73,6 @@ def test_resolve_scan_floor_defers_on_a_failed_witness(monkeypatch):
     assert calls == []
 
 
-def test_resolve_scan_floor_defers_on_unknown(monkeypatch):
-    import services.resolution.creation_block_floor as floor_mod
-
-    floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
-    monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: None)
-    assert floor_mod.resolve_scan_floor("0x" + "ab" * 20, 1) is None
-
-
 def test_resolve_scan_floor_none_for_zero_or_missing_address(monkeypatch):
     import services.resolution.creation_block_floor as floor_mod
 

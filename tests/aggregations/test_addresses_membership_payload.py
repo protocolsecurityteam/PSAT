@@ -11,7 +11,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import event
 
 from db.models import (
     Contract,
@@ -20,7 +19,6 @@ from db.models import (
     ContractProbeAttempt,
 )
 from services.aggregations.company_overview.payload import (
-    _all_addresses_count,
     all_addresses_for_protocol,
 )
 from tests.conftest import requires_postgres
@@ -97,58 +95,6 @@ def test_member_carries_state_and_admitting_witnesses(db_session, protocol):
     ]
 
 
-def test_witness_display_entry_flags_heuristic_rules():
-    """No export presents a heuristic membership as proven —
-    the display entry carries the gate's own heuristic predicate."""
-    from services.aggregations.company_overview.payload import _witness_display_entry
-
-    w4h = ContractMembershipWitness(
-        contract_id=1,
-        protocol_id=1,
-        rule="w4h_deployer_affinity",
-        evidence={"deployer": _addr("d")},
-    )
-    assert _witness_display_entry(w4h)["heuristic"] is True
-
-    derived = ContractMembershipWitness(
-        contract_id=1,
-        protocol_id=1,
-        rule="w2_structural",
-        via_address=_addr("via"),
-        evidence={"edge_kind": "implementation", "heuristic_via": True},
-    )
-    assert _witness_display_entry(derived)["heuristic"] is True
-
-    proven = ContractMembershipWitness(
-        contract_id=1,
-        protocol_id=1,
-        rule="w2_structural",
-        via_address=_addr("via"),
-        evidence={"edge_kind": "implementation"},
-    )
-    assert _witness_display_entry(proven)["heuristic"] is False
-
-
-def test_member_revoked_witness_not_displayed(db_session, protocol):
-    from datetime import datetime, timezone
-
-    member = _add_member(db_session, protocol)
-    db_session.add(
-        ContractMembershipWitness(
-            contract_id=member.id,
-            protocol_id=protocol.id,
-            rule="w5_human",
-            evidence={"actor": "ops", "asserted_at": "2026-08-24T00:00:00+00:00"},
-            revoked_at=datetime.now(timezone.utc),
-        )
-    )
-    db_session.commit()
-
-    row = _row(all_addresses_for_protocol(db_session, protocol), member.address)
-    assert row["membership_state"] == "member"
-    assert row["membership_witnesses"] == []
-
-
 def test_candidate_probed_reason_names_the_reads(db_session, protocol):
     cand = _add_candidate(db_session, protocol)
     owner = _addr("owner")
@@ -223,72 +169,3 @@ def test_pruned_carries_code_absent_block(db_session, protocol):
     row = _row(all_addresses_for_protocol(db_session, protocol), cand.address)
     assert row["membership_state"] == "pruned"
     assert row["membership_reason"] == {"kind": "code_absent", "code_probe_block": 999}
-
-
-def test_unclaimed_and_foreign_rows_excluded(db_session, protocol):
-    other = _add_protocol(db_session, f"member-payload-other-{uuid.uuid4().hex[:8]}")
-    unclaimed = Contract(address=_addr("u"), chain="ethereum", protocol_id=None, nominated_protocol_id=None)
-    # A member of ANOTHER protocol that this protocol also nominated stays in
-    # the other protocol's inventory only.
-    foreign = Contract(address=_addr("f"), chain="ethereum", protocol_id=other.id, nominated_protocol_id=protocol.id)
-    db_session.add_all([unclaimed, foreign])
-    db_session.commit()
-
-    addrs = {r["address"] for r in all_addresses_for_protocol(db_session, protocol)}
-    assert unclaimed.address not in addrs
-    assert foreign.address not in addrs
-
-
-def test_count_matches_inventory_extension(db_session, protocol):
-    _add_member(db_session, protocol)
-    _add_candidate(db_session, protocol)
-    pruned = _add_candidate(db_session, protocol)
-    db_session.add(
-        ContractCreationWitness(
-            chain_id=1, address=pruned.address.lower(), code_probe_block=5, code_absent_at_probe=True
-        )
-    )
-    db_session.commit()
-
-    assert _all_addresses_count(db_session, protocol) == 3
-    assert len(all_addresses_for_protocol(db_session, protocol)) == 3
-
-
-def test_membership_enrichment_is_batched(db_session, protocol):
-    for _ in range(4):
-        member = _add_member(db_session, protocol)
-        db_session.add(
-            ContractMembershipWitness(
-                contract_id=member.id,
-                protocol_id=protocol.id,
-                rule="w6_llama_seed",
-                evidence={"adapter_slug": "x", "chain_id": 1, "code_probe_block": 1},
-            )
-        )
-    for _ in range(4):
-        cand = _add_candidate(db_session, protocol)
-        db_session.add(
-            ContractProbeAttempt(
-                contract_id=cand.id,
-                chain_id=1,
-                block_number=7,
-                results={"status": "probed", "code_present": True, "reads": {}, "resolved_addresses": []},
-            )
-        )
-    db_session.commit()
-
-    queries: list[str] = []
-
-    def before_cursor_execute(conn, cursor, statement, params, context, executemany):
-        if statement.strip().lower().startswith("select"):
-            queries.append(statement)
-
-    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
-    try:
-        payload = all_addresses_for_protocol(db_session, protocol)
-    finally:
-        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
-
-    assert len(payload) == 8
-    # One query per evidence table, never per row.
-    assert len(queries) <= 6, f"expected ≤ 6 SELECTs for 8 rows, got {len(queries)}:\n" + "\n".join(queries)

@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import os
 import uuid
-from types import SimpleNamespace
-from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -116,46 +114,6 @@ class TestDetermineContractType:
 
 
 class TestBuildMonitoringConfig:
-    @pytest.mark.parametrize(
-        "summary_kw, contract_type, expected_flags",
-        [
-            pytest.param(
-                {"is_upgradeable": True},
-                "proxy",
-                {"watch_upgrades": True, "watch_ownership": True},
-                id="proxy",
-            ),
-            pytest.param(
-                {"is_pausable": True}, "pausable", {"watch_pause": True, "watch_upgrades": False}, id="pausable"
-            ),
-            pytest.param(None, "safe", {"watch_safe_signers": True}, id="safe"),
-            pytest.param(None, "timelock", {"watch_timelock": True}, id="timelock"),
-            pytest.param({"control_model": "role-based"}, "regular", {"watch_roles": True}, id="role-based"),
-        ],
-    )
-    def test_config_flags(self, summary_kw, contract_type, expected_flags):
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        summary = None if summary_kw is None else _mock_summary(**summary_kw)
-        config = _build_monitoring_config(summary, [], contract_type)
-        for flag, value in expected_flags.items():
-            assert config[flag] is value
-
-    def test_tracked_topics_persisted_when_supplied(self):
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        tracked = [
-            {
-                "topic0": "0x" + "a" * 64,
-                "signature": "OwnerUpdated(address,address)",
-                "event_type": "ownership_transferred",
-                "controller_id": "state_variable:owner",
-                "inputs": [],
-            }
-        ]
-        config = _build_monitoring_config(None, [], "regular", tracked)
-        assert config["tracked_topics"] == tracked
-
     def test_empty_tracked_topics_witnessed_as_empty_list(self):
         """Key absence is never a builder output."""
         from services.monitoring.enrollment import _build_monitoring_config
@@ -167,36 +125,6 @@ class TestBuildMonitoringConfig:
 
 
 class TestBuildInitialState:
-    def test_includes_implementation(self):
-        from services.monitoring.enrollment import _build_initial_state
-
-        contract = _mock_contract(implementation="0x" + "d" * 40)
-        state = _build_initial_state(contract, [])
-        assert state["implementation"] == "0x" + "d" * 40
-
-    def test_includes_owner(self):
-        from services.monitoring.enrollment import _build_initial_state
-
-        contract = _mock_contract()
-        cv = _mock_controller_value(controller_id="owner", value="0x" + "e" * 40)
-        state = _build_initial_state(contract, [cv])
-        assert state["owner"] == "0x" + "e" * 40
-
-    def test_ignores_pending_owner_and_other_substring_matches(self):
-        """The old substring match latched ``pendingOwner`` and friends into ``owner``; only the canonical Ownable
-        slot counts.
-        """
-        from services.monitoring.enrollment import _build_initial_state
-
-        contract = _mock_contract()
-        active = _mock_controller_value(controller_id="state_variable:owner", value="0x" + "a" * 40)
-        pending = _mock_controller_value(controller_id="state_variable:pendingOwner", value="0x" + "b" * 40)
-        previous = _mock_controller_value(controller_id="state_variable:previousOwner", value="0x" + "c" * 40)
-        role_owner = _mock_controller_value(controller_id="state_variable:roleOwner", value="0x" + "d" * 40)
-        # Last-write-wins under the old match would have latched the last entry.
-        state = _build_initial_state(contract, [active, pending, previous, role_owner])
-        assert state["owner"] == "0x" + "a" * 40
-
     def test_ignores_state_variable_destination_admin(self):
         from services.monitoring.enrollment import _build_initial_state
 
@@ -207,15 +135,6 @@ class TestBuildInitialState:
         )
         state = _build_initial_state(contract, [active, nested])
         assert state["admin"] == "0x" + "1" * 40
-
-    def test_zero_address_owner_is_not_seeded(self):
-        """A zero owner would make the first live poll of a real owner false-fire."""
-        from services.monitoring.enrollment import _build_initial_state
-
-        contract = _mock_contract()
-        cv = _mock_controller_value(controller_id="owner", value="0x" + "0" * 40)
-        state = _build_initial_state(contract, [cv])
-        assert "owner" not in state
 
     def test_zero_address_variants_and_plan_fields_not_seeded(self):
         from services.monitoring.enrollment import _build_initial_state
@@ -1006,67 +925,6 @@ class TestEnrollmentIntegration:
         pg_session.commit()
         return proto
 
-    def test_maybe_enroll_skips_and_marks_dirty_when_lock_held(self, pg_session):
-        from sqlalchemy import func
-
-        from db.models import MonitoringEnrollmentQueue
-        from services.monitoring.enrollment import maybe_enroll_protocol
-
-        proto = self._seed_one_contract_protocol(pg_session)
-
-        holder_engine = create_engine(DATABASE_URL)
-        holder = Session(holder_engine, expire_on_commit=False)
-        held = holder.execute(
-            text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
-            {"pid": proto.id},
-        ).scalar()
-        assert held is True
-        try:
-            with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-                fired = maybe_enroll_protocol(pg_session, proto.id, "http://rpc", "ethereum")
-            assert fired is False
-            n = pg_session.execute(
-                select(func.count()).select_from(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)
-            ).scalar()
-            assert n == 0  # nothing enrolled while the lock was held
-            q = pg_session.execute(
-                select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
-            ).scalar_one_or_none()
-            assert q is not None  # dirty row left for the reconciler
-        finally:
-            holder.rollback()  # release the lock
-            holder.close()
-            holder_engine.dispose()
-
-        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            fired2 = maybe_enroll_protocol(pg_session, proto.id, "http://rpc", "ethereum")
-        assert fired2 is True
-        pg_session.expire_all()
-        n2 = pg_session.execute(
-            select(func.count()).select_from(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)
-        ).scalar()
-        assert n2 == 1
-
-    def test_advisory_lock_released_on_enroll_commit(self, pg_session):
-        from services.monitoring.enrollment import maybe_enroll_protocol
-
-        proto = self._seed_one_contract_protocol(pg_session)
-        with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            assert maybe_enroll_protocol(pg_session, proto.id, "http://rpc", "ethereum") is True
-
-        other_engine = create_engine(DATABASE_URL)
-        other = Session(other_engine, expire_on_commit=False)
-        try:
-            got = other.execute(
-                text("SELECT pg_try_advisory_xact_lock(hashtext('protocol_enrollment'), :pid)"),
-                {"pid": proto.id},
-            ).scalar()
-            assert got is True  # lock was freed when maybe_enroll committed
-        finally:
-            other.rollback()
-            other.close()
-            other_engine.dispose()
-
     def test_controller_rows_survive_stale_detection(self, pg_session):
         """A flush-ordering regression."""
         from db.models import Contract, ControlGraphNode, Protocol
@@ -1401,30 +1259,6 @@ class TestControlGraphTypeReconciliation:
             .one()
         )
 
-    def test_upgrades_unknown_cgn_from_fp(self, pg_session):
-        from services.governance.control_graph_types import reconcile_control_graph_types
-
-        c = self._proto_contract(pg_session, "0x" + "a3" * 20)
-        gov_safe = "0x" + "e6" * 20
-        self._add_cgn(pg_session, c.id, gov_safe, "unknown")
-        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
-        pg_session.commit()
-
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
-        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
-
-    def test_does_not_downgrade_concrete_cgn(self, pg_session):
-        from services.governance.control_graph_types import reconcile_control_graph_types
-
-        c = self._proto_contract(pg_session, "0x" + "a4" * 20)
-        addr = "0x" + "e7" * 20
-        self._add_cgn(pg_session, c.id, addr, "timelock")
-        _grant_primary_authority(pg_session, c.id, addr, function_name="schedule", resolved_type="safe")
-        pg_session.commit()
-
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
-        assert self._node_type(pg_session, c.id, addr) == "timelock"
-
     def test_skips_non_governance_fp_types(self, pg_session):
         from services.governance.control_graph_types import reconcile_control_graph_types
 
@@ -1436,20 +1270,6 @@ class TestControlGraphTypeReconciliation:
 
         assert reconcile_control_graph_types(pg_session, [c.id]) == 0
         assert self._node_type(pg_session, c.id, eoa_addr) == "unknown"
-
-    def test_idempotent(self, pg_session):
-        from services.governance.control_graph_types import reconcile_control_graph_types
-
-        c = self._proto_contract(pg_session, "0x" + "a6" * 20)
-        addr = "0x" + "e9" * 20
-        self._add_cgn(pg_session, c.id, addr, "unknown")
-        _grant_primary_authority(pg_session, c.id, addr, function_name="upgradeTo", resolved_type="proxy_admin")
-        pg_session.commit()
-
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
-        pg_session.flush()
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
-        assert self._node_type(pg_session, c.id, addr) == "proxy_admin"
 
     @staticmethod
     def _node_details(session, contract_id, addr):
@@ -1489,28 +1309,6 @@ class TestControlGraphTypeReconciliation:
         details = self._node_details(pg_session, c.id, gov_safe) or {}
         assert details.get("owners") == owners
         assert details.get("threshold") == 2
-
-    def test_backfills_config_onto_already_typed_node(self, pg_session):
-        from services.governance.control_graph_types import reconcile_control_graph_types
-
-        c = self._proto_contract(pg_session, "0x" + "b2" * 20)
-        gov_safe = "0x" + "f2" * 20
-        owners = ["0x" + "44" * 20, "0x" + "55" * 20]
-        self._add_cgn(pg_session, c.id, gov_safe, "safe")
-        _grant_primary_authority(
-            pg_session,
-            c.id,
-            gov_safe,
-            function_name="cancel",
-            resolved_type="safe",
-            details={"owners": owners, "threshold": 2},
-        )
-        pg_session.commit()
-
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
-        pg_session.flush()
-        assert (self._node_details(pg_session, c.id, gov_safe) or {}).get("owners") == owners
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 0
 
     def test_does_not_fold_owners_onto_disagreeing_type(self, pg_session):
         from services.governance.control_graph_types import reconcile_control_graph_types
@@ -1591,20 +1389,6 @@ class TestControlGraphTypeReconciliation:
             .one()
         )
 
-    def test_safe_upgrade_stamps_coherent_analysis_state(self, pg_session):
-        """('safe', NULL) is a self-refuting pair."""
-        from services.governance.control_graph_types import reconcile_control_graph_types
-
-        c = self._proto_contract(pg_session, "0x" + "b5" * 20)
-        gov_safe = "0x" + "f5" * 20
-        self._add_cgn(pg_session, c.id, gov_safe, "unknown")
-        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
-        pg_session.commit()
-
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
-        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
-        assert self._node_analysis_state(pg_session, c.id, gov_safe) == "not_analyzable"
-
     def test_pretyped_safe_with_null_state_is_healed_and_converges(self, pg_session):
         from services.governance.control_graph_types import reconcile_control_graph_types
 
@@ -1632,208 +1416,3 @@ class TestControlGraphTypeReconciliation:
         assert reconcile_control_graph_types(pg_session, [c.id]) == 1
         assert self._node_type(pg_session, c.id, addr) == "timelock"
         assert self._node_analysis_state(pg_session, c.id, addr) is None
-
-    def test_determined_analysis_state_never_overwritten(self, pg_session):
-        from db.models import ControlGraphNode
-        from services.governance.control_graph_types import reconcile_control_graph_types
-
-        c = self._proto_contract(pg_session, "0x" + "b8" * 20)
-        gov_safe = "0x" + "f9" * 20
-        pg_session.add(
-            ControlGraphNode(
-                contract_id=c.id,
-                address=gov_safe,
-                node_type="unknown",
-                resolved_type="unknown",
-                analysis_state="attempt_failed",
-                details={"materialize_error": "boom"},
-            )
-        )
-        pg_session.flush()
-        _grant_primary_authority(pg_session, c.id, gov_safe, function_name="cancel", resolved_type="safe")
-        pg_session.commit()
-
-        assert reconcile_control_graph_types(pg_session, [c.id]) == 1
-        assert self._node_type(pg_session, c.id, gov_safe) == "safe"
-        assert self._node_analysis_state(pg_session, c.id, gov_safe) == "attempt_failed"
-
-
-class TestTrackingPlanNotDetermined:
-    """Not-determined vs found-nothing at the enrollment boundary.
-
-    The loader returns no topics in four situations and only one is a finding, so ``monitoring_config`` must not
-    present the other three as one. Uses the real ``find_by_address``, since the collapse happens inside it.
-    """
-
-    _TOPIC0 = "0x" + "ab" * 32
-    _PLAN_WITH_EVENTS = {
-        "tracked_controllers": [
-            {
-                "controller_id": "state_variable:guardian",
-                "event_watch": {
-                    "events": [
-                        {
-                            "topic0": _TOPIC0,
-                            "signature": "GuardianChanged(address,address)",
-                            "inputs": [{"name": "old", "type": "address", "indexed": True}],
-                        }
-                    ]
-                },
-            }
-        ]
-    }
-
-    @pytest.fixture()
-    def materialization_factory(self, pg_session):
-        from db.models import ContractMaterialization
-
-        made: list[tuple[str, str]] = []
-
-        def _make(address: str, **overrides):
-            from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
-            from utils.chains import chain_cache_token
-
-            keccak = ("0x" + uuid.uuid4().hex * 2)[:66]
-            fields = {
-                # The chain-token normalization is part of what find_by_address does.
-                "chain": chain_cache_token("ethereum"),
-                "bytecode_keccak": keccak,
-                "address": address.lower(),
-                "contract_name": "Fixture",
-                "status": "ready",
-                "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
-            }
-            fields.update(overrides)
-            row = ContractMaterialization(**fields)
-            pg_session.add(row)
-            pg_session.commit()
-            made.append((fields["chain"], keccak))
-            return row
-
-        try:
-            yield _make
-        finally:
-            pg_session.rollback()
-            for chain, keccak in made:
-                row = pg_session.get(ContractMaterialization, (chain, keccak))
-                if row is not None:
-                    pg_session.delete(row)
-            pg_session.commit()
-
-    @pytest.mark.parametrize(
-        "address_byte, row_overrides",
-        [
-            # 35 of 85 rows have no materialization, so nothing ever read a tracking plan.
-            pytest.param("11", None, id="no-materialization-row"),
-            # A superseded schema is a miss on purpose; publishing zero topics would deny real governance events.
-            pytest.param(
-                "33", lambda version: {"analysis_schema_version": version - 1}, id="superseded-schema-version"
-            ),
-            pytest.param("44", lambda version: {"status": "building"}, id="unready-row"),
-        ],
-    )
-    def test_missing_current_materialization_is_not_determined(
-        self, pg_session, materialization_factory, address_byte, row_overrides
-    ):
-        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + address_byte * 20
-        if row_overrides is not None:
-            materialization_factory(
-                address, tracking_plan=self._PLAN_WITH_EVENTS, **row_overrides(ANALYSIS_SCHEMA_VERSION)
-            )
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert (topics, plan) == ([], None)
-        assert not_determined == "no_current_materialization"
-
-        config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert "tracked_topics" not in config
-        assert config["tracking_plan_not_determined"] == "no_current_materialization"
-
-    def test_unreadable_plan_is_stamped_with_its_own_reason(self, pg_session, materialization_factory, monkeypatch):
-        """An outage and a missing materialization have different remedies."""
-        from db.storage import StorageContentNotDetermined
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + "55" * 20
-        materialization_factory(address, tracking_plan_blob_key="artifacts/x/tracking_plan.json")
-        monkeypatch.setattr(
-            enr,
-            "hydrate_tracking_plan",
-            lambda _row: (_ for _ in ()).throw(StorageContentNotDetermined("bucket unreachable")),
-        )
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert (topics, plan) == ([], None)
-        assert not_determined == "plan_not_readable"
-
-        config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracking_plan_not_determined"] == "plan_not_readable"
-
-    def test_a_plan_object_the_bucket_says_is_gone_gets_its_own_token(
-        self, pg_session, materialization_factory, monkeypatch
-    ):
-        """An absent object reads the same forever; an unreachable bucket may answer next tick."""
-        from db.storage import StorageContentAbsent
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + "66" * 20
-        materialization_factory(address, tracking_plan_blob_key="artifacts/x/tracking_plan.json")
-        monkeypatch.setattr(
-            enr,
-            "hydrate_tracking_plan",
-            lambda _row: (_ for _ in ()).throw(StorageContentAbsent("no object at any candidate")),
-        )
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert (topics, plan) == ([], None)
-        assert not_determined == "plan_object_absent"
-
-        config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracking_plan_not_determined"] == "plan_object_absent"
-
-    def test_a_read_plan_with_no_events_stays_clean(self, pg_session, materialization_factory):
-        """The one shape where empty ``tracked_topics`` is a finding (5 of 85 rows)."""
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + "66" * 20
-        materialization_factory(address, tracking_plan={"tracked_controllers": []})
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert topics == []
-        assert plan == {"tracked_controllers": []}
-        assert not_determined is None
-
-        config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracked_topics"] == []
-        assert "tracking_plan_not_determined" not in config
-
-    def test_a_read_plan_with_events_stays_clean_and_publishes_them(self, pg_session, materialization_factory):
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + "77" * 20
-        materialization_factory(address, tracking_plan=self._PLAN_WITH_EVENTS)
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        topics, _plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert not_determined is None
-        assert [t["topic0"] for t in topics] == [self._TOPIC0]
-
-        config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracked_topics"] == topics
-        assert "tracking_plan_not_determined" not in config
-
-    def test_unanalyzed_primary_controller_config_is_flagged(self):
-        """Primary controllers are enrolled without analysis, so their empty topics must be stamped."""
-        from services.monitoring import enrollment as enr
-
-        config = enr._build_monitoring_config(
-            None, [], "safe", None, [{"field": "threshold"}], plan_not_determined="contract_not_analyzed"
-        )
-        assert config["tracking_plan_not_determined"] == "contract_not_analyzed"

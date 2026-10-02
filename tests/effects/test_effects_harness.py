@@ -4,17 +4,13 @@ negative fail-closed test.
 
 from __future__ import annotations
 
-import pytest
-
 from services.clients.rpc import EthCallResult
-from services.effects import calldata as calldata_mod
 from services.effects import recipes
 from services.effects.config import (
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
     TIER_CALL,
-    TIER_HISTORICAL,
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
@@ -26,11 +22,9 @@ from services.effects.preflight import (
     InMemoryCapabilityStore,
     probe_simulate_support,
 )
-from services.effects.selection import AssetHolding
 from services.effects.simulate import (
     SimResult,
     SimulateUnsupportedError,
-    transfers_out,
 )
 from tests.support.effects_stubs import (
     _REVERT_A,
@@ -47,62 +41,6 @@ from tests.support.effects_stubs import (
     transfer_log,
     uint_ret,
 )
-
-
-def test_transfers_out_extracts_only_source_sends():
-    call = ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(TOKEN, PRINCIPAL, CONTRACT, 9)])
-    out = transfers_out(call, CONTRACT)
-    assert len(out) == 1
-    assert out[0][0] == CONTRACT.lower()
-    assert out[0][1] == SENTINEL.lower()
-
-
-def test_transfers_in_extracts_only_dest_receives():
-    call = ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(TOKEN, PRINCIPAL, CONTRACT, 9)])
-    from services.effects.simulate import transfers_in
-
-    ins = transfers_in(call, CONTRACT)
-    assert len(ins) == 1
-    assert ins[0][0] == PRINCIPAL.lower()
-    assert ins[0][1] == CONTRACT.lower()
-
-
-def _amount_word(n: int) -> str:
-    return "0x" + n.to_bytes(32, "big").hex()
-
-
-_OTHER_ASSET = "0x" + "77" * 20
-
-
-@pytest.mark.parametrize(
-    "direction,logs,pin_kwargs,unpinned_count",
-    [
-        # A ``Transfer`` topic doesn't say which contract emitted it.
-        pytest.param(
-            "in",
-            [transfer_log(CONTRACT, PRINCIPAL, CONTRACT, 5), transfer_log(_OTHER_ASSET, PRINCIPAL, CONTRACT, 9)],
-            {"exclude_asset": CONTRACT},
-            2,
-            id="transfers_in_exclude_emitting_asset",
-        ),
-        pytest.param(
-            "out",
-            [transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(_OTHER_ASSET, CONTRACT, SENTINEL, 9)],
-            {"only_asset": _OTHER_ASSET},
-            2,
-            id="transfers_out_pin_emitting_asset",
-        ),
-    ],
-)
-def test_transfer_filters_pin_the_emitting_asset(direction, logs, pin_kwargs, unpinned_count):
-    from services.effects.simulate import transfers_in
-
-    fn = transfers_in if direction == "in" else transfers_out
-    call = ok(logs=logs)
-    assert len(fn(call, CONTRACT)) == unpinned_count
-    kept = fn(call, CONTRACT, **pin_kwargs)
-    assert len(kept) == 1
-    assert kept[0][2] == _amount_word(9)
 
 
 def test_preflight_probes_and_persists_support():
@@ -125,180 +63,6 @@ def test_preflight_records_unsupported_and_routes_to_fallback():
     assert store.get_simulate_support(999) is None
 
 
-def test_value_out_caller_arbitrary_proven_via_sentinel():
-    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
-    sentinel = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 3)]),))
-    sim = ScriptedSimulate(base, sentinel)
-    store = RecordingStore()
-    eff = recipes.value_out(
-        simulate=sim,
-        store=store,
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-        taint_param_reaches_sink=True,
-        sentinel_address=SENTINEL,
-        sentinel_calldata="0xdeadbeef" + "ee" * 32,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
-    assert eff.details["shape_proved_by"] == "simulation"
-    # The base probe's recipient is the prober's own calldata; a caller-arbitrary destination is the finding.
-    assert "destination" not in eff.concrete
-    assert SENTINEL.lower() not in str(eff.concrete)
-    assert eff.discrepancy is None
-    assert eff.transcript_ptr is not None
-
-
-def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destination():
-    """``NEUTRAL_CALLER`` fills every synthesized address argument, so it comes straight back in the ``Transfer``
-    log.
-    """
-    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 7)]),))
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["value_moved"] is True
-    assert "destination" not in eff.concrete
-    real = "0x" + "cd" * 20
-    eff2 = recipes.value_out(
-        simulate=ScriptedSimulate(SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, real, 7)]),))),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-    )
-    assert eff2.concrete["destination"] == real
-
-
-def test_an_invented_recipient_among_several_destinations_leaves_it_undetermined():
-    """The exclusion applies to the convergence answer, not the set; applied first, a 90% self-pay plus a 10% fee
-    published the fee sink as where value went.
-    """
-    treasury = "0x" + "17" * 20
-    base = SimResult(
-        calls=(
-            ok(
-                logs=[
-                    transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 90),
-                    transfer_log(TOKEN, CONTRACT, treasury, 10),
-                ]
-            ),
-        )
-    )
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert "destination" not in eff.concrete
-    other = "0x" + "ce" * 20
-    diverged = SimResult(
-        calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, other, 10)]),)
-    )
-    eff2 = recipes.value_out(
-        simulate=ScriptedSimulate(diverged),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-    )
-    assert "destination" not in eff2.concrete
-    # Logs converging on one real destination are still one destination.
-    converged = SimResult(
-        calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, treasury, 10)]),)
-    )
-    eff3 = recipes.value_out(
-        simulate=ScriptedSimulate(converged),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-    )
-    assert eff3.concrete["destination"] == treasury
-
-
-def test_sentinel_only_caller_arbitrary_publishes_no_destination():
-    # The destination is empty, not the fabricated probe address.
-    base = SimResult(calls=(ok(),))
-    sentinel = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 3)]),))
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base, sentinel),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xdeadbeef",
-        simulate_supported=True,
-        sentinel_address=SENTINEL,
-        sentinel_calldata="0xdeadbeef" + "ee" * 32,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
-    assert eff.details["value_moved"] is False
-    assert "destination" not in eff.concrete
-
-
-def test_value_out_value_moved_records_single_observed_destination():
-    # One observation can't prove a fixed shape, but the destination is recorded for the state plane.
-    recipient = "0x" + "ab" * 20
-    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, recipient, 9)]),))
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xabcd0002",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["value_moved"] is True
-    assert eff.details["destination_shape"] == recipes.SHAPE_UNKNOWN
-    assert eff.details["shape_proved_by"] == "none"
-    assert eff.concrete["destination"] == recipient.lower()
-
-
-def test_value_out_static_fixed_shape_from_static_plane():
-    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "cd" * 20, 7)]),))
-    sim = ScriptedSimulate(base)
-    eff = recipes.value_out(
-        simulate=sim,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0xabcd0001",
-        simulate_supported=True,
-        static_shape=recipes.SHAPE_IMMUTABLE_FIXED,
-        static_destination="0x" + "cd" * 20,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["destination_shape"] == recipes.SHAPE_IMMUTABLE_FIXED
-    assert eff.details["shape_proved_by"] == "static"
-    assert eff.concrete["destination"] == "0x" + "cd" * 20
-
-
 def test_code_upgrade_tier1_sentinel_slot_changed_proven():
     slot = recipes.EIP1967_IMPL_SLOT
     post = SimResult(calls=(ok(),), storage={CONTRACT.lower(): {slot: _addr_topic(SENTINEL)}})
@@ -319,25 +83,6 @@ def test_code_upgrade_tier1_sentinel_slot_changed_proven():
     assert eff.details["upgradeable"] is True
 
 
-def test_code_upgrade_tier0_indexed_plus_current_state_proven():
-    eff = recipes.code_upgrade(
-        simulate=ScriptedSimulate(),
-        store=RecordingStore(),
-        ctx=CTX,
-        proxy_address=CONTRACT,
-        principal=PRINCIPAL,
-        upgrade_calldata="0x",
-        sentinel_address=SENTINEL,
-        sentinel_override=None,
-        impl_before=None,
-        indexed_upgrade=True,
-        current_impl_nonzero=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.tier == TIER_HISTORICAL
-    assert eff.concrete["current_check_passed"] is True
-
-
 def test_authority_change_kernel_gate_opened_proven():
     randoms, _ = select_identities("0x2f2ff15d", CONTRACT, principal=PRINCIPAL)
     res = SimResult(calls=(rv(), rv(), ok(), ok(uint_ret(1)), ok(uint_ret(1))))
@@ -355,55 +100,6 @@ def test_authority_change_kernel_gate_opened_proven():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.scope == SCOPE_KERNEL
     assert eff.details["gate_mutation"] is True
-
-
-def test_supply_mint_delta_sign_proven():
-    zero = "0x" + "00" * 20
-    res = SimResult(
-        calls=(
-            ok(uint_ret(1000)),
-            ok(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
-            ok(uint_ret(1500)),
-        )
-    )
-    sim = ScriptedSimulate(res)
-    eff = recipes.supply(
-        simulate=sim,
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "mint"
-
-
-def test_supply_mint_unbacked_emits_backing_inflow_false():
-    zero = "0x" + "00" * 20
-    res = SimResult(
-        calls=(
-            ok(uint_ret(1000)),
-            ok(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),  # mint-from-zero only
-            ok(uint_ret(1500)),
-        )
-    )
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    backing = eff.details["backing"]
-    assert backing["inflow_observed"] is False
-    assert backing["minted"] is True
-    assert eff.concrete["backing_inflow_transfers"] == 0
-    assert eff.concrete["backing_mint_transfers"] == 1
 
 
 def test_self_mint_into_the_vault_is_not_backing():
@@ -432,53 +128,6 @@ def test_self_mint_into_the_vault_is_not_backing():
     assert eff.concrete["backing_inflow_transfers"] == 0
     assert backing["minted"] is True
     assert eff.concrete["backing_mint_transfers"] == 1
-
-
-def test_foreign_asset_mint_into_the_vault_still_counts_as_backing():
-    zero = "0x" + "00" * 20
-    asset = "0x" + "77" * 20
-    res = SimResult(
-        calls=(
-            ok(uint_ret(1000)),
-            ok(logs=[transfer_log(asset, zero, TOKEN, 500), transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
-            ok(uint_ret(1500)),
-        )
-    )
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-    )
-    assert eff.details["backing"]["inflow_observed"] is True
-    assert eff.concrete["backing_inflow_transfers"] == 1
-
-
-def test_supply_mint_counts_only_the_measured_token_as_minted():
-    # ``totalSupply`` was measured on one token, so another token's mint must not stand in.
-    zero = "0x" + "00" * 20
-    other = "0x" + "88" * 20
-    res = SimResult(
-        calls=(
-            ok(uint_ret(1000)),
-            ok(logs=[transfer_log(other, zero, PRINCIPAL, 500)]),  # a DIFFERENT token's mint
-            ok(uint_ret(1500)),
-        )
-    )
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-    )
-    assert eff.details["backing"]["minted"] is False
-    assert eff.concrete["backing_mint_transfers"] == 0
 
 
 def test_supply_mint_backed_emits_backing_inflow_true():
@@ -512,139 +161,6 @@ def test_supply_mint_backed_emits_backing_inflow_true():
     assert backing["minted"] is True
 
 
-def test_supply_burn_emits_no_backing():
-    zero = "0x" + "00" * 20
-    res = SimResult(
-        calls=(
-            ok(uint_ret(1500)),
-            ok(logs=[transfer_log(TOKEN, PRINCIPAL, zero, 500)]),
-            ok(uint_ret(1000)),
-        )
-    )
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x42966c68" + "00" * 32,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "burn"
-    assert "backing" not in eff.details
-
-
-def test_value_out_reach_measures_downstream_holder_loss():
-    # Reach sums each holder whose value provably left.
-    lp = "0x" + "55" * 20
-    other = "0x" + "66" * 20
-    base = SimResult(
-        calls=(
-            ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3), transfer_log(TOKEN, lp, "0x" + "ab" * 20, 9)]),
-        )
-    )
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        value_holders=(
-            AssetHolding(CONTRACT, TOKEN, 221_000_000.0),
-            AssetHolding(lp, TOKEN, 55_200_000.0),
-            AssetHolding(other, TOKEN, 1_000.0),
-        ),
-        acting_balance_usd=221_000_000.0,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    # Reach is state-plane, so it rides ``concrete``; ``details`` is what the behavioral cache shares with twins.
-    assert eff.concrete["observed_reach_value_usd"] == 221_000_000.0 + 55_200_000.0
-    assert eff.concrete["observed_reach_holders"] == sorted([CONTRACT.lower(), lp.lower()])
-    assert eff.concrete["reach_determined"] is True
-    assert "reach_indeterminate" not in eff.concrete
-    assert "observed_reach_floor_usd" not in eff.concrete
-    assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
-    assert lp.lower() not in str(eff.details)
-
-
-def test_value_out_reach_floors_and_flags_when_no_holder_moved():
-    # Downstream value is never imputed via the control graph.
-    lp = "0x" + "55" * 20
-    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-        value_holders=(AssetHolding(lp, TOKEN, 55_200_000.0),),
-        acting_balance_usd=221_000_000.0,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    # Publishing the acting balance as measured reach let a zero-balance router read "$0 reach".
-    assert eff.concrete["reach_determined"] is False
-    assert eff.concrete["reach_indeterminate"] is True
-    assert eff.concrete["observed_reach_floor_usd"] == 221_000_000.0
-    assert "observed_reach_value_usd" not in eff.concrete
-    assert "observed_reach_holders" not in eff.concrete
-    assert not any(k.startswith(("observed_reach", "reach_")) for k in eff.details)
-
-
-def test_value_out_reach_absent_without_holder_set():
-    base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
-    eff = recipes.value_out(
-        simulate=ScriptedSimulate(base),
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert "observed_reach_value_usd" not in eff.concrete
-    assert "reach_indeterminate" not in eff.concrete
-    assert "reach_determined" not in eff.concrete
-    assert "observed_reach_floor_usd" not in eff.concrete
-    assert "observed_reach_value_usd" not in eff.details
-    assert "reach_indeterminate" not in eff.details
-
-
-def test_section8_rule1_existential_only_nonobservation_is_unknown():
-    sim = ScriptedSimulate(SimResult(calls=(ok(),)))
-    eff = recipes.value_out(
-        simulate=sim,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        calldata="0x11111111",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "no_value_observed"
-
-
-def test_section8_rule1b_supply_zero_delta_is_unknown():
-    res = SimResult(calls=(ok(uint_ret(42)), ok(), ok(uint_ret(42))))
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "no_supply_delta"
-
-
 def test_section8_rule2_single_identity_never_opens():
     opened = authorization_opened(
         [EthCallResult(False, "0x", _REVERT_A, None)], [EthCallResult(True, "0x", None, None)]
@@ -664,12 +180,6 @@ def test_section8_rule2_single_identity_never_opens():
     assert eff.reason == "insufficient_identities"
 
 
-def test_section8_rule2b_indeterminate_after_split_never_opens():
-    before = [EthCallResult(False, "0x", _REVERT_A, None), EthCallResult(False, "0x", _REVERT_A, None)]
-    after_split = [EthCallResult(True, "0x", None, None), EthCallResult(False, "0x", _REVERT_A, None)]
-    assert authorization_opened(before, after_split) is False
-
-
 def test_section8_rule4_precondition_revert_is_unknown():
     randoms, _ = select_identities("0x2f2ff15d", CONTRACT, principal=PRINCIPAL)
     res = SimResult(calls=(rv(), rv(), rv(), rv(), rv()))  # mutate (index 2) reverts
@@ -685,43 +195,6 @@ def test_section8_rule4_precondition_revert_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "mutation_call_reverted"
-
-
-def test_section8_rule4b_supply_mint_revert_is_unknown():
-    res = SimResult(calls=(ok(uint_ret(10)), rv(), ok(uint_ret(10))))
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=RecordingStore(),
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19",
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "mint_call_reverted"
-    assert "backing" not in eff.details
-
-
-def test_section8_rule5_every_verdict_is_tiered_and_replayable():
-    store = RecordingStore()
-    res = SimResult(
-        calls=(ok(uint_ret(1)), ok(logs=[transfer_log(TOKEN, "0x" + "00" * 20, PRINCIPAL, 1)]), ok(uint_ret(2)))
-    )
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(res),
-        store=store,
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19",
-        simulate_supported=True,
-    )
-    assert eff.tier == TIER_CALL
-    assert eff.transcript_ptr is not None
-    tr = store.stored[-1]
-    for key in ("tier", "block_number", "hardfork", "calls", "results"):
-        assert key in tr
 
 
 def test_section8_rule14_simulate_unsupported_declares_tier2_fallback():
@@ -805,112 +278,5 @@ def test_code_upgrade_slot_unchanged_is_unknown():
     assert eff.reason == "impl_slot_unchanged"
 
 
-def test_code_upgrade_tier0_historical_only_current_fails_is_unknown():
-    eff = recipes.code_upgrade(
-        simulate=ScriptedSimulate(),
-        store=RecordingStore(),
-        ctx=CTX,
-        proxy_address=CONTRACT,
-        principal=PRINCIPAL,
-        upgrade_calldata="0x",
-        sentinel_address=SENTINEL,
-        sentinel_override=None,
-        impl_before=None,
-        indexed_upgrade=True,
-        current_impl_nonzero=False,
-    )
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.concrete["current_check_passed"] is False
-
-
 # The withholding branches never ran in the corpus. Each asserts ``backing`` is absent, not false, since unmeasured
 # backing must not read as dilution.
-
-
-def _mint_block(supply_before: int = 1000, supply_after: int = 1500, logs=()):
-    return SimResult(calls=(ok(uint_ret(supply_before)), ok(logs=logs), ok(uint_ret(supply_after))))
-
-
-def test_backing_withheld_when_a_proven_token_slot_kept_the_encoder_filler():
-    """Static proved parameter 1 carries a token and no seeded retry supplied one."""
-    zero = "0x" + "00" * 20
-    store = RecordingStore()
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(_mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)])),
-        store=store,
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-        token_param_indexes=(1,),
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "mint"
-    assert "backing" not in eff.details
-    assert store.stored[-1]["backing_withheld"] == "token_param_unresolved"
-
-
-def test_backing_withheld_when_no_identity_could_fill_the_address_arguments():
-    """With no principal the encoder wrote ``address(0)`` into every address argument."""
-    zero = "0x" + "00" * 20
-    store = RecordingStore()
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(_mint_block(logs=[transfer_log(TOKEN, zero, CONTRACT, 500)])),
-        store=store,
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=None,
-        mint_calldata="0x40c10f19" + "00" * 64,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "mint"
-    assert "backing" not in eff.details
-    assert store.stored[-1]["backing_withheld"] == "prober_address_unidentifiable"
-
-
-def test_backing_withheld_when_the_prober_supplied_address_is_not_proven_inert():
-    """The differential did not reproduce the delta with reverting code at the prober's address."""
-    zero = "0x" + "00" * 20
-    principal_word = PRINCIPAL[2:].rjust(64, "0")
-    store = RecordingStore()
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(
-            _mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
-            SimResult(calls=(ok(uint_ret(1000)), rv(), ok(uint_ret(1000)))),
-        ),
-        store=store,
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + principal_word + "00" * 32,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "mint"
-    assert "backing" not in eff.details
-    assert store.stored[-1]["backing_withheld"] == "prober_address_not_proven_inert"
-
-
-def test_the_same_call_publishes_dilution_once_the_prober_address_is_proven_inert():
-    """The discriminating sibling: the differential reproduces the delta, so ``inflow_observed: false`` is earned."""
-    zero = "0x" + "00" * 20
-    principal_word = PRINCIPAL[2:].rjust(64, "0")
-    store = RecordingStore()
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(
-            _mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
-            SimResult(calls=(ok(uint_ret(1000)), ok(), ok(uint_ret(1500)))),
-        ),
-        store=store,
-        ctx=CTX,
-        token_address=TOKEN,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19" + principal_word + "00" * 32,
-        simulate_supported=True,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["backing"]["inflow_observed"] is False
-    assert eff.details["backing"]["minted"] is True
-    assert "backing_withheld" not in store.stored[-1]

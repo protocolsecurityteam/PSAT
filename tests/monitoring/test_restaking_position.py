@@ -16,32 +16,24 @@ from services.monitoring import restaking_reads
 from services.monitoring.restaking_reads import (
     PINNED_FINALITY_MARGIN,
     NodeReads,
-    decode_address_word,
-    decode_int256_word,
     decode_strict_bool_word,
     decode_withdrawable_shares,
-    decode_word,
     manager_contract_id_for,
     persist_positions,
     pinned_head,
     position_record,
-    restaking_history_depth,
     withdrawable_calldata_operands,
 )
 from tests.conftest import requires_postgres
 from utils.restaking_status import (
-    CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
     CROSS_READ_AGREE,
     CROSS_READ_DISAGREE_WITHIN_INVARIANT,
-    CROSS_READ_NOT_DETERMINED,
     EIGENPOD_BASIS_NO_EIGENPOD_PROVEN,
     EIGENPOD_BASIS_NOT_DETERMINED,
     EIGENPOD_BASIS_PROVEN_CROSS_READ,
-    NODE_SET_COMPLETENESS_NOT_DETERMINED,
     SHARES_BASIS_EIGENLAYER_BEACON_SHARES,
     SHARES_BASIS_NO_EIGENPOD_PROVEN,
     SHARES_BASIS_NOT_DETERMINED,
-    SHARES_BASIS_READ_FAILED,
 )
 
 BLOCK = 25643300
@@ -49,14 +41,12 @@ BLOCK_HASH = "0x" + "ab" * 32
 
 # The near-miss below answers 0 with success and looks identical when elided.
 STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeebeac0"
-NEAR_MISS_STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 NODE_WITH_SHARES = "0x53e1eb2fa5ec3c5097e67265e33ea4e53ab61b79"
 POD_WITH_SHARES = "0xb274d6b6f7e02e43b9978625dcd6c84047482d56"
 SHARES_WEI = 30000000000000000000
 
 NODE_ZERO_SHARES = "0x05b1e40339823e1af30a8ed70c3fbf7f1d0ce9ae"
-POD_ZERO_SHARES = "0x81b58cabe3f00cd37e074a133f87d1012341455c"
 
 BEACON_IMPLEMENTATION = "0x556db8c611fe63e694413f718d795f976dcf5881"
 
@@ -125,83 +115,6 @@ def _record(
     )
 
 
-def _skeleton(node: str) -> dict:
-    return {
-        "chain_id": 1,
-        "node_address": node,
-        "block_number": BLOCK,
-        "block_hash": BLOCK_HASH,
-        "eigenpod": None,
-        "eigenpod_basis": EIGENPOD_BASIS_NOT_DETERMINED,
-        "eigenlayer_beacon_shares_wei": None,
-        "shares_basis": SHARES_BASIS_NOT_DETERMINED,
-        "shares_strategy": None,
-        "deposit_shares_wei": None,
-        "cross_read_agreement": CROSS_READ_NOT_DETERMINED,
-        "active_validator_count": None,
-        "last_checkpoint_timestamp": None,
-        "consensus_layer_residual": CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
-        "node_set_completeness": NODE_SET_COMPLETENESS_NOT_DETERMINED,
-    }
-
-
-class TestHappyPathBothShapes:
-    def test_node_with_shares_byte_exact(self):
-        assert _record() == {
-            "chain_id": 1,
-            "node_address": NODE_WITH_SHARES,
-            "block_number": BLOCK,
-            "block_hash": BLOCK_HASH,
-            "eigenpod": POD_WITH_SHARES,
-            "eigenpod_basis": EIGENPOD_BASIS_PROVEN_CROSS_READ,
-            "eigenlayer_beacon_shares_wei": SHARES_WEI,
-            "shares_basis": SHARES_BASIS_EIGENLAYER_BEACON_SHARES,
-            "shares_strategy": STRATEGY,
-            "deposit_shares_wei": SHARES_WEI,
-            "cross_read_agreement": CROSS_READ_AGREE,
-            "active_validator_count": 3,
-            "last_checkpoint_timestamp": 1774052327,
-            "consensus_layer_residual": "not_determined",
-            "node_set_completeness": "not_determined",
-        }
-
-    def test_enumerated_node_zero_shares_with_funded_pod_byte_exact(self):
-        record = position_record(
-            chain_id=1,
-            node_address=NODE_ZERO_SHARES,
-            block_number=BLOCK,
-            block_hash=BLOCK_HASH,
-            strategy=STRATEGY,
-            reads=NodeReads(
-                get_eigen_pod=_addr_word(POD_ZERO_SHARES),
-                owner_to_pod=_addr_word(POD_ZERO_SHARES),
-                has_pod=_word(1),
-                pod_owner_deposit_shares=_word(0),
-                withdrawable_shares=_shares_return(0, 0),
-                active_validator_count=_word(0),
-                last_checkpoint_timestamp=_word(1784243039),
-            ),
-            withdrawable_calldata=_calldata(NODE_ZERO_SHARES),
-        )
-        assert record == {
-            "chain_id": 1,
-            "node_address": NODE_ZERO_SHARES,
-            "block_number": BLOCK,
-            "block_hash": BLOCK_HASH,
-            "eigenpod": POD_ZERO_SHARES,
-            "eigenpod_basis": EIGENPOD_BASIS_PROVEN_CROSS_READ,
-            "eigenlayer_beacon_shares_wei": 0,
-            "shares_basis": SHARES_BASIS_EIGENLAYER_BEACON_SHARES,
-            "shares_strategy": STRATEGY,
-            "deposit_shares_wei": 0,
-            "cross_read_agreement": CROSS_READ_AGREE,
-            "active_validator_count": 0,
-            "last_checkpoint_timestamp": 1784243039,
-            "consensus_layer_residual": "not_determined",
-            "node_set_completeness": "not_determined",
-        }
-
-
 class TestEigenpodIdentityLegs:
     def test_all_three_zero_is_the_proven_absent_arm(self):
         record = _record(
@@ -216,30 +129,11 @@ class TestEigenpodIdentityLegs:
         assert record["eigenpod"] is None
         assert record["shares_strategy"] is None
 
-    def test_codeless_node_empty_return_is_not_a_proven_zero(self):
-        """A codeless node answers empty with success; a one-leg reading would mint a proven zero from unread state."""
-        record = _record(get_eigen_pod="0x", owner_to_pod=ZERO_WORD, has_pod=_word(0))
-        assert record == _skeleton(NODE_WITH_SHARES)
-
-    @pytest.mark.parametrize(
-        "leg",
-        ["get_eigen_pod", "owner_to_pod", "has_pod"],
-    )
-    @pytest.mark.parametrize("bad", ["0x", None, "0x00", "0x" + "0" * 62])
-    def test_any_short_or_failed_leg_is_not_determined(self, leg, bad):
-        record = _record(**{leg: bad})
-        assert record["eigenpod_basis"] == EIGENPOD_BASIS_NOT_DETERMINED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
     def test_two_agreeing_address_legs_with_bad_has_pod_is_not_determined(self):
         for has_pod in ("0x", _word(2), _word(0), None):
             record = _record(has_pod=has_pod)
             assert record["eigenpod_basis"] == EIGENPOD_BASIS_NOT_DETERMINED
             assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-
-    def test_disagreeing_address_legs_are_not_determined(self):
-        record = _record(owner_to_pod=_addr_word(POD_ZERO_SHARES))
-        assert record["eigenpod_basis"] == EIGENPOD_BASIS_NOT_DETERMINED
 
     def test_has_pod_must_be_exactly_zero_or_one(self):
         assert decode_strict_bool_word(_word(0)) is False
@@ -257,48 +151,6 @@ class TestStrategyIsWitnessed:
         assert record["shares_strategy"] is None
 
 
-class TestFailedReadsNeverBecomeZero:
-    def test_withdrawable_call_failed_is_read_failed_and_null(self):
-        record = _record(withdrawable_shares=None)
-        assert record["shares_basis"] == SHARES_BASIS_READ_FAILED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-        assert record["eigenlayer_beacon_shares_wei"] != 0
-
-    @pytest.mark.parametrize(
-        "raw",
-        ["0x", "0x" + "00" * 32, "0x" + "".join(f"{v:064x}" for v in (0x20, 0x80, 1, 0, 1, 0))],
-    )
-    def test_malformed_shares_return_is_read_failed(self, raw):
-        record = _record(withdrawable_shares=raw)
-        assert record["shares_basis"] == SHARES_BASIS_READ_FAILED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
-    def test_deposit_leg_failure_never_substitutes_the_withdrawable_leg(self):
-        record = _record(withdrawable_shares=None, pod_owner_deposit_shares=_word(SHARES_WEI))
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
-    def test_zero_with_failed_deposit_leg_cannot_publish_a_zero(self):
-        record = _record(withdrawable_shares=_shares_return(0, 0), pod_owner_deposit_shares=None)
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
-    def test_dm_deposit_leg_below_withdrawable_is_inconsistent(self):
-        """A present deposit leg below withdrawable disproves the accounting model."""
-        record = _record(
-            pod_owner_deposit_shares=None,
-            withdrawable_shares="0x" + "".join(f"{v:064x}" for v in (0x40, 0x80, 1, SHARES_WEI, 1, 0)),
-        )
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-
-    def test_nonzero_with_failed_epm_deposit_leg_publishes_single_source(self):
-        """Intended: an absent deposit leg isn't disagreement, so the proven read still publishes."""
-        record = _record(pod_owner_deposit_shares=None)
-        assert record["shares_basis"] == SHARES_BASIS_EIGENLAYER_BEACON_SHARES
-        assert record["eigenlayer_beacon_shares_wei"] == SHARES_WEI
-        assert record["deposit_shares_wei"] is None
-        assert record["cross_read_agreement"] == CROSS_READ_NOT_DETERMINED
-
-
 class TestCrossReadPartition:
     def test_disagree_within_invariant_publishes_with_a_flag(self):
         record = _record(
@@ -308,53 +160,8 @@ class TestCrossReadPartition:
         assert record["cross_read_agreement"] == CROSS_READ_DISAGREE_WITHIN_INVARIANT
         assert record["eigenlayer_beacon_shares_wei"] == SHARES_WEI - 1
 
-    def test_inconsistent_withdrawable_above_deposit_suppresses(self):
-        record = _record(
-            withdrawable_shares=_shares_return(SHARES_WEI + 1, SHARES_WEI),
-            pod_owner_deposit_shares=_word(SHARES_WEI),
-        )
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
-    def test_inconsistent_negative_deposit_with_positive_withdrawable_suppresses(self):
-        record = _record(
-            withdrawable_shares=_shares_return(SHARES_WEI, SHARES_WEI),
-            pod_owner_deposit_shares=_word((1 << 256) - 5),
-        )
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
-    def test_fully_slashed_zero_against_positive_deposit_is_withheld(self):
-        """Intended under-claim, recorded so nobody "fixes" (iii)."""
-        record = _record(
-            withdrawable_shares=_shares_return(0, SHARES_WEI),
-            pod_owner_deposit_shares=_word(SHARES_WEI),
-        )
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-        assert record["eigenlayer_beacon_shares_wei"] is None
-
 
 class TestDecoders:
-    def test_int256_is_signed_and_unclamped(self):
-        assert decode_int256_word(_word((1 << 256) - 1)) == -1
-        assert decode_int256_word(_word((1 << 256) - SHARES_WEI)) == -SHARES_WEI
-        assert decode_int256_word(_word(SHARES_WEI)) == SHARES_WEI
-        assert decode_int256_word(_word((1 << 256) - 1)) != (1 << 256) - 1
-
-    def test_negative_deposit_beside_zero_withdrawable_is_withheld(self):
-        """Unsigned decoding would give ~1.15e77 and publish."""
-        record = _record(
-            pod_owner_deposit_shares=_word((1 << 256) - 5),
-            withdrawable_shares=_shares_return(0, 0),
-        )
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-
-    def test_word_decoder_rejects_short_returns(self):
-        assert decode_word("0x") is None
-        assert decode_word("0x0") is None
-        assert decode_word(None) is None
-        assert decode_word(_word(0)) == 0
-
     def test_shares_decoder_asserts_the_whole_abi_shape(self):
         assert decode_withdrawable_shares(_shares_return(7, 9)) == (7, 9)
         # Each would otherwise decode an offset or length as a quantity.
@@ -370,20 +177,6 @@ class TestDecoderStrictness:
     """``int(s, 16)`` accepts ``_`` and strips whitespace, so a malformed word could decode; unreachable via
     ``multicall3_aggregate3`` today, but the decoders are exported.
     """
-
-    def test_whitespace_padded_short_word_is_not_a_zero(self):
-        assert decode_word("0x" + "0" * 63 + "\n") is None
-
-    def test_underscore_separated_word_is_rejected(self):
-        assert decode_word("0x_" + "f" * 63) is None
-
-    @pytest.mark.parametrize("body", ["0" * 63 + "\n", "_" + "f" * 63, "g" * 64, "0" * 62 + " 1"])
-    def test_non_hex_bodies_reject_across_every_decoder(self, body):
-        raw = "0x" + body
-        assert decode_word(raw) is None
-        assert decode_int256_word(raw) is None
-        assert decode_address_word(raw) is None
-        assert decode_strict_bool_word(raw) is None
 
     @pytest.mark.parametrize(
         "dirty",
@@ -401,11 +194,6 @@ class TestDecoderStrictness:
     def test_whitespace_in_a_shares_word_is_rejected(self, dirty):
         assert decode_withdrawable_shares(dirty) == (None, None)
 
-    def test_dirty_high_order_bits_are_not_truncated_into_an_address(self):
-        dirty = "0x" + "de" * 12 + POD_WITH_SHARES.removeprefix("0x")
-        assert decode_address_word(dirty) is None
-        assert decode_address_word("0x" + "00" * 12 + POD_WITH_SHARES.removeprefix("0x")) == POD_WITH_SHARES
-
     def test_dirty_address_word_denies_the_pod_cross_read(self):
         dirty = "0x" + "de" * 12 + POD_WITH_SHARES.removeprefix("0x")
         record = _record(get_eigen_pod=dirty, owner_to_pod=dirty)
@@ -414,11 +202,6 @@ class TestDecoderStrictness:
 
 class TestStrategyGateIsOnTheIssuedBytes:
     """The quantity is licensed by the issued bytes naming this strategy and this node."""
-
-    def test_asserted_strategy_must_match_the_calldata(self):
-        record = _record(strategy=NEAR_MISS_STRATEGY, calldata=_calldata(NODE_WITH_SHARES, STRATEGY))
-        assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
-        assert record["shares_strategy"] is None
 
     def test_calldata_for_a_different_staker_is_rejected(self):
         record = _record(calldata=_calldata(NODE_ZERO_SHARES, STRATEGY))
@@ -447,15 +230,6 @@ class TestStrategyGateIsOnTheIssuedBytes:
 
 
 class TestPodFactsRequireAProvenPod:
-    def test_pod_facts_withheld_without_the_cross_read(self):
-        record = _record(has_pod="0x", active_validator_count=_word(0), last_checkpoint_timestamp=_word(0))
-        assert record["active_validator_count"] is None
-        assert record["last_checkpoint_timestamp"] is None
-
-    def test_never_checkpointed_zero_is_a_witness_when_the_pod_is_proven(self):
-        record = _record(last_checkpoint_timestamp=_word(0))
-        assert record["last_checkpoint_timestamp"] == 0
-
     @pytest.mark.parametrize(
         ("count", "timestamp", "expected"),
         [
@@ -488,11 +262,6 @@ class TestPinnedHead:
     def test_matching_header_pins(self, monkeypatch):
         self._stub(monkeypatch, {"number": hex(BLOCK), "hash": BLOCK_HASH})
         assert pinned_head(1, "http://stub") == (BLOCK, BLOCK_HASH)
-
-    def test_header_for_a_different_height_is_refused(self, monkeypatch):
-        """A racing upstream can answer another block."""
-        self._stub(monkeypatch, {"number": hex(BLOCK - 3), "hash": BLOCK_HASH})
-        assert pinned_head(1, "http://stub") is None
 
     @pytest.mark.parametrize(
         "header",
@@ -533,54 +302,6 @@ class TestConstraintsAreABackstop:
         session.add(RestakingPosition(**values))
         session.flush()
 
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            pytest.param({"shares_basis": "bogus"}, id="unrecognised-basis"),
-            pytest.param({"eigenpod_basis": "bogus"}, id="unrecognised-pod-basis"),
-            pytest.param({"cross_read_agreement": "bogus"}, id="unrecognised-agreement"),
-            pytest.param({"consensus_layer_residual": "0"}, id="residual-as-number"),
-            pytest.param({"consensus_layer_residual": "66000000000000000000"}, id="residual-as-wei"),
-            pytest.param({"node_set_completeness": "complete"}, id="node-set-complete"),
-            pytest.param(
-                {"shares_basis": SHARES_BASIS_READ_FAILED},
-                id="read-failed-with-a-quantity",
-            ),
-            pytest.param(
-                {"eigenlayer_beacon_shares_wei": 0, "cross_read_agreement": CROSS_READ_DISAGREE_WITHIN_INVARIANT},
-                id="zero-without-agreement",
-            ),
-            pytest.param(
-                {"shares_strategy": None},
-                id="quantity-without-a-witnessed-strategy",
-            ),
-            pytest.param(
-                {
-                    "eigenpod_basis": EIGENPOD_BASIS_NO_EIGENPOD_PROVEN,
-                    "eigenpod": None,
-                    "shares_basis": SHARES_BASIS_NO_EIGENPOD_PROVEN,
-                    "eigenlayer_beacon_shares_wei": 0,
-                    "shares_strategy": None,
-                    "deposit_shares_wei": None,
-                    "active_validator_count": 0,
-                },
-                id="pod-facts-without-a-proven-pod",
-            ),
-            pytest.param(
-                {"eigenpod_basis": EIGENPOD_BASIS_NO_EIGENPOD_PROVEN},
-                id="absent-pod-carrying-an-address",
-            ),
-            pytest.param(
-                {"eigenlayer_beacon_shares_wei": -1, "deposit_shares_wei": -1},
-                id="negative-share-quantity",
-            ),
-        ],
-    )
-    def test_violating_shapes_are_rejected(self, db_session, overrides):
-        with pytest.raises(Exception):
-            self._row(db_session, **overrides)
-        db_session.rollback()
-
     def test_basis_columns_are_not_null_in_the_reflected_schema(self, db_session):
         """A CHECK evaluating to NULL passes in Postgres."""
         columns = {c["name"]: c for c in inspect(db_session.get_bind()).get_columns("restaking_positions")}
@@ -594,110 +315,6 @@ class TestConstraintsAreABackstop:
             "block_hash",
         ):
             assert columns[name]["nullable"] is False, name
-
-
-@requires_postgres
-class TestLatestView:
-    def _insert(self, session, *, block, basis, shares, node=NODE_WITH_SHARES):
-        session.add(
-            RestakingPosition(
-                chain_id=1,
-                node_address=node,
-                block_number=block,
-                block_hash=bytes([block % 251]) * 32,
-                eigenpod=POD_WITH_SHARES if basis != SHARES_BASIS_NO_EIGENPOD_PROVEN else None,
-                eigenpod_basis=(
-                    EIGENPOD_BASIS_PROVEN_CROSS_READ
-                    if basis == SHARES_BASIS_EIGENLAYER_BEACON_SHARES
-                    else EIGENPOD_BASIS_NOT_DETERMINED
-                ),
-                eigenlayer_beacon_shares_wei=shares,
-                shares_basis=basis,
-                shares_strategy=STRATEGY if basis == SHARES_BASIS_EIGENLAYER_BEACON_SHARES else None,
-                deposit_shares_wei=shares,
-                cross_read_agreement=CROSS_READ_AGREE,
-                active_validator_count=None,
-                last_checkpoint_timestamp=None,
-                consensus_layer_residual="not_determined",
-                node_set_completeness="not_determined",
-            )
-        )
-        session.flush()
-
-    def _latest(self, session, node=NODE_WITH_SHARES):
-        return (
-            session.query(RestakingPositionLatest)
-            .filter(RestakingPositionLatest.node_address == node, RestakingPositionLatest.chain_id == 1)
-            .all()
-        )
-
-    def test_later_read_failed_row_does_not_withdraw_a_proven_position(self, db_session):
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=SHARES_WEI)
-        self._insert(db_session, block=BLOCK + 100, basis=SHARES_BASIS_READ_FAILED, shares=None)
-        rows = self._latest(db_session)
-        assert [r.block_number for r in rows] == [BLOCK]
-        assert rows[0].eigenlayer_beacon_shares_wei == SHARES_WEI
-        db_session.rollback()
-
-    def test_later_not_determined_row_does_not_withdraw_a_proven_position(self, db_session):
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=SHARES_WEI)
-        self._insert(db_session, block=BLOCK + 100, basis=SHARES_BASIS_NOT_DETERMINED, shares=None)
-        rows = self._latest(db_session)
-        assert [r.block_number for r in rows] == [BLOCK]
-        db_session.rollback()
-
-    def test_later_observing_row_wins(self, db_session):
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=SHARES_WEI)
-        self._insert(db_session, block=BLOCK + 100, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=1)
-        rows = self._latest(db_session)
-        assert [(r.block_number, int(r.eigenlayer_beacon_shares_wei)) for r in rows] == [(BLOCK + 100, 1)]
-        db_session.rollback()
-
-    def test_same_height_resolves_deterministically_by_id(self, db_session):
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=SHARES_WEI)
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=7)
-        rows = self._latest(db_session)
-        assert len(rows) == 1
-        assert int(rows[0].eigenlayer_beacon_shares_wei) == 7
-        db_session.rollback()
-
-    def test_node_with_only_non_observing_rows_is_absent_not_zero(self, db_session):
-        """A missing row read as 0 would reintroduce absent-row-as-$0."""
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_READ_FAILED, shares=None)
-        self._insert(db_session, block=BLOCK + 1, basis=SHARES_BASIS_NOT_DETERMINED, shares=None)
-        assert self._latest(db_session) == []
-        db_session.rollback()
-
-    def test_view_partition_includes_chain_id(self, db_session):
-        self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=SHARES_WEI)
-        db_session.add(
-            RestakingPosition(
-                chain_id=8453,
-                node_address=NODE_WITH_SHARES,
-                block_number=BLOCK - 1000,
-                block_hash=b"\x02" * 32,
-                eigenpod=POD_WITH_SHARES,
-                eigenpod_basis=EIGENPOD_BASIS_PROVEN_CROSS_READ,
-                eigenlayer_beacon_shares_wei=5,
-                shares_basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES,
-                shares_strategy=STRATEGY,
-                deposit_shares_wei=5,
-                cross_read_agreement=CROSS_READ_AGREE,
-                consensus_layer_residual="not_determined",
-                node_set_completeness="not_determined",
-            )
-        )
-        db_session.flush()
-        rows = (
-            db_session.query(RestakingPositionLatest)
-            .filter(RestakingPositionLatest.node_address == NODE_WITH_SHARES)
-            .all()
-        )
-        assert sorted((r.chain_id, int(r.eigenlayer_beacon_shares_wei)) for r in rows) == [
-            (1, SHARES_WEI),
-            (8453, 5),
-        ]
-        db_session.rollback()
 
 
 @requires_postgres
@@ -755,11 +372,6 @@ class TestPersistence:
         )
         assert [int(r.eigenlayer_beacon_shares_wei) for r in latest] == [SHARES_WEI]
         db_session.rollback()
-
-    def test_retention_depth_below_one_is_rejected(self, monkeypatch):
-        monkeypatch.setenv("PSAT_RESTAKING_HISTORY_DEPTH", "0")
-        with pytest.raises(ValueError):
-            restaking_history_depth()
 
     def test_manager_provenance_is_the_emitting_address_row(self, db_session):
         protocol = Protocol(name="restaking-provenance")

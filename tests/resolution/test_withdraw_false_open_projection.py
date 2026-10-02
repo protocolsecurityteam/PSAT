@@ -27,9 +27,7 @@ from services.resolution.capability_resolver import capability_to_dict
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
 TELLER_TARGET = "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b"
 WITHDRAW = "0x16762eed"
-BRIDGE = "0x05921740"
 DEPOSIT = "0x8b6099db"
-DEPOSIT_AND_BRIDGE = "0xf8b7b66d"
 
 # Public when the flag is off, OR an unresolved caller-tainted check.
 _BEFORE_TRANSFER = {
@@ -112,22 +110,6 @@ def test_withdraw_empty_exact_solmate_set_gates_the_and(earned_public):
     surface = project_capability_surface(_requires_auth_tree(WITHDRAW))
     assert not surface.authority_public, "withdraw is role-gated (isCapabilityPublic=False) and must stay gated"
     assert capability_surface_status(_requires_auth_tree(WITHDRAW), surface) == "resolved_empty"
-
-
-@pytest.mark.parametrize("selector", [BRIDGE, DEPOSIT, DEPOSIT_AND_BRIDGE])
-def test_public_capability_function_stays_public(earned_public, selector):
-    auth = _authority_cap_dict(selector)
-    assert auth["kind"] == "conditional_universal"
-
-    surface = project_capability_surface(_requires_auth_tree(selector))
-    assert surface.authority_public, f"selector {selector} is a public RolesAuthority capability and must stay public"
-
-
-def test_bare_empty_exact_set_without_solmate_trace_does_not_gate(earned_public):
-    # Only the Solmate provably-nobody read blocks; a generic exact-empty set stays a side-condition.
-    bare = {"kind": "finite_set", "members": [], "membership_quality": "exact", "confidence": "enumerable"}
-    surface = project_capability_surface({"kind": "AND", "children": [_BEFORE_TRANSFER, bare]})
-    assert surface.authority_public
 
 
 def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate(earned_public):

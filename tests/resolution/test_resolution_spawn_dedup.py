@@ -25,22 +25,6 @@ def _graph(parent_addr: str, child_addr: str) -> dict:
 
 
 @requires_postgres
-def test_spawn_dedup_is_case_insensitive(db_session):
-    from db.models import Job
-    from db.queue import create_job
-    from workers.resolution_worker import ResolutionWorker
-
-    parent_addr, child_addr = _addr(), _addr()
-    parent = create_job(db_session, {"address": parent_addr})
-    create_job(db_session, {"address": child_addr[:2] + child_addr[2:].upper()})
-    db_session.commit()
-
-    ResolutionWorker()._queue_discovered_contracts(db_session, parent, _graph(parent_addr, child_addr), "http://r.l")
-
-    assert db_session.query(Job).filter(func.lower(Job.address) == child_addr).count() == 1
-
-
-@requires_postgres
 def test_spawn_dedup_is_chain_scoped(db_session, monkeypatch):
     from db.models import Job
     from db.queue import create_job

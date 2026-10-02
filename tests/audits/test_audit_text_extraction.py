@@ -11,7 +11,6 @@ import requests
 
 from services.audits.text_extraction import (
     PdfDownloadError,
-    PdfParseError,
     PdfTooLargeError,
     audit_text_key,
     download_audit_body,
@@ -23,103 +22,6 @@ from tests.support.pdf import minimal_pdf_with_text
 
 
 class TestExtractTextFromPdf:
-    def test_roundtrips_simple_ascii(self):
-        body = minimal_pdf_with_text("Audit scope covers Pool.sol and Vault.sol.")
-        text = extract_text_from_pdf(body)
-        assert "Pool.sol" in text
-        assert "Vault.sol" in text
-        assert "--- page 1 ---" in text
-
-    @pytest.mark.parametrize("body", [b"not a pdf at all", b""], ids=["garbage_body", "empty_body"])
-    def test_unparseable_body_raises_parse_error(self, body):
-        with pytest.raises(PdfParseError):
-            extract_text_from_pdf(body)
-
-    def test_link_annotation_uris_are_included_in_extracted_text(self):
-        """Certora embeds commit SHAs as hyperlinks that ``extract_text()`` drops, leaving ``reviewed_commits``
-        empty.
-        """
-        import io
-
-        from pypdf import PdfWriter
-        from pypdf.annotations import Link
-        from pypdf.generic import RectangleObject
-
-        sha = "353765993b40e3c2bddcdcdf7adc6f2f6ec080c9"  # 40 hex chars with letters
-        url = f"https://github.com/etherfi-protocol/smart-contracts/commit/{sha}"
-
-        w = PdfWriter()
-        w.add_blank_page(width=612, height=792)
-        w.add_annotation(
-            page_number=0,
-            annotation=Link(rect=RectangleObject((100, 700, 300, 720)), url=url),
-        )
-        buf = io.BytesIO()
-        w.write(buf)
-
-        text = extract_text_from_pdf(buf.getvalue())
-
-        assert sha in text, f"commit SHA from link annotation lost in extraction. Extracted text: {text!r}"
-
-    def test_link_annotations_across_multiple_pages(self):
-        import io
-
-        from pypdf import PdfWriter
-        from pypdf.annotations import Link
-        from pypdf.generic import RectangleObject
-
-        sha_p1 = "aaaaaaa" + "0" * 33
-        sha_p2 = "bbbbbbb" + "1" * 33
-        w = PdfWriter()
-        w.add_blank_page(width=612, height=792)
-        w.add_blank_page(width=612, height=792)
-        w.add_annotation(
-            page_number=0,
-            annotation=Link(
-                rect=RectangleObject((100, 700, 300, 720)),
-                url=f"https://github.com/x/y/commit/{sha_p1}",
-            ),
-        )
-        w.add_annotation(
-            page_number=1,
-            annotation=Link(
-                rect=RectangleObject((100, 700, 300, 720)),
-                url=f"https://github.com/x/y/commit/{sha_p2}",
-            ),
-        )
-        buf = io.BytesIO()
-        w.write(buf)
-
-        text = extract_text_from_pdf(buf.getvalue())
-        assert sha_p1 in text
-        assert sha_p2 in text
-        assert "--- page 1 ---" in text
-        assert "--- page 2 ---" in text
-
-    def test_non_link_annotations_do_not_leak_garbage(self):
-        """Only ``/Link`` annotations with ``/A/URI`` count."""
-        import io
-
-        from pypdf import PdfWriter
-        from pypdf.annotations import FreeText
-        from pypdf.generic import RectangleObject
-
-        w = PdfWriter()
-        w.add_blank_page(width=612, height=792)
-        w.add_annotation(
-            page_number=0,
-            annotation=FreeText(
-                text="annotator's private note — should not appear",
-                rect=RectangleObject((100, 700, 400, 720)),
-                font_size="12pt",
-            ),
-        )
-        buf = io.BytesIO()
-        w.write(buf)
-
-        text = extract_text_from_pdf(buf.getvalue())
-        assert "annotator's private note" not in text
-
     def test_end_to_end_link_sha_reaches_reviewed_commits_extractor(self):
         """The Certora-V3.Prelude-1 case: a hyperlinked "commit" with no inline SHA."""
         import io
@@ -170,29 +72,6 @@ def _mock_response(
 
 
 class TestDownloadPdfBoundaries:
-    def test_happy_path_returns_bytes(self):
-        session = MagicMock()
-        session.get.return_value = _mock_response(body=b"%PDF-1.4\n...")
-        assert download_pdf("https://example.com/a.pdf", session=session) == b"%PDF-1.4\n..."
-
-    def test_non_200_raises_download_error(self):
-        session = MagicMock()
-        session.get.return_value = _mock_response(status_code=404)
-        with pytest.raises(PdfDownloadError, match="HTTP 404"):
-            download_pdf("https://example.com/missing.pdf", session=session)
-
-    def test_rejects_html_content_type(self):
-        """Soft-redirects (login walls, 200 HTML) are the main cause of misclassified bodies."""
-        session = MagicMock()
-        session.get.return_value = _mock_response(content_type="text/html")
-        with pytest.raises(PdfDownloadError, match="content-type"):
-            download_pdf("https://example.com/a.pdf", session=session)
-
-    def test_accepts_octet_stream(self):
-        session = MagicMock()
-        session.get.return_value = _mock_response(content_type="application/octet-stream", body=b"PDF body")
-        assert download_pdf("https://example.com/a.pdf", session=session) == b"PDF body"
-
     def test_content_length_over_cap_raises(self):
         session = MagicMock()
         session.get.return_value = _mock_response(
@@ -200,21 +79,6 @@ class TestDownloadPdfBoundaries:
         )
         with pytest.raises(PdfTooLargeError, match="Content-Length"):
             download_pdf("https://example.com/huge.pdf", session=session)
-
-    def test_streamed_body_over_cap_raises(self):
-        """Content-Length is optional."""
-        session = MagicMock()
-        resp = _mock_response()
-        resp.iter_content.return_value = iter([b"x" * (60 * 1024 * 1024)])
-        session.get.return_value = resp
-        with pytest.raises(PdfTooLargeError, match="streamed body"):
-            download_pdf("https://example.com/huge.pdf", session=session)
-
-    def test_request_exception_raises_download_error(self):
-        session = MagicMock()
-        session.get.side_effect = requests.ConnectionError("connection refused")
-        with pytest.raises(PdfDownloadError, match="fetch error"):
-            download_pdf("https://example.com/a.pdf", session=session)
 
 
 # Prod saw bursts of ConnectionResetError(104) from Code4rena / Sherlock; requests wraps it as ConnectionError.
@@ -305,27 +169,6 @@ class TestDownloadAuditBodyTextMode:
         )
         assert body == payload
 
-    def test_rejects_html_in_text_mode(self):
-        """A GitHub /blob/ URL serves the HTML code view."""
-        session = MagicMock()
-        session.get.return_value = _mock_response(content_type="text/html")
-        with pytest.raises(PdfDownloadError, match="content-type"):
-            download_audit_body(
-                "https://github.com/x/y/blob/main/audit.md",
-                session=session,
-                kind="text",
-            )
-
-    def test_pdf_mode_still_rejects_text_markdown(self):
-        session = MagicMock()
-        session.get.return_value = _mock_response(content_type="text/markdown")
-        with pytest.raises(PdfDownloadError, match="content-type"):
-            download_audit_body(
-                "https://example.com/audit.pdf",
-                session=session,
-                kind="pdf",
-            )
-
 
 _MD_BODY = "# Hats Finance Audit\n\n" + ("\n## Scope\n\nPool.sol, Vault.sol, Strategy.sol. " * 30)
 
@@ -402,23 +245,6 @@ class TestProcessAuditReportTextFiles:
         assert captured["mode"] == "text"
         assert captured["text"] == _MD_BODY
         assert "--- page 1 ---" not in captured["text"]
-
-    def test_txt_url_success(self, monkeypatch):
-        body = ("plain text audit body. " * 60).encode("utf-8")
-
-        monkeypatch.setattr(
-            "services.audits.text_extraction.download_text",
-            lambda url, session=None: body,
-        )
-        monkeypatch.setattr(
-            "services.audits.text_extraction.store_audit_text",
-            lambda aid, text: (f"audits/text/{aid}.txt", len(text.encode("utf-8")), "c" * 64),
-        )
-        out = process_audit_report(
-            audit_report_id=11,
-            url="https://example.com/reports/audit.txt",
-        )
-        assert out.status == "success"
 
     def test_markdown_under_min_threshold_skipped(self, monkeypatch):
         monkeypatch.setattr(

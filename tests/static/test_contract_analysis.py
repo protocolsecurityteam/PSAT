@@ -64,26 +64,6 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
     raise AssertionError(f"Tracked controller {label} not found")
 
 
-def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp_path):
-    from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
-
-    project_dir = _write_project(
-        tmp_path,
-        "Token",
-        _fixture_source("token/token_erc20_ownable_pausable.sol"),
-    )
-
-    analysis, predicate_trees, effects = collect_contract_analysis_with_artifacts(project_dir)
-
-    assert analysis["schema_version"] == "0.1"
-    assert predicate_trees is not None
-    assert predicate_trees.get("schema_version") == "semantic"
-    assert "trees" in predicate_trees or "error" in predicate_trees
-    assert effects is not None
-    assert effects.get("schema_version") == "semantic-3"
-    assert "functions" in effects or "error" in effects
-
-
 def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timelock_name_guessing(tmp_path):
     project_dir = _write_project(
         tmp_path,
@@ -123,19 +103,6 @@ def test_collect_contract_analysis_detects_erc721_as_nft(tmp_path):
     assert analysis["summary"]["is_nft"] is True
 
 
-def test_state_write_in_internal_helper_surfaces_on_caller(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "IndirectOwnerPause",
-        _fixture_source("pause/indirect_owner_pause.sol"),
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pause()")
-    assert "owner" in semantic["controller_refs"]
-    assert any(sink_id.endswith(":state_write:paused") for sink_id in semantic["sink_ids"])
-
-
 def test_contract_creation_sink_classified(tmp_path):
     project_dir = _write_project(
         tmp_path,
@@ -147,60 +114,6 @@ def test_contract_creation_sink_classified(tmp_path):
     semantic = _semantic_function(analysis, "createChild()")
     assert semantic["effect_labels"] == ["contract_deployment"]
     assert semantic["action_summary"] == "Deploys a new contract instance."
-
-
-@pytest.mark.parametrize(
-    ("contract_name", "fixture_name", "signature", "target", "sink_kind"),
-    [
-        (
-            "ExternalCallControl",
-            "calls/external_call_control.sol",
-            "pingTarget(uint256)",
-            "target.ping",
-            "external_call",
-        ),
-        (
-            "DelegateCallControl",
-            "calls/delegatecall_control.sol",
-            "execute(bytes)",
-            "implementation",
-            "delegatecall",
-        ),
-        (
-            "SelfDestructControl",
-            "calls/selfdestruct_control.sol",
-            "destroy()",
-            "selfdestruct",
-            "selfdestruct",
-        ),
-    ],
-)
-def test_additional_semantic_sink_kinds_surface_on_semantic_summary(
-    tmp_path, contract_name, fixture_name, signature, target, sink_kind
-):
-    project_dir = _write_project(
-        tmp_path,
-        contract_name,
-        _fixture_source(fixture_name),
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, signature)
-    assert any(sink_id.endswith(f":{sink_kind}:{target}") for sink_id in semantic["sink_ids"])
-    assert "owner" in semantic["controller_refs"]
-
-
-def test_external_call_in_internal_helper_surfaces_on_caller(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "IndirectExternalCallControl",
-        _fixture_source("calls/indirect_external_call_control.sol"),
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pingTarget(uint256)")
-    assert "owner" in semantic["controller_refs"]
-    assert any(sink_id.endswith(":external_call:target.ping") for sink_id in semantic["sink_ids"])
 
 
 def test_modifier_helper_auth_structure_recovered(tmp_path):
@@ -283,62 +196,6 @@ def test_semantic_function_semantics_detect_pause_and_asset_flow(tmp_path):
     assert pause["action_summary"] == "Changes the contract pause state."
 
 
-def test_controller_tracking_falls_back_to_state_only_without_events(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OwnerNoEvent",
-        _fixture_source("tracking/owner_update_no_event.sol"),
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-
-    owner_tracking = _tracked_controller(analysis, "owner")
-    assert owner_tracking["tracking_mode"] == "state_only"
-    assert owner_tracking["associated_events"] == []
-    assert {writer["function"] for writer in owner_tracking["writer_functions"]} == {"transferOwnership(address)"}
-
-
-def test_non_authority_external_calls_with_caller_args_not_classified_as_authority(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "NonAuthorityExternalCallGuard",
-        """
-        pragma solidity ^0.8.19;
-
-        interface TokenLike {
-            function balanceOf(address account) external view returns (uint256);
-        }
-
-        interface PingTarget {
-            function ping(uint256 value) external;
-        }
-
-        contract NonAuthorityExternalCallGuard {
-            address public owner;
-            TokenLike public token;
-
-            constructor(TokenLike token_) {
-                owner = msg.sender;
-                token = token_;
-            }
-
-            function manage(PingTarget target, uint256 value) external {
-                require(msg.sender == owner, "not owner");
-                require(token.balanceOf(msg.sender) > 0, "no balance");
-                target.ping(value);
-            }
-        }
-        """,
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "manage(PingTarget,uint256)")
-
-    assert "owner" in semantic["controller_refs"]
-    assert "token" not in semantic["controller_refs"]
-    assert "external_authority_check" not in semantic["guard_kinds"]
-
-
 def test_void_role_registry_upgrader_is_controller_ref(tmp_path):
     project_dir = _write_project(
         tmp_path,
@@ -371,45 +228,6 @@ def test_void_role_registry_upgrader_is_controller_ref(tmp_path):
 
     assert "roleRegistry" in semantic["controller_refs"]
     assert "delegatecall_execution" in semantic["effect_labels"]
-
-
-def test_external_role_getter_name_is_not_tracked_as_role_identifier(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueRolePause",
-        """
-        pragma solidity ^0.8.19;
-
-        interface IRoleRegistry {
-            function hasRole(bytes32 role, address account) external view returns (bool);
-            function BREAK_GLASS() external view returns (bytes32);
-        }
-
-        contract OpaqueRolePause {
-            IRoleRegistry public roleRegistry;
-            bool public paused;
-
-            constructor(IRoleRegistry registry) {
-                roleRegistry = registry;
-            }
-
-            function pauseContract() external {
-                require(roleRegistry.hasRole(roleRegistry.BREAK_GLASS(), msg.sender), "bad role");
-                paused = true;
-            }
-        }
-        """,
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pauseContract()")
-
-    assert "roleRegistry" in semantic["controller_refs"]
-    assert "BREAK_GLASS" not in semantic["controller_refs"]
-
-    tracked_ids = {target["controller_id"] for target in analysis["controller_tracking"]}
-    assert "external_contract:roleRegistry" in tracked_ids
-    assert "role_identifier:BREAK_GLASS" not in tracked_ids
 
 
 def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):

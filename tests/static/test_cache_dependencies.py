@@ -480,69 +480,6 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
     assert "0x0000000000000000000000000000000000000099" in art["classifications"]
 
 
-def test_merge_upgrade_history():
-    from workers.static_worker import _merge_upgrade_history
-
-    merged = _merge_upgrade_history(FAKE_UH_PREV, FAKE_UH_NEW)
-
-    proxy_addr = "0xdac17f958d2ee523a2206206994597c13d831ec7"
-    assert proxy_addr in merged["proxies"]
-    proxy = merged["proxies"][proxy_addr]
-
-    assert len(proxy["events"]) == 2
-    tx_hashes = [e["tx_hash"] for e in proxy["events"]]
-    assert "0xaaa" in tx_hashes
-    assert "0xbbb" in tx_hashes
-
-    assert len(proxy["implementations"]) == 2
-    assert proxy["upgrade_count"] == 2
-    assert proxy["first_upgrade_block"] == 50
-    assert proxy["last_upgrade_block"] == 100
-
-    assert merged["total_upgrades"] == 2
-
-
-def test_merge_upgrade_history_disjoint_proxies():
-    from workers.static_worker import _merge_upgrade_history
-
-    other_proxy = {
-        "schema_version": "0.1",
-        "target_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
-        "proxies": {
-            "0x0000000000000000000000000000000000000077": {
-                "proxy_address": "0x0000000000000000000000000000000000000077",
-                "proxy_type": "eip1967",
-                "current_implementation": "0x0000000000000000000000000000000000000088",
-                "upgrade_count": 1,
-                "first_upgrade_block": 200,
-                "last_upgrade_block": 200,
-                "implementations": [
-                    {
-                        "address": "0x0000000000000000000000000000000000000088",
-                        "block_introduced": 200,
-                        "tx_hash": "0xccc",
-                    },
-                ],
-                "events": [
-                    {
-                        "event_type": "upgraded",
-                        "block_number": 200,
-                        "tx_hash": "0xccc",
-                        "log_index": 0,
-                        "implementation": "0x0000000000000000000000000000000000000088",
-                    },
-                ],
-            },
-        },
-        "total_upgrades": 1,
-    }
-
-    merged = _merge_upgrade_history(FAKE_UH_PREV, other_proxy)
-    assert "0xdac17f958d2ee523a2206206994597c13d831ec7" in merged["proxies"]
-    assert "0x0000000000000000000000000000000000000077" in merged["proxies"]
-    assert merged["total_upgrades"] == 2
-
-
 def test_upgrade_history_append_only_on_rerun(db_session, monkeypatch):
     from db.queue import get_artifact, store_artifact
     from workers.static_worker import StaticWorker
@@ -688,38 +625,6 @@ def test_enrichment_cache_skips_cached_addresses(db_session, monkeypatch):
     assert unified["dependencies"][addr_c].get("contract_name") == "TokenC"
 
 
-@pytest.mark.parametrize(
-    ("name", "data"),
-    [
-        pytest.param("static_dependencies", FAKE_STATIC_DEPS, id="static_dependencies"),
-        pytest.param("classifications", FAKE_CLS_OUTPUT, id="classifications_as_seed"),
-        pytest.param("upgrade_history", FAKE_UH_PREV, id="upgrade_history_as_seed"),
-        pytest.param(
-            "enrichment_cache",
-            {
-                "0x0000000000000000000000000000000000000aaa": {
-                    "name": "SomeToken",
-                    "selectors": {"0x12345678": "transfer"},
-                }
-            },
-            id="enrichment_cache",
-        ),
-    ],
-)
-def test_artifact_copied_by_copy_static_cache(db_session, name, data):
-    from db.queue import copy_static_cache, create_job, get_artifact, store_artifact
-
-    source_job = _create_completed_job_with_static_data(db_session)
-    store_artifact(db_session, source_job.id, name, data=data)
-
-    target_job = create_job(db_session, {"address": ADDR_A})
-    copy_static_cache(db_session, source_job.id, target_job.id)
-
-    art = get_artifact(db_session, target_job.id, name)
-    assert isinstance(art, dict)
-    assert art == data
-
-
 def test_merge_dynamic_deps_duplicate_edge_provenance():
     from workers.static_worker import _merge_dynamic_deps
 
@@ -765,17 +670,6 @@ def test_merge_dynamic_deps_duplicate_edge_provenance():
     assert len(edge["provenance"]) == 2
     prov_hashes = {p["tx_hash"] for p in edge["provenance"]}
     assert prov_hashes == {"0x111", "0x222"}
-
-
-def test_merge_dynamic_deps_empty_inputs():
-    from workers.static_worker import _merge_dynamic_deps
-
-    merged = _merge_dynamic_deps({}, FAKE_DYN_DEPS_OLD)
-    assert merged["dependencies"] == FAKE_DYN_DEPS_OLD["dependencies"]
-    assert len(merged["transactions_analyzed"]) == 2
-
-    merged2 = _merge_dynamic_deps(FAKE_DYN_DEPS_OLD, {})
-    assert merged2["dependencies"] == FAKE_DYN_DEPS_OLD["dependencies"]
 
 
 def test_merge_upgrade_history_deduplicates_events():

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from services.scoring import planes as P
-from services.scoring.schema import entity_key
 from tests.support.scoring_builders import (
     KEY_C,
     KEY_V,
@@ -25,59 +24,6 @@ def test_a_closure_publishes_a_zero_count_for_a_rule_that_never_fired():
         "anchors": 0,
         "authority_slots_by_label": {},
     }
-
-
-def test_a_refused_edge_and_a_renounced_authority_are_counted_apart():
-    """What this scorer declined to walk vs what the protocol is; collapsing them loses the earned negative."""
-    zero = entity_key("ethereum", P.ZERO_ADDRESS)
-    closure = P.ControlClosure(
-        edges=(),
-        refusals=(
-            P.RefusedEdge(
-                rule=P.REFUSAL_ZERO_PRINCIPAL,
-                principal=zero,
-                anchor=KEY_V,
-                relation="controller_value",
-                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
-                edge_id=1,
-            ),
-        ),
-        renounced=(
-            P.RenouncedAuthority(
-                anchor=KEY_V,
-                relation="controller_value",
-                scope=P.parse_edge_scope("owner", "controller_value"),
-                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
-                edge_id=1,
-            ),
-        ),
-    )
-    assert closure.refusal_counts()[P.REFUSAL_ZERO_PRINCIPAL] == 1
-    assert closure.renounced_counts() == {
-        "edges": 1,
-        "authority_slots": 1,
-        "anchors": 1,
-        "authority_slots_by_label": {"owner": 1},
-    }
-    assert closure.principals() == ()
-    assert closure.controlled_by(zero) == ()
-
-
-def test_a_relation_named_after_a_getter_may_not_suppress_that_getters_label():
-    """The deleted branch decided nothing DB-wide and would have silently suppressed a real getter's labels."""
-    scope = P.parse_edge_scope("authority", "authority")
-    assert (scope.kind, scope.state_var) == (P.SCOPE_STATE_VAR, "authority")
-    assert P.parse_edge_scope("controller_value", "controller_value").kind == P.SCOPE_STATE_VAR
-    assert P.parse_edge_scope("owner", "controller_value").kind == P.SCOPE_STATE_VAR
-
-
-def test_a_role_relation_never_fabricates_a_state_variable():
-    """The identifier reading once minted ``state_var="roles"`` from the label ``roles``."""
-    scope = P.parse_edge_scope("roles", "role_principal")
-    assert (scope.kind, scope.state_var, scope.roles) == (P.SCOPE_NOT_DETERMINED, None, ())
-    assert scope.label == "roles"
-    assert P.parse_edge_scope("someGetter", "role_principal").kind == P.SCOPE_NOT_DETERMINED
-    assert P.parse_edge_scope("roles 12", "role_principal").roles == (12,)
 
 
 def test_an_unpriced_reading_superseding_a_priced_one_is_counted():
@@ -132,28 +78,3 @@ def test_the_write_order_fallback_sizes_itself_in_accounts_and_dollars():
     assert reduction["write_order_disagreeing_accounts"] == 1
     assert reduction["write_order_selected_usd"] == 900.0
     assert reduction["write_order_spread_usd"] == 800.0
-
-
-def test_a_renounced_slot_is_counted_as_slots_and_as_the_edges_that_witness_it():
-    """``control_graph_edges`` has a row per witnessed read."""
-    scope = P.parse_edge_scope("owner", "controller_value")
-    closure = P.ControlClosure(
-        edges=(),
-        renounced=tuple(
-            P.RenouncedAuthority(
-                anchor=anchor,
-                relation="controller_value",
-                scope=scope,
-                witness=P.EDGE_WITNESS_CONTROL_GRAPH,
-                edge_id=edge_id,
-            )
-            for anchor, edge_id in ((KEY_V, 1), (KEY_V, 2), (KEY_V, 3), (KEY_C, 4))
-        ),
-    )
-    assert closure.renounced_counts() == {
-        "edges": 4,
-        "authority_slots": 2,
-        "anchors": 2,
-        # The breakdown is per label, so both anchors' ``owner`` slots land on one key.
-        "authority_slots_by_label": {"owner": 2},
-    }

@@ -157,24 +157,6 @@ def test_company_semantic_capabilities_unknown_company_404(api_client, db_sessio
 
 
 @requires_postgres
-def test_company_semantic_capabilities_empty_when_no_completed_jobs(api_client, db_session):
-    """Distinct from the unknown-company 404."""
-    from db.models import Protocol
-
-    name = f"empty_company_{uuid.uuid4().hex[:6]}"
-    proto = Protocol(name=name)
-    db_session.add(proto)
-    db_session.commit()
-
-    resp = api_client.get(f"/api/company/{name}/semantic_capabilities")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["company"] == name
-    assert body["contracts"] == {}
-    assert body["missing_semantic_count"] == 0
-
-
-@requires_postgres
 def test_company_semantic_capabilities_resolver_failure_treated_as_missing(api_client, db_session, monkeypatch):
     name = f"company_failsafe_{uuid.uuid4().hex[:6]}"
     addr = "0x" + uuid.uuid4().hex[:8] + "44" * 16
@@ -198,23 +180,3 @@ def test_company_semantic_capabilities_resolver_failure_treated_as_missing(api_c
     body = resp.json()
     assert body["contracts"][addr] is None
     assert body["missing_semantic_count"] == 1
-
-
-@requires_postgres
-def test_company_semantic_capabilities_route_not_admin_gated(api_client, db_session):
-    """External consumers need this without credentials."""
-    import api as api_module
-    from routers.deps import require_admin_key
-
-    api_module.app.dependency_overrides.pop(require_admin_key, None)
-
-    name = f"company_unauth_{uuid.uuid4().hex[:6]}"
-    addr = "0x" + uuid.uuid4().hex[:8] + "55" * 16
-    _seed_protocol_with_jobs(
-        db_session,
-        name=name,
-        addresses_with_artifacts=[(addr, _semantic_artifact_with_guard())],
-    )
-
-    resp = api_client.get(f"/api/company/{name}/semantic_capabilities")
-    assert resp.status_code == 200

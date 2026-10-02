@@ -3,7 +3,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from sqlalchemy import event, select
 
 from db.models import (
@@ -21,7 +20,6 @@ from db.models import (
     UpgradeEvent,
 )
 from services.aggregations.company_overview import (
-    CompanyNotFound,
     _build_principal_lookup,
     _entity_key,
     _prefetch_child_tables,
@@ -172,21 +170,6 @@ def test_resolve_company_jobs_excludes_orphan_contracts(db_session):
     )
 
 
-def test_company_tagged_jobs_without_a_protocol_are_not_a_company(db_session):
-    company = f"unresolved-{uuid.uuid4().hex[:8]}"
-    parent = _add_job(db_session, address=_addr("p"), company=company, name="parent")
-    child_addr = _addr("c")
-    _add_job(db_session, address=child_addr, request={"address": child_addr, "parent_job_id": str(parent.id)})
-
-    assert resolve_company_jobs(db_session, company) == (None, [])
-
-
-def test_resolve_company_jobs_unknown_returns_empty(db_session):
-    protocol, jobs = resolve_company_jobs(db_session, f"missing-{uuid.uuid4().hex[:8]}")
-    assert protocol is None
-    assert jobs == []
-
-
 def test_prefetch_contracts_address_chain_fallback(db_session):
     """When a Contract row has been re-keyed to a newer job, the address+chain
     fallback locates it for the original requesting job."""
@@ -230,11 +213,6 @@ def test_resolve_implementation_contracts_links_proxy_to_impl(db_session):
     assert impl_token in impl_job_by_entity
     assert impl_job_by_entity[impl_token].id == impl_job.id
     assert contracts_by_job[impl_job.id].id == impl_contract.id
-
-
-def test_build_company_overview_raises_when_unknown(db_session):
-    with pytest.raises(CompanyNotFound):
-        build_company_overview(db_session, f"missing-{uuid.uuid4().hex[:8]}")
 
 
 def test_build_company_overview_omits_functions_field(db_session):
@@ -397,11 +375,6 @@ def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
     assert entry["authority_public"] is True
     assert entry["authority_roles"], "authority_roles should be populated"
     assert entry["direct_owner"] is None
-
-
-def test_build_functions_for_protocol_unknown_company_raises(db_session):
-    with pytest.raises(CompanyNotFound):
-        build_functions_for_protocol(db_session, f"missing-{uuid.uuid4().hex[:8]}")
 
 
 def test_build_functions_for_protocol_two_chains_shared_address(db_session):

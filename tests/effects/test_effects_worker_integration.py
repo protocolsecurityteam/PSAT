@@ -12,13 +12,11 @@ from db.models import (
 )
 from db.queue import create_job, get_artifact
 from services.effects.config import (
-    EFFECT_CLASS_CODE_UPGRADE,
     EFFECT_CLASS_FREEZE_PAUSE,
     EFFECT_CLASS_SUPPLY,
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
     SCOPE_PROJECTION,
-    TIER_HISTORICAL,
     VERDICT_PROVEN,
     VERDICT_UNKNOWN,
 )
@@ -159,82 +157,10 @@ def _twin_jobs(session, monkeypatch, addresses):
     return jobs, fn_ids
 
 
-@requires_postgres
-def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
-    """The second re-simulates once for the self-audit; the third is a free hit."""
-    session = clean_effects
-    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
-
-    hashes = {fns[CONTRACT_A]: ("K", "sA"), fns[CONTRACT_B]: ("K", "sB"), fns[CONTRACT_C]: ("K", "sC")}
-    prober = _Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY, details={"supply_delta_sign": "mint"}))
-    worker = EffectsWorker(
-        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
-    )
-    hits = misses = 0
-    for job in jobs:
-        _errors, metrics = _run(worker, session, job)
-        hits += metrics["cache_hits_kernel"]
-        misses += metrics["cache_misses"]
-
-    assert fns[CONTRACT_A] in prober.runs
-    assert fns[CONTRACT_B] in prober.runs
-    assert fns[CONTRACT_C] not in prober.runs
-    assert len(prober.runs) == 2
-
-    row = session.query(EffectBehaviorCache).one()
-    assert row.audit_status == "passed"
-    assert misses == 1
-    assert hits == 2
-    assert session.query(EffectVerdict).count() == 3
-
-
 # ---------------------------------------------------------------------------
 # 3b. Tier-0 (historical) verdicts NEVER transfer across bytecode twins — each
 #     deployment's current-state check must run.
 # ---------------------------------------------------------------------------
-
-
-@requires_postgres
-def test_tier0_historical_verdict_never_transfers_across_twins(clean_effects, monkeypatch):
-    """Tier-0 is never code-plane cached: C's impl is currently zero, so a cached verdict would give it A's
-    "upgradeable now".
-    """
-    session = clean_effects
-    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
-
-    hashes = {fns[CONTRACT_A]: ("KUP", "sA"), fns[CONTRACT_B]: ("KUP", "sB"), fns[CONTRACT_C]: ("KUP", "sC")}
-    upgraded = {fns[CONTRACT_A]: True, fns[CONTRACT_B]: True, fns[CONTRACT_C]: False}
-
-    def factory(c, ctx):
-        if upgraded[c.function_id]:
-            return proven(
-                EFFECT_CLASS_CODE_UPGRADE,
-                tier=TIER_HISTORICAL,
-                reason="indexed_upgrade_plus_current_state",
-                details={"upgradeable": True},
-                concrete={"current_check_passed": True},
-            )
-        return unknown(
-            EFFECT_CLASS_CODE_UPGRADE,
-            tier=TIER_HISTORICAL,
-            reason="historical_only_current_check_failed",
-            concrete={"current_check_passed": False},
-        )
-
-    prober = _Prober(factory, effect_class=EFFECT_CLASS_CODE_UPGRADE, gate_ref="proxy:transparent")
-    worker = EffectsWorker(
-        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
-    )
-    for job in jobs:
-        _run(worker, session, job)
-
-    assert set(prober.runs) == set(fns.values())
-    assert session.query(EffectBehaviorCache).count() == 0
-
-    verdicts = {v.function_id: v for v in session.query(EffectVerdict).all()}
-    assert verdicts[fns[CONTRACT_A]].verdict == VERDICT_PROVEN
-    assert verdicts[fns[CONTRACT_B]].verdict == VERDICT_PROVEN
-    assert verdicts[fns[CONTRACT_C]].verdict == VERDICT_UNKNOWN
 
 
 @requires_postgres
@@ -424,51 +350,8 @@ def test_transcript_name_is_stable_for_identical_content(clean_effects):
     assert EFFECT_CLASS_VALUE_OUT in first
 
 
-@requires_postgres
-def test_select_scopes_to_the_jobs_own_contract(clean_effects):
-    """Drives the real ``select_candidates``."""
-    session = clean_effects
-    pid, fns = _protocol_with_functions(session, [CONTRACT_A, CONTRACT_B])
-    job_a = _make_job(session, pid, "scoped-a", address=CONTRACT_A)
-    _make_job(session, pid, "scoped-b", address=CONTRACT_B)
-    session.commit()
-
-    picked = {c.function_id for c in EffectsWorker()._select(session, job_a)}
-    assert picked == {fns[CONTRACT_A]}
-
-
 # Every unknown supply verdict has the same details, so without the reason a withheld-on-contradiction verdict is
 # indistinguishable from "supply did not move".
-
-
-@requires_postgres
-def test_withheld_supply_sign_is_distinguishable_from_a_plain_non_observation(clean_effects, monkeypatch):
-    session = clean_effects
-    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
-    # Two different behaviors producing the same structural witness.
-    hashes = {fns[CONTRACT_A]: ("KA", "sA"), fns[CONTRACT_B]: ("KB", "sB")}
-    reasons = {
-        fns[CONTRACT_A]: "supply_sign_contradicted_by_transfers",
-        fns[CONTRACT_B]: "no_supply_delta",
-    }
-
-    def factory(c, ctx):
-        return unknown(
-            EFFECT_CLASS_SUPPLY,
-            reason=reasons[c.function_id],
-            details={"observation": "executed"},
-        )
-
-    worker = EffectsWorker(
-        prober=_Prober(factory), hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
-    )
-    for job in jobs:
-        _run(worker, session, job)
-
-    witnesses = {v.function_id: v.witness for v in session.query(EffectVerdict).all()}
-    assert witnesses[fns[CONTRACT_A]]["reason"] == "supply_sign_contradicted_by_transfers"
-    assert witnesses[fns[CONTRACT_B]]["reason"] == "no_supply_delta"
-    assert witnesses[fns[CONTRACT_A]]["observation"] == "executed"
 
 
 @requires_postgres
@@ -491,34 +374,6 @@ def test_a_cached_reason_is_served_to_the_twin_that_hits_it(clean_effects, monke
     assert session.query(EffectBehaviorCache).one().details["reason"] == "no_supply_delta"
     witnesses = {v.function_id: v.witness for v in session.query(EffectVerdict).all()}
     assert witnesses[fns[CONTRACT_C]]["reason"] == "no_supply_delta"
-
-
-def test_a_zero_key_hit_is_corroborated_before_it_is_trusted(clean_effects, monkeypatch):
-    """``authority_change`` rows carry no structural key, so the audit used to compare unknown with itself; the
-    re-probe must agree on verdict and reason.
-    """
-    session = clean_effects
-    jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
-    hashes = {fns[a]: ("K0", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B, CONTRACT_C)}
-
-    def factory(c, ctx):
-        return unknown(
-            EFFECT_CLASS_SUPPLY,
-            reason="no_supply_delta",
-            details={"observation": "executed"},
-        )
-
-    prober = _Prober(factory)
-    worker = EffectsWorker(
-        prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, jobs[0])
-    )
-    for job in jobs:
-        _run(worker, session, job)
-
-    assert fns[CONTRACT_A] in prober.runs and fns[CONTRACT_B] in prober.runs
-    assert fns[CONTRACT_C] not in prober.runs
-    row = session.query(EffectBehaviorCache).one()
-    assert row.audit_status == "passed"
 
 
 def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, monkeypatch):

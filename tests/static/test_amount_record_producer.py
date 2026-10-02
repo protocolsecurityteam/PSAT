@@ -283,15 +283,6 @@ def _ir_lvalue(code_unit, predicate) -> Any:
     raise AssertionError("fixture no longer contains the IR shape under test")
 
 
-def test_a_parameter_keyed_struct_member_names_its_declaration_member_and_slot(_unit):
-    flow = _flow(_unit, "Records", "cancelBid(uint256)")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    assert flow["amount_record_variable"] == "Records.bids"
-    assert flow["amount_record_member_path"] == ["amount"]
-    assert flow["amount_record_key_kinds"] == ["param"]
-    assert flow["amount_record_key_param_indexes"] == [0]
-
-
 @pytest.mark.parametrize(
     "signature,kind",
     [

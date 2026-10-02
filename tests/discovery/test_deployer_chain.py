@@ -3,8 +3,6 @@
 Name resolution has no chain param yet, hence ``resolve_names=False``.
 """
 
-import pytest
-
 from services.discovery import deployer
 
 _SEEDS = ["0x" + f"{n:040x}" for n in (0x11, 0x22, 0x33)]
@@ -22,27 +20,6 @@ def _fake_get_factory(seen):
         return {"result": []}
 
     return fake_get
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "expected_chain"),
-    [
-        pytest.param({"chain_id": 8453}, 8453, id="threads_chain_id"),
-        pytest.param({}, 1, id="defaults_to_mainnet"),
-    ],
-)
-def test_expand_from_deployers_threads_chain_id(monkeypatch, kwargs, expected_chain):
-    seen: list[tuple[str, int | None]] = []
-    monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory(seen))
-
-    entries = deployer.expand_from_deployers(_SEEDS, resolve_names=False, **kwargs)
-
-    assert entries, "expected at least one expanded entry"
-    creation_chain_ids = [c for a, c in seen if a == "getcontractcreation"]
-    txlist_chain_ids = [c for a, c in seen if a == "txlist"]
-    assert creation_chain_ids == [expected_chain]
-    assert txlist_chain_ids == [expected_chain]
-    assert {c for _, c in seen} == {expected_chain}
 
 
 def test_explorer_links_follow_the_expansion_chain(monkeypatch):

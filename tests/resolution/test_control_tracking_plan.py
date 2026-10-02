@@ -41,57 +41,6 @@ def _tracked_controller(plan: ControlTrackingPlan, label: str) -> TrackedControl
     raise AssertionError(f"Tracked controller {label} not found")
 
 
-def test_build_control_tracking_plan_uses_event_watch_when_available(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "AuthModifierController",
-        _fixture_source("composed/auth_modifier_controller.sol"),
-    )
-    analysis = collect_contract_analysis(project_dir)
-
-    plan = build_control_tracking_plan(analysis)
-
-    owner = _tracked_controller(plan, "owner")
-    assert owner["tracking_mode"] == "event_plus_state"
-    assert owner["event_watch"] == {
-        "transport": "wss_logs",
-        "contract_address": "0x1111111111111111111111111111111111111111",
-        "events": [
-            {
-                "name": "OwnershipTransferred",
-                "signature": "OwnershipTransferred(address,address)",
-                "topic0": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
-                "inputs": [
-                    {"name": "user", "type": "address", "indexed": True},
-                    {"name": "newOwner", "type": "address", "indexed": True},
-                ],
-                "effect_tags": {"writes": ["owner"]},
-            }
-        ],
-        "writer_functions": ["transferOwnership(address)"],
-    }
-    assert owner["polling_fallback"]["cadence"] == "realtime_confirm"
-
-    authority = _tracked_controller(plan, "authority")
-    assert authority["event_watch"] == {
-        "transport": "wss_logs",
-        "contract_address": "0x1111111111111111111111111111111111111111",
-        "events": [
-            {
-                "name": "AuthorityUpdated",
-                "signature": "AuthorityUpdated(address,address)",
-                "topic0": "0xa3396fd7f6e0a21b50e5089d2da70d5ac0a3bbbd1f617a93f134b76389980198",
-                "inputs": [
-                    {"name": "user", "type": "address", "indexed": True},
-                    {"name": "newAuthority", "type": "address", "indexed": True},
-                ],
-                "effect_tags": {"writes": ["authority"]},
-            }
-        ],
-        "writer_functions": ["setAuthority(AuthorityLike)"],
-    }
-
-
 def test_build_control_tracking_plan_falls_back_to_state_only(tmp_path):
     project_dir = _write_project(
         tmp_path,

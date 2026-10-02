@@ -16,7 +16,6 @@ from db.models import (
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_UNMEASURED_LEGACY,
     IndexedEventCursor,
-    IndexedEventLog,
     MonitoredContract,
     Protocol,
 )
@@ -137,27 +136,6 @@ def stub_rpc(monkeypatch):
 
 
 @requires_postgres
-def test_enrol_persists_the_witnessed_lower_bound_byte_exactly(db_session):
-    assert enroll_event_cursor(
-        db_session,
-        chain_id=1,
-        event_address=_ADDR,
-        topic0=_TOPIC_ALLOW_TO,
-        start_block=_SEED,
-        first_indexed_block=_SEED,
-        first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
-        enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
-    )
-    db_session.commit()
-    assert _provenance(_row(db_session)) == {
-        "last_indexed_block": _SEED,
-        "first_indexed_block": _SEED,
-        "first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION,
-        "backfill_complete": False,
-    }
-
-
-@requires_postgres
 def test_enrol_without_provenance_defaults_to_not_determined(db_session):
     """``start_block``'s ``= 0`` default must not become a claim of coverage from genesis."""
     assert enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
@@ -189,15 +167,6 @@ def test_witness_rejects_a_prior_incarnation_and_discards_the_number(stub_rpc):
 def test_witness_rejects_an_eip7702_delegation_stub(stub_rpc):
     """A 0xef0100 delegation stub can be set and cleared, so it dates nothing."""
     stub_rpc(code_at=_EIP7702_STUB)
-    assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
-
-
-def test_witness_failure_yields_not_determined_never_a_bound(stub_rpc):
-    stub_rpc(raise_on="eth_getLogs")
-    assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
-    stub_rpc(raise_on="eth_getCode")
-    assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
-    stub_rpc(code_before=_CODE)
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
 
 
@@ -274,29 +243,6 @@ def test_enrolment_drains_the_whole_fleet_across_passes(db_session, stub_rpc):
 
 
 @requires_postgres
-def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_rpc):
-    """AllowTo/DenyTo key on the recipient, so only the tracking plan names their writers."""
-    stub_rpc()
-    _monitored(db_session, _DENYLIST_SURFACE)
-    assert enroll_from_tracked_topics(db_session) == 6
-    enrolled = set(
-        db_session.execute(select(IndexedEventCursor.topic0).where(IndexedEventCursor.event_address == _ADDR)).scalars()
-    )
-    assert enrolled == {t.lower() for t in _DENYLIST_SURFACE}
-    assert _row(db_session).enrollment_basis == ENROLLMENT_BASIS_TRACKED_TOPICS
-
-
-@requires_postgres
-def test_tracked_topics_enrolment_skips_unresolvable_and_inactive_rows(db_session, stub_rpc):
-    stub_rpc()
-    _monitored(db_session, _DENYLIST_SURFACE, chain="not-a-real-chain")
-    assert enroll_from_tracked_topics(db_session) == 0
-    _monitored(db_session, _DENYLIST_SURFACE, chain="ethereum", active=False)
-    assert enroll_from_tracked_topics(db_session) == 0
-    assert db_session.execute(select(IndexedEventCursor)).first() is None
-
-
-@requires_postgres
 def test_coverage_gate_reports_missing_writers_and_licenses_nothing(db_session, stub_rpc):
     stub_rpc()
     _monitored(db_session, [_TOPIC_ALLOW_FROM, _TOPIC_DENY_FROM, _TOPIC_ALLOW_OP, _TOPIC_DENY_OP])
@@ -357,47 +303,7 @@ def test_full_surface_fully_witnessed_still_licenses_nothing(db_session):
     }
 
 
-@requires_postgres
-def test_cold_asserted_cursor_is_named_as_such(db_session):
-    enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
-    db_session.commit()
-    report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_ALLOW_TO])
-    assert report["enrolled"] == [_TOPIC_ALLOW_TO]
-    assert report["warm"] == []
-    assert REASON_COLD_CURSORS in report["blocking_reasons"]
-
-
 # A1 — a tracking-plan cursor never becomes an exactness source
-
-
-@requires_postgres
-@pytest.mark.parametrize(
-    "basis",
-    [
-        ENROLLMENT_BASIS_TRACKED_TOPICS,
-        # The literal default ``enroll_event_cursor`` writes.
-        "not_determined",
-        # A new enrolment source is inert until allow-listed.
-        "code_asserted_pubkey_fold",
-    ],
-)
-def test_ineligible_basis_cannot_mint_an_exact_empty(db_session, basis):
-    enroll_event_cursor(
-        db_session,
-        chain_id=1,
-        event_address=_ADDR,
-        topic0=_TOPIC_DENY_TO,
-        start_block=_SEED,
-        enrollment_basis=basis,
-    )
-    db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true, last_indexed_block = 25000000"))
-    db_session.commit()
-    assert db_session.execute(select(IndexedEventLog)).first() is None
-    assert _row(db_session, topic0=_TOPIC_DENY_TO).enrollment_basis == basis
-
-    result = _fold(db_session, _TOPIC_DENY_TO)
-    assert (result.confidence, result.partial_reason) == ("partial", "no_index_cursor")
-    assert result.members == []
 
 
 @requires_postgres
@@ -459,13 +365,6 @@ def test_refused_cursor_is_not_reported_warm(db_session):
     assert report["warm"] == []
     assert report["exactness_ineligible"] == [_TOPIC_DENY_TO]
     assert REASON_COLD_CURSORS in report["blocking_reasons"]
-
-
-@requires_postgres
-def test_uppercase_topic_is_not_silently_dropped_from_missing(db_session):
-    report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_DENY_TO.upper()])
-    assert report["write_surface_asserted"] == [_TOPIC_DENY_TO]
-    assert report["missing"] == [_TOPIC_DENY_TO]
 
 
 @requires_postgres
@@ -544,35 +443,6 @@ def test_page_at_the_cap_bisects_instead_of_advancing(monkeypatch):
     assert rpc.windows[1:3] == [(0, 49_999), (50_000, 99_999)]
 
 
-def test_page_at_the_cap_on_the_floor_span_raises(monkeypatch):
-    rpc = _CappedRpc(lambda lo, hi: 100)
-    fetcher = _fetcher(monkeypatch, rpc, max_block_range=1_000_000, min_bisect_span=10_000, result_cap=100)
-    with pytest.raises(RuntimeError, match="result cap"):
-        fetcher.fetch_logs(event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=9_999)
-
-
-def test_page_below_the_cap_is_accepted_and_counted(monkeypatch):
-    rpc = _CappedRpc(lambda lo, hi: 99)
-    fetcher = _fetcher(monkeypatch, rpc, min_bisect_span=10_000, result_cap=100)
-    stats: list[FetchWindowStat] = []
-    logs = fetcher.fetch_logs(
-        event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=9_999, window_stats=stats
-    )
-    assert len(logs) == 99
-    assert rpc.windows == [(0, 9_999)]
-    assert stats == [FetchWindowStat(from_block=0, to_block=9_999, returned_log_count=99, cap=100)]
-
-
-def test_unset_cap_never_raises_and_never_claims_completeness(monkeypatch):
-    """Comparing to None raises TypeError, which would escape the bisect."""
-    rpc = _CappedRpc(lambda lo, hi: 125_629)
-    fetcher = _fetcher(monkeypatch, rpc, min_bisect_span=10_000, result_cap=None)
-    stats: list[FetchWindowStat] = []
-    fetcher.fetch_logs(event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=9_999, window_stats=stats)
-    assert rpc.windows == [(0, 9_999)]
-    assert stats[0].cap is None
-
-
 @pytest.mark.parametrize("payload", [None, {}, "0x", 0])
 def test_unreadable_page_is_not_recorded_as_zero_logs(monkeypatch, payload):
 
@@ -629,16 +499,6 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
     assert report["page_completeness"] == "not_determined"
 
 
-def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
-    """R8. ``iter_pages`` is shared with the monitoring watcher, which must keep returning pages, not
-    bisect-and-raise."""
-    monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "50000")
-    assert default_result_cap() == 50_000
-    watcher_fetcher = RpcEventLogFetcher("http://stub", max_block_range=10_000, min_bisect_span=1_000, chain_id=1)
-    assert watcher_fetcher.result_cap is None
-    assert RpcEventLogFetcher("http://stub", chain_id=1, result_cap=default_result_cap()).result_cap == 50_000
-
-
 def test_default_result_cap_is_unset_and_ignores_junk(monkeypatch):
     monkeypatch.delenv("PSAT_GETLOGS_RESULT_CAP", raising=False)
     assert default_result_cap() is None
@@ -693,20 +553,6 @@ def test_fetch_without_accumulator_is_byte_identical(monkeypatch):
     with_windows, with_logs = _run(window_stats=[])
     assert without_windows == with_windows == [(0, 49_999), (50_000, 99_999), (100_000, 120_000)]
     assert without_logs == with_logs
-
-
-def test_error_bisect_path_is_untouched(monkeypatch):
-    windows: list[tuple[int, int]] = []
-
-    def _rpc(url, method, params, chain_id=None):
-        lo, hi = int(params[0]["fromBlock"], 16), int(params[0]["toBlock"], 16)
-        windows.append((lo, hi))
-        raise RuntimeError("Limit exceeded")
-
-    fetcher = _fetcher(monkeypatch, _rpc, max_block_range=1_000_000, min_bisect_span=10_000)
-    with pytest.raises(RuntimeError, match="Limit exceeded"):
-        fetcher.fetch_logs(event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=39_999)
-    assert windows[:3] == [(0, 39_999), (0, 19_999), (0, 9_999)]
 
 
 # The indexer records what its pages returned

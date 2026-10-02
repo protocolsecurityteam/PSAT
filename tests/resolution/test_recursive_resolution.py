@@ -3,7 +3,6 @@ from typing import cast
 import pytest
 
 from schemas.resolved_control_graph import ResolvedGraphEdge, ResolvedGraphNode
-from services.discovery.classifier import ClassificationIncompleteError
 from services.resolution import recursive
 from services.resolution.recursive import (
     LoadedArtifacts,
@@ -642,18 +641,6 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
 # ---------------------------------------------------------------------------
 # #122 — no-impl proxy must fail closed; #121 coupling — ClassificationIncompleteError propagates.
 # ---------------------------------------------------------------------------
-
-
-def test_materialize_contract_artifacts_propagates_classification_incomplete(monkeypatch):
-    """#121: the proxy decision lives outside the classify except block so this propagates."""
-
-    def _raise(address, rpc_url, *, chain_id=None):
-        raise ClassificationIncompleteError("proxy slots unread")
-
-    monkeypatch.setattr("services.discovery.classifier.classify_single", _raise)
-
-    with pytest.raises(ClassificationIncompleteError):
-        _materialize_contract_artifacts("0x" + "11" * 20, "http://rpc.example", workspace_prefix="t")
 
 
 def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch):

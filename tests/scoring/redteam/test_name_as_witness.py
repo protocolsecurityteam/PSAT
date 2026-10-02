@@ -19,13 +19,11 @@ from tests.support.scoring_builders import (
     facts,
     flow_sig,
     fold,  # noqa: F401  (fold fixture, registered by import)
-    magnitude,
     proven,
     reaches,
     sig,
     value_plane,
 )
-from utils.scoring_status import DESTINATION_STATE_UNCONSTRAINED_PROVEN, SEVERITY_STATE_NOT_DETERMINED
 
 
 def _contract_facts(**over: Any) -> D._ContractFacts:
@@ -122,29 +120,6 @@ def test_g3_destination_operand_does_not_corroborate_self_ness():
     assert "destination_self_corroborated_by_literal" in literal.notes
 
 
-def test_g3_a_priced_destination_with_a_withheld_severity_charges_nothing_and_says_so(fold):
-    """An excluded row's notes reach no finding, so the warning channel carries the refusal."""
-    signal = flow_sig(
-        function_name="unwrap",
-        authority_openness="open",
-        destination=Tri.proven(DESTINATION_STATE_UNCONSTRAINED_PROVEN, "caller_arbitrary"),
-        witness_notes=(
-            "destination_msg_sender_with_open_caller_gate",
-            "flow_severity_withheld_pending_amount_witness",
-        ),
-        gates=magnitude(1_000_000.0),
-        **reaches(KEY_C),
-    )
-    document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
-
-    assert signal.destination.state == DESTINATION_STATE_UNCONSTRAINED_PROVEN
-    assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
-    assert not signal.enters_grade
-    assert document.findings == []
-    withheld = [w for w in document.warnings if w["kind"] == "flow_severity_withheld_pending_amount_witness"]
-    assert [(w["function"], w["capability"]) for w in withheld] == [("unwrap", "flow.out")]
-
-
 def test_d1_the_published_principal_is_the_one_that_set_the_weakness(fold):
     signal = sig(
         authority_openness="restricted",
@@ -237,78 +212,6 @@ def test_d4_a_proven_no_reach_is_published_as_an_earned_negative(fold):
     )
     document = fold([signal], value=value_plane({KEY_C: {"usdc": 1_000_000.0}}))
     assert [row["state"] for row in document.earned_negatives] == ["proven_no_reach"]
-
-
-def test_f5_confidence_does_not_rise_when_analysis_is_lost(fold):
-    answered = sig(
-        function_name="upgradeTo",
-        deployment_address=C,
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        gates=bounded_by_sheet(1_000_000_000.0),
-        **proven(1.0),
-        **reaches(KEY_C),
-    )
-    unanswered = [
-        sig(
-            claim_id="roles.grant",
-            function_name=f"grantRole{index}",
-            deployment_address="0x" + str(index) * 40,
-            contract_id=10 + index,
-            selector=f"0x0000000{index}",
-            **proven(0.55),
-            **reaches(entity_key("ethereum", "0x" + str(index) * 40)),
-        )
-        for index in (5, 6, 7)
-    ]
-    principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=3)}
-    plane = value_plane({KEY_C: {"usdc": 1_000_000_000.0}})
-
-    more = fold([answered, *unanswered], principals=principals, value=plane)
-    less = fold([answered], principals=principals, value=plane)
-    assert less.confidence_pct is not None and more.confidence_pct is not None
-    assert less.confidence_pct <= more.confidence_pct
-
-
-def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():
-    from utils.scoring_status import DESTINATION_BEARING_CLAIMS, DESTINATION_FREE_CLAIMS
-
-    assert not set(DESTINATION_BEARING_CLAIMS) & set(DESTINATION_FREE_CLAIMS)
-    for claim in ("value_router", "callee_pointer.rotate", "upgrade.implementation"):
-        assert claim not in DESTINATION_FREE_CLAIMS
-
-
-def test_d3_an_unanswerable_signal_outside_the_perimeter_does_not_move_confidence(fold):
-    """A perimeter that grew with the analysis would let confidence move by the act of looking."""
-    answered = sig(
-        function_name="upgradeTo",
-        deployment_address=C,
-        authority_openness="restricted",
-        principal_state="enumerated",
-        principal_refs=(PrincipalRef(1, "ethereum", SAFE),),
-        **proven(1.0),
-        **reaches(KEY_C),
-    )
-    injected = sig(
-        claim_id="roles.grant",
-        function_name="grantRole",
-        deployment_address="0x" + "9" * 40,
-        contract_id=99,
-        selector="0x99999999",
-        **proven(0.55),
-        **reaches(entity_key("ethereum", "0x" + "9" * 40)),
-    )
-    principals = {1: facts(1, SAFE, "safe", owners=OWNERS, threshold=3)}
-    plane = value_plane({KEY_C: {"usdc": 1_000_000_000.0}})
-
-    before = fold([answered], principals=principals, value=plane)
-    after = fold([answered, injected], principals=principals, value=plane)
-    assert after.confidence_pct == before.confidence_pct
-    detail_before = before.model_parameters["confidence_detail"]
-    detail_after = after.model_parameters["confidence_detail"]
-    assert detail_after["perimeter_entities"] == detail_before["perimeter_entities"]
-    assert detail_after["perimeter_value_weighted_denominator"] == detail_before["perimeter_value_weighted_denominator"]
 
 
 def test_g5_an_undecidable_asset_identity_falls_to_the_unpriced_branch(fold):

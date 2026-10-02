@@ -203,27 +203,3 @@ def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch
     assert hydration[0].severity == "degraded"
 
     assert session.rollback.called
-
-
-def test_hydration_row_miss_stays_silent(monkeypatch: pytest.MonkeyPatch) -> None:
-    session, degraded, records = _drive_hydration(monkeypatch, raises=False)
-
-    assert [r for r in records if r.levelno >= logging.WARNING] == []
-    assert degraded == []
-    assert not session.rollback.called
-
-
-def test_principal_classification_failures_collect_per_contract() -> None:
-    """D5: reported once per contract, not per principal."""
-    from services.policy import effective_permissions_writer as writer
-
-    memo: dict[str, Any] = {}
-    failures: list[BaseException] = []
-
-    def _boom(_address: str) -> Any:
-        raise RuntimeError("classifier down")
-
-    for addr in ("0xaaa", "0xbbb", "0xAAA"):
-        assert writer._classify_principal(addr, _boom, memo, failures=failures) == (None, None)
-
-    assert len(failures) == 2

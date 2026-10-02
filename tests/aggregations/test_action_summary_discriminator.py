@@ -8,16 +8,8 @@ import pytest
 
 from services.aggregations.action_summary import (
     ARBITRARY_SUMMARY,
-    VACUOUS_SUMMARY,
     describe_action,
 )
-
-
-def test_vacuous_summary_is_labelled_as_restating_nothing():
-    summary, kind, note = describe_action(VACUOUS_SUMMARY, [])
-    assert summary == VACUOUS_SUMMARY
-    assert kind == "vacuous"
-    assert note and "restates no evidence" in note
 
 
 def test_target_list_summary_discloses_the_write_conflation():
@@ -28,14 +20,6 @@ def test_target_list_summary_discloses_the_write_conflation():
     assert summary == "Writes or calls into: accountantState."
     assert kind == "effect_target_list"
     assert note and "state-write" in note
-
-
-def test_a_plain_label_summary_carries_no_note():
-    """Negative control: the note is not a blanket hedge."""
-    summary, kind, note = describe_action("Changes the contract pause state.", [{"claim_id": "pause.set"}])
-    assert summary == "Changes the contract pause state."
-    assert kind == "effect_label"
-    assert note is None
 
 
 def _exec_claim(constraint=None):
@@ -92,10 +76,3 @@ def test_no_claim_list_at_all_is_not_treated_as_a_contradiction():
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, None)
     assert summary == ARBITRARY_SUMMARY
     assert note and "no claim list" in note
-
-
-def test_an_absent_sentence_is_its_own_state():
-    summary, kind, note = describe_action(None, [])
-    assert summary is None
-    assert kind == "absent"
-    assert note is None

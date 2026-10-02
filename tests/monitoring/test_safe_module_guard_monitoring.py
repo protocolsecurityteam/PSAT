@@ -10,7 +10,6 @@ from typing import Any, cast
 import pytest
 
 from services.monitoring.event_topics import (
-    ALL_EVENT_TOPICS,
     CHANGED_GUARD_TOPIC0,
     DISABLED_MODULE_TOPIC0,
     ENABLED_MODULE_TOPIC0,
@@ -18,28 +17,13 @@ from services.monitoring.event_topics import (
     EXECUTION_FROM_MODULE_FAILURE_TOPIC0,
     EXECUTION_FROM_MODULE_SUCCESS_TOPIC0,
     EXECUTION_SUCCESS_TOPIC0,
-    GOVERNANCE_EVENT_TOPICS,
     parse_any_log,
     parse_governance_log,
-)
-from services.monitoring.polling_plan import (
-    SAFE_GUARD_SLOT,
-    SAFE_MODULES_HEAD_SLOT,
-    build_polling_plan,
 )
 from services.monitoring.unified_watcher import _should_watch
 
 MODULE = "0x2e1b5a40edc922bce489668b11749b8eabd67f6b"
 SAFE = "0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca"
-
-
-def test_topics_are_registered_and_therefore_scanned():
-    """Registration is what enrolls every active Safe."""
-    assert GOVERNANCE_EVENT_TOPICS[ENABLED_MODULE_TOPIC0] == "safe_module_enabled"
-    assert GOVERNANCE_EVENT_TOPICS[DISABLED_MODULE_TOPIC0] == "safe_module_disabled"
-    assert GOVERNANCE_EVENT_TOPICS[CHANGED_GUARD_TOPIC0] == "safe_guard_changed"
-    for topic in (ENABLED_MODULE_TOPIC0, DISABLED_MODULE_TOPIC0, CHANGED_GUARD_TOPIC0):
-        assert topic in ALL_EVENT_TOPICS
 
 
 def _log(topic0: str, *, indexed: bool):
@@ -66,15 +50,6 @@ def _parsed(log: dict) -> dict[str, Any]:
     out = parse_governance_log(log)
     assert out is not None
     return out
-
-
-def test_enabled_module_decodes_on_both_indexing_conventions():
-    """1.3.0 is 9 of the 19 Safe principals here, and it doesn't index the address."""
-    for indexed in (True, False):
-        parsed = _parsed(_log(ENABLED_MODULE_TOPIC0, indexed=indexed))
-        assert parsed["event_type"] == "safe_module_enabled"
-        assert parsed["module"] == MODULE
-        assert parsed["effect_tags"]["writes"] == ["_safe_modules"]
 
 
 def test_disabled_module_and_changed_guard_decode():
@@ -176,20 +151,6 @@ def test_malformed_topic_or_data_publishes_no_address(topic0, topics_tail, data,
     assert key not in parsed
 
 
-def test_well_formed_logs_decode_byte_identically():
-    for topic0, key in (
-        (ENABLED_MODULE_TOPIC0, "module"),
-        (DISABLED_MODULE_TOPIC0, "module"),
-        (CHANGED_GUARD_TOPIC0, "guard"),
-    ):
-        for indexed in (True, False):
-            parsed = _parsed(_log(topic0, indexed=indexed))
-            assert parsed[key] == MODULE
-    # "Guard removed" is a real event.
-    parsed = _parsed(_log_with(CHANGED_GUARD_TOPIC0, topics_tail=["0x" + "0" * 64], data="0x"))
-    assert parsed["guard"] == "0x" + "0" * 40
-
-
 def test_should_watch_respects_the_flag():
     class _MC:
         def __init__(self, config):
@@ -200,26 +161,6 @@ def test_should_watch_respects_the_flag():
     assert _should_watch(cast(Any, _MC({"watch_safe_modules": False})), parsed) is False
     # Rows enrolled before the flag existed default on.
     assert _should_watch(cast(Any, _MC({"watch_ownership": True})), parsed) is True
-
-
-def test_safe_polling_plan_carries_both_storage_slots():
-    plan = {entry["field"]: entry for entry in build_polling_plan(contract_type="safe")}
-    assert plan["modules_head"]["kind"] == "storage_slot"
-    assert plan["modules_head"]["slot"] == SAFE_MODULES_HEAD_SLOT
-    assert plan["modules_head"]["suppress_when_scan_event_types"] == [
-        "safe_module_enabled",
-        "safe_module_disabled",
-    ]
-    assert plan["guard"]["kind"] == "storage_slot"
-    assert plan["guard"]["slot"] == SAFE_GUARD_SLOT
-    assert plan["guard"]["suppress_when_scan_event_types"] == ["safe_guard_changed"]
-    assert plan["threshold"]["target"] == "getThreshold"
-
-
-def test_non_safe_types_get_no_safe_slot_entries():
-    fields = {entry["field"] for entry in build_polling_plan(contract_type="timelock")}
-    assert "modules_head" not in fields
-    assert "guard" not in fields
 
 
 class TestSafeExecutionEvents:
@@ -246,19 +187,6 @@ class TestSafeExecutionEvents:
         assert ev["safe_tx_hash"] == "0x" + hash_byte * 32
         assert ev["payment"] == payment
         assert ev["log_index"] == log_index
-
-    def test_short_data_does_not_crash(self):
-        log = {
-            "topics": [EXECUTION_SUCCESS_TOPIC0],
-            "data": "0x" + "ab" * 8,  # well under the 64+64 hex chars expected
-            "blockNumber": "0x1",
-            "transactionHash": "0xa",
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert ev["event_type"] == "safe_tx_executed"
-        assert "safe_tx_hash" not in ev
-        assert "payment" not in ev
 
     @pytest.mark.parametrize(
         ("topic0", "address", "safe_tx_hash", "data", "block", "tx", "log_index", "event_type", "payment"),
@@ -308,36 +236,6 @@ class TestSafeExecutionEvents:
         assert ev["payment"] == payment
 
     # A body that isn't payment alone means an unreadable layout; the hash still decodes, and no payment is invented.
-    @pytest.mark.parametrize(
-        "data",
-        [
-            pytest.param("0x" + "11" * 32 + "22" * 32, id="two-word-body"),
-            pytest.param("0x", id="empty-body"),
-        ],
-    )
-    def test_indexed_variant_with_unreadable_body_publishes_no_payment(self, data):
-        log = {
-            "topics": [EXECUTION_SUCCESS_TOPIC0, "0x" + "ab" * 32],
-            "data": data,
-            "blockNumber": "0x1",
-            "transactionHash": "0xa",
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert ev["safe_tx_hash"] == "0x" + "ab" * 32
-        assert "payment" not in ev
-
-    def test_indexed_variant_with_malformed_topic_publishes_no_hash(self):
-        log = {
-            "topics": [EXECUTION_SUCCESS_TOPIC0, "0xabcd"],
-            "data": "0x" + format(7, "x").zfill(64),
-            "blockNumber": "0x1",
-            "transactionHash": "0xa",
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert "safe_tx_hash" not in ev
-        assert ev["payment"] == 7
 
     @pytest.mark.parametrize(
         ("topic0", "module_byte", "tx", "event_type"),

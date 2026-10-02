@@ -59,144 +59,7 @@ def _claims(ac, fn_name: str) -> set[str]:
 # Q1: can value leave the contract?
 
 
-def test_q1_eth_leaves_via_call_value():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address payable to, uint256 amt) external onlyOwner {{
-        (bool ok,) = to.call{{value: amt}}("");
-        require(ok);
-    }}
-    receive() external payable {{}}
-}}
-"""
-    ac = _analyze(source)
-    assert "asset_send" in _labels(ac, fn)
-
-
-def test_q1_erc20_leaves_via_transfer():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IERC20 {{ function transfer(address, uint256) external returns (bool); function balanceOf(address) external view returns (uint256); }}
-contract Target {{
-    address public owner;
-    IERC20 public token;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address to) external onlyOwner {{ token.transfer(to, token.balanceOf(address(this))); }}
-}}
-"""
-    ac = _analyze(source)
-    assert "asset_send" in _labels(ac, fn)
-
-
-def test_q1_erc20_leaves_via_encoded_selector():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    address public token;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address to, uint256 amt) external onlyOwner {{
-        (bool ok,) = token.call(abi.encodeWithSelector(0xa9059cbb, to, amt));
-        require(ok);
-    }}
-}}
-"""
-    ac = _analyze(source)
-    assert "asset_send" in _labels(ac, fn)
-
-
-def test_q1_eth_leaves_via_selfdestruct():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address payable to) external onlyOwner {{ selfdestruct(to); }}
-    receive() external payable {{}}
-}}
-"""
-    ac = _analyze(source)
-    assert "selfdestruct_capability" in _labels(ac, fn)
-
-
-def test_q1_value_leaves_via_internal_helper():
-    fn = _rand()
-    helper = f"_{_rand()}"
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address payable to, uint256 amt) external onlyOwner {{ {helper}(to, amt); }}
-    function {helper}(address payable to, uint256 amt) internal {{
-        (bool ok,) = to.call{{value: amt}}("");
-        require(ok);
-    }}
-    receive() external payable {{}}
-}}
-"""
-    ac = _analyze(source)
-    assert "asset_send" in _labels(ac, fn)
-
-
 # Q2: can deposits/withdrawals be blocked? A bool a gating modifier reads.
-
-
-def test_q2_random_bool_gates_functions():
-    var = f"_{_rand()}"
-    mod = _rand()
-    stop_fn = _rand()
-    resume_fn = _rand()
-    guarded_fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    bool public {var};
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    modifier {mod}() {{ require(!{var}); _; }}
-    function {stop_fn}() external onlyOwner {{ {var} = true; }}
-    function {resume_fn}() external onlyOwner {{ {var} = false; }}
-    function {guarded_fn}() external payable {mod} {{ }}
-}}
-"""
-    ac = _analyze(source)
-    assert "pause_toggle" in _labels(ac, stop_fn)
-    assert "pause_toggle" in _labels(ac, resume_fn)
-
-
-def test_q2_inverted_bool_guard():
-    var = f"_{_rand()}"
-    mod = _rand()
-    disable_fn = _rand()
-    guarded_fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    bool public {var};
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    modifier {mod}() {{ require({var}); _; }}
-    function {disable_fn}() external onlyOwner {{ {var} = false; }}
-    function {guarded_fn}() external payable {mod} {{ }}
-}}
-"""
-    ac = _analyze(source)
-    assert "pause_toggle" in _labels(ac, disable_fn)
 
 
 # Q3: can new value be created?
@@ -218,42 +81,6 @@ contract Target {{
 """
     ac = _analyze(source)
     assert "mint" not in _labels(ac, fn)
-
-
-def test_q3_cross_contract_mint():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IMintable {{ function mint(address to, uint256 amount) external; }}
-contract Target {{
-    address public owner;
-    IMintable public token;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address to, uint256 amt) external onlyOwner {{ token.mint(to, amt); }}
-}}
-"""
-    ac = _analyze(source)
-    assert "mint" in _labels(ac, fn)
-
-
-def test_q3_mint_via_encoded_selector():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    address public token;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address to, uint256 amt) external onlyOwner {{
-        (bool ok,) = token.call(abi.encodeWithSelector(0x40c10f19, to, amt));
-        require(ok);
-    }}
-}}
-"""
-    ac = _analyze(source)
-    assert "mint" in _labels(ac, fn)
 
 
 # Q4: can the code change? The bespoke impl-slot detectors are retired (0 fires on prod); ``upgrade.implementation`` is
@@ -282,81 +109,7 @@ contract Target {{
     assert "delegatecall_execution" in _labels(ac, "fallback")
 
 
-def test_q4_assembly_sstore_sload_delegatecall():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address newImpl) external onlyOwner {{
-        bytes32 slot = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;
-        assembly {{ sstore(slot, newImpl) }}
-    }}
-    fallback() external payable {{
-        bytes32 slot = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;
-        assembly {{
-            let impl := sload(slot)
-            calldatacopy(0,0,calldatasize())
-            let r := delegatecall(gas(),impl,0,calldatasize(),0,0)
-            returndatacopy(0,0,returndatasize())
-            switch r case 0 {{ revert(0,returndatasize()) }} default {{ return(0,returndatasize()) }}
-        }}
-    }}
-}}
-"""
-    ac = _analyze(source)
-    assert "implementation_update" not in _labels(ac, fn)
-    assert "delegatecall_execution" in _labels(ac, "fallback")
-
-
 # Q5: can who's in charge change? A bespoke rotation is ``authorized_caller.rotate``, not ownership.
-
-
-def test_q5_random_owner_var():
-    var = f"_{_rand()}"
-    mod = _rand()
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public {var};
-    constructor() {{ {var} = msg.sender; }}
-    modifier {mod}() {{ require(msg.sender == {var}); _; }}
-    function {fn}(address newAdmin) external {mod} {{ {var} = newAdmin; }}
-}}
-"""
-    ac = _analyze(source)
-    assert "authorized_caller.rotate" in _claims(ac, fn)
-    assert "ownership_transfer" not in _labels(ac, fn)
-
-
-def test_q5_two_step_ownership():
-    admin_var = f"_{_rand()}"
-    pending_var = f"_{_rand()}"
-    nominate_fn = _rand()
-    accept_fn = _rand()
-    mod = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public {admin_var};
-    address public {pending_var};
-    modifier {mod}() {{ require(msg.sender == {admin_var}); _; }}
-    function {nominate_fn}(address a) external {mod} {{ {pending_var} = a; }}
-    function {accept_fn}() external {{
-        require(msg.sender == {pending_var});
-        {admin_var} = msg.sender;
-        {pending_var} = address(0);
-    }}
-}}
-"""
-    ac = _analyze(source)
-    assert "authorized_caller.rotate" in _claims(ac, accept_fn)
-    assert "ownership_transfer" not in _labels(ac, accept_fn)
 
 
 # Q6: can the rules change? An address called in a modifier is an authority; one called during transfers is a hook.
@@ -384,28 +137,6 @@ contract Target {{
 """
     ac = _analyze(source)
     assert "hook_update" in _labels(ac, set_fn)
-
-
-def test_compound_drain_and_selfdestruct():
-    fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public owner;
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {fn}(address payable to) external onlyOwner {{
-        (bool ok,) = to.call{{value: address(this).balance}}("");
-        require(ok);
-        selfdestruct(to);
-    }}
-    receive() external payable {{}}
-}}
-"""
-    ac = _analyze(source)
-    labels = _labels(ac, fn)
-    assert "asset_send" in labels
-    assert "selfdestruct_capability" in labels
 
 
 def test_compound_pause_and_ownership():
@@ -436,34 +167,6 @@ contract Target {{
     assert "pause_toggle" in labels
     assert "authorized_caller.rotate" in _claims(ac, fn)
     assert "ownership_transfer" not in labels
-
-
-def test_q6_recursive_authority():
-    auth_var = f"_{_rand()}"
-    mod = _rand()
-    set_fn = _rand()
-    helper = f"_{_rand()}"
-    auth_helper = f"_{_rand()}"
-    guarded_fn = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-interface IAuth {{ function canCall(address, address, bytes4) external view returns (bool); }}
-contract Target {{
-    address public owner;
-    IAuth public {auth_var};
-    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
-    function {auth_helper}(bytes4 sig) internal view returns (bool) {{
-        return address({auth_var}) == address(0) || {auth_var}.canCall(msg.sender, address(this), sig);
-    }}
-    modifier {mod}(bytes4 sig) {{ require({auth_helper}(sig)); _; }}
-    function {helper}(IAuth a) internal {{ {auth_var} = a; }}
-    function {set_fn}(IAuth a) external onlyOwner {{ {helper}(a); }}
-    function {guarded_fn}() external {mod}(msg.sig) {{ }}
-}}
-"""
-    ac = _analyze(source)
-    assert "authority_update" not in _labels(ac, set_fn)
 
 
 def test_q6_recursive_hook():

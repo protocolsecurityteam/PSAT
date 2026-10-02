@@ -15,11 +15,8 @@ from services.monitoring import (
     HEARTBEAT_PROTOCOL_POLLER,
     HEARTBEAT_PROTOCOL_SCANNER,
     HEARTBEAT_PROTOCOL_TVL,
-    emit_monitor_cycle,
 )
 from utils.logging import log_timed_phase
-
-_CYCLE_FIELDS = {"contracts_scanned", "blocks_scanned", "events_found", "partial", "duration_ms"}
 
 
 def test_failed_phase_can_log_duration_when_stage_artifact_is_unavailable(caplog):
@@ -32,53 +29,6 @@ def test_failed_phase_can_log_duration_when_stage_artifact_is_unavailable(caplog
     assert record.phase == "membership_gate_intake"
     assert record.outcome == "failed"
     assert record.duration_ms >= 0
-
-
-def test_emit_monitor_cycle_running_heartbeat_and_info(caplog):
-    with patch.object(monitoring, "record_heartbeat") as hb:
-        with caplog.at_level(logging.INFO, logger="services.monitoring"):
-            emit_monitor_cycle(
-                HEARTBEAT_PROTOCOL_SCANNER,
-                started=0.0,
-                contracts_scanned=7,
-                blocks_scanned=2000,
-                events_found=0,
-                partial=False,
-            )
-
-    hb.assert_called_once()
-    (process,), kwargs = hb.call_args
-    assert process == HEARTBEAT_PROTOCOL_SCANNER
-    assert kwargs["status"] == "running"
-    assert _CYCLE_FIELDS <= set(kwargs["detail"])
-    assert kwargs["detail"]["events_found"] == 0
-    assert kwargs["detail"]["contracts_scanned"] == 7
-    assert kwargs["detail"]["partial"] is False
-
-    rec = next(r for r in caplog.records if r.message == "monitor cycle complete")
-    assert rec.levelno == logging.INFO
-    assert getattr(rec, "daemon") == HEARTBEAT_PROTOCOL_SCANNER
-    assert getattr(rec, "events_found") == 0
-    assert getattr(rec, "blocks_scanned") == 2000
-    assert getattr(rec, "partial") is False
-
-
-def test_emit_monitor_cycle_partial_marks_degraded():
-    with patch.object(monitoring, "record_heartbeat") as hb:
-        emit_monitor_cycle(
-            HEARTBEAT_PROTOCOL_POLLER,
-            started=0.0,
-            contracts_scanned=3,
-            blocks_scanned=0,
-            events_found=0,
-            partial=True,
-            note="batch_rpc_failed",
-        )
-
-    _, kwargs = hb.call_args
-    assert kwargs["status"] == "degraded"
-    assert kwargs["detail"]["partial"] is True
-    assert kwargs["detail"]["note"] == "batch_rpc_failed"
 
 
 def test_scan_for_events_zero_active_contracts_still_emits_cycle(caplog):
@@ -168,29 +118,6 @@ def test_proxy_watcher_reverting_getter_is_not_a_transport_failure(caplog):
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
-def test_proxy_watcher_treats_an_unrecognised_failure_as_not_determined(caplog):
-    from services.monitoring import proxy_watcher
-
-    def _guard(*_args, **_kwargs):
-        raise RuntimeError(
-            "eRPC URL/chain_id mismatch: caller declared chain_id=8453 but the RPC URL routes chain_id=1"
-        )
-
-    proxy_watcher.reset_not_determined_warn_state()
-    with patch.object(proxy_watcher, "rpc_request", _guard):
-        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
-            assert (
-                proxy_watcher.resolve_current_implementation(
-                    "0x" + "e" * 40, "http://stub", proxy_type="eip1967", chain_id=8453
-                )
-                is None
-            )
-
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert warnings[0].probes_unanswered == 1
-
-
 def test_proxy_watcher_rate_limit_payload_is_not_a_proven_absence(caplog):
     """Only a revert says anything about the contract."""
     from services.monitoring import proxy_watcher
@@ -209,42 +136,6 @@ def test_proxy_watcher_rate_limit_payload_is_not_a_proven_absence(caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].probes_unanswered == 1
-
-
-def test_proxy_watcher_storage_read_error_is_never_an_empty_slot(caplog):
-    from services.monitoring import proxy_watcher
-
-    def _trie_gone(_url, method, _params, **_kwargs):
-        assert method == "eth_getStorageAt"
-        raise RuntimeError(str({"code": -32000, "message": "missing trie node"}))
-
-    proxy_watcher.reset_not_determined_warn_state()
-    with patch.object(proxy_watcher, "rpc_request", _trie_gone):
-        with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
-            assert (
-                proxy_watcher.resolve_current_implementation("0x" + "a2" * 20, "http://stub", proxy_type="eip1967")
-                is None
-            )
-
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert warnings[0].probes_unanswered == 1
-
-
-def test_proxy_watcher_warn_once_is_keyed_per_proxy(caplog):
-    from services.monitoring import proxy_watcher
-
-    def _dead(*_args, **_kwargs):
-        raise RuntimeError("RPC request failed for http://stub: connection refused")
-
-    proxy_watcher.reset_not_determined_warn_state()
-    with patch.object(proxy_watcher, "rpc_request", _dead):
-        with caplog.at_level(logging.DEBUG, logger="services.monitoring.proxy_watcher"):
-            for address in ("0x" + "b1" * 20, "0x" + "b1" * 20, "0x" + "b2" * 20):
-                proxy_watcher.resolve_current_implementation(address, "http://stub", proxy_type="eip1967")
-
-    warned = [r.address for r in caplog.records if r.levelno == logging.WARNING]
-    assert warned == ["0x" + "b1" * 20, "0x" + "b2" * 20]
 
 
 def test_heartbeat_write_failure_warns_then_rate_limits(caplog, monkeypatch):

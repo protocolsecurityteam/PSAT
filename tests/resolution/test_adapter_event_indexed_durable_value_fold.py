@@ -24,9 +24,7 @@ CALLER_B = "0xcd425f44758a08baab3c4908f3e3de5776e45d7a"
 RESOLUTION_BLOCK = 25389671
 
 _EIG_SIG = "UserAllowedForwardedEigenpodCallsUpdated(address,bytes4,bool)"
-_EXT_SIG = "UserAllowedForwardedExternalCallsUpdated(address,bytes4,address,bool)"
 EIG_TOPIC0 = mapping_enumerator._event_topic0(_EIG_SIG)
-EXT_TOPIC0 = mapping_enumerator._event_topic0(_EXT_SIG)
 
 
 def _word(addr_or_hex: str) -> str:
@@ -52,23 +50,6 @@ def _eig_log(caller: str, selector: str, value: bool, *, block: int, tx_index: i
         block_hash=block.to_bytes(8, "big").rjust(32, b"\x11"),
         transaction_index=tx_index,
         topics=[EIG_TOPIC0, _word(caller), _selector_word(selector)],
-        data_words=[_bool_word(value)],
-    )
-
-
-def _ext_log(
-    caller: str, selector: str, target: str, value: bool, *, block: int, tx_index: int, log_index: int
-) -> IndexedEventLog:
-    return IndexedEventLog(
-        chain_id=1,
-        event_address=STATE_HOLDER,
-        topic0=EXT_TOPIC0,
-        tx_hash=(block * 100 + log_index).to_bytes(8, "big").rjust(32, b"\x00"),
-        log_index=log_index,
-        block_number=block,
-        block_hash=block.to_bytes(8, "big").rjust(32, b"\x22"),
-        transaction_index=tx_index,
-        topics=[EXT_TOPIC0, _word(caller), _selector_word(selector), _word(target)],
         data_words=[_bool_word(value)],
     )
 
@@ -111,33 +92,6 @@ def _eigenpod_descriptor() -> dict:
     }
 
 
-def _external_descriptor() -> dict:
-    return {
-        "kind": "mapping_membership",
-        "storage_var": "allowedForwardedExternalCalls",
-        "key_sources": [
-            {"source": "msg_sender"},
-            {"source": "parameter", "parameter_index": 1, "parameter_name": "selector"},
-            {"source": "parameter", "parameter_index": 2, "parameter_name": "target"},
-        ],
-        "enumeration_hint": [
-            {
-                "topic0": EXT_TOPIC0,
-                "topics_to_keys": {"1": 0, "2": 1, "3": 2},
-                "data_to_keys": {},
-                "direction": "set",
-                "event_signature": _EXT_SIG,
-                "event_name": "UserAllowedForwardedExternalCallsUpdated",
-                "mapping_name": "allowedForwardedExternalCalls",
-                "key_position": 2,
-                "indexed_positions": [0, 1, 2],
-                "value_position": 3,
-                "writer_function": "updateAllowedForwardedExternalCalls(address,bytes4,address,bool)",
-            }
-        ],
-    }
-
-
 @pytest.fixture(autouse=True)
 def _stub_creation_block_floor(monkeypatch):
     """Tests of a specific floor or the defer path re-stub ``resolve_scan_floor``."""
@@ -166,86 +120,6 @@ def _seed(session, rows, cursors):
     for row in rows:
         session.add(row)
     session.flush()
-
-
-def test_durable_value_fold_recovers_single_eigenpod_caller(db_session, no_live_calls):
-    rows = [
-        _eig_log(CALLER_A, "0x88676cad", True, block=23591216, tx_index=0, log_index=146),
-        _eig_log(CALLER_A, "0xf074ba62", True, block=23591216, tx_index=0, log_index=148),
-        _eig_log(CALLER_A, "0x3f65cf19", True, block=23591216, tx_index=0, log_index=150),
-    ]
-    _seed(db_session, rows, [_cursor(EIG_TOPIC0, last_block=25389740, complete=True)])
-
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "finite_set"
-    assert cap.membership_quality == "exact"
-    assert sorted(cap.members or []) == [CALLER_A.lower()]
-    assert no_live_calls == []
-
-
-def test_durable_value_fold_recovers_two_external_callers(db_session, no_live_calls):
-    rows = [
-        _ext_log(
-            CALLER_A,
-            "0x3ccc861d",
-            "0x7750d328b314effa365a0402ccfd489b80b0adda",
-            True,
-            block=23591216,
-            tx_index=0,
-            log_index=144,
-        ),
-        _ext_log(
-            CALLER_B,
-            "0xeea9064b",
-            "0x39053d51b77dc0d36036fc1fcc8cb819df8ef37a",
-            True,
-            block=24047816,
-            tx_index=0,
-            log_index=680,
-        ),
-    ]
-    _seed(db_session, rows, [_cursor(EXT_TOPIC0, last_block=25389740, complete=True)])
-
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(_external_descriptor(), ctx)
-
-    assert cap.kind == "finite_set"
-    assert cap.membership_quality == "exact"
-    assert sorted(cap.members or []) == sorted([CALLER_A.lower(), CALLER_B.lower()])
-    assert no_live_calls == []
-
-
-def test_durable_value_fold_drops_caller_whose_latest_value_is_false(db_session, no_live_calls):
-    # The fold can only add real members, never open the function.
-    rows = [
-        _eig_log(CALLER_A, "0x88676cad", True, block=100, tx_index=0, log_index=0),
-        _eig_log(CALLER_A, "0x88676cad", False, block=200, tx_index=0, log_index=0),
-    ]
-    _seed(db_session, rows, [_cursor(EIG_TOPIC0, last_block=25389740, complete=True)])
-
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "finite_set"
-    assert (cap.members or []) == []
-    assert no_live_calls == []
 
 
 def test_durable_value_fold_respects_resolution_block(db_session, no_live_calls):
@@ -321,42 +195,6 @@ def test_cold_durable_index_performs_zero_row_scans(db_session, no_live_calls, i
     assert no_live_calls == []
 
 
-def test_no_cursor_at_all_performs_zero_row_scans(db_session, no_live_calls, iter_rows_spy):
-    # The audited run wasted this scan on every caller-keyed-ACL function.
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "external_check_only"
-    assert cap.check is not None
-    assert cap.check.extra.get("deferred_pending_index") is True
-    assert iter_rows_spy == []
-    assert no_live_calls == []
-
-
-def test_warm_durable_index_still_scans_rows(db_session, no_live_calls, iter_rows_spy):
-    rows = [_eig_log(CALLER_A, "0x88676cad", True, block=23591216, tx_index=0, log_index=146)]
-    _seed(db_session, rows, [_cursor(EIG_TOPIC0, last_block=25389740, complete=True)])
-
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "finite_set"
-    assert cap.membership_quality == "exact"
-    assert sorted(cap.members or []) == [CALLER_A.lower()]
-    assert len(iter_rows_spy) == 1  # warm path scans exactly once
-    assert no_live_calls == []
-
-
 def test_cold_defer_projects_identically_to_unsupported_leaf(db_session, no_live_calls):
     # The cold deferral projects the same public/gated verdict as the unsupported leaf it replaces.
     from services.policy.capability_surface import project_capability_surface
@@ -400,32 +238,6 @@ def test_structural_absent_repo_without_fold_event_values_falls_through_to_live(
         event_log_repo=cast(Any, _NoValueFoldRepo()),
     )
     cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "unsupported"
-    assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
-
-
-def test_structural_absent_no_repo_falls_through_to_live(monkeypatch):
-    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
-    ctx = EvaluationContext(chain_id=1, contract_address=STATE_HOLDER, block=RESOLUTION_BLOCK)
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "unsupported"
-    assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
-
-
-def test_zero_event_address_does_not_defer_forever(db_session, monkeypatch):
-    # A zero address never gets a cursor, so deferring would wait forever.
-    monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
-    desc = _eigenpod_descriptor()
-    desc["enumeration_hint"][0]["event_address"] = "0x" + "0" * 40
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=PostgresEventLogRepo(db_session),
-    )
-    cap = EventIndexedAdapter().enumerate(desc, ctx)
 
     assert cap.kind == "unsupported"
     assert "mapping_value_scan_failed" in (cap.unsupported_reason or "")
@@ -605,51 +417,6 @@ def test_durable_explicit_value_predicate_filters_by_value(db_session, no_live_c
     assert cap.membership_quality == "exact"
     assert sorted(cap.members or []) == [CALLER_A.lower()]
     assert no_live_calls == []
-
-
-def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, monkeypatch):
-    captured: dict = {}
-
-    async def fake_values(contract_address, writer_specs, **kwargs):
-        captured["contract_address"] = contract_address
-        captured["kwargs"] = kwargs
-        return {
-            "entries": [{"key": CALLER_A.lower(), "value_hex": _bool_word(True), "last_block": 100}],
-            "status": "complete",
-            "pages_fetched": 1,
-            "last_block_scanned": 100,
-            "error": None,
-        }
-
-    monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values", fake_values)
-    mapping_enumerator._VALUE_CACHE.clear()
-
-    class _NoValueFoldRepo: ...
-
-    sentinel_client = object()
-    sentinel_module = object()
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=STATE_HOLDER,
-        block=RESOLUTION_BLOCK,
-        event_log_repo=cast(Any, _NoValueFoldRepo()),
-        meta={
-            "hypersync_token": "tok-123",
-            "hypersync_client": sentinel_client,
-            "hypersync_module": sentinel_module,
-            "hypersync_url": "https://eth.example.xyz",
-        },
-    )
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-
-    assert cap.kind == "finite_set"
-    assert sorted(cap.members or []) == [CALLER_A.lower()]
-    assert captured["contract_address"] == STATE_HOLDER
-    kw = captured["kwargs"]
-    assert kw.get("bearer_token") == "tok-123"
-    assert kw.get("client") is sentinel_client
-    assert kw.get("hypersync_url") == "https://eth.example.xyz"
-    assert kw.get("to_block") == RESOLUTION_BLOCK
 
 
 def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):

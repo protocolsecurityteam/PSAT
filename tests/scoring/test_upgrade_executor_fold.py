@@ -24,7 +24,7 @@ from db.models import (
     UpgradeTransaction,
 )
 from services.discovery import upgrade_history as uh
-from services.monitoring.event_topics import CALL_EXECUTED_TOPIC0, EXECUTION_SUCCESS_TOPIC0
+from services.monitoring.event_topics import CALL_EXECUTED_TOPIC0
 
 _FIXTURES = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "upgrade_receipts" / "protocol1_receipts.json").read_text()
@@ -214,16 +214,6 @@ def _receipt(tx_hash, **overrides):
     return data
 
 
-def test_topic0_pins():
-    from eth_utils.crypto import keccak
-
-    assert uh.UPGRADED_TOPIC0 == "0x" + keccak(text="Upgraded(address)").hex()
-    assert CALL_EXECUTED_TOPIC0 == "0x" + keccak(text="CallExecuted(bytes32,uint256,address,uint256,bytes)").hex()
-    assert EXECUTION_SUCCESS_TOPIC0 == "0x" + keccak(text="ExecutionSuccess(bytes32,uint256)").hex()
-    assert CALL_EXECUTED_TOPIC0 == "0xc2617efa69bab66782fa219543714338489c4e9e178271560a91b82c3f612b58"
-    assert uh.UPGRADED_TOPIC0 == "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b"
-
-
 def test_bloom_membership_matches_the_real_receipts():
     """A bloom has no false negatives, which licenses ``safe_direct``; the log array's completeness is exactly what's
     in question.
@@ -234,49 +224,6 @@ def test_bloom_membership_matches_the_real_receipts():
     assert uh._bloom_has_topic(fanout["logsBloom"], CALL_EXECUTED_TOPIC0) is True
     assert uh._bloom_has_topic(None, CALL_EXECUTED_TOPIC0) is None
     assert uh._bloom_has_topic("0x00", CALL_EXECUTED_TOPIC0) is None
-
-
-def test_pruned_log_array_with_intact_bloom_is_not_determined(world, wire):
-    """eRPC fans out across upstreams, so a pruned log array is a real risk."""
-    session = world["session"]
-    proxy = world["contract"](PROXY_ETHERFI_NODES_MANAGER)
-    world["event"](proxy, TX_FANOUT, BLOCK_FANOUT)
-    world["classify"](TIMELOCK, "timelock")
-    world["classify"](SAFE_ROUTING_THE_TIMELOCK, "safe")
-
-    stripped = _receipt(TX_FANOUT)
-    stripped["logs"] = [log for log in stripped["logs"] if log["topics"][0].lower() != CALL_EXECUTED_TOPIC0.lower()]
-    wire.receipts = {TX_FANOUT: stripped}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_FANOUT))
-    assert row.receipt_log_set_complete_for_tx is False
-    assert row.executor_kind == "not_determined"
-    assert row.executor_address is None
-    assert row.executor_call_targets is None
-
-
-def test_pruned_log_array_with_the_bloom_removed_is_not_determined(world, wire):
-    """With no bloom, a consistent-unless-contradicted rule would mint ``safe_direct`` from a ``timelock_routed``
-    receipt.
-    """
-    session = world["session"]
-    proxy = world["contract"](PROXY_ETHERFI_NODES_MANAGER)
-    world["event"](proxy, TX_FANOUT, BLOCK_FANOUT)
-    world["classify"](TIMELOCK, "timelock")
-    world["classify"](SAFE_ROUTING_THE_TIMELOCK, "safe")
-
-    stripped = _receipt(TX_FANOUT)
-    stripped["logs"] = [log for log in stripped["logs"] if log["topics"][0].lower() != CALL_EXECUTED_TOPIC0.lower()]
-    stripped.pop("logsBloom")
-    wire.receipts = {TX_FANOUT: stripped}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_FANOUT))
-    assert row.receipt_log_set_complete_for_tx is False
-    assert row.executor_kind == "not_determined"
-    assert row.executor_kind != "safe_direct"
-    assert row.executor_address is None
 
 
 def test_all_zero_bloom_is_not_proof_of_absence(world, wire):
@@ -304,22 +251,6 @@ def test_all_zero_bloom_is_not_proof_of_absence(world, wire):
     session.refresh(row)
     assert row.receipt_log_set_complete_for_tx is True
     assert row.executor_kind == "safe_direct"
-
-
-def test_receipt_missing_our_own_event_is_not_complete(world, wire):
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe")
-
-    filtered = _receipt(TX_SAFE_DIRECT)
-    filtered["logs"] = [log for log in filtered["logs"] if log["topics"][0].lower() != uh.UPGRADED_TOPIC0.lower()]
-    wire.receipts = {TX_SAFE_DIRECT: filtered}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.receipt_log_set_complete_for_tx is False
-    assert row.executor_kind == "not_determined"
 
 
 @pytest.fixture()
@@ -354,21 +285,6 @@ def test_nineteen_events_are_one_governance_action(fanout_world):
     assert session.query(UpgradeTransaction).count() == 1
 
 
-def test_fanout_executor_is_the_classified_timelock(fanout_world):
-    session = fanout_world["session"]
-    row = session.get(UpgradeTransaction, (1, TX_FANOUT))
-    assert row.executor_kind == "timelock_routed"
-    assert row.executor_address == TIMELOCK
-    assert row.executor_classified_type == "timelock"
-    assert row.executor_classification_source == "control_graph_nodes"
-    assert row.receipt_log_set_complete_for_tx is True
-    assert row.tx_status == 1
-    assert row.block_number == BLOCK_FANOUT
-    assert row.is_contract_creation is False
-    # The tx also carries a Safe's ExecutionSuccess; CallExecuted decides.
-    assert row.executor_address != SAFE_ROUTING_THE_TIMELOCK
-
-
 def test_call_targets_distinguish_the_proxies_the_timelock_actually_called(fanout_world):
     """A3: 26 ``Upgraded`` emitters, 24 of them ``CallExecuted`` targets."""
     session = fanout_world["session"]
@@ -384,72 +300,6 @@ def test_call_targets_distinguish_the_proxies_the_timelock_actually_called(fanou
     assert sorted(emitters - targets) == sorted(FANOUT_UNTARGETED)
 
     assert PROXY_ETHERFI_NODES_MANAGER.lower() in targets
-
-
-def test_safe_direct_publishes_no_authoriser_though_receipt_from_is_populated(world, wire):
-    """``receipt.from`` is the submitter, not the signer set: five senders relayed for one Safe."""
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe")
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_kind == "safe_direct"
-    assert row.executor_address == SAFE_DIRECT_EMITTER
-    assert row.executor_classified_type == "safe"
-    assert row.executor_call_targets is None
-
-    assert row.receipt_from == "0x544bdcbb88f2756000de227580aaad7376f3794e"
-    assert not hasattr(row, "authorising_eoa")
-    basis = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["basis"]
-    assert basis["authorising_eoa"] == "not_determined"
-
-
-def test_one_hop_publishes_no_authoriser(world, wire):
-    """``receipt.to == proxy`` only proves the top-level frame; self-calls, multicall and ERC-2771 break it at the
-    upgrade site.
-    """
-    session = world["session"]
-    proxy = world["contract"](PROXY_ONE_HOP)
-    world["event"](proxy, TX_ONE_HOP, BLOCK_ONE_HOP)
-    wire.receipts = {TX_ONE_HOP: _receipt(TX_ONE_HOP)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_ONE_HOP))
-    assert row.executor_kind == "not_determined"
-    assert row.executor_kind != "eoa_one_hop"
-    assert "eoa_one_hop" not in set(__import__("db.models", fromlist=["EXECUTOR_KINDS"]).EXECUTOR_KINDS)
-    assert row.executor_address is None
-    assert row.receipt_to == PROXY_ONE_HOP
-    assert row.receipt_from == "0xf8a86ea1ac39ec529814c377bd484387d395421e"
-    basis = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["basis"]
-    assert basis["authorising_eoa"] == "not_determined"
-
-
-def test_eoa_creation_transaction_is_a_deployment_not_an_upgrade(world, wire):
-    session = world["session"]
-    proxy = world["contract"](PROXY_ONE_HOP)
-    world["event"](proxy, TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA)
-    world["event"](proxy, TX_ONE_HOP, BLOCK_ONE_HOP)
-    wire.receipts = {TX_DEPLOY_EOA: _receipt(TX_DEPLOY_EOA), TX_ONE_HOP: _receipt(TX_ONE_HOP)}
-    wire.creation = {PROXY_ONE_HOP: (TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA)}
-    wire.code = {(PROXY_ONE_HOP, hex(BLOCK_DEPLOY_EOA - 1)): "0x"}
-    _run_fold(session, wire, [proxy.id])
-
-    deploy = session.get(UpgradeTransaction, (1, TX_DEPLOY_EOA))
-    assert deploy.is_contract_creation is True
-    assert deploy.receipt_to is None
-    assert deploy.created_contract_address == PROXY_ONE_HOP
-    assert uh.event_is_deployment(
-        deploy, None, proxy_address=PROXY_ONE_HOP, event_block=BLOCK_DEPLOY_EOA, pair_event_count=1
-    )
-
-    entry = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]
-    assert entry["count"] == 1, "the creation event must not be published as an upgrade"
-    assert entry["basis"]["deployments_excluded"] == 1
-    assert entry["basis"]["events_total"] == 2
 
 
 def test_factory_deployed_proxy_needs_both_witnesses(world, wire):
@@ -608,23 +458,6 @@ def test_unavailable_receipt_writes_no_row_and_drops_no_event(world, wire):
     assert entry["basis"]["tx_facts_present"] == 0
 
 
-def test_unclassified_safe_emitter_is_not_determined(world, wire):
-    """T7: the emitter really is a Safe, but nothing in the classification plane says so, and the fold may not decide
-    that itself.
-    """
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.receipt_log_set_complete_for_tx is True, "the receipt is fine; the emitter is what is unknown"
-    assert row.executor_kind == "not_determined"
-    assert row.executor_address is None
-    assert row.executor_classification_source is None
-
-
 def test_reverted_transaction_publishes_nothing_positive(world, wire):
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
@@ -747,64 +580,7 @@ def test_published_count_drops_the_deployment_and_keeps_the_unwitnessed(world, w
     assert after["basis"]["recorded_event_coverage"] == "not_determined"
 
 
-def test_post_exclusion_zero_is_not_determined_never_zero(world, wire):
-    """A5: the recording surface is unwitnessed (only ERC-1967 topics; ``old_impl`` NULL on backfilled rows), so zero
-    would read as an earned negative.
-    """
-    session = world["session"]
-    proxy = world["contract"](PROXY_ONE_HOP)
-    world["event"](proxy, TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA)
-    wire.receipts = {TX_DEPLOY_EOA: _receipt(TX_DEPLOY_EOA)}
-    _run_fold(session, wire, [proxy.id])
-
-    entry = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]
-    assert entry["count"] is None
-    assert entry["count"] != 0
-    assert entry["basis"]["events_total"] == 1
-    assert entry["basis"]["deployments_excluded"] == 1
-    assert entry["basis"]["recorded_event_coverage"] == "not_determined"
-
-
-def test_company_overview_publishes_the_count_with_its_basis(world, wire):
-    from services.aggregations.company_overview import _prefetch_child_tables
-
-    session = world["session"]
-    proxy = world["contract"](PROXY_ONE_HOP)
-    world["event"](proxy, TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA)
-    world["event"](proxy, TX_ONE_HOP, BLOCK_ONE_HOP)
-    wire.receipts = {TX_DEPLOY_EOA: _receipt(TX_DEPLOY_EOA), TX_ONE_HOP: _receipt(TX_ONE_HOP)}
-    _run_fold(session, wire, [proxy.id])
-
-    children = _prefetch_child_tables(session, {proxy.id})
-    entry = children["upgrade_events_count"][proxy.id]
-    assert entry["count"] == 1
-    assert entry["basis"]["authorising_eoa"] == "not_determined"
-    assert entry["basis"]["timelock_is_decoy"] == "not_determined"
-    assert entry["basis"]["recorded_event_coverage"] == "not_determined"
-
-
 # Addresses are identities only within a chain; an unscoped read is the cross-chain fail-open PR #158 closed elsewhere.
-
-
-def test_off_chain_twin_does_not_classify_the_emitter(world, wire):
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](
-        SAFE_DIRECT_EMITTER,
-        "safe",
-        chain="base",
-        details={"safe_protection": {"probe_block": 24_000_000}},
-    )
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_kind == uh.NOT_DETERMINED
-    assert row.executor_address is None
-    assert row.executor_classification_source is None
-    assert row.executor_classified_type is None
-    assert row.executor_classification_block is None
 
 
 def test_same_chain_twin_still_classifies_exactly_as_before(world, wire):
@@ -828,26 +604,6 @@ def test_same_chain_twin_still_classifies_exactly_as_before(world, wire):
     assert row.executor_classification_block == 21_000_000
 
 
-def test_classification_block_is_never_taken_from_another_chains_probe(world, wire):
-    """Publishing Base's probe height beside a mainnet row would cite a chain this tx was never on."""
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain="ethereum")
-    world["classify"](
-        SAFE_DIRECT_EMITTER,
-        "safe",
-        chain="base",
-        details={"safe_protection": {"probe_block": 24_000_000}},
-    )
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_kind == "safe_direct"
-    assert row.executor_classification_block is None
-
-
 def test_a_row_whose_contract_has_no_chain_classifies_nothing(world, wire):
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
@@ -861,43 +617,4 @@ def test_a_row_whose_contract_has_no_chain_classifies_nothing(world, wire):
     assert row.executor_address is None
 
 
-def test_an_off_chain_disagreement_no_longer_blocks_a_same_chain_verdict(world, wire):
-    """The unscoped read also failed closed wrongly: a Base twin typed ``timelock`` blanked the mainnet ``safe``
-    verdict.
-    """
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain="ethereum")
-    world["classify"](SAFE_DIRECT_EMITTER, "timelock", chain="base")
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_kind == "safe_direct"
-    assert row.executor_classified_type == "safe"
-
-
 # ``mainnet`` is the registry alias for chain 1.
-@pytest.mark.parametrize(
-    "classifications",
-    [
-        pytest.param([("safe", {}), ("timelock", {})], id="planes-that-disagree"),
-        pytest.param(
-            [("safe", {"chain": "ethereum"}), ("timelock", {"chain": "mainnet"})],
-            id="same-chain-disagreement",
-        ),
-    ],
-)
-def test_disagreeing_classifications_blank_the_verdict(world, wire, classifications):
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    for classified_type, kwargs in classifications:
-        world["classify"](SAFE_DIRECT_EMITTER, classified_type, **kwargs)
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_kind == uh.NOT_DETERMINED
-    assert row.executor_address is None

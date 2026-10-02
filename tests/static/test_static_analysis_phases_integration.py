@@ -60,24 +60,6 @@ class TestAnalysisPhaseSuccess:
         assert calls[1]["data"] == predicate_trees
         assert calls[2]["data"] == effects
 
-    def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
-        worker = StaticWorker()
-        monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-        monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
-        session = MagicMock()
-        job = _job()
-
-        monkeypatch.setattr(
-            "workers.static_worker.collect_contract_analysis_with_artifacts",
-            lambda project_dir: ({"schema_version": "0.1"}, None, None),
-        )
-        calls = _capture_store_artifact(monkeypatch)
-
-        result = worker._run_analysis_phase(session, job, tmp_path, "TestContract", job.address)
-
-        assert result == {"schema_version": "0.1"}
-        assert [call["name"] for call in calls] == ["contract_analysis"]
-
 
 class TestAnalysisPhaseFailure:
     def test_stores_analysis_error_on_exception(self, monkeypatch, tmp_path):

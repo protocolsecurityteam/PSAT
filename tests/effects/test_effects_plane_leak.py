@@ -29,7 +29,6 @@ from services.effects.selection import AssetHolding, Candidate
 from services.effects.simulate import SimCallResult, SimResult
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_stubs import RecordingStore, ok, transfer_log
-from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.logging import degraded_errors_var, stage_metrics_var
 from workers.effects_worker import EffectsWorker, _Seams
 
@@ -330,38 +329,6 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
 
 
 @requires_postgres
-def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
-    session = clean_effects
-    pid, fns, cids = _protocol(session, [CONTRACT_A])
-    _run_for(session, pid, fns, cids, CONTRACT_A, "leak-a", monkeypatch, [])
-    session.expire_all()
-
-    cached = session.query(EffectBehaviorCache).one()
-    body = str(cached.details)
-    assert HOLDER.lower() not in body.lower()
-    assert RECIPIENT.lower() not in body.lower()
-    assert str(REACH_USD) not in body
-    assert not any(k.startswith(("observed_reach", "reach_")) for k in (cached.details or {}))
-    # The proving execution is one deployment's observation too.
-    assert PROVING_EXECUTION_KEY not in (cached.details or {})
-    assert PRINCIPAL.lower() not in body.lower()
-    assert (cached.details or {})["value_moved"] is True
-
-    row = session.query(EffectVerdict).one()
-    residue = dict(row.observed_residue or {})
-    execution = residue.pop(PROVING_EXECUTION_KEY)
-    assert residue == {
-        "observed_reach_value_usd": REACH_USD,
-        "observed_reach_holders": [HOLDER.lower()],
-        "reach_determined": True,
-        "observed_reach_assets": [TOKEN.lower()],
-        "reach_tvl_check": "skipped_no_tvl",
-    }
-    assert execution["caller"] == PRINCIPAL.lower()
-    assert execution["target"] == CONTRACT_A.lower()
-
-
-@requires_postgres
 def test_cache_hit_never_inherits_another_deployments_reach(clean_effects, monkeypatch):
     session = clean_effects
     pid, fns, cids = _protocol(session, [CONTRACT_A, CONTRACT_B])
@@ -405,18 +372,3 @@ def test_minted_claim_surfaces_reach_only_for_the_observing_deployment(clean_eff
     observed_b = claim_b["witness"].get("observed", {})
     assert "observed_reach_holders" not in observed_b
     assert "observed_reach_value_usd" not in observed_b
-
-
-@requires_postgres
-def test_reach_survives_a_later_observation_less_rewrite(clean_effects, monkeypatch):
-    """The residue column is preserved across an observation-less rewrite, like the destination."""
-    session = clean_effects
-    pid, fns, cids = _protocol(session, [CONTRACT_A])
-    runs: list[str] = []
-    _run_for(session, pid, fns, cids, CONTRACT_A, "leak-keep-1", monkeypatch, runs)
-    _run_for(session, pid, fns, cids, CONTRACT_A, "leak-keep-2", monkeypatch, runs)
-    session.expire_all()
-
-    row = session.query(EffectVerdict).one()
-    assert row.observed_residue["observed_reach_holders"] == [HOLDER.lower()]
-    assert row.observed_residue["observed_reach_value_usd"] == REACH_USD

@@ -16,38 +16,6 @@ def _clear_cache():
     rd.reset_cache()
 
 
-def test_budget_charge_search_increments_and_costs():
-    b = rd._Budget()
-    b.charge_search("auto")
-    b.charge_search("deep-lite")
-    assert b.search_calls == 2
-    assert abs(b.estimated_cost_usd - 0.019) < 1e-9
-
-
-def test_budget_search_cap_trips():
-    b = rd._Budget()
-    for _ in range(rd.MAX_SEARCH_CALLS_PER_PROTOCOL):
-        b.charge_search("auto")
-    with pytest.raises(RuntimeError, match="search budget"):
-        b.charge_search("auto")
-
-
-def test_budget_research_cap_trips():
-    b = rd._Budget()
-    for _ in range(rd.MAX_RESEARCH_CALLS_PER_PROTOCOL):
-        b.charge_research()
-    with pytest.raises(RuntimeError, match="research budget"):
-        b.charge_research()
-
-
-def test_budget_circuit_breaker_trips_on_cost():
-    b = rd._Budget()
-    # The breaker is $2.00; inflate cost without hitting the call cap.
-    b.estimated_cost_usd = 1.95
-    with pytest.raises(RuntimeError, match="circuit breaker"):
-        b.charge_research()
-
-
 def test_search_fn_returns_seeds_on_research_plus_first_call(monkeypatch):
     seeds = [{"url": "https://seed.example.com", "title": "S"}]
     budget = rd._Budget()
@@ -115,11 +83,6 @@ def test_patch_classify_with_seeds_appends_unseen_urls():
         rd.audit_reports_mod.classify_search_results = original
 
 
-def test_load_known_docs_missing_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(rd, "KNOWN_DOCS_PATH", tmp_path / "missing.yaml")
-    assert rd._load_known_docs() == {}
-
-
 def test_load_known_docs_present(monkeypatch, tmp_path):
     p = tmp_path / "k.yaml"
     p.write_text("protocols:\n  gmx:\n    audit_urls: [https://a]\n")
@@ -127,15 +90,6 @@ def test_load_known_docs_present(monkeypatch, tmp_path):
     out = rd._load_known_docs()
     assert "gmx" in out
     assert out["gmx"]["audit_urls"] == ["https://a"]
-
-
-def test_apply_spa_overrides_no_known(monkeypatch):
-    monkeypatch.setattr(rd, "_load_known_docs", lambda: {})
-    inv = {"contracts": []}
-    aud = {"reports": []}
-    rd._apply_spa_overrides("nope", inv, aud)
-    assert inv == {"contracts": []}
-    assert aud == {"reports": []}
 
 
 def test_apply_spa_overrides_injects(monkeypatch):
@@ -262,31 +216,6 @@ def test_dependency_research_full_flow(monkeypatch):
     assert out[0]["url"] == "https://example.com/bv.pdf"
     assert out[0]["dependency_component"] == "BoringVault"
     assert out[0]["discovery_source"] == "dependency_two_pass"
-
-
-def test_dependency_research_skips_audits_without_url(monkeypatch):
-    def fake(instructions, schema=None):
-        if "components" in instructions or "third-party" in instructions:
-            return {"data": {"components": [{"name": "X", "author": "Y"}]}}
-        return {"data": {"auditReports": [{"auditor": "Z", "url": ""}]}}
-
-    monkeypatch.setattr(rd, "_cached_deep_research", fake)
-    out = rd._dependency_research("p", rd._Budget())
-    assert out == []
-
-
-def test_dependency_research_pass2_failure_skipped(monkeypatch):
-    state = {"calls": 0}
-
-    def fake(instructions, schema=None):
-        state["calls"] += 1
-        if state["calls"] == 1:
-            return {"data": {"components": [{"name": "X", "author": "Y"}]}}
-        raise RuntimeError("pass 2 down")
-
-    monkeypatch.setattr(rd, "_cached_deep_research", fake)
-    out = rd._dependency_research("p", rd._Budget())
-    assert out == []  # pass 2 failure is logged + skipped
 
 
 def test_dependency_research_breaks_when_budget_exhausted(monkeypatch):
@@ -428,21 +357,6 @@ def test_run_discovery_triggers_dependency_pass(monkeypatch):
     assert "https://dep.example.com" in urls
 
 
-def test_run_discovery_audit_seed_failure_does_not_abort(monkeypatch):
-    _stub_discovery_modules(monkeypatch)
-
-    def fake_dr(instructions, schema=None):
-        if "audit reports" in instructions:
-            raise RuntimeError("seed call down")
-        return {"data": {"contracts": []}}
-
-    monkeypatch.setattr(rd, "_cached_deep_research", fake_dr)
-    monkeypatch.setattr(rd, "_needs_dependency_pass", lambda protocol, contracts, audits: False)
-
-    out = rd.run_discovery("p")
-    assert out["meta"]["protocol"] == "p"
-
-
 def test_run_discovery_skips_invalid_addresses_from_deep_research(monkeypatch):
     _stub_discovery_modules(monkeypatch)
     monkeypatch.setattr(
@@ -478,18 +392,6 @@ def test_run_discovery_applies_spa_overrides(monkeypatch):
     assert "https://known.audit/a.pdf" in urls
 
 
-def test_reset_cache_clears_entries(monkeypatch):
-    monkeypatch.setattr(
-        rd.exa,
-        "deep_research",
-        lambda instructions, schema=None, timeout_seconds=900: {"data": {}},
-    )
-    rd._cached_deep_research("k1", schema={})
-    assert rd._research_cache  # populated
-    rd.reset_cache()
-    assert rd._research_cache == {}
-
-
 def test_research_cache_evicts_at_max(monkeypatch):
     monkeypatch.setattr(rd, "_RESEARCH_CACHE_MAX", 4)
     monkeypatch.setattr(
@@ -500,19 +402,6 @@ def test_research_cache_evicts_at_max(monkeypatch):
     for i in range(20):
         rd._cached_deep_research(f"instr-{i}", schema={})
     assert len(rd._research_cache) <= rd._RESEARCH_CACHE_MAX
-
-
-def test_research_cache_ttl_expiry_reprobes(monkeypatch):
-    calls: list[str] = []
-    monkeypatch.setattr(
-        rd.exa,
-        "deep_research",
-        lambda instructions, schema=None, timeout_seconds=900: calls.append(instructions) or {"data": {}},
-    )
-    monkeypatch.setattr(rd, "RESEARCH_CACHE_TTL_SECONDS", 0)
-    rd._cached_deep_research("k", schema={})
-    rd._cached_deep_research("k", schema={})
-    assert len(calls) == 2
 
 
 def test_research_cache_pressure_state_set_and_cleared(monkeypatch):

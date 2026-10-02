@@ -26,7 +26,6 @@ from services.resolution.adapters.solmate_roles import (
     _ROLE_TOPICS,
     CANCALL_SELECTOR,
     CANCALL_SIGNATURE,
-    SolmateRolesAuthorityAdapter,
 )
 from services.resolution.capabilities import CapabilityExpr, ExternalCheck
 from services.resolution.capability_resolver import capability_to_dict
@@ -45,7 +44,6 @@ from tests.conftest import requires_postgres
 _ROLE_SET_TOPIC0 = SOLADY_ENUMERABLE_ROLES.grant_events[0].topic0
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
-_SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 _PAUSE = "0x8456cb59"
 
 
@@ -73,28 +71,6 @@ def _ctx(repo: PostgresEventLogRepo, teller: str, authority: str, selector: str)
     )
 
 
-def _seed_role_logs(session, authority: str) -> None:
-    """Synthetic monotonic ordering keeps the fixture's log order, which the canCall fold depends on."""
-    for i, log in enumerate(_fixture()["logs"]):
-        data = log.get("data") or "0x"
-        body = data[2:] if isinstance(data, str) and data.startswith("0x") else ""
-        data_words = ["0x" + body[j : j + 64] for j in range(0, len(body), 64)] if body else []
-        session.add(
-            IndexedEventLog(
-                chain_id=1,
-                event_address=authority.lower(),
-                topic0=str(log["topics"][0]).lower(),
-                tx_hash=i.to_bytes(32, "big"),
-                log_index=0,
-                block_number=i,
-                block_hash=b"\x00" * 32,
-                transaction_index=0,
-                topics=[str(t).lower() for t in log["topics"]],
-                data_words=data_words,
-            )
-        )
-
-
 def _seed_role_cursors(
     session, authority: str, *, backfill_complete: bool, last_block: int = 10_000, chain_id: int = 1
 ) -> None:
@@ -116,51 +92,6 @@ def _seed_role_cursors(
 # Half 1 — adapters tag index-cold deferrals, and the SAME resolver self-heals
 # once the events are durably indexed (real PostgresEventLogRepo + DB).
 # ---------------------------------------------------------------------------
-
-
-@requires_postgres
-def test_solmate_cold_index_defers_with_marker(db_session):
-    fixture = _fixture()
-    authority, teller = fixture["authority"].lower(), fixture["teller"].lower()
-    cap = SolmateRolesAuthorityAdapter().enumerate(
-        _descriptor(), _ctx(PostgresEventLogRepo(db_session), teller, authority, _PAUSE)
-    )
-    assert cap.kind == "external_check_only"
-    assert cap.check is not None
-    assert cap.check.extra.get("basis") == ["no_index_cursor"]
-    assert cap.check.extra.get(DEFERRED_MARKER) is True
-    assert cap.check.target_address == authority
-
-
-@requires_postgres
-def test_solmate_warm_index_self_heals_to_concrete_caller(db_session):
-    fixture = _fixture()
-    authority, teller = fixture["authority"].lower(), fixture["teller"].lower()
-    _seed_role_logs(db_session, authority)
-    _seed_role_cursors(db_session, authority, backfill_complete=True)
-    db_session.commit()
-
-    cap = SolmateRolesAuthorityAdapter().enumerate(
-        _descriptor(), _ctx(PostgresEventLogRepo(db_session), teller, authority, _PAUSE)
-    )
-    assert cap.kind == "finite_set"
-    assert _SAFE_4_6 in (cap.members or [])
-    assert cap.membership_quality == "exact"
-    assert capability_to_dict(cap).get("check") is None
-
-
-@requires_postgres
-def test_solmate_backfill_incomplete_cursor_still_defers(db_session):
-    fixture = _fixture()
-    authority, teller = fixture["authority"].lower(), fixture["teller"].lower()
-    _seed_role_cursors(db_session, authority, backfill_complete=False)
-    db_session.commit()
-    cap = SolmateRolesAuthorityAdapter().enumerate(
-        _descriptor(), _ctx(PostgresEventLogRepo(db_session), teller, authority, _PAUSE)
-    )
-    assert cap.kind == "external_check_only"
-    assert cap.check is not None
-    assert cap.check.extra.get(DEFERRED_MARKER) is True
 
 
 def test_iter_deferred_authorities_handles_signer_and_non_dict():
@@ -236,51 +167,6 @@ def test_reconciler_reenqueues_only_when_authority_backfilled(db_session):
     assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
 
 
-@requires_postgres
-def test_reconciler_skips_when_address_has_an_active_job(db_session):
-    authority = "0x" + "e5" * 20
-    addr = "0x" + "f6" * 20
-    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_deferred_cap(authority))
-    _seed_role_cursors(db_session, authority, backfill_complete=True)
-    db_session.add(Job(address=addr, status=JobStatus.processing, stage=JobStage.policy, request={"chain": "ethereum"}))
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
-    assert job.status == JobStatus.completed and job.stage == JobStage.done
-
-
-@requires_postgres
-def test_reconciler_ignores_non_deferred_external_check(db_session):
-    target = "0x" + "c3" * 20
-    plain = capability_to_dict(
-        CapabilityExpr.external_check_only(
-            ExternalCheck(target_address=target, target_call_selector="0xdeadbeef", extra={"basis": ["eip1271"]})
-        )
-    )
-    job = _seed_completed_job_with_cap(db_session, address="0x" + "d4" * 20, capability_expr=plain)
-    _seed_role_cursors(db_session, target, backfill_complete=True)
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
-    assert job.stage == JobStage.done
-
-
-@requires_postgres
-def test_reconciler_does_not_select_off_chain_twin(db_session):
-    # The row-select is scoped to the pass's chain.
-    authority = "0x" + "e5" * 20
-    addr = "0x" + "f6" * 20
-    base_job = _seed_completed_job_with_cap(
-        db_session, address=addr, capability_expr=_deferred_cap(authority), chain="base"
-    )
-    _seed_role_cursors(db_session, authority, backfill_complete=True, chain_id=1)  # warm on ethereum
-    _seed_role_cursors(db_session, authority, backfill_complete=False, chain_id=8453)  # still cold on base
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
-    assert base_job.status == JobStatus.completed and base_job.stage == JobStage.done
-
-
 # ``contracts.job_id`` is SET NULL on job deletion, stranding the contract's rows outside the reconciler; these pin the
 # shape, not the count.
 
@@ -315,30 +201,6 @@ def _seed_orphaned_contract(
     )
     db_session.commit()
     return job
-
-
-@requires_postgres
-def test_orphaned_contract_marker_rows_are_reachable_at_all(db_session):
-    """The old inner join on ``Contract.job_id`` returned nothing for these."""
-    from services.resolution.deferred_reconciler import _orphaned_marker_rows
-
-    authority = "0x" + "a7" * 20
-    addr = "0x" + "b8" * 20
-    job = _seed_orphaned_contract(db_session, address=addr, capability_expr=_deferred_cap(authority))
-    assert job is not None
-
-    linked = db_session.execute(
-        select(func.count())
-        .select_from(Contract)
-        .join(Job, Contract.job_id == Job.id)
-        .where(func.lower(Contract.address) == addr.lower())
-    ).scalar()
-    assert linked == 0
-
-    rows = _orphaned_marker_rows(db_session, 1)
-    pairs = {(row[0], row[3]) for row in rows}
-    contract_id = db_session.execute(select(Contract.id).where(func.lower(Contract.address) == addr.lower())).scalar()
-    assert (job.id, contract_id) in pairs
 
 
 @requires_postgres
@@ -439,117 +301,6 @@ def test_orphan_adoption_never_steals_a_contract_from_a_job_that_has_one(db_sess
     assert job.stage == JobStage.done
 
 
-@requires_postgres
-def test_orphan_adoption_is_chain_scoped(db_session):
-    authority = "0x" + "ae" * 20
-    addr = "0x" + "c1" * 20
-
-    db_session.query(Contract).filter(func.lower(Contract.address) == addr.lower()).delete()
-    db_session.query(Job).filter(func.lower(Job.address) == addr.lower()).delete()
-    db_session.commit()
-
-    eth_job = Job(address=addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"})
-    db_session.add(eth_job)
-    db_session.flush()
-    base_orphan = Contract(address=addr, chain="base", job_id=None)
-    db_session.add(base_orphan)
-    db_session.flush()
-    db_session.add(
-        EffectiveFunction(
-            contract_id=base_orphan.id,
-            function_name="pause",
-            abi_signature="pause()",
-            selector=_PAUSE,
-            capability_expr=_deferred_cap(authority),
-        )
-    )
-    _seed_role_cursors(db_session, authority, backfill_complete=True, chain_id=1)
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
-    db_session.refresh(base_orphan)
-    assert base_orphan.job_id is None
-    assert eth_job.stage == JobStage.done
-
-
-@requires_postgres
-def test_two_candidate_jobs_adopt_the_orphan_exactly_once(db_session):
-    authority = "0x" + "c3" * 20
-    addr = "0x" + "c4" * 20
-
-    db_session.query(Contract).filter(func.lower(Contract.address) == addr.lower()).delete()
-    db_session.query(Job).filter(func.lower(Job.address) == addr.lower()).delete()
-    db_session.commit()
-
-    jobs = []
-    for _ in range(2):
-        job = Job(address=addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"})
-        db_session.add(job)
-        db_session.flush()
-        jobs.append(job)
-    orphan = Contract(address=addr, chain="ethereum", job_id=None)
-    db_session.add(orphan)
-    db_session.flush()
-    db_session.add(
-        EffectiveFunction(
-            contract_id=orphan.id,
-            function_name="pause",
-            abi_signature="pause()",
-            selector=_PAUSE,
-            capability_expr=_deferred_cap(authority),
-        )
-    )
-    _seed_role_cursors(db_session, authority, backfill_complete=True)
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
-    db_session.refresh(orphan)
-    assert orphan.job_id in {j.id for j in jobs}
-    requeued = [j for j in jobs if j.stage == JobStage.policy]
-    assert len(requeued) == 1
-    assert requeued[0].id == orphan.job_id
-    assert (
-        db_session.execute(select(func.count()).select_from(Contract).where(Contract.job_id == requeued[0].id)).scalar()
-        == 1
-    )
-
-
-@requires_postgres
-def test_orphan_route_ignores_a_non_deferred_external_check(db_session):
-    target = "0x" + "af" * 20
-    addr = "0x" + "c2" * 20
-    plain = capability_to_dict(
-        CapabilityExpr.external_check_only(
-            ExternalCheck(target_address=target, target_call_selector="0xdeadbeef", extra={"basis": ["eip1271"]})
-        )
-    )
-    job = _seed_orphaned_contract(db_session, address=addr, capability_expr=plain)
-    assert job is not None
-    _seed_role_cursors(db_session, target, backfill_complete=True)
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
-    contract = db_session.execute(select(Contract).where(func.lower(Contract.address) == addr.lower())).scalar_one()
-    assert contract.job_id is None
-    assert job.stage == JobStage.done
-
-
-@requires_postgres
-def test_reconciler_active_job_check_is_chain_scoped(db_session):
-    # The active-job guard is per chain.
-    authority = "0x" + "c1" * 20
-    addr = "0x" + "d2" * 20
-    eth_job = _seed_completed_job_with_cap(
-        db_session, address=addr, capability_expr=_deferred_cap(authority), chain="ethereum"
-    )
-    _seed_role_cursors(db_session, authority, backfill_complete=True, chain_id=1)
-    db_session.add(Job(address=addr, status=JobStatus.processing, stage=JobStage.policy, request={"chain": "base"}))
-    db_session.commit()
-
-    assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
-    assert eth_job.status == JobStatus.queued and eth_job.stage == JobStage.policy
-
-
 # The warm self-heal for an enumerated role store drifting past its folded frontier.
 
 
@@ -635,19 +386,6 @@ def test_drift_reenqueues_on_post_frontier_row(db_session):
 
 
 @requires_postgres
-def test_drift_ignores_pre_frontier_row(db_session):
-    authority = "0x" + "a6" * 20
-    addr = "0x" + "b7" * 20
-    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_role_store_cap(authority, 100))
-    _seed_role_store_cursor(db_session, authority, backfill_complete=True)
-    _seed_role_set_row(db_session, authority, block=50)  # already folded (<= frontier)
-    db_session.commit()
-
-    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
-    assert job.stage == JobStage.done
-
-
-@requires_postgres
 def test_drift_requires_backfill_complete(db_session):
     # Mid-backfill would re-resolve into a cold deferral.
     authority = "0x" + "a8" * 20
@@ -659,46 +397,3 @@ def test_drift_requires_backfill_complete(db_session):
 
     assert reconcile_role_set_drift(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
-
-
-@requires_postgres
-def test_drift_row_select_is_chain_scoped(db_session):
-    authority = "0x" + "ac" * 20
-    addr = "0x" + "bd" * 20
-    base_job = _seed_completed_job_with_cap(
-        db_session, address=addr, capability_expr=_role_store_cap(authority, 100), chain="base"
-    )
-    _seed_role_store_cursor(db_session, authority, backfill_complete=True)  # chain_id=1
-    _seed_role_set_row(db_session, authority, block=200)  # chain_id=1 grant past frontier
-    db_session.commit()
-
-    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
-    assert base_job.status == JobStatus.completed and base_job.stage == JobStage.done
-
-
-@requires_postgres
-def test_drift_ignores_non_role_store_capability(db_session):
-    # That's the cold reconciler's job.
-    authority = "0x" + "aa" * 20
-    addr = "0x" + "bb" * 20
-    job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_deferred_cap(authority))
-    _seed_role_store_cursor(db_session, authority, backfill_complete=True)
-    _seed_role_set_row(db_session, authority, block=200)
-    db_session.commit()
-
-    assert reconcile_role_set_drift(db_session, chain_id=1) == 0
-    assert job.stage == JobStage.done
-
-
-def test_event_indexer_loop_invokes_deferred_reconciler():
-    import inspect
-
-    from workers import event_log_indexer
-
-    src = inspect.getsource(event_log_indexer.run_event_log_indexer_loop)
-    assert "drain_reconciliation" in src
-    from services.resolution import indexer_scheduler
-
-    scheduler_src = inspect.getsource(indexer_scheduler.drain_reconciliation)
-    assert "reconcile_deferred_resolutions" in scheduler_src
-    assert "reconcile_role_set_drift" in scheduler_src

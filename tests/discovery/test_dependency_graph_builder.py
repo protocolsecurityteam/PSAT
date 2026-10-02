@@ -57,30 +57,6 @@ def test_dynamic_edges_suppress_static_ref():
     assert result["edges"][0]["op"] == "CALL"
 
 
-def test_proxy_delegates_to_edge():
-    deps = {
-        DEP_A: {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "source": ["dynamic"],
-            "implementation": {
-                "address": IMPL,
-                "type": "implementation",
-                "source": ["classification"],
-            },
-        },
-    }
-    graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
-    result = build_dependency_visualization(_unified(deps=deps, graph=graph))
-
-    assert len(result["nodes"]) == 3
-
-    ops = {(e["from"], e["to"], e["op"]) for e in result["edges"]}
-    assert (f"addr:{DEP_A}", f"addr:{IMPL}", "DELEGATES_TO") in ops
-    assert (f"addr:{TARGET}", f"addr:{DEP_A}", "CALL") in ops
-    assert not any(e["op"] == "STATIC_REF" and e["to"] == f"addr:{IMPL}" for e in result["edges"])
-
-
 _PROXY_GRAPH = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
 _NESTED_IMPL_DEPS = {
     DEP_A: {

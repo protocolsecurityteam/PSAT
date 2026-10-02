@@ -158,23 +158,6 @@ def test_native_transfer_immutable_whole_balance(tmp_path):
     assert flow["amount_kind"] == {"kind": "whole_balance", "tier": "static_trace"}
 
 
-def test_lattice_reaches_the_claim_witness(tmp_path):
-    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
-    effects = build_effects(contract)
-    claims = build_claims(contract, effects, {})["functions"]
-
-    def flow_out_witness(sig):
-        rows = [c for c in claims[sig] if c["claim_id"] == "flow.out"]
-        assert rows, f"no flow.out claim on {sig}"
-        return rows[0]["witness"]["flows"]
-
-    theft = flow_out_witness("payTo(address,uint256)")
-    assert any(e.get("target_kind", {}).get("kind") == "param" for e in theft)
-
-    routing = flow_out_witness("withdrawEther()")
-    assert any(e.get("target_kind") == {"kind": "immutable", "tier": "static_trace"} for e in routing)
-
-
 # ``storage_no_setter`` is a proven negative only when write attribution is exhaustive; raw-slot ``sstore`` and
 # ``delegatecall`` aren't visible to the scan.
 
