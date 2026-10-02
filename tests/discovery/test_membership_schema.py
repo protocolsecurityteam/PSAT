@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from db.models import Contract, ContractMembershipWitness, Protocol, ProtocolDeployer
+from db.models import Contract, ContractMembershipWitness, ProtocolDeployer
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _protocol
 
 pytestmark = [requires_postgres]
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def test_contracts_nominated_protocol_id_column(db_session):
@@ -55,8 +47,7 @@ def test_witness_table_shape(db_session):
 
 
 def test_witness_unique_covers_null_via(db_session):
-    # Postgres NULL != NULL would admit duplicate via-less rows under a plain
-    # composite unique; the partial-index pair must reject them.
+    # NULL != NULL would admit duplicate via-less rows under a plain composite unique.
     protocol = _protocol(db_session)
     row = Contract(address=ADDR(0x300), chain="ethereum", nominated_protocol_id=protocol.id)
     db_session.add(row)

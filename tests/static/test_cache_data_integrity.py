@@ -1,10 +1,3 @@
-"""Data integrity after cache copy: ``copy_static_cache`` preserves proxy fields, old
-jobs keep accessible Contract data, and /api/company and /api/analyses/{id} still
-return real data for old jobs.
-
-Designed to FAIL on the buggy code and PASS after the fixes.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -19,10 +12,6 @@ from tests.cache_helpers import (
 )
 
 pytestmark = requires_postgres
-
-# ---------------------------------------------------------------------------
-# 1. copy_static_cache must NOT zero proxy fields
-# ---------------------------------------------------------------------------
 
 
 def test_copy_static_cache_preserves_proxy_fields(db_session):
@@ -85,15 +74,8 @@ def test_copy_static_cache_preserves_non_proxy_contract(db_session):
     assert contract.implementation is None
 
 
-# ---------------------------------------------------------------------------
-# 2. Old job's Contract data remains queryable after cache copy
-# ---------------------------------------------------------------------------
-
-
 def test_old_job_contract_accessible_by_address_after_copy(db_session):
-    """After copy_static_cache reassigns the Contract row's job_id to the
-    new job, the old job should still be able to find its Contract data
-    via an address-based lookup (since job_id lookup will fail)."""
+    """copy_static_cache reassigns job_id, so the old job must find its row by address."""
     from db.models import Contract, ContractSummary
     from db.queue import copy_static_cache, create_job
 
@@ -118,7 +100,6 @@ def test_old_job_contract_accessible_by_address_after_copy(db_session):
     target_job = create_job(db_session, {"address": ADDR_A})
     copy_static_cache(db_session, source_job.id, target_job.id)
 
-    # The row's job_id now points to target_job, so job_id lookup fails; address lookup MUST work.
     contract_by_addr = (
         db_session.query(Contract)
         .filter(
@@ -140,14 +121,8 @@ def test_old_job_contract_accessible_by_address_after_copy(db_session):
     assert summary is not None, "ContractSummary should still be linked"
 
 
-# ---------------------------------------------------------------------------
-# 3. API endpoint data integrity (using FastAPI TestClient)
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def api_client(db_session, monkeypatch):
-    """Create a FastAPI TestClient backed by the test db_session."""
 
     class _FakeSessionCtx:
         def __init__(self):
@@ -169,8 +144,6 @@ def api_client(db_session, monkeypatch):
 
 
 def _setup_company_with_proxy(db_session, monkeypatch):
-    """Create a completed company job with a proxy contract, then run
-    copy_static_cache to simulate a re-analysis.  Returns (old_job, new_job)."""
     from db.models import (
         Contract,
         ContractSummary,
@@ -273,7 +246,6 @@ def _setup_company_with_proxy(db_session, monkeypatch):
         },
     )
 
-    # Now simulate a re-analysis: create a new job and run copy_static_cache
     new_job = create_job(
         db_session,
         {
@@ -311,7 +283,6 @@ def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monk
         (c for c in contracts if (c.get("address") or "").lower() == ADDR_A.lower()),
         None,
     )
-    # If the contract row was orphaned, proxy_contract will have all-null fields
     assert proxy_contract is not None, (
         f"Expected contract {ADDR_A} in company response, got addresses: {[c.get('address') for c in contracts]}"
     )
@@ -326,16 +297,9 @@ def test_api_analysis_detail_returns_data_for_old_job(db_session, api_client, mo
     assert resp.status_code == 200
     data = resp.json()
 
-    # The contract_analysis artifact was copied to the new job, but the old
-    # job should still have its own copy
     assert data.get("contract_analysis") is not None or data.get("address") is not None, (
         "Old job analysis detail should have data, not be empty"
     )
-
-
-# ---------------------------------------------------------------------------
-# 4. Repeated copy_static_cache calls don't corrupt
-# ---------------------------------------------------------------------------
 
 
 def test_repeated_copy_static_cache_preserves_proxy_fields(db_session):

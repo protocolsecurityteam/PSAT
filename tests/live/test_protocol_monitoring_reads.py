@@ -1,5 +1,3 @@
-"""Protocol monitoring reads (/api/protocols/{id}/...) — shape, not count (watcher state varies)."""
-
 from __future__ import annotations
 
 from tests.live.conftest import LiveClient
@@ -34,7 +32,6 @@ def test_protocol_tvl_shape(company_protocol_id: int, live_client: LiveClient):
     body = live_client.protocol_tvl(company_protocol_id, days=7)
     assert body["protocol_id"] == company_protocol_id
     assert isinstance(body.get("protocol_name"), str)
-    # ``current`` is always present (inner fields None when no snapshots); ``history`` always a list.
     assert "current" in body and isinstance(body["current"], dict)
     assert "history" in body and isinstance(body["history"], list)
 

@@ -1,14 +1,8 @@
-"""UPGRADE_INTERFACE_VERSION() no longer selects 'proxy_admin' (W6-3).
+"""W6-3: an ``UPGRADE_INTERFACE_VERSION()`` answer alone no longer selects 'proxy_admin'.
 
-The '5.0.0' string is the OZ-v5 UUPSUpgradeable constant, answered THROUGH every OZ-v5
-UUPS proxy, so a UIV answer alone typed PROXIES as proxy admins at confidence=high
-(5/5 published proxy_admin nodes had a nonzero ERC-1967 slot at block 25619159; the
-genuine v4 ProxyAdmin 0x8b9566ad... reverts on UIV). proxy_admin is terminal, so the walk
-stopped AT the proxy and never reached the real upgrade authority.
-
-UIV + nonzero slot -> 'contract'; + zero slot + proxiableUUID -> 'contract' (UUPS impl);
-+ zero slot + owner() -> 'proxy_admin' (OZ-v5 shape); unreadable discriminator ->
-'contract' + had_error (uncached). Wire stubbed; shapes mirror pinned observations.
+Every OZ-v5 UUPS proxy answers it through the implementation, so proxies were typed as terminal proxy admins and
+the walk stopped before the real upgrade authority. UIV + nonzero slot or + proxiableUUID is 'contract'; UIV +
+zero slot + owner() is 'proxy_admin'; an unreadable discriminator is 'contract' + had_error.
 """
 
 from __future__ import annotations
@@ -17,19 +11,13 @@ import pytest
 
 from services.resolution import tracking
 from services.resolution.tracking import _classify_uncached, _classify_uncached_batched
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 PROXY = "0x" + "8f" * 20  # stands in for the KING proxy 0x8f08b704...
 IMPL = "0x" + "1c" * 20  # its implementation
 OWNER = "0x" + "a0" * 20  # stands in for 0xa000244b... (the real authority)
 
 _ZERO_WORD = "0x" + "0" * 64
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
 
 
 def _uint(n: int) -> str:
@@ -47,9 +35,7 @@ def _string_word(s: str) -> str:
 
 
 def _wire(monkeypatch, probe_map, *, storage=_ZERO_WORD, storage_raises=False, batched: bool = True):
-    """Stub both classify paths from one signature->outcome map (raw hex, "revert",
-    "transport"; missing -> "0x", the empty-success shape sibling harnesses use so absent
-    probes do not set had_error)."""
+    """Missing signatures return "0x" so absent probes don't set had_error."""
 
     def _outcome(signature: str) -> str:
         return probe_map.get(signature, "0x")
@@ -82,17 +68,13 @@ def _wire(monkeypatch, probe_map, *, storage=_ZERO_WORD, storage_raises=False, b
     del batched
 
 
-# The observed KING-proxy probe shape at pinned block 25619159: every classify
-# probe reverts except UIV; the negative control reverts (honest dispatch);
-# the ERC-1967 implementation slot is nonzero.
+# The KING-proxy shape at block 25619159.
 _UUPS_PROXY = {"UPGRADE_INTERFACE_VERSION()": _string_word("5.0.0")}
 
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_uups_proxy_is_a_contract_not_a_proxy_admin(monkeypatch, batched):
-    """The KING-proxy shape: UIV answers, 1967 impl slot nonzero → the address
-    is a PROXY. Typed 'contract' (non-terminal — the walk continues), never
-    'proxy_admin'."""
+    """Non-terminal, so the walk continues."""
     _wire(monkeypatch, _UUPS_PROXY, storage=_addr_word(IMPL))
     fn = _classify_uncached_batched if batched else _classify_uncached
     kind, details, had_error = fn("https://rpc", PROXY, "latest")
@@ -104,8 +86,6 @@ def test_uups_proxy_is_a_contract_not_a_proxy_admin(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_bare_uups_implementation_is_a_contract(monkeypatch, batched):
-    """UIV + zero slot + proxiableUUID answers → a bare UUPS implementation,
-    not a proxy admin."""
     probe_map = dict(_UUPS_PROXY)
     probe_map["proxiableUUID()"] = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
     _wire(monkeypatch, probe_map, storage=_ZERO_WORD)
@@ -118,8 +98,7 @@ def test_bare_uups_implementation_is_a_contract(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_v5_proxy_admin_shape_earns_the_token(monkeypatch, batched):
-    """Positive control (R4): UIV + zero slot + no proxiableUUID + owner() is
-    the OZ-v5 ProxyAdmin shape — the one earner of 'proxy_admin' here."""
+    """R4: the one earner of 'proxy_admin'."""
     probe_map = dict(_UUPS_PROXY)
     probe_map["owner()"] = _addr_word(OWNER)
     _wire(monkeypatch, probe_map, storage=_ZERO_WORD)
@@ -132,9 +111,7 @@ def test_v5_proxy_admin_shape_earns_the_token(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_v4_proxy_admin_keeps_contract_type(monkeypatch, batched):
-    """The corpus's genuine (v4) ProxyAdmin 0x8b9566ad... reverts on UIV and
-    answers owner(): it stays 'contract' (unchanged — a non-terminal way-point
-    whose owner the walk can still reach)."""
+    """The v4 ProxyAdmin 0x8b9566ad reverts on UIV and stays a non-terminal way-point."""
     _wire(monkeypatch, {"owner()": _addr_word(OWNER)}, storage=_ZERO_WORD)
     fn = _classify_uncached_batched if batched else _classify_uncached
     kind, details, _had_error = fn("https://rpc", PROXY, "latest")
@@ -144,8 +121,6 @@ def test_v4_proxy_admin_keeps_contract_type(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_slot_read_failure_withholds_the_verdict_uncached(monkeypatch, batched):
-    """If the 1967-slot discriminator read did not happen, neither 'proxy'
-    nor 'proxy_admin' is determined: plain 'contract' + had_error (uncached)."""
     probe_map = dict(_UUPS_PROXY)
     probe_map["owner()"] = _addr_word(OWNER)
     _wire(monkeypatch, probe_map, storage_raises=True)
@@ -158,8 +133,7 @@ def test_slot_read_failure_withholds_the_verdict_uncached(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_uups_proxy_behind_catch_all_control_stays_gated(monkeypatch, batched):
-    """W6-2 gate composes: an address answering the negative control never
-    reaches the UIV discriminators at all."""
+    """The W6-2 gate runs first."""
     probe_map = dict(_UUPS_PROXY)
     probe_map[tracking._NEGATIVE_CONTROL_SIG] = _uint(1)
     _wire(monkeypatch, probe_map, storage=_addr_word(IMPL))
@@ -171,10 +145,7 @@ def test_uups_proxy_behind_catch_all_control_stays_gated(monkeypatch, batched):
 
 
 def test_walk_continues_through_a_uups_proxy_to_the_real_authority(monkeypatch):
-    """The 0x6db24ee6→0xa000244b control: a UUPS proxy typed 'contract' is
-    non-terminal, so the terminal-principal walk probes its canonical getters
-    (delegatecalled to the implementation) and reaches the real owner —
-    instead of stopping at the proxy as terminal 'proxy_admin'."""
+    """A UUPS proxy typed 'contract' lets the walk reach the real owner through the implementation."""
     from services.clients.rpc import EthCallResult, selector
     from workers import policy_worker as pw
 

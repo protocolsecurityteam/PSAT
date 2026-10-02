@@ -1,10 +1,5 @@
-"""Per-deployment resolution-result scoping + proxy-aware impl-job reconcile.
-
-Covers ``db.deployment`` (derivation + scope predicate), ``db.queue.reconcile_impl_job_for_proxy``
-(a standalone impl job is *converted* to proxy context and re-enqueued instead of skipped;
-same-proxy is a true duplicate; different-proxy is a genuine shared impl), the writers'
-delete-scope (two deployments of one ``contract_id`` coexist; re-resolution sweeps legacy
-NULL rows), and ``capability_resolver`` reading only its own deployment's controller values.
+"""A standalone impl job is converted to proxy context instead of skipped, two deployments of one ``contract_id``
+coexist, and the resolver reads only its own deployment's controller values.
 """
 
 from __future__ import annotations
@@ -37,11 +32,6 @@ def _fn_record(status: str = "resolved_empty") -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# db.deployment (pure)
-# ---------------------------------------------------------------------------
-
-
 def test_normalize_deployment():
     from db.deployment import normalize_deployment
 
@@ -49,11 +39,6 @@ def test_normalize_deployment():
     assert normalize_deployment(None) is None
     assert normalize_deployment("not-an-address") is None
     assert normalize_deployment("0x1234") is None  # wrong length
-
-
-# ---------------------------------------------------------------------------
-# reconcile_impl_job_for_proxy — the discovery-ordering fix
-# ---------------------------------------------------------------------------
 
 
 def _mk_job(session, address, *, proxy=None, status, stage, root=None):
@@ -87,8 +72,7 @@ def _cleanup_jobs(session, addrs):
 
 @requires_postgres
 def test_reconcile_backpatches_completed_standalone_and_reenqueues(db_session):
-    """The LRTSquared bug: a standalone impl that already resolved against its own empty
-    storage is converted to proxy context AND re-enqueued from static."""
+    """The LRTSquared bug: it resolved against its own empty storage."""
     from db.models import JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy
 
@@ -111,8 +95,6 @@ def test_reconcile_backpatches_completed_standalone_and_reenqueues(db_session):
 
 @requires_postgres
 def test_reconcile_backpatches_queued_standalone_without_reenqueue(db_session):
-    """A standalone job still queued before resolution just gains proxy context;
-    no stage reset is needed (it hasn't run yet)."""
     from db.models import JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy
 
@@ -129,19 +111,15 @@ def test_reconcile_backpatches_queued_standalone_without_reenqueue(db_session):
         _cleanup_jobs(db_session, [impl])
 
 
-# (existing job's proxy / cascade root, caller's proxy / cascade root, decision). Keys are resolved to fresh
-# addresses / root ids per run; ``None`` existing_job means no job for the impl exists.
+# ``None`` existing_job means no job for the impl exists.
 @requires_postgres
 @pytest.mark.parametrize(
     ("existing_job", "call_proxy", "call_root", "expected"),
     [
         pytest.param(("p1", None), "p1", None, "skip", id="skip_same_proxy"),
         pytest.param(None, "p1", None, "spawn", id="spawn_when_no_existing_job"),
-        # A job already bound to proxy P1 means a genuine shared impl when P2 links the same bytecode: spawn a
-        # separate per-deployment job (the N>1 case).
+        # A genuine shared impl: spawn a separate per-deployment job.
         pytest.param(("p1", None), "p2", None, "spawn", id="spawn_for_different_proxy_shared_impl"),
-        # In --force mode the lookup is cascade-scoped: a same-proxy job from a *different* cascade does not
-        # count as a duplicate.
         pytest.param(("p1", "r1"), "p1", "r2", "spawn", id="force_scopes_by_root_job"),
     ],
 )
@@ -172,11 +150,6 @@ def test_reconcile_decision_table(db_session, existing_job, call_proxy, call_roo
         assert decision == expected
     finally:
         _cleanup_jobs(db_session, [impl])
-
-
-# ---------------------------------------------------------------------------
-# Writer delete-scope — per-deployment isolation + legacy NULL sweep
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -213,8 +186,6 @@ def test_writer_isolates_deployments(db_session):
 
 @requires_postgres
 def test_writer_sweeps_legacy_null_rows(db_session):
-    """A legacy untagged (NULL) row is swept the first time the deployment
-    re-resolves — the back-patch/re-resolution cleanup path."""
     from db.models import Contract, EffectiveFunction
     from services.policy.effective_permissions_writer import write_effective_function_rows
 
@@ -245,11 +216,6 @@ def test_writer_sweeps_legacy_null_rows(db_session):
     assert rows[0].deployment_address == proxy  # NULL legacy row gone
 
 
-# ---------------------------------------------------------------------------
-# capability_resolver — per-deployment controller-value read
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_controller_values_scoped_to_job_deployment(db_session):
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus
@@ -270,7 +236,6 @@ def test_controller_values_scoped_to_job_deployment(db_session):
     db_session.add(c)
     db_session.commit()
 
-    # Same controller, two deployments of the shared impl row.
     db_session.add(
         ControllerValue(
             contract_id=c.id, deployment_address=p1, controller_id="state_variable:owner", value="0x" + "a" * 40
@@ -290,11 +255,6 @@ def test_controller_values_scoped_to_job_deployment(db_session):
         _cleanup_jobs(db_session, [impl])
 
 
-# ---------------------------------------------------------------------------
-# static_worker wiring — _resolve_proxy converts a pre-existing standalone impl
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_resolve_proxy_backpatches_standalone_impl(db_session, monkeypatch):
     from db.models import Contract, JobStage, JobStatus
@@ -302,7 +262,6 @@ def test_resolve_proxy_backpatches_standalone_impl(db_session, monkeypatch):
 
     proxy, impl = _addr(), _addr()
     proxy_job = _mk_job(db_session, proxy, status=JobStatus.processing, stage=JobStage.static, root=str(uuid.uuid4()))
-    # _resolve_proxy needs an rpc_url in the request + a Contract row for the proxy.
     proxy_job.request = {**(proxy_job.request or {}), "rpc_url": "http://stub", "chain": "ethereum"}
     db_session.add(Contract(address=proxy, chain="ethereum", job_id=proxy_job.id))
     impl_job = _mk_job(db_session, impl, status=JobStatus.completed, stage=JobStage.done)
@@ -336,20 +295,12 @@ def test_resolve_proxy_backpatches_standalone_impl(db_session, monkeypatch):
         _cleanup_jobs(db_session, [proxy, impl])
 
 
-# ---------------------------------------------------------------------------
-# End-to-end heal (verdict regression point (d)) through the REAL resolution + policy
-# stack; only the snapshot/graph/balance wire is stubbed. ``build_control_snapshot`` keys
-# its governor read off the address the worker hands it (the proxy when
-# ``request.proxy_address`` is set), so if the override regresses the governor reads 0x0
-# and the function stays resolved_empty.
-# ---------------------------------------------------------------------------
+# Only the snapshot/graph/balance wire is stubbed; if the proxy override regresses the governor reads 0x0.
 
 _GATE_FN = "setGovernor(address)"
 
 
 def _governor_gate_tree() -> dict:
-    """A ``msg.sender == governor`` caller-authority equality leaf — the shape
-    ``build_predicate_artifacts`` emits (see test_canonical_authority_getter_resolution)."""
     return {
         "op": "LEAF",
         "leaf": {
@@ -380,9 +331,7 @@ def _gate_fn_record() -> dict:
 
 
 def _stub_resolution_wire(monkeypatch, worker, *, proxy: str, governor: str) -> None:
-    """Stub only the RPC-touching seams of ResolutionWorker. ``build_control_snapshot``
-    models proxy-vs-impl storage: the governor lives in the proxy and reads 0x0 against the
-    impl, so the address it sees shows whether ``request.proxy_address`` was honored."""
+    """The address the snapshot sees shows whether ``request.proxy_address`` was honored."""
     zero = "0x" + "00" * 20
 
     def fake_snapshot(plan, rpc_url, *_a, **_k):
@@ -417,8 +366,6 @@ def _stub_resolution_wire(monkeypatch, worker, *, proxy: str, governor: str) -> 
 
 
 def _gate_status_and_principal(db_session, job, contract, deployment):
-    """Run the REAL policy resolve + writer for ``job`` and return
-    ``(status, principal_addresses)`` for the governor-gated function."""
     from db.models import EffectiveFunction, FunctionPrincipal
     from services.policy.effective_permissions_writer import write_effective_function_rows
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -446,13 +393,7 @@ def _gate_status_and_principal(db_session, job, contract, deployment):
 
 @requires_postgres
 def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, monkeypatch):
-    """The full LRTSquared-shaped heal: a governor-gated impl function that resolves_empty
-    standalone (governor read against empty impl storage) resolves to the governor once the
-    proxy is discovered and ``reconcile_impl_job_for_proxy`` back-patches the impl job.
-
-    Revert-proof at three points: the reconcile back-patch, the resolution proxy-override,
-    and the per-deployment controller-value read/sweep.
-    """
+    """Revert-proof at the back-patch, the proxy override and the per-deployment read."""
     from db.models import Contract, JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy, store_artifact
     from workers.resolution_worker import ResolutionWorker
@@ -494,14 +435,12 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
     _stub_resolution_wire(monkeypatch, worker, proxy=proxy, governor=governor)
 
     try:
-        # --- Phase A: standalone resolution is a false-negative (the bug) ---
         worker.process(db_session, job)
         ef_a, principals_a, cap_a = _gate_status_and_principal(db_session, job, contract, deployment=None)
         assert ef_a.status == "resolved_empty", f"standalone gate should be resolved_empty, got {ef_a.status} ({cap_a})"
         assert principals_a == []
         assert ef_a.deployment_address is None
 
-        # --- Step: proxy discovered later → reconcile back-patches the impl job ---
         decision = reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, proxy_type="eip1967")
         assert decision == "backpatched"
         db_session.refresh(job)
@@ -509,7 +448,6 @@ def test_end_to_end_heal_standalone_impl_resolves_after_backpatch(db_session, mo
         assert isinstance(req, dict)
         assert req["proxy_address"] == proxy  # the impl now carries proxy context
 
-        # --- Phase B: re-resolution against the proxy heals the function ---
         worker.process(db_session, job)
         ef_b, principals_b, cap_b = _gate_status_and_principal(db_session, job, contract, deployment=proxy)
         assert ef_b.status != "resolved_empty", f"proxy-context gate should resolve, got resolved_empty ({cap_b})"

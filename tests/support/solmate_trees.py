@@ -1,6 +1,4 @@
-"""Predicate-tree artifact for a Solmate ``Auth`` contract whose ``pause()``
-gate delegates to ``authority.canCall``. Shared by the event-indexer enrollment
-tests that assert the indexer follows the delegated authority."""
+"""A Solmate ``Auth`` tree whose ``pause()`` delegates to ``authority.canCall``."""
 
 from __future__ import annotations
 

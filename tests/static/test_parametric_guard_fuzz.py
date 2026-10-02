@@ -1,28 +1,8 @@
-"""Fuzzing-style regression tests for parametric-guard predicate extraction.
-
-The pipeline recognizes "guarded" for many concrete shapes but does not yet capture
-the *predicate* gating a function plus the *runtime parameter(s)* it depends on in
-one structured object the resolver can route on; so parametric guards (grantRole /
-renounceRole / Maker ``wards`` / external ``canCall`` / ERC-721 ``ownerOf``) admit
-but resolve to zero principals and the UI renders 'Unresolved'.
-
-Seven shapes (codex): caller_equals_argument, role_member_dynamic_arg,
-dynamic_role_admin, mapping_member_dynamic_scope, external_policy_dynamic,
-caller_equals_external_owner, disjunction. The names only seed generators and label
-test IDs; the *assertion* is shape-agnostic (no ``kind == "<shape-name>"`` check,
-which would be name matching one level up): a generic structured predicate
-referencing msg.sender and depending on a runtime parameter, however labeled.
-
-Identifiers are gibberish and any candidate containing a ``BANNED_SUBSTRINGS`` entry
-is rejected, so whatever the analyzer detects must come from IR analysis. Shapes
-common enough for a canonical-name fixture (``ownerOf``, ``canCall``) are paired with
-a renamed method of the same IR shape, so the test cannot pass via ABI-name matching.
-
-``test_fuzz_fixtures_are_valid`` (NOT xfailed) proves fixtures are healthy (compile,
-substring ban, real declared signatures, unguarded twin not admitted).
-``test_parametric_guard_emits_predicate_signal`` is ``xfail(strict=True)`` so that
-when the implementation lands every variant flips at once and pytest forces removal
-of the decorator, ratcheting against silent regression.
+"""Parametric guards (grantRole, Maker ``wards``, external ``canCall``, ``ownerOf``) admit but resolve to zero
+principals because the pipeline doesn't capture predicate + runtime parameter as one routable object. Seven
+shapes seed generators, but the assertion is shape-agnostic, and gibberish identifiers with a banned-substring
+list force IR-based detection. ``test_parametric_guard_emits_predicate_signal`` is ``xfail(strict=True)`` so
+every variant flips at once when it lands.
 """
 
 from __future__ import annotations
@@ -39,10 +19,8 @@ from tests.support.foundry_project import write_foundry_project
 
 pytestmark = pytest.mark.compile
 
-# Reserved substrings from legacy classifier terms. A generated identifier containing
-# one is rejected, so a detected result cannot be explained by a substring match.
+# A detected result can't be explained by a substring match.
 BANNED_SUBSTRINGS = (
-    # Authority / role family
     "auth",
     "role",
     "owner",
@@ -72,7 +50,6 @@ BANNED_SUBSTRINGS = (
     "committee",
     "kernel",
     "acl",
-    # Lifecycle / mutators
     "factory",
     "create",
     "deploy",
@@ -87,7 +64,6 @@ BANNED_SUBSTRINGS = (
     "queue",
     "execute",
     "cancel",
-    # External policy / signature
     "canperform",
     "caninvoke",
     "cancall",
@@ -97,9 +73,7 @@ BANNED_SUBSTRINGS = (
     "merkle",
 )
 
-# Standard ABI names that genuinely identify a pattern. A test using one is an
-# integration check, not a structural one; parameterization carries a ``stdname``
-# flag to say so.
+# A test using one is an integration check, flagged ``stdname``.
 STANDARD_ABI_NAMES = ("ownerOf", "canCall")
 
 
@@ -109,7 +83,6 @@ def _is_clean_identifier(name: str) -> bool:
 
 
 def _gen_identifier(rng: random.Random, prefix: str = "") -> str:
-    """Pure-gibberish identifier clean of every banned substring; stable per-seed."""
     consonants = "bcdfghjklmnpqrstvwxz"
     vowels = "aeiouy"
     while True:
@@ -128,22 +101,7 @@ def _semantic_entry(analysis: Any, signature: str) -> dict | None:
 
 
 def _has_parametric_guard_signal(entry: dict | None) -> bool:
-    """Label-free check: does the entry carry a structured predicate that references
-    msg.sender and depends on at least one runtime function parameter?
-
-    The seven-shape taxonomy only picks diverse fixtures; a generic implementation
-    extracts ONE thing (a predicate object with parameter-binding metadata), so the
-    assertion is uniform across shapes.
-
-    A candidate is a dict with a structural msg.sender reference (``msg_sender_in_predicate``
-    / ``references_msg_sender`` / ``basis``/``operands`` containing 'msg.sender' / a
-    ``predicate`` string mentioning it) AND a parameter-binding field
-    (``parameter_indices``, ``argument_index``/``argument_name``, ``role_param``/
-    ``role_param_index``/``scope_param``, or ``conditional_principals``). Candidates
-    are searched in ``parametric_guards``, ``predicates``, ``guard_shape`` /
-    ``parametric_guard`` and typed ``sinks``. Field names stay permissive because the
-    implementation hasn't picked one yet; the contract is on payload, not naming.
-    """
+    """Field names stay permissive because the implementation hasn't picked one; the contract is on payload."""
     if entry is None:
         return False
 
@@ -198,10 +156,7 @@ def _has_parametric_guard_signal(entry: dict | None) -> bool:
     return False
 
 
-# Solidity templates per shape. Each generator returns the guarded source and an
-# "unguarded twin" that drops the check; the twin is the precision check (a
-# structural fix MUST NOT admit it as a parametric guard).
-# ---------------------------------------------------------------------------
+# Each generator also returns an unguarded twin that a structural fix must not admit.
 
 
 def _shape_caller_equals_argument(rng: random.Random) -> tuple[str, str, str, str]:
@@ -262,9 +217,7 @@ contract C {{
 
 
 def _shape_dynamic_role_admin(rng: random.Random) -> tuple[str, str, str, str]:
-    """``hasRole(getRoleAdmin(roleArg), msg.sender)`` with a getter-helper
-    sandwiched in; an earlier template inlined ``admin_map[r]`` and could miss the
-    real two-hop indirection."""
+    """An earlier template inlined ``admin_map[r]`` and missed the two-hop indirection."""
     fn = _gen_identifier(rng)
     membership_check = _gen_identifier(rng, prefix="_")
     admin_lookup = _gen_identifier(rng, prefix="_")
@@ -310,8 +263,7 @@ contract C {{
 
 
 def _shape_mapping_member_dynamic_scope(rng: random.Random) -> tuple[str, str, str, str]:
-    """MakerDAO-style ``wards[ilk][user] == 1``: like role_member_dynamic_arg but a
-    uint flag, kept separate because ``== 1`` is a distinct routing case."""
+    """``== 1`` is a distinct routing case."""
     fn = _gen_identifier(rng)
     scope_map = _gen_identifier(rng, prefix="_")
     state = _gen_identifier(rng, prefix="_")
@@ -342,8 +294,6 @@ contract C {{
 
 
 def _shape_external_policy_dynamic(rng: random.Random, *, stdname: bool) -> tuple[str, str, str, str]:
-    """``policy.<bool fn>(msg.sender, target, selector)``. ``stdname=False`` uses a
-    renamed method of the same call shape, resolved via structural detection."""
     fn = _gen_identifier(rng)
     auth_field = _gen_identifier(rng, prefix="_")
     iface = _gen_identifier(rng, prefix="I").capitalize()
@@ -382,8 +332,6 @@ contract C {{
 
 
 def _shape_caller_equals_external_owner(rng: random.Random, *, stdname: bool) -> tuple[str, str, str, str]:
-    """``msg.sender == external.<address-returning view>(arg)``; the renamed variant
-    uses a fuzzed view to prove structural detection (standard: ``ownerOf``)."""
     fn = _gen_identifier(rng)
     nft_field = _gen_identifier(rng, prefix="_")
     iface = _gen_identifier(rng, prefix="I").capitalize()
@@ -474,11 +422,8 @@ def _gen_for_shape(shape_name: str, rng: random.Random):
     raise ValueError(shape_name)
 
 
-# Shape name -> fuzz-variant count (names only seed generators and label test IDs).
-# One variant per shape: each is a cold solc compile in a fresh ``tmp_path``, and the
-# former 5-per-shape sweep cost ~120 compiles per offline run. Every variant is still
-# gibberish-generated, so the substring ban is unchanged. Raise a count locally for
-# the wider sweep when touching the generators.
+# One variant per shape: each is a cold solc compile, and five per shape cost ~120 compiles per run. Raise locally when
+# touching the generators.
 SHAPES: dict[str, int] = {
     "caller_equals_argument": 1,
     "role_member_dynamic_arg": 1,
@@ -491,8 +436,6 @@ SHAPES: dict[str, int] = {
     "disjunction": 1,
 }
 
-# The strict-xfail arm ratchets on one variant flipping to XPASS, so it does not need
-# the full shape sweep.
 XFAIL_RATCHET_CASE = ("caller_equals_argument", 0)
 
 TOP_SEED = 0xC0DE_BABE
@@ -503,8 +446,7 @@ def _rng(shape: str, variant: int) -> random.Random:
 
 
 def _strip_solidity_comments(source: str) -> str:
-    """Remove ``//`` line comments so hygiene ignores explanatory prose (which may use
-    words like 'check'); Slither sees the same. Block comments aren't used."""
+    """Comments may use words like 'check'."""
     lines = []
     for line in source.splitlines():
         idx = line.find("//")
@@ -513,12 +455,6 @@ def _strip_solidity_comments(source: str) -> str:
 
 
 def _check_substring_hygiene(source: str, *, allow_standard_abi: bool) -> str | None:
-    """Error message if a banned substring leaked, else None.
-
-    ``allow_standard_abi=True`` lets ``STANDARD_ABI_NAMES`` (``ownerOf``, ``canCall``)
-    through: they are the point of the integration variants.
-    """
-    # Solidity language/type tokens, not user-chosen identifiers.
     primitives = {
         "pragma",
         "solidity",
@@ -570,7 +506,6 @@ def _check_substring_hygiene(source: str, *, allow_standard_abi: bool) -> str | 
         "a",
         "who",
     }
-    # Split member calls so the standard-ABI exception applies only to exact method names.
     leaks = []
     stripped = _strip_solidity_comments(source)
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
@@ -586,12 +521,7 @@ def _check_substring_hygiene(source: str, *, allow_standard_abi: bool) -> str | 
 
 
 def _extract_function_signatures(source: str) -> set[str]:
-    """Pull ``name(type1,type2)`` shapes out of a Solidity source string.
-
-    Codex finding: asserting ``_semantic_entry(analysis, sig_u) is None`` passes
-    vacuously if the generator returned a signature that does not exist; this lets
-    the test prove ``sig_u`` is a real declared function first.
-    """
+    """Otherwise ``_semantic_entry(analysis, sig_u) is None`` passes vacuously on a nonexistent signature."""
     sigs: set[str] = set()
     for m in re.finditer(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", source):
         name = m.group(1)
@@ -609,37 +539,22 @@ def _extract_function_signatures(source: str) -> set[str]:
     return sigs
 
 
-# Fixture-validity test (NOT xfailed): catches generator bugs an xfail would mask.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "shape_name,variant",
     [(name, v) for name, n in SHAPES.items() for v in range(n)],
     ids=lambda x: str(x),
 )
 def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
-    """Every generated source must compile, pass the banned-substring hygiene check
-    (modulo standard-ABI exceptions), declare ``sig_u`` for real (anti-vacuity on the
-    negative control), and NOT admit the unguarded twin (precision).
-
-    Positive-side admission of the *guarded* variant is intentionally not asserted:
-    the strict-xfailed test owns "admit + emit typed predicate" as one bundled
-    assertion, and a separate "admits today" test would flip green when admission
-    lands without the typed predicate, weakening the ratchet.
-    """
+    """Guarded-side admission isn't asserted here: a separate green test would weaken the strict-xfail ratchet."""
     rng = _rng(shape_name, variant)
     gen = _gen_for_shape(shape_name, rng)
     guarded_src, unguarded_src, sig_u, is_stdname = gen[0], gen[1], gen[3], gen[4]
 
-    # 1. Hygiene: comments stripped, no banned substring in any token.
     msg = _check_substring_hygiene(guarded_src, allow_standard_abi=is_stdname)
     assert msg is None, f"[{shape_name} v{variant}] guarded: {msg}\n{guarded_src}"
     msg = _check_substring_hygiene(unguarded_src, allow_standard_abi=is_stdname)
     assert msg is None, f"[{shape_name} v{variant}] unguarded: {msg}\n{unguarded_src}"
 
-    # 2. Anti-vacuity: sig_u must be a function the source declares, or the
-    # negative-control assertion below would pass for free.
     declared = _extract_function_signatures(unguarded_src)
     assert sig_u in declared, (
         f"[{shape_name} v{variant}] generator returned sig_u={sig_u!r} but unguarded "
@@ -650,9 +565,7 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     project_g = write_foundry_project(tmp_path / "g", "C", guarded_src)
     collect_contract_analysis(project_g)  # exception → fixture broken
 
-    # 3. Negative control: the unguarded twin must NOT carry a caller-authority leaf.
-    # Functions with state writes (every unguarded twin) are included in
-    # semantic_functions even without a gate, so the check is on the predicate tree.
+    # Every unguarded twin has state writes and is in semantic_functions anyway, so check the predicate tree.
     project_u = write_foundry_project(tmp_path / "u", "C", unguarded_src)
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
@@ -674,11 +587,6 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
         f"incidental check or the structural classification is "
         f"overinclusive.\n{unguarded_src}"
     )
-
-
-# Typed-predicate emission test, xfail(strict=True) so it ratchets when typed
-# predicates land.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -703,8 +611,6 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     strict=True,
 )
 def test_parametric_guard_emits_predicate_signal(shape_name: str, variant: int, tmp_path: Path):
-    """Label-free: the entry carries a structured predicate that references msg.sender
-    AND depends on a runtime parameter, whichever of the seven shapes it is."""
     rng = _rng(shape_name, variant)
     gen = _gen_for_shape(shape_name, rng)
     guarded_src, sig_g = gen[0], gen[2]

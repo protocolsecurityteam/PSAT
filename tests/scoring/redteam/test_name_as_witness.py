@@ -1,5 +1,3 @@
-"""Name-as-witness, contradictions and published labels."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -62,10 +60,7 @@ def test_f6_the_registry_escalation_needs_mutator_selectors():
     assert "registry_owner_self_grant_escalation" in basis
 
 
-# "Every resolved principal is the contract" is a lower bound, not closure. The enumeration is a proven
-# LOWER BOUND on the caller set, so "no other caller resolved" cannot drive a capability-class base to
-# zero: the observation is published, the severity does not move on it. Both arms stay at 0.3 and each
-# names which arm it took.
+# The caller enumeration is a lower bound, so "no other caller resolved" cannot zero a capability-class base.
 @pytest.mark.parametrize(
     ("self_gated", "expected_notes", "expected_basis", "absent_basis"),
     [
@@ -128,13 +123,7 @@ def test_g3_destination_operand_does_not_corroborate_self_ness():
 
 
 def test_g3_a_priced_destination_with_a_withheld_severity_charges_nothing_and_says_so(fold):
-    """A proven destination is not a proven price.
-
-    Payee and entity are proven and priced, but the witness for what the payout
-    is bounded by is missing. The row must land nowhere in the ledger, and the
-    refusal must be legible: an excluded row's notes reach no finding, so the
-    warning channel is the only surface that can carry the reason.
-    """
+    """An excluded row's notes reach no finding, so the warning channel carries the refusal."""
     signal = flow_sig(
         function_name="unwrap",
         authority_openness="open",
@@ -157,7 +146,6 @@ def test_g3_a_priced_destination_with_a_withheld_severity_charges_nothing_and_sa
 
 
 def test_d1_the_published_principal_is_the_one_that_set_the_weakness(fold):
-    """The named gate must be the argmax, not whichever row was folded last."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -209,7 +197,6 @@ def test_d5_the_document_publishes_its_unit_evidence(fold):
     assert set(document.findings[0]["unit_members"]) == set(units[merged])
     overlaps = document.provenance["safe_keyset_overlaps"]
     assert overlaps and overlaps[0]["merged"] is True
-    # No fabricated sentinel threshold reaches a published structure.
     assert "99" not in str(overlaps)
 
 
@@ -293,12 +280,7 @@ def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():
 
 
 def test_d3_an_unanswerable_signal_outside_the_perimeter_does_not_move_confidence(fold):
-    """The denominator is the value plane plus the closure, never the population.
-
-    A signal that answers nothing, on an entity neither plane mentions, must
-    leave confidence exactly where it was: a perimeter that grew with the
-    analysis would let the figure move by the act of looking.
-    """
+    """A perimeter that grew with the analysis would let confidence move by the act of looking."""
     answered = sig(
         function_name="upgradeTo",
         deployment_address=C,
@@ -330,7 +312,6 @@ def test_d3_an_unanswerable_signal_outside_the_perimeter_does_not_move_confidenc
 
 
 def test_g5_an_undecidable_asset_identity_falls_to_the_unpriced_branch(fold):
-    """Single-asset pricing is licensed by a decidable token identity, not by a sheet."""
     undecidable = flow_sig(
         function_name="withdrawToken",
         authority_openness="open",
@@ -361,5 +342,4 @@ def test_g5_an_undecidable_asset_identity_falls_to_the_unpriced_branch(fold):
     assert blocked["value_at_stake_usd"] is None
     assert blocked["undetermined_instances"][0]["why"].startswith("token_identity_not_decidable")
     assert priced["value_at_stake_usd"] == 50_000_000.0
-    # And the gap is charged to confidence rather than being free.
     assert fold([undecidable], value=plane).model_parameters["confidence_detail"]["value_priced_pct"] is not None

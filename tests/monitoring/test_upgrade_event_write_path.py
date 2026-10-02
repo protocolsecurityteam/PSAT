@@ -1,15 +1,8 @@
-"""``UpgradeEvent`` write-path integrity across the three ``upgrade_events`` writers
-(artifact projection, log scanner, storage-slot poller).
+"""``UpgradeEvent`` write-path integrity across its three writers.
 
-1. No writer may invent a block number. The poller has no block and used to write
-   ``block_number=0``; consumers order by ``block_number ASC NULLS LAST``, so 0 sorted the
-   poll row ahead of the genuine genesis deployment and shifted every impl-era window.
-2. Every writer identifies itself via ``source``: ``old_impl`` NULL is ambiguous and
-   ``timestamp`` is a block time for two writers but a detection time for the third.
-
-Each ordering test carries a defect control (the same fixture with ``block_number=0``,
-asserted to still corrupt ordering) so it can't pass vacuously. Fixture addresses and
-blocks are real mainnet data for proxy ``0x8b71140a…``.
+The poller used to write ``block_number=0``, which sorted ahead of genesis and shifted every impl-era window;
+every writer also stamps ``source`` since ``old_impl`` and ``timestamp`` mean different things per writer. Each
+ordering test carries a ``block_number=0`` defect control.
 """
 
 from __future__ import annotations
@@ -32,8 +25,6 @@ from db.models import (
 )
 from services.monitoring.unified_watcher import _sync_relational_tables, poll_for_state_changes
 
-# Real mainnet values (eth_getStorageAt on the EIP-1967 slot at blocks 18000000 / 24000000 /
-# 25619159 / head-10).
 PROXY = "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"
 IMPL_GENESIS = "0x0c5631727ecf13f3e726bc3301e364af51b69295"  # active at block 18000000
 IMPL_MIDDLE = "0x0f366df7af5003fc7c6524665ca58bdeaddc3745"  # active at block 24000000
@@ -44,7 +35,6 @@ BLOCK_GENESIS = 17174453
 BLOCK_MIDDLE = 23000000
 BLOCK_CURRENT = 25533308
 
-# The ordering all three consumers use.
 CANONICAL_ORDER = (UpgradeEvent.block_number.asc().nullslast(), UpgradeEvent.id.asc())
 
 
@@ -54,7 +44,6 @@ def _word(addr: str) -> str:
 
 @pytest.fixture()
 def proxy_with_history(db_session):
-    """A proxy Contract with two genuine, block-carrying upgrade events."""
     protocol = Protocol(name=f"w0-9-{uuid.uuid4().hex[:10]}")
     db_session.add(protocol)
     db_session.commit()
@@ -130,7 +119,6 @@ def _seed_monitored(session, contract, *, current_impl: str) -> MonitoredContrac
 
 
 def _run_poll(session, observed_impl: str) -> None:
-    """Drive the real ``poll_for_state_changes`` with only the wire stubbed."""
 
     def _mock(_url, calls):
         return [(_word(observed_impl), "ok") for _ in calls]
@@ -145,9 +133,6 @@ def _ordered(session, contract_id: int) -> list[UpgradeEvent]:
         .scalars()
         .all()
     )
-
-
-# --- 1. the poller never invents a block --------------------------------
 
 
 def test_poll_detected_upgrade_writes_no_block_and_no_tx(db_session, proxy_with_history, monkeypatch):
@@ -182,8 +167,7 @@ def test_poll_detected_upgrade_sorts_after_every_real_event(db_session, proxy_wi
     assert [r.new_impl for r in rows] == [IMPL_GENESIS, IMPL_MIDDLE, IMPL_CURRENT, IMPL_NEXT]
     assert rows[0].block_number == BLOCK_GENESIS, "the genuine genesis deployment must stay first"
 
-    # --- defect control: the same fixture with the old sentinel ---------
-    # Proves this assertion can still see the defect it was written for.
+    # Proves the assertion still sees the defect.
     db_session.add(
         UpgradeEvent(
             contract_id=proxy_with_history.id,
@@ -197,9 +181,6 @@ def test_poll_detected_upgrade_sorts_after_every_real_event(db_session, proxy_wi
     corrupted = _ordered(db_session, proxy_with_history.id)
     assert corrupted[0].block_number == 0, "control: block_number=0 still sorts ahead of genesis"
     assert corrupted[0].new_impl != IMPL_GENESIS
-
-
-# --- 2. every writer identifies itself ----------------------------------
 
 
 def test_poll_and_event_scan_writers_stamp_distinct_sources(db_session, proxy_with_history, monkeypatch):
@@ -230,10 +211,8 @@ def test_poll_and_event_scan_writers_stamp_distinct_sources(db_session, proxy_wi
         UPGRADE_SOURCE_POLL,
         UPGRADE_SOURCE_EVENT_SCAN,
     }, "all three writers must be distinguishable"
-    # The log-derived row carries a real block; only the poll row does not.
     assert by_source[UPGRADE_SOURCE_EVENT_SCAN][0].block_number == BLOCK_CURRENT + 1000
     assert by_source[UPGRADE_SOURCE_POLL][0].block_number is None
-    # old_impl NULL now means "this writer does not record it" — readable.
     assert all(r.old_impl is None for r in by_source[UPGRADE_SOURCE_BACKFILL])
     assert by_source[UPGRADE_SOURCE_POLL][0].old_impl is not None
 
@@ -273,12 +252,8 @@ def test_artifact_projection_stamps_backfill_source(db_session, proxy_with_histo
     assert rows[0].block_number == BLOCK_GENESIS
 
 
-# --- 3. the consumer that re-collapsed the NULL --------------------------
-
-
 def test_impl_windows_keep_genesis_first_when_a_row_has_no_block(db_session, proxy_with_history):
-    """``_compute_impl_windows_batch`` used to fold NULL to 0 and sort on it, putting a
-    block-less event back in front of genesis after SQL ordering had sunk it."""
+    """It folded NULL to 0 and put a block-less event back in front of genesis."""
     from services.audits.coverage import _compute_impl_windows_batch
 
     db_session.add(
@@ -309,13 +284,11 @@ def test_impl_windows_keep_genesis_first_when_a_row_has_no_block(db_session, pro
         assert genesis.to_block == BLOCK_MIDDLE
         assert genesis.successor == "known"
 
-        # The block-less impl's own window: start unknown, and honestly so.
         pollw = windows[impls[3].id][0]
         assert pollw.from_block is None
         assert pollw.successor == "none"
 
-        # The impl it replaced is closed, not open — to_block is None only
-        # because the successor's block is unknown.
+        # to_block is None only because the successor's block is unknown.
         prev = windows[impls[2].id][0]
         assert prev.to_block is None
         assert prev.successor == "block_unknown"
@@ -326,8 +299,7 @@ def test_impl_windows_keep_genesis_first_when_a_row_has_no_block(db_session, pro
 
 
 def test_undated_audit_does_not_attach_to_a_superseded_impl():
-    """The open-window pick keyed off ``to_block is None``, which a block-less successor
-    also produces, filing an undated audit against an already-replaced impl."""
+    """A block-less successor also yields ``to_block is None``."""
     from services.audits.coverage import ImplWindow, _confidence_for_impl_era
 
     superseded = ImplWindow(
@@ -353,16 +325,13 @@ def test_undated_audit_does_not_attach_to_a_superseded_impl():
     assert confidence == "low"
     assert window is current
 
-    # Positive case: a dated audit inside the superseded window still lands
-    # there, at high confidence — the hedge above did not cost the real answer.
     dated, w = _confidence_for_impl_era(datetime(2026, 6, 15, tzinfo=timezone.utc), [superseded, current])
     assert dated == "high"
     assert w is superseded
 
 
 def test_half_known_block_window_is_not_published_as_open_ended():
-    """A NULL ``covered_to_block`` beside a non-NULL ``covered_from_block`` reads as open-ended,
-    but an unproven upper bound is not proof coverage extends forward, so publish neither bound."""
+    """An unproven upper bound doesn't prove coverage extends forward."""
     from services.audits.coverage import ImplWindow, _publishable_block_bounds
 
     closed = ImplWindow(

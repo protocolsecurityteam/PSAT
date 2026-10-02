@@ -1,14 +1,6 @@
-"""Tests for ``build_effects``.
-
-End-to-end: compile a Solidity fixture, run the effects builder, and
-assert semantic sink discovery + label inference.
-"""
-
 from __future__ import annotations
 
 import json
-import textwrap
-from pathlib import Path
 
 import pytest
 from eth_utils.crypto import keccak
@@ -30,6 +22,7 @@ from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts_with_pause_info,
 )
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _selector(signature: str) -> str:
@@ -38,13 +31,6 @@ def _selector(signature: str) -> str:
 
 def _claim_ids(info: EffectInfo) -> set[str]:
     return {claim["claim_id"] for claim in (info.get("claims") or [])}
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
 
 
 def _contract(sl: Slither, name: str | None = None):
@@ -82,7 +68,6 @@ def test_basic_state_write_emits_state_write_sink(tmp_path):
     assert len(state_writes) == 1
     assert state_writes[0]["target"] == "x"
     assert "x" in info["effect_targets"]
-    # Selector + writer_selectors populated for state writers.
     assert info["selector"].startswith("0x") and len(info["selector"]) == 10
     assert info["writer_selectors"] == [info["selector"]]
 
@@ -109,8 +94,6 @@ def test_internal_helper_writes_surface_on_caller(tmp_path):
     info = _info(artifact, "bump(uint256)")
     targets = {s["target"] for s in info["sinks"] if s["kind"] == "state_write"}
     assert {"x", "y"}.issubset(targets), f"expected x and y, got {targets}"
-    # Internal helpers don't appear as their own entry — their effects
-    # propagate to external callers only.
     assert "_bumpInternally(uint256)" not in artifact["functions"]
 
 
@@ -170,8 +153,7 @@ def test_effect_label_recognition_pause_toggle(tmp_path):
 
 
 def test_semantic_effects_includes_unguarded_public_function(tmp_path):
-    """The semantic effects artifact MUST surface unguarded external functions;
-    ``predicate_trees`` omits them (no revert path) but consumers need the sink."""
+    """``predicate_trees`` omits them (no revert path), but consumers need the sink."""
     sl = _compile(
         tmp_path,
         """
@@ -210,7 +192,6 @@ def test_semantic_effects_includes_unguarded_public_function(tmp_path):
     sinks = {(s["kind"], s["target"]) for s in public_setter["sinks"]}
     assert ("state_write", "x") in sinks
 
-    # setBoth writes x directly and y transitively via the internal helper.
     set_both_sinks = {(s["kind"], s["target"]) for s in artifact["functions"]["setBoth(uint256,uint256)"]["sinks"]}
     assert ("state_write", "x") in set_both_sinks
     assert ("state_write", "y") in set_both_sinks
@@ -228,13 +209,10 @@ def test_artifact_is_json_serializable(tmp_path):
         """,
     )
     artifact = build_effects(_contract(sl))
-    # Round-trips cleanly — no slither-bound objects leaking through.
     json.dumps(artifact)
 
 
 def test_fallback_and_receive_included(tmp_path):
-    """Fallback + receive are real sink-bearing surfaces and MUST be emitted, even
-    though the predicate-tree builder skips them."""
     sl = _compile(
         tmp_path,
         """
@@ -252,8 +230,6 @@ def test_fallback_and_receive_included(tmp_path):
     )
     artifact = build_effects(_contract(sl))
     fns = set(artifact["functions"].keys())
-    # Slither typically emits fallback as ``fallback()`` and receive as
-    # ``receive()``; allow both spellings just in case.
     assert any("fallback" in f for f in fns), fns
     assert any("receive" in f for f in fns), fns
 
@@ -274,15 +250,10 @@ def test_constructor_skipped(tmp_path):
     assert not any(name.startswith("constructor") for name in artifact["functions"]), artifact["functions"]
 
 
-# Authorization-capability labels: ownership_transfer / role_management come from
-# the Plane-1 claims registry (``ownership.*`` selector-gated + ghost-immune;
-# ``roles.*`` canonical-selector; bespoke rotation is ``authorized_caller.rotate``)
-# and are folded in by ``project_effect_labels``, the same sequence core.py runs.
+# Authorization labels come from the Plane-1 claims registry via ``project_effect_labels``, as in core.py.
 
 
 def _pipeline_effects(sl, contract_name=None):
-    """Run the static label sequence core.py runs (facts, Plane-1 claims, label
-    projection) and return the mutated effects artifact."""
     contract = _contract(sl, contract_name)
     effects = build_effects(contract)
     predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
@@ -319,11 +290,7 @@ contract MyToken is Ownable {
 
 
 def test_oz_ownable_checkowner_indirection_is_ownership_transfer(tmp_path):
-    """OZ 5.x routes the caller check through ``onlyOwner -> _checkOwner ->
-    owner() == _msgSender()``. The ``ownership.*`` matcher keys on the canonical
-    ``transferOwnership``/``renounceOwnership`` selectors plus the ``owner()``
-    getter sibling, so the setters project to ``ownership_transfer`` and never
-    the retired ``hook_update`` fallback."""
+    """OZ 5.x routes through ``_checkOwner``; the matcher keys on canonical selectors plus the ``owner()`` sibling."""
     artifact = _pipeline_effects(_compile(tmp_path, _OZ_OWNABLE), "MyToken")
     assert "ownership_transfer" in _info(artifact, "transferOwnership(address)")["effect_labels"]
     assert "ownership_transfer" in _info(artifact, "renounceOwnership()")["effect_labels"]
@@ -331,33 +298,20 @@ def test_oz_ownable_checkowner_indirection_is_ownership_transfer(tmp_path):
 
 
 def test_incidental_config_read_in_auth_gate_is_not_ownership(tmp_path):
-    """THE precision regression. ``setFeeRecipient`` is gated by a modifier
-    that checks ``msg.sender == owner()`` AND reads ``feeRecipient`` (the
-    ``require(feeRecipient != 0)``). Only ``owner`` is the caller-authority
-    var; ``feeRecipient``'s read is a ``business`` leaf — so the config setter
-    must NOT be tagged ownership_transfer. (A naive 'modifier reads the
-    written var + mentions msg.sender' rule mislabels this.)"""
+    """The modifier reads ``feeRecipient`` as a business leaf; only ``owner`` is the caller-authority var."""
     artifact = _pipeline_effects(_compile(tmp_path, _OZ_OWNABLE), "MyToken")
     assert "ownership_transfer" not in _info(artifact, "setFeeRecipient(address)")["effect_labels"]
-    # Control: the genuine owner setter in the same contract IS tagged.
     assert "ownership_transfer" in _info(artifact, "transferOwnership(address)")["effect_labels"]
 
 
 def test_addr_setter_under_unrelated_owner_gate_is_not_ownership(tmp_path):
-    """``setTreasury`` writes an address and is gated by ``onlyOwner``, but the
-    gate's caller-authority var is ``_owner`` — not ``treasury`` — so it's not
-    ownership. A plain uint setter is likewise untouched."""
     artifact = _pipeline_effects(_compile(tmp_path, _OZ_OWNABLE), "MyToken")
     assert "ownership_transfer" not in _info(artifact, "setTreasury(address)")["effect_labels"]
     assert _info(artifact, "setX(uint256)")["effect_labels"] == []
 
 
 def test_ownership_detection_is_name_agnostic(tmp_path):
-    """No ``owner``/``Ownable`` identifiers and no canonical ownership selector,
-    so ``ownership.*`` (standards-gated) does not fire. The obfuscated
-    caller-authority scalar rotation is the name-agnostic
-    ``authorized_caller.rotate`` idiom instead — same admin weight, but not the
-    ghost-prone ownership_transfer sentence."""
+    """``ownership.*`` is standards-gated, so an obfuscated rotation is ``authorized_caller.rotate`` instead."""
     sl = _compile(
         tmp_path,
         """
@@ -376,10 +330,7 @@ def test_ownership_detection_is_name_agnostic(tmp_path):
 
 
 def test_oz_accesscontrol_grantrole_is_role_management(tmp_path):
-    """OZ AccessControl ``grantRole``/``revokeRole`` are matched by their
-    canonical IAccessControl selector → ``role_management``. (Role membership
-    isn't inferred from the predicate post-pass — a caller-keyed data map is
-    indistinguishable from a caller-keyed ACL; see the composeQueue test.)"""
+    """Role membership isn't inferred from the predicate post-pass; a caller-keyed data map looks identical."""
     sl = _compile(
         tmp_path,
         """
@@ -407,14 +358,9 @@ def test_oz_accesscontrol_grantrole_is_role_management(tmp_path):
 
 
 def test_caller_keyed_data_map_is_not_role_management(tmp_path):
-    """Regression for a real EndpointV2 false positive. ``send`` writes a
-    per-sender queue ``q[msg.sender][guid]`` and guards on
-    ``q[msg.sender][guid] == 0`` — which the predicate builder classifies as a
-    caller_authority *membership* leaf (caller is key 0). A naive 'writes a
-    caller_authority membership var → role_management' rule mislabels this
-    data writer as role management. ``roles.*`` is standard-gated on canonical
-    selectors and ``authorized_caller.rotate`` needs a scalar-equality leaf, so
-    ``send`` stays untagged."""
+    """EndpointV2's ``send`` guards ``q[msg.sender][guid] == 0``, which classifies as a caller_authority membership
+    leaf.
+    """
     sl = _compile(
         tmp_path,
         """
@@ -467,9 +413,7 @@ contract RolesAuthority is Auth {
 
 
 def test_solmate_rolesauthority_setters_are_role_management(tmp_path):
-    """Solmate's role state is read via the external ``authority.canCall`` —
-    no in-contract edge for the data-flow rule — so the role setters are
-    recognised by their canonical ABI selector instead."""
+    """Role state is read through external ``authority.canCall``, so the setters are matched by selector."""
     artifact = build_effects(_contract(_compile(tmp_path, _SOLMATE_AUTH), "RolesAuthority"))
     assert "role_management" in _info(artifact, "setUserRole(address,uint8,bool)")["effect_labels"]
     assert "role_management" in _info(artifact, "setRoleCapability(uint8,address,bytes4,bool)")["effect_labels"]
@@ -477,9 +421,6 @@ def test_solmate_rolesauthority_setters_are_role_management(tmp_path):
 
 
 def test_solmate_setauthority_is_authority_update(tmp_path):
-    """Replacing the ``Authority`` contract governs every gated call — the
-    selector residue tags it ``authority_update`` rather than the coarse
-    ``external_contract_call`` it used to get."""
     artifact = build_effects(_contract(_compile(tmp_path, _SOLMATE_AUTH), "RolesAuthority"))
     labels = _info(artifact, "setAuthority(Authority)")["effect_labels"]
     assert "authority_update" in labels

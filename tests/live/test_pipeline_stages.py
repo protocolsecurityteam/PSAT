@@ -1,5 +1,3 @@
-"""Single-contract pipeline output: WETH reaches ``done`` and emits the expected per-stage artifacts."""
-
 from __future__ import annotations
 
 import pytest
@@ -33,7 +31,6 @@ def test_dependencies_artifact(analyzed_weth, live_client: LiveClient):
 
 
 def test_control_tracking_plan_artifact(analyzed_weth, live_client: LiveClient):
-    # WETH has no guarded controls; plan can be empty but the artifact must still exist.
     art = live_client.artifact(analyzed_weth["job_id"], "control_tracking_plan")
     assert isinstance(art, dict), "control_tracking_plan artifact should exist"
 
@@ -43,7 +40,6 @@ def test_control_tracking_plan_artifact(analyzed_weth, live_client: LiveClient):
     ["control_snapshot", "effective_permissions", "principal_labels"],
 )
 def test_unconditionally_emitted_artifacts(analyzed_weth, live_client: LiveClient, artifact_name: str):
-    # resolution_worker.py:97 + policy_worker.py:213/283 emit these unconditionally.
     art = live_client.artifact(analyzed_weth["job_id"], artifact_name)
     assert art is not None, f"{artifact_name} artifact was not emitted"
     assert isinstance(art, (dict, list)), f"{artifact_name} should be structured JSON"

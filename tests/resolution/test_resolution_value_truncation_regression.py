@@ -1,26 +1,14 @@
-"""Regression tests for the 2026-05-26 resolution stall (etherfi run).
+"""The 2026-05-26 etherfi resolution stall.
 
-1. TRIGGER: ``_decode_controller_value`` returned the raw multi-word ABI blob for a struct
-   getter with no ``member_path`` (AccountantWithRateProviders ``accountantState()``); at >66
-   chars it overflowed ``controller_values.value`` (VARCHAR(66)) with
-   ``StringDataRightTruncation`` on commit.
-2. AMPLIFIER: ``BaseWorker._execute_job``'s failure handler read the expired
-   ``job.retry_count`` before ``session.rollback()``, re-raising ``PendingRollbackError`` and
-   leaving the job in 'processing'; the stale-job sweep requeued it forever (never bumping
-   ``retry_count``).
-
-DB-backed tests hit real Postgres (the truncation only reproduces against the live VARCHAR(66)
-constraint) and keep artifacts inline.
+``_decode_controller_value`` returned a raw multi-word struct blob that overflowed ``controller_values.value``
+(VARCHAR(66)); the failure handler then read expired ``retry_count`` before rollback and left the job
+processing, so the stale sweep requeued it forever. Needs real Postgres for the VARCHAR constraint.
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
 from eth_abi.abi import encode
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, JobStage, JobStatus
 from db.queue import create_job
@@ -32,29 +20,19 @@ from services.resolution.tracking import (
     clear_classify_cache,
 )
 from tests.cache_helpers import requires_postgres
+from tests.support.db_fixtures import (
+    _read_stage_errors,
+    test_session_local,  # noqa: F401  (fixture, registered by import)
+)
 from workers.base import BaseWorker
 
 _ADDR = "0x2222222222222222222222222222222222222222"
-# A 3-word struct (address, uint96, bool) — the exact shape of AccountantState.
-# 0x + 3*64 hex = 194 chars, well past VARCHAR(66).
+# The AccountantState shape: 194 chars.
 _RAW_STRUCT = "0x" + encode(["address", "uint96", "bool"], [_ADDR, 123, False]).hex()
 
 
 @pytest.fixture()
-def test_session_local(monkeypatch):
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-    test_engine = create_engine(test_url)
-    test_factory = sessionmaker(bind=test_engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("workers.base.SessionLocal", test_factory)
-    yield test_factory
-    test_engine.dispose()
-
-
-@pytest.fixture()
 def clean_db(db_session):
-    """Nuke touched tables (FK-safe: children before parents)."""
 
     def _wipe():
         db_session.query(ControllerValue).delete()
@@ -70,22 +48,10 @@ def clean_db(db_session):
     _wipe()
 
 
-def _read_stage_errors(session, job_id):
-    art = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == "stage_errors").one_or_none()
-    if art is None or art.data is None:
-        return None
-    return art.data
-
-
-# Bug 1 (trigger), decode boundary — unit
-
-
 def test_decode_controller_value_refuses_unstorable_struct_blob():
-    # No read_spec at all (the prod top-level ``accountantState`` controller).
     with pytest.raises(ValueError, match="exceeds storable width"):
         _decode_controller_value(_RAW_STRUCT, "state_variable", None)
 
-    # A getter_call read_spec that is a struct but carries no member_path.
     struct_spec_no_projection = {
         "strategy": "getter_call",
         "target": "accountantState",
@@ -97,7 +63,6 @@ def test_decode_controller_value_refuses_unstorable_struct_blob():
 
 
 def test_decode_controller_value_storable_paths_unchanged():
-    """The fix must not regress storable paths: a left-padded address word and a projected struct member."""
     word = "0x" + "00" * 12 + "ab" * 20
     assert _decode_controller_value(word, "state_variable", None) == "0x" + "ab" * 20
     assert len("0x" + "ab" * 20) <= _CONTROLLER_VALUE_MAX_LEN
@@ -114,9 +79,6 @@ def test_decode_controller_value_storable_paths_unchanged():
     assert _decode_controller_value(_RAW_STRUCT, "state_variable", projected) == _ADDR  # pyright: ignore[reportArgumentType]
 
 
-# Bug 1 (trigger), end-to-end snapshot -> real controller_values INSERT
-
-
 def _struct_controller_plan() -> ControlTrackingPlan:
     contract_address = "0x1111111111111111111111111111111111111111"
     return {
@@ -130,8 +92,6 @@ def _struct_controller_plan() -> ControlTrackingPlan:
                 "label": "accountantState",
                 "source": "accountantState",
                 "kind": "state_variable",
-                # Struct getter, NO member_path — the spurious top-level
-                # controller that produced the raw multi-word blob in prod.
                 "read_spec": {
                     "strategy": "getter_call",
                     "target": "accountantState",
@@ -154,10 +114,7 @@ def _struct_controller_plan() -> ControlTrackingPlan:
 
 @requires_postgres
 def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
-    """build_control_snapshot must not emit a value that overflows controller_values.value.
-
-    Discovery no longer emits a bare-struct controller, so this pins resolution-layer
-    defense-in-depth: a bare-struct controller handed in directly resolves to an honest ``None``."""
+    """Discovery no longer emits a bare-struct controller; this is defense in depth."""
     clear_classify_cache()
     plan = _struct_controller_plan()
 
@@ -178,7 +135,6 @@ def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
     assert entry["value"] is None
     assert entry["resolved_type"] == "unknown"
 
-    # Persist the snapshot the way workers/resolution_worker.py:~140-154 does.
     session = clean_db
     contract = Contract(address=plan["contract_address"], contract_name=plan["contract_name"])
     session.add(contract)
@@ -202,13 +158,7 @@ def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
     assert stored.value is None
 
 
-# Bug 2 (amplifier), handler must not stall on a poisoned session
-
-
 class _SessionPoisoningWorker(BaseWorker):
-    """``process()`` reproduces the prod failure: an expired ``job`` row plus a controller_values
-    INSERT overflowing VARCHAR(66), leaving the session in pending-rollback."""
-
     stage = JobStage.resolution
     next_stage = JobStage.policy
     poll_interval = 0.0
@@ -234,7 +184,6 @@ class _SessionPoisoningWorker(BaseWorker):
 
 @requires_postgres
 def test_execute_job_marks_terminal_on_session_poisoning_dataerror(clean_db, test_session_local):
-    """A session-poisoning DataError lands the job in ``failed_terminal``; the handler must not re-raise."""
     session = clean_db
     contract = Contract(address="0x" + "11" * 20, contract_name="AccountantWithRateProviders")
     session.add(contract)

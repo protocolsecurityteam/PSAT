@@ -33,13 +33,11 @@ def test_chain_by_name_canonical():
 
 
 def test_chain_by_name_registry_alias():
-    # Aliases declared directly on ChainInfo.
     assert chain_by_name("mainnet").name == "ethereum"
     assert chain_by_name("bera").name == "berachain"
 
 
 def test_chain_by_name_loose_label_alias():
-    # Falls back through canonical_chain for loose human labels.
     assert chain_by_name("Arbitrum One").chain_id == 42161
     assert chain_by_name("AVAX").name == "avalanche"
     assert chain_by_name("matic").name == "polygon"
@@ -77,14 +75,11 @@ def test_every_chain_has_a_native_asset():
 @pytest.mark.parametrize(
     ("name", "symbol"),
     [
-        # ETH-native chains are the only ones TVL can price at the ETH/USD quote.
         *[
             pytest.param(n, "ETH", id=n)
             for n in ("ethereum", "base", "arbitrum", "optimism", "linea", "scroll", "zksync", "blast", "mode")
         ],
-        # These chains carry their own native gas token (never ETH), so TVL must
-        # refuse to quote their native balance at the ETH price. POL is the
-        # current canonical symbol for polygon (renamed from MATIC).
+        # These chains have their own gas token, so TVL must not quote them at the ETH price.
         pytest.param("polygon", "POL", id="polygon"),
         pytest.param("bsc", "BNB", id="bsc"),
         pytest.param("avalanche", "AVAX", id="avalanche"),

@@ -1,8 +1,6 @@
-"""Dump REAL prod predicate_trees + state_var_values for the cofinite e2e fixtures.
+"""Dump prod predicate_trees and state_var_values for the cofinite e2e fixtures.
 
-Source of truth = the prod analysis artifacts (the real static pipeline's output from
-real verified on-chain source). Read-only. Writes tests/fixtures/cofinite/*.json.
-Run manually with prod env; the test consumes only the committed JSON (no network).
+Run manually with prod env; tests read only the committed JSON.
 """
 
 import json
@@ -57,9 +55,7 @@ TARGETS = [
         ["registerNodeOperator(bytes,uint64)"],
     ),
 ]
-# Each ``keep`` is exactly the signatures the e2e test asserts on (the trees resolve
-# independently and inlining pulls from the *callee's* artifact, so siblings are dead
-# weight). Trimming was verified to change 0 resolver output for the kept functions.
+# Each ``keep`` is exactly the signatures the e2e test asserts on; trimming changed no resolver output.
 
 OUT = "/home/riley/PSAT/tests/fixtures/cofinite"
 os.makedirs(OUT, exist_ok=True)
@@ -108,7 +104,6 @@ with SessionLocal() as s:
         with open(path, "w") as fh:
             json.dump(payload, fh, indent=1, sort_keys=True)
         print(f"OK {name}: {len(trees)} trees, {len(svs)} state vars -> {path}")
-        # show the function sigs we kept for canary contracts (to pick assertions)
         if keep is None and name in ("weeth", "roles_authority", "accountant", "node_operator_manager", "teller"):
             sigs = [
                 k

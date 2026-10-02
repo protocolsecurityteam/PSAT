@@ -118,7 +118,6 @@ def test_rollback_preserves_complete_prefix_then_restart_and_replay(db_session, 
         assert cursor.window_stats_cap == 1_000_000
     work = db_session.get(IndexerWork, ("reconcile", "1"))
     assert work is not None and work.dirty
-    # Each topic INSERT invalidates once; the failed prefix's invalidation rolled back.
     assert work.revision == 6  # three enrollment signals + three committed INSERTs
 
     monkeypatch.setattr(indexer, "_bulk_insert_logs", original)
@@ -129,7 +128,6 @@ def test_rollback_preserves_complete_prefix_then_restart_and_replay(db_session, 
     assert count_logs(db_session) == 18
     assert all(c.last_indexed_block == 6 and c.backfill_complete for c in positions(db_session))
 
-    # Retrying an already persisted range cannot duplicate events.
     db_session.execute(update(IndexedEventCursor).values(last_indexed_block=0, last_indexed_block_hash=None))
     db_session.commit()
     assert scan(db_session, fetcher, write_max_rows=6).inserted == 0
@@ -253,7 +251,6 @@ def test_reorg_and_final_hash_reads_do_not_hold_reconciliation_lock(db_session):
 
 
 def test_incident_sized_backfill_allows_repeated_concurrent_submissions(db_session):
-    """The incident's 252,760 rows used to share one transaction (254 INSERTs)."""
     seed(db_session)
     counts = (35_240, 183_634, 33_886)
     logs = []
@@ -286,8 +283,7 @@ def test_incident_sized_backfill_allows_repeated_concurrent_submissions(db_sessi
         assert first_insert.wait(30)
         outcomes = []
         for attempt in range(24):
-            # Sample throughout the backfill, not just the initial lock release.
-            # Only submitters wait; the writer runs without artificial delays.
+            # Sample throughout the backfill; only submitters wait.
             with progress:
                 assert progress.wait_for(lambda: len(lock_durations) >= attempt * 2 or done.is_set(), timeout=30)
             with Session(engine) as session:

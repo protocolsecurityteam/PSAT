@@ -1,11 +1,5 @@
-"""YAML-driven corpus harness.
-
-For every ``tests/corpus_manifests/*.yaml``: compile the Solidity (inline or via
-``source_path:``) against Slither, run ``build_predicate_artifacts`` on the subject
-contract, assert each ``expected_functions`` entry matches the semantic leaf fields, and
-assert every ``unguarded`` function is absent from the trees dict (absent = publicly
-callable). Manifests give #18's go/no-go gate authoritative expected output; schema and
-how to add one: ``tests/corpus_manifests/README.md``.
+"""Runs every ``tests/corpus_manifests/*.yaml`` through ``build_predicate_artifacts``; an ``unguarded`` function must
+be absent from the trees. Schema: ``tests/corpus_manifests/README.md``.
 """
 
 from __future__ import annotations
@@ -70,11 +64,6 @@ def test_corpus_manifest(manifest_path: Path, tmp_path: Path):
         )
 
 
-# ---------------------------------------------------------------------------
-# Loader / matching
-# ---------------------------------------------------------------------------
-
-
 def _load_manifest(path: Path) -> dict[str, Any]:
     with path.open("r") as f:
         data = yaml.safe_load(f) or {}
@@ -111,10 +100,7 @@ def _walk_leaves(tree: dict[str, Any]):
         yield from _walk_leaves(child)
 
 
-# Manifest fields that are matched directly against the leaf's
-# fields. Each is OPTIONAL — the manifest only pins fields it cares
-# about. New fields can be added as the pipeline grows by extending
-# this list.
+# Optional: a manifest pins only the fields it cares about.
 _MATCHED_FIELDS = (
     "authority_role",
     "kind",

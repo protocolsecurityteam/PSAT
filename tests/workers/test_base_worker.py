@@ -1,8 +1,3 @@
-"""Tests for workers.base — BaseWorker loop, recovery, and signal handling.
-
-These are pure unit tests that mock all DB dependencies.
-"""
-
 from __future__ import annotations
 
 import os
@@ -10,35 +5,17 @@ import signal
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from db.models import JobStage, JobStatus
+from tests.support.worker_stubs import _make_job, _TestWorker
 from workers.base import BaseWorker, JobHandledDirectly
-
-# ---------------------------------------------------------------------------
-# Concrete subclass for testing
-# ---------------------------------------------------------------------------
-
-
-class _TestWorker(BaseWorker):
-    """Minimal concrete worker for testing."""
-
-    stage = JobStage.discovery
-    next_stage = JobStage.static
-    poll_interval = 0  # no real sleeping in tests
-
-    def process(self, session, job):
-        """No-op — individual tests override via mock."""
-        pass
 
 
 class _DoneWorker(BaseWorker):
-    """Worker whose next_stage is done (triggers complete_job)."""
-
     stage = JobStage.policy
     next_stage = JobStage.done
     poll_interval = 0
@@ -47,40 +24,12 @@ class _DoneWorker(BaseWorker):
         pass
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_job(**overrides):
-    """Return a lightweight mock Job object."""
-    defaults = dict(
-        id=uuid.uuid4(),
-        address="0x" + "a" * 40,
-        name="test-job",
-        status=JobStatus.processing,
-        stage=JobStage.discovery,
-        updated_at=datetime.now(timezone.utc),
-        worker_id="some-worker",
-        detail=None,
-        retry_count=0,
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
-
-
 @pytest.fixture(autouse=True)
 def _force_single_job_concurrency(monkeypatch):
-    """These tests assert the K=1 legacy path; a developer's ``.env`` (loaded by
-    ``db.models``) may set concurrency > 1 and break the exact-call assertions."""
+    """A developer ``.env`` may set concurrency > 1."""
     for key in list(os.environ):
         if key.startswith("PSAT_") and key.endswith("_JOB_CONCURRENCY"):
             monkeypatch.delenv(key, raising=False)
-
-
-# ---------------------------------------------------------------------------
-# Tests: _handle_sigterm
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -89,11 +38,6 @@ def test_handle_sigterm_sets_running_false(mock_signal):
     assert w._running is True
     w._handle_sigterm(signal.SIGTERM, None)
     assert w._running is False
-
-
-# ---------------------------------------------------------------------------
-# Tests: _recover_stale_jobs
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -122,11 +66,6 @@ def test_recover_stale_jobs_no_stale(mock_signal):
     w._recover_stale_jobs(mock_session)
 
     mock_session.commit.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Tests: run_loop
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -246,10 +185,8 @@ def test_run_loop_process_exception_calls_fail_job_terminal(mock_fail, mock_clai
     assert args[0] is mock_session  # session
     assert args[1] == job.id  # job_id
     assert "boom" in args[2]  # error traceback contains "boom"
-    # ``kind`` keyword is the classifier verdict — RuntimeError is terminal.
     assert mock_fail.call_args.kwargs.get("kind") == "terminal"
-    # rollback fires at least once from the exception handler; the empty-
-    # sweep branch of ``reclaim_stuck_jobs`` may also call it.
+    # The empty-sweep branch of ``reclaim_stuck_jobs`` may also roll back.
     mock_session.rollback.assert_called()
 
 
@@ -261,12 +198,7 @@ def test_run_loop_process_exception_calls_fail_job_terminal(mock_fail, mock_clai
 def test_worker_failure_is_one_line_with_structured_fields(
     mock_configure, mock_fail, mock_claim, mock_session_cls, mock_signal, caplog
 ):
-    """Failure is one log line: facts as fields/contextvars, traceback in ``exc_info``.
-
-    ``configure_logging`` is patched out because its first call clears every root
-    handler (caplog's included), so otherwise this passes only if logging was
-    already configured by an earlier test.
-    """
+    """``configure_logging``'s first call clears caplog's handler, so it's patched out."""
     import logging
 
     job = _make_job()
@@ -300,7 +232,6 @@ def test_worker_failure_is_one_line_with_structured_fields(
     assert record.job_name == job.name
     assert record.process_rss_peak_sampled_bytes >= record.process_rss_start_bytes
     assert record.process_rss_peak_sampled_bytes >= record.process_rss_end_bytes
-    # Terminal: the job really failed, so the traceback belongs on the line.
     assert record.exc_info is not None
 
 
@@ -312,8 +243,6 @@ def test_worker_failure_is_one_line_with_structured_fields(
 def test_requeued_failure_carries_no_traceback(
     mock_requeue, mock_claim, mock_session_cls, mock_signal, mock_configure, caplog
 ):
-    """A requeued job has not failed, so ``exc_info`` is terminal-only; ``exc_type``/
-    ``exc_message`` still name the cause and the StageError keeps the traceback."""
     import logging
 
     import requests
@@ -375,17 +304,11 @@ def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, 
     mock_complete.assert_called_once_with(mock_session, job.id, lease_id=None)
 
 
-# ---------------------------------------------------------------------------
-# Tests: _claim_job sweeps stuck processing rows before claiming
-# ---------------------------------------------------------------------------
-
-
 @patch("workers.base.signal.signal")
 @patch("workers.base.reclaim_stuck_jobs")
 @patch("workers.base.claim_job")
 def test_claim_job_sweeps_stuck_rows_before_claiming(mock_claim, mock_reclaim, mock_signal):
-    """Crashed workers' jobs must be reclaimable on the next poll, not after 30 cycles
-    of the stage-filtered recovery sweep."""
+    """Otherwise they'd wait 30 cycles of the stage-filtered sweep."""
     w = _TestWorker()
     mock_session = MagicMock()
     mock_reclaim.return_value = []
@@ -397,16 +320,10 @@ def test_claim_job_sweeps_stuck_rows_before_claiming(mock_claim, mock_reclaim, m
     mock_claim.assert_called_once_with(mock_session, JobStage.discovery, w.worker_id)
 
 
-# ---------------------------------------------------------------------------
-# Tests: _heartbeat — bumps updated_at without changing detail
-# ---------------------------------------------------------------------------
-
-
 @patch("workers.base.SessionLocal")
 @patch("workers.base.signal.signal")
 def test_heartbeat_issues_update_and_commits(mock_signal, SessionLocalMock):
-    """The legacy (no-lease) path opens a fresh ``SessionLocal()`` rather than the
-    worker's main session — see ``test_heartbeat_fresh_session.py`` for why."""
+    """See ``test_heartbeat_fresh_session.py``."""
     fresh = MagicMock()
     fresh.__enter__ = MagicMock(return_value=fresh)
     fresh.__exit__ = MagicMock(return_value=False)
@@ -425,7 +342,6 @@ def test_heartbeat_issues_update_and_commits(mock_signal, SessionLocalMock):
     assert "updated_at" in compiled.lower()
     assert "detail" not in compiled.lower()
     fresh.commit.assert_called_once()
-    # Worker's main session must NOT be touched.
     worker_session.execute.assert_not_called()
 
 
@@ -465,8 +381,7 @@ def test_heartbeat_uses_claim_time_token(mock_signal, SessionLocalMock, mock_hea
 @patch("workers.base.SessionLocal")
 @patch("workers.base.signal.signal")
 def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
-    """A DB failure in the fresh-session UPDATE is non-fatal but logged at WARNING;
-    a silent DEBUG log once hid the heartbeat-stall bug."""
+    """A silent DEBUG log once hid the heartbeat-stall bug."""
     fresh = MagicMock()
     fresh.__enter__ = MagicMock(return_value=fresh)
     fresh.__exit__ = MagicMock(return_value=False)
@@ -484,12 +399,8 @@ def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
 
 @pytest.fixture()
 def _restore_workers_base_module():
-    """Clear the stale-job override, then put ``workers.base`` back.
-
-    ``importlib.reload`` makes ``JobHandledDirectly``/``BaseWorker`` NEW class
-    objects while already-imported modules keep the old ones, so a later
-    ``JobHandledDirectly`` would match no ``pytest.raises`` elsewhere. The
-    originals are rebound afterwards.
+    """``importlib.reload`` mints new class objects, so a later ``JobHandledDirectly`` would match no
+    ``pytest.raises``; the originals are rebound.
     """
     import importlib
 
@@ -510,19 +421,11 @@ def _restore_workers_base_module():
 
 
 def test_stale_job_timeout_default_is_600(_restore_workers_base_module):
-    """The default stale-job timeout is 600s now that fan-outs can sit minutes between writes."""
     import importlib
 
-    # The fixture cleared the override, so this observes the code's default
-    # rather than whatever the ambient environment happens to carry.
     base = _restore_workers_base_module
     importlib.reload(base)
     assert base.STALE_JOB_TIMEOUT == 600
-
-
-# ---------------------------------------------------------------------------
-# Tests: error handling edge cases in run_loop
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -567,8 +470,7 @@ def test_run_loop_fail_job_exception_retries_with_fresh_session(mock_fail, mock_
     assert mock_fail.call_count == 2
     second_call_args = mock_fail.call_args_list[1][0]
     assert second_call_args[0] is fresh_session
-    # fresh_session.close is called in the retry block; it may also be called
-    # when SessionLocal returns it as the main loop session in later iterations.
+    # It may also be called when SessionLocal returns it as the main session.
     assert fresh_session.close.call_count >= 1
 
 

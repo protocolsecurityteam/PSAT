@@ -50,11 +50,6 @@ def ADDR(n: int) -> str:
 SAFE = ADDR(0x5AFE)
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def make_mc(db_session):
     protocol = Protocol(name="salience", chains=["ethereum"])
@@ -70,8 +65,7 @@ def make_mc(db_session):
         monitoring_config: dict | None = None,
         last_known_state: dict | None = None,
     ) -> MonitoredContract:
-        # Each call gets its own address: ``contracts`` is uniquely keyed on
-        # (address, chain), so a test that needs two contracts cannot share one.
+        # ``contracts`` is keyed on (address, chain), so each call gets its own address.
         address = address or ADDR(next(counter))
         contract = Contract(protocol_id=protocol.id, address=address, chain="ethereum")
         db_session.add(contract)
@@ -107,7 +101,6 @@ def rate(db_session, mc, event_type: str, data: dict | None = None) -> tuple[str
 
 @pytest.mark.parametrize("event_type", sorted(sal.CANONICAL_CONFIG_FAMILIES))
 def test_rule_canonical_config_family(db_session, make_mc, event_type):
-    """Every hand-rolled family whose single occurrence IS the change."""
     assert rate(db_session, make_mc(), event_type, {}) == (
         sal.SALIENCE_ALERT,
         [sal.BASIS_CANONICAL_CONFIG_FAMILY],
@@ -115,9 +108,7 @@ def test_rule_canonical_config_family(db_session, make_mc, event_type):
 
 
 def test_the_canonical_family_list_is_exactly_the_spec_list(db_session, make_mc):
-    """A type NOT on the list may not be folded in silently — it falls through
-    to ``not_determined`` (visible), which is the honest answer for a family
-    nobody rated."""
+    """An unlisted type falls through to ``not_determined``, the honest answer for a family nobody rated."""
     assert "new_pending_implementation" not in sal.CANONICAL_CONFIG_FAMILIES
     level, basis = rate(db_session, make_mc(), "new_pending_implementation", {})
     assert (level, basis) == (sal.SALIENCE_NOT_DETERMINED, [sal.BASIS_NO_RULE])
@@ -125,9 +116,7 @@ def test_the_canonical_family_list_is_exactly_the_spec_list(db_session, make_mc)
 
 @pytest.mark.parametrize("event_type", ["safe_tx_failed", "safe_module_failed"])
 def test_rule_execution_failure(db_session, make_mc, event_type):
-    """An execution that reverted is an anomaly by construction — and it
-    outranks every safe_exec rule below, so a failed indirect call is still
-    an alert."""
+    """It outranks every safe_exec rule, so a failed indirect call is still an alert."""
     assert rate(db_session, make_mc(), event_type, {"safe_exec": {"status": "not_top_level_call"}}) == (
         sal.SALIENCE_ALERT,
         [sal.BASIS_EXECUTION_FAILURE],
@@ -135,8 +124,7 @@ def test_rule_execution_failure(db_session, make_mc, event_type):
 
 
 def test_rule_safe_exec_delegatecall_unrecognized(db_session, make_mc):
-    """Not proven to be MultiSend ⇒ raise. The absent recognition flag is the
-    reason to alert, not a reason to demote."""
+    """The absent recognition flag is a reason to alert, not to demote."""
     data = {"safe_exec": {"status": "decoded", "operation": 1, "to": ADDR(0xBAD)}}
     assert rate(db_session, make_mc(), "safe_tx_executed", data) == (
         sal.SALIENCE_ALERT,
@@ -159,10 +147,8 @@ def test_rule_qualified_member_change(db_session, make_mc):
 
 
 def test_rule_reinitialization(db_session, make_mc):
-    """A second Initialized on an enrolled proxy is a takeover signal; the
-    first one is a deployment doing what deployments do."""
+    """A second Initialized on an enrolled proxy is a takeover signal."""
     mc = make_mc()
-    # No prior row yet — nothing to reinitialize from.
     assert rate(db_session, mc, "initialized", {}) == (sal.SALIENCE_NOT_DETERMINED, [sal.BASIS_NO_RULE])
 
     db_session.add(
@@ -181,8 +167,6 @@ def test_rule_reinitialization(db_session, make_mc):
 
 
 def test_reinitialization_needs_an_enrollment_block(db_session, make_mc):
-    """Without a floor there is no "since we started watching", so the prior
-    row cannot be shown to be a *re*-initialization."""
     mc = make_mc(enrollment_block=None)
     db_session.add(
         MonitoredEvent(
@@ -217,8 +201,7 @@ def test_rule_timelock_operation(db_session, make_mc, event_type):
 
 
 def test_rule_safe_exec_call(db_session, make_mc):
-    """A decoded call is substantive whether or not a name resolves — name
-    resolution is display, never level."""
+    """Name resolution is display, never level."""
     unnamed = {"safe_exec": {"status": "decoded", "operation": 0, "to": ADDR(9), "signature": None}}
     named = {"safe_exec": {"status": "decoded", "operation": 0, "to": ADDR(9), "signature": "setFee(uint256)"}}
     expected = (sal.SALIENCE_NOTABLE, [sal.BASIS_SAFE_EXEC_CALL])
@@ -246,8 +229,7 @@ def test_rule_safe_exec_multisend_takes_the_batch_floor(db_session, make_mc):
 
 
 def test_rule_safe_exec_multisend_takes_the_max_over_inner_calls(db_session, make_mc):
-    """An inner delegatecall to a target not proven to be MultiSend escalates
-    the whole batch — the batch's level is the max, not its floor."""
+    """The batch's level is the max, not its floor."""
     data = {
         "safe_exec": {
             "status": "decoded",
@@ -266,8 +248,7 @@ def test_rule_safe_exec_multisend_takes_the_max_over_inner_calls(db_session, mak
 
 
 def test_rule_safe_exec_batch_undecodable(db_session, make_mc):
-    """A truncated batch would understate what the Safe did, so the level
-    refuses rather than rating a partial list."""
+    """A truncated batch would understate what the Safe did."""
     data = {
         "safe_exec": {
             "status": "decoded",
@@ -294,8 +275,6 @@ def test_rule_tracked_config_event(db_session, make_mc, event_type):
 
 
 def test_rule_correlated_cause_raises_to_the_effect_max(db_session, make_mc):
-    """Same transaction hash is a fact, not an inference: a routine execution
-    that caused an alert is at least as salient as what it caused."""
     data = {
         "safe_exec": {"status": "not_top_level_call"},
         "correlated_events": [
@@ -310,8 +289,6 @@ def test_rule_correlated_cause_raises_to_the_effect_max(db_session, make_mc):
 
 
 def test_rule_correlated_cause_floors_at_notable(db_session, make_mc):
-    """An effect whose own level is unknown contributes the floor, never a
-    guess — and never lets the cause stay routine."""
     data = {
         "safe_exec": {"status": "not_top_level_call"},
         "correlated_events": [{"event_id": "a", "event_type": "whatever"}],
@@ -323,7 +300,6 @@ def test_rule_correlated_cause_floors_at_notable(db_session, make_mc):
 
 
 def test_correlated_cause_replaces_no_rule(db_session, make_mc):
-    """``no_rule`` would be a false statement once correlation rated the row."""
     data = {"correlated_events": [{"event_id": "a", "event_type": "paused", "salience": sal.SALIENCE_ALERT}]}
     assert rate(db_session, make_mc(), "some_unrated_type", data) == (
         sal.SALIENCE_ALERT,
@@ -332,8 +308,7 @@ def test_correlated_cause_replaces_no_rule(db_session, make_mc):
 
 
 def test_an_empty_correlation_list_changes_nothing(db_session, make_mc):
-    """The join is scoped to what is monitored, so an empty list is NOT an
-    earned negative and must not move the level in either direction."""
+    """The join is scoped to what is monitored, so empty is not an earned negative."""
     data = {
         "safe_exec": {"status": "not_top_level_call"},
         "correlated_events": [],
@@ -355,8 +330,6 @@ def test_rule_metric_field_diff(db_session, make_mc, event_type):
 
 
 def test_rule_safe_exec_indirect(db_session, make_mc):
-    """A POSITIVE finding — the observed tx was proven not to be a direct
-    execTransaction on this Safe."""
     assert rate(db_session, make_mc(), "safe_tx_executed", {"safe_exec": {"status": "not_top_level_call"}}) == (
         sal.SALIENCE_ROUTINE,
         [sal.BASIS_SAFE_EXEC_INDIRECT],
@@ -392,15 +365,8 @@ def test_rule_no_rule_for_everything_else(db_session, make_mc):
     )
 
 
-# ---------------------------------------------------------------------------
-# The mechanical gate — no ``routine`` from an absent input
-# ---------------------------------------------------------------------------
-
-
 def test_a_field_diff_with_no_signal_class_is_not_determined(db_session, make_mc):
-    """The fleet's persisted polling plans predate the stamp. Until a
-    re-enrollment pass runs, every poll diff lands HERE — visible — and not on
-    the routine arm."""
+    """Persisted polling plans predate the stamp, so poll diffs land here until re-enrollment."""
     for data in ({}, {"field": "x", "old_value": "1", "new_value": "2"}):
         assert rate(db_session, make_mc(), "state_changed_poll", data) == (
             sal.SALIENCE_NOT_DETERMINED,
@@ -409,8 +375,6 @@ def test_a_field_diff_with_no_signal_class_is_not_determined(db_session, make_mc
 
 
 def test_a_metric_class_without_its_basis_cannot_mint_routine(db_session, make_mc):
-    """``metric ⇒ routine`` is earned by a stated basis. A class with no basis
-    is a row that LOOKS classified and is not."""
     for basis in (None, "", 3):
         data = {"signal_class": SIGNAL_CLASS_METRIC, "signal_class_basis": basis}
         level, codes = rate(db_session, make_mc(), "state_changed_poll", data)
@@ -419,10 +383,7 @@ def test_a_metric_class_without_its_basis_cannot_mint_routine(db_session, make_m
 
 
 def test_no_rule_mints_routine_without_a_positive_basis(db_session, make_mc):
-    """The gate, stated as one assertion over the whole surface: the only two
-    inputs that produce ``routine`` are a stamped metric class with a basis and
-    a decoded ``not_top_level_call`` status. Everything else — including every
-    shape with the relevant input REMOVED — must land elsewhere."""
+    """The only two routine inputs are a stamped metric class with basis and a decoded ``not_top_level_call``."""
     mc = make_mc()
     shapes: list[tuple[str, dict | None]] = [
         ("state_changed_poll", None),
@@ -475,7 +436,6 @@ def test_not_determined_sorts_with_notable_never_with_routine():
     assert sal.salience_rank(sal.SALIENCE_NOT_DETERMINED) == sal.salience_rank(sal.SALIENCE_NOTABLE)
     assert sal.salience_rank(sal.SALIENCE_NOT_DETERMINED) > sal.salience_rank(sal.SALIENCE_ROUTINE)
     assert sal.salience_rank(sal.SALIENCE_ALERT) > sal.salience_rank(sal.SALIENCE_NOTABLE)
-    # An unknown / absent level is measured at not_determined, never at routine.
     assert sal.salience_rank(None) == sal.salience_rank(sal.SALIENCE_NOT_DETERMINED)
     assert sal.salience_rank("bogus") == sal.salience_rank(sal.SALIENCE_NOT_DETERMINED)
 
@@ -539,10 +499,7 @@ def test_a_proven_caller_gate_primitive_classifies_config():
 
 
 def test_an_ungated_primitive_classifies_metric_with_a_stated_basis():
-    """The honest default: an unclassified number is not presumed to be a
-    control parameter. ``no_gate_provenance`` is a POSITIVE basis — the
-    derivation completed for this entry and carried no gate proof — which is
-    what lets it collapse at render without suppressing on ignorance."""
+    """``no_gate_provenance`` is a positive basis, which lets it collapse at render without suppressing on ignorance."""
     plan = _by_field(
         build_polling_plan(
             contract_type="regular",
@@ -556,8 +513,6 @@ def test_an_ungated_primitive_classifies_metric_with_a_stated_basis():
 
 
 def test_call_target_provenance_is_not_a_gate_proof():
-    """``call_target`` means "called, and no gate was proven" — the same
-    not-a-proof the event-type resolver refuses to mint a controller claim on."""
     plan = _by_field(
         build_polling_plan(
             contract_type="regular",
@@ -592,8 +547,6 @@ def test_vendored_entries_classify_config_with_their_own_provenance(contract_typ
 
 
 def test_every_freshly_built_entry_carries_both_keys_or_neither():
-    """A class without its basis cannot mint ``routine``, so writing one alone
-    would only produce a row that looks classified and is not."""
     plan = build_polling_plan(
         contract_type="safe",
         proxy_type="eip1967",
@@ -607,11 +560,6 @@ def test_every_freshly_built_entry_carries_both_keys_or_neither():
     for entry in plan:
         assert entry.get("signal_class") in (SIGNAL_CLASS_CONFIG, SIGNAL_CLASS_METRIC), entry
         assert entry.get("signal_class_basis"), entry
-
-
-# ---------------------------------------------------------------------------
-# Mint site 3 — the rotation poller
-# ---------------------------------------------------------------------------
 
 
 def _poll_entry(signal_class: str | None = None, basis: str | None = None) -> dict:
@@ -672,10 +620,6 @@ def test_poll_mint_refuses_a_half_stamped_entry(db_session, make_mc):
     assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
 
 
-# ---------------------------------------------------------------------------
-# Mint sites 1 and 2 — the scanner and the verification read
-# ---------------------------------------------------------------------------
-
 SAFE_EXEC_TOPIC0 = "0x" + keccak(text="ExecutionSuccess(bytes32,uint256)").hex()
 OWNERSHIP_TOPIC0 = "0x" + keccak(text="OwnershipTransferred(address,address)").hex()
 RATE_TOPIC0 = "0x" + keccak(text="RateUpdated(uint256)").hex()
@@ -707,8 +651,7 @@ def _fetched(topic0: str, *, address: str, data: str = "0x", block: int = 200, i
 
 
 def test_scan_mint_stamps_salience_on_the_persisted_row(db_session, make_mc):
-    """Mint site 1. Assigned before the insert, so the level is durable in the
-    same write as the row."""
+    """Assigned before the insert, so the level is durable in the same write."""
     mc = make_mc(contract_type="safe", monitoring_config={"watch_safe_signers": True})
     cohort = _Cohort(chain="ethereum", member_ids=[mc.id], addresses=[mc.address.lower()], cursor=199)
     log = _fetched(SAFE_EXEC_TOPIC0, address=mc.address, data="0x" + "ab" * 32 + "00" * 32)
@@ -750,8 +693,7 @@ def _hint_spec() -> dict:
 
 
 def test_verification_read_mint_stamps_the_entrys_signal_class(db_session, make_mc):
-    """Mint site 2. The plan entry that ANSWERED is in scope only here, so its
-    class rides onto the row the read produced."""
+    """Only here is the answering plan entry in scope."""
     entry = _poll_entry(SIGNAL_CLASS_METRIC, SIGNAL_BASIS_NO_GATE_PROVENANCE)
     mc = make_mc(
         monitoring_config={"tracked_topics": [_hint_spec()], "polling_plan": [entry]},
@@ -785,11 +727,6 @@ def test_verification_read_mint_stamps_the_entrys_signal_class(db_session, make_
     assert row.data["witness"] == "read_verified"
 
 
-# ---------------------------------------------------------------------------
-# The enrichment recompute seam
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _no_wire():
     """The driver's transaction fetch issues RPC calls, and these tests
@@ -819,11 +756,7 @@ def _seed_event(db_session, mc, event_type: str, data: dict) -> MonitoredEvent:
 
 
 def test_a_type_the_registry_does_not_cover_is_left_untouched(db_session, make_mc):
-    """The driver only ever touches a row some enricher has something to say
-    about — including the salience the mint site already assigned.
-
-    (Phase 1 used an EMPTY registry; now it is stated against a type outside it:
-    ``authority_updated`` alone in its transaction has no decoder or correlation partner.)"""
+    """``authority_updated`` alone in its transaction has no decoder or correlation partner."""
     assert set(ENRICHERS) == {"safe_tx_executed", "safe_tx_failed", "timelock_scheduled", "timelock_executed"}
     assert NEEDS_TX == frozenset({"safe_tx_executed", "safe_tx_failed"})
 
@@ -843,9 +776,7 @@ def test_a_type_the_registry_does_not_cover_is_left_untouched(db_session, make_m
 
 
 def test_the_driver_recomputes_salience_for_rows_an_enricher_changed(db_session, make_mc):
-    """Step 6 is part of the contract, not an optimization: enrichment changes
-    the inputs the rules read, so the mint-time level is provisional and the
-    post-enrichment level is what the notifier and the frontend see."""
+    """Enrichment changes the rule inputs, so the mint-time level is provisional."""
     mc = make_mc(contract_type="safe")
     event = _seed_event(
         db_session,
@@ -940,9 +871,7 @@ def notify_env(db_session, make_mc):
     ],
 )
 def test_salience_allows(db_session, notify_env, minimum, level, allowed):
-    """``not_determined`` passes a ``notable`` threshold — an event the
-    classifier never rated must not be dropped by a bar it was never measured
-    against. It does NOT pass ``alert``: that threshold asks for proven alerts."""
+    """An unrated event must not be dropped by a bar it was never measured against; it doesn't pass ``alert``."""
     sub, emit = notify_env
     sub.event_filter = {"min_salience": minimum} if minimum else None
     db_session.commit()
@@ -961,7 +890,6 @@ def test_a_subscription_without_min_salience_receives_exactly_what_it_does_today
 
 
 def test_a_rejected_webhook_is_not_counted_as_a_sent_notification(db_session, notify_env, caplog):
-    """A revoked webhook used to look exactly like successful delivery."""
     import logging as _logging
     from types import SimpleNamespace
 
@@ -979,8 +907,6 @@ def test_a_rejected_webhook_is_not_counted_as_a_sent_notification(db_session, no
 
 
 def test_min_salience_composes_with_the_event_type_filter(db_session, notify_env):
-    """Both must pass. The type filter alone still admits; adding the
-    threshold subtracts, and only for the subscription that asked."""
     sub, emit = notify_env
     routine = emit("ownership_transferred", {"salience": sal.SALIENCE_ROUTINE, "new_owner": ADDR(9)})
 
@@ -1021,11 +947,7 @@ def test_min_salience_never_overrides_the_tier_gate(db_session, notify_env):
 
 
 def test_the_api_passes_salience_through_verbatim(db_session, api_client, make_mc):
-    """``list_monitored_events`` serializes ``data`` whole — no key whitelist,
-    no projection — so the level and its basis reach the frontend for free.
-    Pinned because the frontend's ``eventSalience`` reads exactly this, and a
-    field silently dropped at the boundary would render as ``not_determined``
-    on every row while the DB held the real answer."""
+    """``data`` is serialized whole; a dropped field would render ``not_determined`` on every row."""
     mc = make_mc()
     _seed_event(
         db_session,
@@ -1042,13 +964,11 @@ def test_the_api_passes_salience_through_verbatim(db_session, api_client, make_m
     assert len(body) == 1
     assert body[0]["data"]["salience"] == sal.SALIENCE_ALERT
     assert body[0]["data"]["salience_basis"] == [sal.BASIS_CANONICAL_CONFIG_FAMILY]
-    # The rest of the payload is untouched by the added keys.
     assert body[0]["data"]["new_owner"] == ADDR(9)
 
 
 def test_a_poll_row_carries_its_signal_class_through_the_api(db_session, api_client, make_mc):
-    """The census's basis lives on the row, so it has to survive the boundary
-    too — that is where an auditor reads it."""
+    """The auditor reads the basis at the boundary."""
     mc = make_mc(last_known_state={"rate": 7})
     _poll(db_session, mc, _poll_entry(SIGNAL_CLASS_METRIC, SIGNAL_BASIS_NO_GATE_PROVENANCE), 9)
 
@@ -1065,9 +985,7 @@ def test_a_poll_row_carries_its_signal_class_through_the_api(db_session, api_cli
 
 
 def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
-    """An enricher may not move a side-effect decision from the taxonomy to a
-    decoder: ``witness_tier`` is what ``notifier._may_notify`` reads, and
-    ``event_type`` is the claim itself."""
+    """``witness_tier`` drives ``notifier._may_notify`` and ``event_type`` is the claim itself."""
     mc = make_mc(contract_type="safe")
     event = _seed_event(
         db_session,
@@ -1096,10 +1014,8 @@ def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
     db_session.expire_all()
 
     row = db_session.get(MonitoredEvent, event.id)
-    # The additive key landed and drove the recompute...
     assert row.data["safe_exec"] == {"status": "not_top_level_call"}
     assert row.data["salience"] == sal.SALIENCE_ROUTINE
-    # ...and every key the taxonomy owns is exactly as it was.
     assert row.data["witness_tier"] == "hint"
     assert row.data["historical"] is True
     assert "reanalysis_job_id" not in row.data
@@ -1108,8 +1024,7 @@ def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
 
 def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, make_mc):
     mc = make_mc(contract_type="safe")
-    # Seeded at the mint-time level, so the correlation recompute is an identity and only the
-    # refused enricher is observable.
+    # The correlation recompute is an identity, so only the refused enricher is observable.
     before = {
         "witness_tier": "hint",
         "salience": sal.SALIENCE_NOT_DETERMINED,
@@ -1126,9 +1041,7 @@ def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, mak
 
 
 def test_a_chainless_contract_is_skipped_rather_than_defaulted(db_session, make_mc, caplog):
-    """No chain means no endpoint and no chain_id guard. Enriching it against
-    whatever ethereum answered would publish another chain's transaction as
-    this contract's decode."""
+    """Enriching against ethereum would publish another chain's transaction as this contract's decode."""
     mc = make_mc(contract_type="safe")
     event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
     mc.chain = ""
@@ -1149,8 +1062,7 @@ def test_a_chainless_contract_is_skipped_rather_than_defaulted(db_session, make_
 
 
 def test_an_unresolvable_chain_costs_that_chain_not_the_window(db_session, make_mc):
-    """``enrich_events`` never raises: the window's rows are already correct
-    and a chain-resolution failure must not roll them back."""
+    """The window's rows are already correct and must not be rolled back."""
     mc = make_mc(contract_type="safe")
     event = _seed_event(db_session, mc, "safe_tx_executed", {"salience": sal.SALIENCE_NOT_DETERMINED})
 
@@ -1195,13 +1107,10 @@ def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_ses
     db_session.commit()
     db_session.expire_all()
 
-    # It ran, and it saw an empty map rather than a fabricated one.
     assert seen == [{}]
     data = db_session.get(MonitoredEvent, event.id).data
     assert data["correlated_events"][0]["event_id"] == str(effect.id)
     assert data["correlated_events"][0]["event_type"] == "paused"
     assert data["salience"] == sal.SALIENCE_ALERT
-    # Both codes ride: the Safe execution itself is still un-decoded (the fetch
-    # failed), and correlation is what raised it. Neither statement erases the
-    # other — that is what the ordered basis list is for.
+    # The execution is still un-decoded and correlation raised it; the ordered basis keeps both.
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED, sal.BASIS_CORRELATED_CAUSE]

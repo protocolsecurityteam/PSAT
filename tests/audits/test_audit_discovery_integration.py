@@ -1,7 +1,5 @@
-"""End-to-end audit-discovery pipeline: the real ``search_audit_reports`` orchestrator (fan-out, dedup,
-auto-hop, DB sync) against stubbed externals. Tavily and GitHub via ``responses``; Solodit by patching
-``_solodit.search`` (its client decodes via a ``node`` subprocess); OpenRouter via ``utils.llm.chat``
-routed on prompt shape. Source of truth for discovery behaviour. Needs Postgres (skips without docker).
+"""The real ``search_audit_reports`` orchestrator against stubbed externals; the source of truth for discovery
+behaviour.
 """
 
 from __future__ import annotations
@@ -18,17 +16,8 @@ from tests.conftest import requires_postgres
 pytestmark = [requires_postgres]
 
 
-# ---------------------------------------------------------------------------
-# Shared plumbing: LLM router, Solodit stub, Tavily/GitHub HTTP stubs
-# ---------------------------------------------------------------------------
-
-
 class LLMRouter:
-    """Dispatches on prompt content: classification "You are analyzing web search results", extraction
-    "You are analyzing a webpage", follow-up "Generate a follow-up search query", filenames "Below are
-    file names", validate+cluster "You are reviewing". An unmatched prompt raises, so every LLM call
-    has a deliberate stub.
-    """
+    """Dispatches on prompt content; an unmatched prompt raises, so every LLM call has a deliberate stub."""
 
     def __init__(self):
         self._routes: list[tuple[str, Callable[[str], str]]] = []
@@ -48,8 +37,8 @@ class LLMRouter:
 
 @pytest.fixture()
 def llm_router(monkeypatch):
-    """Patch ``utils.llm.chat`` (attribute lookup at call time reaches all importers); explicit per-module
-    patches guard future ``from utils.llm import chat`` sites.
+    """Attribute lookup at call time reaches all importers; the per-module patches guard future ``from utils.llm
+    import chat`` sites.
     """
     router = LLMRouter()
     monkeypatch.setattr("utils.llm.chat", router)
@@ -61,9 +50,7 @@ def llm_router(monkeypatch):
 
 @pytest.fixture()
 def solodit_stub(monkeypatch):
-    """Stub the top-level ``solodit.search``, its only public entry point (the wire format is devalue-encoded + node-
-    decoded).
-    """
+    """``search`` is the only public entry point; the wire format is devalue-encoded and node-decoded."""
     from services.discovery import solodit
 
     results: list[dict] = []
@@ -81,17 +68,10 @@ def solodit_stub(monkeypatch):
 
 @pytest.fixture()
 def http_stubs(monkeypatch):
-    """Activate ``responses`` so no HTTP escapes. Forces a dummy TAVILY_API_KEY: a missing key raises TavilyError
-    before any HTTP call, bypassing the stubs and failing opaquely on CI.
-    """
+    """A missing TAVILY_API_KEY raises before any HTTP call, bypassing the stubs and failing opaquely on CI."""
     monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-stub-key")
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         yield rsps
-
-
-# ---------------------------------------------------------------------------
-# Reusable stub builders
-# ---------------------------------------------------------------------------
 
 
 def tavily_returns(http_stubs, results_by_query: dict[str, list[dict]]):
@@ -129,9 +109,6 @@ def github_repo_meta(http_stubs, owner: str, repo: str, default_branch: str = "m
 
 
 def github_tree(http_stubs, owner: str, repo: str, branch: str, paths: list[dict]):
-    """``paths`` entries look like ``{"path": "audits", "type": "tree"}`` or ``{"path": "audits/foo.pdf", "type":
-    "blob"}``.
-    """
     http_stubs.get(
         f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}",
         json={"tree": paths, "truncated": False},
@@ -157,9 +134,7 @@ def github_dir_contents(http_stubs, owner: str, repo: str, path: str, files: lis
 
 
 def github_branch_sha(http_stubs, owner: str, repo: str, branch: str, sha: str):
-    """Stub the branch-ref lookup of ``_resolve_branch_commit``. The URL path is ``/git/refs/heads/`` (plural),
-    not the singular GitHub docs render; a mismatch silently yields ``source_commit=None`` on tree entries.
-    """
+    """The path is ``/git/refs/heads/`` (plural); a mismatch silently yields ``source_commit=None``."""
     http_stubs.get(
         f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch}",
         json={"ref": f"refs/heads/{branch}", "object": {"sha": sha}},
@@ -167,14 +142,7 @@ def github_branch_sha(http_stubs, owner: str, repo: str, branch: str, sha: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# Scenario 1: multi-source happy path
-# ---------------------------------------------------------------------------
-
-
 def test_multisource_discovery_merges_solodit_tavily_and_github(solodit_stub, http_stubs, llm_router):
-    """All three sources produce entries; URL + filename dedup collapses the
-    same-PDF mirrors; the final list carries merged provenance fields."""
     from services.discovery.audit_reports import search_audit_reports
 
     solodit_stub.append(
@@ -310,14 +278,7 @@ def test_multisource_discovery_merges_solodit_tavily_and_github(solodit_stub, ht
     assert github_entry.get("source_commit") == "a" * 40
 
 
-# ---------------------------------------------------------------------------
-# Scenario 2: Solodit down → Tavily path still produces output
-# ---------------------------------------------------------------------------
-
-
 def test_solodit_down_does_not_block_pipeline(solodit_stub, http_stubs, llm_router):
-    """A Solodit outage leaves the list empty; Tavily + LLM classify + GitHub
-    fan-out still deliver reports."""
     from services.discovery.audit_reports import search_audit_reports
 
     tavily_returns(
@@ -333,8 +294,7 @@ def test_solodit_down_does_not_block_pipeline(solodit_stub, http_stubs, llm_rout
         },
     )
 
-    # PDF URLs short-circuit into _build_fallback_entry without needing
-    # extraction / GitHub calls, so only the classifier runs.
+    # PDF URLs short-circuit into _build_fallback_entry, so only the classifier runs.
     llm_router.on_prompt_contains(
         "Generate a follow-up search query",
         lambda _: "",
@@ -367,14 +327,7 @@ def test_solodit_down_does_not_block_pipeline(solodit_stub, http_stubs, llm_rout
     assert "pdf" in result["reports"][0]["url"]
 
 
-# ---------------------------------------------------------------------------
-# Scenario 3: Classification confidence threshold filters noise
-# ---------------------------------------------------------------------------
-
-
 def test_low_confidence_classifier_output_is_filtered(solodit_stub, http_stubs, llm_router):
-    """Stage-1 classifier output below 0.5 confidence never makes it to
-    Stage 2, so it can't produce a report entry."""
     from services.discovery.audit_reports import search_audit_reports
 
     tavily_returns(
@@ -407,7 +360,6 @@ def test_low_confidence_classifier_output_is_filtered(solodit_stub, http_stubs, 
             ]
         ),
     )
-    # No validate call fires — zero reports to validate.
     llm_router.on_prompt_contains(
         "You are reviewing",
         lambda _: json.dumps({"entries": []}),
@@ -415,11 +367,6 @@ def test_low_confidence_classifier_output_is_filtered(solodit_stub, http_stubs, 
 
     result = search_audit_reports("Gamma", official_domain="gamma.xyz")
     assert result["reports"] == []
-
-
-# ---------------------------------------------------------------------------
-# Scenario 4: malformed LLM classification → graceful empty
-# ---------------------------------------------------------------------------
 
 
 def test_malformed_classification_response_returns_empty(solodit_stub, http_stubs, llm_router):
@@ -446,11 +393,6 @@ def test_malformed_classification_response_returns_empty(solodit_stub, http_stub
 
     result = search_audit_reports("Delta", official_domain="delta.xyz")
     assert result["reports"] == []
-
-
-# ---------------------------------------------------------------------------
-# Scenario 5: DB sync — search results land in audit_reports with provenance
-# ---------------------------------------------------------------------------
 
 
 def test_search_results_sync_to_audit_reports_table(db_session, solodit_stub, http_stubs, llm_router):
@@ -483,8 +425,7 @@ def test_search_results_sync_to_audit_reports_table(db_session, solodit_stub, ht
     )
 
     llm_router.on_prompt_contains("Generate a follow-up search query", lambda _: "")
-    # No Tavily results → classifier short-circuits before LLM call;
-    # the single Solodit entry flows straight into the validate step.
+    # No Tavily results, so the Solodit entry flows straight into validate.
     llm_router.on_prompt_contains(
         "You are reviewing",
         lambda _: json.dumps({"entries": [{"i": 0, "valid": True, "cluster": 1}]}),
@@ -501,13 +442,7 @@ def test_search_results_sync_to_audit_reports_table(db_session, solodit_stub, ht
     assert row.title == "Epsilon Security Review"
     assert row.date == "2024-05-15"
     assert row.url.startswith("https://solodit.cyfrin.io/")
-    # Solodit-sourced entries don't carry a GitHub source_repo.
     assert row.source_repo is None
-
-
-# ---------------------------------------------------------------------------
-# Scenario 6: sync is idempotent — same URL upserts, no duplicates
-# ---------------------------------------------------------------------------
 
 
 def test_sync_upserts_on_duplicate_url(db_session):
@@ -581,19 +516,8 @@ def test_sync_upserts_on_duplicate_url(db_session):
     assert rows[0].classified_commits == [{"sha": "abc123def456", "label": "reviewed", "provenance": "ai_returned"}]
 
 
-# ---------------------------------------------------------------------------
-# Scenario 7: sync drops entries missing required fields
-# ---------------------------------------------------------------------------
-
-
 def test_stage3_linked_url_triggers_org_auto_hop(solodit_stub, http_stubs, llm_router):
-    """Three-hop auto-hop: Tavily -> Stage 2 page -> Stage 3 follow -> a linked URL at the protocol's GitHub
-    org. Stage 3 must auto-hop on URLs found in pages it fetches, not just those handed via discovered_links.
-
-    Regression (etherfi): Halborn case study -> ether.fi homepage -> github.com/etherfi-protocol/smart-
-    contracts/tree/master/audits
-    was silently dropped, so the audits/ dir was never enumerated.
-    """
+    """Stage 3 must auto-hop on URLs in pages it fetches; the etherfi GitHub audits/ dir was silently dropped."""
     from services.discovery.audit_reports import search_audit_reports
 
     tavily_returns(
@@ -631,7 +555,6 @@ def test_stage3_linked_url_triggers_org_auto_hop(solodit_stub, http_stubs, llm_r
     )
 
     github_org_repos(http_stubs, "acme-labs", ["acme-protocol", "frontend"])
-    # ``frontend`` has no audits/; ``acme-protocol`` does.
     github_repo_meta(http_stubs, "acme-labs", "acme-protocol", default_branch="main")
     github_tree(
         http_stubs,
@@ -673,7 +596,6 @@ def test_stage3_linked_url_triggers_org_auto_hop(solodit_stub, http_stubs, llm_r
         ),
     )
 
-    # Page-level extraction stub dispatching per-URL on page_text in the prompt.
     def _extract(prompt: str) -> str:
         if "Acme Case Study" in prompt:
             return json.dumps({"reports": [], "linked_urls": ["https://acme.xyz"]})
@@ -721,7 +643,6 @@ def test_stage3_linked_url_triggers_org_auto_hop(solodit_stub, http_stubs, llm_r
     result = search_audit_reports("Acme", official_domain="acme.xyz")
 
     auditors = [r.get("auditor") for r in result["reports"]]
-    # Pre-fix auditors == [] because the org auto-hop never fired.
     assert "Halborn" in auditors, f"Two-hop auto-hop did not enumerate the org. Reports: {result['reports']!r}"
     assert "Spearbit" in auditors
     halborn = next(r for r in result["reports"] if r.get("auditor") == "Halborn")
@@ -743,7 +664,7 @@ def _sync_capturing_degraded(session, protocol_id: int, reports: list[dict]) -> 
 
 
 def test_sync_reports_entries_missing_required_fields(db_session):
-    """A silent drop leaves the artifact's entry count and the table's row count disagreeing unexplained."""
+    """A silent drop leaves the artifact and table row counts disagreeing unexplained."""
     from db.models import AuditReport, Protocol
 
     name = f"drop-test-{uuid.uuid4().hex[:8]}"
@@ -774,8 +695,7 @@ def test_sync_reports_entries_missing_required_fields(db_session):
 
 
 def test_sync_reports_url_collisions_within_one_batch(db_session):
-    """Two entries claiming one URL collapse to one row (the table is keyed on
-    ``(protocol_id, url)``); the overwritten entry is named, not lost."""
+    """The table is keyed on ``(protocol_id, url)``; the overwritten entry is named, not lost."""
     from db.models import AuditReport, Protocol
 
     protocol = Protocol(name=f"collision-test-{uuid.uuid4().hex[:8]}")

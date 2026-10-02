@@ -1,11 +1,3 @@
-"""Integration tests for the ``SelectionWorker``.
-
-The selection stage ranks every discovered contract (inventory, DApp crawl,
-DefiLlama) for the ``analyze_limit`` budget on equal footing. Real Postgres
-(``db_session``); covers both claim paths, the confidence filter, the
-default-confidence shim, and the dedup + proxy re-queue branch.
-"""
-
 from __future__ import annotations
 
 import time
@@ -23,15 +15,9 @@ from workers.base import JobHandledDirectly
 pytestmark = [requires_postgres]
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _stub_activity_fetch(monkeypatch):
-    """Deterministic local lookup for the Etherscan activity fetch: real scoring
-    math, no network. Tests override ``_ACTIVITY_TIMES`` to control ranking."""
+    """Real scoring math with no network; tests set ``_ACTIVITY_TIMES`` to control ranking."""
     from services.discovery import activity as activity_module
 
     def fake_etherscan_get(module, action, **params):
@@ -44,7 +30,6 @@ def _stub_activity_fetch(monkeypatch):
     monkeypatch.setattr(activity_module.etherscan, "get", fake_etherscan_get)
 
 
-# Mutable mapping used by the stub above. Tests populate it in arrange.
 _ACTIVITY_TIMES: dict[str, float] = {}
 
 
@@ -57,7 +42,6 @@ def _reset_activity_times():
 
 @pytest.fixture()
 def worker():
-    """SelectionWorker with signal handlers patched so pytest stays clean."""
     from workers.selection_worker import SelectionWorker
 
     with patch("signal.signal"):
@@ -66,9 +50,7 @@ def worker():
 
 @pytest.fixture()
 def seed_protocol(db_session):
-    """A bare Protocol row + id/name/address_factory; the factory hands out
-    globally unique addresses to avoid ``(address, chain)`` collisions with
-    leftover rows."""
+    """Unique addresses avoid ``(address, chain)`` collisions with leftover rows."""
     from db.models import Contract, Job, Protocol
 
     name = f"sel-worker-{uuid.uuid4().hex[:10]}"
@@ -101,11 +83,6 @@ def seed_protocol(db_session):
         db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# Seeding helpers
-# ---------------------------------------------------------------------------
-
-
 def _add_contract(
     session,
     *,
@@ -118,8 +95,6 @@ def _add_contract(
     is_proxy: bool = False,
     job_id=None,
 ):
-    """Insert a Contract row, accepting either ``discovery_sources`` list or a
-    single string for convenience (tests that pre-date the array column)."""
     from db.models import Contract
 
     if isinstance(discovery_sources, str):
@@ -196,16 +171,9 @@ def _add_sibling_job(
     return job
 
 
-# ---------------------------------------------------------------------------
-# 1. Happy path: ranks across sources, writes top-N child jobs, completes
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, seed_protocol):
-    """All three sources compete in one ranking pass: inventory (high
-    confidence), dapp_crawl and defillama (null confidence -> 0.7), plus one
-    very-low-confidence inventory row that must be filtered."""
+    """Null-confidence sources default to 0.7; one very-low-confidence row must be filtered."""
     from db.models import Contract, Job, JobStage, JobStatus
     from db.queue import get_artifact
 
@@ -257,7 +225,6 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
     )
     assert len(children) == 3
     child_addresses = {child.address for child in children}
-    # Top three by rank_score: recent activity wins over stale inventory
     assert child_addresses == {inv_top, dapp_top, defi_mid}
     assert inv_lowconf not in child_addresses
     assert inv_stale not in child_addresses
@@ -271,8 +238,7 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
         assert req["rpc_url"] == "https://rpc.example"
         assert any(s in {"inventory", "dapp_crawl", "defillama"} for s in req.get("discovery_sources", []))
 
-        # Rank scores persist on Contract rows so the UI and analyze-remaining
-        # fallback agree.
+        # The UI and analyze-remaining read the persisted rank.
     ranked_rows = {
         row.address: row
         for row in db_session.execute(
@@ -290,19 +256,13 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
     assert len(summary["child_jobs"]) == 3
 
 
-# ---------------------------------------------------------------------------
-# 2. Confidence filter: everything below _MIN_CONFIDENCE_THRESHOLD is skipped
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_selection_filters_below_confidence_threshold(db_session, worker, seed_protocol):
     from db.models import Job
 
     protocol_id, company, addr = seed_protocol
 
-    # All three rows sit below the 0.3 threshold (dapp_crawl/defillama would
-    # default to 0.7 if null — forcing a low value here keeps the filter honest)
+    # Forced low so the null-to-0.7 default can't pass the filter.
     for source in ("inventory", "dapp_crawl", "defillama"):
         _add_contract(
             db_session,
@@ -324,15 +284,8 @@ def test_selection_filters_below_confidence_threshold(db_session, worker, seed_p
     assert children == []
 
 
-# ---------------------------------------------------------------------------
-# 3. Default confidence applied to null dapp_crawl / defillama rows
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker, seed_protocol):
-    """Null-confidence dapp_crawl/defillama rows clear the threshold: the
-    source-specific default (0.7) applies, otherwise NULL would be filtered."""
     from db.models import Job
 
     protocol_id, company, addr = seed_protocol
@@ -350,15 +303,8 @@ def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker,
     assert [c.address for c in children] == [target]
 
 
-# ---------------------------------------------------------------------------
-# 5. Dedup: address with an existing non-proxy job is skipped
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_existing_non_proxy_job_skips_address(db_session, worker, seed_protocol):
-    """A contract with a live analysis job is skipped (no duplicate work across
-    re-runs); proxies fall through to the re-queue branch in the next test."""
     from db.models import Job, JobStage, JobStatus
 
     protocol_id, company, addr = seed_protocol
@@ -382,11 +328,6 @@ def test_existing_non_proxy_job_skips_address(db_session, worker, seed_protocol)
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
     )
     assert new_children == []
-
-
-# ---------------------------------------------------------------------------
-# 6. Proxy re-queue branch: even with an existing job, proxies get re-queued
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -423,16 +364,9 @@ def test_proxy_with_existing_job_is_re_queued(db_session, worker, seed_protocol)
     assert [c.address for c in new_children] == [target]
 
 
-# ---------------------------------------------------------------------------
-# 6b. Within-cascade dedupe predicate: the JSON filters, against real SQL
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_existing_in_same_cascade_matches_only_the_address_cascade_and_chain(db_session, seed_protocol):
-    """``_existing_in_same_cascade`` is the ``--force`` in-cascade dedupe gate
-    (``selection_worker.py:357``); its address / ``request->>'root_job_id'`` /
-    conditional chain predicates only mean something against real SQL."""
+    """The JSON predicates only mean something against real SQL."""
     from db.models import Job, JobStage, JobStatus
     from workers.selection_worker import _existing_in_same_cascade
 
@@ -455,19 +389,11 @@ def test_existing_in_same_cascade_matches_only_the_address_cascade_and_chain(db_
     db_session.commit()
 
     assert _existing_in_same_cascade(db_session, target, "ethereum", "root-1") is True
-    # root-2's only job is on base: the chain predicate is applied, not ignored.
     assert _existing_in_same_cascade(db_session, target, "ethereum", "root-2") is False
-    # chain=None omits the filter entirely rather than matching a NULL chain.
+    # chain=None omits the filter rather than matching a NULL chain.
     assert _existing_in_same_cascade(db_session, target, None, "root-2") is True
-    # A cascade with no job for this address is not a match.
     assert _existing_in_same_cascade(db_session, target, "ethereum", "root-3") is False
-    # Another address in the same cascade does not answer for this one.
     assert _existing_in_same_cascade(db_session, unrelated, "ethereum", "root-2") is False
-
-
-# ---------------------------------------------------------------------------
-# 7. Readiness predicate: claim blocks while a dapp_crawl sibling is in flight
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -512,8 +438,7 @@ def test_claim_fires_when_sibling_completes(db_session, worker, seed_protocol):
 
 @requires_postgres
 def test_ready_claim_stamps_lease(db_session, worker, seed_protocol):
-    """A claimed selection job must carry a lease — without it the stale-job
-    sweep can requeue live work and a sibling double-runs it."""
+    """Without a lease the stale-job sweep can requeue live work."""
     protocol_id, company, _addr = seed_protocol
     _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
 
@@ -540,15 +465,8 @@ def test_stuck_claim_stamps_lease(db_session, worker, seed_protocol):
     assert claimed.lease_expires_at is not None
 
 
-# ---------------------------------------------------------------------------
-# 8. Stuck-sibling escape hatch: claim fires past the timeout regardless
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_corroborated_contract_outranks_single_source_peer(db_session, worker, seed_protocol):
-    """A contract tagged by multiple discovery sources outranks a
-    same-confidence peer tagged by one (corroboration boost)."""
     from db.models import Contract, Job
 
     protocol_id, company, addr = seed_protocol
@@ -615,17 +533,9 @@ def test_stuck_job_escape_hatch_claims_past_timeout(db_session, worker, seed_pro
     assert claimed.id == job.id
 
 
-# ---------------------------------------------------------------------------
-# P2: analyze_limit must be filled after deduping
-# ---------------------------------------------------------------------------
-
-
 class TestAnalyzeLimitFilling:
     def test_skipped_entries_dont_consume_limit(self, db_session, monkeypatch):
-        """When top-ranked entries are skipped (existing jobs), remaining slots
-        fill from lower-ranked eligible entries. Moved from
-        ``DiscoveryWorker._process_company`` to ``SelectionWorker._queue_top_n``;
-        the ``n >= 3`` children-despite-3-dupes signal guards the same path."""
+        """Skipped entries must not consume the limit; the rest fills from lower ranks."""
         from sqlalchemy import select
 
         from db.models import Contract, Job, JobStage, JobStatus, Protocol
@@ -688,8 +598,6 @@ class TestAnalyzeLimitFilling:
             .all()
         )
 
-        # Bug: top 5 eligible selected, 3 skipped -> only 2 jobs. Fix: skip the
-        # 3 dupes, pick the next 3.
         assert len(child_jobs) >= 3, (
             f"Expected at least 3 child jobs (filling past skipped entries), "
             f"got {len(child_jobs)}. Skipped entries consumed the analyze_limit."
@@ -702,7 +610,6 @@ class TestAnalyzeLimitFilling:
 
 
 def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
-    """Transport-boundary stubs for the gate's probe pass (never the wire)."""
     from services.clients.rpc import EthCallResult
     from services.discovery import probes
     from utils.evm import OWNER_SELECTOR
@@ -739,10 +646,9 @@ def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
 
 @requires_postgres
 def test_selection_settles_pending_nominations_before_ranking(db_session, worker, seed_protocol, monkeypatch):
-    """A cold cascade's crawl nominations land AFTER discovery's inline probe
-    pass; selection must settle them before ranking, or a fully-nominated
-    protocol ranks zero candidates (preview run 2026-08-25: first cascade
-    ended "no eligible candidates" while 585 nominations sat unprobed)."""
+    """Crawl nominations land after discovery's probe pass; unsettled, a cold cascade once ranked zero of 585
+    nominations.
+    """
     from db.models import (
         WITNESS_RULE_W1_CODE,
         WITNESS_RULE_W2_STRUCTURAL,
@@ -759,7 +665,6 @@ def test_selection_settles_pending_nominations_before_ranking(db_session, worker
     anchor_addr = addr()
     candidate_addr = addr()
 
-    # Anchor: an already-analyzed member (job_id set → not a ranking candidate).
     anchor_job = Job(company=company, address=anchor_addr, stage=JobStage.done, status=JobStatus.completed, request={})
     db_session.add(anchor_job)
     db_session.commit()
@@ -781,8 +686,7 @@ def test_selection_settles_pending_nominations_before_ranking(db_session, worker
     db_session.add_all([anchor, candidate])
     db_session.commit()
 
-    # W2 edge whose via-fact holds (anchor's stored pointer names the
-    # candidate); the probe pass supplies the missing W1.
+    # The probe pass supplies the missing W1.
     anchor.implementation = candidate.address
     db_session.flush()
     gate.write_witness(

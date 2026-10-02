@@ -1,9 +1,7 @@
-"""The surface reach document: the scorer's own hop verdicts, three states.
+"""Surface reach document on hand-built planes.
 
-Hand-built planes, no database. Every case pins one arm of the unification:
-what the walk proves is ``reached``, what it could not establish is a
-``frontier`` entry carrying the scorer's own reason token, and what neither
-holds is absent — never defaulted, never inferred from an edge's existence.
+The walk's proven hops are ``reached``, unestablished ones are ``frontier`` entries with the scorer's reason token, and
+nothing is inferred from an edge's existence.
 """
 
 from __future__ import annotations
@@ -34,7 +32,6 @@ KEY_ZERO = entity_key("ethereum", ZERO)
 
 
 def edge(principal: str, anchor: str, *, relation: str | None = "controller_value", label: str | None = "owner"):
-    """A closure edge; ``relation=None`` is the admin/beacon column witness."""
     return P.ControlEdge(
         principal=principal,
         anchor=anchor,
@@ -54,8 +51,6 @@ def pinned_conditions(destination: str) -> P.ConditionPlane:
 
 
 class _StubConferral(P.ConferralPlane):
-    """Grants stipulated per test — the stub signals carry no persisted function."""
-
     def __init__(self, rewrites=(), role_functions=None):
         super().__init__(role_functions=dict(role_functions or {}))
         self._rewrites = frozenset(rewrites)
@@ -99,8 +94,6 @@ def compute(closure, *, conditions=None, conferral=None, signals=()):
 
 
 def test_admin_column_edge_expands_as_code_control():
-    """Holding the admin slot is upgrade power: the walk continues past the
-    anchor with no conferral question, hop-numbered from the anchor."""
     closure = P.ControlClosure(
         edges=(edge(KEY_SAFE, KEY_ANCHOR, relation=None), edge(KEY_ANCHOR, KEY_VAULT), edge(KEY_VAULT, KEY_DEEP))
     )
@@ -115,8 +108,6 @@ def test_admin_column_edge_expands_as_code_control():
 
 
 def test_stored_authority_does_not_expand_and_publishes_the_gap():
-    """Being the stored owner of the anchor witnesses hop 1 and nothing past
-    it: the anchor's own onward edges become frontier entries, not reach."""
     closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ANCHOR), edge(KEY_ANCHOR, KEY_VAULT)))
     record = compute(closure)
     assert record["reached"] == {KEY_ANCHOR: {"hop": 1, "basis": R.BASIS_CLOSURE_EDGE}}
@@ -150,8 +141,7 @@ def test_code_walk_condition_refused_hop_carries_the_scorer_token():
 
 
 def test_reached_beats_frontier():
-    """A destination another source reaches anyway was withheld from nothing —
-    same rule as the fold's gap filter."""
+    """Same rule as the fold's gap filter."""
     closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ANCHOR), edge(KEY_ANCHOR, KEY_VAULT)))
     signal = reach_signal("upgrade.implementation", KEY_ANCHOR)
     record = compute(closure, signals=(signal,))
@@ -168,8 +158,6 @@ def test_zero_address_is_refused_as_seed_and_as_hop():
 
 
 def test_non_transitive_capability_seeds_only_no_frontier():
-    """Non-transitivity is a proven boundary, not a gap: no expansion and no
-    frontier entry for the seed's onward edges."""
     closure = P.ControlClosure(edges=(edge(KEY_ANCHOR, KEY_VAULT),))
     signal = reach_signal("flow.out", KEY_ANCHOR)
     record = compute(closure, signals=(signal,))
@@ -178,8 +166,6 @@ def test_non_transitive_capability_seeds_only_no_frontier():
 
 
 def test_signal_walk_parity_with_the_fold_closure():
-    """The reach document never claims what the fold's walk does not, and every
-    hop the fold refuses appears on the frontier — same planes, same grant."""
     closure = P.ControlClosure(
         edges=(edge(KEY_ANCHOR, KEY_VAULT, label="owner"), edge(KEY_ANCHOR, KEY_DEEP, label="hook"))
     )
@@ -196,8 +182,6 @@ def test_signal_walk_parity_with_the_fold_closure():
     fold_refusals = {(gap["caller"], gap["destination"], gap["reason"]) for gap in gaps}
     surface_frontier = {(e["from"], e["to"], e["reason"]) for e in record["frontier"]}
     assert fold_refusals <= surface_frontier
-    # Positive arms of the same parity: the walked destination is claimed, at
-    # the walk's own hop, and the refused one is not.
     assert record["reached"][KEY_VAULT] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
     assert KEY_DEEP not in record["reached"]
 
@@ -207,9 +191,9 @@ KEY_PROXY = entity_key("ethereum", PROXY)
 
 
 def test_seed_standpoint_carries_the_walk_the_fold_ran_from_it():
-    """The finding row names the seed as the walk's origin ("AtomicSolverV3 ->
-    reaches BoringVault"), so selecting the seed shows the same walked hops and
-    the same refusals — hop-numbered from the standpoint, not the principal."""
+    """The finding row names the seed as the walk's origin, so hops are numbered from the standpoint, not the
+    principal.
+    """
     closure = P.ControlClosure(
         edges=(edge(KEY_ANCHOR, KEY_VAULT, label="owner"), edge(KEY_VAULT, KEY_DEEP, label="owner"))
     )
@@ -223,15 +207,11 @@ def test_seed_standpoint_carries_the_walk_the_fold_ran_from_it():
         None,
         {KEY_ANCHOR: (signal,)},
     )
-    # VAULT's hop-1 entry keeps whichever witness landed first (the entity's
-    # own closure edge ties with the walk at hop 1); the claim pinned here is
-    # the WALKED continuation past it, which only the standpoint arm proves.
+    # The entity's own edge ties with the walk at hop 1; what's pinned is the walked continuation past it.
     assert record["reached"][KEY_VAULT]["hop"] == 1
     assert record["reached"][KEY_DEEP] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
     assert record["parents"] == {KEY_VAULT: KEY_ANCHOR, KEY_DEEP: KEY_VAULT}
 
-    # A refusal on the standpoint's walk lands on its frontier with the
-    # scorer's token, displacing the blanket authority-exercise entry.
     hook = P.ControlClosure(edges=(edge(KEY_ANCHOR, KEY_VAULT, label="owner"), edge(KEY_VAULT, KEY_DEEP, label="hook")))
     record = R.entity_reach(
         KEY_ANCHOR,
@@ -247,9 +227,7 @@ def test_seed_standpoint_carries_the_walk_the_fold_ran_from_it():
 
 
 def test_reached_keys_fold_onto_the_proxy():
-    """The walk speaks in raw anchors; everything PUBLISHES at the canonical
-    key — the fold's own rule — or a consumer keying nodes by the proxy would
-    silently miss every destination that folds."""
+    """Otherwise a consumer keying by proxy misses every folded destination."""
     alias = {KEY_VAULT: KEY_PROXY}
     closure = P.ControlClosure(
         edges=(edge(KEY_SAFE, KEY_ANCHOR, relation=None), edge(KEY_ANCHOR, KEY_VAULT), edge(KEY_VAULT, KEY_DEEP))
@@ -260,13 +238,11 @@ def test_reached_keys_fold_onto_the_proxy():
     assert KEY_VAULT not in record["reached"]
     assert record["reached"][KEY_PROXY] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
     assert record["parents"][KEY_PROXY] == KEY_ANCHOR
-    # The onward hop's caller folds too: DEEP's parent is the proxy, not the impl.
     assert record["parents"][KEY_DEEP] == KEY_PROXY
 
 
 def test_frontier_endpoints_fold_and_a_self_fold_is_dropped():
-    """A frontier destination publishes canonically; a refusal folding onto its
-    own caller withheld nothing (the destination is the caller's alias)."""
+    """A refusal folding onto its own caller withheld nothing."""
     alias = {KEY_VAULT: KEY_PROXY}
     closure = P.ControlClosure(edges=(edge(KEY_SAFE, KEY_ANCHOR), edge(KEY_ANCHOR, KEY_VAULT)))
     record = R.entity_reach(
@@ -283,14 +259,11 @@ def test_frontier_endpoints_fold_and_a_self_fold_is_dropped():
 
 
 def test_hop_relaxes_to_the_parents_route_it_publishes():
-    """A seed re-admitting an intermediate at hop 1 shortens its descendants'
-    counts to the route ``parents`` draws — the chip's number can never exceed
-    the length of its own lit route."""
+    """The chip's hop number can never exceed its lit route length."""
     closure = P.ControlClosure(
         edges=(edge(KEY_SAFE, KEY_ANCHOR, relation=None), edge(KEY_ANCHOR, KEY_VAULT), edge(KEY_VAULT, KEY_DEEP))
     )
-    # flow.out is non-transitive: it seeds VAULT at hop 1 and walks nothing, so
-    # DEEP's hop-3 admission from the code walk must relax along parents.
+    # flow.out is non-transitive, so DEEP's hop-3 admission must relax along parents.
     signal = reach_signal("flow.out", KEY_VAULT)
     record = compute(closure, signals=(signal,))
     assert record["reached"][KEY_VAULT] == {"hop": 1, "basis": R.BASIS_SIGNAL_SEED}

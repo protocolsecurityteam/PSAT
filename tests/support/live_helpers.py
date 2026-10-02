@@ -1,8 +1,4 @@
-"""Shared helpers for the live suite that the offline suite also pins.
-
-Lives outside ``tests/live/`` so the offline regression tests can import them
-without the live auto-marker in ``tests/live/conftest.py`` tagging those tests
-as live."""
+"""Outside ``tests/live/`` so offline tests can import them without the live auto-marker."""
 
 from __future__ import annotations
 
@@ -18,13 +14,7 @@ _TERMINAL_STATUSES = ("completed", "failed", "failed_terminal")
 
 
 class _ClientLike(Protocol):
-    """Subset of ``LiveClient`` that ``_resolve_impl_job`` needs.
-
-    Declared as a Protocol so the offline regression test in
-    ``tests/meta/test_live_impl_job_resolution.py`` can pass a stub without inheriting
-    the full requests-based client. Keeps the helper testable without
-    a deployed API.
-    """
+    """A Protocol so ``tests/meta/test_live_impl_job_resolution.py`` can pass a stub."""
 
     def children_of(self, parent_job_id: str) -> list[dict[str, Any]]: ...
     def jobs(self) -> list[dict[str, Any]]: ...
@@ -38,27 +28,9 @@ def _resolve_impl_job(
     impl_address: str,
     timeout: float = DEFAULT_SINGLE_TIMEOUT,
 ) -> dict[str, Any] | None:
-    """Locate the impl analysis job for ``impl_address`` and wait for it
-    to terminate.
-
-    Search order matches the previous in-test logic:
-      1. Children of ``parent_job_id`` — the path the parent took when it
-         spawned a fresh impl child.
-      2. ``client.jobs()`` filtered by address — the warm-cache path where
-         the static worker logged ``impl <addr> already has job <id>,
-         skipping`` and reused an existing run.
-
-    Returns ``None`` if no candidate exists at all (caller should assert
-    this case to produce a useful failure message).
-
-    The race this helper closes:
-      Pre-fix the test asserted ``status == "completed"`` synchronously on
-      the matched job. When the suite ran fast enough that the impl child
-      was still ``processing``, the assertion failed even though the
-      pipeline was healthy and would have finished moments later. This
-      manifested on PR-63 once the mapping_enumeration_cache fix made the
-      surrounding tests substantially faster — there was no longer enough
-      wall-clock for the impl to settle before this test fired.
+    """Searches the parent's children, then ``client.jobs()`` by address (the warm-cache reuse path), and waits for
+    termination. Asserting ``completed`` synchronously failed on PR-63 once the suite got fast enough to catch the
+    impl still processing.
     """
     children = client.children_of(parent_job_id)
     child_match = [c for c in children if (c.get("address") or "").lower() == impl_address]
@@ -69,10 +41,7 @@ def _resolve_impl_job(
         candidates = [j for j in all_jobs if (j.get("address") or "").lower() == impl_address]
         if not candidates:
             return None
-        # Prefer an already-terminal candidate so we don't poll a stale
-        # ``processing`` row when a completed sibling exists. If none is
-        # terminal yet, take the most recent (which is what callers want
-        # to wait on anyway).
+        # Prefer a terminal candidate over a stale ``processing`` row.
         terminal = [j for j in candidates if j["status"] in _TERMINAL_STATUSES]
         impl_job = terminal[0] if terminal else candidates[0]
 

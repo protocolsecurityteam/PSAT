@@ -1,5 +1,3 @@
-"""Tests for the interaction capture log."""
-
 from services.crawlers.dapp.interaction_log import InteractionLog
 
 

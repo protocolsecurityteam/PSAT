@@ -1,5 +1,3 @@
-"""Signal, plane and case builders for the scoring fold."""
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -58,7 +56,6 @@ def sig(**over: Any) -> FunctionSignal:
 
 
 def flow_sig(**over: Any) -> FunctionSignal:
-    """A ``flow.out`` signal carrying the gates the distiller always writes."""
     gates = {
         "token_identity": Tri.not_determined().to_json(),
         "asset_class": Tri.not_determined().to_json(),
@@ -72,24 +69,13 @@ def flow_sig(**over: Any) -> FunctionSignal:
 
 
 def magnitude(usd: float) -> dict[str, Any]:
-    """A witnessed reach magnitude, so the reach-magnitude term is not the minimum.
-
-    A perimeter test asserts on the perimeter; leaving the magnitude unwitnessed
-    would make every one of them a test of the reach-magnitude term instead.
-    """
+    """Otherwise every perimeter test would really test the reach-magnitude term."""
     return {"reach_magnitude_usd": Tri.proven("proven_floor", usd).to_json()}
 
 
 def bounded_by_sheet(usd: float) -> dict[str, Any]:
-    """An EXACT magnitude witness, so the entity's sheet may bound the charge.
-
-    A magnitude witness is the only thing that puts a dollar figure on a reach:
-    the reached entity's balance sheet answers "how much is there", never "how
-    much can this reach move", and the fold refuses to substitute one for the
-    other. A test whose subject is the exposure budget, the tie disclosure or the
-    floor flag needs a row that publishes dollars at all, so it carries the
-    witness the real signal would have to carry — usually set to the sheet, which
-    is the case where ``min(sheet, witness)`` leaves the sheet standing.
+    """The fold never substitutes the reached entity's sheet for a magnitude witness, so tests about exposure, ties
+    or floors need one. Usually set to the sheet, where ``min(sheet, witness)`` leaves the sheet standing.
     """
     return {"reach_magnitude_usd": Tri.proven("proven_exact", usd).to_json()}
 
@@ -144,21 +130,15 @@ def value_plane(
     plane.per_asset = per_asset or {}
     plane.per_asset_state = per_asset_state or {}
     plane.asset_set_proven_complete = asset_set_proven_complete or {}
-    # The confidence perimeter's base population, as the DB would supply it.
     plane.contract_entities = set(contracts) | set(plane.per_asset) | set(plane.per_asset_state)
     plane.alias = alias or {}
     plane.provenance = {"stub": True}
     return plane
 
 
-# The chain-scan witness a proven-empty sheet cannot be published without. The
-# reference corpus carries real ones now; these tests build theirs so the state
-# under test is the plane's rule and not one corpus's data.
+# Built here so the state under test is the plane's rule, not one corpus's data.
 SCANNED = {
     "source": "chain_log_sweep",
-    # Both figures, as the plane publishes them: a sheet is whole only where
-    # every account it folds was scanned, so the denominator travels with the
-    # numerator.
     "accounts_scanned": 1,
     "accounts_folded": 1,
     "accounts": ["0x" + "a" * 40],
@@ -174,12 +154,9 @@ def closure_of(
     relation: str = "controller_value",
     label: str | None = "owner",
 ) -> P.ControlClosure:
-    """A ``ControlClosure`` from bare ``{principal: {anchor}}`` adjacency.
+    """Relation and label are stub detail; these tests assert reach membership.
 
-    The relation and label are stub witness detail — these tests assert on reach
-    membership, which is the whole of what the closure carried before it carried
-    scope. A test that means to exercise a scope builds its own closure and
-    passes it here, where it goes straight through.
+    Pass a real closure to exercise scope.
     """
     if isinstance(adjacency, P.ControlClosure):
         return adjacency
@@ -203,13 +180,7 @@ def condition_plane(
     licensed: dict[tuple[str, str], tuple[tuple[str, int, tuple[str, ...]], ...]] | None = None,
     by_entity: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] | None = None,
 ) -> P.ConditionPlane:
-    """A ``ConditionPlane`` from ``{key: ((name, id, conditions), ...)}``.
-
-    Empty by default, which is the "no destination function was analysed" state:
-    the walk consults nothing, no caller condition is witnessed, and every hop
-    stands on its edge — the behaviour every test written before the plane
-    existed asserts.
-    """
+    """Empty by default: no destination function analysed, so every hop stands on its edge."""
 
     def rows(spec):
         return {
@@ -225,14 +196,8 @@ def condition_plane(
 
 
 class _StubConferral(P.ConferralPlane):
-    """A conferral plane that answers for signals carrying no ``function_id``.
-
-    The stub signals these tests build have no persisted function behind them,
-    so the real per-function ``state_writes`` lookup would report every gate's
-    rewrites as unextracted and no gate would confer anything. That is the right
-    answer for a real signal and the wrong question for a test asserting reach
-    membership over a hand-built closure, so the grant is stipulated instead —
-    and the stipulation is visible in the call, not hidden in a default.
+    """Stub signals have no persisted function, so the real ``state_writes`` lookup would confer nothing; the grant
+    is stipulated visibly instead.
     """
 
     def __init__(self, rewrites, role_functions):
@@ -247,13 +212,7 @@ class _StubConferral(P.ConferralPlane):
 
 
 def conferral_plane(*, rewrites=("owner",), role_functions=None) -> P.ConferralPlane:
-    """What the gates in a test are stipulated to seize, and what roles license.
-
-    ``rewrites`` defaults to ``owner`` because ``closure_of`` labels its edges
-    ``owner``: a test written before conferral existed keeps asserting the reach
-    membership it meant to assert. A test exercising the conferral test itself
-    passes its own.
-    """
+    """``rewrites`` defaults to ``owner`` because ``closure_of`` labels edges ``owner``."""
     return _StubConferral(rewrites, role_functions)
 
 
@@ -264,13 +223,7 @@ def act_as_plane(
     read_kinds: dict[tuple[str, str], str] | None = None,
     read_failures: dict[tuple[str, str], tuple[str, int | None]] | None = None,
 ) -> P.ActAsPlane:
-    """An ``ActAsPlane`` from bare call sites, receiver reads and destination ACLs.
-
-    Empty by default, which is the honest state for every test written before
-    composition existed: nothing witnesses that a seized node can be made to act
-    anywhere, so no gate-control magnitude composes and the reach keeps the
-    not_determined magnitude those tests assert on.
-    """
+    """Empty by default, so no gate-control magnitude composes."""
     plane = P.ActAsPlane(
         call_sites=dict(call_sites or {}),
         reads=dict(reads or {}),
@@ -284,7 +237,6 @@ def act_as_plane(
 
 @pytest.fixture()
 def fold(monkeypatch):
-    """Drive the fold with stubbed planes: no database, no network."""
 
     def _run(
         signals,
@@ -301,12 +253,9 @@ def fold(monkeypatch):
         deletability=None,
         routes=None,
     ):
-        """``signals=None`` drives the PERSISTED path, through the population read.
+        """``signals=None`` drives the persisted path.
 
-        ``deletability`` defaults to the bypass every principal clears
-        (``CA.admits_every_principal``), because these cases are about the axes
-        AROUND the composition rule — ties, chain shapes, predicate blocks — and
-        would otherwise all withhold. The rule's own arms are pinned in
+        ``deletability`` defaults to the bypass because these cases vary the axes around the rule; its own arms are in
         ``tests/scoring/test_three_arm_composition.py``.
         """
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
@@ -326,7 +275,6 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "unconsumed_reach_relations", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "load_ledgers", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "load_audit_posture", lambda s, p, v: {"stub": True})
-        # The planes are stubbed, so the fold never touches a session.
         return FOLD.compute_protocol_score(cast(Any, None), 1, signals=signals)
 
     return _run
@@ -342,24 +290,16 @@ def _role_edge(label, principal=None, anchor=None):
     )
 
 
-# The flow.out selector the destination's own witness is written against, and
-# the licence that names it. One pair, reused, so each test below varies exactly
-# one witness.
+# Reused so each test varies exactly one witness.
 COMPOSED_SELECTOR = "0x18457e61"
 
-# The CALLING function's own selector — which function of the caller the call
-# site sits in. A single-hop case never constrains it (the seized gate is what
-# licenses hop 1), so one value serves all of them.
+# Single-hop cases never constrain the calling selector.
 CALLING_SELECTOR = "0x2ddd62ce"
 
 
 def _composing_case(**over: Any) -> dict[str, Any]:
-    """A gate over ``C`` whose role licenses ``exit`` at ``V``, which moves $1M.
-
-    Everything a composed magnitude needs, assembled once: the licence (role 12
-    naming ``exit`` at the vault), the destination's own ``flow.out`` witness,
-    and the act-as step (a restricted, authority-gated function of ``C`` calling
-    that selector on a state variable read on-chain holding ``V``).
+    """Role 12 licenses ``exit`` at ``V``, which has a $1M ``flow.out`` witness, and a gated function of ``C`` calls
+    it on a state variable holding ``V``.
     """
     case: dict[str, Any] = {
         "closure": P.ControlClosure(edges=(_role_edge("roles 12"),)),
@@ -408,14 +348,10 @@ def _gate_row(document) -> dict[str, Any]:
     return next(f for f in document.findings if f["capability"] == "authority.replace")
 
 
-# The reference corpus's own solver -> teller -> vault chain. The teller is a
-# ROUTER — it holds nothing — so a chain that dies at it recovers $0 and the
-# only figure ever in play is the vault's own witness.
+# The corpus's solver -> teller -> vault chain. The teller holds nothing.
 TELLER = "0x" + "7" * 40
 KEY_T = entity_key("ethereum", TELLER)
-# bulkWithdraw at the teller: the selector the teller's ACL admits the solver
-# for, and — the same value in the other role — the OWN selector of the teller
-# function hop 2 must then be issued from.
+# The selector the teller's ACL admits, and also the teller function hop 2 is issued from.
 HOP1_SELECTOR = "0x3e64ce99"
 
 HOP1_ACCEPTED = P.DestinationAcceptance(
@@ -427,14 +363,9 @@ HOP1_ACCEPTED = P.DestinationAcceptance(
 
 
 def _two_hop_case(**over: Any) -> dict[str, Any]:
-    """The whole chain, every link witnessed by a different shape.
+    """Hop 1: a parameter callee witnessed by the teller's ACL (role 12).
 
-    Hop 1 is the shape only the destination's ACL can witness: a restricted,
-    authority-gated function of the seized node whose callee is a PARAMETER, and
-    the teller's own access-control list naming the seized node for that
-    selector by role 12. Hop 2 is the state-variable shape: the teller's
-    ``vault`` pointer, read on-chain holding the vault. The money is at the far
-    end of both.
+    Hop 2: the teller's ``vault`` pointer read on-chain.
     """
     case: dict[str, Any] = {
         "closure": P.ControlClosure(
@@ -457,30 +388,20 @@ def _two_hop_case(**over: Any) -> dict[str, Any]:
             reads={(KEY_T, "vault"): (KEY_V, "eth_call", 25_657_731)},
             destination_acl={(KEY_T, HOP1_SELECTOR): {KEY_C: HOP1_ACCEPTED}},
         ),
-        # The router holds nothing and the seized node holds nothing; every
-        # dollar in this case is the vault's.
         "value": value_plane({KEY_V: {"usdc": 5_000_000.0}}, contracts=(KEY_C, KEY_T)),
     }
     case.update(over)
     return case
 
 
-# A second licensed selector at the same destination, sorting ABOVE
-# COMPOSED_SELECTOR. Pairing the higher selector with the WEAKER witness state
-# is what makes these cases discriminating: iteration order offers the lower
-# selector first, so a rule that kept the first arrival would publish the
-# stronger state, and only a rule that ranks the state can pick the other one.
+# Pairs the higher selector with the weaker state so a first-arrival rule publishes the wrong one.
 TIE_SELECTOR = "0xf6e715d0"
 TIE_CALLING_SELECTOR = "0x244b0f6a"
 
 
 def _tied_case(**over: Any) -> dict[str, Any]:
-    """One entity, two licensed selectors, equal dollars, disagreeing states.
-
-    Each selector is reached through its OWN calling function and its OWN
-    pointer read, so the published chain names which of the two the entry was
-    actually taken from — a chain left pointing at the losing candidate would
-    still look well-formed.
+    """Each selector has its own calling function and pointer read, so a chain left on the losing candidate still
+    looks well-formed.
     """
     case: dict[str, Any] = {
         "closure": P.ControlClosure(edges=(_role_edge("roles 12"),)),
@@ -511,11 +432,6 @@ def _tied_case(**over: Any) -> dict[str, Any]:
 
 
 def _tied_signals(*, tie_usd: float = 1_000_000.0) -> list[FunctionSignal]:
-    """The composing population plus ``manage``, priced at ``tie_usd``.
-
-    ``exit`` keeps ``_composing_signals``' ``proven_exact`` and ``manage`` is a
-    ``proven_floor``: the weaker state on the higher selector.
-    """
     signals = _composing_signals()
     signals.append(
         flow_sig(
@@ -539,10 +455,7 @@ def _cc_row(document, capability: str = "upgrade.implementation") -> dict[str, A
     return next(f for f in document.findings if f["capability"] == capability)
 
 
-# ---------------------------------------------------------------------------
-# Shared across the redteam modules (tests/scoring/redteam/): the addresses and
-# builders more than one section reads.
-# ---------------------------------------------------------------------------
+# Shared across the redteam modules.
 SAFE2 = "0x" + "5" * 40
 TIMELOCK = "0x" + "7" * 40
 PROXY = "0x" + "6" * 40
@@ -580,8 +493,6 @@ def _pause_document(fold, pauser: P.PrincipalFacts, recovery: P.PrincipalFacts |
 
 
 class _Row:
-    """The columns ``_reduce_observations`` reads off a balance row."""
-
     def __init__(self, usd, *, block=None, fetched=None, rid=0, raw="1000000"):
         self.usd_value = usd
         self.block_number = block
@@ -612,7 +523,6 @@ INITIATOR_GUARD = "initiator != address(this)"
 
 
 def _queue_signal(claim: str, **over: Any) -> FunctionSignal:
-    """One principal over the queue: the shape of the AtomicQueue finding."""
     return sig(
         claim_id=claim,
         function_name="setAuthority",

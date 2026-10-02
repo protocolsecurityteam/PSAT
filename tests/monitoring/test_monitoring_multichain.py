@@ -1,9 +1,4 @@
-"""M1.1 item 4 - second-chain threading proof for the monitoring daemons.
-
-Existing monitoring tests drive chain-``ethereum`` inputs only. These drive a chain-``base``
-(8453) input through poller, scanner, TVL refresh and enrollment and assert the *base* eRPC
-route / chain id reaches the wire. Only the wire is stubbed, never the production classes.
-"""
+"""Drives a Base (8453) input through poller, scanner, TVL and enrollment; only the wire is stubbed."""
 
 from __future__ import annotations
 
@@ -29,28 +24,16 @@ def _addr(prefix: str) -> str:
     return "0x" + (prefix * 40)[:40]
 
 
-# ---------------------------------------------------------------------------
-# chain_rpc helper
-# ---------------------------------------------------------------------------
-
-
 def test_rpc_for_chain_mainnet_verbatim_second_chain_resolves(monkeypatch):
     from services.monitoring.chain_rpc import chain_id_for, rpc_for_chain
 
     monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)
 
-    # Mainnet keeps the incoming URL byte-for-byte (chain-1 behavior unchanged).
     assert rpc_for_chain("ethereum", MAINNET_SEED) == MAINNET_SEED
     assert chain_id_for("ethereum") == 1
 
-    # A second chain resolves its OWN eRPC route from the registry.
     assert rpc_for_chain("base", MAINNET_SEED) == BASE_URL
     assert chain_id_for("base") == 8453
-
-
-# ---------------------------------------------------------------------------
-# poll_for_state_changes — per-chain RPC selection
-# ---------------------------------------------------------------------------
 
 
 def test_poll_sends_base_contract_to_base_rpc(db_session, monkeypatch):
@@ -84,11 +67,6 @@ def test_poll_sends_base_contract_to_base_rpc(db_session, monkeypatch):
     poll_for_state_changes(db_session, MAINNET_SEED)
 
     assert seen_urls == [BASE_URL]
-
-
-# ---------------------------------------------------------------------------
-# scan_for_events — per-chain RPC selection (head read + getLogs)
-# ---------------------------------------------------------------------------
 
 
 def test_scan_reads_base_cohort_on_base_rpc(db_session, monkeypatch):
@@ -128,14 +106,8 @@ def test_scan_reads_base_cohort_on_base_rpc(db_session, monkeypatch):
 
     scan_for_events(db_session, MAINNET_SEED)
 
-    # Head reads and getLogs both hit the base route, never the mainnet seed.
     assert head_urls and all(u == BASE_URL for u in head_urls)
     assert getlogs_urls and all(u == BASE_URL for u in getlogs_urls)
-
-
-# ---------------------------------------------------------------------------
-# TVL — per-contract chain id on the Etherscan balance calls
-# ---------------------------------------------------------------------------
 
 
 def test_tvl_refresh_passes_contract_chain_id(db_session, monkeypatch):
@@ -167,19 +139,12 @@ def test_tvl_refresh_passes_contract_chain_id(db_session, monkeypatch):
     monkeypatch.setattr("services.clients.etherscan.get_eth_balance", _bal)
     monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", _tokens)
     monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda *a, **kw: None)
-    # The chain id under test rides the Etherscan calls; the pinned native read
-    # is a separate wire on the same path, so it is stubbed to its unavailable
-    # outcome rather than left live.
+    # The pinned native read is a separate wire, stubbed unavailable.
     pinned_native_unavailable(monkeypatch)
 
     refresh_contract_balances(db_session, proto.id)
 
     assert seen_chain_ids == [8453, 8453]
-
-
-# ---------------------------------------------------------------------------
-# Enrollment — WatchedProxy keyed on the contract's chain + base seed block
-# ---------------------------------------------------------------------------
 
 
 def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):
@@ -219,7 +184,6 @@ def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):
 
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", _rpc)
 
-    # Seed with the mainnet URL; the base contract must still resolve its own route.
     enroll_protocol_contracts(db_session, proto.id, MAINNET_SEED, "ethereum")
 
     wp = db_session.execute(select(WatchedProxy).where(WatchedProxy.proxy_address == proxy_addr)).scalar_one()
@@ -228,7 +192,6 @@ def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):
     mc = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == proxy_addr)).scalar_one()
     assert mc.chain == "base"
 
-    # The enrollment seed-block read went to the base route, not the mainnet seed.
     assert block_urls and all(u == BASE_URL for u in block_urls)
 
 

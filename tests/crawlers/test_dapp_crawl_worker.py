@@ -1,9 +1,4 @@
-"""Tests for DAppCrawlWorker.process() code paths.
-
-Child-job creation and ``analyze_limit`` moved to ``SelectionWorker`` (covered there and in
-``test_dapp_crawl_worker_integration``); this file keeps worker-local concerns: validation, crawler params,
-protocol derivation, artifact storage, interaction persistence.
-"""
+"""Child-job creation moved to ``SelectionWorker``; this file keeps worker-local concerns."""
 
 from __future__ import annotations
 
@@ -24,8 +19,7 @@ ADDR_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 @pytest.fixture
 def dapp_worker_module(monkeypatch: pytest.MonkeyPatch):
-    """Import the worker under a temporary Playwright stub (the crawler imports it at module load) so no fake
-    modules leak into the rest of the suite."""
+    """The crawler imports Playwright at module load; the stub must not leak into the rest of the suite."""
     pw = ModuleType("playwright")
     pw_async = ModuleType("playwright.async_api")
     pw_async.async_playwright = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
@@ -86,8 +80,6 @@ def _patch_worker_deps(
         return SimpleNamespace(id=1, name=name, official_domain=official_domain, canonical_slug=canonical_slug)
 
     monkeypatch.setattr(worker_module, "get_or_create_protocol", fake_get_or_create_protocol)
-    # Worker now resolves the hostname to a canonical DefiLlama slug before
-    # upserting the Protocol row; stub the network call away.
     monkeypatch.setattr(
         worker_module,
         "resolve_protocol",

@@ -1,32 +1,20 @@
 """Regression tests for the ``flow.out`` destination/amount lattice.
 
-Each test compiles a real Solidity fixture and drives production ``build_effects``
-(``build_claims`` for the passthrough test). Guards the two -12 theft-vs-routing
-false positives: an immutable/fixed destination (routing) must classify distinctly
-from a caller-chosen one (extraction), and ambiguity must degrade to
-``indeterminate`` rather than guess a member of the union.
+Guards the -12 theft-vs-routing false positives: fixed destinations must differ from caller-chosen ones, and ambiguity
+degrades to ``indeterminate``.
 """
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.claims import build_claims  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-
-
-def _compile(tmp_path: Path, source: str, name: str):
-    f = tmp_path / f"{name}.sol"
-    f.write_text(textwrap.dedent(source).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == name)
+from tests.support.slither_compile import _compile_named  # noqa: E402
 
 
 def _out_flow(info, kind: str | None = None) -> Any:
@@ -128,17 +116,15 @@ contract Lattice {
 
 
 def test_cast_through_immutable_destination(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["withdrawEther()"])
     assert flow["target_kind"] == {"kind": "immutable", "tier": "static_trace"}
-    # Math.min(address(this).balance, view_call) is provably <= the contract's own
-    # balance — the minimum of the self-balance and some other value.
     assert flow["amount_kind"] == {"kind": "capped_by_balance", "tier": "static_trace"}
 
 
 def test_caller_param_destination_is_extraction(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payTo(address,uint256)"])
     assert flow["target_kind"]["kind"] == "param"
@@ -146,7 +132,7 @@ def test_caller_param_destination_is_extraction(tmp_path):
 
 
 def test_direct_immutable_is_dispositive(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["feeToSink(address,uint256)"])
     assert flow["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
@@ -154,14 +140,14 @@ def test_direct_immutable_is_dispositive(tmp_path):
 
 
 def test_msg_sender_destination(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["claim(address,uint256)"])
     assert flow["target_kind"] == {"kind": "msg_sender", "tier": "dispositive_ast"}
 
 
 def test_storage_setter_vs_no_setter(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     setter = _out_flow(effects["functions"]["payTreasury()"])
     assert setter["target_kind"]["kind"] == "storage_setter"
@@ -172,7 +158,7 @@ def test_storage_setter_vs_no_setter(tmp_path):
 
 
 def test_constant_destination_and_msg_value(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["toBurn()"])
     assert flow["target_kind"]["kind"] == "constant"
@@ -180,29 +166,24 @@ def test_constant_destination_and_msg_value(tmp_path):
 
 
 def test_cross_branch_mix_names_both_destinations(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMix(bool,address,uint256)"])
-    # param on one branch, immutable on the other: never collapse to a MEMBER, but
-    # both are resolved, so it is a known disjunction, not an absence of knowledge.
     assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
-    # Tier stays the weaker of the contributing sites, as for any other fold.
     assert flow["target_kind"]["tier"] == "static_trace"
 
 
 def test_branch_reassigned_local_is_indeterminate(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMerged(bool,address,uint256)"])
-    # One call site, destination = Phi-merged local (param|immutable). The
-    # engine's base-name keying can silently keep either branch; the guard must
-    # never let a collapsed single kind through.
+    # The engine's base-name keying can silently keep either branch.
     assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
 
 
 def test_native_transfer_immutable_whole_balance(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["sweep()"], kind="native_transfer_send")
     assert flow["target_kind"]["kind"] == "immutable"
@@ -240,14 +221,14 @@ contract Indirection {
 
 
 def test_state_var_survives_internal_call(tmp_path):
-    contract = _compile(tmp_path, INDIRECTION_SRC, "Indirection")
+    contract = _compile_named(tmp_path, INDIRECTION_SRC, "Indirection")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["withdrawEther()"])
     assert flow["target_kind"]["kind"] == "immutable"
 
 
 def test_lattice_reaches_the_claim_witness(tmp_path):
-    contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
+    contract = _compile_named(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
 
@@ -263,11 +244,8 @@ def test_lattice_reaches_the_claim_witness(tmp_path):
     assert any(e.get("target_kind") == {"kind": "immutable", "tier": "static_trace"} for e in routing)
 
 
-# Setter-scan completeness: ``storage_no_setter`` is a proven negative only when
-# Slither's write attribution is exhaustive. A raw-slot ``sstore`` or ``delegatecall``
-# is a write channel the scan cannot see, so it degrades to indeterminate (never
-# storage_setter, which would assert an unproven positive).
-# ---------------------------------------------------------------------------
+# ``storage_no_setter`` is a proven negative only when write attribution is exhaustive; raw-slot ``sstore`` and
+# ``delegatecall`` aren't visible to the scan.
 
 _RAW_SLOT_SRC = """
 pragma solidity ^0.8.20;
@@ -307,38 +285,30 @@ contract Clean {
 
 
 def test_raw_slot_sstore_defeats_no_setter_proof(tmp_path):
-    contract = _compile(tmp_path, _RAW_SLOT_SRC, "RawSlot")
+    contract = _compile_named(tmp_path, _RAW_SLOT_SRC, "RawSlot")
     effects = build_effects(contract)
-    # An unattributed sstore to a raw slot could redirect collector; the absence
-    # of an attributed setter is no longer dispositive.
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
 
 
 def test_delegatecall_defeats_no_setter_proof(tmp_path):
-    contract = _compile(tmp_path, _DELEGATECALL_SRC, "Dele")
+    contract = _compile_named(tmp_path, _DELEGATECALL_SRC, "Dele")
     effects = build_effects(contract)
-    # Foreign code via delegatecall can write any slot as this contract.
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
 
 
 def test_slot_symbol_sstore_counts_as_setter(tmp_path):
-    contract = _compile(tmp_path, _SLOT_SYMBOL_SRC, "SlotSym")
+    contract = _compile_named(tmp_path, _SLOT_SYMBOL_SRC, "SlotSym")
     effects = build_effects(contract)
-    # ``sstore(collector.slot, …)`` IS attributed to collector -> a real setter.
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
 
 
 def test_clean_no_setter_stays_proven_negative(tmp_path):
-    contract = _compile(tmp_path, _CLEAN_NO_SETTER_SRC, "Clean")
+    contract = _compile_named(tmp_path, _CLEAN_NO_SETTER_SRC, "Clean")
     effects = build_effects(contract)
-    # No delegatecall, no assembly sstore, no setter -> the sound case survives.
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
 
 
-# Storage-pointer aliasing (register #1): a var written only through a callee taking
-# a ``storage`` reference is not attributed by Slither. Resolve the alias to its
-# origin (a real setter); degrade to indeterminate only when unresolvable.
-# ---------------------------------------------------------------------------
+# Writes through a callee's ``storage`` reference aren't attributed by Slither, so resolve the alias.
 
 _STORAGE_LIB = """
 struct Box { address owner; }
@@ -427,28 +397,21 @@ contract LibReturn {
 @pytest.mark.parametrize(
     ("src", "name", "expected_kind"),
     [
-        # box.owner is redirectable via L.put -> the alias is resolved to a setter.
         pytest.param(_LIB_WRITE_SRC, "LibWrite", "storage_setter", id="library_write"),
-        # A storage ref passed only for reading is not a setter; the clean proof holds.
         pytest.param(_LIB_READ_SRC, "LibRead", "storage_no_setter", id="library_read_only"),
-        # putNested forwards the storage ref into _inner, which writes it.
         pytest.param(_LIB_NESTED_SRC, "LibNested", "storage_setter", id="library_transitive_write"),
-        # ``Box storage b = box;`` traces back to box -> a resolved setter.
         pytest.param(_LIB_LOCAL_SRC, "LibLocal", "storage_setter", id="library_local_pointer_write"),
-        # The storage pointer comes from a call return: some unknown var was written
-        # through the alias, so no no-setter proof in the contract is sound.
+        # Some unknown var was written through the alias, so no no-setter proof is sound.
         pytest.param(_LIB_UNRESOLVABLE_SRC, "LibReturn", "indeterminate", id="library_unresolvable_alias"),
     ],
 )
 def test_library_storage_alias_target_kind(tmp_path, src, name, expected_kind):
-    contract = _compile(tmp_path, src, name)
+    contract = _compile_named(tmp_path, src, name)
     effects = build_effects(contract)
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == expected_kind
 
 
-# tx.origin destination (register #7): ``caller_controlled`` (theft-shaped), NOT
-# folded into msg_sender (the address differs).
-# ---------------------------------------------------------------------------
+# tx.origin is ``caller_controlled`` and not folded into msg_sender.
 
 _TX_ORIGIN_SRC = """
 pragma solidity ^0.8.20;
@@ -463,7 +426,7 @@ contract Origin {
 
 
 def test_tx_origin_destination_is_caller_controlled(tmp_path):
-    contract = _compile(tmp_path, _TX_ORIGIN_SRC, "Origin")
+    contract = _compile_named(tmp_path, _TX_ORIGIN_SRC, "Origin")
     effects = build_effects(contract)
     direct = _out_flow(effects["functions"]["claim(address,uint256)"])
     assert direct["target_kind"] == {"kind": "caller_controlled", "tier": "dispositive_ast"}
@@ -471,9 +434,7 @@ def test_tx_origin_destination_is_caller_controlled(tmp_path):
     assert traced["target_kind"] == {"kind": "caller_controlled", "tier": "static_trace"}
 
 
-# Struct-field destination of a branch-reassigned local (register #8): the
-# merged-local guard must reach the base through Member/Index ops.
-# ---------------------------------------------------------------------------
+# The merged-local guard must reach the base through Member/Index ops.
 
 _STRUCT_MERGE_SRC = """
 pragma solidity ^0.8.20;
@@ -494,16 +455,10 @@ contract StructMerge {
 
 
 def test_struct_field_of_merged_local_is_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _STRUCT_MERGE_SRC, "StructMerge")
+    contract = _compile_named(tmp_path, _STRUCT_MERGE_SRC, "StructMerge")
     effects = build_effects(contract)
-    # Without Member traversal in the def-use walk this escapes as storage_setter
-    # (the collapsed boxA branch); the guard now reaches the merged base ``s``.
     assert _out_flow(effects["functions"]["payMerged(bool,uint256)"])["target_kind"]["kind"] == "indeterminate"
 
-
-# Engine-bundle memoization (register #9): a helper reached from multiple entries is
-# analyzed once (behavior-preserving).
-# ---------------------------------------------------------------------------
 
 _SHARED_HELPER_SRC = """
 pragma solidity ^0.8.20;
@@ -520,7 +475,7 @@ contract Shared {
 
 
 def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
-    contract = _compile(tmp_path, _SHARED_HELPER_SRC, "Shared")
+    contract = _compile_named(tmp_path, _SHARED_HELPER_SRC, "Shared")
     import services.static.contract_analysis_pipeline.effects.origins as eff_mod
 
     real_engine = eff_mod.ProvenanceEngine
@@ -535,8 +490,6 @@ def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
     monkeypatch.setattr(eff_mod, "ProvenanceEngine", CountingEngine)
     effects = build_effects(contract)
 
-    # _pay moves value and is reached from BOTH entries, yet its engine is built
-    # exactly once (cross-entry memoization); without it the count would be 2.
     assert counts.get("_pay") == 1
 
     a = _out_flow(effects["functions"]["entryA(uint256)"])
@@ -545,9 +498,7 @@ def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
     assert a["amount_kind"] == b["amount_kind"]
 
 
-# Per-site breakdown: the fold returns ``indeterminate`` on any MIX, hiding resolved
-# destinations; ``target_kinds`` / ``amount_kinds`` publish the sites beside it.
-# ---------------------------------------------------------------------------
+# The fold hides resolved sites on a mix, so ``target_kinds`` / ``amount_kinds`` publish them.
 
 _SITES_SRC = """
 pragma solidity ^0.8.20;
@@ -622,48 +573,39 @@ contract Sites {
 
 
 def test_two_resolved_sites_publish_both_destinations(tmp_path):
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["twoResolved(address,uint256)"])
-    # Two sites, each resolved: the scalar names the disjunction and the members
-    # ARE the alternatives (a consumer reads them and takes the worst).
     assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"immutable", "param"}
     assert all(e["tier"] in ("dispositive_ast", "static_trace") for e in flow["target_kinds"])
-    # The amount lattice gets the same treatment, independently.
     assert flow["amount_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["amount_kinds"]} == {"param", "msg_value"}
 
 
 def test_sites_that_all_execute_in_one_call_still_fold_to_several(tmp_path):
-    """``several`` counts classifications, it does not claim exclusivity.
-
-    Both sends run in the same invocation, so a name meaning "one of these" would
-    be a false statement about control flow."""
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    """Both sends run in one invocation, so "one of these" would be false."""
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payThenSweep(address,uint256)"])
     assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
-    # No parameter slot is published for the destination: only one of the two
-    # sites is the caller's argument, so a probe planted in that slot would not
-    # redirect the other.
+    # A probe planted in one site's slot wouldn't redirect the other.
     assert flow.get("target_param_index") is None
 
 
 def test_indeterminate_site_stays_visible_in_the_breakdown(tmp_path):
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["oneIndeterminate(bool,address,uint256)"])
     assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
     kinds = [e["kind"] for e in flow["target_kinds"]]
-    # The resolved site is named AND the unknown one is still reported unknown.
     assert "immutable" in kinds
     assert "indeterminate" in kinds
 
 
 def test_single_site_carries_no_breakdown(tmp_path):
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["single(uint256)"])
     assert flow["target_kind"]["kind"] == "immutable"
@@ -672,11 +614,10 @@ def test_single_site_carries_no_breakdown(tmp_path):
 
 
 def test_agreeing_sites_carry_no_breakdown(tmp_path):
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["twoAgreeing(uint256,uint256)"])
     assert flow["target_kind"]["kind"] == "immutable"
-    # Two sites, one meaning: the breakdown would repeat the fold verbatim.
     assert "target_kinds" not in flow
 
 
@@ -684,29 +625,24 @@ def test_sites_agreeing_on_a_kind_carry_no_breakdown_even_at_mixed_tiers():
     from services.static.contract_analysis_pipeline.effects import _fold_sites, _site_breakdown
 
     sites = [("msg_sender", "dispositive_ast"), ("msg_sender", "static_trace")]
-    # The fold keeps the kind and takes the weaker tier, so it already says
-    # everything the sites do. A breakdown here would read "msg.sender,
-    # msg.sender" on a flow whose destination was never in doubt.
     assert _fold_sites(sites) == {"kind": "msg_sender", "tier": "static_trace"}
     assert _site_breakdown(sites) is None
 
 
 def test_breakdown_is_bounded_by_the_lattice_not_the_site_count(tmp_path):
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["manySites(address,uint256)"])
     assert flow["target_kind"]["kind"] == "several"
     entries = flow["target_kinds"]
-    # Seven sends, three meanings — deduplication by (kind, tier) is the cap.
     assert {e["kind"] for e in entries} == {"immutable", "param", "msg_sender"}
     assert len(entries) == len({(e["kind"], e["tier"]) for e in entries})
-    # One amount origin across all seven sites still publishes nothing.
     assert flow["amount_kind"]["kind"] == "param"
     assert "amount_kinds" not in flow
 
 
 def test_breakdown_reaches_the_claim_witness(tmp_path):
-    contract = _compile(tmp_path, _SITES_SRC, "Sites")
+    contract = _compile_named(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
     rows = [c for c in claims["twoResolved(address,uint256)"] if c["claim_id"] == "flow.out"]

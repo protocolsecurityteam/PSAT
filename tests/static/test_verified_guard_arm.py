@@ -1,4 +1,4 @@
-"""W2's verified-guard satisfier, ``verified_guard_verdicts``.
+"""A contract-level reentrancy guard var must never license a function that doesn't carry the guard.
 
 Closes one fail-open: a reentrancy guard var declared on a contract must never license a function
 that does not carry the guard. Each refusal fixture removes exactly one conjunct of the proof
@@ -54,10 +54,6 @@ def _refusal(reason: str, declaration: str | None = None) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Positive: OZ v4 single-modifier form
-# ---------------------------------------------------------------------------
-
 _OZ_V4 = """
 pragma solidity ^0.8.19;
 contract C {
@@ -90,10 +86,6 @@ def test_oz_v4_guard_is_proven(tmp_path):
     }
 
 
-# ---------------------------------------------------------------------------
-# Positive: OZ v5 split form (the callee-following path)
-# ---------------------------------------------------------------------------
-
 _OZ_V5 = """
 pragma solidity ^0.8.19;
 contract C {
@@ -121,8 +113,7 @@ contract C {
 
 
 def test_oz_v5_split_guard_is_proven(tmp_path):
-    """The pre/post writes live in private helpers; the revert lives in one of
-    them. Neither is visible in the modifier's own IRs."""
+    """Neither write is visible in the modifier's own IRs."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _OZ_V5, "C"))
     assert verdicts["withdraw()"] == {
         "state": "proven",
@@ -133,10 +124,6 @@ def test_oz_v5_split_guard_is_proven(tmp_path):
         "guard_modifiers": ["C.nonReentrant()"],
     }
 
-
-# ---------------------------------------------------------------------------
-# Positive: the guard inherited from a base contract
-# ---------------------------------------------------------------------------
 
 _INHERITED = """
 pragma solidity ^0.8.19;
@@ -159,16 +146,11 @@ contract C is Guard {
 
 
 def test_inherited_guard_modifier_is_proven(tmp_path):
-    """The join is ``id()``-identity; Slither hands the derived contract its own
-    copy of an inherited modifier, and that copy is what the function lists."""
+    """The join is ``id()``-identity, and Slither gives the derived contract its own copy of the modifier."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _INHERITED, "C"))
     assert verdicts["withdraw()"]["state"] == "proven"
     assert verdicts["withdraw()"]["guard_modifiers"] == ["Guard.nonReentrant()"]
 
-
-# ---------------------------------------------------------------------------
-# A12 — the fail-open this unit exists to close
-# ---------------------------------------------------------------------------
 
 _A12_GUARD_VAR_BUT_NO_MODIFIER = """
 pragma solidity ^0.8.19;
@@ -199,16 +181,10 @@ def test_a12_contract_guard_var_does_not_license_an_unguarded_function(tmp_path)
     contract = _contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C")
     verdicts = verified_guard_verdicts(contract)
     assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "C.payout()")
-    # Paired positive: the sibling carries the modifier, so the refusal is not the analysis failing to run.
     assert verdicts["guardedWithdraw()"]["state"] == "proven"
-    # And the guard var IS contract-scoped, which is precisely why the
-    # per-function join is load-bearing.
+    # The guard var is contract-scoped, which is why the per-function join matters.
     assert "_status" in ReentrancyAnalyzer(contract).run()
 
-
-# ---------------------------------------------------------------------------
-# A13 — set/restore without a revert reading the var is not a guard
-# ---------------------------------------------------------------------------
 
 _A13_FAKE_GUARD_NO_REVERT = """
 pragma solidity ^0.8.19;
@@ -265,9 +241,7 @@ contract C {
 
 
 def test_a14_name_only_guard_refuses(tmp_path):
-    """``_reentrancyLock`` under a modifier named ``reentrancyGuard``: every identifier says guard
-    but the post-placeholder write is missing. ``effects.py``'s name fallback would admit it;
-    nothing on this arm can reach that fallback."""
+    """``effects.py``'s name fallback would admit it; nothing on this arm can reach it."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _A14_NAME_ONLY_GUARD, "C"))
     assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
 
@@ -282,17 +256,11 @@ def test_a14_sibling_adding_only_the_post_placeholder_write_is_proven(tmp_path):
 
 
 def test_a14_renamed_equivalent_of_the_real_guard_is_still_proven(tmp_path):
-    """The mirror of A14: strip every guard-suggesting identifier from the OZ v4
-    shape and it must still prove. Names neither earn nor deny."""
     source = _OZ_V4.replace("_status", "q").replace("nonReentrant", "m")
     verdicts = verified_guard_verdicts(_contract(tmp_path, source, "C"))
     assert verdicts["withdraw()"]["state"] == "proven"
     assert verdicts["withdraw()"]["guard_vars"] == ["q"]
 
-
-# ---------------------------------------------------------------------------
-# A15 — transient-storage guards are invisible to the write walk
-# ---------------------------------------------------------------------------
 
 _A15_TRANSIENT_GUARD = """
 pragma solidity ^0.8.24;
@@ -315,14 +283,12 @@ contract C {
 
 
 def test_a15_transient_guard_refuses(tmp_path):
-    """``tstore``/``tload`` lower to ``SolidityCall`` IRs, not state writes, so the walk sees nothing:
-    the verdict stays ``not_determined`` (fail-closed on storage we cannot read)."""
+    """``tstore``/``tload`` lower to ``SolidityCall`` IRs, not state writes."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _A15_TRANSIENT_GUARD, "C"))
     assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
 
 
 def test_a15_same_shape_in_persistent_storage_is_proven(tmp_path):
-    """Same control flow in a state variable: the refusal above is about visibility, not shape."""
     source = """
     pragma solidity ^0.8.24;
     contract C {
@@ -342,10 +308,6 @@ def test_a15_same_shape_in_persistent_storage_is_proven(tmp_path):
     verdicts = verified_guard_verdicts(_contract(tmp_path, source, "C"))
     assert verdicts["payout()"]["state"] == "proven"
 
-
-# ---------------------------------------------------------------------------
-# Function identity — a signature does not name a body in an inheritance chain
-# ---------------------------------------------------------------------------
 
 _SHADOWED_OVERRIDE = """
 pragma solidity ^0.8.19;
@@ -378,19 +340,14 @@ contract C is Mid {}
 
 
 def test_shadowed_base_declaration_does_not_publish_the_overrides_verdict(tmp_path):
-    """``C``'s live ``payout`` is ``Mid``'s (guard dropped); ``Base``'s guarded body is still in
-    ``contract.functions`` and must not answer for it. Signature-only keying let the last-yielded
-    declaration (the base) win."""
+    """Signature-only keying let the shadowed base declaration win."""
     contract = _contract(tmp_path, _SHADOWED_OVERRIDE, "C")
     verdicts = verified_guard_verdicts(contract)
     assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "Mid.payout()")
-    # Internal functions shadow the same way, and the visibility never entered it.
     assert verdicts["helper()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "Mid.helper()")
-    # Non-vacuity: the shadowed guarded body is present and would have proven.
     shadowed = [f for f in contract.functions if f.canonical_name == "Base.payout()"]
     assert shadowed and shadowed[0].is_shadowed
-    # ``Function.modifiers`` is a heterogeneous list (base-constructor calls ride
-    # in it), so read the name off whatever is there.
+    # ``Function.modifiers`` also carries base-constructor calls.
     assert [getattr(m, "canonical_name", None) for m in shadowed[0].modifiers] == ["Base.nonReentrant()"]
 
 
@@ -471,8 +428,7 @@ class _Contract:
 
 
 def test_two_live_declarations_of_one_signature_refuse(tmp_path):
-    """Solidity won't compile this, so it runs on a stub: ``is_shadowed`` missing or unset must
-    surface as a refusal, never a silent pick between two bodies."""
+    """Solidity won't compile this shape, so it runs on a stub."""
     contract = _Contract(
         [
             _Fn("A.payout()", "payout()", is_shadowed=False),
@@ -482,18 +438,11 @@ def test_two_live_declarations_of_one_signature_refuse(tmp_path):
     )
     verdicts = verified_guard_verdicts(contract)
     assert verdicts["payout()"] == _refusal(W2_REASON_AMBIGUOUS_DECLARATION)
-    # Non-vacuity: an unambiguous sibling in the same stub still resolves.
     assert verdicts["solo()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "A.solo()")
 
 
-# ---------------------------------------------------------------------------
-# Surface contract for the consumer
-# ---------------------------------------------------------------------------
-
-
 def test_verdicts_are_total_over_live_declarations(tmp_path):
-    """One verdict per live body, so a consumer never reads absence as a fact and a shadowed body
-    never adds a key (asserted on the inheritance fixture, where signature keying would collapse them)."""
+    """Asserted on the inheritance fixture, where signature keying would collapse them."""
     contract = _contract(tmp_path, _SHADOWED_OVERRIDE, "C")
     live = [f for f in contract.functions if not f.is_constructor and not f.is_shadowed]
     shadowed = [f for f in contract.functions if not f.is_constructor and f.is_shadowed]
@@ -505,8 +454,6 @@ def test_verdicts_are_total_over_live_declarations(tmp_path):
 
 
 def test_proven_dict_names_which_modifier_holds_which_var(tmp_path):
-    """The modifier-retaining computation is the whole difference from the
-    contract-scoped var set — without it there is nothing to join against."""
     contract = _contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C")
     proven = reentrancy_guard_modifiers(contract)
     by_name = {m.canonical_name: proven[id(m)] for m in contract.modifiers if id(m) in proven}
@@ -516,7 +463,6 @@ def test_proven_dict_names_which_modifier_holds_which_var(tmp_path):
 def test_proven_dict_is_empty_when_no_modifier_earns_it(tmp_path):
     contract = _contract(tmp_path, _A13_FAKE_GUARD_NO_REVERT, "C")
     assert reentrancy_guard_modifiers(contract) == {}
-    # Non-vacuity: the modifier exists and does write the var on both sides.
     assert [m.canonical_name for m in contract.modifiers] == ["C.notAGuard()"]
 
 
@@ -543,8 +489,7 @@ contract C {
 
 
 def test_a_modifier_holding_two_guard_vars_publishes_both(tmp_path):
-    """``run`` unions the proven set; picking one (first of a ``set``) made the published var depend on
-    the hash seed."""
+    """Picking one made the published var depend on the hash seed."""
     contract = _contract(tmp_path, _TWO_GUARD_VARS, "C")
     assert reentrancy_guard_modifiers(contract) == {id(contract.modifiers[0]): frozenset({"a", "b"})}
     assert ReentrancyAnalyzer(contract).run() == {"a", "b"}

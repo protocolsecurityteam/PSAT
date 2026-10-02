@@ -156,8 +156,7 @@ def test_observation_and_pause_never_drain_or_start(lifecycle, mode, paused):
 
 def test_claim_and_drain_serialized_in_postgres(lifecycle):
     age_idle(lifecycle)
-    # Hold gate before inserting work, exactly as a claimer does. The
-    # controller must wait, then observe the committed processing row.
+    # The controller must wait, then observe the committed processing row.
     assert claim_allowed(lifecycle)
     result = []
     started = threading.Event()
@@ -359,8 +358,7 @@ def test_verification_source_and_orphan_exclusion(lifecycle, monkeypatch):
     lifecycle.commit()
     assert worker._claim_batch(lifecycle) == [coverage.id]
     assert snapshot(lifecycle).active
-    # Reset while still an implementation, then reclassify it as a proxy:
-    # existing coverage becomes unclaimable and must not keep the VM awake.
+    # Coverage for a reclassified proxy becomes unclaimable and must not keep the VM awake.
     lifecycle.execute(text("UPDATE audit_contract_coverage SET equivalence_status='pending'"))
     lifecycle.commit()
     contract.is_proxy = True
@@ -384,7 +382,6 @@ def test_custom_readiness_and_stuck_fallback_match_consumer(lifecycle, monkeypat
         lifecycle.add(
             AuditReport(protocol_id=protocol.id, url="https://example.invalid/a.pdf", title="test", auditor="test")
         )
-        # Audit text is independently runnable. Only test jobs readiness below.
         worker = CoverageWorker()
     else:
         sibling = add_job(lifecycle, JobStage.dapp_crawl)
@@ -427,8 +424,6 @@ def test_indexer_dirty_work_does_not_wake_analysis(lifecycle):
 
 @pytest.mark.parametrize("managed", [False, True])
 def test_pipeline_queue_state_and_artifacts_equivalent(lifecycle, monkeypatch, managed):
-    """Verifies the lifecycle wrapper doesn't alter persisted payloads; external analyses
-    are covered by their own suites."""
     from db.queue import get_artifact, store_artifact
 
     if not managed:

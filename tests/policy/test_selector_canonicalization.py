@@ -1,13 +1,6 @@
-"""Regression tests for EVM-canonical function-selector derivation.
-
-Predicate trees are keyed on Slither ``full_name`` (``addAsset(ERC20)``,
-``setMode(Mode)``), but the real selector — and ``effective_functions.selector`` /
-the Solmate ``canCall`` fold key — needs the canonical ABI signature (contract →
-``address``, enum → ``uint8``, struct → tuple). Re-deriving from ``full_name`` mapped
-every non-elementary type to ``address``: a false-negative on every role-gated
-enum/struct-param function. These tests pin the chain static
-``canonical_signatures`` map → effective-permissions selector → resolver canCall
-selector, on real compiled Solidity.
+"""Trees are keyed on Slither ``full_name``, but selectors need the canonical ABI signature; re-deriving from
+full_name mapped every user type to ``address``, missing every role-gated enum/struct function. Pinned on real
+compiled Solidity.
 """
 
 from __future__ import annotations
@@ -37,7 +30,6 @@ def _sel(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
-# Canonical EVM selectors vs. the wrong "collapse every user type to address" ones.
 SET_MODE_CANONICAL = _sel("setMode(uint8)")
 SET_MODE_ADDRESS_BUG = _sel("setMode(address)")
 EXECUTE_CANONICAL = _sel("execute((uint256,address))")
@@ -85,7 +77,6 @@ contract C {
 
 @pytest.fixture(scope="module")
 def predicate_artifact(tmp_path_factory) -> dict:
-    """Compile with real Slither and run the production artifact builder."""
     tmp = tmp_path_factory.mktemp("sel_canon")
     f = tmp / "C.sol"
     f.write_text(textwrap.dedent(SOURCE).strip() + "\n")
@@ -94,14 +85,12 @@ def predicate_artifact(tmp_path_factory) -> dict:
 
 
 def _lookup(canonical: dict[str, str], func_name: str) -> tuple[str, str]:
-    """Return ``(full_name_key, canonical_signature)`` for the entry matching the function name."""
     matches = {k: v for k, v in canonical.items() if k.split("(", 1)[0] == func_name}
     assert len(matches) == 1, f"expected exactly one {func_name}, got {matches}"
     return next(iter(matches.items()))
 
 
 def test_predicate_artifact_emits_canonical_signatures(predicate_artifact):
-    """enum→uint8, struct→tuple, contract→address; elementary-only functions are omitted."""
     canonical = predicate_artifact.get("canonical_signatures")
     assert isinstance(canonical, dict) and canonical, "canonical_signatures missing/empty"
 
@@ -117,12 +106,9 @@ def test_predicate_artifact_emits_canonical_signatures(predicate_artifact):
 
 
 def test_resolver_selector_uses_artifact_canonical_map(predicate_artifact):
-    """Feeding the artifact's canonical map into the resolver's selector helper yields
-    the true ``msg.sig`` for struct/enum functions.
-
-    Without the map only full_name remains, and Slither qualifies a contract-declared
-    struct/enum with its declarer (``C.Mode``) — provably not a contract reference, so
-    the fallback refuses it rather than publishing the address-collapse selector."""
+    """Without the map, a declarer-qualified struct/enum (``C.Mode``) is refused rather than published as the
+    address-collapse selector.
+    """
     canonical = predicate_artifact["canonical_signatures"]
     mode_key, _ = _lookup(canonical, "setMode")
     exec_key, _ = _lookup(canonical, "execute")
@@ -137,7 +123,6 @@ def test_resolver_selector_uses_artifact_canonical_map(predicate_artifact):
 
 
 def test_selector_for_signature_falls_back_for_contracts_without_map():
-    """No regression to the #104 fix: without a map a contract/interface param still lowers to ``address``."""
     assert _selector_for_signature("addAsset(ERC20)") == _sel("addAsset(address)")
     assert _selector_for_signature("setNum(uint256)") == SET_NUM_CANONICAL
     assert _selector_for_signature(None) is None
@@ -146,7 +131,6 @@ def test_selector_for_signature_falls_back_for_contracts_without_map():
 
 
 def test_build_effective_permissions_selector_column_is_canonical(predicate_artifact):
-    """``effective_functions.selector`` / ``abi_signature`` come from the canonical map."""
     analysis = {"subject": {"address": "0x" + "11" * 20, "name": "C"}}
     ep = build_effective_permissions(
         analysis,
@@ -162,19 +146,11 @@ def test_build_effective_permissions_selector_column_is_canonical(predicate_arti
     assert by_name["setFoo"]["selector"] == SET_FOO_CANONICAL
 
 
-# --- nested / repeated user-defined type lowering -------------------------
-#
-# Every occurrence of a repeated or nested user-defined type must lower, not just the
-# first. Mirrors LayerZeroTeller ``depositAndBridgeWithPermit`` (two ERC20 fields) and
-# AvsOperator ``verifyBlsKey`` (two ``G1Point`` fields).
+# Mirrors LayerZeroTeller ``depositAndBridgeWithPermit`` and AvsOperator ``verifyBlsKey``.
 
-# depositAndBridgeWithPermit(Permit{ERC20,uint256,ERC20,uint8})
 PERMIT_CANONICAL = _sel("depositAndBridgeWithPermit((address,uint256,address,uint8))")
-# Pre-fix partial lowering left the 2nd ERC20 raw.
 PERMIT_PARTIAL_BUG = _sel("depositAndBridgeWithPermit((address,uint256,ERC20,uint8))")
-# verifyBlsKey(BlsKey{G1Point{uint256,uint256}, G1Point{uint256,uint256}})
 BLS_CANONICAL = _sel("verifyBlsKey(((uint256,uint256),(uint256,uint256)))")
-# Array-of-struct preserving its [N] suffix with a repeated contract field.
 PARAMS_CANONICAL = _sel("setParams((address,uint256,address)[2])")
 
 NESTED_SOURCE = """
@@ -219,7 +195,6 @@ def nested_artifact(tmp_path_factory) -> dict:
 
 
 def test_repeated_and_nested_user_types_lower_at_every_occurrence(nested_artifact):
-    """Every occurrence of a repeated/nested type lowers, not the partially-lowered string of the bug."""
     canonical = nested_artifact["canonical_signatures"]
 
     _, permit = _lookup(canonical, "depositAndBridgeWithPermit")
@@ -237,7 +212,6 @@ def test_repeated_and_nested_user_types_lower_at_every_occurrence(nested_artifac
 
 
 def test_nested_canonical_flows_to_effective_permissions_selector(nested_artifact):
-    """The corrected signature reaches ``effective_functions.selector``."""
     analysis = {"subject": {"address": "0x" + "22" * 20, "name": "D"}}
     ep = build_effective_permissions(
         analysis,
@@ -251,8 +225,6 @@ def test_nested_canonical_flows_to_effective_permissions_selector(nested_artifac
     assert by_name["setParams"]["selector"] == PARAMS_CANONICAL
 
 
-# Dynamic array of a repeated-contract struct plus a user-defined value type
-# (``type ... is``): exercises ``[]`` suffix and type-alias lowering.
 ALIAS_AND_DYNARRAY_SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -283,8 +255,6 @@ def alias_artifact(tmp_path_factory) -> dict:
 
 
 def test_dynamic_array_and_type_alias_lower(alias_artifact):
-    """A ``[]`` array of a struct with a repeated contract field lowers every occurrence
-    and keeps the suffix; a user-defined value type lowers to its underlying type."""
     canonical = alias_artifact["canonical_signatures"]
     _, route = _lookup(canonical, "route")
     assert route == "route((address,uint256,address)[],uint128)"
@@ -292,8 +262,6 @@ def test_dynamic_array_and_type_alias_lower(alias_artifact):
 
 
 def test_canonical_signature_rejects_self_recursive_struct():
-    """A self-recursive struct can't be lowered to a real selector (a user-defined
-    token survives the walk), so it's rejected and consumers fall back to the string."""
 
     src = textwrap.dedent(
         """
@@ -335,11 +303,9 @@ class _NoName:
 @pytest.mark.parametrize(
     "fake",
     [
-        # ``solidity_signature`` raises for the occasional non-lowerable struct param (recursive
-        # types); those drop out of the map so consumers fall back to full_name.
+        # Consumers fall back to full_name.
         pytest.param(_Raises(), id="slither-cannot-lower"),
         pytest.param(_NonString(), id="non-string-solidity-signature"),
-        # No lowerable ``parameters`` returns ``None`` rather than raising.
         pytest.param(_NoParams(), id="missing-parameters"),
         pytest.param(_NoName(), id="missing-name"),
     ],
@@ -348,17 +314,10 @@ def test_canonical_signature_guards(fake):
     assert _canonical_signature(fake) is None
 
 
-# ---------------------------------------------------------------------------
-# The fallback itself: what it may lower, and what it must refuse to.
-# ---------------------------------------------------------------------------
-
-
 def test_fallback_refuses_to_hash_a_qualified_struct_or_enum():
-    """``IFoo.PermitInput`` is declared INSIDE ``IFoo``; Solidity has no nested
-    contracts, so a qualified token isn't a contract reference and ``address`` is wrong,
-    while the tuple layout isn't recoverable from the name. The fallback used to answer
-    ``address`` anyway, publishing a selector for a nonexistent dispatch (92 of the
-    corpus's 250 non-canonical tokens). No answer is the honest one."""
+    """A qualified token isn't a contract reference and its tuple layout isn't recoverable, so the old ``address``
+    answer published nonexistent selectors (92 of 250 corpus tokens).
+    """
     from services.policy.effective_permissions import _abi_signature, _abi_signature_and_selector
 
     qualified = "requestWithdrawWithPermit(uint256,address,IWeETHWithdrawAdapter.PermitInput)"
@@ -373,8 +332,6 @@ def test_fallback_refuses_to_hash_a_qualified_struct_or_enum():
 
 
 def test_fallback_preserves_an_already_lowered_tuple():
-    """A canonical tuple token is ABI, not a user-defined name: collapsing
-    ``(uint256,address)`` to ``address`` yields a selector for a different function."""
     from services.policy.effective_permissions import _abi_signature, _abi_signature_and_selector
 
     canonical = "execute((uint256,address),bytes)"
@@ -384,7 +341,6 @@ def test_fallback_preserves_an_already_lowered_tuple():
 
 
 def test_canonical_map_still_wins_over_the_fallback():
-    """The fallback is only reached when the map has no entry."""
     from services.policy.effective_permissions import _abi_signature_and_selector
 
     canonical = "f((uint256,uint8))"

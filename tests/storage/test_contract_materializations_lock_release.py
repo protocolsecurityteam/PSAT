@@ -1,12 +1,6 @@
-"""Architectural invariant: ``materialize_or_wait`` must not hold the ``(chain, bytecode_keccak)``
-advisory lock, or any open transaction on the cache session, during ``builder()``.
-
-The builder is the forge+Slither pipeline (1-3 minutes on real contracts); an idle connection that
-long trips Neon's pooler SSL idle timeout, so the final ``UPSERT ... status='ready'`` fails, the
-cache row is never written and the recursive resolver rebuilds the same bytecode (seen ~21 times
-over 4 days and 5 PR previews). From inside the builder a separate session probes the lock with
-``pg_try_advisory_xact_lock`` (and rolls back so the outer call can re-acquire it); a false
-probe means the cache layer is still holding it.
+"""``builder()`` runs forge+Slither for minutes, and holding the lock or a transaction that long tripped Neon's SSL
+idle timeout, so the cache row never landed and the same bytecode was rebuilt ~21 times. A separate session probes
+the lock from inside the builder.
 """
 
 from __future__ import annotations
@@ -14,41 +8,14 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 from sqlalchemy import text
 
 from db import contract_materializations as cm
-from db.models import ContractMaterialization
 from tests.conftest import requires_postgres
-
-
-@pytest.fixture()
-def _clean_cm(db_session):
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-
-
-@pytest.fixture()
-def _route_to_test_db(monkeypatch):
-    """Point ``db.contract_materializations.SessionLocal`` at the test DB (duplicated from
-    ``test_contract_materializations_blob.py`` so this file stays a standalone reproduction)."""
-    import os
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session, sessionmaker
-
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-
-    engine = create_engine(test_url)
-    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("db.contract_materializations.SessionLocal", factory)
-    yield
-    engine.dispose()
+from tests.support.materializations import (
+    _clean_cm,  # noqa: F401  (fixture, registered by import)
+    _route_to_test_db,  # noqa: F401  (fixture, registered by import)
+)
 
 
 @requires_postgres
@@ -68,7 +35,6 @@ def test_materialize_does_not_hold_advisory_lock_during_builder(_route_to_test_d
                 ).scalar()
                 state["lock_free_during_builder"] = bool(got)
             finally:
-                # Release the probe lock so the outer write-phase attempt can proceed.
                 probe.rollback()
         return {
             "contract_name": "LockReleaseTest",

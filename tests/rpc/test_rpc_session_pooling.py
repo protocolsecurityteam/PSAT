@@ -1,11 +1,4 @@
-"""Regression tests for the per-thread ``requests.Session`` in ``services/clients/rpc.py``.
-
-Bare ``requests.post()`` opens a socket per call; per-thread Sessions let urllib3 reuse
-TCP/TLS sockets, which matters for RPC-heavy stages where handshake latency dominates.
-Pinned: same Session within a thread; different Sessions across threads (``requests.Session``
-is not thread-safe); ``rpc_request`` goes through the cached Session, not bare
-``requests.post`` (a silent revert re-introduces the per-call handshake); retries still work.
-"""
+"""Per-thread Sessions let urllib3 reuse TCP/TLS sockets for RPC-heavy stages."""
 
 from __future__ import annotations
 
@@ -29,14 +22,12 @@ def test_same_thread_reuses_session():
 
 
 def test_different_threads_get_different_sessions():
-    """requests.Session is not thread-safe across calls; sharing one would corrupt socket state
-    under load, invisibly in single-threaded bench runs."""
+    """Sharing would corrupt socket state under load, invisibly in single-threaded benches."""
     _reset_thread_session()
     main_session = rpc._get_session()
     other_session: list[Any] = []
 
     def _worker():
-        # No reset here — we want each thread to get its own fresh one.
         other_session.append(rpc._get_session())
 
     t = threading.Thread(target=_worker)
@@ -47,7 +38,7 @@ def test_different_threads_get_different_sessions():
 
 
 def test_rpc_request_routes_through_session():
-    """A revert to bare ``requests.post`` would lose pooling silently (bench wouldn't catch it for weeks)."""
+    """A revert to bare ``requests.post`` would lose pooling silently."""
     _reset_thread_session()
     fake_response = MagicMock()
     fake_response.status_code = 200

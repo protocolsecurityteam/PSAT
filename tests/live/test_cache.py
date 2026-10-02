@@ -1,5 +1,3 @@
-"""Caching: re-running an address/company should reuse cached static data."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -25,7 +23,7 @@ def test_first_run_has_artifacts(analyzed_weth, live_client: LiveClient):
 def test_second_run_uses_cache(analyzed_weth, cached_weth, live_client: LiveClient):
     req2 = cached_weth.get("request") or {}
     assert req2.get("static_cached") is True, f"second WETH run did not hit cache: request={req2}"
-    # Don't pin cache_source_job_id: a warm preview DB may reuse an earlier session's WETH job.
+    # A warm preview DB may reuse an earlier session's WETH job.
     source_id = req2.get("cache_source_job_id")
     assert source_id, f"static_cached=True but no cache_source_job_id on request={req2}"
     source = live_client.job(source_id)
@@ -81,8 +79,7 @@ def test_first_company_run_has_children(company_first_children):
 
 
 def test_first_company_run_has_inventory(company_first_inventory, company_first_children):
-    # contract_inventory is the dapp_crawl artifact; if Tavily can't pick a domain it's empty.
-    # Discovery may still have succeeded via DefiLlama → fall back to children with addresses.
+    # If Tavily can't pick a domain the dapp_crawl inventory is empty; fall back to children with addresses.
     inventory_contracts = (company_first_inventory or {}).get("contracts") or []
     child_addrs = [c for c in company_first_children if c.get("address")]
     assert inventory_contracts or child_addrs, (
@@ -96,14 +93,14 @@ def test_second_company_run_deduplicates(
     company_second_run,
     live_client: LiveClient,
 ):
-    # find_existing_job_for_address skips failed jobs so Run 2 can retry; only count completed.
+    # Failed jobs are skipped for retry, so only count completed.
     child_addrs1 = {
         c["address"].lower() for c in company_first_children if c.get("address") and c["status"] == "completed"
     }
     children2 = live_client.poll_children_until_done(company_second_run["job_id"])
     child_addrs2 = {c["address"].lower() for c in children2 if c.get("address")}
 
-    # Proxies are re-queued every run for upgrade checks — only non-proxy dups are a cache miss.
+    # Proxies are re-queued every run for upgrade checks.
     all_jobs = live_client.jobs()
     proxy_addrs = {(j.get("address") or "").lower() for j in all_jobs if j.get("is_proxy")}
     non_proxy_dup = (child_addrs1 & child_addrs2) - proxy_addrs

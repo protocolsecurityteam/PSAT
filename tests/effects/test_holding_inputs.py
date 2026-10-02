@@ -1,5 +1,3 @@
-"""Positive holdings remain analysis inputs even when their price is unknown."""
-
 from __future__ import annotations
 
 from db.models import ContractBalance, ContractBalanceFetch

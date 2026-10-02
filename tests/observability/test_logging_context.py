@@ -1,9 +1,5 @@
-"""Unit tests for utils/logging: JSON formatter + ContextVar propagation. No DB.
-
-Pins: ``bind_trace_context`` survives ``ThreadPoolExecutor.submit`` under
-``copy_context().run`` (the workers/base.py + parallel_map pattern); ``parallel_map``
-propagates ``trace_id``; the formatter omits unset context fields (no ``"trace_id": null``);
-concurrent contexts never cross-contaminate.
+"""``bind_trace_context`` must survive ``ThreadPoolExecutor.submit`` under ``copy_context().run``, and concurrent
+contexts must never cross-contaminate.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from utils.logging import (
 
 
 def _capture(level: int = logging.INFO) -> tuple[logging.Logger, io.StringIO]:
-    """Build a logger pointed at an in-memory stream with our JSON formatter."""
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.setFormatter(JsonFormatter())
@@ -32,11 +27,6 @@ def _capture(level: int = logging.INFO) -> tuple[logging.Logger, io.StringIO]:
     logger.setLevel(level)
     logger.propagate = False
     return logger, stream
-
-
-# ---------------------------------------------------------------------------
-# JSON formatter shape
-# ---------------------------------------------------------------------------
 
 
 def test_formatter_omits_unset_context_fields():
@@ -96,11 +86,9 @@ def test_bind_trace_context_nests_cleanly():
 
 
 def test_configure_logging_is_idempotent_across_calls():
-    """A second call is a no-op, so harnesses (pytest's caplog) can add handlers without being
-    wiped on a later worker init."""
+    """Harnesses like caplog add handlers that a later worker init must not wipe."""
     root = logging.getLogger()
-    # Reset the guard flag and any prior JSON handler; other tests (or BaseWorker.__init__)
-    # may have triggered the first-call path.
+    # Other tests or BaseWorker.__init__ may already have run the first-call path.
     if hasattr(root, "_psat_json_logging_configured"):
         delattr(root, "_psat_json_logging_configured")
     for h in list(root.handlers):
@@ -115,11 +103,6 @@ def test_configure_logging_is_idempotent_across_calls():
     assert n_after_first == 1
     assert n_after_second == 2
     assert extra in root.handlers
-
-
-# ---------------------------------------------------------------------------
-# ContextVar propagation across thread fan-out
-# ---------------------------------------------------------------------------
 
 
 def test_parallel_map_propagates_trace_id():
@@ -142,7 +125,6 @@ def test_parallel_map_propagates_trace_id():
 
 
 def test_parallel_map_sequential_path_propagates_trace_id():
-    """max_workers=1 runs in-thread; the caller's bind must still be visible."""
 
     def read_trace(item: int) -> str | None:
         return trace_id_var.get()

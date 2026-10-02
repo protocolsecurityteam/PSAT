@@ -7,18 +7,15 @@ the integration tests confirm the facts land in ``principal_labels.details``.
 
 from typing import Any, cast
 
-import pytest
-
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
-from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import (
     _compute_signer_overlap,
     build_principal_labels,
     load_protocol_safe_owner_sets,
 )
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
-# Ops Safe (4/7) and pauser Safe (1/5) — the pauser's owners are a strict subset,
-# the exact etherfi shape the plan cites.
+# The pauser's owners are a strict subset: the etherfi shape the plan cites.
 OPS = "0x2aca71020de61bb532008049e1bd41e451ae8adc"
 PAUSER = "0x427989bb12f4a390d11e7647d467dea02b9d2ee3"
 OPS_OWNERS = [f"0x{i:040x}" for i in range(1, 8)]  # 7 owners
@@ -27,20 +24,10 @@ DISJOINT = "0x" + "9" * 40
 DISJOINT_OWNERS = [f"0x{i:040x}" for i in range(100, 103)]
 
 
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
-
-
 def _registry(*entries):
     return {
         addr.lower(): {"owners": [o.lower() for o in owners], "membership_quality": "exact"} for addr, owners in entries
     }
-
-
-# --- pure overlap algebra ----------------------------------------------------
 
 
 def test_subset_relation_emitted_with_flag():
@@ -83,8 +70,7 @@ def test_disjoint_sets_emitted_with_empty_overlap():
 
 
 def test_omitted_when_self_absent_from_registry():
-    # A Safe not in the exact-owners registry (owners absent / non-exact) has no
-    # dispositive owner set — the fact is omitted, never guessed.
+    # No dispositive owner set means the fact is omitted, never guessed.
     registry = _registry((OPS, OPS_OWNERS))
     assert _compute_signer_overlap(PAUSER, registry) is None
 
@@ -92,9 +78,6 @@ def test_omitted_when_self_absent_from_registry():
 def test_omitted_when_no_other_safe_to_compare():
     registry = _registry((PAUSER, PAUSER_OWNERS))
     assert _compute_signer_overlap(PAUSER, registry) is None
-
-
-# --- DB owner-quality gate ---------------------------------------------------
 
 
 def _make_safe_fp(session, contract, address, details):
@@ -112,14 +95,11 @@ def test_load_protocol_safe_owner_sets_owner_quality_gate(db_session):
     db_session.add(contract)
     db_session.flush()
 
-    # exact + owners -> admitted (appears on two functions -> dedup to one entry)
     _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS, "threshold": 4, "membership_quality": "exact"})
     _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS, "threshold": 4, "membership_quality": "exact"})
-    # lower_bound -> excluded (owner set not dispositively enumerated)
     _make_safe_fp(
         db_session, contract, PAUSER, {"owners": PAUSER_OWNERS, "threshold": 1, "membership_quality": "lower_bound"}
     )
-    # exact but no owners -> excluded
     _make_safe_fp(db_session, contract, DISJOINT, {"threshold": 2, "membership_quality": "exact"})
     db_session.commit()
 
@@ -130,7 +110,7 @@ def test_load_protocol_safe_owner_sets_owner_quality_gate(db_session):
 
 
 def test_load_protocol_safe_owner_sets_conflicting_exacts_omitted(db_session):
-    # Two exact witnesses that DISAGREE on the owner set -> fail closed, omit.
+    # Disagreeing exact witnesses fail closed.
     protocol = Protocol(name="etherfi-conflict")
     db_session.add(protocol)
     db_session.flush()
@@ -139,7 +119,6 @@ def test_load_protocol_safe_owner_sets_conflicting_exacts_omitted(db_session):
     db_session.flush()
     _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS, "membership_quality": "exact"})
     _make_safe_fp(db_session, contract, OPS, {"owners": OPS_OWNERS[:6], "membership_quality": "exact"})
-    # A second, non-conflicting Safe stays admitted (conflict is per-Safe).
     _make_safe_fp(db_session, contract, PAUSER, {"owners": PAUSER_OWNERS, "membership_quality": "exact"})
     db_session.commit()
 
@@ -148,7 +127,6 @@ def test_load_protocol_safe_owner_sets_conflicting_exacts_omitted(db_session):
 
 
 def test_load_protocol_safe_owner_sets_exact_and_lower_bound_not_a_conflict(db_session):
-    # lower_bound is skipped and the exact stands: an exact + lower_bound pair is not a conflict (regression guard).
     protocol = Protocol(name="etherfi-mixed-quality")
     db_session.add(protocol)
     db_session.flush()
@@ -180,8 +158,6 @@ def test_load_protocol_safe_owner_sets_scoped_to_protocol(db_session):
     assert set(load_protocol_safe_owner_sets(db_session, p1.id)) == {OPS.lower()}
     assert set(load_protocol_safe_owner_sets(db_session, p2.id)) == {PAUSER.lower()}
 
-
-# --- build_principal_labels integration --------------------------------------
 
 TARGET = "0x1111111111111111111111111111111111111111"
 CONTRACT_PRINCIPAL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"

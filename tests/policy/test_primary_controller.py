@@ -1,8 +1,5 @@
-"""Unit tests for services.governance.primary_controller.
-
-Primary-controller assignment decides which non-contract principals materialize
-MonitoredContract rows at enrollment and which group container each contract joins
-on the Surface canvas; both call sites share this module.
+"""Primary assignment decides which principals get MonitoredContract rows and which group each contract joins on the
+canvas.
 """
 
 from __future__ import annotations
@@ -21,7 +18,6 @@ def _p(addr: str, ptype: str) -> dict:
 
 
 def _fn(callers: set[str], labels: set[str] | None = None, *, claims: list[str] | None = None) -> dict:
-    """One EffectiveFunction's caller set + effect labels (and optional Plane-1 claim ids)."""
     fn: dict = {"callers": set(callers), "labels": set(labels or ())}
     if claims is not None:
         fn["claims"] = list(claims)
@@ -37,10 +33,7 @@ def test_unknown_type_excluded():
 
 
 def test_principals_winning_zero_contracts_present_with_empty_list():
-    """The dict must distinguish 'unknown principal' from 'known principal that won
-    nothing' — Surface uses it to not render an EOA as a group; enrollment uses it to
-    deactivate the MonitoredContract row.
-    """
+    """Surface uses it to not render an EOA as a group; enrollment to deactivate the row."""
     principals = [_p("0xfee", "safe"), _p("0xreal", "safe")]
     fp = {"0xc1": {"0xreal"}}
     result = assign_primary_controllers(principals, fp)
@@ -49,10 +42,8 @@ def test_principals_winning_zero_contracts_present_with_empty_list():
 
 
 def test_state_variable_destination_safe_excluded_by_fp():
-    """Repro of the etherfi bug: two same-type Safes, ``0xcea`` the real governance
-    multisig (FP-tagged everywhere) and ``0xa99`` the fee destination in
-    ``accountantState.payoutAddress`` with no FP rows. FP membership excludes it
-    without depending on label naming.
+    """The etherfi bug: the fee-destination Safe has no FP rows, so FP membership excludes it without relying on
+    labels.
     """
     cea = "0xcea8039076e35a825854c5c2f85659430b06ec96"
     a99 = "0xa9962a5bfbea6918e958dee0647e99fd7863b95a"
@@ -72,9 +63,8 @@ def test_state_variable_destination_safe_excluded_by_fp():
 @pytest.mark.parametrize(
     ("principals", "winner", "loser"),
     [
-        # Safe wins over Timelock when both are eligible for the same contract.
         pytest.param([_p("0xsafe", "safe"), _p("0xtl", "timelock")], "0xsafe", "0xtl", id="type-priority"),
-        # All else equal, lex-smaller address wins (stable across re-runs).
+        # Stable across re-runs.
         pytest.param([_p("0xaaa", "safe"), _p("0xbbb", "safe")], "0xaaa", "0xbbb", id="lex-address"),
     ],
 )
@@ -86,10 +76,7 @@ def test_primary_tiebreakers(principals, winner, loser):
 
 
 def test_portfolio_size_does_not_decide():
-    """Same type, same authority tier → lex order decides, NOT portfolio size. The old
-    "owns more overall" tiebreak counted whatever subset was analyzed, so box identity
-    flipped as coverage grew (etherfi 0x2aca-vs-timelock regression). ``0xaaa`` wins
-    ``0xc1`` even though ``0xzzzbig`` holds three other contracts."""
+    """The old portfolio tiebreak flipped assignments as coverage grew."""
     fp = {
         "0xc1": {"0xzzzbig", "0xaaa"},
         "0xc2": {"0xzzzbig"},
@@ -105,8 +92,6 @@ def test_portfolio_size_does_not_decide():
 
 
 def test_address_lowercasing():
-    """Mixed-case principal addresses must match the lower-cased FP map, since callers
-    don't always normalize both sides."""
     fp = {"0xc1": {"0xabc"}}
     result = assign_primary_controllers([_p("0xABC", "safe")], fp)
     assert result["0xabc"] == ["0xc1"]
@@ -115,37 +100,28 @@ def test_address_lowercasing():
 def test_empty_inputs():
     assert assign_primary_controllers([], {}) == {}
     assert assign_primary_controllers([_p("0xa", "safe")], {}) == {"0xa": []}
-    # Contracts in fp without any principal listed are silently ignored.
     assert assign_primary_controllers([], {"0xc1": {"0xa"}}) == {}
 
 
 def test_output_is_sorted():
-    """Sorted contract lists per principal — stable enrollment / UI ordering."""
     fp = {"0xc3": {"0xa"}, "0xc1": {"0xa"}, "0xc2": {"0xa"}}
     result = assign_primary_controllers([_p("0xa", "safe")], fp)
     assert result["0xa"] == ["0xc1", "0xc2", "0xc3"]
 
 
 def test_governance_passthrough_resolves_safe_behind_timelock():
-    """Safe → Timelock → governed contract (the ether.fi shape): the contract's only FP
-    caller is an in-protocol Timelock (a contract, never a principal). With the Timelock
-    marked pass-through, the Safe controlling it becomes primary.
-    """
+    """The ether.fi shape: the Timelock is a contract, never a principal, so it passes through."""
     vault, timelock, safe = "0xc1", "0xtl", "0xsafe"
     fp = {
         vault: {timelock},  # vault.onlyOwner caller resolves to the timelock
         timelock: {safe},  # timelock.execute caller resolves to the safe
     }
     result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough={timelock})
-    # Safe owns both the vault (through the timelock) and the timelock itself.
     assert sorted(result[safe]) == sorted([vault, timelock])
 
 
 def test_governance_passthrough_off_is_unchanged_one_hop():
-    """Same graph, no pass-through → the Safe is only a direct caller of the timelock.
-    Proves the traversal is what restores the vault attribution, and the ``None``
-    default preserves one-hop behavior.
-    """
+    """The ``None`` default preserves one-hop behavior."""
     vault, timelock, safe = "0xc1", "0xtl", "0xsafe"
     fp = {vault: {timelock}, timelock: {safe}}
     result = assign_primary_controllers([_p(safe, "safe")], fp)
@@ -153,11 +129,7 @@ def test_governance_passthrough_off_is_unchanged_one_hop():
 
 
 def test_governance_passthrough_excludes_fee_destination():
-    """A fee-destination Safe with no FP row is not pulled in by pass-through — only
-    FP (call-authority) edges are followed. Pins the Monitoring-tab regression: a Safe
-    in a state variable (``accountantState.payoutAddress``) must never be promoted to
-    a governing controller.
-    """
+    """Only FP edges are followed."""
     vault, timelock, gov_safe, fee_safe = "0xc1", "0xtl", "0xgov", "0xfee"
     fp = {vault: {timelock}, timelock: {gov_safe}}  # fee_safe absent from every FP set
     result = assign_primary_controllers(
@@ -170,8 +142,6 @@ def test_governance_passthrough_excludes_fee_destination():
 
 
 def test_governance_passthrough_is_cycle_and_depth_safe():
-    """A cyclic FP graph through pass-through contracts terminates (visited-set) and
-    still resolves the reachable principal."""
     a, b, safe = "0xa", "0xb", "0xsafe"
     fp = {a: {b, safe}, b: {a}}  # a <-> b mutually reference; safe calls a
     result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough={a, b})
@@ -179,28 +149,19 @@ def test_governance_passthrough_is_cycle_and_depth_safe():
 
 
 def test_governance_passthrough_does_not_recurse_through_non_governance():
-    """Only ``governance_passthrough`` addresses are expanded; an in-protocol FP caller
-    that is not a timelock/proxy-admin stays terminal, so we don't over-attribute
-    through ordinary operational contracts.
-    """
+    """Otherwise ordinary operational contracts over-attribute."""
     vault, manager, safe = "0xc1", "0xmgr", "0xsafe"
     fp = {vault: {manager}, manager: {safe}}
-    # manager is NOT passed through → safe only owns manager, not vault.
     result = assign_primary_controllers([_p(safe, "safe")], fp, governance_passthrough=set())
     assert result[safe] == [manager]
 
 
-# --- authority-tier ranking + veto gating ----------------------------------
-#
-# Contest key: (authority tier on THIS contract, principal type, lex address) —
-# per-contract facts only, so assignments can't flip as coverage grows. Tier evidence
-# comes from the optional fp_function_detail map.
+# Contest key: (tier on this contract, type, lex address), per-contract facts only so assignments don't flip as coverage
+# grows.
 
 
 def test_owner_tier_beats_operational_tier_regardless_of_portfolio():
-    """The Base etherfi shape: 0x183f holds transferOwnership/setAuthority while 0x607d
-    (lex-smaller, more contracts elsewhere) holds only operational rights. The owner wins
-    the shared contracts; the operator keeps only what nobody governs."""
+    """The Base etherfi shape."""
     owner, ops = "0xffff", "0x0001"  # ops is lex-smaller: tier must dominate
     shared = ["0xc1", "0xc2"]
     fp = {"0xc1": {owner, ops}, "0xc2": {owner, ops}, "0xc3": {ops}, "0xc4": {ops}, "0xc5": {ops}}
@@ -227,7 +188,6 @@ def test_owner_tier_beats_operational_tier_regardless_of_portfolio():
 
 
 def test_tier_beats_type_priority():
-    """An EOA that provably owns the contract outranks a Safe that can only pause it."""
     eoa, safe = "0xeoa", "0xsafe"
     fp = {"0xc1": {eoa, safe}}
     detail = {
@@ -246,9 +206,7 @@ def test_tier_beats_type_priority():
 
 
 def test_mediated_governing_tier_beats_direct_operational_tier():
-    """The Ethereum etherfi shape: the timelock holds upgradeTo on the vault (governing),
-    the ops Safe holds direct pause (operational). The Safe driving the timelock
-    inherits its tier and wins despite the ops Safe's more direct authority."""
+    """The Ethereum etherfi shape: the timelock's driver inherits its governing tier."""
     vault, tl, driver, ops = "0xc1", "0xtl", "0xdriver", "0xaops"  # ops lex-smaller
     fp = {vault: {tl, ops}, tl: {driver}}
     detail = {
@@ -264,16 +222,12 @@ def test_mediated_governing_tier_beats_direct_operational_tier():
         governance_passthrough={tl},
         fp_function_detail_by_contract=detail,
     )
-    # Driver wins the vault (inherited tier) AND the timelock itself (schedule/execute
-    # are governing claims on the mediator), so the whole unit lands in one group.
+    # schedule/execute are governing claims on the mediator too.
     assert sorted(result[driver]) == [vault, tl]
     assert result[ops] == []
 
 
 def test_veto_only_caller_does_not_inherit_through_mediator():
-    """The 0x055a8b-vs-0xcdd57d shape: both Safes are FP callers of the timelock, but
-    one can only ``cancel`` (veto) while the other holds schedule/execute. The veto
-    holder must not inherit the timelock's authority, even if lex-smaller."""
     vault, tl = "0xc1", "0xtl"
     canceller, driver = "0xaaa", "0xbbb"  # canceller lex-smaller: gating must do the work
     fp = {vault: {tl}, tl: {canceller, driver}}
@@ -295,9 +249,7 @@ def test_veto_only_caller_does_not_inherit_through_mediator():
 
 
 def test_partial_claim_coverage_does_not_read_as_veto_only():
-    """Review finding: the veto test is per-function, not per-claim-union. A caller with
-    cancel PLUS a claim-less privileged function isn't proven veto-only, so it keeps the
-    legacy expansion."""
+    """The veto test is per function, not per claim union."""
     vault, tl = "0xc1", "0xtl"
     canceller, prop = "0xbbb", "0xaaa"  # prop lex-smaller irrelevant; gating is the test
     fp = {vault: {tl}, tl: {canceller, prop}}
@@ -319,9 +271,7 @@ def test_partial_claim_coverage_does_not_read_as_veto_only():
 
 
 def test_proven_non_driver_does_not_inherit():
-    """Review finding: inheritance needs a positive driving witness, not just 'not
-    cancel-only'. A caller whose full claim coverage is only timelock.set_delay can't
-    make the mediator act and must not inherit its tier."""
+    """Inheritance needs a positive driving witness."""
     vault, tl = "0xc1", "0xtl"
     delay_setter, driver = "0xaaa", "0xzzz"  # delay setter lex-smaller: gating must do the work
     fp = {vault: {tl}, tl: {delay_setter, driver}}
@@ -343,9 +293,6 @@ def test_proven_non_driver_does_not_inherit():
 
 
 def test_whitelist_callers_do_not_inherit_through_mediator():
-    """Review finding: significance gating must hold one hop out. A mediator whose own
-    functions are a broad unprivileged whitelist anchors no primary claim for its
-    callers, else the lex-smallest whitelist member wins the vault it can upgrade."""
     vault, tl = "0xd1", "0xtl"
     bidders = {f"0xb{i}" for i in range(6)}
     fp = {vault: {tl}, tl: set(bidders)}
@@ -363,8 +310,7 @@ def test_whitelist_callers_do_not_inherit_through_mediator():
 
 
 def test_delegatecall_is_governing_tier():
-    """Review finding: delegatecall runs arbitrary code in the contract's storage
-    context, so it ranks governs (tier 3), above a role granter."""
+    """Delegatecall runs arbitrary code in the contract's storage."""
     dc, granter = "0xzzz", "0xaaa"  # delegatecall holder lex-larger: tier must decide
     fp = {"0xc1": {dc, granter}}
     detail = {
@@ -383,8 +329,7 @@ def test_delegatecall_is_governing_tier():
 
 
 def test_composite_detail_caller_tokens_still_gate():
-    """Review finding: the evidence fold must accept composite ``<chain>::<address>``
-    caller tokens; a keyspace mismatch would silently disable the gates."""
+    """A keyspace mismatch would silently disable the gates."""
     bidders = {f"eth::0xb{i}" for i in range(6)}
     auction = "eth::0xauction"
     fp = {auction: set(bidders)}
@@ -398,8 +343,6 @@ def test_composite_detail_caller_tokens_still_gate():
 
 
 def test_claimless_mediator_caller_still_inherits():
-    """Veto gating needs a positive cancel-only witness; a mediator caller with no claim
-    rows (stale/degraded artifact) keeps the legacy expansion."""
     vault, tl, safe = "0xc1", "0xtl", "0xsafe"
     fp = {vault: {tl}, tl: {safe}}
     detail = {vault: [_fn({tl}, claims=["upgrade.implementation"])]}  # no rows for tl's callers
@@ -413,10 +356,7 @@ def test_claimless_mediator_caller_still_inherits():
 
 
 def test_broad_whitelist_callers_not_primary_eligible():
-    """With the portfolio-count tiebreak gone, the lex-smallest of ~33 bidders sharing
-    ``createBid`` must not win the AuctionManager's box: a caller whose only proven
-    functions are insignificant (no privileged label/claim, wider than the gate
-    threshold) isn't primary-eligible, so the auction has no primary."""
+    """Otherwise the lex-smallest of ~33 bidders would win the AuctionManager."""
     bidders = {f"0xbidder{i}" for i in range(6)}
     auction = "0xauction"
     fp = {auction: set(bidders)}
@@ -429,11 +369,7 @@ def test_broad_whitelist_callers_not_primary_eligible():
     assert all(result[b] == [] for b in bidders)
 
 
-# --- assign_operand_render_groups ------------------------------------------
-#
-# Machinery contracts (passthrough timelock, Pauser, L1 bridge receiver) render with
-# the unit they operate on. The override changes only the render group; primary_for is
-# untouched, so their controller reads as a co-controller row inside that box.
+# The override changes only the render group, not primary_for.
 
 
 def _all_contracts(fp: dict) -> set:
@@ -441,8 +377,6 @@ def _all_contracts(fp: dict) -> set:
 
 
 def test_mediator_render_group_follows_operand_unit():
-    """Mediator driven by the ops Safe, operating contracts won by the gov Safe →
-    rendered with the gov Safe's group; the gov timelock needs no override."""
     tl_ops, tl_gov = "0xtlops", "0xtlgov"
     primary_for = {"0xgov": ["0xc1", "0xc2", "0xc3", tl_gov], "0xops": [tl_ops]}
     fp = {
@@ -457,8 +391,6 @@ def test_mediator_render_group_follows_operand_unit():
 
 
 def test_unowned_mediator_joins_operand_unit():
-    """A mediator nobody primary-controls still joins its operand unit's group, even
-    when its driver is unknown."""
     tl = "0xtl"
     primary_for = {"0xgov": ["0xc1", "0xc2"]}
     fp = {"0xc1": {tl}, "0xc2": {tl}, tl: set()}
@@ -466,7 +398,6 @@ def test_unowned_mediator_joins_operand_unit():
 
 
 def test_mediator_render_group_tie_is_split_evidence():
-    """Operands split evenly between two groups: no single home is witnessed, so it stays."""
     tl = "0xtl"
     primary_for = {"0xgov1": ["0xc1"], "0xgov2": ["0xc2"], "0xops": [tl]}
     fp = {"0xc1": {tl}, "0xc2": {tl}, tl: {"0xops"}}
@@ -474,7 +405,6 @@ def test_mediator_render_group_tie_is_split_evidence():
 
 
 def test_mediator_render_group_ignores_unowned_operands():
-    """Unowned operands contribute no plurality evidence (none owned → no home to move to)."""
     tl = "0xtl"
     primary_for = {"0xops": [tl]}
     fp = {"0xc1": {tl}, "0xc2": {tl}, tl: {"0xops"}}
@@ -482,7 +412,6 @@ def test_mediator_render_group_ignores_unowned_operands():
 
 
 def test_mediator_plurality_tolerates_stray_operands():
-    """The mediator arm is plurality, not unanimity."""
     tl = "0xtl"
     primary_for = {"0xgov": ["0xc1", "0xc2"], "0xother": ["0xc3"], "0xops": [tl]}
     fp = {"0xc1": {tl}, "0xc2": {tl}, "0xc3": {tl}, tl: {"0xops"}}
@@ -491,8 +420,7 @@ def test_mediator_plurality_tolerates_stray_operands():
 
 
 def test_ordinary_machinery_moves_only_on_unanimity():
-    """The etherfi Pauser / L1-receiver shape: an ordinary (non-mediator) contract
-    joins its operand group only when EVERY operand is owned by that one principal."""
+    """The etherfi Pauser / L1-receiver shape."""
     pauser, receiver = "0xpauser", "0xreceiver"
     primary_for = {
         "0xliquid": ["0xv1", "0xv2", "0xv3"],
@@ -509,13 +437,10 @@ def test_ordinary_machinery_moves_only_on_unanimity():
         receiver: {"0xother"},
     }
     result = assign_operand_render_groups(fp, _all_contracts(fp), set(), primary_for)
-    # Pauser: unanimous over 0xliquid's unit → moves. Receiver: split → stays.
     assert result == {pauser: "0xliquid"}
 
 
 def test_ordinary_machinery_blocked_by_unowned_operand():
-    """Unanimity requires every operand OWNED; an unowned operand is no evidence for any
-    home (unlike the mediator arm, which weighs only proven homes)."""
     pauser = "0xpauser"
     primary_for = {"0xliquid": ["0xv1"], "0xother": [pauser]}
     fp = {"0xv1": {pauser}, "0xv2": {pauser}, pauser: {"0xother"}}  # 0xv2 unowned
@@ -523,38 +448,27 @@ def test_ordinary_machinery_blocked_by_unowned_operand():
 
 
 def test_principals_never_rehomed():
-    """A Safe appearing as an FP caller is not a contract; it never gets a render-group entry."""
     safe = "0xsafe"
     primary_for = {safe: ["0xc1", "0xc2"]}
     fp = {"0xc1": {safe}, "0xc2": {safe}}
-    # contract_keys excludes the safe: only c1/c2 are rendered contracts.
     assert assign_operand_render_groups(fp, {"0xc1", "0xc2"}, set(), primary_for) == {}
 
 
-# --- assign_co_controllers -------------------------------------------------
-#
-# The pauser/guardian case: a Safe with real authority (pause, recover, …) on contracts
-# a bigger governance Safe wins primary for must be recovered as a co-controller; a
-# permissionless caller (createBid, shared by many) must not be.
+# A pauser/guardian Safe is recovered as a co-controller; a permissionless caller is not.
 
 
 def test_co_controller_privileged_label_kept_despite_losing_primary():
-    """A guardian Safe that can ``pause`` a contract the big Safe primary-owns co-controls
-    it: ``pause_toggle`` is privileged, so the wide caller set is irrelevant. Mirrors
-    EtherFi 0x2aca losing 8 contracts to the passthrough Safe yet holding pause/recover."""
+    """Mirrors EtherFi 0x2aca."""
     big, guardian, contract = "0xbig", "0xguardian", "0xc1"
     primary_for = {big: [contract], guardian: []}
     detail = {contract: [_fn({big, guardian, "0xeoa"}, {"pause_toggle"})]}
     result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
     assert result[guardian] == [contract]
-    # The primary is never listed as co-controlling what it already owns.
     assert result[big] == []
 
 
 def test_co_controller_tight_gate_kept_even_without_strong_label():
-    """A sole-caller config/withdrawal gate (``setCapacity`` / ``sweepFunds``, labelled
-    only ``external_contract_call``) still counts via the gate arm. Mirrors ops timelock
-    0xcd425f44, whose functions are all tightly gated."""
+    """Mirrors ops timelock 0xcd425f44."""
     big, ops, contract = "0xbig", "0xops", "0xc1"
     primary_for = {big: [contract], ops: []}
     detail = {contract: [_fn({ops}, {"external_contract_call"})]}
@@ -563,8 +477,7 @@ def test_co_controller_tight_gate_kept_even_without_strong_label():
 
 
 def test_co_controller_permissionless_caller_excluded():
-    """A function shared by many callers with no privileged label is a broad whitelist,
-    not governance. Mirrors ``AuctionManager.createBid`` (33 bidders)."""
+    """Mirrors ``AuctionManager.createBid``."""
     bidders = {f"0xbidder{i}" for i in range(8)}
     contract = "0xauction"
     principals = [_p(b, "safe") for b in bidders]
@@ -575,7 +488,6 @@ def test_co_controller_permissionless_caller_excluded():
 
 
 def test_co_controller_non_principal_types_ignored():
-    """Only safe/timelock/eoa/proxy_admin participate; a ``contract``-typed caller doesn't."""
     contract = "0xc1"
     detail = {contract: [_fn({"0xinner", "0xsafe"}, {"pause_toggle"})]}
     result = assign_co_controllers([_p("0xinner", "contract"), _p("0xsafe", "safe")], detail, {"0xsafe": []})
@@ -586,11 +498,8 @@ def test_co_controller_non_principal_types_ignored():
 @pytest.mark.parametrize(
     "claims_by_contract",
     [
-        # ``upgrade.implementation`` fires as a claim (its ``implementation_update`` legacy label was
-        # corpus-dead), so a Safe holding an upgrade function co-controls even with a wide caller set
-        # the gate arm would reject.
+        # The legacy label was corpus-dead, so the claim is what fires.
         pytest.param({"0xc1": ["upgrade.implementation"]}, id="upgrade-implementation"),
-        # Claim families with no legacy label (``safe.*``, ``timelock.*``) make their callers co-controllers.
         pytest.param(
             {"0xsafecontract": ["safe.signer_mgmt"], "0xtlcontract": ["timelock.schedule"]},
             id="new-claim-families",
@@ -609,8 +518,6 @@ def test_co_controller_privileged_claims(claims_by_contract):
 
 
 def test_co_controller_callee_pointer_claim_excluded():
-    """``callee_pointer.rotate`` is excluded from the privileged claim set (like legacy
-    ``hook_update``), so a wide caller set on it makes no caller a co-controller."""
     contract = "0xc1"
     wide = {f"0xcaller{i}" for i in range(8)}
     principals = [_p(c, "safe") for c in wide]
@@ -621,8 +528,6 @@ def test_co_controller_callee_pointer_claim_excluded():
 
 
 def test_co_controller_claims_take_precedence_over_legacy_labels():
-    """When a row carries claims they are authoritative and legacy labels aren't
-    consulted: a ``callee_pointer.rotate`` claim beats a privileged ``pause_toggle`` label."""
     contract = "0xc1"
     wide = {f"0xcaller{i}" for i in range(8)}
     principals = [_p(c, "safe") for c in wide]
@@ -636,11 +541,8 @@ def test_co_controller_claims_take_precedence_over_legacy_labels():
 
 
 def test_co_controller_empty_and_shape():
-    """Empty inputs are safe, and every participating principal appears with at least an
-    empty list ('co-controls nothing' vs 'unknown principal')."""
     assert assign_co_controllers([], {}, {}) == {}
     assert assign_co_controllers([_p("0xa", "safe")], {}, {}) == {"0xa": []}
-    # Address casing is normalized on both sides.
     detail = {"0xC1": [_fn({"0xAbC"}, {"role_management"})]}
     result = assign_co_controllers([_p("0xABC", "safe")], detail, {})
     assert result == {"0xabc": ["0xc1"]}

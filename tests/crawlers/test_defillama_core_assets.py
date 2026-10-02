@@ -1,5 +1,3 @@
-"""Tests for core assets loading and address-to-chain mapping."""
-
 import json
 import tempfile
 from pathlib import Path

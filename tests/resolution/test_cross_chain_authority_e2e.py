@@ -33,18 +33,13 @@ from workers.policy_worker import (
 )
 
 BASE_CHAIN_ID = 8453
-# Real Base-mainnet OP-stack predeploys (utils/chains.py registry constants).
 BASE_MESSENGER = "0x4200000000000000000000000000000000000007"
 BASE_BRIDGE = "0x4200000000000000000000000000000000000010"
-# Real Base-mainnet L1 ProxyAdminOwner (Ethereum Gnosis Safe, docs.base.org).
 L1_PROXY_ADMIN_OWNER = "0x7bb41c3008b3f03fe483b28b8db90e19cf07595c"
-# The L2 alias is arithmetic (L1 + 0x1111…1111 mod 2**160); pinned as a literal
-# and cross-checked against the recognizer's own transform so the fixture and the
-# code under test cannot silently drift.
+# Pinned as a literal and cross-checked, so fixture and code can't drift.
 ALIASED_L1_OWNER = "0x8cc51c3008b3f03fe483b28b8db90e19cf076a6d"
 assert undo_l1_to_l2_alias(ALIASED_L1_OWNER) == L1_PROXY_ADMIN_OWNER
 
-# Native Base principals (arbitrary Base-local addresses, NOT cross-chain).
 NATIVE_EOA_OWNER = "0x" + "ab" * 20
 NATIVE_CONTRACT_OWNER = "0x" + "cd" * 20
 
@@ -55,8 +50,6 @@ _SOME_BYTECODE = "0x60806040"
 
 @pytest.fixture(autouse=True)
 def _reset_executor():
-    """``PSAT_RPC_FANOUT`` flips per test must rebuild the shared pool; the
-    process-wide classify cache must not leak addresses across tests."""
     RpcExecutor.reset_for_tests()
     clear_classify_cache()
     yield
@@ -66,12 +59,7 @@ def _reset_executor():
 
 @pytest.fixture
 def wire(monkeypatch):
-    """Stub the classify wire (``_rpc_request``), never the classifier. Forces the sequential
-    classify path and records every address ``eth_getCode`` is issued for, so tests can
-    assert which principals were recognized before the wire.
-
-    ``eth_getCode`` returns bytecode for ``_CONTRACT_ADDRS`` (``contract``), ``0x``
-    otherwise (``eoa``); every ``eth_call`` probe is absent."""
+    """Forces the sequential classify path and records every ``eth_getCode`` address."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "1")
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", False)
@@ -106,8 +94,6 @@ def _role_fn(name: str, role: int, principal: str) -> dict:
 
 
 def _base_effective_permissions() -> dict:
-    """A Base L2Vault whose five authorities span every cross-chain arm plus two
-    native controls (the same-harness true-negative)."""
     return {
         "contract_address": TARGET,
         "contract_name": "L2Vault",
@@ -122,8 +108,7 @@ def _base_effective_permissions() -> dict:
 
 
 def _scope_graph() -> dict:
-    """Control graph carrying the target and the L1 owner Safe as an in-scope reference
-    (so ``_known_addresses_for_scope`` surfaces it and the alias resolves)."""
+    """The L1 owner must be in scope for the alias to resolve."""
     return {
         "nodes": [
             {
@@ -153,9 +138,6 @@ def _scope_graph() -> dict:
         ],
         "edges": [],
     }
-
-
-# --- build_principal_labels, real classify wire ------------------------------
 
 
 def test_base_positive_arm_native_true_negative_and_no_wire_for_recognized(wire):
@@ -189,12 +171,8 @@ def test_base_positive_arm_native_true_negative_and_no_wire_for_recognized(wire)
     assert principals[NATIVE_CONTRACT_OWNER]["resolved_type"] == "contract"
     assert "cross_chain_authority" not in principals[NATIVE_CONTRACT_OWNER]["labels"]
 
-    # The in-scope L1 reference is not itself an alias of anything in scope, so
-    # it is classified natively — the hint is a hint, not a control edge.
     assert principals[L1_PROXY_ADMIN_OWNER]["resolved_type"] != CROSS_CHAIN_AUTHORITY_TYPE
 
-    # The recognizer runs before classification, so an aliased/bridge principal issues zero RPCs;
-    # only the native owners (and the L1 reference) do.
     probed = set(wire)
     assert ALIASED_L1_OWNER not in probed
     assert BASE_MESSENGER not in probed
@@ -205,8 +183,6 @@ def test_base_positive_arm_native_true_negative_and_no_wire_for_recognized(wire)
 
 
 def test_mainnet_run_classifies_everything_through_the_wire(wire):
-    """chain_id=1 -> recognizer is None: Base predeploy / aliased addresses carry no special
-    meaning, so none is labelled cross-chain and each is probed."""
     ep = _base_effective_permissions()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(1, _known_addresses_for_scope(graph, TARGET))
@@ -229,12 +205,7 @@ def test_mainnet_run_classifies_everything_through_the_wire(wire):
     assert {ALIASED_L1_OWNER, BASE_MESSENGER, BASE_BRIDGE} <= probed
 
 
-# --- FunctionPrincipal type resolver, real classify wire ---------------------
-
-
 def test_fp_resolver_labels_bridge_without_wire_and_types_native(wire):
-    """The FunctionPrincipal resolver (policy_worker ~513): the recognizer wins for the
-    bridge with no RPC; a native contract falls through to the real classifier."""
     recognize = _make_principal_type_resolver({}, "http://base.rpc.example", make_cross_chain_recognizer(BASE_CHAIN_ID))
 
     kind, details = recognize(BASE_BRIDGE)
@@ -247,19 +218,11 @@ def test_fp_resolver_labels_bridge_without_wire_and_types_native(wire):
     assert NATIVE_CONTRACT_OWNER.lower() in set(wire)
 
 
-# --- policy_worker chain-id → recognizer wiring (inertness) ------------------
-
-
 def _job(*, chain_id, chain=None, address=TARGET) -> Any:
-    """A ``_chain_id_for_job``-shaped stand-in (it reads only ``chain_id`` /
-    ``address`` / ``request``), typed ``Any`` so the helper's ``Job`` param
-    accepts it without a DB row."""
     return SimpleNamespace(id="j", chain_id=chain_id, address=address, request={"chain": chain} if chain else {})
 
 
 def test_base_job_yields_live_recognizer_mainnet_job_yields_none():
-    """The policy_worker derivation: a Base job binds a recognizer; a mainnet job binds None
-    so classification is byte-identical to pre-multichain main."""
     base_by_id = _job(chain_id=BASE_CHAIN_ID)
     assert _chain_id_for_job(base_by_id) == BASE_CHAIN_ID
     rec = make_cross_chain_recognizer(_chain_id_for_job(base_by_id), _known_addresses_for_scope({}, TARGET))
@@ -269,7 +232,6 @@ def test_base_job_yields_live_recognizer_mainnet_job_yields_none():
         {"address": BASE_MESSENGER, "role": "cross_domain_messenger"},
     )
 
-    # Chain derived from the request JSONB when the column is unset.
     base_by_name = _job(chain_id=None, chain="base")
     assert _chain_id_for_job(base_by_name) == BASE_CHAIN_ID
     assert make_cross_chain_recognizer(_chain_id_for_job(base_by_name)) is not None

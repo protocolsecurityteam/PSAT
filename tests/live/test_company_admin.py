@@ -1,5 +1,3 @@
-"""Company-scoped admin mutations: analyze-remaining + refresh_coverage (both idempotent)."""
-
 from __future__ import annotations
 
 import pytest
@@ -9,17 +7,12 @@ from tests.live.conftest import DEFAULT_TEST_COMPANY, LiveClient
 
 @pytest.fixture
 def _drain_etherfi_queue(live_client: LiveClient):
-    """Cancel every queued etherfi job after the test.
-
-    ``analyze-remaining`` queues hundreds of rows; left in place they starve downstream tests
-    (test_concurrency especially) on the same preview DB.
-    """
+    """``analyze-remaining`` queues hundreds of rows that would starve later tests on the same preview."""
     yield
     live_client.cancel_queued_company_jobs(DEFAULT_TEST_COMPANY)
 
 
 def test_analyze_remaining_response_shape(analyzed_company, live_client: LiveClient, _drain_etherfi_queue):
-    # Shape-only: ``queued`` count depends on prior runs against this preview's DB.
     body = live_client.analyze_remaining(DEFAULT_TEST_COMPANY)
     assert isinstance(body.get("queued"), int)
     assert body["queued"] >= 0
@@ -44,7 +37,6 @@ def test_refresh_coverage_returns_count(analyzed_company, live_client: LiveClien
     assert isinstance(body.get("protocol_id"), int)
     assert isinstance(body.get("coverage_rows"), int)
     assert body["coverage_rows"] >= 0
-    # Echoing our param back confirms the fast path was used.
     assert body.get("verify_source_equivalence") is False
 
 
@@ -58,7 +50,7 @@ def test_refresh_coverage_unknown_company_404(live_client: LiveClient):
 
 
 def test_refresh_coverage_idempotent(analyzed_company, live_client: LiveClient):
-    """Twice-in-a-row should produce the same row count (growth = dup bug, shrink = race bug)."""
+    """Growth means a dup bug, shrink a race bug."""
     first = live_client.refresh_company_coverage(DEFAULT_TEST_COMPANY)
     second = live_client.refresh_company_coverage(DEFAULT_TEST_COMPANY)
     assert first["coverage_rows"] == second["coverage_rows"], (

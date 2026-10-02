@@ -101,11 +101,6 @@ def test_read_verified_change_notifies(db_session, notify_env):
     assert labels["Witness"] == "verification read"
 
 
-# ---------------------------------------------------------------------------
-# Legacy webhook filters must not be muted by the strengthened vocabulary
-# ---------------------------------------------------------------------------
-
-
 def test_filter_shim_carries_a_canonical_seed_onto_the_verified_form():
     expanded = _expand_allowed_event_types(["ownership_transferred"])
     assert "value_changed:state_variable:owner" in expanded
@@ -121,8 +116,6 @@ def test_filter_shim_carries_a_neutral_seed_onto_the_verified_form():
 
 
 def test_filter_shim_invents_no_member_coverage():
-    """No legacy filter covered a mapping's members; expanding one onto ``member_changed``
-    would be a claim about the subscriber's intent."""
     expanded = _expand_allowed_event_types(["state_changed:state_variable:fromDenyList"])
     assert not any(t.startswith("member_changed") for t in expanded)
 
@@ -136,9 +129,7 @@ _SIGNER_TYPES = ["signer_added", "signer_removed", "threshold_changed"]
 
 
 def test_the_split_mutes_no_pre_split_signers_filter():
-    """`safe_exec` leaving the `signers` group changes what a NEW save enumerates. A filter
-    saved before it enumerated three types under a UI grouping that delivered all seven and
-    nothing in the row says otherwise, so it keeps all seven."""
+    """A pre-split filter enumerated three types under a grouping that delivered seven, so it keeps seven."""
     expanded = _expand_allowed_event_types(_SIGNER_TYPES)
     for event_type in _SAFE_EXEC_TYPES:
         assert event_type in expanded
@@ -156,7 +147,6 @@ def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
 
 
 def test_a_filter_naming_both_groups_hears_both():
-    """What the UI writes today: both groups named, both groups' types enumerated."""
     both = _SIGNER_TYPES + list(_SAFE_EXEC_TYPES)
     groups = ["signers", "safe_exec"]
     for event_type in both:
@@ -165,9 +155,7 @@ def test_a_filter_naming_both_groups_hears_both():
 
 @pytest.mark.parametrize("token", [None, [], "signers", ["signers", 3], 7, ["banana"], ["banana", "kiwi"]])
 def test_an_unreadable_group_token_falls_back_to_no_mute(token):
-    """A token we cannot read is not a statement of coverage. It SUPPRESSES the legacy
-    expansion, so reading ``["banana"]`` as a statement would mute a subscription's Safe
-    executions over a word this system never defined."""
+    """An unreadable token would otherwise mute Safe executions over a word never defined."""
     from services.monitoring.notifier import _stated_filter_groups
 
     stated = _stated_filter_groups({"event_types": _SIGNER_TYPES, "groups": token})
@@ -182,8 +170,7 @@ def test_an_unknown_name_beside_a_known_one_does_not_erase_the_known_one():
 
 
 def test_the_known_group_vocabulary_mirrors_the_frontend_table():
-    """``_KNOWN_FILTER_GROUPS`` is a hand-kept mirror of MONITOR_ALERT_GROUPS; a group missing
-    here is silently unreadable, muting exactly what the mirror protects."""
+    """A group missing from this mirror of MONITOR_ALERT_GROUPS is silently unreadable."""
     import re
     from pathlib import Path
 
@@ -228,14 +215,7 @@ def test_a_filtered_subscription_still_hears_the_verified_successor(db_session, 
     assert send.call_count == 1
 
 
-# ---------------------------------------------------------------------------
-# event_type column width
-# ---------------------------------------------------------------------------
-
-
 def test_the_longest_mintable_type_fits(db_session, notify_env):
-    """Worst real case on the audited fleet (a struct-member controller id under the
-    read-verified stem) must store whole, not truncated."""
     longest = value_changed_event_type("state_variable:accountantState.payoutAddress")
     assert len(longest) == 58
     assert len(longest) <= MAX_EVENT_TYPE_LENGTH
@@ -245,7 +225,6 @@ def test_the_longest_mintable_type_fits(db_session, notify_env):
     db_session.expire_all()
     assert db_session.get(MonitoredEvent, event.id).event_type == at_limit
 
-    # One over is refused by the database rather than silently trimmed.
     with pytest.raises(Exception):
         db_session.execute(
             text(
@@ -257,15 +236,8 @@ def test_the_longest_mintable_type_fits(db_session, notify_env):
     db_session.rollback()
 
 
-# ---------------------------------------------------------------------------
-# Review round 1 — the state-polling seed, and stale-plan provenance
-# ---------------------------------------------------------------------------
-
-
 def test_state_polling_subscribers_hear_read_verified_changes(db_session, notify_env):
-    """The "State polling" UI category writes ``["state_changed_poll"]``. A verification read
-    advances last_known_state one tick earlier, so the poll finds no diff and never fires;
-    without this the subscriber hears the rotation from neither path."""
+    """A verification read advances state one tick earlier, so the poll never fires."""
     assert _filter_allows(["state_changed_poll"], "value_changed:state_variable:owner")
     assert _filter_allows(["state_changed_poll"], "value_changed:state_variable:anythingElse")
 
@@ -282,7 +254,6 @@ def test_state_polling_subscribers_hear_read_verified_changes(db_session, notify
 
 
 def test_the_state_polling_seed_is_not_a_blanket_wildcard():
-    """It admits read-witnessed diffs, not everything."""
     assert not _filter_allows(["state_changed_poll"], "ownership_transferred")
     assert not _filter_allows(["state_changed_poll"], "member_changed:fromDenyList")
     assert not _filter_allows(["state_changed_poll"], "state_changed:state_variable:_balances")
@@ -294,8 +265,6 @@ def test_absent_filter_still_allows_everything(db_session):
 
 
 def test_stale_plan_provenance_reaches_the_recipient(db_session, notify_env):
-    """A recipient cannot infer "watching on a plan last read at T" from an embed identical
-    to a fresh-plan one."""
     event = notify_env(
         "ownership_transferred",
         {"new_owner": ADDR(0x99), "plan_stale_since": "2026-08-01T00:00:00Z"},

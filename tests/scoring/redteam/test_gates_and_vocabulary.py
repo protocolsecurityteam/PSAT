@@ -1,5 +1,3 @@
-"""Gates and vocabulary."""
-
 from __future__ import annotations
 
 from services.scoring.schema import FunctionSignal, PrincipalRef, Tri, not_determined_signal_defaults
@@ -104,7 +102,6 @@ def test_probe_a_poisoned_payload_fails_closed_on_its_own_row(fold):
         principals={1: facts(1, EOA, "eoa")},
         value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
     )
-    # The bad row is withheld; the rest of the protocol still scores.
     assert [f["capability"] for f in document.findings] == ["upgrade.implementation"]
     assert "gate_input_malformed" in {w["kind"] for w in document.warnings}
 

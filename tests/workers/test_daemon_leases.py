@@ -1,8 +1,6 @@
 """Daemon-lease primitive against the real test Postgres.
 
-No fakes: drives ``db.queue.try_acquire_daemon_lease`` / ``renew_daemon_lease``. Exclusivity
-lives in the ``INSERT ... ON CONFLICT (name) DO UPDATE ... WHERE`` statement, so the
-contention case uses two independent connections.
+Exclusivity lives in the ``ON CONFLICT ... WHERE`` statement, so contention uses two connections.
 """
 
 from __future__ import annotations
@@ -27,7 +25,6 @@ pytestmark = requires_postgres
 
 
 def _lease_name() -> str:
-    # Unique per test so rows never collide across the shared test DB.
     return f"test_lease:{uuid.uuid4().hex[:12]}"
 
 
@@ -57,9 +54,7 @@ def lease_session():
         engine.dispose()
 
 
-# Fresh-acquire-wins and the distinct-holder-loses-while-unexpired branch are
-# both asserted (through two independent connections, strictly stronger than a
-# single-session variant) by ``test_contention_two_connections`` below.
+# The other two branches are covered by ``test_contention_two_connections``.
 
 
 def test_expired_lease_is_stolen(lease_session):
@@ -69,7 +64,6 @@ def test_expired_lease_is_stolen(lease_session):
     holder_a = uuid.uuid4()
     holder_b = uuid.uuid4()
 
-    # Negative TTL seeds an already-expired lease (expires_at = NOW() - 5s).
     assert try_acquire_daemon_lease(session, name, holder_a, ttl_seconds=-5) is True
     assert try_acquire_daemon_lease(session, name, holder_b, ttl_seconds=60) is True
     assert _holder(session, name) == holder_b
@@ -84,8 +78,7 @@ def test_holder_reacquire_extends_expiry(lease_session):
     assert try_acquire_daemon_lease(session, name, holder, ttl_seconds=60) is True
     before = _expires_at(session, name)
 
-    # Re-acquire (renewal) always wins for the current holder and pushes
-    # expires_at forward; a longer TTL makes the forward move unambiguous.
+    # A longer TTL makes the forward move unambiguous.
     assert renew_daemon_lease(session, name, holder, ttl_seconds=120) is True
     after = _expires_at(session, name)
 
@@ -95,7 +88,6 @@ def test_holder_reacquire_extends_expiry(lease_session):
 
 
 def test_contention_two_connections(lease_session):
-    """Two sessions prove the ON CONFLICT WHERE, not in-process coordination, gives exclusivity."""
     session_a, created = lease_session
     name = _lease_name()
     created.append(name)
@@ -106,11 +98,9 @@ def test_contention_two_connections(lease_session):
     session_b = Session(engine_b, expire_on_commit=False)
     try:
         assert try_acquire_daemon_lease(session_a, name, holder_a, ttl_seconds=60) is True
-        # Second connection, live lease held elsewhere → loses.
         assert try_acquire_daemon_lease(session_b, name, holder_b, ttl_seconds=60) is False
         assert _holder(session_b, name) == holder_a
 
-        # Once A's lease expires, B can take it from its own connection.
         assert try_acquire_daemon_lease(session_a, name, holder_a, ttl_seconds=-5) is True
         assert try_acquire_daemon_lease(session_b, name, holder_b, ttl_seconds=60) is True
         assert _holder(session_a, name) == holder_b

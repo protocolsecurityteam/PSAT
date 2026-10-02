@@ -1,10 +1,4 @@
-"""Integration tests: ``trace_id`` end-to-end across HTTP -> DB -> child jobs.
-
-Skips when ``TEST_DATABASE_URL`` is unset or unreachable (as ``tests/cache_helpers.requires_postgres``
-does). Pins: the API mints, echoes and persists a trace id without ``X-PSAT-Trace-Id``; a
-client-supplied one is persisted and echoed; ``db.queue.create_job`` under a parent's bound trace
-context stamps the child with the parent's id (the discovery DApp/DefiLlama sibling spawn path).
-"""
+"""Skips without a reachable TEST_DATABASE_URL."""
 
 from __future__ import annotations
 
@@ -53,10 +47,7 @@ def test_post_analyze_with_client_header_uses_supplied_trace_id(db_session, api_
 
 @requires_postgres
 def test_create_job_inherits_bound_trace_id(db_session):
-    """A child job created inside a parent's bind block inherits the parent's id.
-
-    Fakes the bind that ``BaseWorker._execute_job`` does, since a real worker needs RPC plumbing.
-    """
+    """A real worker needs RPC plumbing, so the bind is faked."""
     from db.models import Job, JobStage
     from db.queue import create_job
     from utils.logging import bind_trace_context
@@ -79,8 +70,7 @@ def test_create_job_inherits_bound_trace_id(db_session):
 
 @requires_postgres
 def test_create_job_without_bind_mints_fresh_id(db_session):
-    """A create_job outside any bind still gets a non-null trace_id, so legacy callers (cron jobs
-    skipping API ingress) can't write NULL rows that defeat correlation."""
+    """Legacy callers skipping API ingress must not write NULL trace ids."""
     from db.models import Job, JobStage
     from db.queue import create_job
 

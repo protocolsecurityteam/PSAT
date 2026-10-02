@@ -1,9 +1,3 @@
-"""Row builders for the effects selection cascade.
-
-Extracted verbatim from ``test_effects_selection``, which four other test
-modules imported these from.
-"""
-
 from __future__ import annotations
 
 from decimal import Decimal
@@ -28,9 +22,7 @@ def _contract(session: Session, protocol_id: int, addr: str, **kw) -> Contract:
     return c
 
 
-#: Sentinel for "this test does not set that mutability column", so the default
-#: stays SQL NULL (not-determined) — the shape every row written before the
-#: mutability columns existed carries, and the shape 1,773/1,773 local rows carry today.
+# The shape every pre-mutability row carries (1,773/1,773 local rows).
 _UNSET = object()
 
 
@@ -60,10 +52,7 @@ def _fn(
         state_changing=state_changing,
         writer_selectors=writer_selectors,
     )
-    # ``none_as_null=True`` on the two JSONB columns means passing ``None``
-    # explicitly is the same SQL NULL as never setting them; the sentinel keeps
-    # "proven none" (``[]``) tellable from "not determined" in the CALL, which is
-    # the whole point of the columns.
+    # The sentinel keeps proven-none (``[]``) distinct from not-determined in the call.
     if state_writes is not _UNSET:
         f.state_writes = state_writes
     if sinks is not _UNSET:
@@ -76,13 +65,7 @@ def _fn(
 def _balance(
     session: Session, contract_id: int, usd: float | Decimal | str, *, raw_balance: str = "1000000000000000000"
 ) -> None:
-    """One NATIVE holdings row.
-
-    ``raw_balance`` defaults to a positive quantity because that is the only
-    shape either writer produces — both gate their native insert on ``> 0`` — and
-    a holdings row is a WITNESSED POSITIVE QUANTITY. Pass ``"0"`` to build the
-    unwitnessed shape a holdings reader must refuse.
-    """
+    """Both writers only insert ``> 0``; pass ``"0"`` for the unwitnessed shape a reader must refuse."""
     session.add(
         ContractBalance(
             contract_id=contract_id,

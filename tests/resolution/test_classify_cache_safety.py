@@ -1,9 +1,4 @@
-"""Regression tests for the classify_resolved_address process-wide cache.
-
-Codex review of the etherfi LP cascade speedup flagged two risks: transient RPC errors
-cached as 'contract' fallbacks, and those leaking via the per-job classify_cache into the
-persisted classified_addresses artifact.
-"""
+"""Transient RPC errors must not be cached as 'contract' or leak into the persisted classified_addresses artifact."""
 
 from __future__ import annotations
 
@@ -29,11 +24,7 @@ def _isolated_cache():
 
 @pytest.fixture(autouse=True)
 def _stub_batch_probe_rpc(monkeypatch):
-    """Offline: the batched classify probe hits the wire. Return all-error so the
-    code falls back to the sequential classifier, which uses the per-call probes
-    (``_get_code`` / ``_try_eth_call_decoded``) these tests already mock. The
-    lazy negative-control probe rides ``_eth_call_raw`` — an empty return means
-    the control passes, keeping these cache-behavior tests type-neutral."""
+    """Batch probes return all-error so the sequential per-call mocks apply."""
     monkeypatch.setattr(
         tracking,
         "_rpc_batch_request_with_status",
@@ -43,8 +34,6 @@ def _stub_batch_probe_rpc(monkeypatch):
 
 
 def test_transient_rpc_error_does_not_poison_cache(monkeypatch):
-    """The dominant correctness bug v4/v5 fixed: a transient probe failure
-    must not cement a wrong 'contract' classification process-wide."""
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(
         tracking,
@@ -52,7 +41,6 @@ def test_transient_rpc_error_does_not_poison_cache(monkeypatch):
         lambda *a, **k: {},
     )
 
-    # Force every probe to look like a transient RPC error (the sentinel path).
     def boom(*a, **k):
         return tracking._PROBE_ERROR
 
@@ -64,9 +52,6 @@ def test_transient_rpc_error_does_not_poison_cache(monkeypatch):
 
 
 def test_with_status_reports_uncacheable_on_error(monkeypatch):
-    """Per-job/artifact callers (recursive.py BFS, principal labeling)
-    must use _with_status to avoid persisting transient-error fallbacks
-    via the classified_addresses artifact."""
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
     monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *a, **k: tracking._PROBE_ERROR)
@@ -86,8 +71,7 @@ def test_clean_classification_is_cacheable(monkeypatch):
 
 
 def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
-    """Codex iter-2 fix: cached details must not be poisoned by callers
-    mutating the returned dict (or its nested lists like Safe.owners)."""
+    """Callers mutating returned details must not poison the cache."""
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
@@ -119,8 +103,6 @@ def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
 
 
 def test_immutable_classification_keeps_long_ttl(monkeypatch):
-    """A plain-contract classification is immutable: aging it past the short (mutable)
-    TTL must NOT re-probe — the long TTL still applies."""
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
@@ -135,7 +117,6 @@ def test_immutable_classification_keeps_long_ttl(monkeypatch):
     kind, details, ts = _CLASSIFY_CACHE[key]
     _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
 
-    # If the entry re-probed it would now look like a Safe; long TTL must hold.
     def fake_safe(_rpc, _addr, signature, _abi, *_a, **_k):
         if signature == "getOwners()":
             return ["0x" + "9" * 40]
@@ -155,11 +136,8 @@ _OWNER_2 = "0x" + "2" * 40
 @pytest.mark.parametrize(
     "block_tag, expected_owners_after_aging",
     [
-        # A 'safe' classification carries owners/threshold which mutate on-chain, so aging it past
-        # the short TTL (still within the long TTL) forces a re-probe.
         pytest.param("latest", [_OWNER_1, _OWNER_2], id="mutable-safe-details-use-short-ttl"),
-        # A pinned-block read is immutable at that block, so even a 'safe' entry keeps the long
-        # TTL: only block_tag='latest' reads use the short TTL.
+        # A pinned-block read is immutable at that block.
         pytest.param("0x100", [_OWNER_1], id="pinned-block-keeps-long-ttl"),
     ],
 )
@@ -194,28 +172,19 @@ def test_mutable_safe_details_ttl_by_block_tag(monkeypatch, block_tag, expected_
 
 
 def test_erc1967_implementation_is_a_mutable_detail():
-    """The ERC-1967 implementation slot moves on every upgrade, so a
-    classification witnessing it must age on the short TTL like owners/
-    threshold/delay — a long-TTL entry would serve the pre-upgrade
-    implementation as current for up to 30 minutes."""
+    """A long TTL would serve the pre-upgrade implementation as current for up to 30 minutes."""
     assert "erc1967_implementation" in tracking._MUTABLE_DETAIL_KEYS
 
 
 def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
-    """Step 3 fan-out: 8 worker threads classifying overlapping address sets
-    must not corrupt the process cache or surface inconsistent values for the
-    same address. Every concurrent reader sees identical (kind, details)."""
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Force the sequential probe path so monkeypatching ``_try_eth_call_decoded``
-    # actually intercepts every probe (the batched path bypasses it).
+    # The batched path bypasses ``_try_eth_call_decoded``.
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
-    # A few addresses look like Safes, the rest are "contract". The fake call records
-    # every probe so we can assert the cache collapses concurrent misses.
     probe_calls: dict[str, int] = {}
     probe_lock = threading.Lock()
 
@@ -259,16 +228,13 @@ def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
     for addr, observed in by_addr.items():
         assert len(observed) == 1, f"address {addr} produced inconsistent classifications: {observed}"
 
-    # Cache must collapse repeated probes — racing misses can each issue one
-    # full probe set but the per-address total is bounded by num threads
-    # times probes-per-classify (5 for "contract", 2 for "safe").
+    # Racing misses can each issue one probe set, so the per-address total is bounded by thread count.
     max_probes_per_address = 8 * len(tracking._CLASSIFY_PROBE_SIGS)
     for addr, count in probe_calls.items():
         assert count <= max_probes_per_address, (
             f"address {addr} re-probed {count} times — cache lock not collapsing concurrent misses"
         )
 
-    # In aggregate: 8 threads x 10 addresses = 80 lookups, cached total must be << 80 x 5.
     total_probes = sum(probe_calls.values())
     assert total_probes < 8 * len(addresses) * len(tracking._CLASSIFY_PROBE_SIGS), (
         f"total probes {total_probes} suggests no caching"

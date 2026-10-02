@@ -5,15 +5,14 @@ at the transport boundary (``rpc_request`` / ``eth_call_batch`` /
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
-from db.models import Contract, ContractCreationWitness, ContractProbeAttempt, Protocol
+from db.models import Contract, ContractCreationWitness, ContractProbeAttempt
 from services.clients.rpc import EthCallResult
 from services.discovery import membership_gate as gate
 from services.discovery import probes
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _protocol
 from utils.evm import EIP1967_IMPL_SLOT, OWNER_SELECTOR
 
 pytestmark = [requires_postgres]
@@ -29,13 +28,6 @@ def _word(address: str) -> str:
 
 
 _ZERO_WORD = "0x" + "0" * 64
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _contract(session, address: str, *, chain: str = "ethereum", nominated: int | None = None) -> Contract:
@@ -136,7 +128,6 @@ def test_probe_persists_code_creation_and_reads(db_session, monkeypatch, erpc_en
     assert attempt.block_number == 100
     assert attempt.results["status"] == "probed"
     assert set(attempt.results["resolved_addresses"]) == {_OWNER, _IMPL}
-    # Reads are pinned at the block the probe read.
     assert all(tag == hex(100) for _data, tag in seen["calls"])
 
 
@@ -185,7 +176,6 @@ def test_probe_rpc_failure_is_an_attempt_not_a_verdict(db_session, monkeypatch, 
 
     assert result.routable is True
     assert result.code_present is None
-    # A transport failure never writes a code verdict.
     assert db_session.get(ContractCreationWitness, (1, row.address)) is None
     attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
     assert attempt is not None and attempt.results["status"] == "rpc_error"
@@ -224,14 +214,12 @@ def test_failed_reprobe_preserves_last_good_results(db_session, monkeypatch, erp
     monkeypatch.setattr(probes, "rpc_request", boom)
     gate.probe(db_session, row)
 
-    # The failed attempt lands as last_error; the good reads survive.
     attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
     assert attempt is not None
     assert attempt.results["status"] == "probed"
     assert _OWNER in attempt.results["resolved_addresses"]
     assert attempt.results["last_error"]["status"] == "rpc_error"
     assert attempt.block_number == 100
-    # Targeted lookup still reaches the candidate through the preserved reads.
     result = gate.evaluate(db_session, gate.FactsDelta(new_edge_addresses=(_OWNER,)))
     assert row.id in result.targeted_contract_ids
 

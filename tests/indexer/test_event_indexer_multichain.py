@@ -1,10 +1,4 @@
-"""M1.1 item 3 — the indexer threads a per-job / per-cursor chain_id instead of stamping everything chain 1.
-
-A second-chain (Base, 8453) input must reach every threaded path: ``_build_indexer_fetchers`` (one eRPC-route
-fetcher per HyperSync-covered chain, none for ``hypersync_url is None``), ``enroll_from_completed_jobs`` (cursor
-stamped with the job's ``chain_id``) and ``scan_enrolled_events`` (per-chain confirmation depth, one loud log per
-fetcher-less chain).
-"""
+"""The indexer threads a per-job / per-cursor chain_id instead of stamping chain 1."""
 
 from __future__ import annotations
 
@@ -20,6 +14,7 @@ from sqlalchemy import func, select
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
+from tests.support.indexer_stubs import _DeterministicBlockHash
 from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES
 from utils.chains import ChainInfo, chain_by_id
 from workers.event_log_indexer import (
@@ -32,27 +27,22 @@ from workers.event_log_indexer import (
 
 _BASE = 8453
 _BASE_HYPERSYNC = "https://base.hypersync.xyz"
-# The indexer routes EVERY covered chain — mainnet included — through its own
-# eRPC route, never the native HyperSync host (that host is the resolution repos'
-# query API and rejects JSON-RPC). A covered chain's fetcher URL is this route.
+# Every covered chain goes through its own eRPC route; the native HyperSync host rejects JSON-RPC.
 _ERPC_BASE = "https://erpc.example"
 _MAINNET_ERPC = f"{_ERPC_BASE}/main/evm/1"
 _BASE_ERPC = f"{_ERPC_BASE}/main/evm/{_BASE}"
-# A registry chain still marked indexer-disabled (hypersync_url=None); arbitrum stays disabled until it earns its slot.
 _UNCOVERED = 42161  # arbitrum
 _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
 
 
 def _url(fetcher: object) -> str:
-    """rpc_url of a concrete Rpc*Fetcher; the Protocol-typed fetcher maps deliberately omit the attribute."""
     return cast(Any, fetcher).rpc_url
 
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Stub the seed-grading wire to the unreachable-RPC outcome ``(None, not_determined)``; this module asserts the
-    cursor's ``chain_id``, not the grade."""
+    """This module asserts the cursor's ``chain_id``, not the grade."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):
@@ -64,9 +54,6 @@ def _no_creation_witness(monkeypatch):
 def _base_chaininfo(**overrides) -> ChainInfo:
     base = chain_by_id(_BASE)
     return dataclasses.replace(base, hypersync_url=_BASE_HYPERSYNC, **overrides)
-
-
-# Fetcher map — per-chain eRPC routes, gated by registry hypersync_url coverage
 
 
 def test_build_fetchers_mainnet_uses_erpc(monkeypatch):
@@ -82,8 +69,6 @@ def test_build_fetchers_second_chain_uses_erpc(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
     chains = (chain_by_id(1), _base_chaininfo())
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers(chains=chains)
-    # A covered second chain reads its OWN eRPC route — never mainnet's, never the
-    # native HyperSync query host.
     assert _url(fetchers[1]) == _MAINNET_ERPC
     assert _url(fetchers[_BASE]) == _BASE_ERPC
     assert _url(head_fetchers[_BASE]) == _BASE_ERPC
@@ -92,14 +77,10 @@ def test_build_fetchers_second_chain_uses_erpc(monkeypatch):
 
 def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
-    # An indexer-disabled chain (hypersync_url=None) → no fetcher.
     chains = (chain_by_id(1), chain_by_id(_UNCOVERED))
     fetchers, _, _ = _build_indexer_fetchers(chains=chains)
     assert _UNCOVERED not in fetchers
     assert set(fetchers) == {1}
-
-
-# Enrollment — cursor chain_id comes from the job's chain
 
 
 @pytest.fixture()
@@ -141,9 +122,6 @@ def test_enroll_stamps_cursor_with_jobs_chain(session, monkeypatch):
     )
 
     protected = "0x" + "11" * 20
-    # A Base job: its first-class chain_id is 8453 (dual-written from
-    # request["chain"]), so every cursor it enrolls must be stamped 8453 — not the
-    # legacy mainnet default.
     job = Job(
         address=protected,
         chain_id=_BASE,
@@ -175,12 +153,8 @@ def test_enroll_stamps_cursor_with_jobs_chain(session, monkeypatch):
         )
     ).all()
     assert rows, "no cursor enrolled for the Base authority"
-    # Every enrolled cursor carries the job's chain, and none was stamped chain 1.
     assert {r[0] for r in rows} == {_BASE}
     assert all(r[1] == deploy - 1 for r in rows)
-
-
-# Scan — per-chain confirmation depth + loud skip on a fetcher-less chain
 
 
 class _EmptyFetcher:
@@ -200,19 +174,13 @@ class _FixedHead:
         return self._head
 
 
-class _DeterministicBlockHash:
-    def block_hash(self, block_number: int) -> bytes:
-        return block_number.to_bytes(32, "big")
-
-
 @requires_postgres
 def test_scan_uses_registry_confirmation_depth_per_chain(session, monkeypatch):
     import workers.event_log_indexer as eli
 
     head = 30_000_000
     custom_depth = 50
-    # Base with a bespoke confirmation depth — the scan must subtract THIS chain's
-    # depth from head, not the fleet-wide 12.
+    # The scan must use this chain's depth, not the fleet-wide 12.
     monkeypatch.setattr(
         eli,
         "chain_by_id",
@@ -237,7 +205,6 @@ def test_scan_uses_registry_confirmation_depth_per_chain(session, monkeypatch):
         )
     ).first()
     assert row is not None
-    # Caught up to head - custom_depth (not head - 12).
     assert row[0] == head - custom_depth
     assert row[1] is True
 
@@ -264,14 +231,12 @@ def test_scan_logs_once_when_chain_has_no_fetcher(session, caplog):
     skip_records = [
         r for r in caplog.records if "no fetcher for chain" in r.getMessage() and getattr(r, "chain_id", None) == _BASE
     ]
-    # Exactly one warning for the chain, even though two cursor groups were skipped.
     assert len(skip_records) == 1
 
 
 @requires_postgres
 def test_scan_failure_logs_bounded_exc_msg(session, monkeypatch, caplog):
-    # A swallowed group-scan failure must carry a bounded, sanitized exc_msg so the
-    # error is attributable without re-enabling per-window traceback storms.
+    # A bounded exc_msg keeps the error attributable without traceback storms.
     import services.resolution.repos.event_logs_rpc as rpc_repo
 
     monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
@@ -296,7 +261,6 @@ def test_scan_failure_logs_bounded_exc_msg(session, monkeypatch, caplog):
     assert summary.failed_groups >= 1
     failed = [r for r in caplog.records if "group scan failed" in r.getMessage()]
     assert failed
-    # Bounded, present exc_msg carrying the swallowed detail.
     assert any(
         isinstance(getattr(r, "exc_msg", None), str) and "malformed" in r.exc_msg and len(r.exc_msg) <= 200
         for r in failed

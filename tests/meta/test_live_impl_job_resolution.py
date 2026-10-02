@@ -1,9 +1,6 @@
-"""Offline regression test for the impl-job race in the live proxy-flow suite.
+"""A synchronous ``status == 'completed'`` assert in the live proxy-flow suite raced a still-processing impl child.
 
-``tests/live/test_proxy_flow.py::test_implementation_job_completed`` asserted ``status == 'completed'``
-synchronously; a still-``processing`` impl child failed a healthy pipeline. The race surfaced after PR-63's cache
-fix cut the suite from ~50 to ~19 min. Fix: ``_resolve_impl_job`` polls when the match isn't terminal; this file
-pins it against a stub client. Lives in ``tests/`` (not ``tests/live/``) so the live auto-marker skips it.
+Lives outside ``tests/live/`` so it runs offline.
 """
 
 from __future__ import annotations
@@ -15,9 +12,6 @@ from tests.support.live_helpers import _resolve_impl_job
 
 
 class _StubClient:
-    """Minimal LiveClient stand-in; ``job_states`` sequences ``poll_job_until_done`` responses without real time
-    passing."""
-
     def __init__(
         self,
         *,
@@ -41,7 +35,6 @@ class _StubClient:
         states = self._states.get(job_id)
         if not states:
             return "completed"
-        # Pop until one remains; final status sticks (terminal-state semantics).
         return states.pop(0) if len(states) > 1 else states[0]
 
     def poll_job_until_done(
@@ -83,7 +76,6 @@ def test_resolve_impl_job_waits_for_processing_to_terminate():
 
 
 def test_resolve_impl_job_returns_immediately_when_already_completed():
-    """Hot path: already completed, so no polling and no ``jobs()`` round-trip beyond ``children_of``."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-2"
     client = _StubClient(
@@ -104,8 +96,7 @@ def test_resolve_impl_job_returns_immediately_when_already_completed():
 
 
 def test_resolve_impl_job_returns_failed_terminal_without_polling():
-    """``failed_terminal`` (db/models.py:49) is as terminal as ``completed``; the helper must not poll it
-    (the sibling bug fixed in commit fff4cb2)."""
+    """The sibling bug fixed in commit fff4cb2."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-3"
     client = _StubClient(
@@ -126,8 +117,7 @@ def test_resolve_impl_job_returns_failed_terminal_without_polling():
 
 
 def test_resolve_impl_job_polls_through_processing_to_failed_terminal():
-    """A processing impl that fails terminally must still return, so the live test surfaces the impl error, not a poll
-    timeout."""
+    """So the live test surfaces the impl error, not a poll timeout."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-4"
     client = _StubClient(
@@ -148,7 +138,6 @@ def test_resolve_impl_job_polls_through_processing_to_failed_terminal():
 
 
 def test_resolve_impl_job_returns_none_when_no_candidate_anywhere():
-    """No match returns None so the caller can assert with a clear message instead of indexing an empty list."""
     client = _StubClient(children=[], all_jobs=[])
 
     result = _resolve_impl_job(
@@ -163,8 +152,6 @@ def test_resolve_impl_job_returns_none_when_no_candidate_anywhere():
 
 
 def test_resolve_impl_job_prefers_terminal_candidate_over_processing():
-    """With several candidates for one impl address (warm DB + fresh sibling), prefer a terminal one and skip
-    polling."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     client = _StubClient(
         children=[],

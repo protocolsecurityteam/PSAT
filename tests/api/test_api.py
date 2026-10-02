@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from tests.cache_helpers import requires_postgres
+from tests.support.api_helpers import _admin_headers
 
 
 def _make_fake_job(
@@ -18,7 +19,6 @@ def _make_fake_job(
     status: str = "completed",
     stage: str = "done",
 ):
-    """Build a mock Job object that looks like db.models.Job."""
     job = MagicMock()
     job.id = uuid.UUID(job_id) if job_id else uuid.uuid4()
     job.address = address
@@ -53,13 +53,6 @@ def make_client() -> TestClient:
     import api
 
     return TestClient(api.app)
-
-
-def _admin_headers() -> dict[str, str]:
-    """Header carrying the configured admin key, for now-gated internal reads."""
-    from routers import deps
-
-    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
 
 
 def test_build_company_function_entry_filters_generic_authority_contract_when_specific_principals_exist() -> None:
@@ -263,9 +256,7 @@ def test_cors_allows_configured_origin(monkeypatch, db_session) -> None:
 
     importlib.reload(api)
     try:
-        # Reload re-evaluated the CORS middleware against the new origin.
-        # SessionLocal lives on routers.deps (every router reads it from
-        # there) — point that at the test DB so /api/health works.
+        # SessionLocal lives on routers.deps; point it at the test DB so /api/health works.
         from routers import deps
         from routers.deps import require_admin_key
 
@@ -355,7 +346,6 @@ def test_missing_analysis_returns_404(mock_session_cls, mock_get_all_artifacts) 
 
 @patch("routers.deps.SessionLocal")
 def test_artifact_endpoint_serves_json_and_text(mock_session_cls) -> None:
-    """Inline-stored artifacts (no storage_key) are served directly."""
     client = make_client()
     fake_job = _make_fake_job(name="demo_run")
 
@@ -371,8 +361,7 @@ def test_artifact_endpoint_serves_json_and_text(mock_session_cls) -> None:
     fake_text_artifact.text_data = "report body"
     fake_text_artifact.content_type = "text/plain"
 
-    # Per-request the endpoint runs: Job lookup (1) → Artifact lookup (2).
-    # Two endpoint calls back-to-back = four execute() invocations total.
+    # Each request runs a Job lookup then an Artifact lookup.
     sequence = [fake_job, fake_json_artifact, fake_job, fake_text_artifact]
 
     def execute_side_effect(*_args, **_kwargs):
@@ -420,30 +409,20 @@ def test_protocol_tvl_caps_days(mock_session_cls) -> None:
     from routers import deps
 
     assert deps.MAX_TVL_HISTORY_DAYS <= 365
-    # The clamp is only proven by the window the query actually asked for: the
-    # query param carries no ``le=``, so ``days = min(days, MAX)`` is the sole
-    # bound on an unauthenticated 9999-day scan.
+    # The param has no ``le=``, so the clamp is the only bound on an unauthenticated 9999-day scan.
     stmt = mock_session.execute.call_args[0][0]
     cutoffs = [v for v in stmt.compile().params.values() if isinstance(v, datetime)]
     assert len(cutoffs) == 1
     assert (datetime.now(timezone.utc) - cutoffs[0]).days == deps.MAX_TVL_HISTORY_DAYS
 
 
-# ---------------------------------------------------------------------------
-# /api/jobs/{job_id}/stage_timings — bench harness consumer
-# ---------------------------------------------------------------------------
-
-
 @patch("routers.deps.SessionLocal")
 def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls, monkeypatch) -> None:
-    """Bench harness needs per-stage timings: collect every ``stage_timing_<stage>`` artifact,
-    keyed by the suffix. Mirrors what the worker writes via ``_record_stage_timing``."""
 
     client = make_client()
     fake_job = _make_fake_job()
 
-    # Inline path (data set, storage_key NULL) exercises the same response assembly without a
-    # fake boto3 client.
+    # The inline path avoids a fake boto3 client.
     art_discovery = SimpleNamespace(
         name="stage_timing_discovery",
         storage_key=None,
@@ -516,17 +495,10 @@ def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls, monkeypatc
     assert resp.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# Storage-failure degradation: per-row, so a flaky bucket can't take down the whole response.
-# ---------------------------------------------------------------------------
-
-
 @patch("routers.deps.get_storage_client")
 @patch("routers.deps.SessionLocal")
 def test_stage_timings_degrades_when_storage_unconfigured(mock_session_cls, mock_get_client) -> None:
-    """If storage is not configured but rows reference ``storage_key``, the
-    endpoint must return what it can (inline rows, empty if none) instead of
-    raising — env drift on a redeploy shouldn't 500 the SPA."""
+    """Env drift on a redeploy shouldn't 500 the SPA."""
 
     fake_job = _make_fake_job()
     storage_row = SimpleNamespace(
@@ -560,10 +532,7 @@ def test_stage_timings_degrades_when_storage_unconfigured(mock_session_cls, mock
 @patch("routers.deps.get_storage_client")
 @patch("routers.deps.SessionLocal")
 def test_stage_timings_degrades_on_storage_transport_error(mock_session_cls, mock_get_client) -> None:
-    """Transport error from the bucket (Tigris hiccup, signing failure, etc.)
-    surfaces as ``None`` for the affected key (per ``get_many``'s contract,
-    pinned in test_db_storage_unit.py). The endpoint must drop the affected
-    stage and keep healthy ones, not 500."""
+    """``get_many`` returns None for a failed key; drop that stage and keep healthy ones."""
     fake_job = _make_fake_job()
     inline_row = SimpleNamespace(
         name="stage_timing_discovery",
@@ -599,10 +568,7 @@ def test_stage_timings_degrades_on_storage_transport_error(mock_session_cls, moc
 
 @patch("routers.deps.SessionLocal")
 def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> None:
-    """The listing builds entirely from DB rows — no object-storage GETs (Tigris RTT x N
-    artifacts was the dominant production cost, and a storage outage could degrade every row).
-    Names come from prefetched Contract rows; only artifact NAMES are listed.
-    """
+    """Storage RTT per artifact was the dominant production cost, and an outage could degrade every row."""
     j_good = _make_fake_job(name="run_good", address="0xaaa")
     j_bad = _make_fake_job(name="run_bad", address="0xbbb")
 
@@ -649,7 +615,6 @@ def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> Non
 
     by_run = {e["run_name"]: e for e in resp.json()}
     assert by_run["run_good"].get("contract_name") == "Good"
-    # No summary anywhere — that field is no longer emitted by the listing.
     assert "summary" not in by_run["run_good"]
     assert "run_bad" in by_run
     assert "contract_name" not in by_run["run_bad"]

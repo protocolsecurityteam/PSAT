@@ -1,6 +1,3 @@
-"""Integration tests for StaticWorker._resolve_proxy() classify-then-dispatch logic (without mocking the
-method itself)."""
-
 from __future__ import annotations
 
 import uuid
@@ -14,10 +11,6 @@ from services.discovery.classifier import ClassificationIncompleteError
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from workers.static_worker import StaticWorker
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 _ADDR = "0x1111111111111111111111111111111111111111"
 _IMPL_ADDR = "0x3333333333333333333333333333333333333333"
@@ -41,7 +34,6 @@ def _job(**overrides):
 
 
 def _capture_store_and_create(monkeypatch):
-    """Patch store_artifact and create_job, returning (store_calls, created_jobs)."""
     store_calls: list[tuple] = []
     created_jobs: list[dict] = []
 
@@ -59,11 +51,6 @@ def _capture_store_and_create(monkeypatch):
     monkeypatch.setattr("workers.static_worker.create_job", _fake_create)
 
     return store_calls, created_jobs
-
-
-# ---------------------------------------------------------------------------
-# 1. Non-proxy classification
-# ---------------------------------------------------------------------------
 
 
 def test_non_proxy_stores_flags_with_is_proxy_false(monkeypatch):
@@ -103,11 +90,6 @@ def test_non_proxy_library_type(monkeypatch):
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
     assert store_calls[0][1] == {"is_proxy": False, "classification_type": "library"}
-
-
-# ---------------------------------------------------------------------------
-# 2. Proxy classification with implementation
-# ---------------------------------------------------------------------------
 
 
 def test_proxy_with_implementation_creates_child_job(monkeypatch):
@@ -216,16 +198,8 @@ def test_proxy_falls_back_to_contract_name_for_child(monkeypatch):
     assert created_jobs[0]["name"] == "ContractNameFallback: (impl)"
 
 
-# ---------------------------------------------------------------------------
-# 2b. UpgradeableBeacon classification
-# ---------------------------------------------------------------------------
-
-
 def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
-    """A type='beacon' classification keeps is_proxy=False so the static worker
-    analyses the beacon itself (discovering its owner()), AND still spawns the
-    implementation as a beacon-context child so each governed instance resolves
-    against the beacon (proxy_type='beacon', proxy_address=<beacon>)."""
+    """The beacon is analysed itself (to find its owner) and its implementation is spawned in beacon context."""
     worker = StaticWorker()
     session = MagicMock()
     contract_row = SimpleNamespace(
@@ -251,13 +225,11 @@ def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
             "owner": "0x2222222222222222222222222222222222222222",
         },
     )
-    # reconcile returns "spawn" -> create_job runs (all dedup lookups miss).
     monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **k: "spawn")
     monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **k: None)
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # The beacon is analysed as itself: is_proxy stays False.
     assert contract_row.is_proxy is False
     assert contract_row.proxy_type == "beacon"
     assert contract_row.implementation == _IMPL_ADDR
@@ -269,17 +241,11 @@ def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
     assert flags["proxy_type"] == "beacon"
     assert flags["beacon"] == _ADDR
 
-    # The impl child is still spawned in beacon context.
     assert len(created_jobs) == 1
     child_req = created_jobs[0]
     assert child_req["address"] == _IMPL_ADDR
     assert child_req["proxy_address"] == _ADDR
     assert child_req["proxy_type"] == "beacon"
-
-
-# ---------------------------------------------------------------------------
-# 3. Proxy with facets (diamond pattern)
-# ---------------------------------------------------------------------------
 
 
 def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
@@ -366,11 +332,6 @@ def test_proxy_facets_only_no_impl(monkeypatch):
     assert created_jobs[1]["name"] == "TestContract: (facet 2)"
 
 
-# ---------------------------------------------------------------------------
-# 4. No RPC available
-# ---------------------------------------------------------------------------
-
-
 def test_no_rpc_stores_classification_skipped(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
@@ -391,7 +352,6 @@ def test_no_rpc_stores_classification_skipped(monkeypatch):
 
 
 def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
-    """With no rpc_url/chain in the request, the mainnet eRPC route is used (no ETH_RPC fallback)."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -436,11 +396,6 @@ def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
     assert store_calls[0][1]["classification_type"] == "regular"
 
 
-# ---------------------------------------------------------------------------
-# 5. classify_single raises exception
-# ---------------------------------------------------------------------------
-
-
 def test_classify_exception_stores_classification_error(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
@@ -461,11 +416,6 @@ def test_classify_exception_stores_classification_error(monkeypatch):
     assert flags["classification_type"] == "unknown"
     assert "RPC timeout" in flags["classification_error"]
     assert created_jobs == []
-
-
-# ---------------------------------------------------------------------------
-# 6. Existing impl job skip
-# ---------------------------------------------------------------------------
 
 
 def test_existing_impl_job_skips_child_creation(monkeypatch):
@@ -500,8 +450,7 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
 
-    # reconcile_impl_job_for_proxy issues up to 3 lookups per impl (same-proxy /
-    # standalone / different-proxy); a same-proxy hit short-circuits to "skip".
+    # Up to 3 lookups per impl; a same-proxy hit short-circuits to skip.
     existing_job = SimpleNamespace(id="existing-job-id")
     session.execute.return_value.scalar_one_or_none.side_effect = [
         None,  # Contract table lookup (no row)
@@ -531,15 +480,11 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
     assert created_jobs[0]["name"] == "TestContract: (facet 1)"
 
 
-# ---------------------------------------------------------------------------
-# #121 — proxy-slot read failure fails closed (re-raise), never analyze a shell
-# ---------------------------------------------------------------------------
+# #121: a proxy-slot read failure fails closed.
 
 
 def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
-    """A ClassificationIncompleteError (transient proxy-slot read failure) must NOT be swallowed
-    into an ``is_proxy=False`` shell the static stage then Slithers; ``_resolve_proxy`` records
-    the degradation and re-raises so the stage fails closed into the retry path."""
+    """Swallowing it would Slither an ``is_proxy=False`` shell."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job()
@@ -560,20 +505,13 @@ def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
     with pytest.raises(ClassificationIncompleteError):
         worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # Degradation recorded, and NO is_proxy=False contract_flags shell was written.
     assert degraded and degraded[0][0] == "proxy_classification"
     assert isinstance(degraded[0][1], ClassificationIncompleteError)
     assert all(name != "contract_flags" for name, _data, _text in store_calls)
     assert created_jobs == []
 
 
-# ---------------------------------------------------------------------------
-# Proxy → impl redirection at the job/dependency layer
-#
-# Both of these drive ``workers.static_worker`` — ``_redirect_proxy_policy_deps``
-# and the dependency-provider lookup the resolver calls into — against real
-# rows, so they need a Postgres session rather than the MagicMock above.
-# ---------------------------------------------------------------------------
+# These drive real rows, so they need Postgres rather than MagicMock.
 
 
 @pytest.fixture

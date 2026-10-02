@@ -1,5 +1,3 @@
-"""Collection changes retain the established monetary scoring policy."""
-
 from types import SimpleNamespace
 
 from services.aggregations.tvl import snapshot_payload

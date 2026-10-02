@@ -17,6 +17,7 @@ from services.effects.hashing import (
     resolved_function_hash,
 )
 from tests.support.effects_ir import _fn, _ir, _node, _var
+from tests.support.solc import _solc_086
 
 pytestmark = pytest.mark.compile
 
@@ -81,13 +82,7 @@ def test_modifier_gate_participates():
     assert resolved_function_hash(fn_a) != resolved_function_hash(fn_b)
 
 
-# ---------------------------------------------------------------------------
-# Item 2 — unverified fallback + immutable masking.
-# ---------------------------------------------------------------------------
-
-
 def _with_metadata(core: bytes) -> bytes:
-    # Fake CBOR metadata trailer: <core><meta bytes><2-byte big-endian meta len>.
     meta = b"\xa2\x64meta"
     return core + meta + len(meta).to_bytes(2, "big")
 
@@ -119,12 +114,8 @@ def test_immutable_masking_recovers_a_hit():
 
 
 def test_masking_never_merges_a_gated_deployment_with_an_ungated_one():
-    """The invariant ``calldata._gate_ref`` relies on to emit ``gate:none``.
-
-    ``gate:none`` covers both proven-ungated and gate-not-lowerable functions, so they may share a
-    cache identity only if ``behavior_hash`` (the whole runtime bytecode, gate included) also
-    matches. Immutable masking must therefore erase the ADDRESS the gate compares against but leave
-    the CALLER/EQ/JUMPI comparison standing.
+    """``gate:none`` covers proven-ungated and not-lowerable functions, so masking must erase the compared address
+    but keep the comparison.
     """
     body = bytes.fromhex("6001600155")  # the guarded action: sstore(1, 1)
 
@@ -138,12 +129,10 @@ def test_masking_never_merges_a_gated_deployment_with_an_ungated_one():
     gated_b = _gated(b"\xbb" * 20)
     selector = "0xdeadbeef"
 
-    # The mask does its job: a per-deployment immutable authority is not an identity.
     assert bytecode_fallback_hash(gated_a, selector, immutable_references=refs) == bytecode_fallback_hash(
         gated_b, selector, immutable_references=refs
     )
-    # ...and cannot reach past it: the gate itself still splits the identity, so a
-    # `gate:none` row can never transfer a verdict onto a deployment that has one.
+    # A ``gate:none`` row can never transfer onto a gated deployment.
     assert bytecode_fallback_hash(gated_a, selector, immutable_references=refs) != bytecode_fallback_hash(
         body, selector, immutable_references=refs
     )
@@ -156,27 +145,6 @@ def test_contract_surface_hash_is_selectorless_and_masks():
     a = prefix + b"\xaa\xbb\xcc\xdd" + b"\xfe"
     b = prefix + b"\x00\x11\x22\x33" + b"\xfe"
     assert contract_surface_hash(a, immutable_references=refs) == contract_surface_hash(b, immutable_references=refs)
-
-
-# ---------------------------------------------------------------------------
-# Real-Slither corroboration (gated behind local solc, offline compile only).
-# ---------------------------------------------------------------------------
-
-
-def _solc_086() -> str:
-    import solc_select.solc_select as ss
-
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = tuple(int(x) for x in version.split("."))
-        except ValueError:
-            continue
-        if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
 
 
 def test_override_vs_mixin_resolved_hashes_differ_real_slither(tmp_path: Path):

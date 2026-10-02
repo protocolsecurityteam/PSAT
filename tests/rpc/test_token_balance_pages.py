@@ -1,12 +1,6 @@
-"""The Etherscan asset-list read: the empty answer, and where the list ends.
-
-``status=0 / 'No token found' / []`` is the endpoint ANSWERING that its index holds no tokens
-for an address; every other ``status=0`` is a failure. Filing both as ``fetch_failed`` threw
-away the pipeline's only cheap trigger for looking at the chain (1,027 attempts over 142
-contracts, for days).
-
-The end of the list is only proven by a SHORT page. The page budget, a mid-paging failure, or
-an endpoint re-serving page 1 leave a prefix: a lower bound that must never read as an at-most.
+"""``status=0 / 'No token found' / []`` is the endpoint answering "no tokens"; filing it as ``fetch_failed``
+discarded the cheap trigger to check the chain (1,027 attempts over 142 contracts). Only a short page proves the
+list ended; anything else is a lower bound.
 """
 
 from __future__ import annotations
@@ -59,7 +53,6 @@ class TestTheEmptyAnswerIsNotAFailure:
         ["No token found", "No transactions found"],
     )
     def test_exactly_the_empty_triple_comes_back_as_data(self, monkeypatch, message):
-        # Both empty-list answers: no tokens for an address, and no transactions (deployer-enumeration shapes).
         payload = {"status": "0", "message": message, "result": []}
         monkeypatch.setattr(etherscan.requests, "get", lambda *a, **kw: _Response(payload))
         monkeypatch.setattr(etherscan, "_get_api_key", lambda: "k")
@@ -173,7 +166,7 @@ class TestGetNativePrice:
     @pytest.mark.parametrize(
         "chain_id,result,action,expected_price",
         [
-            # ethprice carries ethbtc + ethusd + *_timestamp siblings; only bare ``*usd`` is the price.
+            # Only bare ``*usd`` is the price.
             pytest.param(
                 1,
                 {"ethbtc": "0.05", "ethbtc_timestamp": "1", "ethusd": "1841.99", "ethusd_timestamp": "2"},
@@ -181,8 +174,7 @@ class TestGetNativePrice:
                 1841.99,
                 id="eth",
             ),
-            # Polygon's POL price comes back under "ethusd"; generic *usd parse must
-            # read it without inferring "ETH" from the key.
+            # Must not infer "ETH" from the key.
             pytest.param(
                 137,
                 {"ethbtc": "0", "ethusd": "0.0826", "ethusd_timestamp": "1"},
@@ -190,8 +182,7 @@ class TestGetNativePrice:
                 0.0826,
                 id="polygon_pol_under_lying_ethusd_key",
             ),
-            # BSC rejects "ethprice": the registry override must drive the call to
-            # "bnbprice", whose value is (mislabeled) under "ethusd".
+            # BSC rejects "ethprice"; bnbprice's value comes back mislabeled under "ethusd".
             pytest.param(56, {"ethusd": "567.97"}, "bnbprice", 567.97, id="bsc_uses_bnbprice"),
         ],
     )

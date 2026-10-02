@@ -1,7 +1,5 @@
-"""End-to-end text-extraction pipeline against real PostgreSQL, S3-compatible storage and FastAPI TestClient.
-Only the outbound HTTP call is mocked; PDF bodies are small hand-built fixtures that ``pypdf`` parses like real
-audits. Claim, thread pool, persist, stale recovery and the API endpoints run as in production.
-Needs Postgres + storage (skips without docker).
+"""Only the outbound HTTP call is mocked; claim, pool, persist, stale recovery and the endpoints run as in
+production.
 """
 
 from __future__ import annotations
@@ -12,26 +10,21 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
-from tests.conftest import SessionFactory, requires_postgres, requires_storage
+from tests.conftest import requires_postgres, requires_storage
+from tests.support.audit_fixtures import api_with_storage  # noqa: F401  (fixture, registered by import)
 from tests.support.pdf import minimal_pdf_with_text
 
 pytestmark = [requires_postgres, requires_storage]
 
 
-# Text long enough to clear the 500-char min-useful-text threshold.
+# Clears the 500-char minimum-useful-text threshold.
 _PADDED_SCOPE = "Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 15
-
-
-# ---------------------------------------------------------------------------
-# Fixtures: seed protocol + audit rows, clean up after each test
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def seed_protocol(db_session):
     from db.models import AuditReport, Protocol
 
-    # Make the protocol name unique per test so parallel runs don't collide.
     name = f"testprotocol-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     p = Protocol(name=name)
     db_session.add(p)
@@ -40,8 +33,6 @@ def seed_protocol(db_session):
     try:
         yield protocol_id
     finally:
-        # Explicit AuditReport cleanup (CASCADE works at DB level, but also
-        # be explicit so cleanup isn't order-dependent).
         db_session.query(AuditReport).filter_by(protocol_id=protocol_id).delete()
         db_session.query(Protocol).filter_by(id=protocol_id).delete()
         db_session.commit()
@@ -71,9 +62,7 @@ def _seed_audit(db_session, protocol_id: int, **overrides) -> int:
 
 @pytest.fixture()
 def worker(monkeypatch):
-    """Worker pointed at the test DB: ``workers.audit_text_extraction.SessionLocal`` is rebound so
-    ``_persist_outcome``'s own session can't write to the developer's real DB.
-    """
+    """Otherwise ``_persist_outcome``'s own session could write to the developer's real DB."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -93,10 +82,7 @@ def worker(monkeypatch):
 
 
 def _mock_download(monkeypatch, mapping: dict[str, bytes | Exception]):
-    """Replace download_pdf / download_text with an exact-URL mapping (bytes -> returned, Exception -> raised).
-    Unmapped URLs raise PdfDownloadError so typos fail loudly; both functions share the mapping so a test can
-    mix .pdf and .md fixtures.
-    """
+    """Unmapped URLs raise so typos fail loudly."""
     from services.audits.text_extraction import PdfDownloadError
 
     def fake_download(url, session=None):
@@ -109,11 +95,6 @@ def _mock_download(monkeypatch, mapping: dict[str, bytes | Exception]):
 
     monkeypatch.setattr("services.audits.text_extraction.download_pdf", fake_download)
     monkeypatch.setattr("services.audits.text_extraction.download_text", fake_download)
-
-
-# ---------------------------------------------------------------------------
-# 1. Worker happy path — claim, process, persist, write to real storage
-# ---------------------------------------------------------------------------
 
 
 def test_worker_processes_pending_rows_end_to_end(db_session, storage_bucket, seed_protocol, worker, monkeypatch):
@@ -138,7 +119,6 @@ def test_worker_processes_pending_rows_end_to_end(db_session, storage_bucket, se
 
     worker._persist_outcome(audit_id, outcome)
 
-    # Re-query via a fresh session — avoid stale identity-map results.
     db_session.expire_all()
     row = db_session.get(AuditReport, audit_id)
     assert row is not None
@@ -154,18 +134,6 @@ def test_worker_processes_pending_rows_end_to_end(db_session, storage_bucket, se
     assert len(body) == outcome.text_size_bytes
     assert "Pool.sol" in body.decode("utf-8")
     assert "--- page 1 ---" in body.decode("utf-8")
-
-
-# ---------------------------------------------------------------------------
-# 1b. Markdown audit files — raw.githubusercontent.com URLs go through the
-# text-decode path instead of pypdf, and the stored text is the markdown
-# body verbatim.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 2. Worker failure path — HTTP error goes to 'failed' with error text
-# ---------------------------------------------------------------------------
 
 
 def test_worker_records_http_failure_without_touching_storage(
@@ -195,11 +163,6 @@ def test_worker_records_http_failure_without_touching_storage(
         storage_bucket.get(f"audits/text/{audit_id}.txt")
 
 
-# ---------------------------------------------------------------------------
-# 4. Claim atomicity — claimed rows transition status and won't re-appear
-# ---------------------------------------------------------------------------
-
-
 def test_claim_batch_flips_status_to_processing(db_session, storage_bucket, seed_protocol, worker):
     _seed_audit(db_session, seed_protocol, url="https://example.com/a.pdf")
     _seed_audit(db_session, seed_protocol, url="https://example.com/b.pdf")
@@ -214,27 +177,6 @@ def test_claim_batch_flips_status_to_processing(db_session, storage_bucket, seed
 
     second = worker._claim_batch(db_session)
     assert second == []
-
-
-# ---------------------------------------------------------------------------
-# 6. API endpoints — metadata, text body, 409, 404
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def api_with_storage(monkeypatch, db_session, storage_bucket):
-    from fastapi.testclient import TestClient
-
-    import api as api_module
-    from routers import deps
-    from routers.deps import require_admin_key
-
-    monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
-    try:
-        yield TestClient(api_module.app)
-    finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
 
 
 def test_api_get_audit_returns_full_metadata(
@@ -296,8 +238,6 @@ def test_api_get_audit_text_streams_body_from_storage(
 def test_api_audit_text_returns_409_when_extraction_not_ready(
     db_session, storage_bucket, seed_protocol, api_with_storage
 ):
-    """A pending / never-extracted audit returns 409 with structured detail
-    (status + reason) so callers can distinguish from 404s."""
     audit_id = _seed_audit(
         db_session,
         seed_protocol,
@@ -307,8 +247,7 @@ def test_api_audit_text_returns_409_when_extraction_not_ready(
     assert r.status_code == 409
     detail = r.json()["detail"]
     assert detail["error"] == "text not available"
-    # status is None on a pending row — the client can use that to tell
-    # "extraction hasn't started" apart from "extraction failed".
+    # None distinguishes "not started" from "failed".
     assert detail["status"] is None
 
 
@@ -339,9 +278,6 @@ def test_api_audit_not_found_returns_404(api_with_storage):
 
 
 def test_api_company_audits_surfaces_has_text_per_entry(db_session, storage_bucket, seed_protocol, api_with_storage):
-    """``has_text`` per entry on the company audits list. Post-extraction state is set directly on the rows; only
-    API serialization is under test.
-    """
     from datetime import datetime
     from datetime import timezone as _tz
 

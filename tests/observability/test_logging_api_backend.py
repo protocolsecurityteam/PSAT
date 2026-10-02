@@ -1,11 +1,4 @@
-"""Offline logging tests for the API + aggregations layer.
-
-Locks in structured-field emission for backlog #12 (request middleware + global exception
-handler), #17 (fleet degraded-health WARNINGs) and #18 (admin-mutation audit trail, admin-key
-reject WARNING, stage_timing body-missing WARNING, lifespan exc_type). HTTP assertions drive a
-throwaway FastAPI app wired with the real middleware/handlers, avoiding the production lifespan
-(which would reach Postgres).
-"""
+"""Uses a throwaway FastAPI app with the real middleware so the production lifespan doesn't reach Postgres."""
 
 from __future__ import annotations
 
@@ -32,9 +25,6 @@ def _rec(caplog, msg_substr: str):
     return matches[-1]
 
 
-# --- #12: request middleware -------------------------------------------------
-
-
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.middleware("http")(api.trace_id_middleware)
@@ -56,7 +46,6 @@ def test_request_middleware_emits_info_with_extra_fields(caplog):
     with caplog.at_level(logging.INFO, logger="api"):
         resp = client.get("/ok", headers={api.TRACE_ID_HEADER: "trace-abc123"})
     assert resp.status_code == 200
-    # trace_id is echoed back so the caller can grep their logs for it.
     assert resp.headers[api.TRACE_ID_HEADER] == "trace-abc123"
     rec = _rec(caplog, "request GET /ok")
     assert rec.levelno == logging.INFO
@@ -69,12 +58,10 @@ def test_request_middleware_emits_info_with_extra_fields(caplog):
 
 def test_request_log_helper_warns_on_5xx_and_slow():
     log = logging.getLogger("api")
-    # 5xx response → WARNING even when fast.
     with _capture(log) as records:
         api._log_request(method="GET", path="/x", status_code=503, duration_ms=5, trace_id="t")
     assert records[-1].levelno == logging.WARNING
     assert records[-1].status_code == 503
-    # Slow 2xx → WARNING on duration alone.
     with _capture(log) as records:
         api._log_request(method="GET", path="/x", status_code=200, duration_ms=api._SLOW_REQUEST_MS + 1, trace_id="t")
     assert records[-1].levelno == logging.WARNING
@@ -89,11 +76,8 @@ def test_unhandled_exception_handler_logs_error_with_traceback(caplog):
     assert rec.levelno == logging.ERROR
     assert rec.exc_type == "ValueError"
     assert rec.path == "/api/boom"
-    # ERROR + exc_info: the only place in this layer that attaches a traceback.
+    # The only place in this layer that attaches a traceback.
     assert rec.exc_info is not None
-
-
-# --- #18: admin mutation audit + admin-key reject ----------------------------
 
 
 def test_log_admin_mutation_emits_info_with_action_and_id(caplog):
@@ -125,7 +109,6 @@ def test_require_admin_key_warns_on_reject_without_leaking_key(caplog, monkeypat
     assert rec.levelno == logging.WARNING
     assert rec.reason == "key_mismatch"
     assert rec.path == "/api/analyze"
-    # The supplied key must never appear in the structured record.
     assert "wrong-key" not in str(rec.__dict__)
 
 
@@ -140,11 +123,8 @@ def test_require_admin_key_distinguishes_missing_from_mismatch(caplog, monkeypat
     assert _rec(caplog, "admin key rejected").reason == "missing_key"
 
 
-# --- #17: fleet degraded-health WARNINGs -------------------------------------
-
-
 def test_fleet_warns_stale_daemon_with_process_and_age():
-    # The WARNING is transition-gated; clear prior state so this asserts the announcement, not the dedupe.
+    # The WARNING is transition-gated.
     fleet.reset_fleet_log_dedupe()
     with _capture(fleet.logger) as records:
         fleet._warn_stale_daemon("event_log_indexer", 420.0)
@@ -165,14 +145,13 @@ def test_fleet_warns_lagging_cursors_with_spread():
 
 
 def test_fleet_stale_daemon_warning_is_deduped_until_recovery():
-    """739 identical WARNINGs for one 9.6h outage was the measured behaviour."""
+    """One 9.6h outage used to log 739 identical WARNINGs."""
     fleet.reset_fleet_log_dedupe()
     with _capture(fleet.logger) as records:
         for _ in range(5):
             fleet._warn_stale_daemon("event_log_indexer", 420.0)
     assert len([r for r in records if r.levelno == logging.WARNING]) == 1
 
-    # Recovery is the other half of the transition, and it re-arms the WARNING.
     with _capture(fleet.logger) as records:
         fleet._note_daemon_fresh("event_log_indexer")
         fleet._note_daemon_fresh("event_log_indexer")
@@ -185,9 +164,6 @@ def test_fleet_stale_daemon_warning_is_deduped_until_recovery():
     assert records[0].levelno == logging.WARNING
 
 
-# --- helpers -----------------------------------------------------------------
-
-
 class _ListHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
@@ -198,10 +174,7 @@ class _ListHandler(logging.Handler):
 
 
 class _capture:
-    """Attach a record-collecting handler to *logger* for the block.
-
-    Independent of caplog so assertions read exact ``extra`` fields regardless of the root
-    handler (configure_logging swaps it globally)."""
+    """Independent of caplog, since configure_logging swaps the root handler."""
 
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger

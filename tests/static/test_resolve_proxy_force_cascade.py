@@ -59,16 +59,11 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     assert child["address"] == "0x2222222222222222222222222222222222222222"
     assert child["proxy_address"] == "0x1111111111111111111111111111111111111111"
     assert child["parent_job_id"] == "job-1"
-    # root_job_id falls back to the parent job id when no upstream cascade is set (keeps within-cascade
-    # dedup for top-level calls).
+    # Keeps within-cascade dedup for top-level calls.
     assert child["root_job_id"] == "job-1"
-    # ``discovery_relationship`` + ``parent_is_member`` carry the
-    # structural-ownership signal to the child's discovery worker.
     assert child["discovery_relationship"] == "implementation"
-    # False because session.execute returns None (no parent Contract row in this
-    # mock setup), so the parent has no discovery_sources to evaluate.
+    # No parent Contract row in this mock.
     assert child["parent_is_member"] is False
-    # Derived default: the request carries no chain.
     assert child["chain"] == "ethereum"
 
 
@@ -108,22 +103,15 @@ def test_process_attempts_semantic_proxy_classification_for_non_obvious_names(mo
     assert called == ["resolve"]
 
 
-# ---------------------------------------------------------------------------
-# Within-cascade impl-job dedupe under --force
-# ---------------------------------------------------------------------------
-
-
 def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
-    """Two proxy paths to the same impl in one cascade: second submission dedupes; new cascades still get fresh jobs."""
     worker = StaticWorker()
     session = MagicMock()
 
-    # Calls 1+2 = first proxy (contract-row + dedupe), 3+4 = second proxy; only call 4 hits an existing prior job.
+    # Calls 1+2 are the first proxy, 3+4 the second; only call 4 hits a prior job.
     existing_in_cascade = SimpleNamespace(id="prior-impl-in-same-cascade")
     call_count = {"n": 0}
 
     def _fake_execute(query, *params):
-        # Skip the advisory_lock SELECT — it's a no-op in the mock.
         if params:
             return MagicMock()
         call_count["n"] += 1
@@ -165,12 +153,11 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
     worker._resolve_proxy(session, job2, job2.address, job2.name)
 
     assert len(created_jobs) == 1, f"second proxy in same cascade must dedupe its impl; got {len(created_jobs)} jobs"
-    # The created job carries root_job_id so downstream static_worker calls in the cascade can dedupe too.
     assert created_jobs[0]["root_job_id"] == "root-1"
 
 
 def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
-    """A differing root_job_id must NOT block a fresh cascade (bench A/B runs need cold-path measurements per root)."""
+    """Bench A/B runs need cold-path measurements per root."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -211,8 +198,6 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
 
 
 def test_no_force_uses_global_dedupe(monkeypatch):
-    """Without --force the global dedupe holds (any prior job wins, even from another cascade); the
-    (address, root_job_id) check must NOT apply."""
     worker = StaticWorker()
     session = MagicMock()
     prior = SimpleNamespace(id="prior-impl-from-other-cascade")
@@ -245,11 +230,9 @@ def test_no_force_uses_global_dedupe(monkeypatch):
 
 @requires_postgres
 def test_load_contract_row_falls_back_to_address_when_job_id_rebound(db_session):
-    """Regression for the live-tests USDC failure (run #25828735277).
-
-    Concurrent cascades on one ``(address, chain)`` rebind the Contract row's ``job_id``
-    (``workers/discovery.py:402``), so the earlier job's job_id lookup returns None;
-    ``_load_contract_row`` must fall back to ``(address, chain)``."""
+    """Live-tests USDC failure (run #25828735277): concurrent cascades rebind the Contract row's ``job_id``
+    (``workers/discovery.py:402``).
+    """
     from db.models import Contract, Job, JobStage, JobStatus
 
     chain = "ethereum"
@@ -277,9 +260,6 @@ def test_load_contract_row_falls_back_to_address_when_job_id_rebound(db_session)
     db_session.add_all([job_a, job_b])
     db_session.commit()
 
-    # Discovery writes the Contract row owned by job_a, then a concurrent
-    # run for the same (address, chain) rebinds it to job_b — the exact
-    # mutation at workers/discovery.py:402.
     contract = Contract(address=addr, chain=chain, job_id=job_a.id, contract_name="Vault")
     db_session.add(contract)
     db_session.commit()

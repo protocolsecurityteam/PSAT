@@ -1,16 +1,10 @@
-"""Unit tests for services.discovery.audit_enrichment (split out of test_run_discovery_orchestrator.py):
-PDF/commit extraction from a report page and the corroboration rules deciding when a repo-hosted PDF
-may be adopted as a report's document.
-"""
-
 from __future__ import annotations
 
 import pytest
 
 from services.discovery import audit_enrichment as ae
 
-# offline: discovery validates/resolves contract chains via Alchemy (chain_resolver)
-# and probes bytecode via eth_getCode — stub both so the pipeline runs without a wire.
+# Offline: stub the chain resolver and eth_getCode.
 pytestmark = pytest.mark.usefixtures("_stub_chain_resolver", "_stub_rpc_bytecode")
 
 
@@ -33,7 +27,6 @@ def test_enrich_extracts_static_pdf_and_verified_github_commit(monkeypatch):
 def test_enrich_drops_ai_commits_that_do_not_resolve(monkeypatch):
     monkeypatch.setattr(ae, "_fetch_html", lambda url, debug=False: None)
     monkeypatch.setattr(ae, "_commit_exists", lambda repo, commit: False)
-    # The repo-hosted-PDF pass would otherwise probe GitHub for audit folders.
     monkeypatch.setattr(ae, "_discover_repo_audit_folders", lambda owner, repo, debug=False: [])
 
     result = {
@@ -84,11 +77,8 @@ def test_enrich_prefers_repo_hosted_dependency_pdf(monkeypatch):
     assert result["reports"][0]["pdf_url"].endswith("/audits/boringvault.pdf")
 
 
-# --- repo-hosted PDF adoption must be corroborated -------------------------
-#
-# Folder listing taken from etherfi-protocol/smart-contracts@master/audits,
-# in tree order — the same set the crawl returns. The first entry is what a
-# positional pick lands on.
+# The etherfi-protocol/smart-contracts audits/ listing in tree order; the first entry is what a positional pick lands
+# on.
 _ETHERFI_AUDIT_FOLDER = [
     {
         "title": "Omniscia Audit",
@@ -159,8 +149,7 @@ _HALBORN_L2_REPORT = {
 }
 
 
-# Wrong-document adoption guards: each folder holds a tempting PDF that must
-# not be adopted, so the report keeps its own url and identity fields.
+# Each folder holds a tempting PDF that must not be adopted.
 @pytest.mark.parametrize(
     ("listing", "report", "protocol"),
     [
@@ -311,14 +300,12 @@ def test_enrich_does_not_adopt_a_pdf(monkeypatch, listing, report, protocol):
 
     out = result["reports"][0]
     assert out.get("pdf_url") is None
-    # Identity fields are never rewritten by the adoption pass.
     assert {k: out.get(k) for k in ("url", "auditor", "title")} == {
         k: original.get(k) for k in ("url", "auditor", "title")
     }
 
 
 def test_enrich_adopts_repo_pdf_corroborated_by_title(monkeypatch):
-    """Positive control: the folder holds this report's own document."""
     _stub_repo_folder(monkeypatch, _ETHERFI_AUDIT_FOLDER)
 
     result = {
@@ -340,9 +327,7 @@ def test_enrich_adopts_repo_pdf_corroborated_by_title(monkeypatch):
 
 
 def test_enrich_adopts_when_the_title_keeps_a_token_beyond_the_two_names(monkeypatch):
-    """Positive control for the same gate: 'EtherFi Deposit Adapter Contract'
-    (a real corpus title) leads with the protocol's name, but 'deposit adapter'
-    survives it, so the report still earns its own document."""
+    """A real corpus title that leads with the protocol's name but keeps 'deposit adapter'."""
     _stub_repo_folder(
         monkeypatch,
         [

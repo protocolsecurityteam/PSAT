@@ -1,14 +1,7 @@
-"""Regression: event ``topic0`` must keccak the canonical ABI signature.
+"""Event ``topic0`` must keccak the canonical ABI signature.
 
-Non-elementary params collapse to their ABI head (contract -> ``address``, enum ->
-``uint8``, UDVT -> underlying, ``T[]`` -> ``canonical(T)[]``, struct -> member
-tuple). Both topic0 producers used to keccak Slither's *declared* type names, which
-matched ZERO on-chain logs, so the privileged-mapping allowlist enumerated EMPTY
-(status=complete) and the tool UNDER-reported privilege holders.
-
-Tests assert the canonicalizer's keccak equals the REAL on-chain ``topic0`` of
-production events (Seaport, Uniswap-v4, ERC-1155, Maker-style); the constants are
-independently sourced, nothing is hardcoded in the producer.
+Keccaking Slither's declared type names matched zero on-chain logs, so the privileged-mapping allowlist enumerated empty
+and under-reported holders. Constants are real on-chain topic0s, sourced independently.
 """
 
 from __future__ import annotations
@@ -26,14 +19,11 @@ from services.static.contract_analysis_pipeline.mapping_events import (  # noqa:
     _event_metadata,
 )
 
-# Real on-chain ``topic0`` values, sourced independently of this pipeline. A wrong
-# topic0 returns zero logs for these events, the exact bug.
 RELY = "0xdd0e34038ac38b2a1ce960229778ac48a8719bc900b6c4f8d0475c6e8b385a60"
 ORDER_FULFILLED = "0x9d9af8e38d66c62e2c12f0225249fd9d721c54b83f48d9352c97c6cacdcb6f31"
 INITIALIZE = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
 TRANSFER_BATCH = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
 
-# Canonical signatures whose keccak equal the constants above.
 CANONICAL = {
     "Rely": "Rely(address)",
     "OrderFulfilled": (
@@ -43,7 +33,6 @@ CANONICAL = {
     ),
     "Initialize": "Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)",
     "TransferBatch": "TransferBatch(address,address,address,uint256[],uint256[])",
-    # Fixed and nested fixed arrays of an interface — exact-match anchor.
     "Fixed": "Fixed(address[2],address[][2])",
 }
 
@@ -54,8 +43,7 @@ ON_CHAIN = {
     "TransferBatch": TRANSFER_BATCH,
 }
 
-# Faithful re-declaration of the production events with their real parameter
-# types (ERC-1155 ``TransferBatch`` is elementary-only and proves the no-op path).
+# ERC-1155 ``TransferBatch`` is elementary-only and proves the no-op path.
 SOURCE = """
 pragma solidity ^0.8.19;
 

@@ -1,5 +1,3 @@
-"""Tests for services.discovery.dependency_graph_builder."""
-
 import pytest
 
 from services.discovery.dependency_graph_builder import build_dependency_visualization
@@ -80,7 +78,6 @@ def test_proxy_delegates_to_edge():
     ops = {(e["from"], e["to"], e["op"]) for e in result["edges"]}
     assert (f"addr:{DEP_A}", f"addr:{IMPL}", "DELEGATES_TO") in ops
     assert (f"addr:{TARGET}", f"addr:{DEP_A}", "CALL") in ops
-    # IMPL is classification-only (nested) — no STATIC_REF
     assert not any(e["op"] == "STATIC_REF" and e["to"] == f"addr:{IMPL}" for e in result["edges"])
 
 

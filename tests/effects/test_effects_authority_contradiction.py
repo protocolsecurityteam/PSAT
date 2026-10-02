@@ -1,9 +1,6 @@
 """Authority-plane contradictions between resolution and execution.
 
-Effects is the only stage that executes a call AS a resolved principal, so it can
-falsify authority resolution: an EXACT ``finite_set`` whose member is rejected by
-a CANONICAL gate-rejection selector named the wrong holder. The detector must key
-on selectors ONLY (the first pass false-positived by substring-matching "not ").
+Detection keys on selectors only; substring matching false-positived.
 """
 
 from __future__ import annotations
@@ -16,11 +13,9 @@ from services.effects import discrepancies
 from services.effects.selection import _membership_exact
 from utils.logging import degraded_errors_var
 
-# Canonical OZ v5 gate-rejection selectors.
 ACCESS_CONTROL_UNAUTHORIZED = "0xe2517d3f"  # AccessControlUnauthorizedAccount(address,bytes32)
 OWNABLE_UNAUTHORIZED = "0x118cdaa7"  # OwnableUnauthorizedAccount(address)
-# A STATE precondition, not a gate rejection: OZ TimelockController's
-# TimelockUnexpectedOperationState / "operation is not ready" family.
+# A state precondition, not a gate rejection.
 STATE_PRECONDITION = "0x5ead8eb5"  # TimelockUnexpectedOperationState(bytes32,bytes32)
 
 CONTRACT = "0x" + "cd" * 20
@@ -55,7 +50,6 @@ def _run(transcript, *, effect_class="value_out", membership_exact=True):
 
 def test_membership_exact_requires_finite_set_and_exact_quality():
     assert _membership_exact({"kind": "finite_set", "membership_quality": "exact"}) is True
-    # A public capability is ``exact`` too, but not a finite enumeration to contradict.
     assert _membership_exact({"kind": "conditional_universal", "membership_quality": "exact"}) is False
     assert _membership_exact({"kind": "unsupported", "membership_quality": "exact"}) is False
     assert _membership_exact({"kind": "finite_set", "membership_quality": "approximate"}) is False
@@ -88,8 +82,7 @@ def test_canonical_gate_rejection_on_an_exact_member_files_a_degraded_error(sele
         # match would.
         pytest.param(_transcript(STATE_PRECONDITION), {}, id="state_precondition_revert"),
         pytest.param(_transcript(ACCESS_CONTROL_UNAUTHORIZED), {"membership_exact": False}, id="non_exact_membership"),
-        # ``authority_change`` rejects RANDOM identities at the gate by design, so a gate-rejection revert
-        # there is expected behaviour, not a contradiction.
+        # ``authority_change`` rejects random identities at the gate by design.
         pytest.param(
             _transcript(ACCESS_CONTROL_UNAUTHORIZED), {"effect_class": "authority_change"}, id="authority_change_class"
         ),
@@ -100,11 +93,6 @@ def test_files_nothing(transcript, run_kwargs):
     filed, errors = _run(transcript, **run_kwargs)
     assert filed is False
     assert errors == []
-
-
-# ---------------------------------------------------------------------------
-# The worker routing seam (_route_section9): the wiring, not just the detector.
-# ---------------------------------------------------------------------------
 
 
 def test_route_section9_files_the_authority_contradiction_on_a_fresh_probe():
@@ -145,7 +133,6 @@ def test_route_section9_files_the_authority_contradiction_on_a_fresh_probe():
     counters = _Counters()
     token = degraded_errors_var.set([])
     try:
-        # No ``self`` state is touched by the method — a bare instance is enough.
         EffectsWorker._route_section9(object.__new__(EffectsWorker), item, "unknown", "tier1", "ptr", None, counters)
         errors = list(degraded_errors_var.get() or ())
     finally:

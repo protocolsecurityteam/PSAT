@@ -1,5 +1,3 @@
-"""Security-hardening middleware + validation coverage (findings 8, 9, 10, 12, 13), offline."""
-
 from __future__ import annotations
 
 import pytest
@@ -11,8 +9,7 @@ def client():
     import api
 
     api._global_limiter.reset()
-    # DB failures surface as 500 responses rather than re-raising, so a route
-    # can be exercised past its rate check without a live database.
+    # Exercises a route past its rate check without a live database.
     return TestClient(api.app, raise_server_exceptions=False)
 
 
@@ -30,9 +27,6 @@ def _reset_limiters():
     pc._probe_limiter.reset()
 
 
-# --- FINDING 9: security headers -------------------------------------------
-
-
 def test_security_headers_present_on_normal_response(client):
     resp = client.get("/api/version")
     assert resp.status_code == 200
@@ -46,9 +40,6 @@ def test_security_headers_present_on_normal_response(client):
     assert "https://fonts.gstatic.com" in csp
     assert "https://fonts.googleapis.com" in csp
     assert "https://api.coingecko.com" in csp
-
-
-# --- FINDING 10: body-size cap ---------------------------------------------
 
 
 def test_oversized_content_length_rejected_with_413(client):
@@ -84,8 +75,6 @@ def test_content_length_exactly_at_limit_passes(client, monkeypatch):
 
 
 def _drive_body_middleware(body_chunks: list[bytes], max_bytes: int):
-    """Drive BodySizeLimitMiddleware at the ASGI layer with a chunked body that
-    carries no Content-Length, returning the messages it sent downstream."""
     import asyncio
 
     import api
@@ -125,8 +114,6 @@ def _drive_body_middleware(body_chunks: list[bytes], max_bytes: int):
 
 
 def test_chunked_oversized_body_rejected_without_content_length():
-    # Two 60-byte chunks = 120 bytes, no Content-Length; cap 100 -> 413 before
-    # the downstream app is ever invoked.
     sent, app_called = _drive_body_middleware([b"x" * 60, b"x" * 60], max_bytes=100)
     start = next(m for m in sent if m["type"] == "http.response.start")
     assert start["status"] == 413
@@ -141,9 +128,6 @@ def test_chunked_within_limit_reaches_app():
     start = next(m for m in sent if m["type"] == "http.response.start")
     assert start["status"] == 200
     assert app_called is True
-
-
-# --- FINDING 10: global per-IP rate limit ----------------------------------
 
 
 def test_global_rate_limit_triggers_429(client):
@@ -164,15 +148,12 @@ def test_global_rate_limit_triggers_429(client):
 @pytest.mark.parametrize(
     "headers_for",
     [
-        # Rotate the client-controlled X-Forwarded-For every request; Fly-Client-IP
-        # (set by the proxy) stays constant, so all four land in one bucket.
+        # Fly-Client-IP is set by the proxy, so rotating XFF must still land in one bucket.
         pytest.param(
             lambda i: {"Fly-Client-IP": "9.9.9.9", "X-Forwarded-For": f"{i}.{i}.{i}.{i}"},
             id="rotating-xff-with-constant-fly-client-ip",
         ),
-        # No Fly-Client-IP: the trusted identity is the RIGHT-most XFF hop
-        # (appended by our proxy). Rotating the left-most (spoofable) hop must
-        # not mint fresh buckets.
+        # Without Fly-Client-IP the trusted identity is the right-most XFF hop, appended by our proxy.
         pytest.param(
             lambda i: {"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 5.5.5.5"},
             id="rotating-left-xff-hop",
@@ -180,7 +161,6 @@ def test_global_rate_limit_triggers_429(client):
     ],
 )
 def test_spoofed_forwarding_headers_do_not_escape_rate_limit(client, headers_for):
-    # CRITICAL: rate-limit spoof bypass via client-controlled forwarding headers.
     import api
 
     original = api._global_limiter.limit
@@ -210,9 +190,6 @@ def test_client_ip_ignores_untrusted_forwarding_headers():
     assert client_ip(req({})) == "1.1.1.1"
 
 
-# --- FINDING 8: capability-route rate limit --------------------------------
-
-
 @pytest.mark.parametrize(
     "url",
     [
@@ -232,14 +209,9 @@ def test_capability_routes_are_rate_limited(client, url):
     finally:
         pc._capabilities_limiter.limit = original
         pc._capabilities_limiter.reset()
-    # First passes the rate check (whatever the downstream status); the second
-    # is throttled by the per-route limiter.
     assert first.status_code != 429
     assert second.status_code == 429
     assert "Retry-After" in second.headers
-
-
-# --- FINDING 13: trace-id sanitization -------------------------------------
 
 
 def test_valid_trace_id_reflected(client):
@@ -261,12 +233,8 @@ def test_bad_trace_id_not_reflected(client, bad):
     resp = client.get("/api/version", headers={"X-PSAT-Trace-Id": bad})
     reflected = resp.headers["X-PSAT-Trace-Id"]
     assert reflected != bad
-    # A fresh 16-char hex id is minted instead.
     assert len(reflected) == 16
     assert all(c in "0123456789abcdef" for c in reflected)
-
-
-# --- FINDING 12: probe address regex ---------------------------------------
 
 
 def test_probe_membership_rejects_non_hex_address():
@@ -279,7 +247,6 @@ def test_probe_membership_rejects_non_hex_address():
             member="0x" + "z" * 40,
         )
     with pytest.raises(ValueError):
-        # 0x + 41 chars: right prefix, wrong length.
         _ProbeMembershipRequest(
             function_signature="grantRole(bytes32,address)",
             predicate_index=0,
@@ -310,9 +277,6 @@ def test_probe_signature_rejects_non_hex_address():
     assert ok.recovered_signer == "0x" + "b" * 40
 
 
-# --- unit: limiter ---------------------------------------------------------
-
-
 def test_sliding_window_limiter_basic():
     from utils.ratelimit import SlidingWindowRateLimiter
 
@@ -334,7 +298,6 @@ def test_sliding_window_limiter_disabled_when_limit_zero():
 
 
 def test_sliding_window_bucket_cap_holds_under_many_keys():
-    # Memory bound: distinct keys can never grow the map past max_keys.
     from utils.ratelimit import SlidingWindowRateLimiter
 
     lim = SlidingWindowRateLimiter(limit=5, window_s=100, max_keys=50, sweep_every=8)
@@ -344,17 +307,13 @@ def test_sliding_window_bucket_cap_holds_under_many_keys():
 
 
 def test_sliding_window_flood_cannot_evict_active_key():
-    # Security invariant: a flood of fresh keys must not displace a
-    # legitimate active client's window (which would reset its budget and let
-    # it bypass the limit). At cap the newcomers are rejected, not admitted by
-    # evicting the incumbent.
+    # A flood of fresh keys must not evict an active client's window and reset its budget.
     from utils.ratelimit import SlidingWindowRateLimiter
 
     lim = SlidingWindowRateLimiter(limit=2, window_s=100, max_keys=10, sweep_every=4)
     assert lim.hit("victim", now=1.0) is None
     assert lim.hit("victim", now=1.0) is None
     assert lim.hit("victim", now=1.0) is not None  # at limit
-    # Attacker sprays many distinct in-window keys, filling the cap.
     rejected = 0
     for i in range(1000):
         if lim.hit(("spray", i), now=1.0) is not None:
@@ -365,9 +324,7 @@ def test_sliding_window_flood_cannot_evict_active_key():
 
 
 def test_sliding_window_full_sweep_is_amortized_not_per_hit():
-    # Cost invariant: the O(active keys) full sweep runs only on the interval,
-    # never once per hit. If the fix is reverted (prune-all every hit) the
-    # sweep count would equal the hit count and this fails.
+    # The full sweep runs only on the interval, never per hit.
     from utils.ratelimit import SlidingWindowRateLimiter
 
     lim = SlidingWindowRateLimiter(limit=5, window_s=100, max_keys=1_000_000, sweep_every=100)

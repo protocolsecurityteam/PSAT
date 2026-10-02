@@ -1,9 +1,5 @@
-"""A published authority principal must carry the basis its getter was picked on.
-
-Three getter choices in ``predicate_evaluator`` rest on an identifier, not the ABI: a slot
-constant's keyword (``_GOVERNOR_SLOT`` -> ``governor()``), the ``_x()`` -> ``x()``
-de-underscore convention, and the ``pending`` prefix (-> ``empty_by_design``). These tests
-pin that provenance and the refusal of a locator naming two different roles.
+"""Three getter choices rest on an identifier, not the ABI: slot keywords, the de-underscore convention and the
+``pending`` prefix. These pin that provenance and the refusal of a locator naming two roles.
 """
 
 from __future__ import annotations
@@ -51,7 +47,6 @@ GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
 
 
 def _only_governor_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only ``governor()`` returns; a slot constant's own ``_GOVERNOR_SLOT()`` has no code."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         if params[0].get("data") != GOVERNOR_SELECTOR:
@@ -62,7 +57,6 @@ def _only_governor_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_slot_keyword_principal_declares_its_name_basis(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``governor()`` is chosen because the identifier contains "governor"; the trace says so."""
     _only_governor_reads(monkeypatch)
     cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "_GOVERNOR_SLOT"}), _ctx())
 
@@ -71,7 +65,6 @@ def test_slot_keyword_principal_declares_its_name_basis(monkeypatch: pytest.Monk
 
 
 def test_public_state_var_principal_declares_the_abi_basis(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Control: a plain ``governor`` state var resolves via its auto-getter, so the basis is the ABI rule."""
     _only_governor_reads(monkeypatch)
     cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "governor"}), _ctx())
 
@@ -80,15 +73,13 @@ def test_public_state_var_principal_declares_the_abi_basis(monkeypatch: pytest.M
 
 
 def test_locator_naming_two_roles_resolves_to_no_getter() -> None:
-    """``authority()`` and ``owner()`` fit equally; with no basis to prefer one, refuse (fail-silent)."""
     assert _canonical_authority_selector_for_slot("AuthorityOwnableStorageLocation") is None
     assert _canonical_authority_selector_for_slot("_GOVERNOR_SLOT") is not None
     assert _canonical_authority_selector_for_slot("OwnableStorageLocation") is not None
 
 
 def test_pending_ceiling_records_that_it_was_never_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The accept-side ceiling stays ``empty_by_design`` but the trace names the accessor
-    prefix and the read outcome, distinguishing it from a zero-read-confirmed empty."""
+    """The trace distinguishes it from a zero-read-confirmed empty."""
 
     def revert(*_a: Any, **_k: Any) -> str:
         raise RuntimeError("execution reverted")
@@ -108,7 +99,6 @@ def test_pending_ceiling_records_that_it_was_never_read(monkeypatch: pytest.Monk
 
 
 def test_struct_member_pending_ceiling_records_no_read_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The struct-member shape has no getter, so no read is attempted and the trace says so."""
 
     def revert(*_a: Any, **_k: Any) -> str:
         raise RuntimeError("execution reverted")

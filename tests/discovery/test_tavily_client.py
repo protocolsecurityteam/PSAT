@@ -1,5 +1,3 @@
-"""Tests for services/clients/tavily.py – Tavily search client."""
-
 from __future__ import annotations
 
 import json
@@ -17,10 +15,6 @@ from services.clients.tavily import (
     normalize_error,
     search,
 )
-
-# ---------------------------------------------------------------------------
-# 1. normalize_error
-# ---------------------------------------------------------------------------
 
 
 class TestNormalizeError:
@@ -46,11 +40,6 @@ class TestNormalizeError:
         assert err == {"provider": "tavily", "error": "fail", **expected}
 
 
-# ---------------------------------------------------------------------------
-# 2. TavilyError
-# ---------------------------------------------------------------------------
-
-
 class TestTavilyError:
     def test_message_from_error_key(self):
         exc = TavilyError({"error": "some message"})
@@ -59,11 +48,6 @@ class TestTavilyError:
     def test_missing_error_key_default_message(self):
         exc = TavilyError({"provider": "tavily"})
         assert str(exc) == "Tavily request failed"
-
-
-# ---------------------------------------------------------------------------
-# 3. error_from_exception
-# ---------------------------------------------------------------------------
 
 
 class TestErrorFromException:
@@ -80,11 +64,6 @@ class TestErrorFromException:
         assert result["error"] == "something broke"
         assert result["provider"] == "tavily"
         assert result["retryable"] is False
-
-
-# ---------------------------------------------------------------------------
-# 4. _build_payload
-# ---------------------------------------------------------------------------
 
 
 class TestBuildPayload:
@@ -114,11 +93,6 @@ class TestBuildPayload:
             monkeypatch.setenv("TAVILY_API_KEY", key)
         with pytest.raises(TavilyError, match="Missing TAVILY_API_KEY"):
             _build_payload("q", 5, "general", "advanced", True)
-
-
-# ---------------------------------------------------------------------------
-# 5-11. search()
-# ---------------------------------------------------------------------------
 
 
 def _mock_response(status_code=200, json_data=None, text="", raise_on_json=False):
@@ -250,14 +224,7 @@ class TestSearch:
             assert posted_payload["query"] == "hello world"
 
 
-# ---------------------------------------------------------------------------
-# 12. cache layer (PSAT_TAVILY_CACHE)
-# ---------------------------------------------------------------------------
-
-
 class TestCacheKey:
-    """The cache key must drop api_key and react to every other request field."""
-
     def _key_for(self, **overrides):
         base = {
             "api_key": "secret",
@@ -287,15 +254,12 @@ class TestCacheKey:
         assert self._key_for(include_raw_content=True) != self._key_for(include_raw_content=False)
 
     def test_stable_across_dict_ordering(self):
-        # sort_keys=True in _cache_key guards against insertion-order drift.
         k1 = _cache_key({"a": 1, "b": 2, "api_key": "x"})
         k2 = _cache_key({"b": 2, "a": 1, "api_key": "y"})
         assert k1 == k2
 
 
 class TestCacheBehavior:
-    """search() consults the cache only when PSAT_TAVILY_CACHE is set."""
-
     @patch("services.clients.tavily.load_dotenv")
     def test_disabled_skips_storage(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
@@ -385,8 +349,7 @@ class TestCacheBehavior:
             result = search("q", max_results=3)
 
         assert result == []
-        # A flaky empty response would poison the cache for 30 days; the write
-        # path bails before that happens.
+        # An empty response would poison the cache for 30 days.
         storage_client.put.assert_not_called()
 
     @patch("services.clients.tavily.load_dotenv")
@@ -473,7 +436,6 @@ class TestCacheBehavior:
             patch("db.storage.get_storage_client", return_value=storage_client),
             patch("services.clients.tavily.requests.post", return_value=resp),
         ):
-            # Bucket flake on write must not surface to the caller.
             result = search("q", max_results=3)
 
         assert result == [{"title": "A"}]

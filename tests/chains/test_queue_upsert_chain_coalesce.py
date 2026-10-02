@@ -31,14 +31,8 @@ def proto_id(db_session):
     return p.id
 
 
-# ---------------------------------------------------------------------------
-# upsert_discovered_contract (single-row) — aligned with the bulk variant
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_single_upsert_dedups_against_legacy_null_row(db_session, proto_id):
-    """A legacy ``chain=NULL`` stub is enriched by a mainnet single-row upsert via the coalesced key, not duplicated."""
     from db.models import Contract
     from db.queue import upsert_discovered_contract
 
@@ -85,8 +79,6 @@ def test_single_upsert_inherits_default_chain_when_entry_chainless(db_session, p
 
 @requires_postgres
 def test_single_upsert_base_entry_does_not_collapse_onto_legacy_null(db_session, proto_id):
-    """A non-mainnet single-row upsert must NOT dedup against a legacy NULL
-    (mainnet) stub: coalescing maps NULL→'ethereum', and 'base' ≠ 'ethereum'."""
     from db.models import Contract
     from db.queue import upsert_discovered_contract
 
@@ -108,18 +100,11 @@ def test_single_upsert_base_entry_does_not_collapse_onto_legacy_null(db_session,
     assert {r.chain for r in rows} == {None, "base"}
 
 
-# ---------------------------------------------------------------------------
-# is_known_proxy — coalesced Contract lookup
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 @pytest.mark.parametrize(
     "chain,expected",
     [
-        # Mainnet lookup coalesces NULL→'ethereum' and finds the legacy proxy row.
         pytest.param("ethereum", True, id="mainnet_finds_legacy_null"),
-        # A Base lookup must not see the legacy (mainnet) NULL proxy row.
         pytest.param("base", False, id="l2_isolated_from_legacy_null"),
     ],
 )
@@ -134,17 +119,11 @@ def test_is_known_proxy_against_legacy_null_row(db_session, proto_id, chain, exp
     assert is_known_proxy(db_session, addr, chain=chain) is expected
 
 
-# ---------------------------------------------------------------------------
-# find_completed_static_cache — coalesced Contract lookup on a NULL-chain row
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 @pytest.mark.parametrize(
     "chain,hit",
     [
-        # A completed job (chain_id=1) whose Contract row is legacy ``chain=NULL`` is a mainnet cache hit; the raw
-        # ``Contract.chain == 'ethereum'`` predicate used to miss it.
+        # The raw ``Contract.chain == 'ethereum'`` predicate used to miss a legacy NULL row.
         pytest.param("ethereum", True, id="mainnet_hit"),
         pytest.param("base", False, id="l2_miss"),
     ],
@@ -158,14 +137,7 @@ def test_static_cache_against_legacy_null_chain_contract(db_session, chain, hit)
     assert (found.id if found is not None else None) == (job.id if hit else None)
 
 
-# ---------------------------------------------------------------------------
-# copy_static_cache — coalesced source-Contract lookup
-# ---------------------------------------------------------------------------
-
-
 def _completed_source_with_null_contract(session, address, request_chain):
-    """A completed source job whose request declares *request_chain* but whose
-    Contract row was persisted ``chain=NULL`` (the legacy write shape)."""
     from db.models import Contract, ContractSummary, JobStage, JobStatus
     from db.queue import create_job, store_artifact, store_source_files
 
@@ -198,8 +170,7 @@ def _completed_source_with_null_contract(session, address, request_chain):
 
 @requires_postgres
 def test_copy_static_cache_matches_legacy_null_source_row(db_session):
-    """The coalesced predicate finds a ``chain=NULL`` source row for a mainnet request; the raw equality returned
-    None and the copy silently produced nothing."""
+    """The raw equality returned None and the copy silently produced nothing."""
     from db.models import Contract
     from db.queue import copy_static_cache, create_job
     from tests.cache_helpers import ADDR_A
@@ -209,6 +180,5 @@ def test_copy_static_cache_matches_legacy_null_source_row(db_session):
 
     new_contract_id = copy_static_cache(db_session, src_job.id, target_job.id)
     assert new_contract_id is not None
-    # The source row was reassigned to the target job (copy_static_cache moves it).
     copied = db_session.query(Contract).filter(Contract.id == new_contract_id).one()
     assert copied.job_id == target_job.id

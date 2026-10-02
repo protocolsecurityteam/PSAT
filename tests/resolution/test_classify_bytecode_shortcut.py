@@ -1,40 +1,26 @@
-"""Regression tests for the bytecode-keccak classifier shortcut in
-``services.resolution.tracking``.
+"""The shortcut skips the probes when the bytecode keccak matches a known impl; byte-exact, so no false positives.
 
-The shortcut skips the 6-probe sequence when the contract's bytecode keccak matches a
-known canonical impl. Byte-exact, so no false positives, and every Safe singleton proxy
-shares one code hash. ``_KNOWN_BYTECODE_IMPLS`` is empty by default; production seeds it.
+The registry is empty by default.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from services.resolution import tracking
 from services.resolution.tracking import _classify_uncached, _classify_uncached_batched
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 
 def _stub_get_code(monkeypatch, code: str = "0x60806040"):
-    """Stub _get_code at the tracking layer (not services.clients.rpc)."""
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_kw: code)
 
 
 def _stub_keccak(monkeypatch, keccak_hex: str):
-    """Stub services.clients.rpc.get_code_with_keccak so the shortcut can read the keccak."""
     monkeypatch.setattr(
         "services.clients.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak_hex)
     )
 
 
 def test_sequential_classifier_shortcut_fires_on_registry_hit(monkeypatch):
-    """A registry hit returns kind + merged details without calling the probe sequence."""
     _stub_get_code(monkeypatch)
     _stub_keccak(monkeypatch, "0x" + "ab" * 32)
 
@@ -56,7 +42,6 @@ def test_sequential_classifier_shortcut_fires_on_registry_hit(monkeypatch):
 
 
 def test_batched_classifier_shortcut_fires_on_registry_hit(monkeypatch):
-    """Same shortcut on the batched path, independent of the env flag."""
     _stub_get_code(monkeypatch)
     _stub_keccak(monkeypatch, "0x" + "cd" * 32)
 
@@ -77,8 +62,6 @@ def test_batched_classifier_shortcut_fires_on_registry_hit(monkeypatch):
 
 
 def test_registry_miss_falls_through_to_probes(monkeypatch):
-    """Registry has entries but THIS contract's keccak isn't in it →
-    fall through to the normal probe sequence."""
     _stub_get_code(monkeypatch)
     _stub_keccak(monkeypatch, "0x" + "ff" * 32)  # not in registry
 
@@ -92,7 +75,6 @@ def test_registry_miss_falls_through_to_probes(monkeypatch):
 
 
 def test_keccak_fetch_failure_falls_through(monkeypatch):
-    """A transient get_code_with_keccak failure falls through to the probe sequence."""
     _stub_get_code(monkeypatch)
 
     def _boom(_rpc, _addr):

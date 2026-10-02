@@ -4,8 +4,6 @@ edges become witness rows + gate promotion — never a stamped ``protocol_id``.
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from db.models import (
@@ -15,13 +13,13 @@ from db.models import (
     ContractCreationWitness,
     ContractMembershipWitness,
     ContractProbeAttempt,
-    Protocol,
 )
 from services.clients.rpc import EthCallResult
 from services.discovery import membership_gate as gate
 from services.discovery import probes
 from services.discovery.perimeter import _produce_structural_witnesses, produce_structural_witness
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _protocol
 
 pytestmark = [requires_postgres]
 
@@ -55,13 +53,6 @@ def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
     monkeypatch.setattr(probes, "rpc_batch_request", lambda rpc_url, calls, *a, **kw: [_ZERO_WORD for _ in calls])
     monkeypatch.setattr(probes.etherscan, "get", lambda module, action, chain_id, **params: {"result": []})
     return seen
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _contract(session, address: str, **kwargs) -> Contract:
@@ -132,7 +123,6 @@ def test_w2_protocol_mismatch_and_chain_mismatch_admit_nothing(db_session):
         )
         is None
     )
-    # A CREATE2 twin's pointer on another chain is not evidence on this one.
     member_other_chain = _contract(
         db_session, ADDR(0x412), chain="base", protocol_id=p1.id, implementation=candidate.address
     )
@@ -185,7 +175,6 @@ def test_witness_pass_nominates_and_promotes_w1_holders_only(db_session, monkeyp
     )
     without_w1 = _contract(db_session, ADDR(0x432), is_proxy=True, implementation=parent.address)
     db_session.flush()
-    # Probes already ran on both; a probe finding NO code cannot mint W1.
     for row in (with_w1, without_w1):
         db_session.add(
             ContractProbeAttempt(contract_id=row.id, chain_id=1, block_number=40, results={"status": "probed"})

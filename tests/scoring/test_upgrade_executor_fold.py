@@ -1,21 +1,8 @@
-"""Upgrade executor fold (C4) — what a transaction receipt can and cannot prove.
-
-``upgrade_events`` stores no sender, receipt or trace; the fold adds the receipt as
-a second instrument. This file pins the LINE between what it proves and what it
-does not:
-
-* it proves which contract EXECUTED an upgrade (keccak-matched marker log, emitter
-  typed by an independent classifier) — ``executor_kind``;
-* it proves a stored ``Upgraded`` log was the proxy's own DEPLOYMENT (two arms;
-  24 of the 120 protocol-1 events);
-* it collapses the 19x fanout, because ``(chain_id, tx_hash)`` is the governance
-  action id;
-* it proves NOTHING about who authorised anything: ``receipt.from`` on a Safe
-  ``execTransaction`` is a relayer (5 distinct senders for 11 transactions on one
-  Safe), so ``authorising_eoa`` is ``not_determined`` on every row.
-
-Fixtures are real mainnet receipts trimmed to the three topics the fold reads
-(``tests/fixtures/upgrade_receipts/protocol1_receipts.json``); the wire is stubbed.
+"""Upgrade executor fold (C4): what a receipt can and cannot prove. It proves which contract executed an upgrade
+and whether a stored ``Upgraded`` log was the proxy's own deployment (24 of 120 protocol-1 events), and
+``(chain_id, tx_hash)`` collapses the 19x fanout. It proves nothing about who authorised it: ``receipt.from``
+on a Safe ``execTransaction`` is a relayer (5 senders for 11 txs on one Safe), so ``authorising_eoa`` is
+always ``not_determined``. Fixtures are real mainnet receipts trimmed to the three topics the fold reads.
 """
 
 from __future__ import annotations
@@ -43,17 +30,13 @@ _FIXTURES = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "upgrade_receipts" / "protocol1_receipts.json").read_text()
 )
 
-# --- the real measured transactions -----------------------------------------
 TX_FANOUT = "0xc9c80e5bc8a3f2eedfca80030eba7a5531bcb23774ca9da3e29a591032570314"  # 19 protocol-1 events
 TX_SAFE_DIRECT = "0x142d4eb9434ec544c10811b222701445f5ba4078540a1194dae4a004a0c8b851"
 TX_DEPLOY_EOA = "0x91ead36d1f684c35f6e32ea70cff333a60b3e2985b4ad62f4670319a52ca2306"  # receipt.to is null
 TX_ONE_HOP = "0x3440c1094672739d4cdd3a09e86bd267af6f97a374d9f5695ec5d262db25e560"  # receipt.to == proxy
 TX_DEPLOY_FACTORY = "0x884ad34345c5df9c0035b3c1dc2ca38d693c3a8186e3acbf699341873afd7851"  # via factory
-# The same proxy the fanout touched, upgraded directly by a Safe 7.8M blocks
-# earlier — a genuinely dual-class proxy, which is the shape the decoy question
-# is asked about.
+# A genuinely dual-class proxy: the one the fanout touched, upgraded directly by a Safe 7.8M blocks earlier.
 TX_DIRECT_ON_DUAL_PROXY = "0x3e2550609c6fef5a01b0f8f29a0163f7eccd3ed4fd8260f980fe9228771ba68d"
-# Two Upgraded logs for ONE proxy in ONE transaction — a real swap-and-restore.
 TX_SWAP_AND_RESTORE = "0xa2e2ce95c31eb30357d4a6fc58a417b11e55f35bdcf0b4464a3622f364d4cec9"
 
 TIMELOCK = "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
@@ -74,8 +57,6 @@ BLOCK_DEPLOY_FACTORY = 23583226
 BLOCK_DIRECT_ON_DUAL_PROXY = 17730747
 BLOCK_SWAP_AND_RESTORE = 21045075
 
-# The 19 protocol-1 proxies the fanout transaction touched (measured against the
-# persisted rows), plus the two it touched outside that scope.
 FANOUT_PROXIES_IN_SCOPE = [
     "0x0ef8fa4760db8f5cd4d993f3e3416f30f942d705",
     "0x1b7a4c3797236a1c37f8741c0be35c2c72736fff",
@@ -97,26 +78,16 @@ FANOUT_PROXIES_IN_SCOPE = [
     "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0",
     PROXY_FACTORY_MADE,
 ]
-# The same transaction also touched two proxies with no protocol of their own —
-# the persisted table carries 21 rows for it, 19 of them in protocol 1.
 FANOUT_PROXIES_OUT_OF_SCOPE = [
     "0x00c452affee3a17d9cecc1bcd2b8d5c7635c4cb9",
     "0x25e821b7197b146f7713c3b89b6a4d83516b912d",
 ]
-# Two of the 26 Upgraded emitters in the fanout receipt are NOT targets of the
-# timelock's own CallExecuted calls — the naive "join every log in the tx to the
-# executor" would over-attribute both.
+# Not targets of the timelock's CallExecuted calls; joining every log in the tx would over-attribute them.
 FANOUT_UNTARGETED = ["0x3c55986cfee455e2533f4d29006634ecf9b7c03f", "0xd789870bea40d056a4d26055d0befcc8755da146"]
 
 
-# ---------------------------------------------------------------------------
-# Harness
-# ---------------------------------------------------------------------------
-
-
 class _Wire:
-    """Stubbed chain + indexer. Records every call so a test can assert what
-    was NOT asked for as well as what was."""
+    """Records every call so tests can assert what was not asked for."""
 
     def __init__(self, receipts=None, code=None, creation=None):
         self.receipts = dict(receipts or {})
@@ -165,7 +136,6 @@ def _run_fold(session, wire_stub, contract_ids, chain_id=1):
 
 @pytest.fixture()
 def world(db_session):
-    """A protocol plus the address bookkeeping the fold reads."""
     protocol = Protocol(name=f"u8-{uuid.uuid4().hex[:10]}")
     db_session.add(protocol)
     db_session.commit()
@@ -202,8 +172,6 @@ def world(db_session):
         return row
 
     def classify(address, resolved_type, *, details=None, chain="ethereum"):
-        # The plane row reaches its chain through the contract it is anchored
-        # to, which is exactly the join the fold scopes on.
         anchor = contract(address, chain=chain)
         db_session.add(
             ControlGraphNode(
@@ -246,11 +214,6 @@ def _receipt(tx_hash, **overrides):
     return data
 
 
-# ---------------------------------------------------------------------------
-# T10 — topic pins. Everything below rests on these three hashes.
-# ---------------------------------------------------------------------------
-
-
 def test_topic0_pins():
     from eth_utils.crypto import keccak
 
@@ -261,33 +224,20 @@ def test_topic0_pins():
     assert uh.UPGRADED_TOPIC0 == "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b"
 
 
-# ---------------------------------------------------------------------------
-# A2 — the completeness basis is COMPUTED
-# ---------------------------------------------------------------------------
-
-
 def test_bloom_membership_matches_the_real_receipts():
-    """A bloom has no false negatives, so ``False`` is proof of absence.
-
-    This is what licenses the ``safe_direct`` verdict, which rests on the
-    absence of ``CallExecuted``: without it the absence would be observed only
-    in the log array whose completeness is exactly what is in question.
+    """A bloom has no false negatives, which licenses ``safe_direct``; the log array's completeness is exactly what's
+    in question.
     """
     direct = _FIXTURES[TX_SAFE_DIRECT]
     fanout = _FIXTURES[TX_FANOUT]
     assert uh._bloom_has_topic(direct["logsBloom"], CALL_EXECUTED_TOPIC0) is False
     assert uh._bloom_has_topic(fanout["logsBloom"], CALL_EXECUTED_TOPIC0) is True
-    # An unusable bloom is not a "no".
     assert uh._bloom_has_topic(None, CALL_EXECUTED_TOPIC0) is None
     assert uh._bloom_has_topic("0x00", CALL_EXECUTED_TOPIC0) is None
 
 
 def test_pruned_log_array_with_intact_bloom_is_not_determined(world, wire):
-    """Bloom says ``CallExecuted`` is there, the log array does not have it.
-
-    eRPC fans out across upstreams, so a pruned log array is a real risk; the
-    transaction must not be read as ``safe_direct`` because the marker went missing.
-    """
+    """eRPC fans out across upstreams, so a pruned log array is a real risk."""
     session = world["session"]
     proxy = world["contract"](PROXY_ETHERFI_NODES_MANAGER)
     world["event"](proxy, TX_FANOUT, BLOCK_FANOUT)
@@ -307,11 +257,8 @@ def test_pruned_log_array_with_intact_bloom_is_not_determined(world, wire):
 
 
 def test_pruned_log_array_with_the_bloom_removed_is_not_determined(world, wire):
-    """The same pruning, with the ``logsBloom`` gone as well.
-
-    With no bloom there is nothing to disagree with, so a "consistent-unless-contradicted"
-    rule reads silence as agreement and mints ``safe_direct`` from a receipt whose
-    ground truth is ``timelock_routed``. The absence arm needs a bloom that works.
+    """With no bloom, a consistent-unless-contradicted rule would mint ``safe_direct`` from a ``timelock_routed``
+    receipt.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_ETHERFI_NODES_MANAGER)
@@ -333,12 +280,7 @@ def test_pruned_log_array_with_the_bloom_removed_is_not_determined(world, wire):
 
 
 def test_all_zero_bloom_is_not_proof_of_absence(world, wire):
-    """An all-zero bloom is shape-valid and answers "absent" to every query.
-
-    The positive control catches it: the log array carries an ``Upgraded`` log, so a
-    working bloom must confirm THAT; one that cannot answer a known question may not
-    be trusted on the unknown.
-    """
+    """The log array carries an ``Upgraded`` log, so a working bloom must confirm it."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -356,8 +298,6 @@ def test_all_zero_bloom_is_not_proof_of_absence(world, wire):
     assert row.executor_kind == "not_determined"
     assert row.executor_kind != "safe_direct"
 
-    # Control: the same receipt with its real bloom does reach safe_direct, so
-    # the assertion above is the bloom's doing and not some other refusal.
     wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
     _run_fold(session, wire, [proxy.id])
     row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
@@ -367,8 +307,6 @@ def test_all_zero_bloom_is_not_proof_of_absence(world, wire):
 
 
 def test_receipt_missing_our_own_event_is_not_complete(world, wire):
-    """Self-consistency: a receipt that does not carry the very ``Upgraded`` log
-    we stored for it cannot be used to reason about what it does NOT carry."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -382,11 +320,6 @@ def test_receipt_missing_our_own_event_is_not_complete(world, wire):
     row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
     assert row.receipt_log_set_complete_for_tx is False
     assert row.executor_kind == "not_determined"
-
-
-# ---------------------------------------------------------------------------
-# T1 / A3 / A7 — the fanout, its executor, and what the executor targeted
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -404,27 +337,18 @@ def fanout_world(world, wire):
 
 
 def test_nineteen_events_are_one_governance_action(fanout_world):
-    """The whole reason ``(chain_id, tx_hash)`` is the key.
-
-    One transaction, 19 stored protocol-1 events across 19 distinct proxies.
-    Counted per event it publishes 19 exercises of upgrade authority; counted
-    per action it publishes one.
-    """
+    """Per event this publishes 19 exercises of upgrade authority; per action, one."""
     session = fanout_world["session"]
     ids = [c.id for c in fanout_world["in_scope"]]
     assert len(ids) == 19
     assert session.query(UpgradeEvent).filter(UpgradeEvent.tx_hash == TX_FANOUT).count() == 21
 
-    # The action id is the PAIR, not the bare hash: the same 32 bytes can name
-    # a different transaction on another chain, and a bare-hash union across
-    # contracts would silently merge them (#158).
+    # The same hash can name another chain's transaction (#158).
     actions = uh.governance_actions_for(session, ids)
     assert actions == {(1, TX_FANOUT)}
     assert len(actions) == 1
 
-    # A7: the answer is always relative to the scope asked for. The same
-    # transaction touches proxies outside it, and widening the scope must not
-    # multiply the action.
+    # A7: widening the scope must not multiply the action.
     all_ids = ids + [c.id for c in fanout_world["out_of_scope"]]
     assert uh.governance_actions_for(session, all_ids) == {(1, TX_FANOUT)}
     assert session.query(UpgradeTransaction).count() == 1
@@ -441,16 +365,12 @@ def test_fanout_executor_is_the_classified_timelock(fanout_world):
     assert row.tx_status == 1
     assert row.block_number == BLOCK_FANOUT
     assert row.is_contract_creation is False
-    # The transaction also carries an ExecutionSuccess (a Safe routed the call
-    # through the timelock). CallExecuted decides, and the Safe is not the
-    # executor of record.
+    # The tx also carries a Safe's ExecutionSuccess; CallExecuted decides.
     assert row.executor_address != SAFE_ROUTING_THE_TIMELOCK
 
 
 def test_call_targets_distinguish_the_proxies_the_timelock_actually_called(fanout_world):
-    """A3 — 26 ``Upgraded`` emitters, 24 of them named as ``CallExecuted``
-    targets. Joining every log in a timelock-routed transaction to the timelock
-    over-attributes the other two."""
+    """A3: 26 ``Upgraded`` emitters, 24 of them ``CallExecuted`` targets."""
     session = fanout_world["session"]
     row = session.get(UpgradeTransaction, (1, TX_FANOUT))
     targets = {t.lower() for t in row.executor_call_targets}
@@ -466,18 +386,8 @@ def test_call_targets_distinguish_the_proxies_the_timelock_actually_called(fanou
     assert PROXY_ETHERFI_NODES_MANAGER.lower() in targets
 
 
-# ---------------------------------------------------------------------------
-# T2 / T4 — the tx.from ban, on both shapes that tempt it
-# ---------------------------------------------------------------------------
-
-
 def test_safe_direct_publishes_no_authoriser_though_receipt_from_is_populated(world, wire):
-    """The reject-list pin.
-
-    ``receipt.from`` is right there, populated, on a transaction whose executor
-    is a Safe we positively classified. It is still the submitter, not the
-    signer set: five distinct senders were measured relaying for one Safe.
-    """
+    """``receipt.from`` is the submitter, not the signer set: five senders relayed for one Safe."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -489,7 +399,6 @@ def test_safe_direct_publishes_no_authoriser_though_receipt_from_is_populated(wo
     assert row.executor_kind == "safe_direct"
     assert row.executor_address == SAFE_DIRECT_EMITTER
     assert row.executor_classified_type == "safe"
-    # ExecutionSuccess carries no target word.
     assert row.executor_call_targets is None
 
     assert row.receipt_from == "0x544bdcbb88f2756000de227580aaad7376f3794e"
@@ -499,12 +408,8 @@ def test_safe_direct_publishes_no_authoriser_though_receipt_from_is_populated(wo
 
 
 def test_one_hop_publishes_no_authoriser(world, wire):
-    """``receipt.to == proxy`` is the strongest shape the corpus offers, and it
-    is still not authorship.
-
-    It proves ``tx.from`` was msg.sender in the TOP-LEVEL frame only (a self-call,
-    multicall or ERC-2771 path all break it at the upgrade site). So: no
-    ``eoa_one_hop`` executor kind, and the authoriser stays unknown.
+    """``receipt.to == proxy`` only proves the top-level frame; self-calls, multicall and ERC-2771 break it at the
+    upgrade site.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
@@ -523,14 +428,7 @@ def test_one_hop_publishes_no_authoriser(world, wire):
     assert basis["authorising_eoa"] == "not_determined"
 
 
-# ---------------------------------------------------------------------------
-# T3 / T5 / A1 — the two deployment arms
-# ---------------------------------------------------------------------------
-
-
 def test_eoa_creation_transaction_is_a_deployment_not_an_upgrade(world, wire):
-    """Arm 1, airtight: ``receipt.to`` is null and ``contractAddress`` is the
-    proxy, so this ``Upgraded`` log is the proxy's own birth."""
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
     world["event"](proxy, TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA)
@@ -555,12 +453,8 @@ def test_eoa_creation_transaction_is_a_deployment_not_an_upgrade(world, wire):
 
 
 def test_factory_deployed_proxy_needs_both_witnesses(world, wire):
-    """Arm 2 — the six the receipt rule alone could never catch.
-
-    A factory-deployed proxy has a populated ``receipt.to``, so on the receipt alone
-    its deployment looks like an upgrade. The indexer naming this transaction AND
-    ``eth_getCode`` showing no code in the preceding block prove it together;
-    neither alone is admitted.
+    """A factory deployment has a populated ``receipt.to``, so it needs the indexer naming the tx and no code at the
+    preceding block, together.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_FACTORY_MADE)
@@ -581,22 +475,18 @@ def test_factory_deployed_proxy_needs_both_witnesses(world, wire):
     assert uh.event_is_deployment(
         row, witness, proxy_address=PROXY_FACTORY_MADE, event_block=BLOCK_DEPLOY_FACTORY, pair_event_count=1
     )
-    # A5: the only event was a deployment, so there is no proven upgrade — and
-    # "0 upgrades" is not what the rows support.
+    # A5: with only a deployment there's no proven upgrade, and "0 upgrades" isn't what the rows support.
     entry = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]
     assert entry["count"] is None
     assert entry["basis"]["deployments_excluded"] == 1
 
 
 def test_one_witness_alone_never_proves_a_deployment(world, wire):
-    """Disagreement between the two witnesses stays ``not_determined``, and a
-    not-determined event stays COUNTED."""
     session = world["session"]
     proxy = world["contract"](PROXY_FACTORY_MADE)
     world["event"](proxy, TX_DEPLOY_FACTORY, BLOCK_DEPLOY_FACTORY)
     wire.receipts = {TX_DEPLOY_FACTORY: _receipt(TX_DEPLOY_FACTORY)}
     wire.creation = {PROXY_FACTORY_MADE: (TX_DEPLOY_FACTORY, BLOCK_DEPLOY_FACTORY)}
-    # The indexer names the tx, but the address already had code.
     wire.code = {(PROXY_FACTORY_MADE, hex(BLOCK_DEPLOY_FACTORY - 1)): "0x60016000"}
     _run_fold(session, wire, [proxy.id])
 
@@ -608,8 +498,6 @@ def test_one_witness_alone_never_proves_a_deployment(world, wire):
     )
     assert uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["count"] == 1
 
-    # Code absent but the indexer naming a DIFFERENT transaction is equally
-    # inadmissible.
     witness.creation_tx_hash = "0x" + "ee" * 32
     witness.code_absent_at_probe = True
     session.commit()
@@ -619,17 +507,11 @@ def test_one_witness_alone_never_proves_a_deployment(world, wire):
 
 
 def test_creation_probe_is_taken_only_where_it_could_decide(world, wire):
-    """The code probe is pinned to the block before the proxy's EARLIEST stored
-    event, and taken only when the indexer names that very transaction.
-
-    Elsewhere the second witness has nothing to corroborate, so a probe would
-    produce a height with no verdict attached — a stray fact a reader mistakes for one.
-    """
+    """Elsewhere a probe would produce a height with no verdict attached."""
     session = world["session"]
     proxy = world["contract"](PROXY_FACTORY_MADE)
     world["event"](proxy, TX_DEPLOY_FACTORY, BLOCK_DEPLOY_FACTORY)
     wire.receipts = {TX_DEPLOY_FACTORY: _receipt(TX_DEPLOY_FACTORY)}
-    # The indexer names a transaction this proxy never emitted an event in.
     wire.creation = {PROXY_FACTORY_MADE: ("0x" + "cc" * 32, BLOCK_DEPLOY_FACTORY - 500)}
     _run_fold(session, wire, [proxy.id])
 
@@ -647,9 +529,7 @@ def test_creation_probe_is_taken_only_where_it_could_decide(world, wire):
 
 
 def test_within_tx_double_upgrade_is_never_excluded(world, wire):
-    """A6 — a transaction that emitted two ``Upgraded`` logs for one proxy is a
-    swap-and-restore, not a plain creation; excluding it would drop a real
-    implementation change along with the creation."""
+    """A6: excluding a swap-and-restore would drop a real implementation change."""
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
     world["event"](proxy, TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA, impl="0x" + "aa" * 20)
@@ -670,20 +550,11 @@ def test_within_tx_double_upgrade_is_never_excluded(world, wire):
 
 
 def test_under_projected_pair_is_caught_by_the_receipts_own_count(world, wire):
-    """The stored rows cannot witness their own under-projection.
-
-    If a swap-and-restore transaction lands only ONE of its two ``Upgraded`` logs in
-    ``upgrade_events``, the deployment guard would exclude a transaction that also
-    carried a real implementation change. The receipt's own per-proxy log count is
-    the independent check; the guard takes the larger.
-
-    **Latent, with zero live instances**: all 3 measured swap-and-restore pairs are
-    fully projected and none is a creation transaction. Kept because the failure is
-    silent when it fires.
+    """If only one of a swap-and-restore's two logs was stored, the stored rows can't show it; the receipt's
+    per-proxy count is the independent check. Latent (0 live instances) but silent when it fires.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
-    # Only ONE row stored for a transaction whose receipt carries two.
     world["event"](proxy, TX_SWAP_AND_RESTORE, BLOCK_SWAP_AND_RESTORE, impl="0x" + "aa" * 20)
     world["classify"](SAFE_DIRECT_EMITTER, "safe")
     wire.receipts = {TX_SWAP_AND_RESTORE: _receipt(TX_SWAP_AND_RESTORE)}
@@ -694,9 +565,6 @@ def test_under_projected_pair_is_caught_by_the_receipts_own_count(world, wire):
     row = session.get(UpgradeTransaction, (1, TX_SWAP_AND_RESTORE))
     witness = session.get(ContractCreationWitness, (1, PROXY_SAFE_DIRECT))
     assert row.receipt_upgraded_counts[PROXY_SAFE_DIRECT] == 2
-    # Both creation witnesses agree, and the pair count from the stored rows is
-    # 1 — everything the deployment rule needs, except that the receipt says the
-    # transaction touched this proxy twice.
     assert witness.creation_tx_hash == TX_SWAP_AND_RESTORE
     assert witness.code_absent_at_probe is True
     assert not uh.event_is_deployment(
@@ -706,8 +574,6 @@ def test_under_projected_pair_is_caught_by_the_receipts_own_count(world, wire):
 
 
 def test_real_swap_and_restore_is_one_action_not_two(world, wire):
-    """The live shape of the same pair: a real Safe transaction that emitted two
-    ``Upgraded`` logs for one proxy. Two events, one exercise of authority."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SWAP_AND_RESTORE, BLOCK_SWAP_AND_RESTORE, impl="0x" + "aa" * 20)
@@ -723,13 +589,7 @@ def test_real_swap_and_restore_is_one_action_not_two(world, wire):
     assert entry["count"] == 1
 
 
-# ---------------------------------------------------------------------------
-# T6 / T7 / T8 — the fail-closed arms
-# ---------------------------------------------------------------------------
-
-
 def test_unavailable_receipt_writes_no_row_and_drops_no_event(world, wire):
-    """T6 — the event must not be dropped, defaulted, or reclassified."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -749,11 +609,8 @@ def test_unavailable_receipt_writes_no_row_and_drops_no_event(world, wire):
 
 
 def test_unclassified_safe_emitter_is_not_determined(world, wire):
-    """T7 — the 11 measured transactions on an unmodelled Safe.
-
-    The emitter really is a Safe. Nothing in the persisted classification plane
-    says so, and the fold does not get to decide that for itself: a marker log
-    from an address we cannot independently type mints no verdict.
+    """T7: the emitter really is a Safe, but nothing in the classification plane says so, and the fold may not decide
+    that itself.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
@@ -769,8 +626,6 @@ def test_unclassified_safe_emitter_is_not_determined(world, wire):
 
 
 def test_reverted_transaction_publishes_nothing_positive(world, wire):
-    """T8 — a reverted transaction cannot have upgraded anything, so every
-    positive is withheld even though the marker log shape is intact."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -800,14 +655,7 @@ def test_receipt_without_status_is_unusable(world, wire):
     assert session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT)) is None
 
 
-# ---------------------------------------------------------------------------
-# A4 — the classification height
-# ---------------------------------------------------------------------------
-
-
-# The classifier's ``probe_block`` is absent on every current row, so the height at which the emitter
-# was typed is unknown. The kind stays valid, but it never claims "the emitter was a Safe AT the
-# upgrade's block", which no receipt can prove.
+# ``probe_block`` is absent on every current row, so the kind never claims "was a Safe at the upgrade's block".
 @pytest.mark.parametrize(
     ("details", "expected_block"),
     [
@@ -835,31 +683,18 @@ def test_classification_block(world, wire, details, expected_block):
     row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
     assert row.executor_kind == "safe_direct"
     assert row.executor_classification_block == expected_block
-    # The direction that matters: the classification is strictly LATER than the upgrade it is being
-    # used to describe.
     assert expected_block is None or row.executor_classification_block > row.block_number
 
 
-# ---------------------------------------------------------------------------
-# T9 — the decoy question, answered honestly
-# ---------------------------------------------------------------------------
-
-
 def test_direct_upgrade_witnessed_block_is_published_and_decoy_is_not(world, wire):
-    """Only the positive is publishable.
-
-    History shows a direct-Safe path WAS exercised at a block, not that it is closed
-    now, so ``timelock_is_decoy`` is ``not_determined`` in BOTH arms (a later direct
-    upgrade exists, or not).
+    """History shows a path was exercised, not that it's closed now, so ``timelock_is_decoy`` is ``not_determined``
+    either way.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
     world["event"](proxy, TX_DIRECT_ON_DUAL_PROXY, BLOCK_DIRECT_ON_DUAL_PROXY)
     world["event"](proxy, TX_FANOUT, BLOCK_FANOUT)
-    # This Safe carries zero rows on every plane in the real corpus, so the real
-    # answer for its 11 transactions is not_determined (see the T7 test). Here
-    # it is classified deliberately: the question under test is what the fold
-    # does once the emitter IS typed.
+    # Classified deliberately; in the real corpus this Safe has no rows (see T7).
     world["classify"](SAFE_UNMODELLED, "safe")
     world["classify"](TIMELOCK, "timelock")
     world["classify"](SAFE_ROUTING_THE_TIMELOCK, "safe")
@@ -870,15 +705,11 @@ def test_direct_upgrade_witnessed_block_is_published_and_decoy_is_not(world, wir
     _run_fold(session, wire, [proxy.id])
 
     basis = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]["basis"]
-    # The real corpus shape: the direct upgrade PREDATES the timelock's use, by
-    # 7.8M blocks. It licenses no claim about the path being open or closed now.
     assert basis["direct_upgrade_witnessed_at_block"] == BLOCK_DIRECT_ON_DUAL_PROXY
     assert BLOCK_DIRECT_ON_DUAL_PROXY < BLOCK_FANOUT
     assert basis["timelock_is_decoy"] == "not_determined"
     assert basis["executor_kinds"] == {"safe_direct": 1, "timelock_routed": 1}
 
-    # Arm two: a direct upgrade that POSTDATES the timelock's first use. The
-    # observation changes; the published decoy verdict does not.
     later = session.query(UpgradeEvent).filter(UpgradeEvent.tx_hash == TX_DIRECT_ON_DUAL_PROXY).one()
     later.block_number = BLOCK_FANOUT + 1
     session.commit()
@@ -886,25 +717,14 @@ def test_direct_upgrade_witnessed_block_is_published_and_decoy_is_not(world, wir
     assert basis_after["timelock_is_decoy"] == "not_determined"
 
 
-# ---------------------------------------------------------------------------
-# T11 / A5 — the published count and its basis
-# ---------------------------------------------------------------------------
-
-
 def test_published_count_drops_the_deployment_and_keeps_the_unwitnessed(world, wire):
-    """T11 — with the receipt fact the proxy publishes one fewer upgrade; with
-    the fact absent it publishes the same number as before.
-
-    The count is an UPPER BOUND either way: removing a PROVEN non-upgrade never
-    over-claims, and leaving an unproven one in never under-claims.
-    """
+    """T11: the count is an upper bound either way."""
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
     world["event"](proxy, TX_DEPLOY_EOA, BLOCK_DEPLOY_EOA)
     world["event"](proxy, TX_ONE_HOP, BLOCK_ONE_HOP)
     world["event"](proxy, TX_FANOUT, BLOCK_FANOUT)
 
-    # No receipt facts yet: three events, three actions — today's answer.
     before = uh.upgrade_action_counts(session, [proxy.id])[proxy.id]
     assert before["count"] == 3
     assert before["basis"]["events_unlinked"] == 3
@@ -928,11 +748,8 @@ def test_published_count_drops_the_deployment_and_keeps_the_unwitnessed(world, w
 
 
 def test_post_exclusion_zero_is_not_determined_never_zero(world, wire):
-    """A5 — the number is RENDERED, so a zero would read as an earned negative.
-
-    Zero here only means "no non-deployment event recorded", and the recording surface
-    is unwitnessed (only ERC-1967 topics folded; ``old_impl`` NULL on backfilled rows).
-    The two proxies whose single stored event is their creation publish nothing.
+    """A5: the recording surface is unwitnessed (only ERC-1967 topics; ``old_impl`` NULL on backfilled rows), so zero
+    would read as an earned negative.
     """
     session = world["session"]
     proxy = world["contract"](PROXY_ONE_HOP)
@@ -949,8 +766,6 @@ def test_post_exclusion_zero_is_not_determined_never_zero(world, wire):
 
 
 def test_company_overview_publishes_the_count_with_its_basis(world, wire):
-    """The aggregation the UI reads must carry the sidecar, not the bare
-    number."""
     from services.aggregations.company_overview import _prefetch_child_tables
 
     session = world["session"]
@@ -968,19 +783,10 @@ def test_company_overview_publishes_the_count_with_its_basis(world, wire):
     assert entry["basis"]["recorded_event_coverage"] == "not_determined"
 
 
-# ---------------------------------------------------------------------------
-# Chain scoping of the classification planes (fix 2)
-#
-# An address is an identity only WITHIN a chain (CREATE2 twins on mainnet and Base
-# are unrelated). The fold reads the planes to mint a POSITIVE verdict, so an
-# unscoped read is a cross-chain fail-open of the class PR #158 closed elsewhere.
-# ---------------------------------------------------------------------------
+# Addresses are identities only within a chain; an unscoped read is the cross-chain fail-open PR #158 closed elsewhere.
 
 
 def test_off_chain_twin_does_not_classify_the_emitter(world, wire):
-    """FALSIFIER: the ONLY row typing this address is anchored to a Base
-    contract. The mainnet receipt must stay ``not_determined`` — no kind, no
-    ``executor_address``, no classification block."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -1002,9 +808,6 @@ def test_off_chain_twin_does_not_classify_the_emitter(world, wire):
 
 
 def test_same_chain_twin_still_classifies_exactly_as_before(world, wire):
-    """RECALL: the identical seeding on the receipt's own chain reaches the same
-    ``safe_direct`` verdict this file already pins elsewhere. The scoping cuts
-    the off-chain row and nothing else."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -1026,10 +829,7 @@ def test_same_chain_twin_still_classifies_exactly_as_before(world, wire):
 
 
 def test_classification_block_is_never_taken_from_another_chains_probe(world, wire):
-    """FALSIFIER: both chains type the address ``safe``, but only the Base row
-    carries a probe height. Publishing it beside a mainnet row would cite a
-    height measured on a chain this transaction was never on — so the field is
-    absent, not borrowed."""
+    """Publishing Base's probe height beside a mainnet row would cite a chain this tx was never on."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -1049,8 +849,6 @@ def test_classification_block_is_never_taken_from_another_chains_probe(world, wi
 
 
 def test_a_row_whose_contract_has_no_chain_classifies_nothing(world, wire):
-    """A contract whose chain is NULL is not determined to be on THIS chain, and
-    a not-determined chain can never license a positive verdict."""
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -1064,10 +862,9 @@ def test_a_row_whose_contract_has_no_chain_classifies_nothing(world, wire):
 
 
 def test_an_off_chain_disagreement_no_longer_blocks_a_same_chain_verdict(world, wire):
-    """The mirror of the fail-open: the unscoped read also FAILED CLOSED wrongly.
-    A Base row typing the twin ``timelock`` used to collide with the mainnet
-    ``safe`` row and blank the verdict. It is a different contract, so it is not
-    a disagreement at all."""
+    """The unscoped read also failed closed wrongly: a Base twin typed ``timelock`` blanked the mainnet ``safe``
+    verdict.
+    """
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
@@ -1081,8 +878,7 @@ def test_an_off_chain_disagreement_no_longer_blocks_a_same_chain_verdict(world, 
     assert row.executor_classified_type == "safe"
 
 
-# RECALL of the fail-closed arm: two rows on the emitter that disagree are an undecidable emitter,
-# including two rows on the RECEIPT'S OWN chain (``mainnet`` is the registry alias for chain 1).
+# ``mainnet`` is the registry alias for chain 1.
 @pytest.mark.parametrize(
     "classifications",
     [

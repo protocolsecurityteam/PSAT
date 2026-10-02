@@ -1,13 +1,5 @@
-"""``delegatecall.execute`` destination resolution, per destination kind.
-
-The self arm is why this module exists: a literal ``address(this)`` is a compile-time
-value no writer or caller can redirect, so it publishes the proven ``self`` kind with
-a proven-constrained ``destination_constraint`` — reached directly or (OZ v5
-``Multicall``) through a library formal, with the same answer.
-
-Arms that must NOT change are asserted in the same compile: caller-named stays
-``param``, storage-held stays ``storage_setter`` with its writer, and ``msg.sender``
-(a solidity variable like ``this``, but not this contract) stays ``indeterminate``.
+"""``address(this)`` is a compile-time value nobody can redirect, so it publishes the proven ``self`` kind, directly
+or via OZ v5 ``Multicall``'s library formal. The other arms are asserted unchanged in the same compile.
 """
 
 from __future__ import annotations
@@ -111,16 +103,12 @@ def witnesses(tmp_path_factory) -> dict[str, dict]:
 
 @pytest.mark.parametrize("signature", ["multicall(bytes[])", "selfCall(bytes)"])
 def test_address_this_destinations_resolve_to_self(witnesses, signature):
-    """Both routes to ``address(this)``. Before the self recognizer these fell
-    through to the catch-all and published ``unresolved_operand`` for a
-    compile-time constant."""
+    """These used to publish ``unresolved_operand`` for a compile-time constant."""
     assert witnesses[signature]["destination"]["target_kind"] == "self"
 
 
 @pytest.mark.parametrize("signature", ["multicall(bytes[])", "selfCall(bytes)"])
 def test_a_self_destination_carries_a_proven_constrained_verdict(witnesses, signature):
-    """``self`` is a PROVEN fixed destination, so its constraint is earned on the
-    destination operand — not the ``not_determined`` the unsettled kinds get."""
     assert witnesses[signature]["destination_constraint"] == {
         "state": "constrained",
         "guard": "literal_self",
@@ -130,8 +118,6 @@ def test_a_self_destination_carries_a_proven_constrained_verdict(witnesses, sign
 
 
 def test_the_claim_still_fires_on_a_self_destination(witnesses):
-    """Only the destination moved: a delegatecall IS happening either way, and
-    the sink evidence has to stay attached to say so."""
     for signature in ("multicall(bytes[])", "selfCall(bytes)"):
         witness = witnesses[signature]
         assert witness["kind"] == "delegatecall_sink"
@@ -146,8 +132,6 @@ def test_a_caller_named_destination_still_resolves_to_its_param(witnesses):
 
 
 def test_a_storage_held_destination_still_resolves_to_its_setter(witnesses):
-    """The other negative guard: whoever passes ``setModule``'s gate owns this
-    contract's storage, and that stays visible."""
     witness = witnesses["execModule(bytes)"]
     assert witness["destination"]["target_kind"] == "storage_setter"
     assert witness["destination"]["variable"] == "module"
@@ -156,9 +140,7 @@ def test_a_storage_held_destination_still_resolves_to_its_setter(witnesses):
 
 
 def test_msg_sender_is_not_read_as_self(witnesses):
-    """``msg.sender`` is a solidity variable too. Recognising the CLASS rather
-    than the name would hand a caller-controlled destination the strongest
-    verdict on the field."""
+    """Recognising the class rather than the name would give a caller-controlled destination the strongest verdict."""
     witness = witnesses["execSender(bytes)"]
     assert witness["destination"]["target_kind"] == "indeterminate"
     assert witness["destination_constraint"] == {"state": "not_determined"}

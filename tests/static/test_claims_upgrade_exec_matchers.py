@@ -1,13 +1,6 @@
-"""Upgrade / exec-family claim matchers, proven on real corpus sources.
-
-Two layers, both on the production stack (nothing under test is faked):
-
-* Slither-driven: each fixture under ``fixtures/contracts/claims_upgrade_exec`` is
-  compiled by the real static pipeline and the minted claims asserted. Every registry
-  entry gets a positive fixture, plus the mandated counterexample and adversarial
-  near-miss (non-proxy ``upgradeTo``; plain ``transfer`` value send).
-* Pure-facts: ``build_claims`` over synthetic ``effects``-shaped dicts locks contract-
-  level gate discrimination without a compiler, so it runs in every offline run.
+"""Upgrade/exec matchers on the production stack: compiled fixtures under ``fixtures/contracts/claims_upgrade_exec``
+(a positive, a counterexample and a near-miss per entry), plus ``build_claims`` over synthetic facts so gate
+discrimination runs without solc.
 """
 
 from __future__ import annotations
@@ -25,9 +18,7 @@ pytestmark = pytest.mark.compile
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "claims_upgrade_exec"
 
-# The claim families this task owns. Other matcher modules share the registry,
-# so every assertion scopes to these ids (a sibling ownership/authorized_caller
-# claim on the same function is legitimate and not this test's concern).
+# Other matcher modules share the registry, so assertions scope to these ids.
 OWNED_CLAIM_IDS = frozenset(
     {
         "upgrade.implementation",
@@ -44,15 +35,8 @@ OWNED_CLAIM_IDS = frozenset(
 )
 
 
-# ---------------------------------------------------------------------------
-# Slither-driven: the real static pipeline over compiled corpus fixtures
-# ---------------------------------------------------------------------------
-
-
 def _pipeline_claim_records(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, list[dict]]:
-    """Run the full static pipeline and return ``{signature: [claim dicts]}`` —
-    the full rows, so a test can hold the WITNESS to account, not only the
-    (claim_id, tier) pair a false verdict can hide behind."""
+    """Full rows, so a test can hold the witness to account, not just (claim_id, tier)."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / fixture_file).read_text()
@@ -61,7 +45,6 @@ def _pipeline_claim_records(tmp_path: Path, fixture_file: str, contract_name: st
     assert effects is not None and "functions" in effects
     out: dict[str, list[dict]] = {}
     for signature, record in effects["functions"].items():
-        # The claims phase always attaches the field, even when empty.
         assert "claims" in record, signature
         out[signature] = list(record["claims"])
     return out
@@ -72,12 +55,10 @@ def _claims_view(records: dict[str, list[dict]]) -> dict[str, set[tuple[str, str
 
 
 def _pipeline_claims(tmp_path: Path, fixture_file: str, contract_name: str) -> dict[str, set[tuple[str, str]]]:
-    """Run the full static pipeline and return ``{signature: {(claim_id, tier)}}``."""
     return _claims_view(_pipeline_claim_records(tmp_path, fixture_file, contract_name))
 
 
 def _claim_witness(records: dict[str, list[dict]], name: str, claim_id: str) -> dict:
-    """The single ``claim_id`` witness on the single function named ``name``."""
     matches = [sig for sig in records if sig.split("(", 1)[0] == name]
     assert len(matches) == 1, f"function {name!r}: {matches}"
     rows = [c for c in records[matches[0]] if c["claim_id"] == claim_id]
@@ -86,7 +67,6 @@ def _claim_witness(records: dict[str, list[dict]], name: str, claim_id: str) -> 
 
 
 def _find(claims: dict[str, set[tuple[str, str]]], name: str) -> set[tuple[str, str]]:
-    """Owned-family claims on the single function named ``name``."""
     matches = [sig for sig in claims if sig.split("(", 1)[0] == name]
     assert matches, f"no function named {name!r} in {sorted(claims)}"
     assert len(matches) == 1, f"ambiguous {name!r}: {matches}"
@@ -98,33 +78,26 @@ def _owned_total(claims: dict[str, set[tuple[str, str]]]) -> int:
 
 
 def test_uups_upgrade_positive(tmp_path):
-    """EETH-class UUPS: proxiableUUID gate → upgradeTo/AndCall both claim."""
     claims = _pipeline_claims(tmp_path, "uups_eeth_upgrade.sol", "EETH")
     assert _find(claims, "upgradeTo") == {("upgrade.implementation", "standard_exact")}
     assert _find(claims, "upgradeToAndCall") == {("upgrade.implementation", "standard_exact")}
-    # The gate marker itself (a view) is never a claim.
     assert _find(claims, "proxiableUUID") == set()
     assert _find(claims, "mintShares") == set()
 
 
 def test_proxy_shell_upgrade_and_admin_positive(tmp_path):
-    """wBETH-class zos shell: delegatecall-fallback gate recovers upgradeTo, and
-    changeAdmin gets proxy.admin_change (today: nothing)."""
     claims = _pipeline_claims(tmp_path, "proxy_shell_wbeth.sol", "WBETHProxy")
     assert _find(claims, "upgradeTo") == {("upgrade.implementation", "standard_exact")}
     assert _find(claims, "changeAdmin") == {("proxy.admin_change", "standard_exact")}
 
 
 def test_non_proxy_upgradeto_is_near_miss_negative(tmp_path):
-    """Adversarial: same selector, no proxy gate → no upgrade/admin claim."""
     claims = _pipeline_claims(tmp_path, "not_a_proxy_upgradeto.sol", "StrategyRegistry")
     assert _find(claims, "upgradeTo") == set()
     assert _find(claims, "changeAdmin") == set()
 
 
 def test_safe_family_positive(tmp_path):
-    """SafeL2-class: signer/module/guard control claims + exec.arbitrary on the
-    execute entries, all under the getThreshold+getOwners+execTransaction gate."""
     records = _pipeline_claim_records(tmp_path, "safe_wallet.sol", "SafeWallet")
     claims = _claims_view(records)
     signer = ("safe.signer_mgmt", "standard_exact")
@@ -137,25 +110,18 @@ def test_safe_family_positive(tmp_path):
     arb = ("exec.arbitrary", "standard_exact")
     for fn in ("execTransaction", "execTransactionFromModule", "execTransactionFromModuleReturnData"):
         assert _find(claims, fn) == {arb}, fn
-    # Gate views carry no claim.
     assert _find(claims, "getThreshold") == set()
     assert _find(claims, "getOwners") == set()
-    # 4 signer + 2 module + 1 guard + 3 exec = 10 owned claims across the Safe family.
+    # 4 signer + 2 module + 1 guard + 3 exec.
     assert _owned_total(claims) == 10
-    # Round-3 R1: the WITNESS, not only the (claim_id, tier) pair.
-    # execTransaction's destination rides under the owners' threshold
-    # signatures — the standard commitment, published identically on the exec
-    # and flow witnesses so the two can never contradict on one function.
+    # Round-3 R1: execTransaction's destination rides under the owners' signatures, published identically on exec and
+    # flow witnesses.
     signed = {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
     assert _claim_witness(records, "execTransaction", "exec.arbitrary")["destination_constraint"] == signed
     exec_flow = _claim_witness(records, "execTransaction", "flow.out")
     assert exec_flow["flows"][0]["target_constraint"] == signed
-    # The module-exec entries share the selectors and the gate, but their guard
-    # (`modules[msg.sender]`) is an allowlist on the CALLER: no signature
-    # commits `to`, an enabled module calls any target with any calldata. The
-    # tree walk sees exactly that caller-keyed gate and PROVES the destination
-    # free — the verdict that keeps the caller-chosen hazard standing
-    # downstream, and above all never `pins: True`.
+    # Module exec gates the caller (``modules[msg.sender]``), so the walk proves the destination free; never ``pins:
+    # True``.
     free = {"state": "unconstrained_proven"}
     for fn in ("execTransactionFromModule", "execTransactionFromModuleReturnData"):
         assert _claim_witness(records, fn, "exec.arbitrary")["destination_constraint"] == free, fn
@@ -164,8 +130,6 @@ def test_safe_family_positive(tmp_path):
 
 
 def test_oz_timelock_family_positive(tmp_path):
-    """TimelockController: per-selector timelock claims; execute/executeBatch
-    carry BOTH timelock.execute AND exec.arbitrary."""
     claims = _pipeline_claims(tmp_path, "oz_timelock.sol", "TimelockController")
     sched = ("timelock.schedule", "standard_exact")
     assert _find(claims, "schedule") == {sched}
@@ -175,14 +139,11 @@ def test_oz_timelock_family_positive(tmp_path):
     assert _find(claims, "executeBatch") == both
     assert _find(claims, "cancel") == {("timelock.cancel", "standard_exact")}
     assert _find(claims, "updateDelay") == {("timelock.set_delay", "standard_exact")}
-    # 6 timelock.* claims + 2 exec.arbitrary on the execute entries.
     assert _find(claims, "getMinDelay") == set()
     assert _find(claims, "hashOperation") == set()
 
 
 def test_boring_vault_manage_idiom_positive(tmp_path):
-    """BoringVault.manage: parameter-tainted target + calldata → exec.arbitrary at
-    the idiom tier (no standard gate)."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     idiom = ("exec.arbitrary", "idiom_structural")
     assert _find(claims, "manage") == {idiom}
@@ -190,11 +151,9 @@ def test_boring_vault_manage_idiom_positive(tmp_path):
 
 
 def test_the_manage_positive_still_names_its_two_parameters(tmp_path):
-    """The positive control for the binding change: where the answer was already
-    right it must stay right, by proof rather than by there being one candidate.
-
-    ``manage`` reaches its call through the library and ``manageDirect`` calls
-    directly, so the two bases are exercised on the same contract."""
+    """``manage`` reaches its call through a library and ``manageDirect`` directly; the answer must stay right by
+    proof, not by there being one candidate.
+    """
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / "boring_vault_manage.sol").read_text()
@@ -213,33 +172,27 @@ def test_the_manage_positive_still_names_its_two_parameters(tmp_path):
     assert witnesses["manageDirect"]["destination_param"] == "target"
     assert witnesses["manageDirect"]["calldata_param"] == "data"
     assert witnesses["manageDirect"]["destination_basis"] == "call_destination"
-    # The batch overload forwards an ELEMENT of each array; the binding names the
-    # array parameter the element came from.
+    # The binding names the array the forwarded element came from.
     assert witnesses["manageBatch"]["destination_param"] == "targets"
     assert witnesses["manageBatch"]["calldata_param"] == "data"
 
 
 def test_batch_manage_idiom_positive(tmp_path):
-    """The batch overload is the same executor with one array level added, and it
-    minted nothing: declared types are ``address[]``/``bytes[]``, and inside the loop
-    the call op reads an element reference. Both had to give for the claim to land.
-    Under-claiming is safe but not harmless — an executor with no exec.arbitrary claim
-    reads as an ordinary function."""
+    """Declared types are ``address[]``/``bytes[]`` and the loop reads element references; an executor without
+    exec.arbitrary reads as ordinary.
+    """
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     idiom = ("exec.arbitrary", "idiom_structural")
     assert _find(claims, "manageBatch") == {idiom}
 
 
 def test_batch_of_fixed_width_digests_is_a_near_miss_negative(tmp_path):
-    """``bytes32[]`` reduces to ``bytes32``, which is not arbitrary calldata —
-    widening the element type must not sweep in every batch that happens to carry
-    an address array."""
+    """``bytes32`` is not arbitrary calldata."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     assert _find(claims, "commitBatch") == set()
 
 
 def _binding_witnesses(tmp_path: Path) -> dict[str, dict]:
-    """``{function name: exec.arbitrary witness}`` over the binding corpus."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     source = (FIXTURES_DIR / "exec_arbitrary_binding.sol").read_text()
@@ -255,11 +208,7 @@ def _binding_witnesses(tmp_path: Path) -> dict[str, dict]:
 
 
 def test_the_destination_is_read_off_the_operand_not_the_read_set(tmp_path):
-    """Two address parameters, and the destination is the second one.
-
-    A read-set intersection pick lands on either, and on the two production functions
-    where a choice existed it landed on the wrong one (``lzCompose`` published ``_from``,
-    a SOURCE). Only the operand position separates them."""
+    """A read-set pick landed on the wrong parameter in production (``lzCompose`` published ``_from``, a source)."""
     witness = _binding_witnesses(tmp_path)["compose"]
     assert (witness["destination_param"], witness["destination_kind"]) == ("to", "param")
     assert witness["destination_basis"] == "call_destination"
@@ -267,10 +216,7 @@ def test_the_destination_is_read_off_the_operand_not_the_read_set(tmp_path):
 
 
 def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
-    """``IComposer(to).compose(from, message, extra)`` fixes the selector, so no argument
-    is an arbitrary calldata blob. Naming one (as the read-set pick did on three production
-    rows) asserts calldata the op does not carry. ``call_argument`` is the proven absence,
-    not ``not_determined``."""
+    """A typed call fixes the selector; ``call_argument`` is the proven absence, not ``not_determined``."""
     witness = _binding_witnesses(tmp_path)["compose"]
     assert witness["calldata_kind"] == "call_argument"
     assert witness["calldata_param"] is None
@@ -278,27 +224,17 @@ def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
 
 
 def test_a_state_variable_destination_mints_no_claim_at_all(tmp_path):
-    """INVERTED. This test used to assert the ``rebalance`` shape carries an
-    ``exec.arbitrary`` claim whose witness says ``state_var`` — the claim minted beside
-    the proof of its own negation. It is a false positive on the real row it modelled
-    (LRTSquaredAdmin.rebalance: the call goes to the storage-held ``swapper``; the two
-    address parameters are ARGUMENTS of a fixed-selector ``ISwapper.swap``).
+    """Inverted: modelled on LRTSquaredAdmin.rebalance, where the call goes to the storage-held ``swapper``.
 
-    The claim says "forwards a caller-supplied target"; ``state_var`` proves the caller
-    does not supply it, so the honest output is no claim — and, via the legacy
-    projection, no ``arbitrary_external_call`` label or "Executes arbitrary external
-    calldata" prose.
-
-    The proven-absent DESTINATION classification still matters: the suppression keys on
-    it (see ``test_the_state_var_destination_state_is_still_produced``)."""
+    ``state_var`` proves the caller doesn't supply the target, so no claim (and no legacy label or prose).
+    """
     assert "rebalance" not in _binding_witnesses(tmp_path)
 
 
 def test_the_state_var_destination_state_is_still_produced(tmp_path):
-    """R2 for the suppression above: the branch it fires on is reached by real compiler
-    output, on a single-op body AND a multi-op body whose every candidate op resolves to
-    storage. ``state_var`` is a function-wide quantifier now, so the multi-op arm proves
-    the suppression still has something real to fire on."""
+    """``state_var`` is a function-wide quantifier, so the multi-op arm proves the suppression still has something
+    real to fire on.
+    """
     from slither import Slither
 
     from services.static.claims.context import ClaimContext
@@ -319,11 +255,10 @@ def test_the_state_var_destination_state_is_still_produced(tmp_path):
 
 
 def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
-    """R4 — the un-hedged positive the suppression must not eat. The Safe/Zodiac
-    transaction-guard idiom calls a FIXED guard with ``(target, data)`` and then the
-    caller-supplied target with caller-supplied data. The first op resolves ``state_var``;
-    the second IS the arbitrary call. A fragment answering with the first op suppressed
-    the whole claim, silently and only in this statement order, so both orders are pinned."""
+    """Safe/Zodiac guard idiom: a fixed guard call then the arbitrary call.
+
+    Answering with the first op suppressed the claim in only this order, so both orders are pinned.
+    """
     witnesses = _binding_witnesses(tmp_path)
     fragment_fields = (
         "destination_param",
@@ -337,23 +272,16 @@ def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
         witness = witnesses[name]
         assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param"), name
         assert (witness["calldata_param"], witness["calldata_kind"]) == ("data", "param"), name
-    # Order-independence, field by field: swapping the two statements must not
-    # move a byte of the published binding.
     assert {f: witnesses["guardThenExec"][f] for f in fragment_fields} == {
         f: witnesses["execThenGuard"][f] for f in fragment_fields
     }
 
 
 def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tmp_path):
-    """Round-5 R1, on real compiler output: a mandatory NONVIEW guard call vetting the
-    caller-supplied ``(target, data)`` (Safe/Zodiac transaction-guard idiom) must leave
-    the destination-constraint answer OPEN, while the guardless control alone earns the
-    negative proof. Before the per-op transparency proof both published
-    ``unconstrained_proven``: the guard's leaf was swallowed as a body call."""
+    """Round-5 R1: before per-op transparency both published ``unconstrained_proven``."""
     records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
     guarded = _claim_witness(records, "execGuarded", "exec.arbitrary")
     open_control = _claim_witness(records, "execOpen", "exec.arbitrary")
-    # Same claim, same binding — only the constraint verdict may differ.
     for witness in (guarded, open_control):
         assert (witness["destination_param"], witness["destination_kind"]) == ("target", "param")
     assert guarded["destination_constraint"] == {"state": "not_determined"}
@@ -361,12 +289,9 @@ def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tm
 
 
 def test_a_shared_callee_identity_is_withheld_from_the_transparency_set(tmp_path):
-    """R2 firing proof for the withheld-subtraction branch, on compiled source.
-    ``execSharedIdentity`` calls ``exec`` on a FIXED receiver and the caller-chosen one:
-    a tree leaf carries the callee identity but not the receiver, so the shared identity
-    proves vacuousness for neither op and the answer stays open. ``execTyped`` (the same
-    caller-chosen op, no fixed sibling) is the control that keeps this from being an
-    always-hedge."""
+    """A tree leaf carries the callee identity but not the receiver, so a shared identity proves vacuousness for
+    neither op.
+    """
     records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
     shared = _claim_witness(records, "execSharedIdentity", "exec.arbitrary")
     typed = _claim_witness(records, "execTyped", "exec.arbitrary")
@@ -377,13 +302,9 @@ def test_a_shared_callee_identity_is_withheld_from_the_transparency_set(tmp_path
 
 
 def test_the_arbitrary_calls_own_revert_surface_is_still_transparent(tmp_path):
-    """R4 — the un-hedged sibling of the guard test above: transparency is earned, not
-    abolished. An op whose destination the IR proves parameter-rooted keeps its own revert
-    surface out of the walk — via a singly assigned local (``t.exec``), a typed call on
-    the parameter (``compose``), and a resolved library forwarder (``manageViaLibrary``) —
-    so the negative proof stays reachable. The two guard-shaped bodies stay open in BOTH
-    statement orders: their ``exec`` leaf belongs to the fixed-destination sibling op, so
-    its identity is withheld and the leaf blocks."""
+    """Transparency is earned per op (singly assigned local, typed call, resolved library forwarder); the
+    guard-shaped bodies stay open in both orders.
+    """
     witnesses = _binding_witnesses(tmp_path)
     for name in ("singlyAssignedLocal", "compose", "manageViaLibrary"):
         assert witnesses[name]["destination_constraint"] == {"state": "unconstrained_proven"}, name
@@ -392,10 +313,7 @@ def test_the_arbitrary_calls_own_revert_surface_is_still_transparent(tmp_path):
 
 
 def test_the_suppression_requires_every_op_to_be_state_var(tmp_path):
-    """The suppression's quantifier: it may fire only where EVERY candidate op's
-    destination is proven storage-held (``twoStateVarSinks``), and an open
-    question on any op outranks a proven absence on another
-    (``stateVarThenBranched`` mints the hedge)."""
+    """An open question on any op outranks a proven absence on another."""
     witnesses = _binding_witnesses(tmp_path)
     assert "twoStateVarSinks" not in witnesses
     hedged = witnesses["stateVarThenBranched"]
@@ -404,10 +322,9 @@ def test_the_suppression_requires_every_op_to_be_state_var(tmp_path):
 
 
 def test_a_library_forwarder_binds_through_its_own_body(tmp_path):
-    """``using Lib for address`` puts the library in the destination operand and
-    the real target in argument position. The library body says which argument
-    that is — as a low-level call, as inline assembly, and with the library's
-    own parameters in either order."""
+    """``using Lib for address`` puts the library in the destination operand; the body says which argument is the
+    real target.
+    """
     witnesses = _binding_witnesses(tmp_path)
     for name in ("manageViaLibrary", "manageReversed", "manageViaAssembly"):
         witness = witnesses[name]
@@ -417,32 +334,19 @@ def test_a_library_forwarder_binds_through_its_own_body(tmp_path):
 
 
 def test_an_unresolved_forwarder_publishes_not_determined_not_the_only_candidate(tmp_path):
-    """The third state, on a real library shape: OpenZeppelin's ``functionCall`` forwards
-    to a sibling rather than calling, so one level of resolution never reaches a call op.
-
-    ``target`` is the only address parameter, so a read-set pick would name it and be
-    right by luck. This distinguishes "we proved the binding" from "there was only one
-    thing to say"; the witness must not collapse them."""
+    """``functionCall`` forwards to a sibling; a read-set pick would be right by luck since ``target`` is the only
+    address parameter.
+    """
     witness = _binding_witnesses(tmp_path)["manageViaTwoStepLibrary"]
     assert witness["destination_kind"] == witness["calldata_kind"] == "not_determined"
     assert witness["destination_param"] is None and witness["calldata_param"] is None
 
 
 def test_a_destination_defined_twice_is_not_determined_not_either_proof(tmp_path):
-    """A name the body defines more than once carries several candidate values under ONE
-    Slither variable object (the IR is not SSA), so which one the call sees is a
-    control-flow question. Both published proof states are wrong answers:
-
-    * ``branchedStateOrParam`` reaches the call from storage on one path and a parameter
-      on the other. ``state_var`` there is a false proven ABSENCE of a caller-chosen
-      destination, which the consumer acts on (``_named_executor_slots`` reads any
-      non-``param`` kind as "no binding").
-    * ``branchedParams`` / ``reassignedLocal`` / ``paramWrittenAfterCall`` publish a
-      parameter NAME — a proof of presence on the wrong parameter.
-
-    ``stateWrittenAfterCall`` is the same shape on a state variable, and not
-    hypothetical: Solmate's ``Auth.setAuthority``, deployed inside BoringVault, calls
-    ``authority.canCall(...)`` and assigns ``authority`` afterwards."""
+    """Slither IR isn't SSA, so a multiply-defined name is a control-flow question and both proof states are wrong:
+    ``state_var`` is a false absence (``_named_executor_slots`` treats non-``param`` as no binding), and a
+    parameter name may be the wrong one. Solmate's ``Auth.setAuthority`` in BoringVault is a live instance.
+    """
     witnesses = _binding_witnesses(tmp_path)
     for name in (
         "branchedStateOrParam",
@@ -458,34 +362,20 @@ def test_a_destination_defined_twice_is_not_determined_not_either_proof(tmp_path
 
 
 def test_a_singly_assigned_local_still_binds_to_its_parameter(tmp_path):
-    """R4 — the un-hedged sibling of the test above, the difference between a resolver and
-    a resolver-shaped hedge.
-
-    ``address t = a; IExec(t).exec(a, d)`` defines ``t`` once, so the local IS the
-    parameter and the name is published. A guard hedging on "came through a local" would
-    fail here — and take ``BoringVault.manage`` with it."""
+    """``t`` is defined once, so it IS the parameter; a local-hedging guard would break ``BoringVault.manage``."""
     witness = _binding_witnesses(tmp_path)["singlyAssignedLocal"]
     assert (witness["destination_param"], witness["destination_kind"]) == ("a", "param")
     assert witness["destination_basis"] == "call_destination"
 
 
 def test_plain_transfer_is_taint_near_miss_negative(tmp_path):
-    """Address-tainted destination but no arbitrary calldata parameter → the
-    value send earns no exec.arbitrary claim."""
     claims = _pipeline_claims(tmp_path, "plain_transfer_call.sol", "PayableToken")
     assert _find(claims, "transfer") == set()
     assert _find(claims, "withdraw") == set()
     assert _owned_total(claims) == 0
 
 
-# ---------------------------------------------------------------------------
-# Pure-facts: gate discrimination without a compiler.
-#
-# The gate POSITIVES (uups / proxy-shell / safe / timelock) are proven on the
-# compiled fixtures above; this layer keeps only the facts-level NEGATIVES —
-# deterministic gate discrimination that needs no solc and so runs in every
-# offline suite even when a compiled positive skips.
-# ---------------------------------------------------------------------------
+# Facts-level gate negatives that need no solc; the positives are proven on the compiled fixtures above.
 
 
 def _fn(selector: str, *, sinks: list[dict] | None = None) -> dict:
@@ -497,8 +387,7 @@ def _external_call_sink(name: str) -> list[dict]:
 
 
 def test_facts_no_gate_no_upgrade_claim():
-    """Selector present, no proxiableUUID sibling / delegatecall fallback /
-    marker event (contract=None ⇒ no events) → the gate blocks the claim."""
+    """contract=None means no events."""
     effects = {
         "schema_version": "semantic-2",
         "contract_name": "Registry",
@@ -513,7 +402,6 @@ def test_facts_no_gate_no_upgrade_claim():
 
 
 def test_facts_safe_control_functions_need_the_gate():
-    """swapOwner without the Safe sibling triple is not a Safe signer op."""
     effects = {
         "schema_version": "semantic-2",
         "contract_name": "NotASafe",
@@ -524,8 +412,7 @@ def test_facts_safe_control_functions_need_the_gate():
 
 
 def test_facts_manage_idiom_fails_closed_without_a_contract():
-    """A body external_call sink but no Slither contract (degraded) cannot prove
-    taint, so the idiom arm emits nothing rather than guessing."""
+    """Degraded: no Slither contract means taint can't be proven."""
     effects = {
         "schema_version": "semantic-2",
         "contract_name": "Vault",
@@ -536,12 +423,8 @@ def test_facts_manage_idiom_fails_closed_without_a_contract():
 
 
 def test_fixed_destination_batch_forwarder_is_a_near_miss_negative(tmp_path):
-    """The address array is an ARGUMENT to a fixed sink, not the thing being called, so
-    this is not arbitrary execution. It minted anyway because the array sits in the call's
-    read set, reaching published output as an "arbitrary-call" chip and a "manager"
-    principal tag.
-
-    The direct test proves a real batch executor (its destination resolves to the array
-    itself), so argument position buys nothing for an array and costs a false badge."""
+    """The array is an argument to a fixed sink; it minted an "arbitrary-call" chip and "manager" tag because it sat
+    in the read set.
+    """
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     assert _find(claims, "notifyBatch") == set()

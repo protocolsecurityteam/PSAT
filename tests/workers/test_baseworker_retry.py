@@ -1,61 +1,21 @@
-"""Integration tests for ``BaseWorker._execute_job`` retry behaviour against real Postgres.
-
-Object storage is intentionally NOT configured; the artifact stays inline
-JSONB which keeps these tests offline-safe.
-"""
+"""Storage is unconfigured so artifacts stay inline and offline-safe."""
 
 from __future__ import annotations
 
-import os
-
-import pytest
 import requests
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
-from db.models import Artifact, Job, JobStage, JobStatus
+from db.models import Job, JobStage, JobStatus
 from db.queue import create_job
 from tests.cache_helpers import requires_postgres
+from tests.support.db_fixtures import (
+    _read_stage_errors,
+    clean_jobs,  # noqa: F401  (fixture, registered by import)
+    test_session_local,  # noqa: F401  (fixture, registered by import)
+)
 from workers.base import BaseWorker
 
 
-@pytest.fixture()
-def test_session_local(monkeypatch):
-    """Worker code opens fresh ``SessionLocal()`` instances that would otherwise hit the
-    prod DATABASE_URL."""
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-    test_engine = create_engine(test_url)
-    test_factory = sessionmaker(bind=test_engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("workers.base.SessionLocal", test_factory)
-    yield test_factory
-    test_engine.dispose()
-
-
-@pytest.fixture()
-def clean_jobs(db_session):
-    """The shared db_session fixture only sweeps monitoring tables on teardown."""
-    db_session.query(Artifact).delete()
-    db_session.query(Job).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(Artifact).delete()
-    db_session.query(Job).delete()
-    db_session.commit()
-
-
-def _read_stage_errors(session, job_id):
-    art = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == "stage_errors").one_or_none()
-    if art is None or art.data is None:
-        return None
-    return art.data
-
-
 class _ConfigurableWorker(BaseWorker):
-    """Worker whose ``process()`` runs a caller-supplied side effect (per-attempt failure shape)."""
-
     stage = JobStage.discovery
     next_stage = JobStage.static
     poll_interval = 0.0
@@ -75,11 +35,6 @@ class _ConfigurableWorker(BaseWorker):
 
 def _transient_exc():
     return requests.exceptions.ConnectionError("upstream blip")
-
-
-# ---------------------------------------------------------------------------
-# Transient → requeued
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -110,15 +65,8 @@ def test_transient_exception_requeues(clean_jobs, test_session_local, monkeypatc
     assert "ConnectionError" in errors[0]["exc_type"]
 
 
-# ---------------------------------------------------------------------------
-# Retries exhausted → failed_terminal
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local, monkeypatch):
-    """``last_failure_kind="transient"`` lets an operator tell exhaustion apart from
-    deterministic-from-the-start."""
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
 
@@ -126,9 +74,7 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
     job_row = create_job(job, {"address": "0xabc", "name": "exhaustion"})
 
     worker = _ConfigurableWorker(side_effect=lambda _n: _transient_exc())
-    # bump retry_count each iteration to mimic what the fleet observes across claims.
     for _ in range(5):
-        # Re-fetch the job each iteration so retry_count is current.
         job.expire_all()
         current = job.get(Job, job_row.id)
         worker._execute_job(job, current)
@@ -137,9 +83,7 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
     refreshed = job.get(Job, job_row.id)
     assert refreshed is not None
     assert refreshed.status == JobStatus.failed_terminal
-    # Retries-exhausted bumps retry_count to the full attempt count so the row
-    # records "5 total attempts before giving up" rather than "4 retries
-    # scheduled" — the latter would lose the final attempt's existence.
+    # Counting the final attempt keeps its existence on the row.
     assert refreshed.retry_count == 5
     assert refreshed.last_failure_kind == "transient"
 
@@ -147,13 +91,7 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
     assert payload is not None
     errors = payload["errors"]
     assert len(errors) == 5
-    # Chronological retry_count tagging: 0, 1, 2, 3, 4.
     assert [e["retry_count"] for e in errors] == [0, 1, 2, 3, 4]
-
-
-# ---------------------------------------------------------------------------
-# Terminal short-circuit
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -180,11 +118,6 @@ def test_terminal_exception_skips_retries(clean_jobs, test_session_local):
     assert errors[0]["retry_count"] == 0
 
 
-# ---------------------------------------------------------------------------
-# Eventual success after transient failures
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
@@ -200,7 +133,6 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
 
     worker = _ConfigurableWorker(side_effect=_side_effect)
 
-    # Patched so we don't need a real next-stage row.
     import workers.base as base
 
     advances: list = []
@@ -217,29 +149,19 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
     job.expire_all()
     refreshed = job.get(Job, job_row.id)
     assert refreshed is not None
-    # Row stays queued (patched advance_job never commits); the interesting
-    # assertions are retry_count and the artifact.
+    # The patched advance_job never commits.
     assert refreshed.retry_count == 2
 
     payload = _read_stage_errors(job, job_row.id)
     assert payload is not None
     errors = payload["errors"]
-    # Two transient failure entries, no entry from the third (successful) attempt.
     assert len(errors) == 2
     assert [e["retry_count"] for e in errors] == [0, 1]
     assert all(e["severity"] == "error" for e in errors)
-    # advance_job was called once after the third attempt's success.
     assert len(advances) == 1
 
 
-# ---------------------------------------------------------------------------
-# Corrupt prior artifact body is preserved as a degraded breadcrumb
-# ---------------------------------------------------------------------------
-#
-# A ``stage_errors`` body failing ``StageErrors.model_validate`` must not be
-# silently dropped (operators read /api/jobs/{id}/errors): prepend a
-# ``severity="degraded"``, ``phase="corrupt_prior"`` entry carrying it in
-# ``context.raw``, then the new entries.
+# A corrupt ``stage_errors`` body is kept as a ``corrupt_prior`` breadcrumb, since operators read /api/jobs/{id}/errors.
 
 
 @requires_postgres
@@ -250,10 +172,7 @@ def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, 
     db_session = clean_jobs
     job_row = create_job(db_session, {"address": "0xabc", "name": "corrupt-prior"})
 
-    # Pre-seed a body that fails ``StageErrors.model_validate``. Pydantic
-    # accepts unknown fields by default, so "shape mismatch" alone isn't
-    # enough — we need ``errors`` to be present-but-malformed (here: a list
-    # whose entries lack required fields like ``stage``/``severity``/...).
+    # Pydantic accepts unknown fields, so ``errors`` must be present but malformed.
     corrupt_body = {
         "schema_version": "v0-legacy",
         "errors": [
@@ -263,7 +182,6 @@ def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, 
     store_artifact(db_session, job_row.id, "stage_errors", data=corrupt_body)
     db_session.commit()
 
-    # Terminal exception so the failure path executes once.
     worker = _ConfigurableWorker(side_effect=lambda _n: ValueError("bad input"))
     worker._execute_job(db_session, job_row)
 
@@ -273,21 +191,17 @@ def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, 
     assert "errors" in payload
 
     entries = payload["errors"]
-    # Corrupt-prior breadcrumb first, then the just-failed attempt's entry.
     assert len(entries) == 2, f"expected breadcrumb + new error, got {entries}"
 
     breadcrumb = entries[0]
     assert breadcrumb["phase"] == "corrupt_prior"
     assert breadcrumb["severity"] == "degraded"
     assert breadcrumb["exc_type"] == "schema.CorruptPriorArtifact"
-    # Raw prior payload is preserved verbatim under context.raw so an
-    # operator can still read it via /api/jobs/{id}/errors.
     assert breadcrumb["context"]["raw"] == corrupt_body
 
     new_error = entries[1]
     assert new_error["severity"] == "error"
     assert "ValueError" in new_error["exc_type"]
 
-    # Round-trip: the artifact still validates as StageErrors.
     StageError.model_validate(breadcrumb)
     StageError.model_validate(new_error)

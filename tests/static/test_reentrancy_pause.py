@@ -1,59 +1,20 @@
-"""Tests for ReentrancyAnalyzer + PauseAnalyzer.
-
-Validates the structural detection rules don't depend on identifier
-names (so a renamed-equivalent contract classifies the same way as
-the canonical OZ source)."""
+"""Structural detection must not depend on identifier names."""
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
-    build_predicate_tree,
-)
 from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
     PauseAnalyzer,
     ReentrancyAnalyzer,
     apply_reentrancy_pause_pass,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
-
-
-def _build_trees(contract):
-    trees = {}
-    for fn in contract.functions:
-        if fn.is_constructor:
-            continue
-        trees[fn.full_name] = build_predicate_tree(fn)
-    return trees
-
-
-def _all_leaves(tree):
-    if tree is None:
-        return []
-    if tree.get("op") == "LEAF":
-        return [tree["leaf"]] if tree.get("leaf") else []
-    out = []
-    for child in tree.get("children") or []:
-        out.extend(_all_leaves(child))
-    return out
-
-
-# ---------------------------------------------------------------------------
-# ReentrancyAnalyzer
-# ---------------------------------------------------------------------------
+from tests.support.predicate_trees import _all_leaves, _build_trees  # noqa: E402
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def test_canonical_oz_reentrancy_guard_detected(tmp_path):
@@ -118,11 +79,6 @@ def test_no_reentrancy_pattern_returns_empty(tmp_path):
     contract = sl.contracts[0]
     guards = ReentrancyAnalyzer(contract).run()
     assert guards == set()
-
-
-# ---------------------------------------------------------------------------
-# PauseAnalyzer
-# ---------------------------------------------------------------------------
 
 
 def test_canonical_oz_pause_detected(tmp_path):
@@ -197,11 +153,6 @@ def test_unauth_writer_does_not_trigger_pause(tmp_path):
     assert pause_vars == set()
 
 
-# ---------------------------------------------------------------------------
-# Apply pass: leaves get reclassified
-# ---------------------------------------------------------------------------
-
-
 def test_apply_pass_classifies_reentrancy_leaf(tmp_path):
     sl = _compile(
         tmp_path,
@@ -268,7 +219,6 @@ def test_apply_pass_classifies_pause_leaf(tmp_path):
 
 
 def test_pause_does_not_clobber_sibling_role_check(tmp_path):
-    """Role leaf keeps its authority (not 'pause'); the pause surfaces as a condition."""
     sl = _compile(
         tmp_path,
         """
@@ -289,23 +239,16 @@ def test_pause_does_not_clobber_sibling_role_check(tmp_path):
         }
     """,
     )
-    # Use the most-derived contract (the inheriting one), not the interface
-    # which Slither also returns.
+    # Slither also returns the interface.
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_trees(contract)
     apply_reentrancy_pause_pass(contract, trees)
     leaves = _all_leaves(trees["pauseContract()"])
     assert leaves, "expected at least one leaf for pauseContract"
-    # At least one leaf keeps caller/delegated authority; 'business' would also be a regression.
     auth_leaves = [leaf for leaf in leaves if leaf["authority_role"] in ("caller_authority", "delegated_authority")]
     assert auth_leaves, (
         f"role-check leaf was clobbered or dropped — got authority_roles={[leaf['authority_role'] for leaf in leaves]}"
     )
-
-
-# ---------------------------------------------------------------------------
-# A.4 — apply_reentrancy_pause_pass returns PauseInfo
-# ---------------------------------------------------------------------------
 
 
 def test_apply_pass_returns_pause_info_for_canonical_pause(tmp_path):
@@ -337,7 +280,6 @@ def test_apply_pass_returns_pause_info_for_canonical_pause(tmp_path):
     pause_info = apply_reentrancy_pause_pass(contract, trees)
     assert pause_info is not None
     assert "_paused" in pause_info["pause_state_vars"]
-    # PauseAnalyzer admits the var via one auth-gated writer; _build_pause_info lists all writers.
     assert "pause()" in pause_info["pause_toggle_functions"]
     assert "unpause()" in pause_info["pause_toggle_functions"]
 
@@ -387,11 +329,6 @@ def test_apply_pass_returns_empty_pause_info_when_nothing_detected(tmp_path):
     assert pause_info["pause_toggle_functions"] == []
     assert pause_info["reentrancy_state_vars"] == []
     assert pause_info["reentrancy_guarded_functions"] == []
-
-
-# ---------------------------------------------------------------------------
-# A.4 — _detect_pausability consumes PauseInfo
-# ---------------------------------------------------------------------------
 
 
 def test_detect_pausability_consumes_pause_info(tmp_path):
@@ -472,12 +409,9 @@ _NO_PAUSE = """
 
 
 def _pause_inputs(tmp_path: Path, source: str):
-    """``(contract, pause_info, trees_artifact, effects_with_claims, effects_without_claims)``.
-
-    The two effects artifacts are what ``core`` can hand ``_detect_pausability``
-    when nothing raises vs when only the claims block raises: identical
-    ``functions`` maps, one carrying the ``claims`` key and one not.
-    ``trees_artifact`` is the third, independently degradable input."""
+    """What ``core`` hands ``_detect_pausability`` when nothing raises vs when only claims raises; trees are the
+    third degradable input.
+    """
     from services.static.claims import attach_claims_to_effects, build_claims, project_effect_labels
     from services.static.contract_analysis_pipeline.effects import build_effects
     from services.static.contract_analysis_pipeline.predicate_artifacts import (
@@ -493,10 +427,7 @@ def _pause_inputs(tmp_path: Path, source: str):
 
 
 def test_detect_pausability_empty_when_no_pause(tmp_path):
-    """R4 positive arm for the un-hedged ``False``: no pause shape and ALL THREE planes ran.
-
-    Effects are passed with claims attached plus the real trees artifact; either degraded
-    input would pin ``False`` on a run where the discriminating evidence was never computed."""
+    """R4: either degraded input would pin ``False`` on a run that never computed the evidence."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
@@ -506,30 +437,24 @@ def test_detect_pausability_empty_when_no_pause(tmp_path):
 
 
 def test_detect_pausability_is_not_determined_without_the_claims_plane(tmp_path):
-    """R1/R2: three ways ``core`` reaches ``_detect_pausability`` without the claims matcher
-    having run, all of which must answer not-determined.
-
-    The third is invisible to a populated-``functions`` test: ``core`` runs ``build_effects``
-    and the claims block under separate ``try``/``except`` (``core.py:225-253``), so when only
-    claims raises every record is present but claim-free."""
+    """R1/R2: ``core`` runs effects and claims under separate try/except, so a claims failure leaves every record
+    present but claim-free.
+    """
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
     contract, pause_info, trees, _, claim_free = _pause_inputs(tmp_path, _NO_PAUSE)
     degraded = {"schema_version": "semantic", "error": "boom"}
     assert _detect_pausability(contract, tmp_path, pause_info, degraded, trees)["is_pausable"] is None
     assert _detect_pausability(contract, tmp_path, pause_info, None, trees)["is_pausable"] is None
-    # The claims stage raised; the effects map is fully populated.
     assert claim_free["functions"], "guard: this arm is only meaningful on a populated map"
     assert all("claims" not in record for record in claim_free["functions"].values())
     assert _detect_pausability(contract, tmp_path, pause_info, claim_free, trees)["is_pausable"] is None
 
 
 def test_detect_pausability_is_not_determined_without_the_trees_plane(tmp_path):
-    """R1/R2 on the THIRD independently degradable plane.
-
-    ``core.py:206-221`` catches the trees stage alone and substitutes an error stub plus empty
-    ``PauseInfo``; nothing downstream raises, so the claims-key discriminator answers True
-    while BOTH pause detectors were blind. ``None`` is the only honest verdict."""
+    """``core.py`` substitutes an empty ``PauseInfo`` when the trees stage fails, so the claims discriminator says
+    True while both detectors were blind.
+    """
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
     contract, _pause_info, _trees, with_claims, _ = _pause_inputs(tmp_path, _NO_PAUSE)
@@ -540,17 +465,12 @@ def test_detect_pausability_is_not_determined_without_the_trees_plane(tmp_path):
         "reentrancy_state_vars": [],
         "reentrancy_guarded_functions": [],
     }
-    # Guard: the claims plane looks healthy, which is exactly the trap.
     assert with_claims["functions"], "guard: this arm is only meaningful on a populated map"
     assert any("claims" in record for record in with_claims["functions"].values())
 
     assert _detect_pausability(contract, tmp_path, empty_pause_info, with_claims, degraded_trees)["is_pausable"] is None
     assert _detect_pausability(contract, tmp_path, empty_pause_info, with_claims, None)["is_pausable"] is None
 
-
-# ---------------------------------------------------------------------------
-# Latch shape — a pause var is a FLAG, not a governed quantity
-# ---------------------------------------------------------------------------
 
 _TIMELOCK_MIN_DELAY = """
 pragma solidity ^0.8.19;
@@ -575,13 +495,9 @@ contract TL {
 
 
 def test_timelock_min_delay_is_not_a_pause_latch(tmp_path):
-    """OZ TimelockController's ``uint256 _minDelay`` matches the
-    written-by-auth + read-with-revert fingerprint (``updateDelay`` is
-    self-gated; ``schedule`` reverts on insufficient delay) but is a governed
-    DURATION, not a latch. Classifying it as one published
-    ``is_pausable=true`` on two mainnet TimelockControllers with no pause
-    mechanism at all (PR-161 contracts 471/554, chain-refuted:
-    ``paused()`` reverts, ``getMinDelay()`` returns a duration)."""
+    """``_minDelay`` matches the auth-written, revert-read fingerprint but is a duration; it published
+    ``is_pausable=true`` on two chain-refuted TimelockControllers (PR-161 contracts 471/554).
+    """
     sl = _compile(tmp_path, _TIMELOCK_MIN_DELAY)
     contract = next(c for c in sl.contracts if c.name == "TL")
     trees = _build_trees(contract)
@@ -590,15 +506,12 @@ def test_timelock_min_delay_is_not_a_pause_latch(tmp_path):
     pause_info = apply_reentrancy_pause_pass(contract, trees)
     assert pause_info["pause_state_vars"] == []
     assert pause_info["pause_toggle_functions"] == []
-    # The comparison leaves reading _minDelay must not be promoted to the
-    # pause authority role either.
     for tree in trees.values():
         for leaf in _all_leaves(tree):
             assert leaf.get("authority_role") != "pause"
 
 
 def test_timelock_min_delay_detect_pausability_false_end_to_end(tmp_path):
-    """All three planes run: publishes ``is_pausable=False`` (not the refuted ``true``, not ``None``)."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _TIMELOCK_MIN_DELAY)
@@ -626,9 +539,7 @@ contract Timelock2 {
 
 
 def test_modifier_hosted_relational_bound_is_not_a_latch(tmp_path):
-    """A modifier-hosted relational bound (``require(delay >= _minDelay)``) must get the same
-    flag discipline as the other arms, or it admits ``_minDelay`` as a latch (the refuted
-    TimelockController shape, ``updateDelay`` published as both pause and unpause)."""
+    """Otherwise ``updateDelay`` publishes as both pause and unpause."""
     sl = _compile(tmp_path, _MODIFIER_RELATIONAL_BOUND)
     contract = next(c for c in sl.contracts if c.name == "Timelock2")
     trees = _build_trees(contract)
@@ -647,7 +558,6 @@ def test_modifier_hosted_relational_bound_publishes_false_end_to_end(tmp_path):
 
 
 def test_modifier_hosted_relational_bound_inherited_variant(tmp_path):
-    """Same shape with candidate and modifier in an abstract ancestor (private AND internal)."""
     for vis in ("private", "internal"):
         sl = _compile(
             tmp_path,
@@ -674,8 +584,7 @@ def test_modifier_hosted_relational_bound_inherited_variant(tmp_path):
 
 
 def test_uint_latch_with_gating_modifier_still_detected(tmp_path):
-    """R4 positive control: EigenLayer shape (``uint256 _paused`` written from a PARAMETER, read
-    by a gating modifier) is a real latch and must keep detecting after ``_minDelay`` is rejected."""
+    """R4: EigenLayer's parameter-written ``uint256 _paused``."""
     sl = _compile(
         tmp_path,
         """
@@ -720,9 +629,9 @@ def test_uint_constant_toggle_latch_still_detected(tmp_path):
 
 
 def test_uint_latch_read_through_helper_in_modifier_detected(tmp_path):
-    """EigenLayer Pausable shape: the modifier reads the latch THROUGH a helper
-    (``require(!paused(index))``). Without the helper hop, EigenStrategy's ``is_pausable=true``
-    rode on a fabricated ``totalShares`` latch (PR-161 contract 635)."""
+    """Without the helper hop, EigenStrategy's pausability rode on a fabricated ``totalShares`` latch (PR-161
+    contract 635).
+    """
     sl = _compile(
         tmp_path,
         """
@@ -761,8 +670,6 @@ def test_uint_latch_read_through_helper_in_modifier_detected(tmp_path):
     contract = next(c for c in sl.contracts if c.name == "EPI")
     trees = _build_trees(contract)
     detected = PauseAnalyzer(contract, trees).run()
-    # The real latch is admitted; the quantity var is not (it is written
-    # from computed values and gates nothing through a modifier).
     assert "_paused" in detected
     assert "totalShares" not in detected
 
@@ -780,10 +687,7 @@ contract UInline {
 
 
 def test_uint_latch_parameter_written_inline_require_detected(tmp_path):
-    """R4 positive control for the third flag-evidence arm: a PARAMETER-written uint latch gated
-    by an INLINE ``require(pausedStatus == 0)`` (no modifier). Dropping it published
-    ``is_pausable=False`` on a pausable contract. The equality-vs-CONSTANT read is the flag
-    evidence; ``_minDelay``'s relational read stays out."""
+    """The equality-vs-constant read is the flag evidence; ``_minDelay``'s relational read stays out."""
     sl = _compile(tmp_path, _UINT_INLINE_LATCH)
     contract = next(c for c in sl.contracts if c.name == "UInline")
     trees = _build_trees(contract)
@@ -791,7 +695,6 @@ def test_uint_latch_parameter_written_inline_require_detected(tmp_path):
 
 
 def test_uint_latch_parameter_written_inline_require_publishes_true(tmp_path):
-    """End-to-end: all three planes run and the inline uint latch publishes ``is_pausable=True``."""
     from services.static.contract_analysis_pipeline.summaries import _detect_pausability
 
     contract, pause_info, trees, with_claims, _ = _pause_inputs(tmp_path, _UINT_INLINE_LATCH)
@@ -814,9 +717,7 @@ contract CE {
 
 
 def test_uint_latch_custom_error_if_revert_detected(tmp_path):
-    """R4 positive control: post-0.8.4 ``if (pausedFlag != 0) revert Paused();``. The revert is
-    in a SEPARATE node from the comparison, so a same-node IR scan misses it; the flag test
-    must look at the polarity-folded ``eq``-vs-constant leaf."""
+    """The revert is in a separate node, so the flag test reads the polarity-folded leaf."""
     sl = _compile(tmp_path, _UINT_CUSTOM_ERROR_LATCH)
     contract = next(c for c in sl.contracts if c.name == "CE")
     trees = _build_trees(contract)
@@ -834,8 +735,6 @@ def test_uint_latch_custom_error_if_revert_publishes_true(tmp_path):
 
 
 def test_uint_latch_read_through_getter_inline_detected(tmp_path):
-    """R4 positive control: the revert read reaches the latch through a GETTER; the leaf plane
-    resolves the hop, while a same-node IR scan sees only a TMP."""
     sl = _compile(
         tmp_path,
         """
@@ -855,8 +754,6 @@ def test_uint_latch_read_through_getter_inline_detected(tmp_path):
 
 
 def test_uint_latch_inline_mask_no_modifier_detected(tmp_path):
-    """R4 positive control: inline bit-mask latch (``require(_paused & 1 == 0)``); the equality's
-    direct operand is the mask TMP, so the leaf plane must fold the arithmetic."""
     sl = _compile(
         tmp_path,
         """
@@ -908,12 +805,9 @@ contract DerivedStrategy is BasePausable {
 
 
 def test_private_latch_declared_in_abstract_base_detected(tmp_path):
-    """R4 for the EigenStrategy shape (PR-161 contract 635): the ``uint256 _paused`` latch is
-    ``private`` in an abstract base. ``contract.state_variables`` excludes private ancestor
-    declarations while the writer index sees the writers, so a same-contract-only lookup vetoed
-    the latch and published ``is_pausable=False`` on a chain-pausable contract. The lookup must
-    cover ``[contract, *inheritance]``; the same-contract variant is
-    ``test_uint_latch_read_through_helper_in_modifier_detected``."""
+    """``contract.state_variables`` excludes private ancestor declarations while the writer index sees the writers,
+    so the lookup must cover the inheritance chain (PR-161 contract 635).
+    """
     sl = _compile(tmp_path, _PRIVATE_BASE_LATCH)
     contract = next(c for c in sl.contracts if c.name == "DerivedStrategy")
     trees = _build_trees(contract)

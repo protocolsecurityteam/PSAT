@@ -1,6 +1,4 @@
-"""Shared fixtures, helpers and constants for static cache tests: a PostgreSQL ``db_session`` with the full PSAT
-schema (needs TEST_DATABASE_URL) that test modules import from here.
-"""
+"""Shared fixtures for static cache tests (needs TEST_DATABASE_URL)."""
 
 from __future__ import annotations
 
@@ -19,10 +17,6 @@ from tests.conftest import requires_postgres as requires_postgres
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
-
-# ---------------------------------------------------------------------------
-# Address / data constants
-# ---------------------------------------------------------------------------
 
 ADDR_A = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
 ADDR_B = "0x0000000000000000000000000000000000000099"
@@ -184,7 +178,6 @@ FAKE_UH_NEW = {
 }
 
 
-# Keep this export for test files that still import it
 def _sqlite_compatible_store_artifact(session, job_id, name, data=None, text_data=None):
     from db.models import Artifact
 
@@ -195,11 +188,6 @@ def _sqlite_compatible_store_artifact(session, job_id, name, data=None, text_dat
     else:
         session.add(Artifact(job_id=job_id, name=name, data=data, text_data=text_data))
     session.commit()
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -270,11 +258,6 @@ def db_session():
         session.commit()
         session.close()
         engine.dispose()
-
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
 
 
 def _create_completed_job_with_static_data(session, address=ADDR_A):

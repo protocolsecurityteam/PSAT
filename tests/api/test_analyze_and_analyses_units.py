@@ -1,11 +1,3 @@
-"""Unit tests for the analyze / analyses endpoints — mocked sessions, no Postgres.
-
-Covers:
-- POST /api/analyze with company and address payloads, plus validation
-- GET /api/analyses proxy flagging via contract_flags artifact
-- GET /api/analyses/{run_name} impl-to-proxy artifact fallback
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -16,9 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from tests.support.api_helpers import _mock_session_ctx
 
 
 def _fake_api_job(
@@ -31,7 +21,6 @@ def _fake_api_job(
     request: dict | None = None,
     is_proxy: bool = False,
 ):
-    """Build a MagicMock that behaves like db.models.Job."""
     job = MagicMock()
     uid = uuid.UUID(job_id) if job_id else uuid.uuid4()
     job.id = uid
@@ -44,9 +33,7 @@ def _fake_api_job(
     job.request = request or {}
     job.error = None
     job.worker_id = None
-    # Must be set explicitly — bare MagicMock attributes are truthy and
-    # the analyses listing now reads Job.is_proxy directly (denormalized
-    # from contract_flags by the static worker).
+    # A bare MagicMock attribute is truthy, and the listing reads Job.is_proxy directly.
     job.is_proxy = is_proxy
     job.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     job.updated_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -67,21 +54,10 @@ def _fake_api_job(
     return job
 
 
-def _mock_session_ctx(mock_session_cls, mock_session):
-    """Wire up a mock SessionLocal so `with SessionLocal() as session:` works."""
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-
 def _make_client() -> TestClient:
     import api
 
     return TestClient(api.app)
-
-
-# ---------------------------------------------------------------------------
-# 2. POST /api/analyze — address payload
-# ---------------------------------------------------------------------------
 
 
 @patch("routers.deps.SessionLocal")
@@ -123,18 +99,9 @@ def test_analyze_address_creates_job(mock_create_job, mock_session_cls):
     assert req_dict.get("company") is None
 
 
-# ---------------------------------------------------------------------------
-# 3. GET /api/analyses — proxy flagging via contract_flags artifact
-# ---------------------------------------------------------------------------
-
-
 @patch("routers.deps.SessionLocal")
 def test_analyses_list_proxy_flagging(mock_session_cls):
-    """A completed proxy job + its impl job merge into one entry carrying is_proxy, proxy_type
-    and implementation_address from the contract_flags artifact.
-
-    _merge_proxy_impl_entries hides standalone proxy entries whose impl child hasn't
-    completed, so both jobs must be present."""
+    """Proxy entries whose impl child hasn't completed are hidden, so both jobs must be present."""
     client = _make_client()
     proxy_job_id = uuid.uuid4()
     impl_job_id = uuid.uuid4()
@@ -167,9 +134,7 @@ def test_analyses_list_proxy_flagging(mock_session_cls):
     impl_job.status = JobStatus.completed
     proxy_job.status = JobStatus.completed
 
-    # proxy_type, implementation and contract_name come from Contract rows (the listing no
-    # longer fetches artifact bodies). The merge prefers the impl's name over generic proxy
-    # names like "UUPSProxy", so both rows must be mocked.
+    # The merge prefers the impl's name over generic proxy names, so both Contract rows are mocked.
     proxy_contract_row = SimpleNamespace(
         address=proxy_addr,
         chain=None,
@@ -189,10 +154,7 @@ def test_analyses_list_proxy_flagging(mock_session_cls):
         implementation=None,
     )
 
-    # /api/analyses query order:
-    #   1. select(Job)             → jobs list
-    #   2. select(Contract...)     → contracts_by_address (returns .scalars())
-    #   3. select(Artifact.job_id, Artifact.name) → name-only artifact rows (.all())
+    # Query order: jobs, contracts (.scalars()), artifact names (.all()).
 
     call_count = {"n": 0}
 
@@ -204,8 +166,6 @@ def test_analyses_list_proxy_flagging(mock_session_cls):
         elif call_count["n"] == 2:
             result.scalars.return_value = iter([proxy_contract_row, impl_contract_row])
         elif call_count["n"] == 3:
-            # Artifact-name listing — empty is fine; this test only cares
-            # about contract_name resolution from Contract rows.
             result.all.return_value = []
         else:
             result.scalars.return_value.all.return_value = []
@@ -220,18 +180,11 @@ def test_analyses_list_proxy_flagging(mock_session_cls):
     entries = response.json()
     assert len(entries) >= 1
 
-    # The merged entry carries proxy info via proxy_address_display and
-    # proxy_type_display (not is_proxy — that field comes from the impl
-    # entry base in the merge, where it's False).
+    # Proxy info rides proxy_address_display/proxy_type_display; is_proxy comes from the impl entry.
     merged = entries[0]
     assert merged["proxy_address_display"] == proxy_addr
     assert merged["proxy_type_display"] == "ERC1967"
     assert merged["display_name"] == "VaultImpl"
-
-
-# ---------------------------------------------------------------------------
-# 4. GET /api/analyses/{run_name} — impl-to-proxy artifact fallback
-# ---------------------------------------------------------------------------
 
 
 @patch("routers.deps.get_artifact")
@@ -265,18 +218,14 @@ def test_analysis_detail_falls_back_to_proxy_artifacts(mock_session_cls, mock_ge
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    # The detail endpoint does:
-    # 1. select(Job).where(Job.name == run_name) -> returns impl_job
-    # 2. select(Job).where(Job.address == proxy_address) -> returns proxy_job
+    # Query order: impl job by name, then proxy job by address.
     call_count = {"n": 0}
 
     def route_execute(stmt, *args, **kwargs):
         call_count["n"] += 1
         result = MagicMock()
-        # First execute: lookup impl job by name
         if call_count["n"] == 1:
             result.scalar_one_or_none.return_value = impl_job
-        # Second execute: lookup proxy job by address
         else:
             result.scalar_one_or_none.return_value = proxy_job
         return result
@@ -302,9 +251,6 @@ def test_analysis_detail_falls_back_to_proxy_artifacts(mock_session_cls, mock_ge
         "dependencies": proxy_dependencies,
     }
 
-    # get_all_artifacts is called once per job — return impl's artifacts for
-    # the impl job's job.id and proxy's artifacts for the proxy job's job.id
-    # (matches the batched proxy-fallback in analysis_detail).
     def fake_get_all_artifacts(session, jid):
         if str(jid) == str(proxy_job_id):
             return proxy_artifacts
@@ -368,9 +314,7 @@ def test_analysis_detail_no_fallback_when_impl_has_artifacts(
     body = response.json()
     assert body["dependency_graph_viz"] == impl_dep_graph
     assert body["dependencies"] == impl_dependencies
-    # get_artifact may still be called for upgrade_history (which the impl
-    # doesn't have), but dependency_graph_viz and dependencies must NOT be
-    # fetched from the proxy since they already exist on the impl.
+    # dependency_graph_viz and dependencies already exist on the impl, so they must not be fetched from the proxy.
     for call_args in mock_get_artifact.call_args_list:
         artifact_name = call_args[0][2] if len(call_args[0]) >= 3 else call_args[1].get("name")
         assert artifact_name not in ("dependency_graph_viz", "dependencies"), (
@@ -396,9 +340,7 @@ def test_analysis_detail_no_fallback_without_proxy_address(mock_session_cls, moc
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    # The endpoint calls session.execute() multiple times:
-    # 1. select(Job).where(name==...) -> returns job
-    # 2. select(Contract).where(job_id==...) -> returns None (no Contract row)
+    # Query order: job by name, then Contract by job_id (none).
     call_count = {"n": 0}
 
     def route_execute(stmt, *args, **kwargs):
@@ -407,7 +349,6 @@ def test_analysis_detail_no_fallback_without_proxy_address(mock_session_cls, moc
         if call_count["n"] == 1:
             result.scalar_one_or_none.return_value = job
         else:
-            # Contract query and any others: return None
             result.scalar_one_or_none.return_value = None
             result.scalars.return_value.all.return_value = []
         return result
@@ -429,17 +370,10 @@ def test_analysis_detail_no_fallback_without_proxy_address(mock_session_cls, moc
     assert "dependency_graph_viz" not in body
 
 
-# ---------------------------------------------------------------------------
-# 5. GET /api/analyses/{run_name} — proxy detail inherits impl artifacts
-# ---------------------------------------------------------------------------
-
-
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_get_artifact, mock_get_all_artifacts):
-    """Proxy detail inherits analysis artifacts (contract_analysis, effective_permissions, ...)
-    from the impl child job — the reverse of the impl->proxy dependency fallback."""
     client = _make_client()
 
     proxy_addr = "0x1111111111111111111111111111111111111111"
@@ -483,14 +417,8 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
     impl_contract.address = impl_addr
     impl_contract.summary = None
 
-    # The endpoint calls session.execute() many times:
-    # 1. select(Job) by name -> proxy_job
-    # 2. select(Contract) by job_id (proxy) -> proxy_contract
-    # 3-7. EffectiveFunction/PrincipalLabel/ControllerValue/CGN/CGE for proxy -> empty
-    # 8. select(Job) by address==impl_addr -> impl_job
-    #    (get_all_artifacts for impl is not an execute call)
-    # 9. select(Contract) by job_id (impl) -> impl_contract
-    #    (relational queries for impl are skipped since artifacts already filled them)
+    # Query order: proxy job by name, proxy Contract, five empty relational queries, impl job by address,
+    # impl Contract. The impl's relational queries are skipped because its artifacts already filled them.
     call_count = 0
 
     def route_execute(stmt, *args, **kwargs):
@@ -544,7 +472,6 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
 
     mock_get_artifact.side_effect = fake_get_artifact
 
-    # get_all_artifacts: first call for proxy, second for impl
     call_count_artifacts = 0
 
     def fake_get_all(session, jid):
@@ -573,11 +500,6 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
     assert body["implementation_address"] == impl_addr
 
 
-# ---------------------------------------------------------------------------
-# Audit report endpoints
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("method", "url"),
     [
@@ -594,14 +516,7 @@ def test_unknown_company_404(mock_session_cls, method, url):
 
     response = getattr(client, method)(url)
     assert response.status_code == 404
-    # Pure lookup: no DELETE should have run.
     assert mock_session.commit.call_count == 0
-
-
-# ---------------------------------------------------------------------------
-# DELETE /api/company/{name}/queued-jobs — test-isolation teardown for
-# analyze-remaining flood
-# ---------------------------------------------------------------------------
 
 
 @patch("routers.deps.SessionLocal")
@@ -623,7 +538,6 @@ def test_cancel_queued_company_jobs_returns_deleted_ids(mock_session_cls):
         if call_count["n"] == 1:
             result.scalar_one_or_none.return_value = protocol
         else:
-            # Second call: DELETE ... RETURNING id — iterator yields single-col rows
             result.__iter__ = lambda self: iter((i,) for i in fake_ids)
         return result
 

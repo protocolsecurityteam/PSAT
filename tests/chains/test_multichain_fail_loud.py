@@ -27,7 +27,6 @@ class TestRequireChain:
         [
             pytest.param((), {"chain": ""}, "", id="empty_string"),
             pytest.param((), {"chain": "   "}, "", id="whitespace_string"),
-            # The discovery "unknown" sentinel is never resolvable — it fails loud.
             pytest.param((), {"chain": "unknown"}, "unit ctx", id="unknown_sentinel"),
             pytest.param((999999,), {}, "999999", id="unregistered_id_with_value"),
             pytest.param((), {"chain": "fantom"}, "fantom", id="unregistered_name_with_value"),
@@ -98,8 +97,7 @@ class TestRequireRpcUrlDistinctErrors:
             require_rpc_url(context="pipeline X", **kwargs)
 
     def test_erpc_unconfigured_raises_runtime_error_not_chain_error(self, monkeypatch):
-        # Chain resolves fine; the failure is the missing eRPC config — a distinct
-        # error class + message, so the two failure modes aren't conflated.
+        # A distinct error class, so the two failure modes aren't conflated.
         monkeypatch.delenv("ERPC_BASE_URL", raising=False)
         from services.clients.rpc import require_rpc_url
 
@@ -143,8 +141,6 @@ class TestErpcChainIdGuard:
         _assert_url_chain_id(url, chain_id)
 
     def test_rpc_request_raises_on_mismatch_before_wire(self, monkeypatch):
-        # The guard fires before any network call: a declared chain_id that
-        # disagrees with the eRPC URL path raises rather than reading the wrong chain.
         from services.clients import rpc
 
         def _boom(*a, **k):  # pragma: no cover - must never be reached
@@ -156,9 +152,9 @@ class TestErpcChainIdGuard:
 
 
 class TestResolutionRpcUrlUsesJobChainColumn:
-    """Regression (PR #153 live-suite failure): a chainless /api/analyze request has its mainnet default only
-    in ``jobs.chain_id``, not the request JSONB. ``_rpc_url_for_job`` must resolve through the column or every
-    such job dies terminal at the resolution stage."""
+    """A chainless /api/analyze has its mainnet default only in ``jobs.chain_id``; otherwise every such job dies at
+    resolution (PR #153).
+    """
 
     def test_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace
@@ -197,9 +193,6 @@ class TestResolutionRpcUrlUsesJobChainColumn:
 
 
 class TestWorkerRpcHelpersUseJobChainColumn:
-    """Same regression as the resolution helper: policy and static workers must resolve RPC via the job's
-    chain column, not the request JSONB alone."""
-
     def test_policy_rpc_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace
         from typing import Any, cast

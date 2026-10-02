@@ -1,5 +1,3 @@
-"""Admission bounds without external services, including disconnect races."""
-
 import asyncio
 import threading
 

@@ -1,15 +1,12 @@
-"""solc-select lookup shared by the real-Slither integration tests, which each
-previously carried a private copy.
-"""
-
 from __future__ import annotations
 
 from typing import cast
 
+import pytest
+
 
 def solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    """Highest installed solc in the same major.minor line as ``floor`` whose
-    patch is >= floor (i.e. a ``^floor`` match). None if nothing satisfies it."""
+    """A ``^floor`` match; None if nothing satisfies it."""
     try:
         from solc_select import solc_select as ss
     except Exception:
@@ -25,3 +22,10 @@ def solc_path_for(floor: tuple[int, int, int]) -> str | None:
     if best is None:
         return None
     return str(ss.artifact_path(".".join(str(x) for x in best)))
+
+
+def _solc_086() -> str:
+    path = solc_path_for((0, 8, 26))
+    if path is None:
+        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
+    return path

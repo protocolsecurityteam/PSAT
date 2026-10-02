@@ -19,8 +19,7 @@ from workers.static_worker import _detect_solc_version as detect_static_solc
             "0.8.24",
             id="bumps_buggy_0_8_versions",
         ),
-        # A ``<0.9.0`` ceiling must not be picked as the compiler version: solc 0.9.0 has no release
-        # artifact, so foundry fails with "version not found in artifacts for this platform: 0.9.0".
+        # solc 0.9.0 has no release artifact, so foundry fails on it.
         pytest.param(
             {
                 "src/Vault.sol": "pragma solidity ^0.8.26;\ncontract Vault {}",
@@ -29,7 +28,6 @@ from workers.static_worker import _detect_solc_version as detect_static_solc
             "0.8.26",
             id="ignores_standalone_upper_bound_pragma",
         ),
-        # ``>=0.8.0 <0.9.0`` resolves to the lower bound (min-bumped to 0.8.24), never the 0.9.0 ceiling.
         pytest.param(
             {"src/M.sol": "pragma solidity >=0.8.0 <0.9.0;\ncontract M {}"},
             "0.8.24",

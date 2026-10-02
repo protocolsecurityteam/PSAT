@@ -82,9 +82,6 @@ def _document(**overrides) -> ScoreDocument:
     return ScoreDocument(**fields)
 
 
-# ------------------------------------------------------------- document summary
-
-
 def test_the_summary_reads_every_field_off_the_finished_document():
     summary = loop.document_summary(_document())
 
@@ -118,8 +115,7 @@ def test_the_summary_reads_every_field_off_the_finished_document():
             },
             id="no-provenance-blocks-omits-rather-than-guesses",
         ),
-        # Present and empty is the fold saying no flow claim was scored: the one case where 0 is the
-        # answer rather than a stand-in for an unasked question.
+        # Present and empty is the one case where 0 is the answer.
         pytest.param(
             {"model_parameters": {"confidence_detail": {"flow_pricing_decidable": {}}}},
             {"flow_pricing_decidable": 0, "flow_pricing_seen": 0},
@@ -143,8 +139,6 @@ def test_summary_null_versus_real_zero(overrides, expected):
     ],
 )
 def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census):
-    """A partial sum presented as whole reads as a pricing regression that never happened, and
-    raising would fail a fold that computed."""
     summary = loop.document_summary(
         _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}})
     )
@@ -157,7 +151,6 @@ def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census
         pytest.param(
             {"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}, 3, id="fault-census-counted-into-summary"
         ),
-        # An unreadable count is null, never the earned zero.
         pytest.param({"records_faulted": None}, None, id="unreadable-fault-count-is-null"),
     ],
 )
@@ -167,11 +160,10 @@ def test_execution_fault_count_in_summary(faults, expected):
 
 
 def test_the_summary_is_total_over_a_malformed_document():
-    """Both entrypoints call this: a raise arms the loop's backoff and fails a computed score in the CLI."""
+    """A raise arms the loop's backoff and fails a computed score."""
     summary = loop.document_summary(
         _document(
             findings=["not a dict", {"undetermined_instances": "not a list"}],
-            # Kindless warnings are bucketed as "unknown", not as the string "None".
             warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"],
             provenance={"population": "not a dict", "exposure_coverage": 7},
             model_parameters={"confidence_detail": "not a dict"},
@@ -184,9 +176,6 @@ def test_the_summary_is_total_over_a_malformed_document():
     assert summary["tracked_total_usd"] is None
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
     assert summary["execution_records_faulted"] is None
-
-
-# ------------------------------------------------------------ the loop boundary
 
 
 class _FakeQuery:
@@ -209,8 +198,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Enough session for ``score_protocol``: a clock, a query, a commit."""
-
     def execute(self, *args, **kwargs):
         return _FakeResult()
 
@@ -227,7 +214,6 @@ class _Row:
 
 @pytest.fixture
 def _substituted_fold(monkeypatch):
-    """Substitute fold and persistence; retired delivery loading is absent."""
     state: dict[str, object] = {"document": _document()}
     monkeypatch.setattr(loop, "compute_protocol_score", lambda *a, **k: state["document"])
     monkeypatch.setattr(loop, "persist_score_document", lambda session, document: _Row())
@@ -238,7 +224,6 @@ _LOOP_LOGGER = "services.scoring.loop"
 
 
 def _score(caplog):
-    """Every assertion is scoped to the loop's own logger so a stray record can't move a count."""
     with caplog.at_level(logging.INFO, logger=_LOOP_LOGGER):
         loop.score_protocol(_FakeSession(), loop.DueProtocol(7, SCORE_TRIGGER_DIRTY_LOOP))  # pyright: ignore[reportArgumentType]
     return [r for r in caplog.records if r.name == _LOOP_LOGGER]
@@ -260,7 +245,7 @@ def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, c
 
 
 def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, caplog, monkeypatch):
-    """The summary is emitted after the commit; a raise would arm the backoff for a durable score."""
+    """The summary runs after the commit."""
 
     def _boom(document):
         raise RuntimeError("summary is broken")
@@ -272,7 +257,6 @@ def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, ca
 
 
 def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_it(monkeypatch, caplog):
-    """The CLI calls the summary bare, so it must itself be total."""
     from services.scoring import cli
 
     document = _document(
@@ -291,9 +275,6 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
     ]
     assert len(summaries) == 1
     assert summaries[0].flow_pricing_decidable is None
-
-
-# --------------------------------------------------- the W2 precondition's arms
 
 
 def _facts(asset_identity=None, state=ASSET_IDENTITY_LOADED) -> _ContractFacts:
@@ -332,8 +313,7 @@ def _entry(provenance="contract_state_unresolved", selector="0xdeadbeef"):
     ],
 )
 def test_every_w2_refusal_arm_names_itself(facts, entries, expected):
-    """Five conjuncts reach one third state; a refusal indistinguishable from the other four
-    can't be acted on."""
+    """A refusal indistinguishable from the other four can't be acted on."""
     tri, refusal = _token_identity(facts, entries)
     assert not tri.is_determined
     assert refusal == expected
@@ -358,9 +338,6 @@ def test_the_refusal_travels_on_the_envelope_and_in_the_witness_notes():
     assert notes == {W2_PLANE_ABSENT, f"asset_identity_plane_{ASSET_IDENTITY_ARTIFACT_MALFORMED}"}
 
 
-# -------------------------------------------------- the flow-asset plane's edge
-
-
 @pytest.mark.parametrize(
     "payload,expected_state,expected_keys",
     [
@@ -381,9 +358,6 @@ def test_an_absent_artifact_and_a_malformed_one_are_different_facts(
     receivers, state = _asset_identity(session=None, job_id="job-1")  # pyright: ignore[reportArgumentType]
     assert state == expected_state
     assert len(receivers) == expected_keys
-
-
-# ------------------------------------------------------ orphaned contract rows
 
 
 class _Contract:
@@ -428,7 +402,6 @@ class _Job:
             [(logging.WARNING, 2, [2, 3])],
             id="null-protocol-contracts-counted-not-silently-skipped",
         ),
-        # Negative control: no orphans, no warning.
         pytest.param([(1, 7)], 0, [], id="no-orphans-means-no-warning"),
     ],
 )

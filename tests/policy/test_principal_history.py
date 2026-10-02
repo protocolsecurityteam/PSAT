@@ -54,7 +54,6 @@ def _log(topic0: str, topics: list[str], enabled: bool, block: int, log_index: i
 
 
 def test_role_authority_history_uses_event_shapes_not_names():
-    """The history reducer keys off indexed ABI shape, not event names."""
     abi = [
         {
             "type": "event",
@@ -135,10 +134,8 @@ def test_role_authority_history_uses_event_shapes_not_names():
 
 
 def test_external_authority_checks_uses_canonical_selector_for_contract_type_params():
-    # The predicate-tree key is Slither's full_name ``addAsset(ERC20)``, but the
-    # ``RoleCapabilityUpdated`` event carries the canonical selector ``addAsset(address)``
-    # (0x298410e5), NOT keccak("addAsset(ERC20)") (0x4fdd72aa); a non-canonical selector
-    # never matches, so the function would show no controller (the canCall selector bug).
+    # Selectors must come from the canonical signature (``addAsset(address)``), not Slither's ``addAsset(ERC20)``, or
+    # the function shows no controller.
     data = json.loads((_SOLMATE_FIXTURES / "teller_predicate_trees.json").read_text())
     checks = _external_authority_checks(
         contract_address=data["contract"],
@@ -151,10 +148,6 @@ def test_external_authority_checks_uses_canonical_selector_for_contract_type_par
     assert checks[0]["selector"] != "0x4fdd72aa"
 
 
-# build_principal_history end-to-end: real orchestrator path, only the Etherscan
-# ABI/getLogs wire stubbed.
-
-# Canonical Solmate RolesAuthority event ABI (classification keys off shape, not name).
 _ROLES_AUTHORITY_ABI = [
     {
         "type": "event",
@@ -203,7 +196,7 @@ class _FakeEtherscanResponse:
 
 @pytest.fixture(autouse=True)
 def _clear_principal_history_caches():
-    # The module memoizes authority logs process-wide; clear so the stubbed wire is consulted.
+    # The module memoizes authority logs process-wide.
     principal_history._LOG_CACHE.clear()
     yield
     principal_history._LOG_CACHE.clear()
@@ -215,8 +208,6 @@ def _teller_predicate_trees() -> tuple[str, dict]:
 
 
 def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
-    """Real ``_external_authority_checks`` + ``build_role_authority_history`` replay,
-    with only the Etherscan wire stubbed. Locks in the ok-path summary metrics."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     contract, predicate_trees = _teller_predicate_trees()
 
@@ -273,8 +264,6 @@ def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
 
 
 def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch):
-    """An authority ABI fetch failure keeps the stage going, marks the source ``error``,
-    AND records a degraded breadcrumb so the swallow surfaces in stage_errors."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     contract, predicate_trees = _teller_predicate_trees()
 
@@ -311,8 +300,7 @@ def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch
     assert metrics["principal_history_role_events"] == 0
 
 
-# _LOG_CACHE cap + TTL: the process-global cache must stay bounded (no OOM in a
-# long-lived worker) and eventually re-read so later role grants are seen.
+# The process-global cache must stay bounded and eventually re-read later grants.
 
 
 def _no_records_get(url, params=None, timeout=None):
@@ -320,7 +308,6 @@ def _no_records_get(url, params=None, timeout=None):
 
 
 def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
-    """Caps _LOG_CACHE at its MAX, evicting the oldest entries."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     monkeypatch.setattr(principal_history, "_LOG_CACHE_MAX", 4)
     monkeypatch.setattr(requests, "get", _no_records_get)
@@ -331,13 +318,11 @@ def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
         principal_history._fetch_logs(authority_address=last_authority, chain_id=1, topic0=SELECTOR)
 
     assert len(principal_history._LOG_CACHE) <= principal_history._LOG_CACHE_MAX
-    # Eviction runs before the write, so the most recent fetch is always retained.
     assert (1, last_authority.lower(), SELECTOR.lower()) in principal_history._LOG_CACHE
     principal_history.clear_log_cache()
 
 
 def test_log_cache_ttl_expiry_refetches(monkeypatch):
-    """Reused within the TTL, re-fetched after expiry so later grants/revokes are picked up."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     calls: list = []
 
@@ -349,10 +334,8 @@ def test_log_cache_ttl_expiry_refetches(monkeypatch):
 
     principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
     assert len(calls) == 1
-    # Within TTL: served from cache, no second wire call.
     principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
     assert len(calls) == 1
-    # Past TTL: the stale entry is dropped and re-fetched.
     monkeypatch.setattr(principal_history, "_LOG_CACHE_TTL_S", -1.0)
     principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
     assert len(calls) == 2

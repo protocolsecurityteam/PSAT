@@ -1,15 +1,8 @@
-"""End-to-end resolution of the Part-2 cofinite/denylist opening, on 100% real data.
+"""The Part-2 cofinite/denylist opening, end to end on real prod etherfi snapshots.
 
-Drives the REAL resolver against snapshots of prod etherfi contracts (real
-``predicate_trees`` + ``state_var_values`` from ``tests/fixtures/cofinite/generate.py``)
-and asserts at the surface/status level, so a revert at any layer is caught. Pins:
-  * ``BoringVault.transfer``/``transferFrom`` (inlined Teller denylist hook) -> **public**.
-  * ``WeETH.recoverERC20/721/ETH`` (truthy ``hasRole`` gate) -> stay **gated**.
-  * ``RolesAuthority.setUserRole`` + ``Accountant`` admin (Solmate ``requiresAuth``) ->
-    stay **gated**: canaries the provisional "open-on-ambiguity" fix erased (93 authorities).
-  * ``NodeOperatorManager.registerNodeOperator`` (``require(!registered[caller])``) -> **public**.
-Hermetic (committed fixture JSON); RPC is stubbed dead so authority resolution degrades to
-its event/state-var paths.
+BoringVault.transfer opens via the inlined Teller denylist and NodeOperatorManager self-registration is public,
+while WeETH.recover* (truthy ``hasRole``) and Solmate ``requiresAuth`` functions stay gated; those are the canaries
+the provisional "open-on-ambiguity" fix erased. RPC is stubbed dead.
 """
 
 from __future__ import annotations
@@ -27,8 +20,7 @@ from tests.conftest import _can_connect, requires_postgres
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "cofinite"
 _ZERO = "0x" + "0" * 40
 
-# Addresses this test seeds — cleanup is scoped to these so parallel workers / sibling
-# tests are untouched.
+# Cleanup is scoped to these so parallel workers are untouched.
 _BORING_VAULT = "0xca8711daf13d852ed2121e4be3894dae366039e4"
 _TELLER = "0x63ede83cbb1c8d90ba52e9497e6c1226a673e884"
 _WEETH = "0x2d10683e941275d502173053927ad6066e6afd6b"
@@ -78,8 +70,6 @@ def session():
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
-    """Stub RPC dead so the Solmate adapter's bytecode confirmation / owner-getter probes
-    fail and the resolver falls back to its event-only / state-var paths."""
     import services.clients.rpc as rpc
 
     def _boom(*_a, **_k):
@@ -103,7 +93,6 @@ def _seed_job_with_trees(session, *, address: str, artifact: dict):
     )
     session.add(job)
     session.flush()
-    # The resolver reads ``artifact["trees"]`` (+ canonical_signatures); store the dump verbatim.
     store_artifact(
         session,
         job.id,
@@ -160,11 +149,6 @@ def _seed_canary(session, name: str, address: str, controllers: dict[str, str] |
     return _resolve(session, address=address, job_id=job.id)
 
 
-# ---------------------------------------------------------------------------
-# Headline: BoringVault.transfer opens via the inlined Teller beforeTransfer denylist
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_boring_vault_transfer_opens_via_inlined_denylist(session):
     teller = _fixture("teller")
@@ -182,7 +166,6 @@ def test_boring_vault_transfer_opens_via_inlined_denylist(session):
         },
     )
 
-    # ``hook`` points at the Teller so transfer inlines the beforeTransfer denylist.
     vault_job = _seed_job_with_trees(session, address=_BORING_VAULT, artifact=vault)
     _seed_contract(
         session,
@@ -207,15 +190,9 @@ def test_boring_vault_transfer_opens_via_inlined_denylist(session):
         assert cap.get("conditions"), f"{sig} cofinite must carry the denylist/share-lock as conditions"
 
 
-# ---------------------------------------------------------------------------
-# Canaries — the negate change must open EXACTLY 0 of these
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_weeth_recover_stays_gated(session):
-    # ``if(!roleRegistry.hasRole(WEETH_OPERATING_ADMIN_ROLE, sender)) revert`` is a TRUTHY
-    # positive gate — never negated — so it stays an external check, never public.
+    # A truthy positive gate is never negated.
     out = _seed_canary(
         session,
         "weeth",
@@ -232,8 +209,6 @@ def test_weeth_recover_stays_gated(session):
 
 @requires_postgres
 def test_roles_authority_setuserrole_stays_gated(session):
-    # Solmate ``requiresAuth`` (positive ``canCall``/owner gate); with the authority
-    # uncrawled it falls to a gated external check, never public.
     out = _seed_canary(
         session,
         "roles_authority",
@@ -254,20 +229,13 @@ def test_accountant_admin_stays_gated(session):
         controllers={"external_contract:authority": _ZERO, "state_variable:owner": _ZERO},
     )
     for sig in ("updateExchangeRate(uint96)", "setRateProviderData(ERC20,bool,address)"):
-        # Index directly, like the siblings above: if canonicalisation ever moves
-        # the output key, this canary must go red rather than silently vanish.
+        # If canonicalisation moves the key this canary must go red, not vanish.
         assert sig in out, f"Accountant.{sig} missing from the resolved capabilities"
         assert _status(out[sig]) != "public", f"Accountant.{sig} (requiresAuth) must NOT open to public"
 
 
-# ---------------------------------------------------------------------------
-# NodeOperatorManager.registerNodeOperator — the already-cofinite P1/P2 case
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_node_operator_register_resolves_public(session):
-    # exact-finite denylist -> cofinite -> public (self-registration).
     out = _seed_canary(session, "node_operator_manager", _NODE_OP_MANAGER)
     cap = out["registerNodeOperator(bytes,uint64)"]
     assert _status(cap) == "public", (

@@ -1,14 +1,6 @@
-"""Standards-coverage matrix — the rigor invariant across authority standards.
+"""Every authority standard must resolve correctly or fail closed, never to a confident-but-wrong ``finite_set``.
 
-Each contract runs through the REAL static->predicate->resolve pipeline. For every standard,
-resolution is either CORRECT (exactly the principal the contract's authority designates,
-checked against the ground-truth owner from a stubbed RPC) or FAIL-CLOSED (an honest
-``external_check_only`` / empty result when the principal can't be enumerated without
-on-chain data), and NEVER a confident-but-wrong ``finite_set`` (exact, non-empty, wrong members).
-
-Member correctness for event-indexed standards (Solmate/AccessControl) on live data is pinned
-in ``test_solmate_end_to_end`` / ``test_adapter_solmate_roles``; here they must fail closed
-without an event history rather than fabricate a set.
+Event-indexed member correctness is pinned in ``test_solmate_end_to_end`` / ``test_adapter_solmate_roles``.
 """
 
 from __future__ import annotations
@@ -62,8 +54,6 @@ def _trees(tmp_path: Path, source: str) -> dict:
 
 
 class _NoEventsRepo:
-    """No indexed event history — event-enumerated standards must fail closed."""
-
     def iter_event_rows(self, **_: Any):
         return []
 
@@ -81,8 +71,6 @@ def _resolve(trees: dict, fn: str, monkeypatch, *, rpc_owner: str | None = None)
     if rpc_owner is not None:
 
         def fake_rpc(rpc_url, method, params, retries: int = 1, **_: Any):
-            # Any nullary authority getter (owner()/governor()/<var>()) returns
-            # the ground-truth owner, left-padded to a 32-byte word.
             return "0x" + rpc_owner[2:].rjust(64, "0")
 
         monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
@@ -113,14 +101,9 @@ def _members(cap: CapabilityExpr) -> set[str]:
 
 
 def _has_confident_members(cap: CapabilityExpr) -> bool:
-    """True iff some branch asserts an EXACT, non-empty member set (lower_bound / external_check_only / empty are not
-    confident)."""
     if cap.kind == "finite_set":
         return bool(cap.members) and cap.membership_quality == "exact"
     return any(_has_confident_members(child) for child in cap.children or [])
-
-
-# CORRECT: owner-style standards resolve to exactly the contract's owner.
 
 
 def test_oz_v4_ownable_owner_getter_resolves_to_owner(tmp_path, monkeypatch):
@@ -154,11 +137,7 @@ def test_bare_owner_state_var_resolves_to_owner(tmp_path, monkeypatch):
     assert _members(cap) == {OWNER.lower()}
 
 
-# FAIL-CLOSED: standards needing on-chain data we lack must NOT fabricate a confident set.
-
-
 def test_solmate_requires_auth_without_events_fails_closed(tmp_path, monkeypatch):
-    # Recognized as Solmate canCall, but with no indexed events it must fail closed.
     trees = _trees(
         tmp_path,
         """
@@ -196,7 +175,6 @@ def test_oz_accesscontrol_role_gate_without_events_fails_closed(tmp_path, monkey
 
 
 def test_unmodeled_custom_authority_fails_closed(tmp_path, monkeypatch):
-    # A bespoke external check with no model must surface as an honest external check.
     trees = _trees(
         tmp_path,
         """

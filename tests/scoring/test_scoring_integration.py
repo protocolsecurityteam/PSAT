@@ -1,20 +1,6 @@
-"""The scorer's pipeline seams: the effects hook, the dirty marks, the loop, the API.
-
-The core (distillation + fold) is pinned elsewhere. Pinned here:
-
-  * effects completion persists signals and enqueues a re-fold, and a raising
-    distillation does NOT fail the job (effects never emits ``failed_terminal``,
-    so a scoring bug must not become a pipeline outage);
-  * a persist failing on contract N leaves contracts 1..N-1 standing, no
-    half-replaced contract;
-  * every write site changing a scored input marks, and an unwritable mark never
-    fails its host;
-  * the loop folds dirty before stale, stamps the perimeter it was handed,
-    accumulates history, clears only the exact mark it consumed, and backs off a
-    protocol whose fold keeps raising;
-  * the double-replace guard stays armed across the hook's savepoints;
-  * the endpoint serves the ledger payload verbatim, distinguishes "no score"
-    from "unreadable document", and reassembles a spilled one.
+"""The scorer's pipeline seams. Effects never emits ``failed_terminal``, so a raising distillation must not fail
+the job; a mid-way persist failure leaves earlier contracts whole; the loop clears only the exact mark it
+consumed and backs off a protocol whose fold keeps raising.
 """
 
 from __future__ import annotations
@@ -132,17 +118,11 @@ class _Fixture:
 
 @pytest.fixture()
 def fx(db_session):
-    """A protocol scoped to one test, torn down whole.
-
-    Its own ``Protocol`` row: the fold, queue and score history are protocol-keyed,
-    so leaked rows would change a neighbour's grade.
-    """
+    """Protocol-keyed rows would otherwise change a neighbour's grade."""
     protocol = Protocol(name=f"scoreint-{uuid.uuid4().hex[:8]}")
     db_session.add(protocol)
     db_session.flush()
-    # ``completed``, not the ``queued`` default: an in-flight job is what makes
-    # the perimeter unsettled, and the fixture must not stamp that on every test
-    # that never asked for it.
+    # An in-flight job makes the perimeter unsettled.
     job = Job(id=uuid.uuid4(), protocol_id=protocol.id, status=JobStatus.completed)
     db_session.add(job)
     db_session.commit()
@@ -168,12 +148,7 @@ def fx(db_session):
 
 @pytest.fixture()
 def other_session():
-    """A SECOND connection, for interleavings a single session cannot express.
-
-    The mark's ``dirty_at`` is ``transaction_timestamp()`` and the defect is a
-    mark stamped in one transaction becoming visible only after another has read
-    the population; that needs two real transactions.
-    """
+    """``dirty_at`` is ``transaction_timestamp()``, and the defect needs two real transactions."""
     engine = create_engine(DATABASE_URL)
     session = Session(engine, expire_on_commit=False)
     try:
@@ -205,18 +180,8 @@ def _document(protocol_id: int, **overrides: Any) -> ScoreDocument:
     return ScoreDocument(**base)
 
 
-# --------------------------------------------------------------------------
-# The end-of-effects hook
-# --------------------------------------------------------------------------
-
-
 def _effects_worker(monkeypatch):
-    """An ``EffectsWorker`` whose selection is empty, so no wire is ever touched.
-
-    The zero-candidate branch keeps the test offline AND exercises the inert
-    path, which distils too (a contract whose job planned nothing still owns the
-    claims the policy stage wrote for it).
-    """
+    """The zero-candidate branch keeps it offline and still distils."""
     from workers.effects_worker import EffectsWorker
 
     monkeypatch.setattr(EffectsWorker, "_select", lambda self, session, job, funnel=None: [])
@@ -278,11 +243,7 @@ def test_poisoned_distillation_does_not_fail_the_job(fx, monkeypatch, caplog):
 
 
 def test_claims_bridge_survives_a_distillation_failure(fx, monkeypatch):
-    """The hook runs inside the job's transaction, so its failure must be contained.
-
-    A raise outside a SAVEPOINT would abort the transaction holding the effects
-    stage's own writes, and the job would die at commit.
-    """
+    """Outside a savepoint the raise would abort the effects stage's own writes."""
     contract = fx.contract()
     function = fx.function(contract)
     worker = _effects_worker(monkeypatch)
@@ -332,12 +293,7 @@ def test_partial_persist_keeps_the_contracts_that_succeeded(fx, monkeypatch, cap
 
 
 def test_retracting_every_signal_for_a_contract_is_logged(fx, monkeypatch, caplog):
-    """A wholesale replace by an EMPTY set is fail-open by construction.
-
-    Correct when the functions genuinely went away, wrong when upstream merely
-    failed to produce them, and the row count cannot tell which; so the
-    retraction is named rather than silent.
-    """
+    """The row count can't tell "functions went away" from "upstream failed", so the retraction is named."""
     contract = fx.contract()
     fx.function(contract)
     worker = _effects_worker(monkeypatch)
@@ -357,11 +313,6 @@ def test_retracting_every_signal_for_a_contract_is_logged(fx, monkeypatch, caplo
     assert any("retracted all" in r.getMessage() and str(contract.id) in r.getMessage() for r in caplog.records)
 
 
-# --------------------------------------------------------------------------
-# The double-replace guard, under the savepoint shape the hook actually uses
-# --------------------------------------------------------------------------
-
-
 def _signal_for(fx, contract: Contract, selector: str) -> FunctionSignal:
     return FunctionSignal(
         job_id=fx.job.id,
@@ -377,12 +328,7 @@ def _signal_for(fx, contract: Contract, selector: str) -> FunctionSignal:
 
 
 def _replace_in_savepoint(fx, contract: Contract, selector: str = "0x00000001") -> None:
-    """Exactly the effects hook's shape: one savepoint per contract, no commit.
-
-    Carries a real signal so the replace INSERTS: an empty replace never flushes,
-    and the flush opens the internal SUBTRANSACTION whose end is the second way
-    this guard can be disarmed.
-    """
+    """An empty replace never flushes, and the flush's subtransaction is the second way to disarm the guard."""
     with fx.session.begin_nested():
         replace_contract_signals(
             fx.session, contract_id=contract.id, signals=[_signal_for(fx, contract, selector)], job_id=fx.job.id
@@ -390,13 +336,8 @@ def _replace_in_savepoint(fx, contract: Contract, selector: str = "0x00000001") 
 
 
 def test_the_double_replace_guard_survives_savepoints(fx):
-    """The guard's invariant is per-PASS, so it must outlive the pass's savepoints.
-
-    ``after_commit``/``after_rollback`` also fire on SAVEPOINT release, and a
-    plain ``flush`` ends an internal SUBTRANSACTION that reports itself as
-    un-nested; either disarms the guard after every contract, so a caller that
-    regrouped signals finer than ``contract_id`` would silently truncate the
-    contract instead of raising.
+    """``after_commit``/``after_rollback`` fire on savepoint release and a flush ends an un-nested subtransaction;
+    either would disarm the guard and silently truncate instead of raising.
     """
     contract = fx.contract()
     _replace_in_savepoint(fx, contract)
@@ -429,11 +370,6 @@ def test_committing_the_pass_disarms_the_guard(fx):
     _replace_in_savepoint(fx, contract, "0x00000002")  # a new pass; no raise
 
 
-# --------------------------------------------------------------------------
-# The dirty mark
-# --------------------------------------------------------------------------
-
-
 def test_mark_is_one_row_per_protocol_and_bumps_dirty_at(fx):
     assert mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_MANUAL)
     fx.session.commit()
@@ -454,7 +390,6 @@ def test_a_failed_mark_never_breaks_its_host_transaction(fx, caplog):
         assert mark_protocol_score_dirty(fx.session, 2_000_000_001, SCORE_DIRTY_MANUAL) is False
     assert any("dirty-mark failed" in r.getMessage() for r in caplog.records)
 
-    # The host transaction is still usable — this is the whole point of the guard.
     contract = fx.contract()
     fx.session.commit()
     assert fx.session.get(Contract, contract.id) is not None
@@ -540,11 +475,6 @@ def test_reanalysis_marks_dirty(fx):
     assert mark is not None and mark.reason == SCORE_DIRTY_REANALYSIS
 
 
-# --------------------------------------------------------------------------
-# The loop
-# --------------------------------------------------------------------------
-
-
 def test_dirty_protocol_is_scored_and_its_mark_cleared(fx):
     contract = fx.contract()
     fx.function(contract)
@@ -564,12 +494,8 @@ def test_dirty_protocol_is_scored_and_its_mark_cleared(fx):
 
 
 def test_a_mark_committed_after_selection_is_not_cleared(fx, other_session):
-    """The real interleaving, not a hand-fed instant.
-
-    ONE long transaction whose mark carries ``transaction_timestamp()`` (from
-    BEFORE the loop ran) but whose data is visible only at commit, after the loop
-    selected. A clear keyed on any instant the loop captured would delete this
-    mark and the change would never be folded.
+    """The mark's timestamp predates the loop but becomes visible only after it selected; a clear keyed on any
+    captured instant would lose it.
     """
     mark_protocol_score_dirty(other_session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     other_session.flush()  # stamped, still invisible to the loop
@@ -585,7 +511,6 @@ def test_a_mark_committed_after_selection_is_not_cleared(fx, other_session):
 
 
 def test_a_mark_that_lands_during_the_fold_survives(fx, other_session):
-    """Selected mark cleared by token equality; a newer mark has a newer token."""
     mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     fx.session.commit()
     due = [d for d in select_due_protocols(fx.session, limit=500) if d.protocol_id == fx.protocol.id][0]
@@ -646,7 +571,6 @@ def test_a_freshly_scored_protocol_is_not_swept(fx):
     due = select_due_protocols(fx.session, limit=200)
     assert fx.protocol.id not in [d.protocol_id for d in due]
 
-    # ...until it ages past the ceiling.
     aged = select_due_protocols(fx.session, limit=200, max_age_s=0)
     assert fx.protocol.id in [d.protocol_id for d in aged]
 
@@ -681,12 +605,7 @@ def _poison(monkeypatch):
 
 
 def test_a_failing_protocol_backs_off_and_frees_its_pass_slot(fx, monkeypatch):
-    """Marks survive a failure and dirty rows sort first, so poison must back off.
-
-    Otherwise permanently-failing protocols hold the pass budget forever and the
-    staleness sweep (the only cover for invalidation events carrying no mark)
-    never runs again.
-    """
+    """Otherwise poison holds the pass budget and the staleness sweep never runs."""
     mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     fx.session.commit()
     _poison(monkeypatch)
@@ -705,12 +624,7 @@ def test_a_failing_protocol_backs_off_and_frees_its_pass_slot(fx, monkeypatch):
 
 
 def test_a_staleness_failure_arms_the_backoff_too(fx, monkeypatch):
-    """A protocol with no queue row would otherwise re-enter through this door.
-
-    A failed fold leaves no score row, so the protocol is permanently stale; if
-    only the dirty arm honoured the backoff it would be re-selected every pass
-    through the sweep.
-    """
+    """A failed fold leaves no score row, so the sweep would re-select it every pass."""
     _poison(monkeypatch)
     assert fx.queued_row() is None
 
@@ -743,7 +657,6 @@ def test_a_successful_fold_clears_a_surviving_mark_backoff(fx, monkeypatch):
     score_loop.score_due_protocols(fx.session, limit=500)
     monkeypatch.undo()
 
-    # A stale-arm fold succeeds while the failed mark is still standing.
     score_protocol(fx.session, DueProtocol(fx.protocol.id, SCORE_TRIGGER_DIRTY_LOOP, dirty_at=None))
 
     fx.session.expire_all()
@@ -773,14 +686,8 @@ def test_score_loop_is_a_supervised_thread():
 
     supervisor = _build_default_supervisor("http://rpc.invalid", 1.0)
     assert HEARTBEAT_PROTOCOL_SCORE in [name for name, _ in supervisor._loops]
-    # Without a PROCESS_META entry the loop is invisible to /api/fleet and to
-    # the ops watchdog — running but unwatched.
+    # Without it the loop is invisible to /api/fleet and the ops watchdog.
     assert HEARTBEAT_PROTOCOL_SCORE in PROCESS_META
-
-
-# --------------------------------------------------------------------------
-# Perimeter stamping — all three states reach the persisted row
-# --------------------------------------------------------------------------
 
 
 def test_perimeter_is_settled_when_the_queue_is_empty(fx):
@@ -824,11 +731,6 @@ def test_the_loop_persists_the_perimeter_it_was_handed(fx, monkeypatch):
     score_protocol(fx.session, DueProtocol(fx.protocol.id, SCORE_TRIGGER_DIRTY_LOOP))
 
     assert fx.scores()[-1].perimeter_state == PERIMETER_NOT_DETERMINED
-
-
-# --------------------------------------------------------------------------
-# Document persistence + the MinIO spill
-# --------------------------------------------------------------------------
 
 
 class _FakeStorage:
@@ -885,12 +787,7 @@ def test_a_large_document_stays_inline_when_storage_is_unconfigured(fx, monkeypa
 
 
 def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
-    """One document, one encoding, whichever side of the threshold it lands on.
-
-    The spilled path's ``default=str`` silently stringifies what the inline
-    path's JSONB serializer rejects, so the same fold would publish different
-    values depending only on size.
-    """
+    """The spill's ``default=str`` stringified what the inline JSONB serializer rejects."""
     storage = _FakeStorage()
     monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
 
@@ -906,11 +803,7 @@ def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
 
 
 def test_a_value_json_cannot_encode_raises_on_both_paths(fx, monkeypatch):
-    """A producer bug fails at persist, with the document in hand, never silently.
-
-    The stringifying fallback made a Decimal a number on one path and a string on
-    the other; raising is the only answer the same on both.
-    """
+    """Raising is the only answer that's the same on both paths."""
     from decimal import Decimal
 
     storage = _FakeStorage()
@@ -938,10 +831,6 @@ def test_an_unreadable_spill_is_not_an_empty_document(fx, monkeypatch):
     with pytest.raises(ScoreDocumentUnavailable):
         load_score_document(row)
 
-
-# --------------------------------------------------------------------------
-# GET /api/company/{name}/score
-# --------------------------------------------------------------------------
 
 _LEDGER_KEYS = {
     "grade_lambda",
@@ -1015,9 +904,8 @@ def test_a_not_determined_grade_is_served_as_such_not_as_zero(fx, api_client):
 @pytest.mark.parametrize(
     "company_name, detail",
     [
-        # One of two 404s; the detail is the only thing telling them apart. The live suite branches on it: a
-        # client reading both alike reports a typo'd protocol as "not scored yet", and the live skip would
-        # turn a missing test company into a green run.
+        # The detail tells the two 404s apart; the live suite branches on it, and conflating them would turn a missing
+        # test company into a green run.
         pytest.param(None, "No score has been computed for this protocol yet", id="no-score-exists"),
         pytest.param("psat-no-such-protocol-xyz", "Company not found", id="unknown-company"),
     ],
@@ -1049,19 +937,9 @@ def test_an_unreadable_document_is_not_reported_as_an_absent_score(fx, api_clien
     assert response.status_code == 503, "a body that could not be read is not a missing score"
 
 
-# --------------------------------------------------------------------------
-# W4a — the two conferral joins, read off real rows
-# --------------------------------------------------------------------------
-
-
 def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(fx):
-    """The role -> selector join, against the columns it actually reads.
-
-    ``function_principals.details.trace[]`` says role N at target T licenses
-    selector S; ``effective_functions.selector`` says which function of T that
-    is. A step whose selector names no analysed function licenses something this
-    document cannot name, so it is counted and credited nowhere (else a magnitude
-    would be attributed to four bytes).
+    """A selector that names no analysed function is counted and credited nowhere, or a magnitude gets attributed to
+    four bytes.
     """
     from db.models import FunctionPrincipal
     from services.scoring import planes as P
@@ -1100,14 +978,11 @@ def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(f
     plane = P.load_conferral_plane(fx.session, fx.protocol.id)
     key = entity_key("ethereum", contract.address)
     exit_fn = P.LicensedFunction("0x18457e61", "exit")
-    # Structured, not a formatted string: the selector is the join key back into
-    # effective_functions and a name containing a space breaks no parse.
+    # The selector is the join key, and names may contain spaces.
     assert exit_fn.as_json() == {"selector": "0x18457e61", "name": "exit"}
-    # Both roles of a multi-role step license the function; the union is the scope.
     assert plane.licensed_functions(key, (5,)) == (exit_fn,)
     assert plane.licensed_functions(key, (9,)) == (exit_fn,)
     assert plane.licensed_functions(key, (5, 9)) == (exit_fn,)
-    # A role nobody witnessed licenses nothing that can be named.
     assert plane.licensed_functions(key, (4,)) == ()
     join = plane.provenance["role_selector_join"]
     assert join["steps_whose_selector_names_no_analysed_function"] == 1
@@ -1115,12 +990,7 @@ def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(f
 
 
 def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
-    """Two functions of one capability confer differently, and the plane says so.
-
-    ``grant_for`` reads the SPECIFIC function's ``state_writes``; the class-wide
-    union is published beside it, used only by the census. Asking the class for a
-    walk would let one row's reach ride on another row's witness.
-    """
+    """``grant_for`` reads the specific function's ``state_writes``; the class-wide union is only for the census."""
     from services.scoring import planes as P
 
     contract = fx.contract()
@@ -1133,16 +1003,12 @@ def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
     fx.session.commit()
 
     plane = P.load_conferral_plane(fx.session, fx.protocol.id)
-    # A guard-origin write is the modifier's bookkeeping, not what the gate does.
     assert plane.grant_for("ownership.transfer", owns.id).rewrites == frozenset({"owner"})
     assert plane.grant_for("ownership.transfer", other.id).rewrites == frozenset({"_owner"})
-    # The class-wide union is strictly wider than either, and is labelled as the
-    # census instrument it is.
     assert plane.capability_grant("ownership.transfer").rewrites == frozenset({"owner", "_owner"})
     scope = P.parse_edge_scope("_owner", "controller_value")
     assert not plane.grant_for("ownership.transfer", owns.id).confers(scope, "ethereum::x").conferred
     assert plane.grant_for("ownership.transfer", other.id).confers(scope, "ethereum::x").conferred
-    # A function with no extracted state_writes confers nothing and says which.
     bare = fx.function(contract, name="renounceOwnership")
     bare.state_writes = None
     fx.session.commit()
@@ -1152,14 +1018,10 @@ def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
 
 
 def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
-    """W1a: the second act-as witness shape, read from where it actually lives.
+    """W1a: roles live at ``details.trace[].roles``.
 
-    The accepting role is at ``function_principals.details.trace[].roles``; a row
-    with roles elsewhere names no admitting role. Such a row is still INDEXED,
-    with empty roles, so the refusal can say "the list names this caller and no
-    role that admits it" rather than "the list does not name this caller".
-    ``membership_quality`` is carried so the plane can refuse an unenumerated
-    membership; where one triple has several rows the strongest is published.
+    A row with none is still indexed so the refusal can say it names the caller but no admitting role; the strongest
+    ``membership_quality`` wins.
     """
     from db.models import FunctionPrincipal
     from services.scoring import planes as P
@@ -1176,7 +1038,6 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
     caller = "0x" + "8" * 40
     fx.session.add_all(
         [
-            # bounded below first, so a first-wins index would publish it
             FunctionPrincipal(
                 function_id=accepted.id,
                 address=caller.upper(),
@@ -1205,8 +1066,6 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
                 principal_type="controller",
                 details={"roles": [12], "membership_quality": "exact"},
             ),
-            # JSONB is not a schema: every shape below is something the column
-            # can hold, and none of them is a role number.
             FunctionPrincipal(
                 function_id=garbled.id,
                 address=caller,
@@ -1216,7 +1075,6 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
                     "membership_quality": "exact",
                 },
             ),
-            # a principal that is not a controller answers a different question
             FunctionPrincipal(
                 function_id=other_kind.id,
                 address=caller,
@@ -1236,10 +1094,8 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
     row = plane.destination_acl[(key, "0x3e64ce99")][caller_key]
     assert (row.roles, row.membership_quality, row.destination_function) == ((3, 12), "exact", "bulkWithdraw")
     assert row.enumerated
-    # named, and naming no admitting role — indexed, and never admitted
     no_role = plane.destination_acl[(key, "0x9d574420")][caller_key]
     assert no_role.roles == () and no_role.membership_quality == "exact"
-    # only the entries that really are role numbers survive the read
     assert plane.destination_acl[(key, "0x5d0a5e1f")][caller_key].roles == (7,)
     assert (key, "0x7a9e5e4b") not in plane.destination_acl
     acceptance = plane.provenance["destination_acceptance"]
@@ -1250,14 +1106,8 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
 
 
 def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
-    """U1/B1: the loader is where the witness is kept or discarded.
-
-    Admission is the address comparison, so every ``controller_values`` row whose
-    read RETURNED an address is indexed whatever ``resolved_type`` calls it
-    (dropping non-``contract`` ones discarded stored reads on the strength of a
-    label). ``eth_call_error`` is the opposite: a read the pipeline ISSUED that
-    reverted, carrying no address, indexed in its own map so it satisfies no
-    receiver test and is never published as a read that never happened.
+    """U1/B1: every read that returned an address is indexed regardless of ``resolved_type``; ``eth_call_error``
+    reads go in their own map so they satisfy no receiver test.
     """
     from db.models import ControllerValue
     from services.scoring import planes as P
@@ -1279,8 +1129,6 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
         for kind in kinds
     ]
     rows += [
-        # a read that was attempted and reverted: no value, and the resolver's
-        # own 'unknown' beside it
         ControllerValue(
             contract_id=holder.id,
             deployment_address=holder.address,
@@ -1291,7 +1139,6 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
             observed_via="eth_call_error",
             block_number=25_657_731,
         ),
-        # a row with no classification at all — a third state, not 'contract'
         ControllerValue(
             contract_id=holder.id,
             deployment_address=holder.address,
@@ -1302,7 +1149,6 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
             observed_via="eth_call",
             block_number=25_657_731,
         ),
-        # an observation kind that is neither a read nor a failed read
         ControllerValue(
             contract_id=holder.id,
             deployment_address=holder.address,
@@ -1321,19 +1167,13 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
     key = entity_key("ethereum", holder.address)
     held_key = entity_key("ethereum", held)
 
-    # every returned read is indexed, whatever the row calls the address...
     for kind in kinds:
         assert plane.reads[(key, f"var_{kind}")] == (held_key, "eth_call", 25_657_731), kind
         assert plane.read_kinds[(key, f"var_{kind}")] == kind, kind
-    # ...including the one nothing classified, which carries no kind rather than
-    # a defaulted one
     assert plane.reads[(key, "var_unclassified")][0] == held_key
     assert (key, "var_unclassified") not in plane.read_kinds
-    # the failed read is NOT a read, and is kept where a receiver test cannot
-    # reach it
     assert (key, "boringVault") not in plane.reads
     assert plane.read_failures[(key, "boringVault")] == ("eth_call_error", 25_657_731)
-    # ...and an observation that is neither is still admitted as neither
     assert (key, "var_polled") not in plane.reads
     assert (key, "var_polled") not in plane.read_failures
 
@@ -1352,9 +1192,6 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
     assert reads["observations_recorded_as_a_failed_read"] == ["eth_call_error"]
     assert "eth_call_error" not in reads["observations_admitted"]
 
-    # ...and the plane answers with the read, not the label: a 'safe' pointer
-    # holding the destination witnesses the step, a 'zero' one earns its own
-    # proven-absent reason, and the reverted read earns a third that is neither.
     plane.call_sites = {
         (key, "0x18457e61"): (
             ("callSafe", "restricted", "var_safe", True, "0x2ddd62ce"),
@@ -1371,12 +1208,7 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
 
 
 def test_two_disagreeing_reads_never_become_a_reverted_read(fx):
-    """The disagreement defeats the failure record, not the other way round.
-
-    A variable read twice to two addresses resolves to nothing; if a failed read
-    of it stayed indexed, the refusal would become "the read reverted on chain",
-    sharper than the evidence supports when reads that DID return defeated it.
-    """
+    """If the failed read stayed indexed, the refusal would claim a revert when real reads defeated it."""
     from db.models import ControllerValue
     from services.scoring import planes as P
 

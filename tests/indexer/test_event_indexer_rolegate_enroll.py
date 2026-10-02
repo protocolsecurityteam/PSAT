@@ -1,10 +1,5 @@
-"""The event-log indexer enrolls a delegated role-gate's RoleSet cursor at the
-authority PROXY, off the caller's outer descriptor — the registry's own predicate
-trees compile to zero descriptors, so the caller side is the only trigger.
-
-Mirrors the Solmate-enroll tests: unit checks on the descriptor predicate + the
-standards-detecting topic0 selection, then a DB integration proving the cursor
-lands at the proxy seeded at creation-1.
+"""A delegated role-gate's RoleSet cursor enrolls at the authority proxy off the caller's descriptor, since the
+registry's own trees compile to zero descriptors.
 """
 
 from __future__ import annotations
@@ -46,9 +41,6 @@ def _gate_descriptor(authority_address: str | None = _PROXY) -> dict[str, Any]:
     }
 
 
-# --- unit: the descriptor predicate ----------------------------------------
-
-
 def test_single_address_param_signature():
     assert _is_single_address_param_signature("onlyOperatingMultisig(address)")
     assert not _is_single_address_param_signature("canCall(address,address,bytes4)")
@@ -76,7 +68,6 @@ def _gate_with(**over: Any) -> dict[str, Any]:
             False,
             id="rejects_solmate_cancall",
         ),
-        # onlyX(owner) — the arg is not the caller, so this is not a caller-gate.
         pytest.param(
             _gate_with(key_sources=[{"source": "state_variable", "state_variable_name": "owner"}]),
             False,
@@ -106,8 +97,7 @@ _REAL_DETECT = eli.detect_standards
             id="uses_detected_standard",
         ),
         pytest.param(lambda *a, **k: "0x00", lambda code: [], all_topic0s(), id="unions_when_inconclusive"),
-        # CRITICAL: probe failure fails open to the union (over-index), never to an empty topic list.
-        # The real detector runs here: it must treat the missing code as inconclusive.
+        # Probe failure over-indexes to the union, never an empty topic list.
         pytest.param(_boom, _REAL_DETECT, all_topic0s(), id="unions_when_probe_raises"),
     ],
 )
@@ -118,8 +108,7 @@ def test_topic0_selection(monkeypatch, probe, detect, expected):
 
 
 def test_topic0s_cache_dedups_detection(monkeypatch):
-    # The pass-scoped cache makes a repeated authority reuse the first detection —
-    # one resolve_probe_code (one eth_getCode) for a whole registry family.
+    # One eth_getCode for a whole registry family.
     calls = {"n": 0}
 
     def _counting(*a, **k):
@@ -135,14 +124,9 @@ def test_topic0s_cache_dedups_detection(monkeypatch):
     assert calls["n"] == 1
 
 
-# --- integration: enroll_from_completed_jobs -------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Stub the seed-grading wire to the unreachable-RPC outcome ``(None, not_determined)``; this module asserts
-    WHICH topics get enrolled, not the grade. ``eli.rpc_request`` is the witness's only user; the role-store
-    probe's wire is ``rss.rpc_request``, stubbed by the tests that care."""
+    """This module asserts which topics enroll, not the grade."""
 
     def _no_wire(*_a, **_kw):
         raise RuntimeError("no rpc")
@@ -208,8 +192,7 @@ def _seed_creation_block(monkeypatch, deploy: int):
 
 
 def _stub_probe_code(monkeypatch, code_for_impl: str, impl: str = _IMPL):
-    """Stub ``resolve_probe_code``'s wire: get_code returns the given code for the impl; the EIP-1967 slot read is
-    disabled (the DB Contract row supplies the proxy→impl hop)."""
+    """The DB Contract row supplies the proxy -> impl hop."""
 
     def _fake_get_code(rpc_url, address, *, chain_id=None):
         return code_for_impl if address.lower() == impl.lower() else "0x00"
@@ -229,7 +212,6 @@ def test_enrolls_roleset_at_proxy_via_proxy_hop(session, monkeypatch):
     deploy = 22_039_954
     _seed_creation_block(monkeypatch, deploy)
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    # DB linkage proxy → impl so resolve_probe_code detects Solady behind the proxy.
     session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
     session.commit()
 
@@ -246,7 +228,6 @@ def test_enrolls_roleset_at_proxy_via_proxy_hop(session, monkeypatch):
     assert row is not None, "RoleSet cursor must be enrolled at the authority proxy"
     assert row[0] == deploy - 1
 
-    # Never at the protected contract (job.address), which emits nothing.
     impl_side = session.execute(
         select(IndexedEventCursor.event_address).where(func.lower(IndexedEventCursor.event_address) == _PROTECTED)
     ).first()
@@ -258,7 +239,6 @@ def test_union_enrolls_when_undetectable(session, monkeypatch):
     from db.models import IndexedEventCursor
 
     _seed_creation_block(monkeypatch, 22_000_000)
-    # No Contract linkage + non-marker code → detection inconclusive → union.
     _stub_probe_code(monkeypatch, "0x00")
     _completed_job_with_gate(session, _gate_descriptor())
 
@@ -292,8 +272,6 @@ def test_enrollment_is_idempotent(session, monkeypatch):
         pytest.param(
             _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors), {"address": "0x" + "00" * 20}, id="zero_address"
         ),
-        # Authority is a state_variable that never resolved (no ControllerValue feed)
-        # and there is no job fallback for the delegated path → no cursor.
         pytest.param(
             "0x00",
             {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}},
@@ -315,11 +293,7 @@ def test_unusable_authority_skips(session, monkeypatch, probe_code, authority):
 
 @requires_postgres
 def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
-    # The production descriptor shape: authority is NOT a literal address but a
-    # state_variable ("roleRegistry") resolved from the job's captured
-    # ControllerValue. Proves the real _event_address_for_descriptor path (not the
-    # hardcoded-address shortcut the other happy-path test uses) lands the cursor
-    # at the resolved proxy.
+    # The production shape: the authority is a state_variable resolved from the job's ControllerValue.
     from db.models import Contract, ControllerValue, IndexedEventCursor
 
     deploy = 22_039_954
@@ -331,7 +305,6 @@ def test_enrolls_via_state_variable_controllervalue(session, monkeypatch):
     desc = _gate_descriptor(authority_address=None)
     desc["authority_contract"] = {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}}
     job = _completed_job_with_gate(session, desc)
-    # The job's own Contract row + a captured ControllerValue supplying roleRegistry.
     contract = Contract(address=_PROTECTED, job_id=job.id, chain="ethereum")
     session.add(contract)
     session.flush()
@@ -369,8 +342,7 @@ def _completed_job_with_two_gates(session, descriptors: list[dict[str, Any]]):
 
 @requires_postgres
 def test_shared_authority_detects_standard_once(session, monkeypatch):
-    # A2/F1: N delegated gates sharing one authority proxy → exactly one
-    # resolve_probe_code (one eth_getCode family cost), not one per descriptor.
+    # A2/F1: one detection per shared authority proxy.
     from db.models import Contract
 
     _seed_creation_block(monkeypatch, 22_039_954)
@@ -398,8 +370,6 @@ def test_shared_authority_detects_standard_once(session, monkeypatch):
 
 @requires_postgres
 def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
-    # A2/F1: once the authority has a role-store cursor, a later pass skips
-    # detection entirely — zero eth_getCode for the whole 250-gate steady state.
     from db.models import Contract
     from tests.support.witness_wire import stub_seed_witness
 
@@ -452,8 +422,6 @@ def test_unwitnessed_cursor_does_not_skip_detection(session, monkeypatch):
 
 @requires_postgres
 def test_solmate_cancall_still_enrolls_its_topics(session, monkeypatch):
-    # Regression: the delegated branch excludes canCall, so a canCall descriptor
-    # keeps enrolling the three Solmate role topics unchanged.
     from db.models import IndexedEventCursor
 
     _seed_creation_block(monkeypatch, 22_000_000)

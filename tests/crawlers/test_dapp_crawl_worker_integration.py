@@ -1,8 +1,5 @@
-"""Integration tests for DAppCrawlWorker with a real Postgres-backed queue.
-
-Stops short of the browser: serves a local fake DApp over HTTP and patches only the crawler entrypoint, so the
-queue/job/artifact/completion paths are real. The browser leg is ``test_dapp_browser_integration.py`` (real
-Playwright, provisioned in the offline CI job ``.github/workflows/_ci-checks.yml``).
+"""Patches only the crawler entrypoint over a local fake DApp; the browser leg is
+``test_dapp_browser_integration.py``.
 """
 
 from __future__ import annotations
@@ -76,14 +73,11 @@ def db_session():
         yield session
     finally:
         session.rollback()
-        # Only delete jobs with test addresses (cascades to artifacts/source_files/dapp_interactions)
         test_addrs = [ADDR_A, ADDR_B, ADDR_C]
         for j in session.execute(select(Job).where(Job.address.in_(test_addrs))).scalars():
             session.delete(j)
-        # Delete the crawl job itself (no address, identified by dapp_urls in request)
         for j in session.execute(select(Job).where(Job.address.is_(None), Job.name.like("DApp crawl%"))).scalars():
             session.delete(j)
-        # Clean up Contract + Protocol rows our test creates (don't cascade from Job deletion)
         for c in session.execute(select(Contract).where(Contract.address.in_(test_addrs))).scalars():
             session.delete(c)
         session.query(Protocol).filter(Protocol.name == "127.0.0.1").delete(synchronize_session=False)
@@ -200,7 +194,7 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     assert isinstance(summary, dict)
     assert summary["mode"] == "dapp_crawl"
     assert summary["discovered_count"] == 4
-    # Crawl summary is address-only: SelectionWorker ranks across all discovery sources after they settle.
+    # SelectionWorker ranks across all discovery sources after they settle.
     assert "analyzed_count" not in summary
     assert "child_jobs" not in summary
 

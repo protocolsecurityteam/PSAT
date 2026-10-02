@@ -1,10 +1,6 @@
-"""What a probe may put in an argument, and which attempts it may fire.
-
-Three prober-fault failures from the 2026-07-22 live run: the probe amount was written into EVERY
-integer argument (a token id got one whole token unit -> ``ERC721: invalid token ID``); a
-``msg.value`` retry was appended unconditionally and non-payable targets rejected it with an EMPTY
-revert (9 of 13 seeded calls); an unfundable payout read as a non-observation with no recorded reason.
-Fixtures are deliberately generic shapes so a pass cannot come from recognizing a protocol.
+"""Three prober faults from the 2026-07-22 live run: the amount went into every integer argument, a ``msg.value``
+retry hit non-payable targets, and an unfundable payout recorded no reason. Fixtures are generic so a pass can't
+come from recognizing a protocol.
 """
 
 from __future__ import annotations
@@ -35,7 +31,6 @@ def _sel(sig: str) -> str:
 
 
 def _facts(sig: str, *, parameter_names: list[str], flows: list[dict[str, Any]] | None = None) -> cd.ContractFacts:
-    """A one-function contract whose static facts say the function pays ETH out."""
     selector = _sel(sig)
     info = {
         "function": sig,
@@ -88,26 +83,17 @@ def _word(data: str, index: int) -> int:
     return int(data[start : start + 64], 16)
 
 
-# ---------------------------------------------------------------------------
-# 1. argument roles
-# ---------------------------------------------------------------------------
-
-
 def test_id_shaped_param_never_receives_the_probe_amount():
-    """A plain ERC-721 redemption: the only argument is a token id, and the
-    seeded retry used to raise it to one whole token unit."""
+    """The seeded retry used to raise a token id to one whole unit."""
     sig = "redeem(uint256)"
     spec = _spec(_facts(sig, parameter_names=["tokenId"]), sig)
     assert _word(spec.calldata, 0) == cd.ARG_IDENTIFIER
-    # The seeded retry scales the QUANTITY; an id is not one, at any token scale.
     for decimals, encoded in spec.seeded_calldata.items():
         assert _word(encoded, 0) == cd.ARG_IDENTIFIER, decimals
 
 
 def test_amount_goes_only_to_the_named_quantity():
-    """``withdraw(uint256 amount, uint256 deadline)``: one argument is a quantity
-    and one is a timestamp. Filling both with the amount is what a blunt
-    substitution does; filling the deadline with 1 wei makes every call expire."""
+    """Filling the deadline with 1 wei makes every call expire."""
     sig = "withdraw(uint256,uint256)"
     spec = _spec(_facts(sig, parameter_names=["amount", "deadline"]), sig)
     assert _word(spec.calldata, 0) == cd.ARG_AMOUNT
@@ -117,8 +103,7 @@ def test_amount_goes_only_to_the_named_quantity():
 
 
 def test_flow_lattice_names_the_quantity_when_the_source_did_not():
-    """No parameter names (an older artifact), but the flow lattice resolved which
-    entry parameter the outgoing amount came from — the dispositive fact."""
+    """No parameter names, but the flow lattice names the source slot."""
     sig = "pay(uint256,uint256)"
     flows = [
         {
@@ -135,8 +120,7 @@ def test_flow_lattice_names_the_quantity_when_the_source_did_not():
 
 
 def test_unproven_role_takes_no_substitution_at_all():
-    """No names, no lattice index: the honest filler is the encoder's zero. A
-    guessed quantity in an unknown slot is how a probe reverts on itself."""
+    """A guessed quantity in an unknown slot makes the probe revert on itself."""
     sig = "act(uint256,uint256)"
     spec = _spec(_facts(sig, parameter_names=[]), sig)
     assert _word(spec.calldata, 0) == 0
@@ -165,14 +149,7 @@ def test_payability_and_native_payout_reach_the_plan():
     assert spec.native_payout is True
 
 
-# ---------------------------------------------------------------------------
-# 2. attempts that cannot witness anything are not issued
-# ---------------------------------------------------------------------------
-
-
 class _Chain:
-    """A contract that reverts every call, recording what it was asked."""
-
     def __init__(self, *, revert_data: str | None = "0x") -> None:
         self.blocks: list[tuple[list, str, dict | None]] = []
         self.revert_data = revert_data
@@ -187,7 +164,6 @@ class _Chain:
 
 
 def _seeder(budget: SeedBudget | None = None):
-    """A seeder that resolves nothing — the shape of a target with no input asset."""
 
     def seeder(_request):
         return None
@@ -215,13 +191,11 @@ def test_non_payable_target_is_never_sent_msg_value():
     chain = _Chain()
     eff = _value_out(chain, seeder=_seeder(), target_payable=False, native_payout=False)
     assert eff.verdict == VERDICT_UNKNOWN
-    # Only the unseeded probe ran: no attempt could have witnessed anything.
     assert chain.target_values == [0]
 
 
 def test_unknown_payability_still_tries_msg_value():
-    """Payability is tri-state: an artifact that predates the fact must not lose
-    the ETH-deposit path."""
+    """An artifact predating the payability fact must keep the ETH-deposit path."""
     chain = _Chain()
     _value_out(chain, seeder=_seeder(), target_payable=None, native_payout=False)
     assert SEED_ETH_VALUE in chain.target_values
@@ -251,8 +225,7 @@ def test_skipped_payable_attempt_records_why():
 
 
 def test_every_failed_attempt_records_its_revert():
-    """``executed=0`` must never be silent: each discarded attempt names the
-    revert it died on."""
+    """``executed=0`` must never be silent."""
     store = RecordingStore()
     budget = SeedBudget()
     recipes.value_out(
@@ -274,14 +247,7 @@ def test_every_failed_attempt_records_its_revert():
     assert budget.metrics()["seed_outcome_target_reverted"] == len(reverted)
 
 
-# ---------------------------------------------------------------------------
-# 3. contract-balance seeding — a capability claim, flagged as one
-# ---------------------------------------------------------------------------
-
-
 class _UnderfundedChain:
-    """A payout that reverts until the CONTRACT itself holds ETH."""
-
     def __init__(self) -> None:
         self.blocks: list[tuple[list, str, dict | None]] = []
 
@@ -323,7 +289,6 @@ def test_contract_balance_seeding_proves_the_payout_and_flags_the_weaker_claim()
     eff = _payout(chain, store=store, target_payable=False, native_payout=True)
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["value_moved"] is True
-    # The claim is "would move value if the contract were funded" and says so.
     assert eff.details["contract_balance_seeded"] is True
     assert store.stored[-1]["contract_balance_seeded"] is True
 
@@ -332,19 +297,17 @@ def test_contract_balance_attempt_runs_last_and_only_where_static_says_eth_leave
     chain = _UnderfundedChain()
     eff = _payout(chain, target_payable=True, native_payout=True)
     assert eff.verdict == VERDICT_PROVEN
-    # The funded block is the LAST one, so a less synthetic attempt would have won had it executed.
+    # The funded attempt is last, so a less synthetic one would have won.
     funded = [i for i, (_c, _t, ov) in enumerate(chain.blocks) if (ov or {}).get(CONTRACT.lower(), {}).get("balance")]
     assert funded == [len(chain.blocks) - 1]
 
-    # ...and a function static says never sends ETH out never pays for it.
     plain = _Chain()
     _value_out(plain, seeder=_seeder(), target_payable=False, native_payout=False)
     assert not any((ov or {}).get(CONTRACT.lower(), {}).get("balance") for _c, _t, ov in plain.blocks)
 
 
 def test_unseeded_success_never_carries_the_capability_flag():
-    """The flag exists to weaken a verdict; a probe that never needed the
-    override must not carry it."""
+    """The flag exists to weaken a verdict."""
     chain = _Chain()
 
     def sim(calls, tag, ov):
@@ -358,7 +321,6 @@ def test_unseeded_success_never_carries_the_capability_flag():
 
 
 def test_claims_bridge_publishes_both_synthesis_qualifiers():
-    """A consumer reading the claim must see the caveat, not just the verdict."""
     from services.effects import claims_bridge
 
     class _Verdict:

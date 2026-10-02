@@ -102,7 +102,6 @@ def test_existing_queued_pass_is_not_duplicated(db_session, protocol):
 
 
 def test_non_worker_evaluate_never_enqueues(db_session, protocol):
-    """The reconcile/re-earn CLIs call ``evaluate`` and commit themselves."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x5401))
     timelock = _d2_member(db_session, protocol, ADDR(0x5402), controls=anchor)
     safe = _anchored_holder(db_session, protocol, ADDR(0x5403))
@@ -117,10 +116,7 @@ def test_non_worker_evaluate_never_enqueues(db_session, protocol):
 
 
 def test_supersession_transient_is_not_reported_as_a_promotion(db_session, protocol):
-    """A member whose published proof is superseded is revoked and re-admitted
-    on the true current proof inside one run. Its membership never changed, so
-    it is not net-new: it must stay out of ``promoted_contract_ids`` and
-    enqueue no selection pass."""
+    """A superseded proof is revoked and re-admitted in one run, so membership never changed."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x5501))
     timelock = _d2_member(db_session, protocol, ADDR(0x5502), controls=anchor)
     safe = _anchored_holder(db_session, protocol, ADDR(0x5503))
@@ -129,8 +125,7 @@ def test_supersession_transient_is_not_reported_as_a_promotion(db_session, proto
     _caller_gate(db_session, ward, timelock.address)
     db_session.commit()
 
-    # The unclaimed ward ``_d2_member`` leaves behind refuses exclusivity, so
-    # the ward admits on the anchor chain and stays there.
+    # The ward ``_d2_member`` leaves behind refuses exclusivity.
     first = gate.evaluate_committed(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)), context="test")
     assert first is not None
     assert first.promoted_contract_ids == (ward.id,)
@@ -140,9 +135,7 @@ def test_supersession_transient_is_not_reported_as_a_promotion(db_session, proto
         job.status = JobStatus.completed
     db_session.commit()
 
-    # That last ward joins the protocol out of band (an admin assertion the
-    # gate did not have to derive), so the controller becomes exclusive and
-    # the recorded chain stops being the current proof.
+    # The ward joins out of band, making the controller exclusive so the recorded chain stops being the current proof.
     stray = db_session.query(Contract).filter(func.lower(Contract.address) == ADDR(0x5502 + 0x800000)).one()
     stray.nominated_protocol_id = protocol.id
     stray.protocol_id = protocol.id

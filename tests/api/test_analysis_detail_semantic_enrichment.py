@@ -1,11 +1,3 @@
-"""Pin semantic enrichment of ``GET /api/analyses/{run_name}``.
-
-The endpoint adds two keys when a predicate-tree artifact exists:
-
-  - ``predicate_trees`` — raw trees-by-function dict
-  - ``semantic_capabilities`` — resolved CapabilityExpr per function
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -13,7 +5,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-# offline: no live owner()/governor() eth_call during predicate evaluation
 pytestmark = pytest.mark.usefixtures("_stub_live_authority")
 
 
@@ -122,9 +113,7 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
 
 @requires_postgres
 def test_endpoint_handles_unguarded_only_contract_with_empty_caps(api_client, db_session):
-    """Contract with only public functions: predicate_trees has
-    trees={}. semantic_capabilities resolves to {} — both keys present
-    but empty, signaling 'analyzed, every function public'."""
+    """Both keys present but empty means analyzed, every function public."""
     from db.queue import store_artifact
 
     address = "0x" + uuid.uuid4().hex[:8] + "44" * 16
@@ -146,12 +135,8 @@ def test_endpoint_handles_unguarded_only_contract_with_empty_caps(api_client, db
 
 @requires_postgres
 def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api_client, db_session, monkeypatch):
-    """R1 at the published boundary.
-
-    ``get_all_artifacts`` fails closed on an unreadable body. This page is
-    allowed to render what did load — but the SPA reads a name's absence from
-    the payload as proof the analysis never produced it, so the shortfall has
-    to be published beside the values, not only logged.
+    """The SPA reads a missing artifact name as "never produced", so unreadable ones must be published, not only
+    logged.
     """
     from db.storage import StorageContentNotDetermined
     from routers import deps
@@ -172,23 +157,14 @@ def test_endpoint_names_artifacts_it_could_not_read_instead_of_omitting_them(api
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # What did read is still rendered.
     assert body["predicate_trees"]["schema_version"] == "semantic"
-    # What did not is named, rather than reading as "the analysis has none".
     assert "effective_permissions" in body["artifacts_not_determined"]
     assert "effective_permissions" not in body["available_artifacts"]
 
 
 @requires_postgres
 def test_endpoint_keeps_a_lost_body_apart_from_one_it_could_not_ask_about(api_client, db_session, monkeypatch):
-    """The shortfall is published in two maps, not one.
-
-    Both are "this name's absence from the payload proves nothing", but only one
-    of them can change on its own: ``artifacts_not_determined`` is worth re-asking,
-    ``artifacts_body_absent`` is a row asserting a key the bucket does not hold and
-    needs the artifact rebuilt. Before this they were one map distinguished only by
-    the prose of the dict value.
-    """
+    """``artifacts_not_determined`` is worth re-asking; ``artifacts_body_absent`` needs the artifact rebuilt."""
     from db.storage import StorageContentAbsent
     from routers import deps
 

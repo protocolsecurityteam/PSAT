@@ -1,13 +1,6 @@
-"""Unit coverage for the auth-family claim matchers over the documented Plane-0
-facts interface.
+"""Auth-family matchers over real ``build_claims`` with Plane-0 fact data shaped like measured contracts.
 
-Drives real ``build_claims``/``ClaimContext``/registry/matchers with ``effects``- and
-``predicate_trees``-shaped fact *data* (no faked collaborators) mirroring shapes
-measured on real contracts (Solmate DSAuth, OZ AccessControl, Solady handover,
-FiatToken rotate, LayerZero composeQueue). No Slither/DB, so it runs offline.
-
-Assertions intersect against :data:`AUTH_FAMILY` so a sibling family's matcher firing
-on the same synthetic function never couples these tests to another stage.
+Assertions intersect :data:`AUTH_FAMILY` so sibling families can't couple in.
 """
 
 from __future__ import annotations
@@ -29,11 +22,6 @@ AUTH_FAMILY = frozenset(
         "authority.replace",
     }
 )
-
-
-# ---------------------------------------------------------------------------
-# Fact builders (the documented Plane-0 shapes)
-# ---------------------------------------------------------------------------
 
 
 def _sw(var, declared_type, *, hygiene="normal", granularity="var"):
@@ -74,11 +62,7 @@ def _ca_membership_leaf():
 
 
 def _delegated_authority_leaf(var):
-    """The ``authority.canCall(msg.sender, ...)`` half of Solmate's
-    ``requiresAuth``: an external_bool leaf whose set descriptor records the state
-    variable holding the authority contract. This is the IR fact
-    ``authority.replace`` reads — the pointer the guard consults, not a variable
-    called ``authority``."""
+    """``authority.replace`` reads the pointer the guard consults, not a variable named ``authority``."""
     return {
         "op": "LEAF",
         "leaf": {
@@ -150,11 +134,6 @@ def _tiers(functions, signature, claim_id):
     return {c["tier"] for c in functions.get(signature) or [] if c["claim_id"] == claim_id}
 
 
-# ---------------------------------------------------------------------------
-# ownership.* — OZ v5 ghost immunity via owner() sibling
-# ---------------------------------------------------------------------------
-
-
 def test_oz_v5_owner_getter_sibling_positive_and_ghost_negative():
     ghost = "OwnableStorageLocation"
     functions = _run(
@@ -181,14 +160,8 @@ def test_oz_v5_owner_getter_sibling_positive_and_ghost_negative():
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
     assert _tiers(functions, "transferOwnership(address)", "ownership.transfer") == {"standard_exact"}
     assert _auth(functions, "renounceOwnership()") == {"ownership.renounce"}
-    # The ghost slot constant drives NOTHING — not on the setter, not on owner().
     assert _auth(functions, "setPeer(uint32,bytes32)") == set()
     assert _auth(functions, "owner()") == set()
-
-
-# ---------------------------------------------------------------------------
-# ownership.* + authority.replace + roles.configure — DSAuth owner-var identity
-# ---------------------------------------------------------------------------
 
 
 def test_dsauth_owner_var_write_identity_no_getter():
@@ -220,7 +193,6 @@ def test_dsauth_owner_var_write_identity_no_getter():
             "canCall(address,address,bytes4)": (_fn("canCall(address,address,bytes4)", view=True), None),
         },
     )
-    # No owner() getter -> corroborated by owner-var write identity.
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
     assert _auth(functions, "setAuthority(address)") == {"authority.replace"}
     for setter in (
@@ -232,8 +204,6 @@ def test_dsauth_owner_var_write_identity_no_getter():
 
 
 def test_dsauth_renounce_via_owner_var_write_identity():
-    # A Solmate-fork Auth (no owner() getter) whose renounce zeroes the owner
-    # scalar corroborates ownership.renounce via owner-var write identity.
     functions = _run(
         "DSAuthRenounce",
         {
@@ -251,9 +221,7 @@ def test_dsauth_renounce_via_owner_var_write_identity():
 
 
 def test_set_authority_without_authority_write_is_not_claimed():
-    # setAuthority selector, and the contract really does consult an external
-    # authority — but this function writes a different var, so the replacement is
-    # unproven and no claim is minted.
+    # This function writes a different var, so the replacement is unproven.
     functions = _run(
         "NotAuth",
         {
@@ -268,9 +236,7 @@ def test_set_authority_without_authority_write_is_not_claimed():
 
 
 def test_set_authority_without_a_consulted_authority_is_not_claimed():
-    """The selector plus a scalar write is not enough: with no gate anywhere that
-    delegates to an external authority, nothing proves the written pointer IS the
-    permission authority. Name-matching the variable used to supply that proof."""
+    """Without a gate delegating to an external authority, nothing proves the pointer is the permission authority."""
     functions = _run(
         "NoDelegatedGate",
         {
@@ -285,9 +251,7 @@ def test_set_authority_without_a_consulted_authority_is_not_claimed():
 
 
 def test_authority_replace_ignores_the_variable_name():
-    """The authority pointer is whatever the delegated-authority gate leaf names.
-    Here it is called ``permissionOracle`` — off every conventional vocabulary —
-    and the claim still lands, because the evidence is the IR, not the identifier."""
+    """The evidence is the IR, not the identifier."""
     functions = _run(
         "OffVocabularyAuth",
         {
@@ -302,11 +266,6 @@ def test_authority_replace_ignores_the_variable_name():
     claim = next(c for c in functions["setAuthority(address)"] if c["claim_id"] == "authority.replace")
     assert claim["tier"] == "standard_exact"
     assert claim["witness"]["write_target"] == "permissionOracle"
-
-
-# ---------------------------------------------------------------------------
-# ownership.* — Solady handover + Ownable2Step accept
-# ---------------------------------------------------------------------------
 
 
 def test_solady_handover_family():
@@ -340,11 +299,6 @@ def test_ownable2step_accept():
     assert _auth(functions, "acceptOwnership()") == {"ownership.accept"}
 
 
-# ---------------------------------------------------------------------------
-# ownership.* + roles.* — DefaultAdminRules staged transfer
-# ---------------------------------------------------------------------------
-
-
 def test_default_admin_rules_and_oz_roles():
     functions = _run(
         "DAR",
@@ -367,17 +321,11 @@ def test_default_admin_rules_and_oz_roles():
 
 
 def test_grant_role_without_access_control_gate_is_not_claimed():
-    # grantRole selector but no hasRole/getRoleAdmin siblings -> no role claim.
     functions = _run(
         "NoGate",
         {"grantRole(bytes32,address)": (_fn("grantRole(bytes32,address)"), None)},
     )
     assert _auth(functions, "grantRole(bytes32,address)") == set()
-
-
-# ---------------------------------------------------------------------------
-# authorized_caller.rotate — positive updateX; transferOwnership + initialize NEG
-# ---------------------------------------------------------------------------
 
 
 def test_authorized_caller_rotate_and_initialize_near_miss():
@@ -397,13 +345,11 @@ def test_authorized_caller_rotate_and_initialize_near_miss():
                 _fn("updateBlacklister(address)", state_writes=[_sw("blacklister", "address")]),
                 _ca_equality_leaf("_owner"),
             ),
-            # pause() establishes `pauser` as a caller-authority scalar.
             "pause()": (_fn("pause()", state_writes=[_sw("paused", "bool")]), _ca_equality_leaf("pauser")),
             "blacklist(address)": (
                 _fn("blacklist(address)", state_writes=[_sw("blacklisted", "mapping(address => bool)")]),
                 _ca_equality_leaf("blacklister"),
             ),
-            # One-shot initialize seeds pauser/_owner but is latched (no CA leaf).
             "initialize(address,address)": (
                 _fn("initialize(address,address)", state_writes=[_sw("pauser", "address"), _sw("_owner", "address")]),
                 _business_leaf("initialized"),
@@ -413,11 +359,8 @@ def test_authorized_caller_rotate_and_initialize_near_miss():
     assert _auth(functions, "updatePauser(address)") == {"authorized_caller.rotate"}
     assert _tiers(functions, "updatePauser(address)", "authorized_caller.rotate") == {"idiom_structural"}
     assert _auth(functions, "updateBlacklister(address)") == {"authorized_caller.rotate"}
-    # Canonical owner carries ownership.transfer, never the rotate.
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
-    # Latched initializer: same scalars, but not caller-gated -> no rotate.
     assert _auth(functions, "initialize(address,address)") == set()
-    # blacklist writes a mapping (not a scalar) -> no rotate.
     assert _auth(functions, "blacklist(address)") == set()
 
     claim = next(c for c in functions["updatePauser(address)"] if c["claim_id"] == "authorized_caller.rotate")
@@ -426,8 +369,6 @@ def test_authorized_caller_rotate_and_initialize_near_miss():
 
 
 def test_rotate_skipped_when_var_is_the_only_owner():
-    # A bespoke owner setter (no ownership standard) writing the sole caller-
-    # authority scalar is the canonical owner -> carried by ownership, not rotate.
     functions = _run(
         "BespokeOwner",
         {
@@ -439,11 +380,6 @@ def test_rotate_skipped_when_var_is_the_only_owner():
     )
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
     assert "authorized_caller.rotate" not in _auth(functions, "transferOwnership(address)")
-
-
-# ---------------------------------------------------------------------------
-# roles.* — Maker wards + the composeQueue counterexample
-# ---------------------------------------------------------------------------
 
 
 def test_maker_wards_rely_deny():
@@ -491,21 +427,13 @@ def test_composequeue_is_not_role_management():
             ),
         },
     )
-    # Caller-keyed data map, membership leaf -> zero auth-family claims.
     assert _auth(functions, "sendCompose(address,bytes32,uint16,bytes)") == set()
     assert _auth(functions, "transferOwnership(address)") == {"ownership.transfer"}
     assert _auth(functions, "renounceOwnership()") == {"ownership.renounce"}
 
 
-# ---------------------------------------------------------------------------
-# Solady EnumerableRoles behind OZ-named wrappers
-# ---------------------------------------------------------------------------
-
-
 def _solady_roles_surface():
-    """The Solady ``EnumerableRoles`` ABI, plus the OZ-named wrappers a registry
-    layers over it. Deliberately NO ``getRoleAdmin``: a flat ``uint256`` role set
-    has no per-role admin to publish, which is why the OZ gate refuses."""
+    """No ``getRoleAdmin``: a flat ``uint256`` role set has no per-role admin, which is why the OZ gate refuses."""
     return {
         "setRole(address,uint256,bool)": (_fn("setRole(address,uint256,bool)"), None),
         "hasRole(address,uint256)": (_fn("hasRole(address,uint256)", view=True), None),
@@ -516,9 +444,7 @@ def _solady_roles_surface():
 
 
 def test_solady_enumerable_roles_wrappers_are_claimed():
-    """A registry can wear OZ's grantRole/revokeRole names over Solady's role set
-    and publish no getRoleAdmin. The OZ gate is right to refuse it, and refusing
-    left a live authority-mutation surface with no claim at all."""
+    """Refusing it under the OZ gate left a live authority-mutation surface unclaimed."""
     functions = _run("SoladyRegistry", _solady_roles_surface())
     assert _auth(functions, "grantRole(bytes32,address)") == {"roles.grant"}
     assert _auth(functions, "revokeRole(bytes32,address)") == {"roles.revoke"}
@@ -526,17 +452,13 @@ def test_solady_enumerable_roles_wrappers_are_claimed():
 
 
 def test_solady_roles_witness_names_the_standard_that_proved_it():
-    """The witness records which standard the gate matched, so it must not say
-    ``oz_access_control`` for a contract that publishes no OZ role ABI."""
     functions = _run("SoladyRegistry", _solady_roles_surface())
     grant = next(c for c in functions["grantRole(bytes32,address)"] if c["claim_id"] == "roles.grant")
     assert grant["witness"]["standard"] == "solady_enumerable_roles"
 
 
 def test_solady_gate_needs_the_enumerable_surface_not_the_wrappers():
-    """The wrappers are what the claim is ABOUT, so they cannot also be its gate.
-    Without the library's own surface there is nothing proving these selectors
-    touch a role set rather than a caller-keyed data map."""
+    """The wrappers are what the claim is about, so they can't also be its gate."""
     surface = _solady_roles_surface()
     del surface["roleHolders(uint256)"]
     functions = _run("HalfSurface", surface)
@@ -545,8 +467,6 @@ def test_solady_gate_needs_the_enumerable_surface_not_the_wrappers():
 
 
 def test_oz_registry_still_reports_oz_provenance():
-    """A registry publishing the full OZ ABI keeps its OZ witness — the new arm
-    must not shadow the existing one."""
     functions = _run(
         "OZRegistry",
         {

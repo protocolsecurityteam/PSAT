@@ -28,18 +28,12 @@ def _addr(n: int) -> str:
 
 @pytest.fixture()
 def seed_protocol(db_session):
-    """Fresh protocol whose contracts get cleaned up by db_session teardown."""
     from db.models import Protocol
 
     p = Protocol(name=f"gate-reg-{uuid.uuid4().hex[:10]}")
     db_session.add(p)
     db_session.commit()
     return p.id
-
-
-# ---------------------------------------------------------------------------
-# 3. Backfill-side gate — services/discovery/upgrade_history.py
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -60,9 +54,7 @@ def stub_etherscan(monkeypatch):
 
 @requires_postgres
 class TestBackfillMembershipGate:
-    """Backfilled impls route through the gate: always NOMINATED; MEMBER only
-    via a member-proxy UpgradeEvent edge (W2 ``historical_implementation``) plus
-    a persisted code fact (W1)."""
+    """Member only via a member-proxy UpgradeEvent edge (W2) plus a persisted code fact (W1)."""
 
     @staticmethod
     def _seed_code_fact(session, addr, block=90):
@@ -76,9 +68,7 @@ class TestBackfillMembershipGate:
         session.commit()
 
     def test_backfill_without_member_edge_produces_candidates(self, db_session, seed_protocol, stub_etherscan):
-        """The EigenPodManager multiplier shape: impls with no proven
-        member-proxy edge stay candidates — a company-page query keyed on
-        ``protocol_id`` returns none of them."""
+        """The EigenPodManager multiplier shape."""
         from db.models import Contract
         from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
@@ -132,17 +122,9 @@ class TestBackfillMembershipGate:
             assert witness_rules == {"w1_code", "w2_structural"}
 
 
-# ---------------------------------------------------------------------------
-# 5. End-to-end shape — the EigenLayer leak in miniature
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 class TestEigenLayerLeakShape:
-    """The real-world shape that motivated the gate: a foreign proxy enters
-    via dapp_crawl and its upgrade history adds N impls. Even WITH stored
-    upgrade events and code facts, a proxy that is not itself a MEMBER
-    licenses nothing — zero pollution in the protocol's rollup."""
+    """A proxy that is not itself a member licenses nothing, even with stored upgrade events and code facts."""
 
     def test_dapp_crawl_proxy_plus_upgrade_history_does_not_pollute(self, db_session, seed_protocol, stub_etherscan):
         from db.models import Contract, ContractCreationWitness, UpgradeEvent
@@ -166,9 +148,6 @@ class TestEigenLayerLeakShape:
         proxy = db_session.query(Contract).filter_by(address=proxy_addr).one()
         assert proxy.protocol_id is None, "writer gate failed at step 1"
 
-        # Step 2: upgrade events + code facts exist for the impls — the
-        # strongest version of the shape. The via proxy is NOT a member, so
-        # the W2 edge does not verify and every impl stays a candidate.
         impl_addrs = {_addr(0xE001), _addr(0xE002), _addr(0xE003)}
         for i, addr in enumerate(sorted(impl_addrs)):
             db_session.add(
@@ -202,11 +181,6 @@ class TestEigenLayerLeakShape:
 
         assert db_session.query(Contract).filter_by(address=proxy_addr).count() == 1
         assert db_session.query(Contract).filter(Contract.address.in_(impl_addrs)).count() == 3
-
-
-# ---------------------------------------------------------------------------
-# 6b. Call-target / NULL-provenance overreach — the WETH9/EndpointV2 leak
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -272,9 +246,7 @@ class TestCallTargetOverreachShape:
         )
 
     def test_w2_cascade_dies_with_the_refused_w3_root(self, db_session, seed_protocol):
-        """The Lido shape: the stETH proxy entered via a call_target CV, then
-        its implementation rode in on W2. Refusing the W3 root must starve the
-        W2 edge — neither row may become a member."""
+        """The Lido shape: refusing the W3 root must starve the W2 edge."""
         from db.models import Contract, ContractCreationWitness, ControllerValue
 
         member, foreign_proxy = self._seed(db_session, seed_protocol, 3)
@@ -304,9 +276,9 @@ class TestCallTargetOverreachShape:
         assert impl.protocol_id is None
 
     def test_exclusivity_observed_set_counts_caller_gate_only(self, db_session, seed_protocol):
-        """Owner ruling: a call_target operand is not an observation of
-        control, so it neither licenses exclusivity nor refuses it — the
-        exclusivity verdict is computed over caller_gate rows alone."""
+        """A call_target operand is not an observation of control, so exclusivity is computed over caller_gate rows
+        alone.
+        """
         from db.models import Contract, ControllerValue, Protocol
         from services.discovery.membership_gate import _controller_is_exclusive
 
@@ -323,8 +295,6 @@ class TestCallTargetOverreachShape:
         foreign = Contract(address=_addr(0xF301), chain="ethereum", protocol_id=other.id)
         db_session.add(foreign)
         db_session.flush()
-        # A call_target row naming the operator on a FOREIGN contract is not
-        # an observation of control and must not decide the verdict either way.
         db_session.add(
             ControllerValue(
                 contract_id=foreign.id, controller_id="router", value=operator, authority_provenance="call_target"
@@ -340,8 +310,7 @@ class TestCallTargetOverreachShape:
             exclude_contract_ids=set(),
         )
 
-        # The same observation with caller_gate provenance IS control — and
-        # being foreign, it kills exclusivity (the two-hop shape).
+        # With caller_gate provenance it is control, and being foreign it kills exclusivity.
         db_session.query(ControllerValue).filter_by(contract_id=foreign.id).update(
             {"authority_provenance": "caller_gate"}
         )
@@ -355,16 +324,9 @@ class TestCallTargetOverreachShape:
         )
 
 
-# ---------------------------------------------------------------------------
-# 7. Structural-orphan adoption migration (3a8f4d1c9b07)
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 class TestProxyMembershipOnClassification:
-    """Membership-gate event 2a at ``static_worker._resolve_proxy``: a proxy is
-    promoted only on a verified W2 edge (its resolved impl IS a member of its
-    NOMINATED protocol) plus W1."""
+    """Event 2a: a proxy is promoted only on a verified W2 edge to its nominated protocol plus W1."""
 
     @staticmethod
     def _seed_proxy_job(db_session, proxy_addr, *, nominated_protocol_id=None):
@@ -442,8 +404,7 @@ class TestProxyMembershipOnClassification:
         assert witness_rules == {"w1_code", "w2_structural"}
 
     def test_unnominated_proxy_never_promotes(self, db_session, seed_protocol, monkeypatch):
-        """No nomination -> no membership, whatever the impl points at
-        (stranger-fork / ERC-6551 TBA shape)."""
+        """The stranger-fork / ERC-6551 TBA shape."""
         from types import SimpleNamespace
 
         from db.models import Contract
@@ -468,9 +429,7 @@ class TestProxyMembershipOnClassification:
         assert row.protocol_id is None
 
     def test_proxy_nominated_elsewhere_stays_candidate(self, db_session, seed_protocol, monkeypatch):
-        """The impl is a member of protocol B; the proxy is nominated to A.
-        The W2 edge only verifies against the NOMINATED protocol, so nothing
-        promotes — no cross-protocol adoption through a shared impl."""
+        """No cross-protocol adoption through a shared impl."""
         from types import SimpleNamespace
 
         from db.models import Contract, Protocol
@@ -496,19 +455,3 @@ class TestProxyMembershipOnClassification:
         row = db_session.query(Contract).filter_by(address=proxy_addr).one()
         assert row.protocol_id is None
         assert row.nominated_protocol_id == seed_protocol
-
-
-# ---------------------------------------------------------------------------
-# 7. Remaining-orphan adoption — the fifth and sixth ownership branches.
-#
-# Branch A — deployer-cascade: an orphan whose deployer also deployed a
-# HIGH-sourced contract attributed to a protocol inherits it. The
-# HIGH-sourced-sibling requirement keeps WETH / USDC / OZ libs out. Motivated
-# by PR-87 orphans spawned at ``workers/resolution_worker.py:499-513`` with
-# NULL ``discovery_sources``.
-#
-# Branch B — historical impls behind a HIGH-impl proxy, anchored on the
-# proxy's CURRENT impl so the proxy itself may be LOW-only
-# (``structural_adoption``). Scope: the 5 LRTSquare* impls behind
-# LRTSquaredCore + UUPSProxy on PR-87.
-# ---------------------------------------------------------------------------

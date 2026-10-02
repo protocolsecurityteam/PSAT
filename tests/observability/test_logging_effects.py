@@ -1,10 +1,5 @@
-"""Offline logging tests for the effects stage (audit part 2, C).
-
-Anvil output is drained into the logger and its tail survives into the spawn error; degraded
-skip/swallow paths pair a log with a bounded ``record_degraded`` (a cold cache can't flood the
-artifact); every worklist item lands in exactly one counter
-(``items == hits + misses + probes_failed + withheld``) in stage metrics and the summary.
-No DB or network.
+"""Anvil output survives into the spawn error, degraded paths pair a log with a bounded record, and every worklist
+item lands in exactly one counter.
 """
 
 from __future__ import annotations
@@ -47,14 +42,7 @@ def _fake_anvil_bin(tmp_path: Path, body: str) -> str:
     return str(script)
 
 
-# ---------------------------------------------------------------------------
-# C1 — anvil output is drained, not discarded
-# ---------------------------------------------------------------------------
-
-
 def test_spawn_failure_carries_returncode_and_output_tail(tmp_path, caplog):
-    """A fork dying at startup must be explainable: exit code and last words ride the exception,
-    not DEVNULL."""
     binary = _fake_anvil_bin(
         tmp_path,
         "echo 'anvil starting'\necho 'error: could not fork: 401 unauthorized' >&2\nexit 3\n",
@@ -77,7 +65,6 @@ def test_spawn_failure_carries_returncode_and_output_tail(tmp_path, caplog):
 
 
 def test_output_tail_is_bounded(tmp_path):
-    """A chatty long-lived fork must not grow the job's memory, and the exception's tail is bounded."""
     lines = _OUTPUT_TAIL_LINES * 5
     binary = _fake_anvil_bin(tmp_path, f'i=0\nwhile [ $i -lt {lines} ]; do echo "line $i"; i=$((i+1)); done\nexit 1\n')
     with pytest.raises(AnvilSpawnError) as excinfo:
@@ -85,13 +72,11 @@ def test_output_tail_is_bounded(tmp_path):
 
     quoted = str(excinfo.value).split(": ", 1)[1]
     assert len(quoted.split(" | ")) <= _OUTPUT_TAIL_LINES
-    # The END of the output survives: the lines nearest the death.
     assert f"line {lines - 1}" in quoted
     assert "line 0" not in quoted
 
 
 def test_close_warns_when_sigterm_is_escalated_to_sigkill(caplog):
-    """A killed fork and a clean shutdown used to look identical in the log."""
 
     class _StubbornProc:
         pid = 4242
@@ -129,7 +114,6 @@ def test_close_warns_when_sigterm_is_escalated_to_sigkill(caplog):
 
 
 def test_close_joins_the_drain_thread(tmp_path):
-    """Many fork open/close cycles per job must leak neither threads nor fds."""
     binary = _fake_anvil_bin(tmp_path, "while true; do echo tick; sleep 0.2; done\n")
     anvil = SubprocessAnvil.__new__(SubprocessAnvil)
     cmd = [binary]
@@ -146,14 +130,8 @@ def test_close_joins_the_drain_thread(tmp_path):
     assert anvil._drain is None
 
 
-# ---------------------------------------------------------------------------
-# C3 — dark swallows in the services
-# ---------------------------------------------------------------------------
-
-
 def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, caplog):
-    """A storage/DB outage here evaporates the Tier-1 probe surface into ``unknown`` verdicts;
-    it must not read as "this contract has no facts"."""
+    """A storage/DB outage here would read as "this contract has no facts"."""
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("storage unavailable")
@@ -170,7 +148,7 @@ def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, c
     rec = next(r for r in caplog.records if r.name == CALLDATA_LOGGER)
     assert rec.levelno == logging.WARNING
     assert rec.exc_type == "RuntimeError"
-    # NOT ``address``: the formatter writes the ambient job address first and drops a colliding extra.
+    # The formatter drops an extra named ``address``.
     assert rec.contract_address == "0x" + "ab" * 20
     assert not hasattr(rec, "address")
     assert [e.phase for e in accumulator] == ["effects_calldata_facts"]
@@ -192,8 +170,7 @@ def test_uint_call_failure_logs_the_zero_it_passes(caplog):
 
 
 def test_proxy_without_implementation_warns_and_leaves_the_record_to_the_worker(monkeypatch, caplog):
-    """The skip is witnessed ONCE, in the worker's capped receiving arm; recording here too
-    would double every entry of a shortfall the dedup race produces in bulk."""
+    """Recording here too would double every entry of the shortfall."""
 
     class _Contract:
         is_proxy = True
@@ -250,8 +227,7 @@ class _ClientReturning:
 
 
 def test_static_setter_var_scan_failure_records_degraded():
-    """The pure-analysis module has no logger by design, so a failed scan is a degraded record
-    rather than vanishing into an empty map."""
+    """The pure-analysis module has no logger by design."""
     from services.static.contract_analysis_pipeline import effects as static_effects
 
     class _Fn:
@@ -268,7 +244,7 @@ def test_static_setter_var_scan_failure_records_degraded():
 
     accumulator: list = []
     token = degraded_errors_var.set(accumulator)
-    # A fresh instance, so the memo (keyed on the contract OBJECT) can't serve an earlier call.
+    # The memo is keyed on the contract object.
     contract = _Contract()
     assert contract not in static_effects._SETTER_VARS
     try:
@@ -278,11 +254,6 @@ def test_static_setter_var_scan_failure_records_degraded():
 
     assert [e.phase for e in accumulator] == ["static_effects_setter_state_vars"]
     assert accumulator[0].context["functions_unscanned"] == 1
-
-
-# ---------------------------------------------------------------------------
-# C4 — metric reconciliation
-# ---------------------------------------------------------------------------
 
 
 def _candidate(fid: int, value: float) -> Candidate:
@@ -311,8 +282,6 @@ def test_dropped_manifest_is_capped_with_the_full_count(caplog):
 
 
 class _FlushOnlySession:
-    """Enough Session for cache-hit bookkeeping (``bump_hit`` mutates and flushes); no DB touched."""
-
     def flush(self) -> None:
         pass
 
@@ -349,8 +318,7 @@ def _item(*, cached=None, needs_audit=False, probed=None, scope=None):
 
 
 def test_every_worklist_item_lands_in_exactly_one_counter():
-    """Drive the four real outcomes through ``_resolve_item`` and assert the identity in ITEM
-    units; deleting any increment breaks it."""
+    """Deleting any increment breaks the identity."""
     from services.effects.config import TIER_HISTORICAL, VERDICT_PROVEN
     from services.effects.harness import ObservedEffect
     from workers.effects_worker import EffectsWorker, _Counters
@@ -358,7 +326,6 @@ def test_every_worklist_item_lands_in_exactly_one_counter():
     worker = EffectsWorker.__new__(EffectsWorker)
     session = _FlushOnlySession()
     counters = _Counters()
-    # Not cacheable (tier-0), so the miss path writes nothing to the cache.
     probe = ObservedEffect(effect_class="supply", verdict=VERDICT_PROVEN, tier=TIER_HISTORICAL)
     items = [
         _item(cached=None, probed=None),  # probe failed
@@ -391,7 +358,6 @@ def test_every_worklist_item_lands_in_exactly_one_counter():
     finally:
         stage_metrics_var.reset(token)
 
-    # The published metrics carry the same identity, and the retired dead one is gone.
     assert "candidates_after_cascade" not in metrics
     assert (
         len(items)
@@ -401,13 +367,11 @@ def test_every_worklist_item_lands_in_exactly_one_counter():
         + metrics["probes_failed"]
         + metrics["withheld"]
     )
-    # ``skipped`` is a CANDIDATE-unit count and stays out of that identity.
     assert metrics["skipped"] == counters.skipped
 
 
 def test_hashless_candidates_record_a_capped_sample_plus_the_exact_total(monkeypatch):
-    """A cold bytecode cache refuses every candidate; stage_errors is uncapped and rewritten per
-    retry, so per-candidate records are bounded and the exact shortfall rides one summary."""
+    """stage_errors is uncapped and rewritten per retry, so per-candidate records are bounded."""
     from types import SimpleNamespace
 
     from workers.effects_worker import _NO_HASH_SAMPLE, EffectsWorker, _Counters
@@ -431,7 +395,6 @@ def test_hashless_candidates_record_a_capped_sample_plus_the_exact_total(monkeyp
 
     assert items == []
     assert counters.skipped == len(candidates)
-    # Uncapped would be len(candidates); it is the cap plus the summary.
     assert len(accumulator) == _NO_HASH_SAMPLE + 1
     summary = accumulator[-1]
     assert summary.context["candidates_without_hash"] == len(candidates)
@@ -439,7 +402,6 @@ def test_hashless_candidates_record_a_capped_sample_plus_the_exact_total(monkeyp
 
 
 def test_selectionless_job_still_reports_a_defined_funnel():
-    """ "selection never ran" must be readable as such, not as an absent funnel."""
     from workers.effects_worker import EffectsWorker
 
     class _Job:
@@ -452,7 +414,6 @@ def test_selectionless_job_still_reports_a_defined_funnel():
 
 
 def _rss_outcome(anvil, caplog):
-    """Drive two samples through the worker; return (counters, records, degraded, metrics)."""
     from workers.effects_worker import EffectsWorker, _Counters
 
     worker = EffectsWorker.__new__(EffectsWorker)
@@ -478,9 +439,9 @@ def _rss_outcome(anvil, caplog):
 
 
 def test_a_dead_fork_publishes_no_rss_peak_at_all(caplog):
-    """THE regression, end to end through the REAL transport: a fork dead before the first
-    sample reads 0 bytes from ``rss_bytes_for_pid`` (never raises); publishing that 0 would be
-    a fallback standing in for a witness."""
+    """A dead fork reads 0 bytes from ``rss_bytes_for_pid``; publishing that 0 would be a fallback standing in for a
+    witness.
+    """
     import os
 
     class _ExitedProc:

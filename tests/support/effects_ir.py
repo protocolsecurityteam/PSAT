@@ -1,8 +1,4 @@
-"""Structural doubles that mimic the getattr surface the effects normalizer reads
-on a Slither Function/Modifier (nodes -> irs -> read/lvalue/function).
-
-Extracted verbatim from ``test_effects_hashing``.
-"""
+"""Doubles for the getattr surface the effects normalizer reads on a Slither Function/Modifier."""
 
 from __future__ import annotations
 

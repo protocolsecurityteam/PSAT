@@ -1,8 +1,5 @@
-"""Shared multi-address getLogs on ``RpcEventLogFetcher``.
-
-The monitoring scanner needs one ``eth_getLogs`` for a whole cohort of contracts, per-emitter attribution, and a raw
-log dict for ``services/monitoring/event_topics.parse_any_log``. Pins the multi-address filter shape, bisect-on-reject
-with an address list, single-address back-compat, and the end-to-end governance decode. Only ``rpc_request`` is stubbed.
+"""One ``eth_getLogs`` per contract cohort for the monitoring scanner, with per-emitter attribution and raw logs for
+``parse_any_log``.
 """
 
 from __future__ import annotations
@@ -80,7 +77,6 @@ def test_multi_address_filter_shape_and_attribution(monkeypatch):
         (_ADDR_B, 101),
         (_ADDR_A, 102),
     ]
-    # Attribution is exact: bucketing by emitter partitions the cohort's logs.
     by_emitter: dict[str, list[int]] = {}
     for log in logs:
         by_emitter.setdefault(log.address, []).append(log.block_number)
@@ -97,7 +93,6 @@ def test_multi_address_bisects_on_rejection(monkeypatch):
         calls.append((from_block, to_block))
         if to_block - from_block + 1 > 100_000:
             raise RuntimeError("{'code': -32005, 'message': 'Limit exceeded: More than 50000 logs returned'}")
-        # Two emitters at the two ends of each surviving sub-window.
         return [
             _raw_log(address=_ADDR_A, topic0=_TOPIC_A, block=from_block),
             _raw_log(address=_ADDR_B, topic0=_TOPIC_A, block=to_block),
@@ -112,7 +107,6 @@ def test_multi_address_bisects_on_rejection(monkeypatch):
         to_block=399_999,
     )
 
-    # 400k fails → 2×200k fail → 4×100k succeed: 7 requests.
     assert len(calls) == 7
     assert [log.block_number for log in logs] == [
         0,
@@ -154,8 +148,6 @@ def test_multi_address_bisect_floor_re_raises(monkeypatch):
 
 
 def test_raw_dict_decodes_through_governance_parser(monkeypatch):
-    """A realistic OwnershipTransferred log round-trips through the production ``parse_any_log`` to the
-    decoded owner rotation, keyed to the emitter the fetcher attributed it to."""
     old_owner = "0x" + "de" * 20
     new_owner = "0x" + "ad" * 20
     raw = _raw_log(
@@ -230,9 +222,7 @@ class TestTopicFilter:
         assert normalize_topic_filter(topics) == expected
 
     def test_an_empty_slot_is_refused_rather_than_sent(self):
-        # An empty list in a topic slot matches nothing at some upstreams and
-        # everything at others, so a batch that came out empty would silently read
-        # as either answer.
+        # An empty topic slot matches nothing at some upstreams and everything at others.
         with pytest.raises(ValueError):
             normalize_topic_filter([["0xAA"], None, []])
 

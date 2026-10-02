@@ -1,9 +1,3 @@
-"""Job / snapshot / graph builders for the policy worker.
-
-Extracted verbatim from ``test_policy_worker_integration``, which
-``test_effects_stage`` imported these from cross-module.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -29,7 +23,6 @@ def _job(**overrides: Any) -> SimpleNamespace:
 
 
 def _minimal_snapshot(controller_values: dict | None = None) -> dict:
-    """Return a minimal control_snapshot dict."""
     return {
         "contract_address": TARGET_ADDRESS,
         "controller_values": controller_values or {},

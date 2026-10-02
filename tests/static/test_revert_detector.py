@@ -1,8 +1,4 @@
-"""Tests for ``RevertDetector`` across the 8 revert-pattern cases.
-
-Each case compiles a tiny contract and asserts the expected RevertGate(s) by count + kind +
-polarity (condition_value identity is Slither-version dependent, so not pinned).
-"""
+"""Asserts gates by count, kind and polarity; condition_value identity is Slither-version dependent."""
 
 from __future__ import annotations
 
@@ -28,12 +24,13 @@ from services.static.contract_analysis_pipeline.revert_detect import (  # noqa: 
 from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
+from tests.support.slither_compile import _compile, _function  # noqa: E402
+from tests.support.solc import _solc_086  # noqa: E402
 
 pytestmark = pytest.mark.compile
 
 
 def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
-    """Drive static→evaluator (as test_earned_public's ``_cap_for``) and return one function's CapabilityExpr."""
     contract = next(c for c in sl.contracts if c.name == cname)
     trees = {}
     for fn in contract.functions:
@@ -45,28 +42,8 @@ def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
     return evaluate_tree(trees[full_name])
 
 
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
-
-
-def _function(sl: Slither, name: str):
-    for c in sl.contracts:
-        for f in c.functions:
-            if f.name == name:
-                return f
-    raise LookupError(name)
-
-
 def _gate_kinds(gates: list[RevertGate]) -> list[str]:
     return [g.kind for g in gates]
-
-
-# ---------------------------------------------------------------------------
-# Case 1: require
-# ---------------------------------------------------------------------------
 
 
 def test_require_simple(tmp_path):
@@ -91,11 +68,6 @@ def test_require_simple(tmp_path):
     assert req.condition_value is not None
 
 
-# ---------------------------------------------------------------------------
-# Case 2: assert
-# ---------------------------------------------------------------------------
-
-
 def test_assert(tmp_path):
     sl = _compile(
         tmp_path,
@@ -111,11 +83,6 @@ def test_assert(tmp_path):
     fn = _function(sl, "f")
     gates = RevertDetector(fn).run()
     assert any(g.kind == "assert" for g in gates)
-
-
-# ---------------------------------------------------------------------------
-# Case 3: if (C) revert
-# ---------------------------------------------------------------------------
 
 
 def test_if_revert_inverts_polarity(tmp_path):
@@ -157,14 +124,8 @@ def test_if_revert_custom_error(tmp_path):
     assert any(g.kind in ("custom_revert", "if_revert") for g in gates), _gate_kinds(gates)
 
 
-# ---------------------------------------------------------------------------
-# Case 5: inline assembly conditional revert
-# ---------------------------------------------------------------------------
-
-
 def test_inline_asm_conditional_revert_structurally_parsed(tmp_path):
-    """``assembly { if iszero(x) { revert(0,0) } }`` is parsed by Slither as structured IF +
-    revert, so the gate kind is ``if_revert`` (not ``inline_asm``)."""
+    """Slither parses it as structured IF + revert."""
     sl = _compile(
         tmp_path,
         """
@@ -184,8 +145,7 @@ def test_inline_asm_conditional_revert_structurally_parsed(tmp_path):
 
 
 def test_pure_compute_assembly_yields_no_gates(tmp_path):
-    """Pure-compute assembly is genuinely ungated (``[]``); the opaque marker is reserved for
-    assembly with a textual `revert` we couldn't structurally extract."""
+    """The opaque marker is reserved for textual reverts we couldn't extract."""
     sl = _compile(
         tmp_path,
         """
@@ -203,11 +163,6 @@ def test_pure_compute_assembly_yields_no_gates(tmp_path):
     fn = _function(sl, "f")
     gates = RevertDetector(fn).run()
     assert gates == []
-
-
-# ---------------------------------------------------------------------------
-# Multiple sequential gates → multiple RevertGate records.
-# ---------------------------------------------------------------------------
 
 
 def test_two_requires_yields_two_gates(tmp_path):
@@ -231,15 +186,8 @@ def test_two_requires_yields_two_gates(tmp_path):
     assert require_count == 2, f"expected 2 require gates, got {require_count}: {_gate_kinds(gates)}"
 
 
-# ---------------------------------------------------------------------------
-# Case 6: try/catch revert
-# ---------------------------------------------------------------------------
-
-
 def test_try_catch_with_revert_in_catch_emits_opaque_gate(tmp_path):
-    """``try x.foo() {} catch { revert(); }`` reverts iff the external call does. We can't
-    classify it structurally, so we emit an opaque ``opaque_try_catch`` gate; otherwise the
-    function looks unguarded."""
+    """Otherwise the function looks unguarded."""
     sl = _compile(
         tmp_path,
         """
@@ -329,18 +277,12 @@ def test_bare_void_state_var_call_is_semantic_precondition(tmp_path):
     assert any(g.kind == "external_call_revert" for g in gates)
 
 
-# ---------------------------------------------------------------------------
-# Bug 1: try/catch around a single external authority-check call must not collapse to
-# opaque(opaque_try_catch). Keeping the call selector + target lets the capability resolver
-# expand it to member addresses; opaque cascades as `unsupported` and left EtherFi's
-# UUPSUpgradeable.upgradeTo unresolvable.
-# ---------------------------------------------------------------------------
+# Keeping the call selector and target lets the resolver expand members; opaque left EtherFi's ``upgradeTo``
+# unresolvable.
 
 
 def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
-    """``try authority.canCall(...) returns (bool ok) { require(ok); } catch { revert; }`` is
-    the OZ AccessManaged / EtherFi RoleRegistry upgrade pattern: an external authority check
-    on ``authority.canCall``, not an opaque gate."""
+    """The OZ AccessManaged / EtherFi RoleRegistry upgrade pattern."""
     sl = _compile(
         tmp_path,
         """
@@ -375,33 +317,7 @@ def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
-# Custom-error require — ``require(cond, MyError())`` (Solidity >=0.8.26).
-# Slither lowers this to a SolidityCall named ``require(bool,error)``. Dropping
-# it left the predicate tree empty and the function defaulted to public; it must
-# be lifted exactly like ``require(bool)`` / ``require(bool,string)``.
-# ---------------------------------------------------------------------------
-
-
-def _solc_086() -> str:
-    """Highest installed solc >=0.8.26, so the custom-error require form
-    parses. Resolved from solc-select's LOCAL store only — the offline guard
-    blocks the binary download under pytest, so an absent version skips
-    rather than installing on demand (the CI workflow preinstalls one;
-    locally: ``solc-select install 0.8.27``)."""
-    import solc_select.solc_select as ss
-
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = tuple(int(x) for x in version.split("."))
-        except ValueError:
-            continue
-        if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
+# Slither lowers ``require(cond, MyError())`` to ``require(bool,error)``; dropping it defaulted the function to public.
 
 
 def _compile_086(tmp_path: Path, source: str) -> Slither:
@@ -454,16 +370,10 @@ def test_require_custom_error_with_args_is_lifted(tmp_path):
     assert any(g.kind == "require" for g in gates), _gate_kinds(gates)
 
 
-# ---------------------------------------------------------------------------
-# Coverage invariant — a require/assert SolidityCall we walked but did not lift
-# into a gate must surface as ``unsupported`` (fail closed), never be silently
-# dropped (which defaults the function to public).
-# ---------------------------------------------------------------------------
+# A walked but unlifted require/assert fails closed instead of defaulting to public.
 
 
 def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
-    """A require form the lifter rejects must surface as an ``opaque``/``unsupported`` gate so
-    the function resolves gated. Simulated by forcing ``_ir_is_require`` to reject every require."""
     import services.static.contract_analysis_pipeline.revert_detect as rd
 
     sl = _compile(
@@ -493,8 +403,6 @@ def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
 
 
 def test_genuinely_ungated_function_stays_gateless(tmp_path):
-    """The coverage invariant must NOT fire on a function with no require/assert: a genuinely
-    permissionless function keeps zero gates (the deliberate public default)."""
     sl = _compile(
         tmp_path,
         """
@@ -510,16 +418,8 @@ def test_genuinely_ungated_function_stays_gateless(tmp_path):
     assert gates == [], f"expected no gates for an ungated function, got {_gate_kinds(gates)}"
 
 
-# ---------------------------------------------------------------------------
-# Discarded-result guard helpers: the require lives in a bool-returning
-# callee whose result the caller ignores.
-# ---------------------------------------------------------------------------
-
-
 def test_discarded_bool_guard_helper_gate_is_found(tmp_path):
-    """``modifier hasRole(r) { _hasRole(r, msg.sender); _; }`` ignores a bool-returning guard, so
-    the require lives in the callee. The lvalue-skip used to drop it (every
-    EtherFiRedemptionManager admin function defaulted to public)."""
+    """The lvalue skip dropped it, so every EtherFiRedemptionManager admin function defaulted to public."""
     sl = _compile(
         tmp_path,
         """
@@ -546,8 +446,6 @@ def test_discarded_bool_guard_helper_gate_is_found(tmp_path):
 
 
 def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
-    """``require(_check(msg.sender))``: the caller's own require is lifted, so the recursion must
-    not also walk the callee and emit a duplicate gate."""
     sl = _compile(
         tmp_path,
         """
@@ -568,15 +466,10 @@ def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
     assert _gate_kinds(gates) == ["require"], f"expected the single caller-side require, got {_gate_kinds(gates)}"
 
 
-# ---------------------------------------------------------------------------
-# Forwarders: the result is RETURNED, never branched on. Nothing lifts it, so
-# the recursion is the only path to the callee's gate (G3 class F).
-# ---------------------------------------------------------------------------
+# A returned result is never branched on, so recursion is the only path to the gate (G3 class F).
 
 
 def test_returned_helper_result_still_recurses_for_the_gate(tmp_path):
-    """``return gatedCallee(...)``: the RETURN reads the result, which used to suppress the
-    recursion, so the callee's require was never walked and the forwarder resolved unguarded."""
     sl = _compile(
         tmp_path,
         """
@@ -602,7 +495,6 @@ def test_returned_helper_result_still_recurses_for_the_gate(tmp_path):
 
 
 def test_returned_helper_result_yields_a_caller_authority_leaf(tmp_path):
-    """R4 positive case: the recovered gate must reach the evaluator as an authority constraint."""
     sl = _compile(
         tmp_path,
         """
@@ -624,8 +516,6 @@ def test_returned_helper_result_yields_a_caller_authority_leaf(tmp_path):
     )
     gated = _cap_for(sl, "forward(uint256)")
     ungated = _cap_for(sl, "open(uint256)")
-    # Before the fix both answered ``conditional_universal`` — the forwarder was
-    # indistinguishable from the genuinely open function next to it.
     assert gated.kind == "finite_set", f"forwarder must resolve to the owner set, got {gated.kind}"
     assert ungated.kind == "conditional_universal", f"the ungated control must stay open, got {ungated.kind}"
 
@@ -654,25 +544,14 @@ def test_result_reaching_a_condition_transitively_is_not_double_walked(tmp_path)
     assert _gate_kinds(gates) == ["require"], f"expected the single caller-side require, got {_gate_kinds(gates)}"
 
 
-# ---------------------------------------------------------------------------
-# Expression-text memo: instance-scoped (mirrors ``_container_condition_reads``), so it's
-# GC'd with the per-function detector and never keys ``id(expr)`` across the
-# lifetime of a different Slither parse.
-# ---------------------------------------------------------------------------
+# The expression-text memo is instance-scoped so ``id(expr)`` keys never outlive the parse.
 
 
-# ---------------------------------------------------------------------------
-# #115: multi-statement guard body — the revert sits >=2 hops below the IF.
-# Slither lowers ``if(C){ emit/assign…; revert; }`` into a chain of EXPRESSION
-# nodes; the historical one-hop son scan missed the revert and returned ``[]``,
-# defaulting the function to public (fail-OPEN). The "exactly one branch always
-# reverts" CFG walk recovers exactly one gate.
-# ---------------------------------------------------------------------------
+# #115: Slither lowers a multi-statement guard to an EXPRESSION chain, and the one-hop son scan returned ``[]``
+# (fail-open).
 
 
 def test_multi_statement_emit_then_revert_is_recovered(tmp_path):
-    """``if (msg.sender != owner) { emit Denied(...); revert(); }``: the revert is two hops below
-    the IF. HEAD returned ``[]`` (public); the walk must recover one allowed_when_false if-revert gate."""
     sl = _compile(
         tmp_path,
         """
@@ -721,9 +600,7 @@ def test_multi_statement_assign_then_revert_is_recovered(tmp_path):
 
 
 def test_revert_after_nested_if_emits_one_outer_gate(tmp_path):
-    """Shape A (prior approach's live fail-open): ``if(outer){ if(flag){ emit;} revert(); }``.
-    Every path leaving the outer-true branch reverts, so exactly one (outer) gate; the inner IF
-    reverts on both arms, so no spurious inner gate. (BFS-to-ENDIF dropped the outer guard.)"""
+    """Every path out of the outer branch reverts; BFS-to-ENDIF dropped the outer guard."""
     sl = _compile(
         tmp_path,
         """
@@ -748,8 +625,7 @@ def test_revert_after_nested_if_emits_one_outer_gate(tmp_path):
 
 
 def test_revert_inside_nested_if_attributes_to_inner_only(tmp_path):
-    """Shape B: ``if(outer){ if(flag){ revert(); } }``. The outer branch can ESCAPE via the inner
-    false arm, so no outer gate; only the inner IF gives exactly one gate (guards BFS over-attribution)."""
+    """The outer branch can escape via the inner false arm."""
     sl = _compile(
         tmp_path,
         """
@@ -772,8 +648,7 @@ def test_revert_inside_nested_if_attributes_to_inner_only(tmp_path):
 
 
 def test_both_branches_revert_emits_no_if_gate(tmp_path):
-    """``if(c){ revert A(); } else { revert B(); }``: BOTH arms revert (not a conditional access
-    fork), so no if-revert gate is fabricated (matches the real ENS both-arms case)."""
+    """Matches the real ENS both-arms case."""
     sl = _compile(
         tmp_path,
         """
@@ -793,12 +668,9 @@ def test_both_branches_revert_emits_no_if_gate(tmp_path):
 
 
 def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
-    """White-box: a branch whose only exit is an unbounded cycle (no revert, no return) must
-    report ESCAPE ``(False, None)``, never a fabricated always-reverts gate. Uses minimal fake
-    CFG nodes to pin the drain-with-no-revert branch independent of Slither's loop lowering."""
+    """Fake CFG nodes pin the drain-with-no-revert branch independent of Slither's loop lowering."""
     from types import SimpleNamespace
 
-    # Two nodes forming a cycle; neither reverts nor returns.
     a = SimpleNamespace(irs=[], irs_ssa=None, type=None, sons=[])
     b = SimpleNamespace(irs=[], irs_ssa=None, type=None, sons=[])
     a.sons = [b]
@@ -806,7 +678,6 @@ def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
     detector = RevertDetector(SimpleNamespace(nodes=[]))
     assert detector._branch_always_reverts(a) == (False, None)
 
-    # Positive control: a node that reverts always-reverts and returns its IR.
     class SolidityCall:  # type-name drives _ir_is_solidity_revert
         def __init__(self) -> None:
             self.function = SimpleNamespace(name="revert()")
@@ -816,18 +687,11 @@ def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
     assert detector._branch_always_reverts(r) == (True, rev_ir)
 
 
-# ---------------------------------------------------------------------------
-# Calls to an ALWAYS-reverting callee as a branch sink. Solady EnumerableRoles writes
-# ``if (!isOwner()) _revertUnauthorized();`` where the helper reverts in assembly. The branch
-# walk used to accept only a literal revert IR, so no gate was lifted and RoleRegistry
-# setRole/grantRole/revokeRole defaulted public. The conservative twin pins the load-bearing
-# condition: a helper that reverts only *conditionally* must NOT manufacture a gate.
-# ---------------------------------------------------------------------------
+# Solady EnumerableRoles reverts in an assembly helper; accepting only literal revert IR left RoleRegistry
+# setRole/grantRole/revokeRole public. A conditionally reverting helper must not manufacture a gate.
 
 
 def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
-    """``if (!_isOwner()) _revertUnauthorized();`` with an assembly-revert helper: recovered as one
-    if_revert gate, function resolves external_check_only (fail-closed), not public (was zero gates)."""
     sl = _compile(
         tmp_path,
         """
@@ -860,9 +724,7 @@ def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
 
 
 def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
-    """Conservative twin (load-bearing): a helper that reverts only *conditionally* must NOT be an
-    always-reverting sink: no gate is fabricated and the function stays public
-    (conditional_universal). Over-closing manufactured false positives in the inverse direction."""
+    """Over-closing produced false positives in the inverse direction."""
     sl = _compile(
         tmp_path,
         """
@@ -888,10 +750,6 @@ def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
 
 
 def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
-    """Revert-proof pin of the RoleRegistry shape: Solady EnumerableRoles'
-    ``_enumerableRolesSenderIsContractOwner`` (assembly ``caller()`` + ``staticcall`` ``owner()``)
-    guarding ``setRole`` via two internal hops and an always-reverting assembly helper; the
-    recovered gate must resolve external_check_only."""
     sl = _compile(
         tmp_path,
         """
@@ -930,13 +788,8 @@ def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
     assert cap.kind == "external_check_only", f"Solady owner-gated setRole must fail closed, got {cap.kind}"
 
 
-# ---------------------------------------------------------------------------
-# A modifier on an INTERNAL callee is a real gate of the entry function. EigenLayer
-# StrategyManager routes deposits through ``_depositIntoStrategy(...) internal
-# onlyStrategiesWhitelistedForDeposit(strategy)``; the result is never branched on, so the
-# cross-function recursion (restored in a96b2ca3) is the ONLY path to the gate. Losing it
-# published a false ``unconstrained_proven`` over a gate that exists.
-# ---------------------------------------------------------------------------
+# EigenLayer StrategyManager's ``_depositIntoStrategy`` carries the whitelist modifier; recursion (a96b2ca3) is the only
+# path to it, and losing it published a false ``unconstrained_proven``.
 
 _L38_SOURCE = """
     pragma solidity ^0.8.19;
@@ -981,9 +834,6 @@ def test_internal_callee_modifier_gate_is_lifted(tmp_path):
 
 
 def test_internal_callee_modifier_gate_reaches_param_constraints(tmp_path):
-    """Claims arm: gated param 0 is ``constrained``/``mapping_allowlist`` (this row published the
-    false adverse ``unconstrained_proven`` on the two StrategyManager deposit entries), while the
-    ungated sibling KEEPS its honest ``unconstrained_proven``."""
     from services.static.claims.context import ClaimContext
     from services.static.claims.matchers import _facts
 

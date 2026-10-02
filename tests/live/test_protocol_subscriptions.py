@@ -1,5 +1,3 @@
-"""Protocol-level subscription mutations: create/delete roundtrip + admin re-enroll."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -10,8 +8,7 @@ import requests
 from tests.live.conftest import LiveClient
 
 TEST_DISCORD_WEBHOOK = "https://discord.com/api/webhooks/0/psat-live-test-protocol-never-delivered"
-# The subscriptions API runs the webhook through ``sanitize_url`` on read, so the
-# token segment comes back masked while the id segment survives.
+# ``sanitize_url`` masks the token segment on read.
 TEST_DISCORD_WEBHOOK_REDACTED = "https://discord.com/api/webhooks/0/<redacted>"
 
 
@@ -21,7 +18,7 @@ def protocol_subscription(
     live_client: LiveClient,
     request,
 ) -> dict[str, Any]:
-    # Function-scoped: the endpoint doesn't dedupe on (protocol_id, webhook_url) so rows would accumulate.
+    # The endpoint doesn't dedupe, so rows would accumulate.
     payload = {
         "discord_webhook_url": TEST_DISCORD_WEBHOOK,
         "label": "psat-live-test",
@@ -44,7 +41,6 @@ def test_protocol_subscription_created(protocol_subscription, company_protocol_i
     assert protocol_subscription["protocol_id"] == company_protocol_id
     assert protocol_subscription["discord_webhook_url"] == TEST_DISCORD_WEBHOOK_REDACTED
     assert protocol_subscription["label"] == "psat-live-test"
-    # event_filter must roundtrip verbatim; the request validator could mangle it.
     assert protocol_subscription.get("event_filter") == {"event_types": ["upgraded"]}
 
     subs = live_client.protocol_subscriptions(company_protocol_id)
@@ -55,7 +51,6 @@ def test_protocol_subscription_delete_roundtrip(
     company_protocol_id: int,
     live_client: LiveClient,
 ):
-    # Not the fixture — avoids racing the finalizer.
     payload = {"discord_webhook_url": TEST_DISCORD_WEBHOOK, "label": "psat-live-test-ephemeral"}
     sub = live_client.subscribe_protocol(company_protocol_id, payload)
     live_client.delete_protocol_subscription(sub["id"])
@@ -65,7 +60,6 @@ def test_protocol_subscription_delete_roundtrip(
 
 
 def test_re_enroll_protocol(company_protocol_id: int, live_client: LiveClient):
-    """Shape-only: exact contract counts depend on live-RPC classification. Skip on 502/503."""
     try:
         body = live_client.re_enroll_protocol(company_protocol_id, chain="ethereum")
     except requests.HTTPError as exc:

@@ -1,9 +1,5 @@
-"""Widening of digest-churning provenance sets.
-
-A self-referential assignment (OZ ``Math.mulDiv``'s ``inverse *= 2 - denominator * inverse``)
-mints a fresh ``callee_args_digest`` every iteration and burns the worklist cap.
-``ProvenanceMap.set`` widens by dropping the (never-emitted) digest, so the engine converges
-while the ``derived_from`` caller-taint witness stays exact.
+"""OZ ``Math.mulDiv``'s self-referential assignment mints a fresh ``callee_args_digest`` every iteration;
+``ProvenanceMap.set`` widens by dropping it so the engine converges with ``derived_from`` still exact.
 """
 
 import textwrap
@@ -21,10 +17,6 @@ from services.static.contract_analysis_pipeline.provenance import (  # noqa: E40
     Source,
     widen,
 )
-
-# ---------------------------------------------------------------------------
-# widen() operator semantics
-# ---------------------------------------------------------------------------
 
 
 def test_widen_strips_digest_and_collapses_variants():
@@ -86,11 +78,6 @@ def test_widen_is_idempotent():
     assert widen(once) == once
 
 
-# ---------------------------------------------------------------------------
-# ProvenanceMap.set trigger
-# ---------------------------------------------------------------------------
-
-
 def test_set_widens_only_after_threshold():
     pmap = ProvenanceMap(sources={})
     origins = frozenset({Source(kind="parameter", parameter_index=0, parameter_name="x")})
@@ -109,18 +96,11 @@ def test_set_widens_only_after_threshold():
 
     for i in range(DEFAULT_WIDEN_AFTER):
         assert pmap.set("v", variant(i)) is True
-    # Below the threshold the digest survives verbatim.
     assert next(iter(pmap.get("v"))).callee_args_digest is not None
-    # Past it, a fresh digest variant widens to the stored (widened) form and
-    # the map reports convergence after one widened store.
     assert pmap.set("v", variant(1000)) is True
     assert next(iter(pmap.get("v"))).callee_args_digest is None
     assert pmap.set("v", variant(1001)) is False
 
-
-# ---------------------------------------------------------------------------
-# Engine convergence on the mulDiv shape
-# ---------------------------------------------------------------------------
 
 _SELF_REF_SRC = """
 contract NewtonMath {
@@ -156,13 +136,9 @@ def test_self_referential_arithmetic_converges_before_cap(_newton):
     caller_bound = frozenset({Source(kind="msg_sender")})
     engine = ProvenanceEngine(fn, parameter_bindings={"x": caller_bound})
     engine.run()
-    # Converged (worklist stopped changing), not cap-truncated, and within a
-    # small margin past the widening threshold.
     assert engine.iterations_run < engine.worklist_cap
     assert engine.iterations_run <= DEFAULT_WIDEN_AFTER + 5
 
-    # The caller-taint witness survives widening: the bound parameter's
-    # msg_sender origin is still reachable from the churned result value.
     def has_msg_sender(sources):
         for s in sources:
             if s.kind == "msg_sender":
@@ -173,5 +149,4 @@ def test_self_referential_arithmetic_converges_before_cap(_newton):
 
     tainted_vars = [name for name, srcs in engine.provenance.sources.items() if has_msg_sender(srcs)]
     assert "x" in tainted_vars
-    # x flows into the returned product; at least one derived value carries it.
     assert len(tainted_vars) > 1

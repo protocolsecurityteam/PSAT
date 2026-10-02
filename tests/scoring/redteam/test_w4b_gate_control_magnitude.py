@@ -1,5 +1,3 @@
-"""W4b: compositional gate-control magnitude (Phase 6)."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -57,9 +55,7 @@ def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
     step = composed[0]["act_as_chain"][0]
     assert (step["caller"], step["destination"], step["calling_function"]) == (KEY_C, KEY_V, "bulkWithdraw")
     assert step["receiver_observed_via"] == "eth_call" and step["receiver_block"] == 25_657_731
-    # A composed call is COUNTED as composed, not as carrying no witness: the
-    # census key existed and was never incremented, so the rows that composed
-    # published a zero where the count belonged.
+    # The key existed but was never incremented.
     census = row["magnitude_witness_census"]
     assert census["magnitude_composed"] == 1
     assert census["magnitude_not_witnessed"] == 0
@@ -70,11 +66,6 @@ def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
 
 
 def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
-    """The anti-composition regression test.
-
-    The destination's witness and its sheet are both ceilings; the published
-    figure clears whichever is lower.
-    """
     for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
         document = fold(
             _composing_signals(),
@@ -90,21 +81,12 @@ def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
 
 
 def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floor(fold):
-    """The row header published BOTH directions of one bound.
-
-    Every dollar of this row's value is a composed figure. The header said
-    ``value_at_stake_is_floor`` and the band said ``">= "``, so the row
-    published a floor over a sum of ceilings and the UI painted the badge.
-    Ceilings do not become a floor by being summed, and coverage gaps mean the
-    total is not a ceiling either.
-    """
+    """The header published a floor over a sum of ceilings; with coverage gaps the total isn't a ceiling either."""
     document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
     row = _gate_row(document)
     assert row["value_at_stake_usd"] == 1_000_000.0
     assert row["entities_priced_from_a_composed_ceiling"] == [KEY_V]
-    # The per-entry bound label and the caller-holding block are DELETED, not
-    # corrected: one asserted a direction the entry never derived, the other was
-    # one constant string false on 30% of what carried it.
+    # Deleted: one asserted an underived direction, the other was a constant false on 30% of carriers.
     entry = row["reach_composed_magnitudes"][0]
     assert "principal_extraction_bound" not in entry
     assert "caller_holding_precondition" not in entry
@@ -113,18 +95,12 @@ def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floo
     assert row["value_band"] == "$1M-$10M"
     basis = row["value_at_stake_basis"]
     assert "NEITHER" in basis and "CEILING" in basis
-    # The basis POINTS at the per-entry disclosure rather than restating it.
     assert "reach_composed_magnitudes[]" in basis
     assert not basis.startswith(">=")
 
 
 def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling(fold):
-    """The second arm, which the reference corpus never reaches.
-
-    Aliasing the seized node onto the vault leaves ONE priced entity whose whole
-    figure is composed, with nothing missing from the sum, so the total bounds
-    the principal from above. Asserted rather than left as an unexecuted branch.
-    """
+    """The reference corpus never reaches this arm."""
     document = fold(
         _composing_signals(),
         principals=_composing_principals(),
@@ -143,13 +119,7 @@ def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceilin
 
 
 def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(fold):
-    """The MIXED shape, end to end: one ceiling beside one figure of its own.
-
-    A second call with its own magnitude witness prices its entity without
-    composition. The total is then part extraction ceiling and part figure not
-    graded for direction, so an at-most would claim a bound the second half does
-    not support, and the basis must count which half is which.
-    """
+    """Part ceiling, part ungraded figure: an at-most would be unsupported."""
     witnessed = sig(
         claim_id="authority.replace",
         function_name="setAuthorityAlso",
@@ -179,12 +149,8 @@ def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(
 
 
 def _attributed(usd: float, **over: Any) -> FunctionSignal:
-    """A ``flow.out`` instance whose figure came off the ATTRIBUTION path.
-
-    ``proven_upper_bound`` is the constant-amount probe crediting a holder's
-    whole priced balance (the live shape behind the reference corpus's rank-1
-    finding); it is no ceiling to :func:`_ceiling_bearing_basis`, which is why
-    its prose used to be written from coverage alone.
+    """``proven_upper_bound`` credits a holder's whole priced balance but is no ceiling to
+    :func:`_ceiling_bearing_basis`.
     """
     return flow_sig(
         authority_openness="restricted",
@@ -210,12 +176,8 @@ def _unwitnessed_elsewhere() -> FunctionSignal:
 
 
 def test_f1_an_attribution_derived_total_under_a_gap_names_the_refusal_not_a_floor(fold):
-    """The live carrier: the basis said ">= proven floor" beside no floor.
-
-    The string was built from the COVERAGE axis in :func:`_row_value`, where the
-    attribution axis is not visible, so a row whose header refused the floor
-    still published floor prose. Both axes are read where the direction is, and
-    the refusal is COUNTED off the membership test it was made on.
+    """The string was built from the coverage axis where attribution isn't visible, so refused-floor rows still
+    published floor prose.
     """
     plane = value_plane(
         {KEY_C: {"usdc": 5_000_000.0}},
@@ -238,23 +200,14 @@ def test_f1_an_attribution_derived_total_under_a_gap_names_the_refusal_not_a_flo
     assert not basis.startswith(">= ")
     assert "proven floor" not in basis
     assert basis.startswith("bounded in NEITHER direction: 1 of 1 entity(ies)")
-    # Named as what the membership test establishes and no further: a sheet
-    # ceiling whose label was withheld reaches this arm too, so the population
-    # is "not proven free of" an upper bound, never "is attribution-derived".
+    # A withheld sheet ceiling also reaches this arm, so it's "not proven free of", never "is attribution-derived".
     assert "NOT proven free of an upper-bounding witness" in basis
-    # Both halves of the coverage gap are still counted — the reason it is not
-    # an at-most either — and neither is left for the reader to infer.
     assert "1 instance(s) not_determined" in basis
     assert "1 entity(ies) holding assets the priced sheet does not cover" in basis
 
 
 def test_f1_a_floor_counts_the_partly_priced_entities_it_was_earned_on(fold):
-    """The mirror face, which the reference corpus has no carrier for.
-
-    ``_bound_direction``'s coverage axis reads undetermined instances AND partly
-    priced entities; the floor string counted only the first, so a floor earned
-    on the second alone had no floor prose, and one earned on both omitted half.
-    """
+    """The floor string counted only undetermined instances, not partly priced entities."""
     plane = value_plane(
         {KEY_C: {"usdc": 5_000_000.0}},
         per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
@@ -277,8 +230,6 @@ def test_f1_a_floor_counts_the_partly_priced_entities_it_was_earned_on(fold):
         == ">= proven floor over 1 entity(ies); 1 entity(ies) holding assets the priced sheet does not cover"
     )
 
-    # And beside an unanswered instance, both populations appear — the count the
-    # old string made of the instances alone is now the whole gap.
     both = fold([floor, _unwitnessed_elsewhere()], principals={1: facts(1, EOA, "eoa")}, value=plane).findings[0]
     assert both["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
     assert both["value_at_stake_basis"] == (
@@ -288,51 +239,31 @@ def test_f1_a_floor_counts_the_partly_priced_entities_it_was_earned_on(fold):
 
 
 def test_b7_a_direction_is_published_only_where_one_was_proven():
-    """Two claims and a fall-through, each earned separately.
-
-    ``floor`` needs a coverage gap and NO composed figure; ``ceiling`` needs
-    EVERY figure composed and nothing missing from the sum. What is absent from
-    the total can only push the truth up, which an at-least survives and an
-    at-most does not.
-    """
+    """What's absent from the total can only push the truth up: an at-least survives, an at-most doesn't."""
     both, one = frozenset({KEY_C, KEY_V}), frozenset({KEY_V})
     direction = FOLD._bound_direction
 
     assert direction(1.0, both, frozenset(), True, False, both) == FOLD.BOUND_DIRECTION_FLOOR
-    # A withheld hop is value the row reaches and the sum does not carry: it
-    # cannot lower the truth, so the floor stands.
     assert direction(1.0, both, frozenset(), True, True, both) == FOLD.BOUND_DIRECTION_FLOOR
     assert direction(1.0, one, one, False, False, frozenset()) == FOLD.BOUND_DIRECTION_CEILING
 
-    # Every way of failing the ceiling, one at a time.
     assert direction(1.0, one, one, True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert direction(1.0, one, one, False, True, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    # MIXED: one entity's figure is a ceiling and the other's is graded in no
-    # direction, so their sum bounds the principal in neither.
     assert direction(1.0, both, one, False, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    # Neither signal fired, which is not a proof that the sum is two-sided.
     assert direction(1.0, both, frozenset(), False, False, both) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    # No total, no direction — and never a floor over a figure that is absent.
     assert direction(None, frozenset(), frozenset(), True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    # F5: the coverage gap is NOT the whole question. An attribution-derived
-    # contribution is itself a ceiling, so a gap over one earns no floor — and a
-    # partial grade is as disqualifying as none, because the ungraded entity's
-    # figure may be the ceiling.
+    # F5: an attribution-derived contribution is itself a ceiling, and a partial grade disqualifies like none.
     assert direction(1.0, both, frozenset(), True, False, frozenset()) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert direction(1.0, both, frozenset(), True, False, one) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
-    # Only the two proven directions qualify the band.
     assert FOLD._BAND_PREFIX == {FOLD.BOUND_DIRECTION_FLOOR: ">= ", FOLD.BOUND_DIRECTION_CEILING: "<= "}
 
 
 def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold):
-    """The binding rule. A licence says N MAY call D, never that P can make it.
+    """A licence says N may call D, never that P can make it.
 
-    Each variant removes one part of the act-as witness, and each alone withholds
-    the magnitude, including the live corpus shape where the call site takes its
-    callee as a PARAMETER.
+    Includes the live shape where the callee is a parameter.
     """
     variants = {
-        # the corpus's own AtomicSolverV3 shape: receiver is not a state variable
         "receiver_not_a_state_variable": act_as_plane(
             call_sites={(KEY_C, COMPOSED_SELECTOR): (("finishSolve", "restricted", "", True, CALLING_SELECTOR),)},
             reads={(KEY_C, "vault"): (KEY_V, "eth_call", 1)},
@@ -363,16 +294,11 @@ def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold
         assert row["value_state"] == "not_determined", name
         assert row["reach_composed_magnitudes"] == [], name
         assert row["reach_composition_census"]["act_as_refused"], name
-        # ...and the reach itself is untouched: membership never depended on it.
         assert KEY_V in row["reach_entities"], name
 
 
 def test_w4b_an_empty_licence_map_composes_nothing(fold):
-    """A destination reached only through a state-variable hop names no function.
-
-    Nothing says WHICH of its functions the gate reaches, and an empty licence
-    must never be read as "price the sheet".
-    """
+    """An empty licence must never read as "price the sheet"."""
     document = fold(
         _composing_signals(),
         principals=_composing_principals(),
@@ -470,9 +396,7 @@ def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
         **_composing_case(
             closure=P.ControlClosure(
                 edges=(
-                    # seed -> intermediate, a state-variable hop licensing nothing
                     _var_edge("authority", principal=KEY_C, anchor=KEY_PROXY),
-                    # intermediate -> destination, fully licensed and fully act-as witnessed
                     _role_edge("roles 12", principal=KEY_PROXY, anchor=KEY_V),
                 )
             ),
@@ -493,10 +417,7 @@ def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
     assert row["reach_licensed_functions"] == {KEY_V: [{"selector": COMPOSED_SELECTOR, "name": "exit"}]}
     assert row["reach_composed_magnitudes"] == []
     assert row["value_at_stake_usd"] is None
-    # ...and the break is NAMED. A licensed hop the walk never offered is not an
-    # act-as refusal at that hop — the question was never asked there — and
-    # publishing it as an empty refusal map left the unit's most important
-    # negative result readable only as silence.
+    # A hop never offered is not a refusal there; publishing an empty refusal map hid the unit's key negative.
     census = row["reach_composition_census"]
     assert census["licensed_hops"] == 1 and census["licensed_selectors"] == 0
     assert census["act_as_refused"] == {FOLD.ACT_AS_CALLER_UNREACHED: 1}

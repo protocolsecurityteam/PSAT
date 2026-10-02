@@ -1,10 +1,5 @@
-"""Regression tests for the ``initial_graph`` parameter on ``resolve_control_graph``.
-
-Skips the 2nd walk the policy worker triggers after computing effective_permissions. Codex
-warned this is "easy to make incomplete", so the design reuses the SAME BFS path with a
-pre-seeded ``processed`` set: only the root (to read the now-populated effective_permissions)
-and newly discovered addresses are re-walked. Also pinned: prior nodes/edges carry over
-without duplication, and behavior is unchanged without initial_graph (legacy callers).
+"""``initial_graph`` skips the second walk the policy worker triggers by reusing the same BFS with a pre-seeded
+``processed`` set; only the root and newly discovered addresses are re-walked.
 """
 
 from __future__ import annotations
@@ -30,12 +25,7 @@ def _isolated_caches():
 
 @pytest.fixture(autouse=True)
 def _default_classify(monkeypatch):
-    """Default the address classifier to the generic answer.
-
-    Analysed nodes take ``resolved_type`` from the classifier, so every walk classifies its
-    root. Tests needing a specific one patch in-body; this keeps the rest off the wire
-    (otherwise the offline guard reports blocked ``rpc`` calls).
-    """
+    """Every walk classifies its root; this keeps the rest off the wire."""
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
         lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}, True),
@@ -43,8 +33,6 @@ def _default_classify(monkeypatch):
 
 
 def _root_artifacts(*, with_role_principals: bool) -> LoadedArtifacts:
-    """Root LoadedArtifacts for both walks; ``with_role_principals`` adds effective_permissions
-    referencing ROLE_PRINCIPAL_EOA (only the second walk should pick it up)."""
     analysis = {"subject": {"address": ROOT_ADDR, "name": "Root"}, "semantic_control": {}}
     plan = {"contract_address": ROOT_ADDR, "controllers": []}
     snapshot = {"controller_values": {}}
@@ -117,7 +105,6 @@ def test_initial_graph_walk_projects_new_role_principal():
             workspace_prefix="test",
         )
 
-        # Second walk WITH role principals; classify is patched so the EOA makes no real RPC calls.
         def _fake_classify(_rpc_url, addr, _block_tag="latest", **_kw):
             return "eoa", {"address": addr.lower()}, True
 
@@ -147,7 +134,6 @@ def test_initial_graph_walk_projects_new_role_principal():
 
 
 def test_initial_graph_skips_re_materialization_of_nested_contracts():
-    """Every analyzed nested contract from the prior walk must be in `processed` (the optimization's wall-clock win)."""
     nested_node = {
         "id": recursive._address_node_id(NESTED_ADDR),
         "address": NESTED_ADDR,
@@ -197,7 +183,7 @@ def test_initial_graph_skips_re_materialization_of_nested_contracts():
 
 
 def test_initial_graph_re_walks_root_so_new_permissions_are_projected():
-    """Root must NOT be in `processed`, or the second walk would miss role principals from its new permissions."""
+    """Otherwise the second walk misses role principals from the new permissions."""
     seed_graph = {
         "nodes": [
             {

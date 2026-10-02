@@ -1,15 +1,8 @@
-"""Getter-less *internal* address authority vars resolve by reading the live sequential
-storage slot (claim #3 group D).
+"""Getter-less internal address authorities resolve by reading their sequential storage slot.
 
-ether.fi ``MembershipNFT`` gates ``mint``/``burn``/``incrementLock`` on
-``msg.sender == address(membershipManager)``, declared WITHOUT ``public``, so its getter
-reverts on every deployment. Before P3 that funneled to ``finite_set([], lower_bound)``, a
-silent under-resolution. Fix: the static pass stamps the sequential slot onto the bare
-``state_variable`` operand (getter-less address scalars at offset 0), and resolution reads
-it with ``eth_getStorageAt``: non-zero -> ``finite_set([manager], exact)``; confirmed-zero ->
-``resolved_empty`` (``slot_read_zero``), never the name-derived ``empty_by_design``;
-unreadable -> honest ``lower_bound``. Like ``test_pending_governor_slot_resolution.py``;
-the global ``_stub_live_authority`` fixture is deliberately not used.
+ether.fi ``MembershipNFT`` gates on an internal ``membershipManager`` whose getter reverts. The static pass stamps
+the slot and resolution reads it: nonzero is the principal, confirmed zero is ``slot_read_zero``, unreadable stays
+``lower_bound``. The global ``_stub_live_authority`` fixture is deliberately not used.
 """
 
 from __future__ import annotations
@@ -19,11 +12,12 @@ from typing import Any
 
 import pytest
 
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import project_capability_surface
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.authority_reads import _Adapter, _Outer, _status, _stub
 from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -32,42 +26,23 @@ MEMBERSHIP_MANAGER_SLOT = "0x" + format(2, "064x")  # sequential layout slot in 
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
-# Bare internal address var, slot carried by the static pass.
 D_MEMBERSHIP_MANAGER_SLOT: dict[str, Any] = {
     "source": "state_variable",
     "state_variable_name": "membershipManager",
     "storage_slot": MEMBERSHIP_MANAGER_SLOT,
 }
-# The pre-P3 shape (no slot): proves the slot is what recovers the principal — a
-# slot-less internal var whose getter reverts must stay under-resolved.
+# The slot is what recovers the principal.
 D_MEMBERSHIP_MANAGER_NO_SLOT: dict[str, Any] = {
     "source": "state_variable",
     "state_variable_name": "membershipManager",
 }
-# Defensive precision: a struct member that (impossibly) carries a slot must not be
-# slot-read — the low-20-byte decode is only valid for a bare scalar at offset 0.
+# The low-20-byte decode is only valid for a bare scalar at offset 0.
 D_STRUCT_MEMBER_WITH_SLOT: dict[str, Any] = {
     "source": "state_variable",
     "state_variable_name": "_pendingThing",
     "member_path": ["addr"],
     "storage_slot": MEMBERSHIP_MANAGER_SLOT,
 }
-
-
-class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
-        self.rpc_url = rpc_url
-        self.contract_address = contract_address
-        self.block = block
-
-
-class _Adapter:
-    def __init__(self, outer: _Outer | None) -> None:
-        if outer is not None:
-            self._outer_ctx = outer
-
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
 
 
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test", address: str = CONTRACT) -> EvaluationContext:
@@ -78,45 +53,15 @@ def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
     return eq_tree(other_operand, "msg.sender == address(membershipManager)")
 
 
-def _stub(monkeypatch: pytest.MonkeyPatch, *, slot: str, getter: str = "revert", recorder: list | None = None) -> None:
-    """``eth_call`` getters use ``getter`` ('revert' to raise — there is no public
-    ``membershipManager()``); ``eth_getStorageAt`` returns ``slot`` ('revert' to
-    simulate an unreadable slot, '0x' for an empty/no-code return)."""
-
-    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
-        if recorder is not None:
-            recorder.append((method, params))
-        if method == "eth_getStorageAt":
-            if slot == "revert":
-                raise RuntimeError("execution reverted")
-            return slot
-        if getter == "revert":
-            raise RuntimeError("execution reverted")
-        return getter
-
-    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
-
-
 def _word(addr: str) -> str:
     return "0x" + addr[2:].rjust(64, "0")
-
-
-def _status(cap: CapabilityExpr) -> str | None:
-    cap_dict = capability_to_dict(cap)
-    return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
 def _principals(cap: CapabilityExpr) -> list[str]:
     return [r["address"] for r in project_capability_surface(capability_to_dict(cap)).principal_rows]
 
 
-# --------------------------------------------------------------------------
-# Resolver unit tests (literal operand; always run).
-# --------------------------------------------------------------------------
-
-
 def test_nonzero_slot_resolves_to_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The live slot value IS the authorized caller — the recovery P3 lands."""
     recorder: list = []
     _stub(monkeypatch, slot=_word(MANAGER), recorder=recorder)
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
@@ -132,8 +77,6 @@ def test_nonzero_slot_resolves_to_manager(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_confirmed_zero_slot_is_resolved_empty_not_by_design(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A read-confirmed zero is a renounced/unset authority: ``resolved_empty`` reporting the
-    READ (``slot_read_zero``), never the accessor-name-based ``empty_by_design``."""
     _stub(monkeypatch, slot="0x" + "00" * 32)
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
 
@@ -146,8 +89,6 @@ def test_confirmed_zero_slot_is_resolved_empty_not_by_design(monkeypatch: pytest
 
 
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both the getter and the slot are unreadable → honest ``lower_bound``
-    (unknown), never a fabricated ``resolved_empty``."""
     _stub(monkeypatch, slot="revert")
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
 
@@ -159,7 +100,6 @@ def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_empty_slot_return_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A bare ``0x`` (empty / no-code) slot return is unreadable, not empty."""
     _stub(monkeypatch, slot="0x")
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
 
@@ -170,8 +110,6 @@ def test_empty_slot_return_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_no_rpc_with_slot_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A slot-bearing operand with no reachable RPC is an honest unknown
-    (``not_read``), never a guess."""
     cap = evaluate_tree(
         _eq_tree(D_MEMBERSHIP_MANAGER_SLOT),
         EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(None)),
@@ -183,8 +121,6 @@ def test_no_rpc_with_slot_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_slotless_internal_var_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The before/after witness: WITHOUT the carried slot the same operand stays the
-    ``lower_bound`` placeholder, so the slot is what recovers the principal."""
     _stub(monkeypatch, slot=_word(MANAGER))  # slot WOULD resolve, but the operand carries none
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_NO_SLOT), _ctx_with_rpc())
 
@@ -195,9 +131,6 @@ def test_slotless_internal_var_stays_lower_bound(monkeypatch: pytest.MonkeyPatch
 
 
 def test_struct_member_slot_is_never_storage_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Precision: a struct-member operand is never slot-read even if a slot is
-    present — the low-20-byte decode is valid only for a bare scalar. No
-    ``eth_getStorageAt`` is issued and the manager value is not adopted."""
     recorder: list = []
     _stub(monkeypatch, slot=_word(MANAGER), recorder=recorder)
     cap = evaluate_tree(_eq_tree(D_STRUCT_MEMBER_WITH_SLOT), _ctx_with_rpc())
@@ -219,6 +152,7 @@ from services.static.contract_analysis_pipeline.internal_authority_slot import (
     _slots_for_vars,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
+from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -236,31 +170,9 @@ def _tree_for(contract: Any, signature: str) -> Any:
     return build_predicate_artifacts(contract)["trees"][signature]
 
 
-def _caller_operand(tree: Any) -> dict[str, Any]:
-    out: list[dict[str, Any]] = []
-
-    def walk(node: Any) -> None:
-        if not isinstance(node, dict):
-            return
-        if node.get("op") == "LEAF":
-            leaf = node.get("leaf") or {}
-            if leaf.get("kind") == "equality" and leaf.get("authority_role") == "caller_authority":
-                out.extend(o for o in (leaf.get("operands") or []) if o.get("source") != "msg_sender")
-            return
-        for child in node.get("children") or []:
-            walk(child)
-
-    walk(tree)
-    assert len(out) == 1, f"expected one caller operand, got {out}"
-    return out[0]
-
-
 class TestMembershipNFTStorageSlot:
     def test_static_pass_precision(self) -> None:
-        """Only *getter-less* address scalars get a slot — both a contract/interface
-        type (``membershipManager``) and a plain ``address`` (``_legacyController``).
-        Excluded: public vars (auto-getter), private vars WITH a manual getter
-        (``_owner``→``owner()``), mappings, and non-address vars."""
+        """Public vars, private vars with a manual getter, mappings and non-address vars are excluded."""
         contract = _membership_nft()
         slots = _slots_for_vars(
             contract,
@@ -280,21 +192,13 @@ class TestMembershipNFTStorageSlot:
         }
 
     def test_private_var_with_manual_getter_is_not_stamped(self) -> None:
-        """The over-reach guard: an OZ-Ownable ``_owner`` is private (no auto-getter)
-        but the contract exposes ``owner()``, so its ``onlyOwner`` gate must resolve
-        through that getter — NEVER a layout-sensitive slot read. The operand on the
-        ``_owner``-gated function must carry no ``storage_slot``."""
+        """``_owner`` must resolve through ``owner()``, never a layout-sensitive slot read."""
         op = _caller_operand(_tree_for(_membership_nft(), "adminAction()"))
         assert op["state_variable_name"] == "_owner"
         assert op.get("storage_slot") is None
 
     def test_owner_gate_resolves_via_canonical_getter_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The flip side of the slot path, end-to-end: ``adminAction()`` gates on
-        ``msg.sender == _owner`` (private, no slot — ``owner()`` exists), so on a
-        ``state_var_values`` miss the resolver de-underscores ``_owner``→``owner()``
-        and reads it live. Revert-proof: ``_owner()`` and any storage read revert;
-        only ``owner()`` (0x8da5cb5b) returns the principal, so this fails on the
-        pre-fix evaluator that tried only the var's own dead ``_owner()`` selector."""
+        """Only ``owner()`` returns the principal, so this fails on an evaluator trying just ``_owner()``."""
         tree = _tree_for(_membership_nft(), "adminAction()")
         recorder: list = []
 
@@ -313,8 +217,6 @@ class TestMembershipNFTStorageSlot:
         assert "0x8da5cb5b" in [p[0]["data"] for m, p in recorder if m == "eth_call"]
 
     def test_operand_carries_sequential_slot(self) -> None:
-        """The static stage stamps the var's sequential layout slot onto the
-        getter-less ``state_variable`` operand of every gated function."""
         contract = _membership_nft()
         for sig in ("mint(address,uint256)", "burn(address,uint256,uint256)", "incrementLock(uint256,uint32)"):
             op = _caller_operand(_tree_for(contract, sig))
@@ -323,15 +225,11 @@ class TestMembershipNFTStorageSlot:
             assert op.get("storage_slot") == MEMBERSHIP_MANAGER_SLOT
 
     def test_public_sibling_var_has_no_slot(self) -> None:
-        """A function gated by a PUBLIC address var resolves through its
-        auto-getter — the pass must NOT stamp a slot on it."""
         op = _caller_operand(_tree_for(_membership_nft(), "rebase(uint256)"))
         assert op["state_variable_name"] == "liquidityPool"
         assert op.get("storage_slot") is None
 
     def test_resolves_live_membership_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """End-to-end: getter reverts, the stamped slot is read, the live value is
-        the principal — ``mint`` is NOT under-resolved."""
         tree = _tree_for(_membership_nft(), "mint(address,uint256)")
         _stub(monkeypatch, slot=_word(MANAGER))
         cap = evaluate_tree(tree, _ctx_with_rpc())
@@ -340,8 +238,6 @@ class TestMembershipNFTStorageSlot:
         assert _status(cap) != "resolved_empty"
 
     def test_public_sibling_resolves_via_getter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The ``liquidityPool``-gated function still resolves through its getter
-        (no slot), proving the slot path is additive, not a replacement."""
         tree = _tree_for(_membership_nft(), "rebase(uint256)")
         _stub(monkeypatch, slot="revert", getter=_word(MANAGER))
         cap = evaluate_tree(tree, _ctx_with_rpc())

@@ -1,5 +1,3 @@
-"""U3: the composed-candidate tie-break, and the destination's own predicates."""
-
 from __future__ import annotations
 
 import itertools
@@ -28,30 +26,22 @@ from utils import execution_record as EX
 
 
 def test_u3_a_tied_composed_figure_publishes_the_weakest_witness_state(fold):
-    """Two independent calls at one figure: the state published claims the least.
-
-    Dollars are not in question, the SELECTOR is: the winner names the published
-    ``witness_state``. Taking the first offered mints ``proven_exact`` from
-    iteration order while an equally-witnessed candidate supports only a floor.
+    """Taking the first offered would mint ``proven_exact`` from iteration order while an equal candidate supports
+    only a floor.
     """
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     row = _gate_row(document)
     entry = next(e for e in row["reach_composed_magnitudes"] if e["entity"] == KEY_V)
     assert row["value_at_stake_usd"] == 1_000_000.0
     assert entry["published_usd"] == 1_000_000.0
-    # The weaker state wins the tie, although its selector sorts LAST and its
-    # candidate is offered second.
     assert entry["selector"] == TIE_SELECTOR
     assert entry["destination_function"] == "manage"
     assert entry["flow_out_witness"]["state"] == "proven_floor"
 
 
 def test_u3_the_published_chain_is_the_chosen_candidates_own(fold):
-    """The whole candidate is selected, never a field of it.
-
-    ``act_as_chain`` is hard-indexed against the function that admitted the
-    published selector; a tie-break that left the chain behind would publish a
-    path ending at a different function from the one named beside it.
+    """``act_as_chain`` is indexed against the function that admitted the selector, so the chain must come from the
+    winning candidate.
     """
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
@@ -64,12 +54,7 @@ def test_u3_the_published_chain_is_the_chosen_candidates_own(fold):
 
 
 def test_u3_the_tie_is_disclosed_and_names_every_candidate(fold):
-    """An arbitrary rule is only admissible if the document says it ran.
-
-    ``composed_selector_tie`` lists both candidates with figure and state,
-    marks the published one, and states the rule. Where the rule decided
-    nothing it is ``null``, never an absent field.
-    """
+    """An arbitrary rule is admissible only if disclosed; ``null`` where it decided nothing, never absent."""
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
     tie = entry["composed_selector_tie"]
@@ -93,16 +78,11 @@ def test_u3_the_tie_is_disclosed_and_names_every_candidate(fold):
     assert "weakest witness state" in tie["chosen_by"] and "lowest selector" in tie["chosen_by"]
     assert "not by evidence" in tie["reading"]
 
-    # One candidate: the rule decided nothing, and that is a published fact.
     single = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
     assert _gate_row(single)["reach_composed_magnitudes"][0]["composed_selector_tie"] is None
 
 
 def test_u3_a_candidate_that_loses_on_dollars_is_not_a_tie(fold):
-    """The figure is still a MAX: the larger call wins outright and is not tied.
-
-    ``composed_selector_tie`` names candidates the EVIDENCE could not separate.
-    """
     document = fold(_tied_signals(tie_usd=400_000.0), principals=_composing_principals(), **_tied_case())
     entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
     assert entry["published_usd"] == 1_000_000.0
@@ -122,12 +102,8 @@ def _candidate(
         (KEY_C, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 1),
     ),
 ) -> Any:
-    """One composed candidate, every ordering input settable.
-
-    ``steps`` is ``(caller, destination, selector, calling_selector,
-    receiver_variable, receiver_block)`` per hop. The DESTINATION is the raw
-    anchor, not the entity: a proxy and its implementation fold to one entity
-    under two anchors.
+    """``steps`` are ``(caller, destination, selector, calling_selector, receiver_variable, receiver_block)``;
+    destination is the raw anchor, since a proxy and its impl share an entity.
     """
     chain = tuple(
         P.ActAsStep(
@@ -158,11 +134,7 @@ def _candidate(
 
 
 def _identity(entry: Any) -> tuple[Any, ...]:
-    """Everything the published entry is rendered from, chain included.
-
-    The chain is compared through ``as_json`` (the step's whole PUBLISHED
-    identity) so the assertion cannot pass on a hand-picked subset of fields.
-    """
+    """Compared via ``as_json`` so the assertion can't pass on a hand-picked subset of fields."""
     return (
         entry.usd,
         entry.selector,
@@ -175,36 +147,27 @@ def _identity(entry: Any) -> tuple[Any, ...]:
 def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
     """Composition order: the order is not evidence.
 
-    Seven pools, each tied through the ordering key and separated at exactly ONE
-    component, so every component decides somewhere. Every ordering of every
-    pool must select the same entry (figure, selector, and CHAIN through the
-    step's whole published identity), or some published field reflects the order
-    the fold built candidates in.
+    8: each pool is tied up to exactly one ordering component, and every permutation must select the same entry.
     """
     pools: dict[str, tuple[list[Any], Any]] = {}
 
-    # 1. dollars: the larger call wins outright and is not a tie.
     pools["published_usd"] = (
         [_candidate(usd=900_000.0, selector="0x0a0a0a0a"), _candidate(usd=1_000_000.0)],
         _candidate(usd=1_000_000.0),
     )
-    # 2. witness state: the weakest of the tied candidates.
     pools["witness_state"] = (
         [_candidate(state="proven_exact"), _candidate(state="proven_floor", selector=TIE_SELECTOR)],
         _candidate(state="proven_floor", selector=TIE_SELECTOR),
     )
-    # 3. selector: lowest, once the state cannot separate them.
     pools["selector"] = (
         [_candidate(selector=TIE_SELECTOR), _candidate(selector=COMPOSED_SELECTOR)],
         _candidate(selector=COMPOSED_SELECTOR),
     )
-    # 4. destination function: lowest, once the selector cannot.
     pools["destination_function"] = (
         [_candidate(function="manage"), _candidate(function="exit")],
         _candidate(function="exit"),
     )
-    # 5. the chain's calling selectors — the same call site reached under two
-    #    different entry functions of the caller.
+    # 5. the same call site reached under two different entry functions of the caller.
     pools["calling_selector_chain"] = (
         [
             _candidate(steps=((KEY_C, KEY_V, COMPOSED_SELECTOR, "0xbbbb0002", "vault", 1),)),
@@ -212,10 +175,7 @@ def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
         ],
         _candidate(steps=((KEY_C, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 1),)),
     )
-    # 6. the chain's own IDENTITY: two different callers whose calling functions
-    #    share a selector. Tied through every component above — only the caller,
-    #    the pointer and the block differ, and all three are published. The
-    #    lowest caller wins: KEY_T is 0x7777..., KEY_C is 0xaaaa....
+    # 6. two callers whose calling functions share a selector; the lowest caller wins.
     pools["chain_identity"] = (
         [
             _candidate(steps=((KEY_C, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 11),)),
@@ -223,22 +183,18 @@ def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
         ],
         _candidate(steps=((KEY_T, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vaultPtr", 22),)),
     )
-    # 7. THE PROXY FOLD. One entity, two raw anchors, so two candidates agree on
-    #    everything but the step's own ``destination`` and the basis rendered
-    #    from it. Neither is in a hand-written list of "the fields that identify
-    #    a step", which is why the key reads the step's whole published identity.
+    # 7. the proxy fold: two raw anchors of one entity, differing only in the step's destination, which is why the key
+    # reads the step's whole published identity.
     pools["proxy_folded_destination"] = (
         [
             _candidate(steps=((KEY_C, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 1),)),
             _candidate(steps=((KEY_C, KEY_PROXY, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 1),)),
         ],
-        # KEY_PROXY sorts below KEY_V, and the basis names it first.
         _candidate(steps=((KEY_C, KEY_PROXY, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 1),)),
     )
 
     for name, (pool, winner) in pools.items():
-        # Every pool must really be tied THROUGH the earlier components, or the
-        # case is not testing the component it claims to.
+        # Otherwise the case isn't testing the component it claims to.
         keys = {FOLD._composed_order(c) for c in pool}
         assert len(keys) == len(pool), name
         expected_ties = sum(1 for c in pool if c.usd == winner.usd) - 1
@@ -248,12 +204,7 @@ def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
 
 
 def test_u3_an_unrankable_witness_state_can_never_win_a_tie():
-    """A state the claim map does not know must not be PREFERRED to one it does.
-
-    Ranking an unknown state with the weakest is the fail-open: "we cannot tell
-    what this claims" would beat a state proven to claim little. It loses every
-    tie, so it reaches the document only as the sole candidate.
-    """
+    """Ranking an unknown state as weakest would be fail-open, so it loses every tie."""
     unknown = _candidate(state="not_determined", selector="0x0a0a0a0a")
     for known in (_candidate(state="proven_floor"), _candidate(state="proven_exact")):
         pool = [unknown, known]
@@ -261,12 +212,8 @@ def test_u3_an_unrankable_witness_state_can_never_win_a_tie():
             chosen = FOLD._select_composed(list(order))
             assert chosen.witness_state == known.witness_state
             assert chosen.selector == known.selector
-    # Sole candidate: published as it stands, and disclosed as no tie at all.
     alone = FOLD._select_composed([unknown])
     assert alone.witness_state == "not_determined" and alone.tied_with == ()
-
-
-# --- destination_predicates (B2) -------------------------------------------
 
 
 AUTH_GUARD = "require(bool,string)(isAuthorized(msg.sender,msg.sig),UNAUTHORIZED)"
@@ -295,13 +242,7 @@ def _predicate_plane() -> P.ConditionPlane:
 
 
 def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
-    """The ceiling claim points at the evidence it was NOT made against.
-
-    The disclosure asserts the destination's own argument semantics went unread;
-    without a pointer that is unfalsifiable, so the entry carries the texts
-    verbatim, in stored order, from the canonical column, and says it evaluated
-    none of them.
-    """
+    """The entry carries the destination's predicate texts verbatim so the "unread" disclosure is falsifiable."""
     document = fold(
         _composing_signals(),
         principals=_composing_principals(),
@@ -313,11 +254,8 @@ def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
     assert block["state"] == P.PREDICATES_EXTRACTED
     assert block["function_id"] == 4242
     assert block["count"] == 3 and block["entries_stored"] == 3
-    # Verbatim and in STORED order — not sorted, not deduped, not filtered.
     assert block["descriptions"] == list(VAULT_PREDICATES)
-    # Nothing is filtered out by kind: the authorization guard this step's own
-    # witness proves satisfied, a transfer post-condition and an SSA call marker
-    # all stay, which is why the block is not readable as unmet conditions.
+    # Nothing is filtered by kind, which is why the block can't be read as unmet conditions.
     assert AUTH_GUARD in block["descriptions"] and SSA_MARKER in block["descriptions"]
     assert block["evaluated"] is False
     for fragment in ("WITHOUT POLARITY", "EVALUATES", "authorization guard"):
@@ -327,11 +265,6 @@ def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
 
 
 def test_u3_the_predicates_ride_on_both_act_as_witness_shapes(fold):
-    """The disclosure is a DESTINATION fact and does not depend on how it was reached.
-
-    ACL-admitted and state-variable steps publish the same destination
-    predicates; the block describes the callee's body, not the witness.
-    """
     shapes = {
         P.ACT_AS_WITNESS_CALLER_STATE_VARIABLE: _composing_case(conditions=_predicate_plane()),
         P.ACT_AS_WITNESS_DESTINATION_ACL: _composing_case(act_as=_acl_plane(), conditions=_predicate_plane()),
@@ -344,12 +277,8 @@ def test_u3_the_predicates_ride_on_both_act_as_witness_shapes(fold):
 
 
 def test_u3_the_predicate_lookup_keeps_its_three_states():
-    """ "No predicate was stored" is three different facts and each keeps its name.
-
-    Extraction ran and found nothing (a read); a column holding no array
-    (extraction never ran); no function under that selector (a join that
-    missed). Collapsing any two would publish a coverage gap as proven absence
-    of guards.
+    """Found-nothing, never-extracted and no-such-function are different facts; collapsing them would publish a
+    coverage gap as absence of guards.
     """
     plane = P.ConditionPlane()
     plane.by_entity = {
@@ -364,7 +293,6 @@ def test_u3_the_predicate_lookup_keeps_its_three_states():
     assert extracted.state == P.PREDICATES_EXTRACTED
     assert extracted.descriptions == VAULT_PREDICATES and extracted.functions_matching == 1
 
-    # Extracted and EMPTY: a read that found no predicate, not a missing read.
     empty = plane.predicates(KEY_V, TIE_SELECTOR)
     assert empty.state == P.PREDICATES_EXTRACTED and empty.descriptions == ()
 
@@ -376,18 +304,13 @@ def test_u3_the_predicate_lookup_keeps_its_three_states():
         absent = plane.predicates(KEY_V, missing)
         assert absent.state == P.PREDICATES_FUNCTION_NOT_LOCATED, missing
         assert (absent.function_id, absent.descriptions) == (None, None), missing
-    # A function whose own selector was never extracted matches nothing: four
-    # bytes nobody recorded do not name a function.
     assert plane.predicates(KEY_V, "0x00000000").state == P.PREDICATES_FUNCTION_NOT_LOCATED
     assert plane.predicates("ethereum::0xnothing", COMPOSED_SELECTOR).state == P.PREDICATES_FUNCTION_NOT_LOCATED
 
 
 def test_u3_the_predicate_texts_are_read_verbatim_from_the_stored_array():
-    """The canonical column, unfiltered, and an entry with no text is counted.
-
-    ``kind`` is not read (the extractor labels everything ``business``), nothing
-    is deduped or reordered, and an entry with no string ``description`` raises
-    ``entries_stored`` above the text count instead of disappearing.
+    """``kind`` is not read (everything is labelled ``business``), and a text-less entry raises ``entries_stored``
+    instead of disappearing.
     """
     texts, entries = P._stored_predicates(
         [
@@ -400,6 +323,5 @@ def test_u3_the_predicate_texts_are_read_verbatim_from_the_stored_array():
     )
     assert texts == (AUTH_GUARD, AUTH_GUARD, "$._status == ENTERED")
     assert entries == 5
-    # A column holding no array is an extraction that never ran.
     assert P._stored_predicates(None) == ((), 0)
     assert P._stored_predicates("[]") == ((), 0)

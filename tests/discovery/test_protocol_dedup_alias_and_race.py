@@ -1,11 +1,3 @@
-"""Protocol dedup regression guards: alias-driven merge, slug race, hostname match.
-
-Originally POC reproductions of three code-review issues, inverted into guards
-once fixed: (1) ``aliases`` merges NULL-slug family rows onto the slug-keyed row,
-(2) concurrent slug INSERTs serialize via a savepoint on
-``uq_protocol_canonical_slug``, (3) ``_match_protocol`` matches bare hostnames.
-"""
-
 from __future__ import annotations
 
 import os
@@ -23,15 +15,8 @@ from tests.conftest import requires_postgres
 pytestmark = [requires_postgres]
 
 
-# ---------------------------------------------------------------------------
-# (1) Pre-existing duplicates merge via the aliases parameter.
-# ---------------------------------------------------------------------------
-
-
 def test_orphan_duplicates_merge_via_aliases(db_session):
-    """Post-migration prod state: two NULL-slug rows for one family collapse on
-    the first worker call, ``aliases`` (display-name spellings) merging the rest
-    into the adopted row."""
+    """``aliases`` merges NULL-slug family rows onto the adopted row."""
     from db.models import AuditReport
 
     row_a = Protocol(name="ether fi", canonical_slug=None)
@@ -39,8 +24,7 @@ def test_orphan_duplicates_merge_via_aliases(db_session):
     db_session.add_all([row_a, row_b])
     db_session.flush()
 
-    # The audit report hangs off the merged-from row (CASCADE FK); it must
-    # follow the survivor, not die with the orphan.
+    # The CASCADE FK row must follow the survivor.
     orphan_audit = AuditReport(
         protocol_id=row_a.id,
         url="https://example.com/audit",
@@ -67,16 +51,8 @@ def test_orphan_duplicates_merge_via_aliases(db_session):
     assert orphan_audit.protocol_id == adopted.id
 
 
-# ---------------------------------------------------------------------------
-# (2) Concurrent slug-keyed inserts serialize cleanly via savepoint retry.
-# ---------------------------------------------------------------------------
-
-
 def test_concurrent_slug_insert_serializes():
-    """Two threads, two sessions, same canonical_slug: both miss the lookup and
-    INSERT; the savepoint catches the loser's IntegrityError and re-fetches, so
-    both see the same row id. Separate engines give genuinely separate
-    connections; a barrier makes both SELECT before either flushes."""
+    """Separate engines give separate connections; the barrier makes both SELECT before either flushes."""
     db_url = os.environ.get("TEST_DATABASE_URL")
     if not db_url:
         pytest.skip("TEST_DATABASE_URL not set")
@@ -124,15 +100,8 @@ def test_concurrent_slug_insert_serializes():
     assert results["a"]["id"] == results["b"]["id"], f"expected both threads to see the same row, got {results!r}"
 
 
-# ---------------------------------------------------------------------------
-# (3) Resolver matches bare hostnames via bidirectional substring.
-# ---------------------------------------------------------------------------
-
-
 def test_resolver_matches_bare_hostname():
-    """``slug_norm in name_norm`` was missing, so ``"etherfiorg"`` (normalized
-    ``"etherfi.org"``) failed to match the ``"etherfi"`` slug; the reverse
-    direction with the same ≥50% length gate fixes the dapp_crawl fall-through."""
+    """The reverse substring direction (with the same 50% length gate) lets "etherfi.org" match the "etherfi" slug."""
     protocols = [
         {
             "slug": "etherfi",
@@ -152,5 +121,4 @@ def test_resolver_matches_bare_hostname():
     matched = _match_protocol("etherfi.org", protocols)
     assert matched is not None and matched["slug"] == "etherfi"
 
-    # An input with no real overlap must still miss.
     assert _match_protocol("zzz", protocols) is None

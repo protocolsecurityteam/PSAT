@@ -11,11 +11,11 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import pytest
 from sqlalchemy import select
 
 from db.models import ContractMaterialization
 from tests.conftest import requires_postgres
+from tests.support.materializations import _clean_cm  # noqa: F401  (fixture, registered by import)
 
 _MIG_PATH = (
     Path(__file__).resolve().parents[2]
@@ -31,15 +31,6 @@ def _load_migration():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-
-
-@pytest.fixture()
-def _clean_cm(db_session):
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
 
 
 def _row(chain, keccak, addr, **kw):
@@ -63,10 +54,7 @@ def test_normalize_chain_tokens_rekeys_and_skips_collisions(_clean_cm):
     a2 = "0x" + "a2" * 20
     a3 = "0x" + "a3" * 20
 
-    # X: plain mainnet name → moves to "1".
     _clean_cm.add(_row("ethereum", k1, a1))
-    # Y (name "ethereum", keccak k2) collides with pre-existing Z ("1", keccak k2)
-    # on the (chain, bytecode_keccak) PK → Y must be left on "ethereum".
     _clean_cm.add(_row("ethereum", k2, a2))
     _clean_cm.add(_row("1", k2, a3))
     _clean_cm.commit()

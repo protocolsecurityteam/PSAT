@@ -1,9 +1,3 @@
-"""Chain-awareness of the ``/api/analyses`` listing for CREATE2 twins.
-
-The listing must pair each job with its *own* chain's Contract row and hide/fold impls only
-within a chain, never letting one chain's metadata or impl entry bleed into the other's.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -73,9 +67,7 @@ def test_twin_listing_entries_carry_own_chain_metadata(api_client, db_session):
 @requires_postgres
 def test_twin_proxy_impl_fold_stays_within_chain(api_client, db_session):
     now = datetime.now(timezone.utc)
-    # ethereum impl newest, base impl oldest → base impl is last in the
-    # updated_at-desc iteration, so the buggy last-wins fold would attach
-    # the base impl to *both* proxies.
+    # The base impl is last in updated_at-desc order, so a last-wins fold would attach it to both proxies.
     p_eth = _seed_job(
         db_session, address=PROXY, chain_id=1, is_proxy=True, request={"chain": "ethereum"}, updated_at=now
     )
@@ -126,8 +118,7 @@ def test_proxy_hidden_when_impl_completed_only_on_other_chain(api_client, db_ses
     p_eth = _seed_job(
         db_session, address=PROXY, chain_id=1, is_proxy=True, request={"chain": "ethereum"}, updated_at=now
     )
-    # A standalone base job exists at IMPL (not an impl-of-this-proxy); there
-    # is no ethereum impl job. It must not un-hide the ethereum proxy.
+    # A standalone base job at IMPL must not un-hide the ethereum proxy.
     i_base = _seed_job(
         db_session,
         address=IMPL,

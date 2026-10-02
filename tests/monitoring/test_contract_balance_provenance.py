@@ -1,10 +1,5 @@
-"""B1 — balance provenance: observed address, observation height, insert-only.
-
-The governing rule these arms encode: a value is published as a positive fact
-only when the evidence proves it. Here that means a height is published only for
-a quantity that was READ at that height, an address is published only because it
-was the address the read was issued against, and every failure lands on an
-explicit not-determined state instead of destroying what was previously known.
+"""B1: a height is published only for a quantity read at it, an address only because the read was issued against it,
+and every failure lands on not-determined instead of destroying what was known.
 """
 
 from __future__ import annotations
@@ -38,8 +33,7 @@ from utils.balance_status import (
     NATIVE_STATUS_PROVEN_ZERO,
 )
 
-# The investigation's reference height. Every pinned read in this unit
-# reproduces here, and the tests replay the wire rather than touching it.
+# The tests replay the wire at this reference height.
 BLOCK = 25643300
 HEAD = BLOCK + PINNED_FINALITY_MARGIN
 
@@ -69,11 +63,7 @@ def _contract(session, protocol_id: int, address: str, chain: str = "ethereum") 
 
 
 def _stub_pinned(monkeypatch, balances: dict[str, int] | None, *, head: int = HEAD, raw: dict | None = None):
-    """Replay the pinned wire: ``eth_blockNumber`` then one ``aggregate3``.
-
-    ``balances`` maps address -> wei (32-byte words); ``raw`` overrides per-address returndata verbatim so an arm
-    can pin the short/empty shapes the decoder must refuse.
-    """
+    """``raw`` pins the short/empty returndata the decoder must refuse."""
     monkeypatch.setattr(
         "services.monitoring.balance_reads.rpc_request",
         lambda url, method, params, **kw: hex(head),
@@ -110,9 +100,7 @@ def _stub_etherscan(monkeypatch, *, wei, token_page=None):
 
     monkeypatch.setattr("services.clients.etherscan.get_eth_balance", _bal)
     monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-    # ``get_eth_price`` delegates to ``get_native_price``, so stubbing it does not
-    # cover the resolution worker, which calls the native quote directly. Same
-    # quote, so the native row is priced the way the TVL arms already price it.
+    # The resolution worker calls the native quote directly.
     monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda chain_id=1: 2000.0)
     monkeypatch.setattr(
         "services.clients.etherscan.get_token_balances_page",
@@ -189,8 +177,7 @@ class TestPinnedRowIsByteExact:
             BLOCK,
             addr,
         )
-        # The anti-inheritance guard: the quantity has a height, the PRICE does
-        # not, and nothing may substitute one for the other.
+        # The quantity has a height, the price does not.
         assert row.price_block_number is None
         assert row.price_usd == 2000.0
 
@@ -218,13 +205,11 @@ class TestPinnedFailureIsNonDestructive:
         before = [(r.id, r.raw_balance, r.block_number) for r in _rows(db_session, c.id)]
         assert before and before[0][2] == BLOCK
 
-        # Everything fails on the second cycle.
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=RuntimeError("boom"), token_page=failed_page())
         _refresh_due(db_session, proto.id)
 
         after = [(r.id, r.raw_balance, r.block_number) for r in _rows(db_session, c.id)]
-        # No row deleted, no row written, the pre-existing block untouched.
         assert after == before
 
         fetch = _fetches(db_session, c.id, "native")[-1]
@@ -232,7 +217,6 @@ class TestPinnedFailureIsNonDestructive:
         assert fetch.asset_set_status == "unattempted"
         assert _fetches(db_session, c.id, "tokens")[-1].asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
         assert fetch.block_number is None
-        # And the view still publishes the last good observation.
         assert [r.id for r in _view(db_session, c.id)] == [before[0][0]]
 
 
@@ -248,24 +232,16 @@ class TestUnpinnedZeroIsNotAProvenZero:
         _refresh_due(db_session, proto.id)
         f = _fetches(db_session, pinned_c.id, "native")[0]
         assert (f.native_status, f.block_number) == (NATIVE_STATUS_PROVEN_ZERO, BLOCK)
-        # A proven zero is an OBSERVATION and is written as one. A quantity
-        # witnessed zero at a named height is the earned negative the value
-        # plane reads as an empty sheet, and dropping it left an absence where a
-        # measurement had been made. It is still not a HOLDING: the quantity is
-        # 0, and every consumer that means "holds this asset" asks the quantity
-        # (``balance_reads.positive_raw_balance``).
+        # A proven zero at a named height is an observation, though not a holding; holders ask ``positive_raw_balance``.
         pinned_rows = [(r.raw_balance, r.block_number, r.token_address) for r in _rows(db_session, pinned_c.id)]
         assert pinned_rows == [("0", BLOCK, None)]
 
-        # Same observed value, unpinned path.
         _stub_unpinned(monkeypatch)
         _stub_etherscan(monkeypatch, wei=0)
         _refresh_due(db_session, proto.id)
         f2 = _fetches(db_session, pinned_c.id, "native")[-1]
         assert (f2.native_status, f2.block_number) == (NATIVE_STATUS_NOT_DETERMINED, None)
-        # And it writes NOTHING: a zero at an unrecorded moment proves zero at no
-        # height, so there is no observation to persist. The pinned row from the
-        # first cycle is still the only one.
+        # A zero at an unrecorded moment proves nothing, so nothing is written.
         assert [(r.raw_balance, r.block_number, r.token_address) for r in _rows(db_session, pinned_c.id)] == pinned_rows
 
     def test_db_refuses_a_blockless_proven_zero(self, db_session):
@@ -320,9 +296,7 @@ class TestErc20FailureIsNotAnEmptyHolding:
 
 @requires_postgres
 class TestSwallowPathsReachFetchFailed:
-    """Arm 5 — BOTH tvl.py swallows, independently: native set ``eth_wei = 0``, ERC-20 set ``token_list = []``;
-    either followed by the destructive DELETE published a proven-sounding absence from a failed read.
-    """
+    """Arm 5: both tvl.py swallows followed by the destructive DELETE published an absence from a failed read."""
 
     def test_native_swallow(self, db_session, monkeypatch):
         proto = _protocol(db_session, "prov-swallow-native")
@@ -370,9 +344,7 @@ class TestEmptyPageVsFailedPage:
 
 @requires_postgres
 class TestAtPageCapAsksTheRawPage:
-    """Arm 7 — the cap is a fact about the ENDPOINT's page, not stored rows: the producer drops zero-balance
-    entries, so a full page stores fewer rows than the cap and a stored-row count reads "not truncated".
-    """
+    """Arm 7: zero-balance entries are dropped, so the stored-row count can't answer the cap question."""
 
     def test_full_page_with_dropped_entries(self, db_session, monkeypatch):
         proto = _protocol(db_session, "prov-cap")
@@ -402,14 +374,12 @@ class TestAtPageCapAsksTheRawPage:
 
 @requires_postgres
 class TestObservedAddressPerWriter:
-    """Arms 8/9 — ONE observed-address policy for both writers: a fetch row's ``observed_address`` is its OWN
-    contract's address, and a read meant for another address is filed against the row that owns it.
-    (The old divergence filed a proxy's 19.06 ETH against the implementation's row, then evicted it when a later
-    implementation-address read won the native class.)"""
+    """Arms 8/9: a fetch row's ``observed_address`` is its own contract's address (the old divergence filed a proxy's
+    ETH on the implementation row, then evicted it).
+    """
 
     def test_tvl_records_the_contract_address_even_for_a_proxy(self, db_session, monkeypatch):
-        """The TVL loop never reads ``request['proxy_address']`` (only the resolution worker does); recording
-        the proxy here would attribute the read to an address this writer never issued it against."""
+        """The TVL loop never reads ``request['proxy_address']``."""
         proto = _protocol(db_session, "prov-obs-tvl")
         proxy_addr = _addr("81")
         impl_addr = _addr("82")
@@ -429,8 +399,6 @@ class TestObservedAddressPerWriter:
         assert [r.observed_address for r in _rows(db_session, proxy.id)] == [proxy_addr]
 
     def test_the_resolution_worker_files_a_proxy_read_against_the_proxy_row(self, db_session, monkeypatch):
-        """A job on the implementation reading the proxy writes the PROXY's row; filing it against the
-        implementation let the TVL loop's next implementation-address read win the native class and withdraw it."""
         from types import SimpleNamespace
         from typing import Any, cast
 
@@ -463,14 +431,13 @@ class TestObservedAddressPerWriter:
         assert fetches[0].block_number == BLOCK
         assert [r.observed_address for r in _rows(db_session, proxy.id)] == [proxy_addr]
         assert [r.block_number for r in _rows(db_session, proxy.id)] == [BLOCK]
-        # ...and nothing at all is filed against the implementation's row.
         assert _fetches(db_session, impl.id) == []
         assert _rows(db_session, impl.id) == []
 
 
 @requires_postgres
 class TestShortReturndataIsNotZero:
-    """Arm 10 — ``(success=True, "0x")`` is a failure, never a proven zero (``aggregate3`` succeeds on empty data)."""
+    """Arm 10: ``aggregate3`` succeeds on empty data."""
 
     @pytest.mark.parametrize("returndata", ["0x", "0x00", _word(0)[:-2]])
     def test_short_word_falls_back_to_unpinned(self, db_session, monkeypatch, returndata):
@@ -513,8 +480,6 @@ class TestTokenRowsNeverInheritTheNativeHeight:
         rows = {r.token_address: r for r in _rows(db_session, c.id)}
         assert rows[None].block_number == BLOCK
         assert rows[tok["token_address"]].block_number is None
-        # And the fetch's native height is not projected onto the token row by
-        # the view either.
         view = {r.token_address: r for r in _view(db_session, c.id)}
         assert view[tok["token_address"]].block_number is None
 
@@ -574,7 +539,7 @@ class TestInsertOnlyHistory:
 
 @requires_postgres
 class TestSoldAssetDisappears:
-    """Arm 13 — insert-only must not republish a gone holding: the latest fetch's rows ARE the observed set."""
+    """Arm 13: the latest fetch's rows are the observed set."""
 
     def test_asset_absent_from_the_new_fetch_leaves_the_view(self, db_session, monkeypatch):
         proto = _protocol(db_session, "prov-sold")
@@ -599,18 +564,13 @@ class TestSoldAssetDisappears:
         _refresh_due(db_session, proto.id)
 
         assert _view(db_session, c.id) == []
-        # ...but the history is still there. Insert-only means nothing is lost.
         assert len(_rows(db_session, c.id)) == 1
 
 
 @requires_postgres
 class TestHalvesFailIndependently:
-    """R1 / the F-1 defect — a class status must not outrun its rows.
-
-    The resolution worker's three Etherscan calls fail independently. It used to return early AFTER writing the fetch
-    row, so a one-half failure persisted ``returned_assets``/``proven_nonzero`` for the half that succeeded with none
-    of its rows. That row-less class won ``contract_balances_latest`` (keyed on status), withdrew every prior holding,
-    and left ``contracts_missing_current_rows`` ``partial`` False.
+    """R1 / F-1: the worker's Etherscan calls fail independently, and an early return after the fetch row published a
+    row-less class that withdrew prior holdings.
     """
 
     def _worker_fetch(self, db_session, monkeypatch, contract, *, native_raises, pinned):
@@ -649,21 +609,16 @@ class TestHalvesFailIndependently:
         c = _contract(db_session, proto.id, addr)
         db_session.commit()
 
-        # A prior good fetch establishes holdings the defect would withdraw.
         self._worker_fetch(db_session, monkeypatch, c, native_raises=False, pinned=True)
         prior_view = _view(db_session, c.id)
         assert {r.token_address for r in prior_view} == {None, "0x" + "f1" * 20}
 
-        # F-1: the native Etherscan half raises while the pinned word is in hand
-        # and the token page succeeds.
         self._worker_fetch(db_session, monkeypatch, c, native_raises=True, pinned=True)
 
         fetch = _fetches(db_session, c.id)[-1]
         view = _view(db_session, c.id)
         by_class = {r.token_address: r for r in view}
 
-        # Every non-failed class on the new fetch persisted its rows, so no class
-        # is published from a row set that was never written.
         for row_class, status in (
             (None, fetch.native_status),
             ("0x" + "f1" * 20, fetch.asset_set_status),
@@ -672,7 +627,6 @@ class TestHalvesFailIndependently:
                 assert row_class in by_class, f"{status} promised rows for {row_class} and wrote none"
                 assert by_class[row_class].fetch_id == fetch.id
 
-        # And nothing was withdrawn: both classes are still published.
         assert {r.token_address for r in view} == {None, "0x" + "f1" * 20}
         assert by_class[None].raw_balance == "6"
         assert by_class[None].block_number == BLOCK
@@ -687,8 +641,6 @@ class TestHalvesFailIndependently:
         first_native = [r for r in _view(db_session, c.id) if r.token_address is None]
         assert len(first_native) == 1
 
-        # No pin available AND the unpinned read raises: the native class is
-        # genuinely not known this cycle.
         self._worker_fetch(db_session, monkeypatch, c, native_raises=True, pinned=False)
 
         fetch = _fetches(db_session, c.id, "native")[-1]
@@ -696,7 +648,6 @@ class TestHalvesFailIndependently:
         assert fetch.asset_set_status == "unattempted"
         assert _fetches(db_session, c.id, "tokens")[-1].asset_set_status == ASSET_SET_STATUS_RETURNED_ASSETS
         view_native = [r for r in _view(db_session, c.id) if r.token_address is None]
-        # The last thing actually observed is still published.
         assert [r.id for r in view_native] == [r.id for r in first_native]
 
 
@@ -730,11 +681,7 @@ def _observe_entity(session, chain: str, address: str, *, wei: int, block: int |
 
 @requires_postgres
 class TestEntityKeyedRecordsReachTheView:
-    """The carrier for entities with no ``contracts`` row, and the view's key.
-
-    The view's ``f.contract_id = cb.contract_id`` is NULL (never true) for entity-keyed rows, so they were stored but
-    silently absent from the view. These arms pin the coalesced key; the contract arm is unchanged.
-    """
+    """The view's contract_id join is NULL for entity-keyed rows, which were stored but invisible."""
 
     def test_an_entity_keyed_row_is_returned_by_the_view(self, db_session):
         address = _addr("e1")
@@ -756,7 +703,6 @@ class TestEntityKeyedRecordsReachTheView:
 
         view = _entity_view(db_session, "ethereum", address)
         assert [(r.raw_balance, r.block_number) for r in view] == [("2", BLOCK + 1)]
-        # Insert-only: the earlier reading is still on record, it just is not current.
         stored = db_session.execute(
             select(ContractBalance).where(ContractBalance.entity_address == address).order_by(ContractBalance.id)
         ).scalars()
@@ -768,14 +714,12 @@ class TestEntityKeyedRecordsReachTheView:
         db_session.flush()
         _observe_entity(db_session, "ethereum", address, wei=6, block=BLOCK + 1, failed_assets=True)
         db_session.flush()
-        # The native class did not fail, so it advances; the ERC-20 class did, so
-        # the failed fetch never wins it. Same per-class rule as the contract arm.
+        # Same per-class rule as the contract arm.
         view = _entity_view(db_session, "ethereum", address)
         assert [(r.raw_balance, r.token_address) for r in view] == [("6", None)]
 
     def test_one_address_two_subjects_never_share_rows(self, db_session, monkeypatch):
-        """The identity is the SUBJECT, not the address: a contract and an entity holder at one address must not
-        withdraw each other's rows."""
+        """The identity is the subject, not the address."""
         proto = _protocol(db_session, "prov-entity-collision")
         address = _addr("e4")
         c = _contract(db_session, proto.id, address)

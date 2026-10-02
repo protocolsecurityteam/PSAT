@@ -1,5 +1,3 @@
-"""EIP-1967 proxy flow: classify → resolve impl → emit classifications → spawn impl child job."""
-
 from __future__ import annotations
 
 import pytest
@@ -12,7 +10,6 @@ USDC_PROXY = "0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48"  # USDC FiatTokenProxy
 
 @pytest.fixture(scope="module")
 def usdc_job(live_client: LiveClient) -> dict:
-    # Module-scoped so the USDC run is amortized across the four tests in this file.
     job = live_client.submit_and_wait(USDC_PROXY, timeout=DEFAULT_SINGLE_TIMEOUT)
     if job["status"] != "completed":
         pytest.fail(f"USDC proxy analysis did not complete: {job.get('error')}")
@@ -48,9 +45,8 @@ def test_implementation_job_completed(usdc_job, live_client: LiveClient):
     impl = (flags.get("implementation") or "").lower()
     assert impl
 
-    # The invariant is "the impl has a completed analysis job somewhere", not "this parent spawned a child": on a
-    # warm preview DB the static worker reuses the existing impl job, so the helper falls back to a full ``jobs()``
-    # lookup and polls until terminal (a synchronous assert raced the impl pipeline).
+    # On a warm preview the impl job may be reused rather than spawned, so the helper falls back to ``jobs()`` and
+    # polls.
     impl_job = _resolve_impl_job(live_client, parent_job_id=usdc_job["job_id"], impl_address=impl)
     assert impl_job, f"No analysis job of any age found for implementation {impl}"
 

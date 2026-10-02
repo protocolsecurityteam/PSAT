@@ -1,18 +1,11 @@
-"""End-to-end proof of the value-out and supply recipes on a real EVM.
+"""Value-out and supply recipes on a real EVM.
 
-Other tests of these recipes script the simulate seam, so the EVM's own behaviour is assumed; that
-assumption is where two published-wrong verdicts came from:
-  * a burn whose ``unchecked { totalSupply -= amount }`` WRAPPED past zero (caller seeded more shares
-    than existed), reading as a near-``2^256`` increase and published as proven, witnessed dilution;
-  * a payout the callee guards out (``if (amount > 0)``), reported as an outflow that cannot execute.
-Both need a real ``SUB`` opcode and a real revert, so the compiled fixture is deployed to a local
-NON-FORKING anvil and the production recipes run through anvil's own ``eth_simulateV1``.
+Scripted simulate seams assumed EVM behaviour, which let a wrapped ``unchecked`` burn publish as dilution and a
+guarded zero payout publish as an outflow. The compiled fixture runs on a local non-forking anvil through its
+own ``eth_simulateV1``; skips without anvil.
 
-Gated behind ``anvil_available`` (bytecode ships pre-compiled, no solc). No live marker, no RPC.
-
-PORTS: every offline anvil binds a fixed localhost port, so a duplicate is a spurious failure that
-only appears when files run together. Taken: 8547-8548 (``test_effects_anvil.py``), 8551-8556
-(``test_effects_token_fixtures_e2e.py``); this file takes 8560. Start ad-hoc anvils above that.
+Ports: 8547-8548 are ``test_effects_anvil.py``, 8551-8556 ``test_effects_token_fixtures_e2e.py``, this file
+8560. Start ad-hoc anvils above that.
 """
 
 from __future__ import annotations
@@ -35,15 +28,13 @@ from services.effects.simulate import SimCall, eth_simulate_v1
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "effects" / "vault_value_supply.json"
 _BATCH_FIXTURE = Path(__file__).parents[1] / "fixtures" / "effects" / "batch_executor_vault.json"
 
-# Clear of every other anvil in the suite — see the module docstring.
 _PORT = 8560
 
 CTX = SimContext(chain_id=31337, block=1, hardfork="prague")
 
 pytestmark = [pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH"), pytest.mark.anvil]
 
-# Storage layout of the fixture, read straight off its source declaration order:
-#   0 owner, 1 totalSupply, 2 balanceOf, 3 _allowances  (treasury is immutable).
+# Slots: 0 owner, 1 totalSupply, 2 balanceOf, 3 _allowances (treasury is immutable).
 _BALANCE_BASE = "0x" + format(2, "064x")
 _TOTAL_SUPPLY_SLOT = "0x" + format(1, "064x")
 
@@ -64,8 +55,7 @@ def _fixture() -> dict[str, Any]:
 
 
 def _cd(fx: dict[str, Any], signature: str, **kw: Any) -> str:
-    """Encode a call to one of the fixture's functions, refusing a signature it does not export (a
-    silently-``None`` calldata would probe the zero selector and assert about nothing)."""
+    """A ``None`` calldata would probe the zero selector and assert nothing."""
     calldata = encode_calldata(fx["selectors"][signature], signature, **kw)
     assert calldata is not None, f"fixture cannot encode {signature}"
     return calldata
@@ -83,7 +73,6 @@ def chain():
 
 @pytest.fixture(scope="module")
 def deployed(chain):
-    """Deploy the vault once and hand back ``(address, owner, simulate)``."""
     fx = _fixture()
     owner = chain.accounts()[0]
     ctor_arg = TREASURY[2:].rjust(64, "0")
@@ -100,21 +89,13 @@ def _slot_overrides(address: str, entries: dict[str, str]) -> dict[str, Any]:
 
 
 def _seeded_holder(address: str, holder: str, shares: int, supply: int) -> dict[str, Any]:
-    """Give ``holder`` a share balance and set the vault's ``totalSupply``."""
     slot = _mapping_entry_slot(_BALANCE_BASE, [int(holder, 16)])
     assert slot is not None
     return _slot_overrides(address, {slot: _word(shares), _TOTAL_SUPPLY_SLOT: _word(supply)})
 
 
-# ---------------------------------------------------------------------------
-# Supply — the burn that wraps
-# ---------------------------------------------------------------------------
-
-
 def test_a_burn_whose_supply_wraps_is_published_as_a_burn(deployed):
-    """The seed hands the caller MORE shares than exist, so the ``unchecked`` decrement wraps on a real
-    EVM. Anvil computes the arithmetic; the recipe must read the sign the EVM produced, not the one
-    Python's arbitrary-precision subtraction suggests."""
+    """The seed gives the caller more shares than exist, so the decrement wraps on a real EVM."""
     address, _owner, simulate, fx = deployed
     holder = "0x" + "22" * 20
     burned = 10**18
@@ -128,7 +109,7 @@ def test_a_burn_whose_supply_wraps_is_published_as_a_burn(deployed):
 
     calldata = _cd(fx, "exit(uint256)", substitutions={0: burned})
 
-    # Precondition asserted, not assumed: the EVM really wrapped (a burn below the supply needs no guard to read right).
+    # The EVM really wrapped.
     probe = seeded(
         [
             SimCall(to=address, data=calldata, from_addr=holder),
@@ -152,12 +133,10 @@ def test_a_burn_whose_supply_wraps_is_published_as_a_burn(deployed):
 
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "burn"
-    # Backing/dilution belongs to mints alone; a burn must never carry it.
     assert "backing" not in eff.details
 
 
 def test_a_real_mint_is_published_as_a_mint(deployed):
-    """The control: same recipe, same chain, a call that genuinely prints units."""
     address, owner, simulate, fx = deployed
     calldata = _cd(fx, "mintTo(address,uint256)", substitutions={0: owner, 1: 1000})
     eff = recipes.supply(
@@ -173,19 +152,12 @@ def test_a_real_mint_is_published_as_a_mint(deployed):
 
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "mint"
-    # No asset came in and the mint emitted a real Transfer from 0x0: the witnessed-dilution shape, earned.
     assert eff.details["backing"]["minted"] is True
     assert eff.details["backing"]["inflow_observed"] is False
 
 
-# ---------------------------------------------------------------------------
-# Value-out — a guarded payout that cannot execute
-# ---------------------------------------------------------------------------
-
-
 def test_a_zero_amount_payout_moves_nothing_and_is_not_proven(deployed):
-    """``sweepToTreasury(0)`` runs to completion and transfers nothing (``if (amount > 0)`` guard). The
-    call SUCCEEDS, so the row must separate "ran and moved nothing" from "never ran" and not be proven."""
+    """The call succeeds and moves nothing (``if (amount > 0)``), so it must not be proven."""
     address, owner, simulate, fx = deployed
     calldata = _cd(fx, "sweepToTreasury(uint256)", substitutions={0: 0})
     eff = recipes.value_out(
@@ -200,14 +172,11 @@ def test_a_zero_amount_payout_moves_nothing_and_is_not_proven(deployed):
 
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.details["value_moved"] is False
-    # It EXECUTED (the guard skipped the transfer); a reverted probe is a different row a consumer must tell apart.
     assert eff.details["observation"] == "executed"
     assert eff.reason == "no_value_observed"
 
 
 def test_a_funded_payout_to_the_immutable_treasury_is_proven_fixed(deployed):
-    """The same function with a non-zero amount and a funded vault moves value; the destination is an
-    immutable the caller cannot name, which static proves and the fork's own transfer confirms."""
     address, owner, simulate, fx = deployed
     vault_slot = _mapping_entry_slot(_BALANCE_BASE, [int(address, 16)])
     assert vault_slot is not None
@@ -228,22 +197,15 @@ def test_a_funded_payout_to_the_immutable_treasury_is_proven_fixed(deployed):
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["value_moved"] is True
     assert eff.details["observation"] == "executed"
-    # Static named the SHAPE (a universal); the fork supplied the ADDRESS.
     assert eff.details["destination_shape"] == "immutable_fixed"
     assert eff.details["shape_proved_by"] == "static"
     assert eff.concrete["destination"] == TREASURY.lower()
-
-
-# ---------------------------------------------------------------------------
-# Value-out — a body that only runs for a non-empty array
-# ---------------------------------------------------------------------------
 
 
 def _batch_fixture() -> dict[str, Any]:
     return json.loads(_BATCH_FIXTURE.read_text())
 
 
-# Storage layout of the batch fixture: slot 0 is ``balanceOf``.
 _BATCH_BALANCE_BASE = "0x" + format(0, "064x")
 
 
@@ -287,11 +249,9 @@ _OUT_FLOW = [{"kind": "callee_erc20_selector", "direction": "out", "origin": "bo
 
 @pytest.fixture(scope="module")
 def batch_vault(chain):
-    """Deploy the batch/executor vault and hand back ``(address, owner, simulate, fx, ctx)``.
-
-    The context carries the block this deployment landed in: recipes simulate at ``ctx.block`` and at
-    any earlier block the address is CODELESS (a call succeeds and moves nothing), making every
-    assertion about a contract that did not exist yet, the fabricated non-observation this file catches."""
+    """Before its deployment block the address is codeless and calls succeed vacuously, so recipes simulate at
+    ``ctx.block``.
+    """
     fx = _batch_fixture()
     owner = chain.accounts()[0]
     address = chain.deploy(owner, fx["creation_bytecode"])
@@ -307,11 +267,7 @@ def batch_vault(chain):
 
 @pytest.fixture(scope="module")
 def held_token(chain, batch_vault):
-    """A SECOND deployment of the fixture standing in for an asset the vault holds (the executor only
-    calls ERC-20 ``transfer`` on it).
-
-    Carries its own context: it lands in a LATER block, and simulated before it the token is a
-    codeless address a low-level call succeeds against, making the test green against no token."""
+    """It lands in a later block, so simulating earlier would test against no token."""
     _address, owner, _simulate, fx, _ctx = batch_vault
     token = chain.deploy(owner, fx["creation_bytecode"])
     block = int(chain._rpc("eth_blockNumber", []), 16)
@@ -341,9 +297,7 @@ _EXECUTOR_FLOW = [
 
 
 def test_a_batch_payout_probed_with_an_empty_array_is_the_cached_false_negative(batch_vault):
-    """The control, and why the fixture exists: with the encoder's default in the array slots the
-    call SUCCEEDS and moves nothing, so the row reads "executed, moved no value", a negative about a
-    loop body the probe never entered."""
+    """The encoder's empty array makes the call succeed and move nothing, a negative about a loop body never entered."""
     address, owner, simulate, fx, ctx = batch_vault
     empty = encode_calldata(fx["selectors"]["batchPay(uint256[],address[])"], "batchPay(uint256[],address[])")
     assert empty is not None
@@ -364,8 +318,6 @@ def test_a_batch_payout_probed_with_an_empty_array_is_the_cached_false_negative(
 
 
 def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):
-    """The non-empty-array probe end to end: PRODUCTION synthesis builds the calldata, and the same
-    function that moved nothing above now moves value on a real EVM."""
     address, owner, simulate, fx, ctx = batch_vault
     signature = "batchPay(uint256[],address[])"
     fn = _fn_facts(
@@ -392,15 +344,7 @@ def test_the_synthesized_batch_probe_reaches_the_loop_body(batch_vault):
     assert eff.concrete["destination"] == owner.lower()
 
 
-# ---------------------------------------------------------------------------
-# Value-out — an arbitrary-call executor
-# ---------------------------------------------------------------------------
-
-
 def _executor_probe(batch_vault, held_token, signature, *, holds_asset: bool):
-    """Synthesize and run the value-out probe for one executor signature, with or
-    without a measured holding to build an inner call from. Returns
-    ``(spec, effect)``."""
     address, owner, simulate, fx, _vault_ctx = batch_vault
     token, ctx = held_token
     holdings = (token,) if holds_asset else ()
@@ -426,9 +370,7 @@ def _executor_probe(batch_vault, held_token, signature, *, holds_asset: bool):
 
 @pytest.mark.parametrize("signature", ["forward(address,bytes,uint256)", "forward(address[],bytes[],uint256[])"])
 def test_an_executor_probed_without_an_inner_call_witnesses_nothing(batch_vault, held_token, signature):
-    """The control. With no measured holding there is no honest inner call, so the payload slot keeps
-    the encoder's empty bytes, and forwarding empty calldata to an account SUCCEEDS: "executed, moved
-    no value" about a function that can move everything the contract holds."""
+    """Forwarding empty calldata succeeds: "moved no value" about a function that can move everything."""
     _spec, eff = _executor_probe(batch_vault, held_token, signature, holds_asset=False)
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.details["observation"] == "executed"
@@ -437,23 +379,19 @@ def test_an_executor_probed_without_an_inner_call_witnesses_nothing(batch_vault,
 
 @pytest.mark.parametrize("signature", ["forward(address,bytes,uint256)", "forward(address[],bytes[],uint256[])"])
 def test_an_executor_moves_a_held_asset_to_a_destination_the_caller_named(batch_vault, held_token, signature):
-    """The executor inner-call synthesis end to end, both arities: it forwards an ERC-20 transfer of an
-    asset the deployment provably holds, and the sentinel variant puts the attacker identity in the
-    payload's recipient, so caller-redirected funds are an OBSERVATION, not an inference."""
+    """The sentinel variant makes caller-redirected funds an observation, not an inference."""
     spec, eff = _executor_probe(batch_vault, held_token, signature, holds_asset=True)
-    # The token came from measured holdings, and it is in the destination slot.
     assert held_token[0][2:].lower() in spec.calldata.lower()
     assert eff.verdict == VERDICT_PROVEN, eff.reason
     assert eff.details["value_moved"] is True
     assert eff.details["observation"] == "executed"
     assert eff.details["destination_shape"] == "caller_arbitrary"
     assert eff.details["shape_proved_by"] == "simulation"
-    # The sentinel is fabricated and must never be published as where the money went; the BASE probe pays the principal.
+    # The sentinel is fabricated and must never be published as the destination.
     assert eff.concrete.get("destination") != cd.SENTINEL_ADDRESS.lower()
 
 
 def _merge(base: Any, extra: dict[str, Any]) -> dict[str, Any]:
-    """Union two state-override maps, with ``extra``'s stateDiff winning per slot."""
     merged: dict[str, Any] = {k: dict(v) for k, v in (base or {}).items()}
     for address, entry in extra.items():
         target = merged.setdefault(address, {})

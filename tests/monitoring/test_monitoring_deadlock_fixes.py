@@ -1,10 +1,5 @@
-"""Integration tests for the four monitoring deadlock-hardening fixes.
-
-Drives the real ``poll_for_state_changes`` / ``run_poll_loop`` / ``run_scan_loop`` against the
-test DB, stubbing only the wire (``rpc_batch_request_classified``) and, for deadlock cases,
-the narrowest DB statement Postgres would abort. Fixes: (1) per-chunk deadlock isolation,
-(2) post-commit notification once per committed chunk, (3) poller start de-phasing,
-(4) no phantom event on the first observation after a baseline cleanse.
+"""Drives the real poll/scan loops against the test DB, stubbing only the wire and the one DB statement Postgres
+would abort.
 """
 
 from __future__ import annotations
@@ -82,20 +77,14 @@ def _rpc_mock(returns: Mapping[str, str | None]):
 
 
 def _deadlock_error() -> OperationalError:
-    """A SQLAlchemy OperationalError wrapping a psycopg2 deadlock, shaped exactly
-    like the one Postgres raises when it aborts one side of a lock cycle."""
     return OperationalError("UPDATE monitored_contracts ...", {}, psycopg2.errors.DeadlockDetected("deadlock detected"))
 
 
 def _conn_lost_error() -> OperationalError:
-    """A non-deadlock OperationalError — the class that must NOT be swallowed."""
     return OperationalError("SELECT 1", {}, psycopg2.OperationalError("server closed the connection unexpectedly"))
 
 
 def _deadlock_on_nth(session: SASession, *, predicate, raise_on: int, error_factory):
-    """Wrap ``session.execute`` so the Nth statement matching *predicate* raises
-    *error_factory()* before touching the DB — simulating Postgres aborting that
-    exact statement. Returns the installed wrapper's call so the caller patches it."""
     real_execute = session.execute
     state = {"hits": 0}
 
@@ -114,13 +103,7 @@ def _is_stamp_update(statement) -> bool:
 
 
 def _is_suppression_select(statement) -> bool:
-    # The suppression query is the only one filtering on detected_at.
     return "detected_at" in str(statement)
-
-
-# ---------------------------------------------------------------------------
-# Fix 1 — chunk-level deadlock isolation
-# ---------------------------------------------------------------------------
 
 
 def test_deadlock_at_stamp_isolates_chunk_and_reports_partial(db_session, monkeypatch):
@@ -152,7 +135,6 @@ def test_deadlock_at_stamp_isolates_chunk_and_reports_partial(db_session, monkey
     returns = {ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191)), ADDR(3): _word(ADDR(192))}
     captured: list[dict] = []
 
-    # Chunk order is a, b, c (last_polled_at asc). Deadlock the 2nd stamp (b).
     wrapper = _deadlock_on_nth(db_session, predicate=_is_stamp_update, raise_on=2, error_factory=_deadlock_error)
     with (
         patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=_rpc_mock(returns)),
@@ -184,8 +166,7 @@ def test_deadlock_at_stamp_isolates_chunk_and_reports_partial(db_session, monkey
 
 
 def test_deadlock_during_suppression_autoflush_rolls_back_in_memory_state(db_session, monkeypatch):
-    """The incident deadlock hit a query-invoked autoflush before commit: a deadlock at the
-    suppression SELECT must revert the chunk's staged last_known_state."""
+    """The incident deadlock hit a query-invoked autoflush before commit."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "3")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -196,8 +177,6 @@ def test_deadlock_during_suppression_autoflush_rolls_back_in_memory_state(db_ses
         last_known_state={"t": ADDR(90)},
         last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
     )
-    # b's entry suppresses when the scanner already saw an ownership event; the
-    # prior event below makes the suppression SELECT actually fire.
     b = _seed(
         db_session,
         2,
@@ -233,16 +212,13 @@ def test_deadlock_during_suppression_autoflush_rolls_back_in_memory_state(db_ses
         assert ra is not None and rb is not None
         assert ra.last_polled_at is not None and ra.last_polled_at > RECENT
         assert ra.last_known_state and ra.last_known_state["t"] == ADDR(190)
-        # The deadlock hit AFTER b's state was staged in memory but BEFORE commit;
-        # rollback must revert both the value and the (missing) stamp.
         assert rb.last_polled_at == datetime(2021, 1, 1, tzinfo=timezone.utc)
         assert rb.last_known_state and rb.last_known_state["guardian"] == ADDR(91)
     engine.dispose()
 
 
 def test_non_deadlock_operational_error_kills_the_pass(db_session, monkeypatch):
-    """A connection-loss OperationalError must propagate (run_poll_loop then
-    records an honest degraded cycle), never be masked as a per-chunk retry."""
+    """It must reach run_poll_loop's degraded cycle, not be masked as a chunk retry."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "3")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -270,7 +246,6 @@ def test_non_deadlock_operational_error_kills_the_pass(db_session, monkeypatch):
     ):
         poll_for_state_changes(db_session, "http://rpc")
 
-    # Chunk a committed durably before the fatal error killed the pass.
     engine = create_engine(os.environ["TEST_DATABASE_URL"])
     with SASession(engine) as fresh:
         ra, rb = fresh.get(MonitoredContract, a.id), fresh.get(MonitoredContract, b.id)
@@ -281,15 +256,10 @@ def test_non_deadlock_operational_error_kills_the_pass(db_session, monkeypatch):
 
 
 def test_deadlock_in_reanalysis_autoflush_is_isolated_not_fatal(db_session, monkeypatch):
-    """Regression for reviewer hole A1: a deadlock in maybe_queue_reanalysis's Job-SELECT
-    autoflush was swallowed by the inner handler, poisoning the session so the NEXT statement
-    raised PendingRollbackError and killed the pass. Only the DB abort is simulated."""
+    """A swallowed deadlock in the reanalysis autoflush poisoned the session so the next statement killed the pass."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
 
-    # contract_id=None so _sync_relational_from_poll no-ops and the reanalysis
-    # Job SELECT is the first query after the staged last_known_state mutation —
-    # its autoflush emits the UPDATE the hook aborts. "owner" is a reanalysis
-    # trigger so maybe_queue_reanalysis actually runs.
+    # contract_id=None makes the reanalysis Job SELECT the first query after the staged mutation.
     mc = _seed(
         db_session,
         1,
@@ -328,7 +298,6 @@ def test_deadlock_in_reanalysis_autoflush_is_isolated_not_fatal(db_session, monk
     assert captured[-1]["partial"] is True
     assert captured[-1]["chunks_failed"] == 1
 
-    # Row is unstamped (retries first) and the observed value is unchanged.
     db_session.rollback()
     reloaded = db_session.get(MonitoredContract, mc.id)
     assert reloaded is not None
@@ -336,17 +305,10 @@ def test_deadlock_in_reanalysis_autoflush_is_isolated_not_fatal(db_session, monk
     assert reloaded.last_known_state and reloaded.last_known_state["owner"] == ADDR(90)
 
 
-# ---------------------------------------------------------------------------
-# Fix 2 — per-chunk post-commit notification
-# ---------------------------------------------------------------------------
-
-
 def test_notifies_committed_chunks_once_never_the_rolled_back_chunk(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "3")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
-    # Seed order (last_polled_at asc) = a, b, c; only the committed chunks' event
-    # ids matter here, read back from the pass return value.
     _seed(
         db_session,
         1,
@@ -384,19 +346,11 @@ def test_notifies_committed_chunks_once_never_the_rolled_back_chunk(db_session, 
         events = poll_for_state_changes(db_session, "http://rpc")
 
     committed_event_ids = {e.id for e in events}
-    # Exactly the committed chunks (a, c) were notified, each once; b never was.
     assert sorted(notified) == sorted(committed_event_ids)
     assert len(notified) == len(set(notified)) == 2
 
 
-# ---------------------------------------------------------------------------
-# Fix 4 — cleansed baseline emits no phantom on first real observation
-# ---------------------------------------------------------------------------
-
-
 def test_cleansed_owner_absent_state_emits_no_phantom(db_session, monkeypatch):
-    """After the merge cleanses a poisoned zero owner (owner absent from state),
-    the first live poll of a real owner is a silent baseline — not a phantom."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     _seed(db_session, 1, plan=[_entry("owner", "0xaa01")], last_known_state={})  # owner absent
 
@@ -407,11 +361,6 @@ def test_cleansed_owner_absent_state_emits_no_phantom(db_session, monkeypatch):
         events = poll_for_state_changes(db_session, "http://rpc")
 
     assert events == []  # first observation of a real owner is silent
-
-
-# ---------------------------------------------------------------------------
-# Fix 3 — loop de-phasing
-# ---------------------------------------------------------------------------
 
 
 def test_poll_startup_offset_is_half_interval_by_default():
@@ -438,8 +387,7 @@ def test_poll_loop_waits_offset_before_first_pass(monkeypatch):
     monkeypatch.setattr(ev, "wait", rec_wait)
     poll_mock = MagicMock()
     monkeypatch.setattr(uw, "poll_for_state_changes", poll_mock)
-    # A "starting" beat must land BEFORE the offset wait so a fresh-DB poller
-    # isn't classified dead during the de-phasing gap (never-beat == stale).
+    # Otherwise a fresh-DB poller reads as dead during the de-phasing gap.
     monkeypatch.setattr(uw, "record_heartbeat", lambda process, *, status, detail: beats.append(status))
 
     uw.run_poll_loop("http://rpc", interval=600, stop_event=ev)
@@ -450,7 +398,6 @@ def test_poll_loop_waits_offset_before_first_pass(monkeypatch):
 
 
 def test_poll_loop_startup_offset_override_disables_shift(monkeypatch):
-    """The standalone --poll runner passes startup_offset_s=0 → no pre-wait."""
     waits: list[float | None] = []
     ev = Event()
 
@@ -469,5 +416,4 @@ def test_poll_loop_startup_offset_override_disables_shift(monkeypatch):
 
     uw.run_poll_loop("http://rpc", interval=600, stop_event=ev, startup_offset_s=0.0)
 
-    # No 300s offset wait — the first wait is the post-pass interval wait.
     assert waits == [600.0]

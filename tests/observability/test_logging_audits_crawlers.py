@@ -1,9 +1,5 @@
-"""Offline logging tests for the audits + crawlers part (Backlog #9).
-
-DefiLlama and DApp crawl external-call failures surface a ``record_degraded`` entry plus a
-``record_stage_metric`` count instead of a silent success, and the audit scope LLM failure
-carries a queryable ``failure_kind`` splitting an API outage from a parser bug. All stubbed
-at the wire.
+"""Backlog #9: crawl failures record degraded plus a count instead of a silent success, and scope LLM failures carry
+``failure_kind`` separating an outage from a parser bug.
 """
 
 from __future__ import annotations
@@ -20,10 +16,6 @@ from utils.logging import (
 
 
 def _bound_accumulators():
-    """Bind fresh degraded + stage-metric accumulators under a job context.
-
-    Returns ``(errors_list, metrics_dict, reset_callable)``, as in test_record_degraded.py.
-    """
     errors: list = []
     metrics: dict = {}
     etok = degraded_errors_var.set(errors)
@@ -44,15 +36,9 @@ def _bound_accumulators():
     return errors, metrics, _reset
 
 
-# --------------------------------------------------------------------------- #
-#  DefiLlama: protocol-not-found surfaces degraded + protocol_matched=False
-# --------------------------------------------------------------------------- #
-
-
 @pytest.mark.parametrize(
     "protocol_name,project_file,matched",
     [
-        # Empty projects/ dir so no protocol matches; no coreAssets.json (load_core_assets returns {}).
         pytest.param("totally-nonexistent-protocol", None, False, id="not_found"),
         pytest.param("myproto", "myproto.js", True, id="match"),
     ],
@@ -76,11 +62,6 @@ def test_defillama_match_records_degraded_and_metric(tmp_path, protocol_name, pr
     assert any(e.phase == "defillama_match" for e in errors) is not matched
 
 
-# --------------------------------------------------------------------------- #
-#  DefiLlama: a failed `git pull` is degraded, not silently swallowed
-# --------------------------------------------------------------------------- #
-
-
 def test_defillama_pull_failure_records_degraded(tmp_path, monkeypatch):
     from services.crawlers.defillama import scan as scan_mod
 
@@ -96,18 +77,13 @@ def test_defillama_pull_failure_records_degraded(tmp_path, monkeypatch):
 
     errors, metrics, reset = _bound_accumulators()
     try:
-        # Must not raise — a stale checkout is still scannable.
+        # A stale checkout is still scannable.
         scan_mod.clone_or_update_repo(tmp_path)
     finally:
         reset()
 
     assert calls and calls[0][1] == "git"
     assert any(e.phase == "defillama_repo_pull" for e in errors)
-
-
-# --------------------------------------------------------------------------- #
-#  DApp: a sniffer exception is swallowed-but-degraded, not `except: pass`
-# --------------------------------------------------------------------------- #
 
 
 def test_dapp_sniffer_exception_records_degraded_and_counts():
@@ -125,7 +101,6 @@ def test_dapp_sniffer_exception_records_degraded_and_counts():
 
     errors, metrics, reset = _bound_accumulators()
     try:
-        # The sniffer must swallow the error (no raise) yet record it.
         asyncio.run(crawler._sniff_response(_BoomResponse(), page_url="https://example.test"))
     finally:
         reset()
@@ -136,13 +111,7 @@ def test_dapp_sniffer_exception_records_degraded_and_counts():
     assert errors[0].exc_type.endswith("RuntimeError")
 
 
-# --------------------------------------------------------------------------- #
-#  Scope LLM: failure_kind splits an API outage from a parser bug
-# --------------------------------------------------------------------------- #
-
-
 def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
-    """The LLM-unavailable fallback records a degraded entry carrying ``failure_kind``."""
     import services.audits.scope_extraction as scope_mod
     from services.audits.scope_extraction._errors import LLMUnavailableError
     from services.audits.scope_extraction._locate import ScopeSection
@@ -164,7 +133,6 @@ def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
         raise LLMUnavailableError("openrouter 402", failure_kind="api")
 
     monkeypatch.setattr(scope_mod, "extract_scope_with_llm", _boom)
-    # Also make the chunk-scan fallback unavailable so both degraded branches run.
     monkeypatch.setattr(
         scope_mod,
         "extract_scope_via_chunk_scan",

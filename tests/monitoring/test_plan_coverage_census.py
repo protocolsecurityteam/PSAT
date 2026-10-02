@@ -64,7 +64,6 @@ def _mk(session, n: int, config, *, chain: str = "ethereum", is_active: bool = T
 
 @pytest.fixture()
 def fleet(db_session):
-    """One row in each plan state, mirroring the audited census shape."""
     _mk(db_session, 1, {TRACKED_TOPICS_KEY: _TOPICS})
     _mk(db_session, 2, {TRACKED_TOPICS_KEY: []})
     _mk(
@@ -111,9 +110,7 @@ def test_census_partitions_the_active_fleet(fleet):
 
 
 def test_ready_stale_row_needs_its_staleness_stamp(fleet, db_session):
-    """Review finding 5: the census reads the same witness the classifier does.
-    Strip the stamp and the row falls back to its token — it is no longer
-    reported as watching on a dated plan."""
+    """The census reads the same witness the classifier does."""
     row = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == _addr(3))).scalar_one()
     config = dict(row.monitoring_config or {})
     del config[TRACKED_TOPICS_STALE_SINCE_KEY]
@@ -127,14 +124,11 @@ def test_ready_stale_row_needs_its_staleness_stamp(fleet, db_session):
 
 
 def test_failed_analysis_is_reported_as_an_overlay(db_session):
-    """A failed build reads as ``no_current_materialization`` at enrollment — the
-    reader cannot see why. The census names the reason without double-counting:
-    the row stays in its partition bucket and is additionally reported here."""
+    """The reason is reported as an overlay without double-counting."""
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
     _mk(db_session, 1, {NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION})
     row = ContractMaterialization(
-        # chain-id token, never the monitored_contracts chain NAME
         chain="1",
         bytecode_keccak=("0x" + uuid.uuid4().hex * 2)[:66],
         address=_addr(1),
@@ -172,15 +166,8 @@ def test_fleet_endpoint_exposes_the_census(api_client, fleet):
     assert body["watchers"]["plan_coverage"]["not_determined_total"] == 3
 
 
-# ---------------------------------------------------------------------------
-# Ops watchdog
-# ---------------------------------------------------------------------------
-
-
 def test_coverage_alarm_is_silent_until_a_threshold_is_set(fleet, monkeypatch):
-    """No default threshold: what counts as an acceptable shortfall is an
-    operator policy, and inventing one here would page on a state the fleet has
-    been in all along."""
+    """An acceptable shortfall is operator policy; inventing one would page on a long-standing state."""
     from services.monitoring import ops_alerts
 
     monkeypatch.delenv("PSAT_PLAN_COVERAGE_ALERT", raising=False)
@@ -193,9 +180,7 @@ def test_coverage_alarm_fires_over_the_threshold(fleet, monkeypatch):
 
     monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "2")
     coverage = ops_alerts.collect_plan_coverage(fleet)
-    # Review finding 6: 2 not-determined (no_current_materialization,
-    # contract_not_analyzed) + 1 stale. The caller-supplied row is an operator's
-    # own choice and is NOT paged on, though it stays in the payload.
+    # Caller-supplied rows are an operator's choice and not paged on.
     problems = ops_alerts._current_problems({}, _now(), coverage)
     assert coverage["not_determined"][CONFIG_SUPPLIED_BY_CALLER] == 1
     assert problems["tracking_plan_coverage"]["uncovered"] == 3
@@ -207,10 +192,7 @@ def test_coverage_alarm_fires_over_the_threshold(fleet, monkeypatch):
 
 @pytest.fixture()
 def _clean_heartbeats(db_session):
-    """``run_ops_alert_tick`` persists its own ``ops_alerter`` heartbeat. The
-    shared ``db_session`` teardown does not sweep ``worker_heartbeats``, so a row
-    left here would be read as a live daemon by every later test on this
-    worker's DB."""
+    """Teardown doesn't sweep ``worker_heartbeats``, so a leftover row would read as a live daemon."""
     from db.models import WorkerHeartbeat
 
     db_session.query(WorkerHeartbeat).delete()
@@ -222,12 +204,8 @@ def _clean_heartbeats(db_session):
 
 
 def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartbeats, monkeypatch):
-    """The alarm rides the existing dedupe/cooldown machinery, so it posts once
-    on the transition and once on recovery."""
     from services.monitoring import ops_alerts
 
-    # 3 pageable uncovered rows (the caller-supplied one is excluded), so a
-    # threshold of 2 is crossed.
     monkeypatch.setenv("PSAT_PLAN_COVERAGE_ALERT", "2")
     monkeypatch.setattr(ops_alerts, "_webhook_url", lambda: None)
     first = ops_alerts.run_ops_alert_tick(fleet)
@@ -237,7 +215,6 @@ def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartb
     second = ops_alerts.run_ops_alert_tick(fleet)
     assert second["posted_down"] == 0  # deduped inside the cooldown
 
-    # Coverage repaired: every row now carries a read plan.
     for mc in fleet.execute(select(MonitoredContract)).scalars().all():
         mc.monitoring_config = {TRACKED_TOPICS_KEY: _TOPICS}
     fleet.commit()
@@ -251,7 +228,6 @@ def test_coverage_alarm_posts_and_recovers_through_the_tick(fleet, _clean_heartb
 
 
 def _marked(session, n: int):
-    """One contract on a current plan whose hint controllers went unverified."""
     mc = _mk(session, n, {TRACKED_TOPICS_KEY: _TOPICS})
     mc.last_poll_status = {
         "rate": VERIFY_ERROR,
@@ -263,8 +239,7 @@ def _marked(session, n: int):
 
 
 def test_fleet_publishes_the_verification_gap_census(db_session):
-    """A current plan does not mean its hint controllers were verified — the two
-    censuses answer different questions, and both ride the fleet payload."""
+    """A current plan does not mean its hint controllers were verified."""
     _marked(db_session, 11)
 
     watchers = build_fleet_status(db_session)["watchers"]
@@ -277,9 +252,7 @@ def test_fleet_publishes_the_verification_gap_census(db_session):
 
 
 def test_the_gap_census_says_what_its_zeroes_mean(api_client, fleet):
-    """No marker anywhere. The payload names its own basis rather than letting
-    four zeroes read as "no verification read has ever failed" — the poller
-    erases markers, so this is a point-in-time census, not a tally."""
+    """The poller erases markers, so this is a point-in-time census."""
     gaps = api_client.get("/api/fleet").json()["watchers"]["verification_gaps"]
     assert gaps == {
         "read_failed": 0,
@@ -303,8 +276,7 @@ def test_ops_collects_the_gap_census_without_a_new_alarm_family(db_session):
 
 
 def test_the_tick_records_the_census_only_when_something_is_marked(db_session, _clean_heartbeats, monkeypatch, caplog):
-    """The log line is what survives the markers: it is timestamped, so an
-    erased marker still leaves a record that the gap existed."""
+    """The timestamped log line survives erased markers."""
     from services.monitoring import ops_alerts
 
     monkeypatch.setattr(ops_alerts, "_webhook_url", lambda: None)
@@ -335,7 +307,6 @@ def _now():
 
 
 def _alert_keys(session) -> list[str]:
-    """Dedupe keys the alerter currently holds in its own heartbeat detail."""
     from db.models import WorkerHeartbeat
     from db.queue import HEARTBEAT_OPS_ALERTER
 

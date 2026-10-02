@@ -1,10 +1,5 @@
-"""F8 — analyze-remaining dedups a legacy NULL-chain contract within mainnet.
-
-``queue`` for a discovered-but-unanalyzed Contract passed ``chain=contract.chain``
-into ``find_existing_job_for_address``. For a legacy NULL-chain row that dropped
-the chain filter entirely, so a job on ANOTHER chain at the same address could be
-adopted. The call site now coalesces NULL→"ethereum" (the documented legacy
-convention), keeping the dedup mainnet-scoped.
+"""F8: a legacy NULL-chain row used to drop the chain filter, adopting a job on another chain; NULL now coalesces to
+ethereum.
 """
 
 from __future__ import annotations
@@ -29,12 +24,10 @@ def test_null_chain_contract_does_not_adopt_a_base_job(api_client, db_session):
 
     addr = _addr()
 
-    # A job for the SAME address already exists on Base (chain_id 8453).
     base_job = create_job(db_session, {"address": addr, "chain": "base"})
     db_session.commit()
     assert base_job.chain_id == 8453
 
-    # A legacy discovered-but-unanalyzed contract at that address with chain=NULL.
     contract = Contract(
         protocol_id=proto.id,
         address=addr,
@@ -137,8 +130,6 @@ def test_allowlisted_chain_stub_still_queues(api_client, db_session, monkeypatch
 
 @requires_postgres
 def test_null_chain_contract_adopts_an_existing_mainnet_job(api_client, db_session):
-    """The positive arm: a NULL-chain contract still dedups against a real
-    mainnet job at the same address (coalesced ethereum matches chain_id 1)."""
     from db.models import Contract, Protocol
     from db.queue import create_job
 

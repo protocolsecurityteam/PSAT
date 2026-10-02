@@ -1,9 +1,3 @@
-"""Pure-logic tests for audit report discovery (no HTTP, LLM or DB): JSON parsing helpers, ``merge_audit_reports``
-dedup/richness, filename date regex, folder-name allowlist, auto-hop policy, cross-source filename dedup,
-provenance plumbing, branch->commit SHA cache. Anything needing Tavily/LLM/GitHub/Solodit mocks belongs in
-``test_audit_discovery_integration.py``, the source of truth for the pipeline.
-"""
-
 from __future__ import annotations
 
 import time
@@ -34,11 +28,6 @@ def _report(
     }
 
 
-# ---------------------------------------------------------------------------
-# JSON parsing helpers — LLM outputs arrive wrapped in prose + markdown fences
-# ---------------------------------------------------------------------------
-
-
 _ARRAY = [{"a": 1}]
 _OBJECT = {"a": 1}
 
@@ -65,11 +54,6 @@ class TestJsonParsing:
     )
     def test_parse_json(self, parse, text, expected):
         assert parse(text) == expected
-
-
-# ---------------------------------------------------------------------------
-# merge_audit_reports — append-only URL-keyed dedup, richness selection
-# ---------------------------------------------------------------------------
 
 
 class TestMergeAuditReports:
@@ -131,11 +115,6 @@ class TestMergeAuditReports:
         assert merged["reports"][0]["date"] == "2024-06-01"
 
 
-# ---------------------------------------------------------------------------
-# Filename date extraction — the regex path that augments LLM-null dates
-# ---------------------------------------------------------------------------
-
-
 class TestFilenameDateExtraction:
     @pytest.mark.parametrize(
         "filename, expected",
@@ -147,9 +126,7 @@ class TestFilenameDateExtraction:
             ("2024-06_audit.pdf", "2024-06"),
             ("Audit-2023.pdf", "2023"),
             ("2025.10.20%20-%20WeETH%20withdrawal%20adapter.pdf", "2025-10-20"),
-            # Invalid month → falls through to year-only
             ("2024-13-01.pdf", "2024"),
-            # Random digits don't match (audit report ID-like)
             ("Bundle_11.pdf", None),
             ("Cash Audit Report.pdf", None),
         ],
@@ -160,8 +137,7 @@ class TestFilenameDateExtraction:
         assert _extract_date_from_filename(filename) == expected
 
     def test_augment_only_fills_missing_llm_date(self):
-        """Filename augmenter never overwrites an LLM-supplied date, and
-        never guesses an auditor — that's the LLM's job."""
+        """The LLM owns auditor attribution; the filename only fills a missing date."""
         from services.discovery.audit_reports import _augment_filename_metadata
 
         meta = {"auditor": "Cantina", "date": "2024-01-01", "title": "X"}
@@ -174,20 +150,13 @@ class TestFilenameDateExtraction:
         assert out["date"] == "2025-10-20"
         assert out["auditor"] == "Halborn"
 
-        # LLM auditor null + filename has obvious auditor → augmenter still
-        # leaves auditor unset.
         meta = {"auditor": None, "date": None, "title": "X"}
         out = _augment_filename_metadata("2025.10.20-Halborn.pdf", meta)
         assert out["date"] == "2025-10-20"
         assert out.get("auditor") is None
 
 
-# ---------------------------------------------------------------------------
-# GitHub blob → raw URL normalization. Blob URLs render HTML (the code-view
-# page); raw URLs serve the actual file bytes. The audit text-extraction
-# worker needs raw URLs for markdown/text files so the response has a
-# text/* content-type instead of text/html.
-# ---------------------------------------------------------------------------
+# Blob URLs render the HTML code view; text extraction needs raw bytes with a text/* content-type.
 
 
 class TestGithubBlobToRaw:
@@ -199,8 +168,6 @@ class TestGithubBlobToRaw:
                 "https://raw.githubusercontent.com/a/b/main/foo.md",
                 id="converts-blob-url-to-raw",
             ),
-            # Audit filenames often contain spaces encoded as %20; they must
-            # survive verbatim (no double-encode, no decode).
             pytest.param(
                 "https://github.com/etherfi-protocol/smart-contracts/blob/master/audits/2023.12.20%20-%20Hats%20Finance.md",
                 "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/2023.12.20%20-%20Hats%20Finance.md",
@@ -255,11 +222,6 @@ class TestReportEntryNormalization:
         assert out["url"] == out["pdf_url"]
 
 
-# ---------------------------------------------------------------------------
-# Auto-hop policy — pure predicate, no HTTP
-# ---------------------------------------------------------------------------
-
-
 class TestAutoHopPolicy:
     def test_should_auto_hop_includes_org_kind(self):
         from services.discovery.audit_reports import _should_auto_hop_org
@@ -267,11 +229,6 @@ class TestAutoHopPolicy:
         assert _should_auto_hop_org("https://github.com/morpho-org", "Morpho", set())
         assert not _should_auto_hop_org("https://github.com/morpho-org", "Morpho", {"morpho-org"})
         assert not _should_auto_hop_org("https://github.com/Certora", "Morpho", set())
-
-
-# ---------------------------------------------------------------------------
-# Cross-source filename dedup — the same PDF mirrored across hosts
-# ---------------------------------------------------------------------------
 
 
 class TestFilenameDedup:
@@ -316,8 +273,6 @@ class TestFilenameDedup:
         assert len(_collapse_by_filename(reports)) == 2
 
     def test_missing_filename_never_groups(self):
-        """Opaque URLs (cantina.xyz/portfolio/<uuid>) shouldn't merge with
-        other opaque URLs even if they look similar."""
         from services.discovery.audit_reports import _collapse_by_filename
 
         reports = [
@@ -350,11 +305,6 @@ class TestFilenameDedup:
         assert out[0]["pdf_url"] is not None
 
 
-# ---------------------------------------------------------------------------
-# Provenance fields — GitHub-sourced audits carry commit/repo/path through
-# ---------------------------------------------------------------------------
-
-
 class TestProvenanceFields:
     @pytest.mark.parametrize(
         "provenance",
@@ -378,10 +328,7 @@ class TestProvenanceFields:
         assert {k: out[k] for k in ("source_commit", "source_repo", "source_path") if k in out} == provenance
 
 
-# ---------------------------------------------------------------------------
-# Branch → commit SHA resolver cache — keeps GitHub rate limit out of the
-# hot path when many URLs point at the same branch
-# ---------------------------------------------------------------------------
+# The cache keeps the GitHub rate limit out of the hot path.
 
 
 class TestResolveBranchCommit:
@@ -429,7 +376,6 @@ class TestResolveBranchCommit:
         assert ar._resolve_branch_commit("owner", "ghost-repo", "main") is None
 
     def test_does_not_cache_negative_result(self, monkeypatch):
-        """A transient miss is not cached, so the next call re-probes."""
         from services.discovery.audit_reports import _github
 
         _github.clear_branch_sha_cache()
@@ -440,7 +386,6 @@ class TestResolveBranchCommit:
             state["n"] += 1
 
             class R:
-                # First call 5xx (transient); retry succeeds.
                 status_code = 500 if state["n"] == 1 else 200
 
                 def json(self):
@@ -503,6 +448,3 @@ class TestResolveBranchCommit:
         for i in range(20):
             _github._resolve_branch_commit("owner", f"repo{i}", "main")
         assert len(_github._BRANCH_SHA_CACHE) <= _github._BRANCH_SHA_CACHE_MAX
-
-
-# ── audit serializer error fields ────────────────────────────────────────────

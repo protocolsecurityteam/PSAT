@@ -79,7 +79,6 @@ def _supply(chain, **kwargs):
 
 @pytest.mark.parametrize("direction", [pytest.param("mint", id="mint"), pytest.param("burn", id="burn")])
 def test_share_accounted_zero_delta_with_zero_address_transfer_yields_a_verdict(direction):
-    """The old early return fired on a zero delta before the mint/burn ``Transfer`` witnesses were computed."""
     eff = _supply(SharesChain(emit=direction))
     assert eff.verdict == VERDICT_PROVEN
     assert eff.reason == f"supply_{direction}"
@@ -87,14 +86,9 @@ def test_share_accounted_zero_delta_with_zero_address_transfer_yields_a_verdict(
 
 
 def test_zero_delta_with_no_zero_address_transfer_stays_no_supply_delta():
-    """Under-claim boundary: no unambiguous zero-address Transfer leaves the non-observation unchanged."""
     eff = _supply(SharesChain(emit=None))
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "no_supply_delta"
-
-
-# G6-A — a vacuous argument makes the non-observation input-dependent, so it must
-# get its own reason AND be refused by the behaviour cache.
 
 
 def test_supply_vacuous_input_gets_its_own_uncacheable_reason():
@@ -104,7 +98,7 @@ def test_supply_vacuous_input_gets_its_own_uncacheable_reason():
     assert vac.details["vacuous_input"] is True
     assert not _is_cacheable(vac)
 
-    # The non-vacuous twin is unchanged AND still cacheable — the split is the fix.
+    # The non-vacuous twin stays cacheable.
     plain = _supply(SharesChain(emit=None), inputs_vacuous=False)
     assert plain.reason == "no_supply_delta"
     assert _is_cacheable(plain)
@@ -130,8 +124,7 @@ def _value_out(chain, **kwargs):
 
 
 def test_value_out_vacuous_input_gets_its_own_uncacheable_reason():
-    """The empty-array ``manage`` probe RAN and moved nothing only because the loop body never entered:
-    a fact about the vacuous argument, not about F."""
+    """The loop body never ran, so the negative is about the argument."""
     vac = _value_out(ExecutedNoValueChain(), inputs_vacuous=True)
     assert vac.verdict == VERDICT_UNKNOWN
     assert vac.reason == "no_value_observed_vacuous_input"

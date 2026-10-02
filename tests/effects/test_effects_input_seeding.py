@@ -1,10 +1,8 @@
 """Input-asset seeding for Tier-1 value/supply probes.
 
-A deposit-backed conversion reverts at its ERC-20 precondition and drops out of the backing
-population. The REAL recipes run against a slot-faithful fake ERC-20 + vault (storage overrides are
-applied to the fake, so a wrong slot gives a wrong read-back as on chain). Witness bar: a seeded
-verdict needs the read-back echoed inside the probe block; ``inflow_observed`` comes only from
-emitted Transfers; ETH is attached only after a zero-value attempt failed; unseedable shapes degrade verbatim.
+Overrides apply to a slot-faithful fake ERC-20, so a wrong slot gives a wrong read-back as on chain. A seeded
+verdict needs the read-back echoed inside the probe block, and ETH is attached only after a zero-value attempt
+failed.
 """
 
 from __future__ import annotations
@@ -67,8 +65,7 @@ def _facts(
             "sinks": sinks,
             "value_flows": [],
             "effect_labels": [],
-            # wrap/unwrap take one quantity; the seeded retry may only scale a
-            # parameter the static plane names as one.
+            # The seeded retry may only scale a parameter the static plane names as a quantity.
             "parameter_names": list(param_names),
         },
         tree=None,
@@ -113,11 +110,6 @@ def _supply(chain, store, **kwargs):
     )
 
 
-# ---------------------------------------------------------------------------
-# Slot discovery — identification IS the read-back
-# ---------------------------------------------------------------------------
-
-
 def test_discovery_identifies_balance_and_allowance_bases():
     chain = FakeChain()
     layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
@@ -127,14 +119,14 @@ def test_discovery_identifies_balance_and_allowance_bases():
         ("allowance(address,address)", ALLOW_BASE, "solidity"),
     }
     assert layout.decimals == 18
-    # One block, one RPC: every candidate carries a distinct magic word.
     assert len(chain.blocks) == 1
 
 
 def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
-    """``totalSupply >= balanceOf(holder)`` holds for real tokens but not direct storage writes;
-    more shares than exist makes a burn wrap (``unchecked { totalSupply -= amount }``), so the seed
-    is capped at live supply. The ALLOWANCE slot is not capped: approvals above supply are ordinary."""
+    """More shares than exist would make an unchecked burn wrap.
+
+    Approvals above supply are ordinary, so allowance is uncapped.
+    """
     supply = 10**20  # well under SEED_AMOUNT (2**128)
     chain = FakeChain(asset_total_supply=supply)
     layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
@@ -148,9 +140,7 @@ def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
 @pytest.mark.parametrize(
     "supply",
     [
-        # No supply to respect, and seeding nothing would simply lose the probe.
         pytest.param(None, id="unanswered_total_supply"),
-        # The cap is a minimum, not a replacement: a supply far above the seed keeps the seed.
         pytest.param(2**200, id="supply_above_the_seed"),
     ],
 )
@@ -169,8 +159,7 @@ def test_discovery_reads_back_token_decimals():
 
 
 def test_discovery_rejects_a_computed_balance_getter():
-    """A rebasing ``balanceOf = shares * rate`` never echoes the seeded word, so
-    it is never seeded — the exotic-layout degrade."""
+    """The exotic-layout degrade."""
     layout = discover_token_layout(
         FakeChain(balance_scale=3), token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1"
     )
@@ -189,12 +178,9 @@ def test_discovery_yields_nothing_for_an_unreadable_token():
 
 
 def test_discovery_retries_narrow_when_the_wide_write_breaks_the_getter():
-    """Writing ~550 candidate slots can clobber a slot the getter itself reads.
-    That reverts every anchor, so a much smaller perturbation is tried once."""
+    """The wide write can clobber a slot the getter reads."""
 
     class FragileToken(FakeChain):
-        """Reverts every anchor while any base above 3 is written."""
-
         def _asset_call(self, data, overrides):
             diff = self._diff(overrides, ASSET)
             wide = len(diff) > 40
@@ -242,7 +228,6 @@ def test_seeder_builds_the_expected_overrides_for_a_standard_erc20():
     diff = seeding.overrides[ASSET.lower()]["stateDiff"]
     assert diff[_slot(BAL_BASE, 1, PRINCIPAL, VAULT)] == word
     assert diff[_slot(ALLOW_BASE, 2, PRINCIPAL, VAULT)] == word
-    # Nothing beyond the principal's own holding of the input asset is touched.
     assert set(diff) == {_slot(BAL_BASE, 1, PRINCIPAL, VAULT), _slot(ALLOW_BASE, 2, PRINCIPAL, VAULT)}
     assert seeding.readback_expected == (word, word)
 
@@ -263,8 +248,6 @@ def test_seeder_memoizes_identity_and_layout_across_candidates():
 
 
 def test_unseeded_probe_runs_first_and_no_seeding_happens_when_it_succeeds():
-    """An admin mint needing no input asset must never trigger discovery; its
-    ``inflow_observed: false`` (witnessed dilution) is unchanged."""
     chain = FakeChain(vault_needs_asset=False, vault_pulls=False)
     store = RecordingStore()
     eff = _supply(chain, store, **_wrap_inputs(chain))
@@ -275,7 +258,6 @@ def test_unseeded_probe_runs_first_and_no_seeding_happens_when_it_succeeds():
         "input_seeded": False,
         "contract_balance_seeded": False,
     }
-    # The per-execution counts are state-plane residue, not cacheable details.
     assert eff.concrete["backing_inflow_transfers"] == 0
     assert eff.concrete["backing_mint_transfers"] == 1
     assert len(chain.blocks) == 1
@@ -298,10 +280,7 @@ def test_seeded_conversion_proves_the_mint_and_witnesses_the_inflow():
 
 
 def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
-    """G8, seam ``claims_bridge.verdict_to_claim``. Synthesis qualifiers must sit at the TOP LEVEL
-    of a supply witness (the only plane ``_observed_summary`` carries) or the claim reads STRONGER
-    than the seeded observation. The recipe once wrote ``input_seeded`` only under ``backing``
-    (mint-only), so every seeded supply row incl. all 4 burns disclosed nothing. Uses the REAL recipe witness."""
+    """G8: qualifiers must be top-level or the claim reads stronger than the seeded observation."""
     chain = FakeChain()
     eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
     assert eff.verdict == VERDICT_PROVEN
@@ -327,8 +306,6 @@ def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
 
 
 def test_a_seeded_supply_burn_witness_reaches_the_claim_observed_summary():
-    """The burn half of G8: top-level qualifiers on a ``supply.burn`` witness project into
-    ``observed`` as for a mint (no burn test existed, so the gap shipped green)."""
     claim = claims_bridge.verdict_to_claim(
         cast(
             claims_bridge.VerdictLike,
@@ -351,8 +328,7 @@ def test_a_seeded_supply_burn_witness_reaches_the_claim_observed_summary():
 
 
 def test_seeded_mint_that_pulls_nothing_still_reports_inflow_false():
-    """Seeding cannot invent a Transfer: storage writes emit no logs. A mint the
-    seed merely unblocked, which then pulls nothing, is still dilution."""
+    """Storage writes emit no logs."""
     chain = FakeChain(vault_pulls=False)
     eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
     assert eff.verdict == VERDICT_PROVEN
@@ -361,8 +337,7 @@ def test_seeded_mint_that_pulls_nothing_still_reports_inflow_false():
 
 
 def test_readback_mismatch_discards_the_seeded_attempt():
-    """The token echoes a DIFFERENT word inside the probe block: the seed did not
-    land where discovery said, so nothing about the seeded call may be trusted."""
+    """The seed did not land where discovery said."""
     chain = FakeChain(readback_liar=True)
     eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
     assert eff.verdict == VERDICT_UNKNOWN
@@ -378,11 +353,6 @@ def test_unseedable_token_leaves_the_verdict_exactly_as_today():
     assert seeded.reason == plain.reason == "mint_call_reverted"
 
 
-# ---------------------------------------------------------------------------
-# msg.value staging — ETH only after a zero-value call provably failed
-# ---------------------------------------------------------------------------
-
-
 def test_eth_is_attached_only_after_the_zero_value_attempt_failed():
     chain = FakeChain(vault_needs_asset=False, vault_needs_eth=True, vault_pulls=False)
     eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
@@ -393,8 +363,7 @@ def test_eth_is_attached_only_after_the_zero_value_attempt_failed():
         for c in block
         if c.to.lower() == VAULT.lower() and c.data.startswith(sel("wrap(uint256)"))
     ]
-    # Every attempt before the last carried value 0, so a payable mint's own
-    # msg.value can never be read as an inflow a caller would not have to supply.
+    # A payable mint's own msg.value can never read as an inflow.
     assert mints[-1] == SEED_ETH_VALUE
     assert all(v == 0 for v in mints[:-1])
     assert len(mints) >= 2
@@ -426,8 +395,7 @@ def test_value_out_seeded_retry_proves_a_precondition_blocked_withdrawal():
         simulate_supported=True,
         gate_ref="gate:none",
     )
-    # The UNSEEDED probe reverted on the precondition, a different non-observation from "ran and
-    # moved nothing"; the reason must say so or the code-plane cache transfers it to every bytecode twin.
+    # A reverted probe differs from "ran and moved nothing", or the cache transfers it to every twin.
     assert plain.verdict == VERDICT_UNKNOWN and plain.reason == "value_probe_reverted"
     assert plain.details["observation"] == "reverted"
 
@@ -447,11 +415,6 @@ def test_value_out_seeded_retry_proves_a_precondition_blocked_withdrawal():
     assert eff.details["input_seeded"] is True
 
 
-# ---------------------------------------------------------------------------
-# Static-side hint + calldata synthesis
-# ---------------------------------------------------------------------------
-
-
 def test_input_token_hints_come_from_a_pull_sink_and_a_flow_token_var():
     fn = _facts(
         "wrap(uint256)",
@@ -465,8 +428,7 @@ def test_input_token_hints_come_from_a_pull_sink_and_a_flow_token_var():
 
 
 def test_input_token_hints_exclude_a_caller_supplied_token_param():
-    """The encoder substitutes the principal for every address arg, so a token
-    that arrives as a parameter is not present to be seeded."""
+    """The encoder fills every address arg with the principal."""
     fn = _facts("enter(address,uint256)", flows=[{"direction": "in", "token_var": "asset_", "is_parameter": True}])
     assert "asset_()" not in input_token_hints(fn)
 
@@ -493,11 +455,6 @@ def test_seeded_calldata_places_the_sentinel_at_the_taint_index():
 def test_seeded_calldata_is_empty_for_an_unencodable_signature():
     fn = _facts("weird")
     assert seeded_calldata(fn, PRINCIPAL) == {}
-
-
-# ---------------------------------------------------------------------------
-# Kill valve
-# ---------------------------------------------------------------------------
 
 
 def test_kill_valve_disables_the_default_seeder(monkeypatch):
@@ -531,13 +488,7 @@ def test_no_seeder_without_simulate_support():
     assert ctx.effective_seeder() is None
 
 
-# ---------------------------------------------------------------------------
-# Per-job cost ceiling (SeedBudget)
-#
-# The retry path fires on the COMMON case (an unseeded probe that reverted), so its cost scales
-# with distinct vaults and tokens. These pin the ceiling, the degrade (exactly the pre-seeding
-# probe), the log, and the counters for judging spend on evidence.
-# ---------------------------------------------------------------------------
+# The retry fires on the common case, so its cost scales with distinct vaults and tokens.
 
 
 def test_layout_budget_stops_discovery_and_degrades_to_the_unseeded_probe(caplog):
@@ -553,7 +504,6 @@ def test_layout_budget_stops_discovery_and_degrades_to_the_unseeded_probe(caplog
     assert budget.layout_discoveries == 0
     assert budget.skipped_layout_discoveries >= 1
     assert budget.metrics()["seed_budget_skips"] >= 1
-    # Not silent: the message names what was skipped.
     assert any(ASSET.lower() in r.getMessage().lower() for r in caplog.records)
     assert budget.exhausted_any is True
     assert ASSET.lower() in " ".join(budget.skipped_names).lower()
@@ -569,7 +519,6 @@ def test_retry_budget_stops_the_seeded_attempt_entirely(caplog):
         eff = _supply(chain, RecordingStore(), **inputs)
 
     assert eff.verdict == VERDICT_UNKNOWN and eff.reason == "mint_call_reverted"
-    # One block only (unseeded read/mint/read): no identity, discovery, or seeded attempt.
     assert len(chain.blocks) == 1
     assert budget.identity_probes == 0 and budget.layout_discoveries == 0
     assert budget.skipped_probe_retries == 1
@@ -596,8 +545,7 @@ def test_budget_counters_report_the_spend_and_the_yield():
 
 
 def test_a_probe_that_succeeds_unseeded_spends_nothing():
-    """No retry, so no identity probe, no discovery and no budget consumed — the
-    common admin-mint case must stay free."""
+    """The common admin-mint case must stay free."""
     budget = SeedBudget()
     chain = FakeChain(vault_needs_asset=False, vault_pulls=False)
     inputs = _wrap_inputs(chain)
@@ -618,9 +566,9 @@ def test_a_probe_that_succeeds_unseeded_spends_nothing():
 
 
 def test_self_token_discovery_is_skipped_once_a_named_asset_anchors():
-    """``__self__`` is the always-appended fallback and resolves with no wire call, so every
-    reverting probe paid a full 548-override discovery block for the probe target itself. A hint
-    that already anchored is the asset static actually saw flow in."""
+    """``__self__`` cost a 548-override discovery block per reverting probe; an anchored hint is the asset static saw
+    flow in.
+    """
     budget = SeedBudget()
     chain = FakeChain()
     inputs = _wrap_inputs(chain)
@@ -636,8 +584,6 @@ def test_self_token_discovery_is_skipped_once_a_named_asset_anchors():
 
 
 def test_self_token_is_still_discovered_when_nothing_else_anchors():
-    """The withdrawal-burns-your-own-shares shape keeps its discovery: the skip
-    is conditional on another candidate having anchored, not unconditional."""
     budget = SeedBudget()
     chain = FakeChain()
     seeder = SimulateSeeder(chain, chain_id=1, budget=budget)

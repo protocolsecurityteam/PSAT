@@ -1,14 +1,8 @@
-"""What may occupy a caller-supplied TOKEN argument, and what a probe may claim about the call it produced.
+"""What may occupy a caller-supplied token argument.
 
-The 2026-07-25 live run left all 8 supply verdicts ``unknown``: the encoder wrote the acting
-principal into every address argument, so a deposit-shaped function got a non-token where it
-expected an ERC-20 and reverted (``TRANSFER_FROM_FAILED``). A token slot must receive a REAL token
-(from a getter the code calls the asset through, or an asset the deployment provably holds), and
-until then no backing witness may be published: measured on a mainnet fork (three vaults), the
-default ``address(0)`` makes the call SUCCEED as a codeless no-op inside ``safeTransfer`` and mint
-against a pull that never happened, so ``inflow_observed: false`` would turn a deposit-backed
-conversion into dilution on evidence the prober manufactured.
-Fixtures are generic shapes so a pass cannot come from recognizing a protocol.
+The 2026-07-25 run left all 8 supply verdicts unknown: the principal went into every address argument, so
+deposits reverted. A token slot needs a real token, and until then no backing witness may be published, since
+``address(0)`` makes ``safeTransfer`` a codeless no-op that mints against a pull that never happened.
 """
 
 from __future__ import annotations
@@ -73,8 +67,7 @@ def _facts(
 
 
 def _pull_sink(sig: str, target: str) -> dict[str, Any]:
-    """A body call THROUGH a name, the shape a library-wrapped pull leaves; its selector belongs to
-    the library, so nothing keyed on ERC-20 selectors sees it."""
+    """Its selector belongs to the library, so nothing keyed on ERC-20 selectors sees it."""
     return {
         "id": f"{sig}:sink0:external_call:{target}.safeTransferFrom",
         "function": sig,
@@ -119,11 +112,6 @@ def _roles(sig: str, names: list[str], sinks: list[dict[str, Any]] | None = None
     return cd.address_param_roles(fn, types)
 
 
-# ---------------------------------------------------------------------------
-# 1. role classification
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("sig", "names", "expected", "roleless"),
     [
@@ -153,22 +141,15 @@ def test_address_param_roles_by_name(sig, names, expected, roleless):
 
 
 def test_a_sink_calling_through_a_parameter_names_it_a_token_without_any_vocabulary():
-    """No token word in the name: the evidence is that the body calls an ERC-20 method THROUGH that parameter."""
     sig = "pull(address,uint256)"
     roles = _roles(sig, ["x", "n"], [_pull_sink(sig, "x")])
     assert roles[0] == cd.ROLE_TOKEN
 
 
 def test_a_name_carrying_both_vocabularies_is_no_evidence_at_all():
-    """Demoting a payout destination to a token slot costs the observation the
-    probe exists for, so an ambiguous name keeps the principal."""
+    """Demoting a payout destination costs the observation the probe exists for."""
     roles = _roles("send(address,uint256)", ["tokenRecipient", "amount"])
     assert roles[0] == cd.ROLE_RECIPIENT
-
-
-# ---------------------------------------------------------------------------
-# 2. what the plan carries
-# ---------------------------------------------------------------------------
 
 
 def test_token_slot_reaches_the_plan_and_the_holdings_ride_with_it():
@@ -179,13 +160,11 @@ def test_token_slot_reaches_the_plan_and_the_holdings_ride_with_it():
         holdings=(TOKEN_A, TOKEN_B),
     )
     assert spec.token_param_indexes == (0,)
-    # Offered to the seeder as resolved addresses, ahead of the self fallback and behind the getters.
     assert TOKEN_A in spec.input_token_hints
     assert spec.input_token_hints[-1] == cd.SELF_TOKEN_HINT
 
 
 def test_holdings_are_withheld_from_a_function_with_no_token_slot():
-    """A function that takes no token cannot spend a layout discovery on one."""
     sig = "mint(address,uint256)"
     spec = _spec(_facts(sig, parameter_names=["to", "amount"]), sig, holdings=(TOKEN_A,))
     assert spec.token_param_indexes == ()
@@ -203,14 +182,11 @@ def test_a_state_var_called_through_becomes_a_getter_hint_but_a_parameter_never_
     assert fn is not None
     hints = cd.input_token_hints(fn)
     assert "nativeWrapper()" in hints
-    # There is no storage behind a parameter; asking for ``depositAsset()``
-    # spends a call to learn nothing.
+    # There is no storage behind a parameter.
     assert "depositAsset()" not in hints
 
 
 def _read_sink(sig: str, target: str, selector: str) -> dict[str, Any]:
-    """A body view call (``shares``/``balanceOf``) whose head names the token
-    without pulling anything."""
     return {
         "id": f"{sig}:sink0:external_call:{target}.read",
         "function": sig,
@@ -222,8 +198,7 @@ def _read_sink(sig: str, target: str, selector: str) -> dict[str, Any]:
 
 
 def test_a_token_read_selector_names_the_token_getter():
-    # A share-accounted wrap reads ``eETH.shares(caller)`` before moving the asset; when the transfer
-    # is library-wrapped behind a temporary that read is the only NAMED head (``_TOKEN_READ_SELECTORS``).
+    # When the transfer is library-wrapped, the ``shares`` read is the only named head.
     sig = "wrap(uint256)"
     for selector in ("0xce7c2ac2", "0xf5eb42dc", "0x70a08231"):
         facts = _facts(sig, parameter_names=["amount"], sinks=[_read_sink(sig, "underlying", selector)])
@@ -233,7 +208,6 @@ def test_a_token_read_selector_names_the_token_getter():
 
 
 def test_a_slither_temporary_head_never_becomes_a_getter_hint():
-    # An unresolved cast/index temporary carries no getter; calling ``TMP_7()`` seeds nothing, so drop it.
     sig = "wrap(uint256)"
     for junk in ("TMP_7", "REF_5", "TUPLE_2"):
         facts = _facts(sig, parameter_names=["amount"], sinks=[_pull_sink(sig, junk)])
@@ -248,11 +222,6 @@ def test_substitute_address_arg_fails_closed_on_a_slot_that_is_not_there():
     assert cd.substitute_address_arg(data, 1, TOKEN_A) is None
     assert cd.substitute_address_arg(data, 0, "0xnope") is None
     assert _arg(cd.substitute_address_arg(data, 0, TOKEN_A) or "", 0) == TOKEN_A
-
-
-# ---------------------------------------------------------------------------
-# 3. the seeded retry writes a proven token — and only a proven one
-# ---------------------------------------------------------------------------
 
 
 def _seeding(*tokens: str) -> Seeding:
@@ -291,7 +260,6 @@ def test_seeded_retry_writes_the_resolved_token_into_the_token_slot():
     )
     assert attempts
     assert _arg(attempts[0].calldata, 0) == TOKEN_A
-    # The recipient slot keeps the identity that makes the payout observable.
     assert _arg(attempts[0].calldata, 2) == PRINCIPAL
     assert transcript["seeding"]["token_args"] == {"0": TOKEN_A}
 
@@ -305,19 +273,12 @@ def test_two_token_slots_take_two_distinct_tokens():
 
 
 def test_the_probe_target_is_never_written_into_a_token_slot():
-    """Feeding a vault its own share token as the deposit asset produces a mint
-    whose only inflow is the minted asset — which the backing rule discards, so
-    the verdict would describe the prober's argument, not the function."""
+    """A vault's own share token as the deposit asset gives a mint whose only inflow the backing rule discards."""
     attempts, transcript = _attempts(
         "deposit(address,uint256,address)", ["depositAsset", "amount", "receiver"], _seeding(VAULT)
     )
     assert _arg(attempts[0].calldata, 0) == PRINCIPAL
     assert {"label": "seed_path", "outcome": "skipped_no_token_for_param"} in transcript["seed_attempts"]
-
-
-# ---------------------------------------------------------------------------
-# 4. the backing witness is gated on the argument that produced it
-# ---------------------------------------------------------------------------
 
 
 def _supply(sig: str, names: list[str], results, *, seeding: Seeding | None = None, holdings=(TOKEN_A,)):
@@ -345,7 +306,6 @@ def _supply(sig: str, names: list[str], results, *, seeding: Seeding | None = No
 
 
 def _reverted_block() -> SimResult:
-    """read -> mint reverts -> read: what an unseeded deposit-shaped probe does."""
     return SimResult(
         calls=(
             SimCallResult(True, "0x0", None, ()),
@@ -387,15 +347,13 @@ def test_backing_is_published_once_every_token_slot_carried_a_proven_token():
 
 
 def test_seeding_a_token_cannot_by_itself_produce_an_inflow():
-    """The seeded call pulls nothing: storage writes emit no logs, so the
-    witnessed negative survives seeding."""
+    """Storage writes emit no logs."""
     reverted = _reverted_block()
     seeded = _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)])
     eff = _supply(
         "deposit(address,uint256,address)",
         ["depositAsset", "amount", "receiver"],
-        # The third block is the inertness differential: the recipient slot still
-        # holds the prober's identity, so the negative has to be earned.
+        # The recipient slot still holds the prober's identity, so the negative needs the inertness differential.
         [reverted, seeded, seeded],
         seeding=_seeding(TOKEN_A),
     )
@@ -404,8 +362,6 @@ def test_seeding_a_token_cannot_by_itself_produce_an_inflow():
 
 
 def test_an_unresolved_token_slot_leaves_the_probe_exactly_as_it_was():
-    """No seeder, no holdings: the calldata is byte-identical to the unseeded
-    probe's, which is the fail-closed direction."""
     sig = "deposit(address,uint256,address)"
     spec = _spec(_facts(sig, parameter_names=["depositAsset", "amount", "receiver"]), sig)
     assert _arg(spec.mint_calldata, 0) == PRINCIPAL
@@ -413,8 +369,7 @@ def test_an_unresolved_token_slot_leaves_the_probe_exactly_as_it_was():
 
 @requires_postgres
 def test_priced_holdings_only_and_richest_first(db_session):
-    """An unpriced holding is usually an airdropped spam token; a mint witnessed
-    against one would look byte-identical to a real deposit."""
+    """An unpriced holding is usually airdropped spam."""
     from db.models import ContractBalance
 
     p = _protocol(db_session, "reach-holdings")

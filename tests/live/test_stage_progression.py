@@ -1,8 +1,4 @@
-"""Pipeline stage advancement — observed sequence must be a prefix of the canonical order.
-
-Canonical (single-address): discovery → static → resolution → policy → effects → coverage → done. ``selection``
-is company-only. ``effects`` is flag-gated (``PSAT_EFFECTS_STAGE``); ``_is_prefix`` tolerates a skipped stage.
-"""
+"""``selection`` is company-only and ``effects`` flag-gated, so ``_is_prefix`` tolerates a skipped stage."""
 
 from __future__ import annotations
 
@@ -27,7 +23,7 @@ def _is_prefix(observed: list[str], canonical: list[str]) -> bool:
 
 
 def test_stages_advance_in_order(live_client: LiveClient):
-    # Poll every 1s (not default 5s) — cached static stage can be sub-2s.
+    # A cached static stage can be sub-2s.
     job_id = live_client.analyze(WETH_ADDRESS)["job_id"]
     seen_stages: list[str] = []
     deadline = time.time() + DEFAULT_SINGLE_TIMEOUT

@@ -1,11 +1,5 @@
-"""Real-Slither tests for the static token-slot derivation pass.
-
-Compiles minimal fixtures and drives ``derive_token_slots`` / ``build_effects`` (the static
-worker's exact calls). Pins the two supported layouts (plain ERC-20; OZ-v5 ERC-7201 namespaced
-with ``_allowances`` one slot past ``_balances``) and the fail-closed boundary: a computed
-``balanceOf`` gets NO entry (the read-back anchor needs a raw read), an ambiguous getter is
-skipped, and a packed struct member before the target abandons namespaced derivation.
-Skips only when no compatible solc is installed. No live marker, no RPC.
+"""Plain ERC-20 and OZ-v5 ERC-7201 layouts, and the fail-closed boundary: computed ``balanceOf`` gets no entry,
+ambiguous getters are skipped, and a packed member before the target abandons namespaced derivation.
 """
 
 from __future__ import annotations
@@ -43,10 +37,6 @@ def _by_role(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {e["role"]: e for e in entries}
 
 
-# ---------------------------------------------------------------------------
-# storage_layout: plain ERC-20
-# ---------------------------------------------------------------------------
-
 PLAIN_ERC20 = """
     pragma solidity ^0.8.20;
     contract PlainERC20 {
@@ -82,12 +72,7 @@ def test_plain_erc20_auto_getter_and_handwritten(tmp_path: Path) -> None:
     assert allow["base_slot"] == "0x" + "0" * 63 + "1"
 
 
-# ---------------------------------------------------------------------------
-# oz_v5_namespaced: ERC-7201 struct members
-# ---------------------------------------------------------------------------
-
-# 0.8's ERC-7201 idiom: a bytes32 *StorageLocation constant is the struct base,
-# members follow in declaration order (_balances at +0, _allowances at +1).
+# _balances at +0, _allowances at +1.
 OZ_V5_ERC20 = """
     pragma solidity ^0.8.20;
     contract OzV5ERC20 {
@@ -135,10 +120,6 @@ def test_oz_v5_namespaced_erc20(tmp_path: Path) -> None:
     assert allow["base_slot"] == _ERC20_BASE[:-2] + "01"  # struct base + 1
 
 
-# ---------------------------------------------------------------------------
-# rebasing: computed balanceOf skipped, direct sharesOf kept
-# ---------------------------------------------------------------------------
-
 REBASING = """
     pragma solidity ^0.8.20;
     contract Rebasing {
@@ -159,7 +140,6 @@ def test_rebasing_excludes_computed_balance_keeps_shares(tmp_path: Path) -> None
 
     assert "balance" not in by_role, "a computed balanceOf must not be a read-back anchor"
     shares = by_role["shares"]
-    # ``shares`` is a public mapping, so its auto-getter is the (direct) anchor.
     assert shares["getter"] == "shares(address)"
     assert shares["derivation"] == "storage_layout"
     assert shares["variable"] == "shares"
@@ -187,10 +167,6 @@ def test_handwritten_shares_of_private_backing(tmp_path: Path) -> None:
     assert shares["variable"] == "_shares"
     assert shares["base_slot"] == "0x" + "0" * 63 + "1"
 
-
-# ---------------------------------------------------------------------------
-# ERC-721 ownerOf through a trivial require wrapper
-# ---------------------------------------------------------------------------
 
 ERC721 = """
     pragma solidity ^0.8.20;
@@ -220,10 +196,6 @@ def test_erc721_owner_of_through_require_wrapper(tmp_path: Path) -> None:
     assert owner["base_slot"] == "0x" + "0" * 63 + "0"
 
 
-# ---------------------------------------------------------------------------
-# Negatives
-# ---------------------------------------------------------------------------
-
 NO_FAMILY = """
     pragma solidity ^0.8.20;
     contract Counter {
@@ -240,7 +212,6 @@ def test_no_family_getters_omits_key(tmp_path: Path) -> None:
     assert "token_slots" not in build_effects(contract)
 
 
-# A getter that reads a second mapping (a freeze check) is not a clean raw read.
 AMBIGUOUS = """
     pragma solidity ^0.8.20;
     contract Ambiguous {
@@ -260,7 +231,6 @@ def test_ambiguous_getter_reading_second_mapping_skipped(tmp_path: Path) -> None
     assert derive_token_slots(contract) is None
 
 
-# A sub-slot scalar before the target makes the namespaced offset unsafe to walk.
 PACKED_NAMESPACE = """
     pragma solidity ^0.8.20;
     contract PackedNS {
@@ -283,11 +253,6 @@ PACKED_NAMESPACE = """
 def test_packed_member_before_target_skips_namespaced(tmp_path: Path) -> None:
     contract = _compile(tmp_path, PACKED_NAMESPACE, "PackedNS")
     assert derive_token_slots(contract) is None
-
-
-# ---------------------------------------------------------------------------
-# Artifact plumbing
-# ---------------------------------------------------------------------------
 
 
 @_needs_solc

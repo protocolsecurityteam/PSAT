@@ -1,8 +1,6 @@
-"""F6 — cursor hygiene: no monitored row starts life with a manufactured scan cursor.
+"""F6: block 0 is not a stand-in for a failed head read.
 
-A failed chain-head read is not-determined; block 0 is not its stand-in. A row seeded there claims the whole chain
-as backlog (served first every pass, forever) and declares an enrollment floor of 0, so every historical event it
-finds publishes as a live change. Both enrollment entry points defer the row instead.
+A genesis cursor claims the whole chain as backlog and a floor of 0, so every historical event publishes as live.
 """
 
 from __future__ import annotations
@@ -69,8 +67,6 @@ def _enroll(session, protocol_id: int, head: str | Exception):
 
 
 def test_new_row_is_deferred_when_the_chain_head_is_not_determined(db_session, analyzed_protocol):
-    """No head, no row: the next pass creates it, where the old fallback persisted a genesis-cursor row that outlived
-    the outage."""
     _enroll(db_session, analyzed_protocol.id, RuntimeError("upstream down"))
 
     assert db_session.execute(select(MonitoredContract).where(MonitoredContract.address == ADDRESS)).all() == []
@@ -82,12 +78,7 @@ def test_new_row_is_deferred_when_the_chain_head_is_not_determined(db_session, a
 
 
 def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, analyzed_protocol):
-    """Review finding 1: a pass that could not create every row it should is not a completed reconcile.
-
-    Without the re-mark the drain deletes the queue row and stamps ``last_enrollment_reconcile_at``, so the deferral
-    survives only as a log line. The re-mark advances ``dirty_at``, which ``_finish_success``'s guarded delete
-    reads as "re-dirtied during the build": the row stays queued.
-    """
+    """Otherwise the drain deletes the queue row and the deferral survives only as a log line."""
     from db.models import MonitoringEnrollmentQueue
     from services.monitoring.reconciler import EnrollmentClaim, _finish_success
     from services.monitoring.tracking_plan_state import HEAD_NOT_DETERMINED_REASON
@@ -113,11 +104,9 @@ def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, 
     ).scalar_one()
     assert row.reason == HEAD_NOT_DETERMINED_REASON
     assert row.dirty_at > claimed_at
-    # ...and not due immediately: the retry re-runs the whole build, and the
-    # chain that just failed to answer will not answer a second later.
+    # The chain that just failed won't answer a second later.
     assert row.dirty_at > datetime.now(timezone.utc)
 
-    # The drain now runs its success bookkeeping: the delete must no-op.
     _finish_success(db_session, claim)
     db_session.expire_all()
     survivor = db_session.execute(
@@ -135,7 +124,6 @@ def test_deferred_enrollment_is_visible_in_the_coverage_census(db_session, analy
 
 
 def test_existing_row_still_reconciles_when_the_head_is_not_determined(db_session, analyzed_protocol):
-    """The guard suppresses only row creation; an existing row keeps converging (its cursor needs no head)."""
     _mk(db_session, ADDRESS, cursor=HEAD - 5000, floor=HEAD - 5000)
 
     _enroll(db_session, analyzed_protocol.id, RuntimeError("upstream down"))
@@ -147,7 +135,6 @@ def test_existing_row_still_reconciles_when_the_head_is_not_determined(db_sessio
 
 
 def test_upsert_route_refuses_to_seed_a_floor_zero_row(api_client, db_session, monkeypatch):
-    """The manual add is the other floor-0 door; it fails loudly rather than persist an unwitnessed cursor and floor."""
     from routers import monitored
 
     proto = Protocol(name=PROTO_NAME)

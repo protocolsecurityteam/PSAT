@@ -1,14 +1,7 @@
 """NULL-chain Contract lookups in ``workers.static_worker``.
 
-Two lookups compared a request-JSONB chain (or none) with a raw ``chain == <value>`` predicate:
-
-  - ``_load_contract_row`` (job_id-rebind fallback) read ``request["chain"]``, so a chainless L2 submission
-    (chain only in ``jobs.chain_id``) dropped the filter and could bind a mainnet row.
-  - ``_resolve_proxy`` membership: the gate's W2 proxy-edge verification is chain-scoped, so a same-address
-    member impl on another chain can never be the admitting anchor.
-
-Both now derive chain from ``jobs.chain_id`` (``_parent_chain_name``) and coalesce NULL≡mainnet: mainnet finds
-legacy NULL rows, a non-mainnet job stays isolated.
+``_load_contract_row`` read only ``request["chain"]``, so a chainless L2 job could bind a mainnet row, and
+``_resolve_proxy``'s W2 verification is chain-scoped. Both now derive chain from ``jobs.chain_id``.
 """
 
 from __future__ import annotations
@@ -34,18 +27,12 @@ def proto_id(db_session):
     return p.id
 
 
-# ---------------------------------------------------------------------------
-# _load_contract_row — job_id-rebind fallback
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 @pytest.mark.parametrize(
     ("job_chain_id", "expected_name"),
     [
         pytest.param(1, "Legacy", id="mainnet-job-finds-legacy-null-row"),
-        # A Base-routed job (chain only in ``jobs.chain_id``) must not bind a legacy mainnet NULL row at the
-        # same address; the request-only read used to drop the filter and bleed.
+        # The request-only read used to drop the filter and bind the mainnet row.
         pytest.param(8453, None, id="l2-job-does-not-bind-mainnet-row"),
     ],
 )
@@ -64,14 +51,7 @@ def test_load_contract_row_coalesces_null_chain(db_session, job_chain_id, expect
     assert getattr(row, "contract_name", None) == expected_name
 
 
-# ---------------------------------------------------------------------------
-# _resolve_proxy — structural-adoption impl anchor
-# ---------------------------------------------------------------------------
-
-
 def _seed_adoption_graph(session, proto_id, *, impl_chain):
-    """Nominated candidate proxy (mainnet, code fact persisted) + a MEMBER
-    impl on *impl_chain*. Returns (job, proxy_addr, impl_addr)."""
     from db.models import Contract, ContractCreationWitness
     from db.queue import create_job
 
@@ -98,7 +78,6 @@ def _seed_adoption_graph(session, proto_id, *, impl_chain):
 
 @pytest.fixture()
 def _stub_resolve_proxy_seams(monkeypatch):
-    """Neutralize ``_resolve_proxy``'s child-spawn tail so the test targets only the membership-gate hook."""
     monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **kw: "skip")
     monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **kw: None)
@@ -109,8 +88,7 @@ def _stub_resolve_proxy_seams(monkeypatch):
     ("impl_chain", "promoted"),
     [
         pytest.param("ethereum", True, id="impl-on-same-chain-promotes"),
-        # The same-address member impl exists only on Base: chain-scoped W2 verification finds no mainnet
-        # member, so no promotion (the fix against cross-chain evidence bleed).
+        # Chain-scoped W2 verification finds no mainnet member, so no promotion.
         pytest.param("base", False, id="impl-only-on-other-chain-does-not-promote"),
     ],
 )

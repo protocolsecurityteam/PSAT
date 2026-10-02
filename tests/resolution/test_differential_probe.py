@@ -16,8 +16,6 @@ from eth_utils.crypto import keccak
 from services.clients.rpc import EthCallResult, encode_address_word
 from services.resolution import differential_probe as dp
 
-# --- recorded outcome constructors -----------------------------------------
-
 TRUE = "0x" + "0" * 63 + "1"
 
 
@@ -46,13 +44,7 @@ ZERO_ADDR = err_string("ERC20: transfer to the zero address")
 UNAUTHORIZED = custom_err("Unauthorized()")
 
 
-# --- a stubbed wire keyed on (block_tag, call) ------------------------------
-
-
 class StubWire:
-    """Records every batch; returns outcomes from a ``(block_tag, from_addr) ->
-    EthCallResult`` responder so tests can vary behavior by caller and by block."""
-
     def __init__(self, responder):
         self.responder = responder
         self.batches: list[tuple[str, list[dict]]] = []
@@ -70,27 +62,25 @@ class StubWire:
 @pytest.mark.parametrize(
     ("randoms", "principal", "expected"),
     [
-        # row 1: revert(A) / success → caller-discriminating (confirmed gated)
         pytest.param(
             [revert(OWNABLE), revert(OWNABLE)],
             ok(),
             "caller_discriminating",
             id="two_sided_random_revert_principal_success",
         ),
-        # row 2: random revert(A), principal revert(B), A≠B → caller-discriminating
         pytest.param(
             [revert(OWNABLE), revert(OWNABLE)],
             revert(ZERO_ADDR),
             "caller_discriminating",
             id="two_sided_different_gates",
         ),
-        # row 3 (CRITICAL): success / success → candidate public; the only path toward a public verdict
+        # The only path toward a public verdict.
         pytest.param([ok(), ok()], ok(), "not_caller_discriminating", id="two_sided_all_success"),
-        # row 4 (CRITICAL): same gate everywhere → inconclusive; a shared earlier gate must not upgrade or confirm
+        # A shared earlier gate must neither upgrade nor confirm.
         pytest.param(
             [revert(OWNABLE), revert(OWNABLE)], revert(OWNABLE), "inconclusive", id="two_sided_same_gate_everywhere"
         ),
-        # row 5 (CRITICAL): a node error (no revert data) among randoms → indeterminate, fails closed
+        # A node error among randoms fails closed.
         pytest.param([revert(OWNABLE), node_error()], ok(), "indeterminate", id="node_error_with_principal"),
         pytest.param([node_error()], None, "indeterminate", id="node_error_one_sided"),
         pytest.param([ok(), ok()], None, "not_caller_discriminating", id="one_sided_all_success"),
@@ -106,12 +96,11 @@ class StubWire:
             "caller_rejected_consistent",
             id="one_sided_all_revert_same_custom",
         ),
-        # (CRITICAL) random/random split is state/arg-specific, not curated-set caller discrimination → withhold
+        # A random/random split is state- or arg-specific, not caller discrimination.
         pytest.param([ok(), revert(OWNABLE)], None, "indeterminate", id="randoms_disagree"),
         pytest.param(
             [revert(OWNABLE), revert(UNAUTHORIZED)], None, "indeterminate", id="one_sided_randoms_revert_different_data"
         ),
-        # principal unusable → reason on randoms alone (both succeed → candidate public)
         pytest.param(
             [ok(), ok()], node_error(), "not_caller_discriminating", id="principal_node_error_falls_back_one_sided"
         ),
@@ -163,7 +152,7 @@ def test_synth_caller_correlated_substitution_sets_identity():
 @pytest.mark.parametrize(
     ("selector", "signature"),
     [
-        # A residual user-defined type (ERC20) is not ABI-encodable → synthesis MISS.
+        # A residual user-defined type is not ABI-encodable.
         pytest.param("0x18457e61", "exit(address,ERC20,uint256,address,uint256)", id="user_defined_type"),
         pytest.param("0x12345678", "notasignature", id="malformed_signature"),
         pytest.param("0x12345678", None, id="no_signature"),
@@ -233,7 +222,7 @@ def test_run_candidate_public_with_block_independence_pass_upgrades():
 
 
 def test_run_candidate_public_but_state_dependent_withholds():
-    # Succeeds at the latest block, reverts at the older block → state-dependent → keep static.
+    # State-dependent admission keeps the static verdict.
     def responder(tag, _frm):
         return ok() if tag == hex(1_000_000) else revert(OWNABLE)
 
@@ -245,7 +234,7 @@ def test_run_candidate_public_but_state_dependent_withholds():
 
 
 def test_run_two_sided_confirmed_gated_does_not_reprobe():
-    # random revert, principal success → confirmed gated; NO block-independence re-probe.
+    # Confirmed gated needs no block-independence re-probe.
     def responder(_tag, frm):
         return ok() if frm == "0xPRINCIPAL".lower() else revert(OWNABLE)
 

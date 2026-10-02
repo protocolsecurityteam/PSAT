@@ -1,13 +1,5 @@
-"""Downgrade of b3d7e1f05a92 (W4-H heuristic layer) on populated data.
-
-The vocabulary narrows only after nothing rests on it: the downgrade must
-unwind heuristic-derived W2 rows and memberships whose only admission was
-heuristic BEFORE deleting the w4h rows and narrowing the CHECK constraints —
-otherwise a heuristic_via W2 row becomes indistinguishable from a proven one,
-and a heuristic-admitted member survives with zero witnesses.
-
-Runs the real alembic round-trip against a THROWAWAY database (created and
-dropped here) so the shared test DB's schema and data are never touched.
+"""The downgrade of b3d7e1f05a92 must unwind heuristic-derived W2 rows and heuristic-only memberships before
+narrowing the CHECKs, or they become indistinguishable from proven ones. Uses a throwaway database.
 """
 
 from __future__ import annotations
@@ -87,12 +79,10 @@ def test_w4h_downgrade_unwinds_heuristic_membership(throwaway_db_url):
                 {"c": contract_id, "p": protocol_id, "r": rule, "v": via, "e": evidence},
             )
 
-        # A: admitted only by the heuristic rule (w1 is a precondition, never
-        # an admission).
+        # w1 is a precondition, never an admission.
         contract_a = add_contract("aa")
         add_witness(contract_a, "w1_code", '{"code_present": true}')
         add_witness(contract_a, "w4h_deployer_affinity", '{"deployer": "' + deployer + '"}', via=deployer)
-        # B: admitted by a W2 edge derived from the heuristic member A.
         contract_b = add_contract("bb")
         add_witness(
             contract_b,
@@ -100,7 +90,6 @@ def test_w4h_downgrade_unwinds_heuristic_membership(throwaway_db_url):
             '{"edge_kind": "implementation", "heuristic_via": true}',
             via="0x" + "aa" * 20,
         )
-        # C: proven member — a plain W2 admission that must survive.
         contract_c = add_contract("cc")
         add_witness(contract_c, "w2_structural", '{"edge_kind": "implementation"}', via="0x" + "ee" * 20)
 
@@ -143,6 +132,5 @@ def test_w4h_downgrade_unwinds_heuristic_membership(throwaway_db_url):
         trust_classes = set(conn.execute(sa.text("SELECT DISTINCT trust_class FROM protocol_deployers")).scalars())
         assert "H" not in trust_classes
 
-    # Round-trip back to head must succeed on the unwound data.
     run_alembic_upgrade(throwaway_db_url)
     engine.dispose()

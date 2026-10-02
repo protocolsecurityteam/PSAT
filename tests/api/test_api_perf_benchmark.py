@@ -1,12 +1,6 @@
-"""Query-count budgets for high-impact API hotspots (issues #1-6 in the perf review).
+"""Query-count budgets for API hotspots on a realistic-shape seed (50 contracts x 50 functions).
 
-Seeds a realistic-shape protocol (50 contracts x 50 effective functions each, control graph,
-balances, upgrade events, principal labels), then asserts each hot endpoint returns the expected
-payload shape within its SQL-statement budget (counted via ``before_cursor_execute``).
-
-Run with ``-s`` to see the printed actual/budget table:
-    set -a; source .env; set +a
-    uv run pytest tests/api/test_api_perf_benchmark.py -s -m "not live"
+Run with ``-s`` to print the actual/budget table.
 """
 
 from __future__ import annotations
@@ -46,8 +40,7 @@ N_PRINCIPALS_PER_FUNCTION = 2
 N_NODES_PER_CONTRACT = 6
 N_EDGES_PER_CONTRACT = 8
 
-# Stage names whose timings the worker fleet records as ``stage_timing_<name>``
-# artifacts; ``done`` is the terminal sink so it never gets one.
+# ``done`` is the terminal sink, so it never records a timing.
 _PERF_STAGE_TIMING_STAGES = (
     "discovery",
     "dapp_crawl",
@@ -65,13 +58,8 @@ def _addr(seed: int) -> str:
 
 
 def _wipe_perf_data(session) -> None:
-    """Remove rows the perf seed may have left behind on the shared test DB.
-
-    ``db_session`` only cleans monitoring + protocol tables, so Job/Contract rows from prior runs
-    would skew SQL counts. Clean by Protocol name (cascades / SET NULL) plus a sweep of
-    company-tagged jobs, and wipe storage-keyed orphan jobs from sibling fixtures: their rows
-    outlive MinIO teardown and would break /api/analyses once ``_scrub_storage_env`` strips
-    the storage config.
+    """``db_session`` only cleans monitoring and protocol tables, so leftover Job/Contract rows would skew SQL
+    counts; storage-keyed orphans also break /api/analyses once storage config is scrubbed.
     """
     session.execute(
         text("DELETE FROM artifacts WHERE job_id IN (SELECT id FROM jobs WHERE company = :c)"),
@@ -105,11 +93,7 @@ def _wipe_perf_data(session) -> None:
 
 @pytest.fixture()
 def seeded(db_session, storage_bucket):
-    # storage_bucket wires ARTIFACT_STORAGE_* to minio so the artifacts
-    # below land as storage_key rows (data NULL) — that's what
-    # /api/analyses and /api/jobs/{job_id}/stage_timings hit in prod, so it
-    # is the only configuration where the per-row fetch the query budgets
-    # bound is on the real code path.
+    # storage_bucket makes artifacts storage_key rows, the prod layout the budgets bound.
     _wipe_perf_data(db_session)
 
     protocol = Protocol(name=PROTOCOL_NAME, chains=["ethereum"])
@@ -273,9 +257,6 @@ def seeded(db_session, storage_bucket):
                 )
             )
 
-        # contract_analysis / contract_flags / dependencies via store_artifact
-        # so each body lands in object storage (storage_key set, data NULL),
-        # matching the prod layout that exposes the per-row GET hotspot.
         store_artifact(
             db_session,
             job.id,
@@ -288,9 +269,7 @@ def seeded(db_session, storage_bucket):
         store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": False})
         store_artifact(db_session, job.id, "dependencies", data={"deps": []})
 
-    # Proxy + impl + audit + coverage rows so the audit_timeline benchmark
-    # exercises the proxy/_current_status branch (where the unstaged
-    # cov_rows-filter optimization lives).
+    # Exercises the proxy branch of the audit_timeline benchmark.
     proxy_addr = _addr(900001)
     impl_addr = _addr(900002)
     proxy_job = Job(
@@ -379,7 +358,6 @@ def seeded(db_session, storage_bucket):
 
     db_session.commit()
 
-    # Stage timings on perf_000 so the stage_timings benchmark has eight storage-backed rows to fan out.
     timing_target = jobs[0]
     for stage in _PERF_STAGE_TIMING_STAGES:
         store_artifact(
@@ -430,9 +408,7 @@ def _measure(engine):
 
 # Post-perf actuals + ~3 slack. Tighten when you intentionally lower a count.
 QUERY_BUDGETS = {
-    # 25 -> 32 when the payload gained the scorer-computed ``reach`` block:
-    # closure/condition/conferral plane loads + the signal population, a fixed
-    # per-protocol count (no N+1).
+    # Includes the scorer ``reach`` block: a fixed per-protocol count, no N+1.
     "company_overview": 35,
     "analyses": 5,
     "analysis_detail": 12,
@@ -444,9 +420,7 @@ QUERY_BUDGETS = {
 
 @requires_postgres
 def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record_property):
-    """Every hot endpoint must stay under its query budget, and must answer
-    with the payload shape callers depend on — including the exact
-    ``stage_timings`` key set, which is a wire-shape freeze."""
+    """The ``stage_timings`` key set is a wire-shape freeze."""
     from services.aggregations import contract_audit_timeline as _cat
 
     monkeypatch.setattr(_cat, "_bytecode_keccak_now_batch", lambda addrs, chain_id=1: {a.lower(): None for a in addrs})
@@ -463,9 +437,8 @@ def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record
         "stage_timings": lambda: api_client.get(f"/api/jobs/{stage_timings_job_id}/stage_timings"),
     }
 
-    # Shape gates the budget: a wrong-shaped 200 makes query counts meaningless. The proxy-merge
-    # pass depends on artifact flags the seed omits, so only assert the listing carries at
-    # least the regulars.
+    # A wrong-shaped 200 makes query counts meaningless; the seed omits proxy-merge flags, so only regulars are
+    # asserted.
     overview = api_client.get(f"/api/company/{PROTOCOL_NAME}").json()
     assert overview["contract_count"] >= N_CONTRACTS
     analyses = api_client.get("/api/analyses").json()

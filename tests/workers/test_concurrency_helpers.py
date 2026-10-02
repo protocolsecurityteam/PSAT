@@ -1,6 +1,3 @@
-"""Unit tests for services/concurrency primitives (parallel_map, RpcExecutor). Every parallel
-fan-out in the codebase relies on these."""
-
 from __future__ import annotations
 
 import threading
@@ -9,22 +6,10 @@ from concurrent.futures import Future
 import pytest
 
 from services.concurrency import (
-    RpcExecutor,
     parallel_map,
     submit_rpc,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
-
-
-# ---------------------------------------------------------------------------
-# parallel_map
-# ---------------------------------------------------------------------------
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
 
 def test_parallel_map_preserves_input_order():
@@ -75,10 +60,8 @@ def test_parallel_map_heartbeat_exception_is_swallowed():
 @pytest.mark.parametrize(
     ("items", "max_workers"),
     [
-        # LeaseLost must propagate so ``BaseWorker._execute_job`` can bail.
-        # psat-pr-73 hit duplicate builds because ``parallel_map`` caught it as a generic
-        # Exception, so the abandoned worker kept running forge builds on a job a sibling
-        # had claimed (signal #4, 2026-05-08 08:17-21).
+        # psat-pr-73 built duplicates because ``parallel_map`` caught LeaseLost as a generic Exception and kept forge
+        # running on a job a sibling had claimed.
         pytest.param([1, 2, 3], 2, id="parallel_path"),
         pytest.param([1, 2, 3], 1, id="single_worker_path"),
     ],
@@ -165,11 +148,6 @@ def test_parallel_map_respects_psat_rpc_fanout_env(monkeypatch):
 
     parallel_map(record_thread, [1, 2, 3])
     assert len(set(seen_threads)) == 1
-
-
-# ---------------------------------------------------------------------------
-# RpcExecutor singleton
-# ---------------------------------------------------------------------------
 
 
 def test_rpc_executor_submit_returns_future_resolving_to_result():

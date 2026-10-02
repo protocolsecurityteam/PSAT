@@ -1,18 +1,10 @@
-"""Cache-hit witness integrity at the worker seam (``_resolve_item``).
-
-The self-hit clobber: the code-plane cache stores a payload stripped of every deployment-plane
-qualifier, and each hit path handed it to ``record_effect_verdict``, overwriting the producing
-verdict's own witness. Absent ``input_seeded`` means "no seeding needed"
-(``claims_bridge._observed_summary``), so PR-161 ``effect_verdicts`` id 146 (eETH ``burnShares``)
-published a proven unseeded burn while its transcript recorded ``input_seeded: true``.
-DB-backed (real Postgres), offline-safe.
+"""The cache stores a payload stripped of deployment-plane qualifiers, and each hit used to overwrite the producing
+verdict's witness with it; PR-161 verdict 146 then published a seeded burn as unseeded.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-import pytest
 
 from db import effect_cache
 from db.effect_cache import record_effect_verdict, upsert_cached_verdict
@@ -21,30 +13,18 @@ from services.effects import claims_bridge
 from services.effects.harness import ObservedEffect
 from services.effects.selection import Candidate
 from tests.cache_helpers import requires_postgres
+from tests.support.effects_worker_harness import clean_effects  # noqa: F401  (fixture, registered by import)
 from workers.effects_worker import EffectsWorker, _Counters, _Item
 
 ADDR = "0x" + "ac" * 20
 SELECTOR = "0xee7a7c04"
 BEHAVIOR_HASH = "bh_hit_witness"
 
-# The producing probe's full payload: proven burn, reached only with seeding.
 FRESH_DETAILS: dict[str, Any] = {
     "observation": "executed",
     "supply_delta_sign": "burn",
     "input_seeded": True,
 }
-
-
-@pytest.fixture()
-def clean_effects(db_session):
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
 
 
 def _candidate() -> Candidate:
@@ -108,8 +88,7 @@ def _resolve(session, it: _Item):
 
 @requires_postgres
 def test_audited_hit_reattaches_the_fresh_probes_seed_qualifiers(clean_effects):
-    """The verdict-146 replay: the audit re-simulated THIS deployment and seeded again, so the
-    served details must carry that measurement, not the cache's structural absence."""
+    """The audit re-simulated this deployment, so the served details carry that measurement."""
     session = clean_effects
     cached = _cache_row(session, details=effect_cache.code_plane_details(dict(FRESH_DETAILS)))
     fresh = ObservedEffect(
@@ -125,16 +104,13 @@ def test_audited_hit_reattaches_the_fresh_probes_seed_qualifiers(clean_effects):
     assert (verdict, tier, ptr) == ("proven", "tier1", "job-cold::t1")
     assert details is not None and details["input_seeded"] is True
     assert details["supply_delta_sign"] == "burn"
-    # A fresh measurement was attached, so the write is NOT cache-shaped: an
-    # absent key here is this run's own observation.
+    # This run's own observation, not a cache-shaped write.
     assert witness_from_cache is False
     assert disc is None
 
 
 @requires_postgres
 def test_audited_hit_with_an_unseeded_fresh_probe_publishes_absence(clean_effects):
-    """The other direction stays earned: a fresh audit probe that needed no
-    seeding publishes ABSENT qualifiers even if a prior payload carried them."""
     session = clean_effects
     cached = _cache_row(session, details={"observation": "executed", "supply_delta_sign": "burn"})
     fresh = ObservedEffect(
@@ -153,10 +129,9 @@ def test_audited_hit_with_an_unseeded_fresh_probe_publishes_absence(clean_effect
 
 @requires_postgres
 def test_audited_hit_attaches_the_fresh_probes_auto_expiry(clean_effects):
-    """The rendered freeze pair must come from ONE observation. ``auto_expiry`` is a subset
-    predicate over this fork's own blast radius and the sole gate on rendering the duration bound as
-    a severity reducer (``claimsVocab.pauseQualifier``), so the audited hit must carry the fresh
-    probe's answer next to its freeze scope, never the cache's answer beside an enlarged scope."""
+    """``auto_expiry`` gates rendering the bound as a reducer, so it must come from the same observation as the
+    freeze scope.
+    """
     session = clean_effects
     cold = {
         "observation": "executed",
@@ -170,7 +145,6 @@ def test_audited_hit_attaches_the_fresh_probes_auto_expiry(clean_effects):
         "duration_bound_source": "guard_constant",
     }
     cached = _cache_row(session, details=effect_cache.code_plane_details(dict(cold)), effect_class="freeze_pause")
-    # The write-side strip already kept the expiry answer off the cache row.
     assert cached.details is not None and "auto_expiry" not in cached.details
     fresh = ObservedEffect(
         effect_class="freeze_pause",
@@ -196,8 +170,7 @@ def test_audited_hit_attaches_the_fresh_probes_auto_expiry(clean_effects):
 
 @requires_postgres
 def test_plain_hit_declares_its_witness_cache_shaped(clean_effects):
-    """No re-simulation happened, so the flag tells the verdict upsert that the
-    payload's missing deployment-plane keys are structural, not measured."""
+    """The flag marks missing deployment-plane keys as structural, not measured."""
     session = clean_effects
     cached = _cache_row(
         session,
@@ -215,15 +188,13 @@ def test_plain_hit_declares_its_witness_cache_shaped(clean_effects):
 
 @requires_postgres
 def test_plain_hit_launders_a_stale_deployment_plane_key(clean_effects):
-    """A same-version row minted before a key joined ``DEPLOYMENT_PLANE_KEYS``
-    (``pause_effective``) must not republish it as this deployment's own."""
+    """A row minted before a key joined ``DEPLOYMENT_PLANE_KEYS`` must not republish it."""
     session = clean_effects
     cached = _cache_row(
         session,
         details={"observation": "executed", "supply_delta_sign": "burn"},
         audit_status=effect_cache.AUDIT_PASSED,
     )
-    # Simulate the stale row: the write-side strip did not know the keys yet.
     cached.details = {**(cached.details or {}), "pause_effective": True, "auto_expiry": True}
     session.flush()
     _, _, _, details, _, _, _ = _resolve(session, _item(cached, needs_audit=False))
@@ -233,9 +204,6 @@ def test_plain_hit_launders_a_stale_deployment_plane_key(clean_effects):
 
 @requires_postgres
 def test_self_hit_round_trip_keeps_the_claim_qualifier(clean_effects):
-    """End to end across the two fixed layers: producing write → plain self-hit
-    rewrite → minted claim. The published claim must still carry the synthesis
-    qualifier the transcript recorded."""
     session = clean_effects
     common: dict[str, Any] = {
         "chain_id": 1,
@@ -246,9 +214,7 @@ def test_self_hit_round_trip_keeps_the_claim_qualifier(clean_effects):
         "verdict": "proven",
         "tier": "tier1",
     }
-    # Cold run: the probe seeded, and said so.
     record_effect_verdict(session, witness={"reason": "supply_burn", **FRESH_DETAILS}, **common)
-    # Later run: plain self-hit serves the code-plane payload.
     cached = _cache_row(
         session,
         details=effect_cache.code_plane_details({"reason": "supply_burn", **FRESH_DETAILS}),

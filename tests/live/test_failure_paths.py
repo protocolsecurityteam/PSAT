@@ -1,5 +1,3 @@
-"""End-to-end failure surfacing — asserts job.error/detail populate on guaranteed-fail inputs."""
-
 from __future__ import annotations
 
 import time
@@ -8,9 +6,8 @@ import pytest
 
 from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT, LiveClient
 
-# Burn address: Etherscan returns "No verified source code"; discovery raises (services/clients/etherscan.py:182).
 NO_CODE_ADDRESS = "0x0000000000000000000000000000000000000000"
-# Non-trivial-looking undeployed address — guards against tests that only pass for the zero case.
+# Guards against tests that only pass for the zero address.
 UNVERIFIED_ADDRESS = "0xDeAdBeefDeadBeefDEADbEEFdEadbeEFDEADBeef"
 
 # Both deterministic-from-the-start failures resolve to ``JobStatus.failed_terminal``
@@ -39,7 +36,6 @@ def test_unverified_contract_fails_cleanly(live_client: LiveClient):
         f"stage={final['stage']} error={final.get('error')}"
     )
     assert final.get("error"), "failed job must populate error field for the frontend to display"
-    # detail is set by db.queue.fail_job — confirms the canonical failure path ran.
     assert final.get("detail"), "failed job must populate detail field"
 
 

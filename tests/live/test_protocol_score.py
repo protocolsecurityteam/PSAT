@@ -1,8 +1,4 @@
-"""The score endpoint and the score loop's liveness, on a deployed preview (read-only, idempotent).
-
-Endpoint tests SKIP when no fold has landed yet (a 404 is then correct). The shape is never skipped: once a
-score exists, the ledger payload's keys and three-state fields must be present, because a consumer branches on them.
-"""
+"""Endpoint tests skip until a fold has landed, but once a score exists its three-state fields are never skipped."""
 
 from __future__ import annotations
 
@@ -28,15 +24,10 @@ PERIMETER_STATES = {"settled", "unsettled", "not_determined"}
 
 
 def _score_or_skip(live_client: LiveClient) -> dict:
-    """The score, or a skip — but ONLY for the legitimate 404.
-
-    The endpoint 404s for an unknown protocol and for one with no fold yet. Skipping on the first would turn a missing
-    test company (a real failure) into a green run, so existence is checked against another endpoint first.
-    """
+    """Skipping on an unknown-protocol 404 would turn a missing test company green, so existence is checked first."""
     response = live_client.company_score(DEFAULT_TEST_COMPANY)
     if response.status_code == 404:
-        # ``/audits`` resolves the company the same way and answers in bytes
-        # rather than the overview's 1-3 MB.
+        # ``/audits`` resolves the company the same way at a fraction of the payload.
         probe = live_client._session.get(live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}/audits"), timeout=30)
         assert probe.status_code == 200, (
             f"'{DEFAULT_TEST_COMPANY}' does not exist on this deployment "
@@ -79,7 +70,6 @@ def test_score_unknown_company_returns_a_distinguishable_404(live_client: LiveCl
 
 
 def test_score_loop_heartbeat_is_present(live_client: LiveClient):
-    """The fold is a supervised thread; without a beat it is running unwatched."""
     daemons = live_client.fleet().get("daemons") or []
     entry = next((d for d in daemons if d.get("process") == "protocol_score"), None)
     assert entry is not None, f"protocol_score absent from /api/fleet daemons: {[d.get('process') for d in daemons]}"

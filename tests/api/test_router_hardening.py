@@ -1,10 +1,3 @@
-"""Hardening for the public/admin routers: bounded pagination, guarded UUID
-parsing, and no exception-string leakage to clients.
-
-Covers routers/monitored.py, routers/protocols.py, routers/agent.py, and
-routers/analyses.py.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -15,9 +8,6 @@ import requests
 from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
-
-
-# --- Bounded pagination (FINDING 7) -----------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -33,12 +23,6 @@ pytestmark = [requires_postgres]
 def test_events_limit_bounds(api_client, path, limit, expected):
     resp = api_client.get(path, params={"limit": limit})
     assert resp.status_code == expected
-
-
-# --- Malformed-address contract on /api/analyze ------------------------------
-
-
-# --- Guarded UUID parsing (FINDING 15) --------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -62,8 +46,6 @@ def test_unknown_or_malformed_uuid_is_404(api_client, method, path, kwargs):
 
 
 def test_monitored_events_bad_contract_id_is_422_not_500(api_client):
-    """``contract_id`` is a UUID column; a malformed value must be rejected
-    before it reaches the DB (public endpoint)."""
     resp = api_client.get("/api/monitored-events", params={"contract_id": "not-a-uuid"})
     assert resp.status_code == 422
 
@@ -72,9 +54,6 @@ def test_monitored_events_valid_contract_id_absent_is_empty(api_client):
     resp = api_client.get("/api/monitored-events", params={"contract_id": str(uuid.uuid4())})
     assert resp.status_code == 200
     assert resp.json() == []
-
-
-# --- No exception-string leakage (FINDING 14) -------------------------------
 
 
 def test_agent_stream_error_is_generic(api_client, monkeypatch):
@@ -95,8 +74,6 @@ def test_agent_stream_error_is_generic(api_client, monkeypatch):
 
 
 def test_analysis_artifact_not_determined_reason_is_generic(api_client, db_session, monkeypatch):
-    """When the storage read is not-determined, the 503 body names the artifact
-    but never carries the raw exception type+message."""
     from db.models import Job, JobStatus
     from db.storage import StorageKeyAbsent
 
@@ -127,8 +104,6 @@ def test_analysis_artifact_not_determined_reason_is_generic(api_client, db_sessi
 
 
 def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_session, monkeypatch):
-    """The upgrade-history absence reason for an unreadable ``stage_errors``
-    read must not carry the raising exception's class name into the client."""
     from db.models import Contract, Job, JobStatus
 
     secret = "boto3.ClientError: connection to internal-bucket refused"
@@ -140,8 +115,7 @@ def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_ses
     )
     db_session.add(job)
     db_session.flush()
-    # Non-proxy, self-consistent → the reason falls through to the
-    # stage_errors read, which we force to raise.
+    # Non-proxy and self-consistent, so the reason falls through to the forced stage_errors read.
     contract = Contract(
         job_id=job.id,
         address="0x" + "f0" * 20,
@@ -172,16 +146,12 @@ def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_ses
         db_session.commit()
 
 
-# --- Unbounded PDF proxy response body (FINDING F4) -------------------------
-#
-# ``GET /api/audits/{audit_id}/pdf`` is a PUBLIC route whose upstream ``url`` is
-# crawler/LLM-sourced. It must stream with a content-type gate and a hard byte
-# cap so a seeded URL at a large or non-PDF public file can't OOM the web VM.
+# The public PDF route's ``url`` is crawler/LLM-sourced, so it must stream with a content-type gate and byte cap or a
+# seeded URL could OOM the web VM.
 
 
 class _FakeStreamResponse:
-    """Minimal stand-in for a streamed ``requests.Response``; ``iter_content`` records how many
-    chunks were consumed so a test can prove the route aborts an oversized body early."""
+    """``consumed`` proves the route aborts an oversized body early."""
 
     def __init__(self, *, content_type, chunks, status=200):
         self.headers = {"content-type": content_type}
@@ -205,11 +175,6 @@ class _FakeStreamResponse:
 
 @pytest.fixture
 def audit_pdf_row(db_session):
-    """A committed ``AuditReport`` (+ owning ``Protocol``) with a public pdf_url.
-
-    Yields the audit id; deletes both rows on teardown so the route test is
-    hermetic and leaves no cross-test residue.
-    """
     from db.models import AuditReport, Protocol
 
     protocol = Protocol(name="__hardening_pdf_proxy__")
@@ -248,8 +213,6 @@ def test_audit_pdf_small_pdf_is_served(api_client, audit_pdf_row, monkeypatch):
 
 
 def test_audit_pdf_non_pdf_content_type_is_rejected(api_client, audit_pdf_row, monkeypatch):
-    """A present-but-wrong content-type (HTML error page) is refused, and the
-    body is never returned to the client."""
     html = b"<html><body>not a pdf</body></html>"
     resp_obj = _FakeStreamResponse(content_type="text/html", chunks=[html])
     monkeypatch.setattr("utils.egress.safe_get", lambda *a, **k: resp_obj)
@@ -262,16 +225,12 @@ def test_audit_pdf_non_pdf_content_type_is_rejected(api_client, audit_pdf_row, m
 
 
 def test_audit_pdf_oversized_body_is_capped_not_buffered(api_client, audit_pdf_row, monkeypatch):
-    """A body exceeding the cap is aborted mid-stream: the route errors and does
-    NOT buffer/return the oversized content."""
-    # Shrink the shared cap so the test stays light; the route imports the
-    # constant at call time, so patching the source module is enough.
+    # The route reads the constant at call time, so patching the source module is enough.
     monkeypatch.setattr("services.audits.text_extraction._MAX_PDF_BYTES", 1000)
 
     chunk = b"x" * 400
 
     def _huge_chunks():
-        # Would yield 40KB if fully consumed; the route must stop well before.
         for _ in range(100):
             yield chunk
 
@@ -281,14 +240,11 @@ def test_audit_pdf_oversized_body_is_capped_not_buffered(api_client, audit_pdf_r
     resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
     assert resp.status_code == 502
     assert len(resp.content) < 1000  # oversized body was not returned
-    # Aborted after crossing the cap (1000 / 400 -> 3 chunks), not after all 100.
     assert resp_obj.consumed <= 4
     assert resp_obj.closed is True
 
 
 def test_audit_pdf_error_does_not_leak_upstream_url_or_error(api_client, audit_pdf_row, monkeypatch):
-    """No error path echoes the upstream URL or raw exception text into the
-    response body (witness discipline / findings #14-15)."""
     from utils.egress import UnsafeUrlError
 
     secret_url = "https://example.com/report.pdf"

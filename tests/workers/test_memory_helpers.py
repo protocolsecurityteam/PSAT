@@ -1,9 +1,4 @@
-"""Tests for utils/memory.py — the introspection helpers wired into BaseWorker.
-
-These deliberately don't assert exact RSS values (host-dependent); they just
-pin behaviour: helpers don't crash on dev hosts (no cgroup v2), the cache-
-pressure message fires once per threshold and resets cleanly.
-"""
+"""RSS values are host-dependent, so these pin behaviour, not numbers."""
 
 from __future__ import annotations
 
@@ -28,11 +23,9 @@ from utils.memory import (
 
 
 def test_rss_bytes_for_pid_live_and_dead():
-    # This process is alive → a real value on Linux, 0 on non-Linux; a pid that
-    # cannot exist → 0 without raising.
+    # 0 on non-Linux.
     assert rss_bytes_for_pid(os.getpid()) >= 0
     assert rss_bytes_for_pid(-1) == 0
-    # A pid well past any plausible live process: gone → /proc/<pid>/status absent.
     assert rss_bytes_for_pid(2**31 - 1) == 0
 
 
@@ -55,15 +48,13 @@ def test_vmrss_bytes_parses_fixture_and_tolerates_missing(tmp_path):
     status = tmp_path / "status"
     status.write_text("Name:\tanvil\nVmPeak:\t  200000 kB\nVmRSS:\t   13648 kB\n")
     assert _vmrss_bytes(status) == 13648 * 1024
-    # No VmRSS line → 0; unreadable path → 0 (never raises).
     (tmp_path / "no_rss").write_text("Name:\tanvil\n")
     assert _vmrss_bytes(tmp_path / "no_rss") == 0
     assert _vmrss_bytes(tmp_path / "does_not_exist") == 0
 
 
 def test_cgroup_helpers_dont_crash_on_dev_host():
-    # On a dev host without cgroup v2 these all return None or 0.
-    # On a Fly machine they return ints. Both are fine.
+    # None or 0 on a dev host without cgroup v2; ints on Fly.
     cgroup_memory_max_bytes()  # no exception
     anon, file = cgroup_anon_file_bytes()
     assert anon is None or anon >= 0
@@ -108,9 +99,7 @@ def test_cache_pressure_skips_to_top_threshold():
 @pytest.mark.parametrize(
     ("reset_arg", "y_level", "y_fires_again"),
     [
-        # Only 'x' was reset — 'y' still suppressed.
         pytest.param("x", 60, False, id="per_name"),
-        # Both should fire again.
         pytest.param(None, 50, True, id="all"),
     ],
 )
@@ -126,6 +115,6 @@ def test_reset_cache_pressure_state(reset_arg, y_level, y_fires_again):
 
 
 def test_cache_pressure_handles_zero_max():
-    # max_size=0 used to be a divide-by-zero — must return None safely.
+    # max_size=0 used to divide by zero.
     assert cache_pressure_message("zero_cache", 0, 0) is None
     assert cache_pressure_message("zero_cache", 5, 0) is None

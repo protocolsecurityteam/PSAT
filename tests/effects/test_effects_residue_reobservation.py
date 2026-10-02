@@ -1,12 +1,8 @@
-"""Effects worker: state-plane residue on cache HITS + the empty-planning marker.
+"""State-plane residue on cache hits, and the empty-planning marker.
 
-1. A verdict row whose FIRST write is a cache hit never gets state-plane residue: the hit is right
-   for the code plane, but ``concrete_destination`` / ``current_check_passed`` describe THIS
-   deployment and a hit carries neither, so the row stays blank on every later hit.
-2. A swept contract that yields no plans writes no verdict and (with no job of its own) no stage
-   artifact, so selection re-sweeps it from every later job.
-For (1) the CACHE still decides the verdict; nothing an observation saw is written back to
-``effect_behavior_cache``.
+A verdict whose first write is a cache hit never got per-deployment residue; and a contract that yields no plans
+wrote nothing, so every later job re-swept it. The cache still decides the verdict, and nothing observed is
+written back to it.
 """
 
 from __future__ import annotations
@@ -157,8 +153,7 @@ def _run(worker, session, job) -> tuple[list, dict]:
 
 
 class _CountingProber:
-    """One plan per candidate. ``runs`` counts every ``run()`` so "no extra
-    observation" is checkable, not asserted by inspection."""
+    """``runs`` makes "no extra observation" checkable."""
 
     def __init__(self, factory, *, effect_class=EFFECT_CLASS_VALUE_OUT, gate_ref="role:X", plans_per_candidate=1):
         self.factory = factory
@@ -179,9 +174,7 @@ class _CountingProber:
 
 
 def _seed_cache(session, *, effect_class, verdict=VERDICT_PROVEN, tier=TIER_CALL, gate_ref="role:X", details=None):
-    """A pre-existing, already-audited cache row: the second deployment of a
-    behavior another contract cached. ``audit_status`` set ⇒ a PLAIN hit, not the
-    self-audit re-simulation."""
+    """``audit_status`` set means a plain hit, not a self-audit."""
     row = upsert_cached_verdict(
         session,
         behavior_hash=BEHAVIOR_HASH,
@@ -209,11 +202,6 @@ def _value_out_effect(destination: str | None = DESTINATION):
     )
 
 
-# ---------------------------------------------------------------------------
-# 1. The gap: a hit whose persisted row has no residue acquires it.
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_first_write_is_a_hit_and_still_acquires_residue(clean_effects, monkeypatch):
     session = clean_effects
@@ -233,7 +221,6 @@ def test_first_write_is_a_hit_and_still_acquires_residue(clean_effects, monkeypa
 
     row = session.query(EffectVerdict).one()
     assert row.concrete_destination == DESTINATION
-    # ...and the VERDICT is still the cache's, not the observation's.
     assert (row.verdict, row.tier, row.witness) == (cached.verdict, cached.tier, cached.details)
     assert metrics["cache_hits_kernel"] == 1
     assert metrics["cache_misses"] == 0
@@ -243,8 +230,6 @@ def test_first_write_is_a_hit_and_still_acquires_residue(clean_effects, monkeypa
 
 @requires_postgres
 def test_residue_observation_never_writes_to_the_behavior_cache(clean_effects, monkeypatch):
-    """The observation is per-deployment state. Nothing it saw may enter
-    the code-plane cache, and the hit must not be recounted as a miss."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-inv3")
@@ -275,8 +260,6 @@ def test_residue_observation_never_writes_to_the_behavior_cache(clean_effects, m
 
 @requires_postgres
 def test_hit_whose_row_already_has_residue_triggers_no_observation(clean_effects, monkeypatch):
-    """The scoping that keeps this affordable: a row that already carries the
-    value needs nothing, so the plan is never run."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-already")
@@ -315,8 +298,7 @@ def test_hit_whose_row_already_has_residue_triggers_no_observation(clean_effects
 
 @requires_postgres
 def test_unknown_value_out_hit_is_not_re_observed(clean_effects, monkeypatch):
-    """``value_out`` records a destination only on the proven branch, so probing
-    an unknown hit would burn two simulations for a guaranteed NULL."""
+    """``value_out`` records a destination only when proven, so probing an unknown hit wastes two simulations."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-unknown")
@@ -338,8 +320,6 @@ def test_unknown_value_out_hit_is_not_re_observed(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_class_without_storable_residue_is_not_re_observed(clean_effects, monkeypatch):
-    """``authority_change`` emits no ``concrete`` at all — there is nothing to go
-    and get, so it must never pay for a probe."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-noclass")
@@ -362,9 +342,7 @@ def test_class_without_storable_residue_is_not_re_observed(clean_effects, monkey
 
 
 def test_code_upgrade_residue_branch_is_unreachable_and_gone():
-    """``_residue_observable``'s ``code_upgrade`` arm required ``TIER_HISTORICAL``, but
-    ``_is_cacheable`` never caches Tier-0 verdicts, so it was dead code and was REMOVED; this pins
-    the premise so a change to either side is caught."""
+    """Tier-0 verdicts are never cached, so that arm was dead and removed; this pins the premise."""
     historical = proven(
         EFFECT_CLASS_CODE_UPGRADE,
         tier=TIER_HISTORICAL,
@@ -386,10 +364,7 @@ def test_code_upgrade_residue_branch_is_unreachable_and_gone():
 
 
 def test_a_caller_arbitrary_hit_is_never_re_probed_for_a_destination(clean_effects):
-    """Consumer half of the withheld-destination rule. The recipe WITHHOLDS ``concrete_destination``
-    on a ``caller_arbitrary`` shape (a probe only sees its own supplied recipient). That deliberate
-    NULL must not read as "no residue yet", or every such deployment burns its re-probe budget
-    (2 Tier-1 probes) chasing a value this stage refuses to store. Other shapes stay observable."""
+    """A withheld destination must not read as "no residue yet", or every such deployment burns its re-probe budget."""
     session = clean_effects
     arbitrary = _seed_cache(
         session,
@@ -408,7 +383,6 @@ def test_a_caller_arbitrary_hit_is_never_re_probed_for_a_destination(clean_effec
             details={"destination_shape": shape},
         )
         assert _residue_observable(row, EFFECT_CLASS_VALUE_OUT) is True
-    # A details-less row (a class that publishes no shape) keeps the old answer.
     bare = EffectBehaviorCache(
         behavior_hash=BEHAVIOR_HASH,
         effect_class=EFFECT_CLASS_VALUE_OUT,
@@ -428,10 +402,7 @@ class _BoomProber:
 @pytest.mark.parametrize(
     ("destination", "jobs", "expected_runs", "expected_destination", "expected_residue"),
     [
-        # A behavior proven IN THE CACHE that THIS deployment cannot reproduce leaves
-        # ``concrete_destination`` NULL forever. Re-flagging on "still NULL" alone re-probed it on
-        # every job of every run; the stored attempt count bounds it at
-        # ``_RESIDUE_PROBE_MAX_ATTEMPTS``.
+        # A cached behavior this deployment can't reproduce stays NULL, so the attempt count bounds re-probing.
         pytest.param(
             None,
             4,
@@ -440,8 +411,6 @@ class _BoomProber:
             {"destination_probe_attempts": _RESIDUE_PROBE_MAX_ATTEMPTS},
             id="bounded-per-deployment",
         ),
-        # The bound never costs a real observation: a probe that resolves the destination closes
-        # the gap on the first attempt and is not re-run.
         pytest.param(DESTINATION, 3, 1, DESTINATION, {"destination_probe_attempts": 1}, id="success-stops-immediately"),
     ],
 )
@@ -473,8 +442,6 @@ def test_residue_reprobe_attempts(
 
 @requires_postgres
 def test_residue_observation_smuggles_nothing_but_its_own_key(clean_effects, monkeypatch):
-    """The observation is a whitelist, not a passthrough: a value_out probe may
-    contribute a destination and nothing else."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-whitelist")
@@ -500,8 +467,6 @@ def test_residue_observation_smuggles_nothing_but_its_own_key(clean_effects, mon
 
 @requires_postgres
 def test_observation_that_yields_nothing_leaves_the_verdict_untouched(clean_effects, monkeypatch):
-    """A destination the probe could not resolve stays NULL — and must not
-    disturb the cached verdict on its way out."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-empty")
@@ -523,8 +488,7 @@ def test_observation_that_yields_nothing_leaves_the_verdict_untouched(clean_effe
 
 @requires_postgres
 def test_failed_residue_observation_does_not_disturb_the_cached_verdict(clean_effects, monkeypatch):
-    """Fail-forward: the observation is best-effort. A raising probe is
-    recorded degraded and the cached verdict persists exactly as it would have."""
+    """Fail-forward: a raising probe is recorded degraded."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-boom")
@@ -571,14 +535,11 @@ def test_kill_valve_restores_the_previous_behavior(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_audit_path_residue_is_taken_for_free(clean_effects, monkeypatch):
-    """A self-audit hit already re-simulated this deployment, so its residue
-    costs nothing extra — and the verdict still comes from the cache."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "residue-audit")
     cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])
     monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
-    # audit_status left None ⇒ this hit triggers the self-audit re-simulation.
     cached = upsert_cached_verdict(
         session,
         behavior_hash=BEHAVIOR_HASH,
@@ -604,14 +565,12 @@ def test_audit_path_residue_is_taken_for_free(clean_effects, monkeypatch):
     assert row.concrete_destination == DESTINATION
     assert (row.verdict, row.tier, row.witness) == (cached_verdict, cached_tier, cached_details)
     assert metrics["cache_hits_kernel"] == 1
-    # The audit's own re-simulation — NOT a second, residue-only run.
     assert prober.runs == [fns[CONTRACT_A]]
 
 
 @requires_postgres
 def test_residue_gap_lookup_is_one_query_for_the_whole_worklist(clean_effects):
-    """The check that gates the observation must not reintroduce the N+1 the
-    ``cache_lookup`` batching just removed."""
+    """Must not reintroduce the N+1 the batching removed."""
     session = clean_effects
     _pid, fns, _cids = _protocol_with_functions(session, [CONTRACT_A, CONTRACT_B])
     for addr in (CONTRACT_A, CONTRACT_B):
@@ -656,11 +615,6 @@ def test_residue_gap_lookup_is_one_query_for_the_whole_worklist(clean_effects):
     assert ("0x" + "ee" * 20, SELECTOR, EFFECT_CLASS_VALUE_OUT) not in got
 
 
-# ---------------------------------------------------------------------------
-# 2. The empty-planning marker.
-# ---------------------------------------------------------------------------
-
-
 def _marker_for(session, contract_id: int) -> EffectsPlanMarker | None:
     return session.query(EffectsPlanMarker).filter(EffectsPlanMarker.contract_id == contract_id).one_or_none()
 
@@ -696,9 +650,7 @@ def test_contract_that_yields_no_plans_is_recorded_as_planned(clean_effects, mon
 
 @requires_postgres
 def test_contract_that_yields_plans_is_not_marked(clean_effects, monkeypatch):
-    """A contract that produced plans is already marked by the verdicts they
-    write. Marking it here would claim coverage for a job that could still die
-    before writing them."""
+    """Marking here would claim coverage for a job that could still die."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "marker-plans")
@@ -717,9 +669,7 @@ def test_contract_that_yields_plans_is_not_marked(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_unresolvable_candidate_blocks_the_marker(clean_effects, monkeypatch):
-    """A candidate skipped for a missing behavioral hash is a TRANSIENT failure.
-    Marking the contract would suppress the retry — coverage loss disguised as a
-    perf win, the one direction this must not have."""
+    """A missing behavioral hash is transient; a marker would suppress the retry."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "marker-skip")
@@ -741,8 +691,7 @@ def test_unresolvable_candidate_blocks_the_marker(clean_effects, monkeypatch):
     ("prober", "env"),
     [
         pytest.param(_BoomProber(), {}, id="raising-prober"),
-        # With Tier 2 off the pause plans never build, so an empty result is an artefact of the
-        # switch rather than a fact about the contract.
+        # With Tier 2 off, an empty result is an artefact of the switch.
         pytest.param(_NoPlanProber(), {"PSAT_EFFECTS_FORK": "0"}, id="fork-disabled"),
     ],
 )
@@ -766,8 +715,6 @@ def test_marker_blocked(clean_effects, monkeypatch, prober, env):
 
 @requires_postgres
 def test_a_partly_unplannable_contract_is_not_marked(clean_effects, monkeypatch):
-    """One resolvable candidate yielding nothing does NOT license a marker while
-    a sibling candidate on the same contract could not be resolved at all."""
     session = clean_effects
     proto = Protocol(name=f"effects-residue-{uuid.uuid4().hex[:8]}")
     session.add(proto)
@@ -804,8 +751,6 @@ def test_a_partly_unplannable_contract_is_not_marked(clean_effects, monkeypatch)
 
 @requires_postgres
 def test_marker_is_refreshed_by_a_later_empty_pass(clean_effects, monkeypatch):
-    """Idempotent by contract: the newest empty pass is the one the freshness
-    rule compares against, so a second run refreshes rather than duplicates."""
     session = clean_effects
     pid, fns, cids = _protocol_with_functions(session, [CONTRACT_A])
     cand = _candidate(CONTRACT_A, fns[CONTRACT_A], cids[CONTRACT_A])

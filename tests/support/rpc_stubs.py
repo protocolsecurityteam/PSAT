@@ -1,10 +1,3 @@
-"""Canned JSON-RPC wire stub for the one-shot latch tests.
-
-Lived in ``tests/resolution/test_one_shot_probe.py`` and was imported cross-module by
-``tests/resolution/test_one_shot_latch_witness.py``; hoisted here so neither test module
-imports the other.
-"""
-
 from __future__ import annotations
 
 _ZERO = "0x" + "0" * 64
@@ -15,9 +8,7 @@ def _word(value: int) -> str:
 
 
 class FakeRpc:
-    """Canned JSON-RPC: ``storage[(address, slot)]`` and ``calls[(address,
-    selector)]`` drive eth_getStorageAt / eth_call; everything else reads
-    zero / empty."""
+    """Everything not in ``storage`` / ``calls`` reads zero or empty."""
 
     def __init__(self, storage=None, calls=None):
         self.storage = storage or {}

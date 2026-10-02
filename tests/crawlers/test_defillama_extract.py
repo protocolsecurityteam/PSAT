@@ -1,5 +1,3 @@
-"""Tests for contract address extraction from adapter source files."""
-
 import tempfile
 from pathlib import Path
 

@@ -53,7 +53,6 @@ def test_etherscan_outside_collection_keeps_existing_retry_policy(monkeypatch):
     monkeypatch.setattr(etherscan, "_get_api_key", lambda: "test-key")
     monkeypatch.setattr(etherscan, "_wait_rate_limit", lambda: waits.append(1))
     monkeypatch.setattr(etherscan.time, "sleep", lambda _: None)
-    # A finished collection must not leave its exhausted budget on other stages.
     with request_budget(RequestBudget(limit=0)), pytest.raises(RequestBudgetExceeded):
         etherscan.get("account", "balance", chain_id=1, address="0x" + "1" * 40)
     waits.clear()

@@ -1,9 +1,3 @@
-"""Unit tests for ``services.audits.source_equivalence`` internals: Etherscan verified-source parsing, GitHub raw
-fetch guards, candidate-path generation and the ``verify_audit_covers_impl`` statuses. DB-integrated coverage
-behaviour is in ``test_audit_coverage.py``. No DB or network; ``requests.get`` and
-``services.clients.etherscan.get`` are stubbed at module scope.
-"""
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -27,25 +21,17 @@ from services.audits.source_equivalence import (
 
 @pytest.fixture(autouse=True)
 def _clear_lru_cache():
-    """The process-global cache is ``_fetch_github_raw_hash`` (``_fetch_github_raw``
-    itself is uncached). Stale hash hits would poison tests that stub
-    ``requests.get`` / ``_fetch_github_raw`` for the same URL."""
+    """Stale hash hits would poison tests that stub the same URL."""
     _fetch_github_raw_hash.cache_clear()
     yield
     _fetch_github_raw_hash.cache_clear()
-
-
-# ---------------------------------------------------------------------------
-# extract_reviewed_commits — filter rules beyond what test_audit_coverage covers
-# ---------------------------------------------------------------------------
 
 
 class TestExtractReviewedCommitsFilters:
     @pytest.mark.parametrize(
         "text, expected",
         [
-            # Alternations like ``ababab`` pass the hex-letter check but are noise; covers the
-            # ``len(set(token)) < 3`` guard.
+            # Covers the ``len(set(token)) < 3`` guard.
             pytest.param("noise abababab more", [], id="rejects-token-with-fewer-than-three-unique-chars"),
             pytest.param(
                 "noise abababab real 1a2b3c4d", ["1a2b3c4d"], id="rejects-low-entropy-token-but-keeps-real-sha"
@@ -61,15 +47,8 @@ class TestExtractReviewedCommitsFilters:
         assert extract_reviewed_commits(text) == expected
 
 
-# ---------------------------------------------------------------------------
-# fetch_etherscan_source_files — happy path, empty, and Etherscan failure
-# ---------------------------------------------------------------------------
-
-
 class TestFetchEtherscanSourceFiles:
-    """``services.discovery`` re-exports ``fetch``, shadowing the submodule, so patch via the submodule object loaded
-    through ``importlib``; ``etherscan.get`` is patched at the submodule level for consistency.
-    """
+    """``services.discovery`` re-exports ``fetch``, shadowing the submodule, so patch via ``importlib``."""
 
     def test_returns_verified_source_for_successful_getsourcecode(self, monkeypatch):
         import importlib
@@ -97,7 +76,6 @@ class TestFetchEtherscanSourceFiles:
         assert got.source.files == {"LiquidityPool.sol": _hash_source_text(content)}
 
     def test_returns_unverified_when_parse_sources_empty(self, monkeypatch):
-        """Unverified contracts surface as status='unverified' so coverage can emit ``etherscan_unverified``."""
         import importlib
 
         fetch_module = importlib.import_module("services.discovery.fetch")
@@ -113,9 +91,7 @@ class TestFetchEtherscanSourceFiles:
         assert got.status == "unverified"
 
     def test_returns_fetch_failed_when_etherscan_raises(self, monkeypatch):
-        """Any Etherscan exception (rate limit, network, malformed) becomes status='fetch_failed' so the retry sweep
-        knows it's transient.
-        """
+        """``fetch_failed`` tells the retry sweep it's transient."""
         import importlib
 
         def boom(*_a, **_k):
@@ -129,11 +105,6 @@ class TestFetchEtherscanSourceFiles:
         assert "etherscan down" in got.detail
 
 
-# ---------------------------------------------------------------------------
-# fetch_db_source_files — DB-lookup helper (no Etherscan call)
-# ---------------------------------------------------------------------------
-
-
 def _raises_db_gone(*_a, **_k):
     raise RuntimeError("DB gone")
 
@@ -142,13 +113,9 @@ class TestFetchDbSourceFilesShortCircuits:
     @pytest.mark.parametrize(
         "contract_exists, job_id, get_source_files",
         [
-            # Session.get returning None: the contract doesn't exist, so no source lookup is attempted.
             pytest.param(False, None, None, id="contract-missing"),
-            # Contract exists but was never analyzed (job_id NULL): caller falls back to Etherscan.
             pytest.param(True, None, None, id="contract-has-no-job-id"),
-            # DB errors during source-file fetch must not bubble; degrade to the Etherscan fallback.
             pytest.param(True, "job-id", _raises_db_gone, id="get-source-files-raises"),
-            # Job completed but no SourceFile rows: same as job_id=None.
             pytest.param(True, "job-id", lambda *_a, **_k: {}, id="no-source-files-rows"),
         ],
     )
@@ -160,12 +127,6 @@ class TestFetchDbSourceFilesShortCircuits:
         if get_source_files is not None:
             monkeypatch.setattr(importlib.import_module("db.queue"), "get_source_files", get_source_files)
         assert fetch_db_source_files(session, 1) is None
-
-
-# ---------------------------------------------------------------------------
-# _fetch_github_raw — HTTP contract boundaries (uncached worker; the hash-level
-# LRU it feeds is cleared per test by the autouse fixture)
-# ---------------------------------------------------------------------------
 
 
 def _resp(
@@ -195,24 +156,21 @@ class TestFetchGithubRaw:
         "fake_get, expected_content, expected_status",
         [
             pytest.param(lambda *_a, **_k: _resp(status_code=404, text="Not Found"), None, "http_404", id="404"),
-            # Distinguishes transient server errors from permanent 404s so the retry sweep retries it.
             pytest.param(lambda *_a, **_k: _resp(status_code=503, text="Unavailable"), None, "http_5xx", id="5xx"),
             pytest.param(_raising_get(requests.ConnectionError("timeout")), None, "transport_error", id="network"),
-            # An image/pdf at the conventional path would poison hashes; rejected without parsing the body.
+            # An image/pdf at the path would poison hashes.
             pytest.param(
                 lambda *_a, **_k: _resp(content_type="image/png", text="binary"),
                 None,
                 "content_type_rejected",
                 id="binary-content-type-rejected",
             ),
-            # Some raw-content CDNs serve source as octet-stream; the guard explicitly allows it.
             pytest.param(
                 lambda *_a, **_k: _resp(content_type="application/octet-stream", text="contract X {}"),
                 "contract X {}",
                 "ok",
                 id="octet-stream-accepted",
             ),
-            # A 6MB response almost certainly isn't a single Solidity file.
             pytest.param(
                 lambda *_a, **_k: _resp(
                     content_type="text/plain", content_bytes=b"x" * (6 * 1024 * 1024), text="x" * 10
@@ -230,8 +188,6 @@ class TestFetchGithubRaw:
         assert got.status == expected_status
 
     def test_authorization_header_set_when_token_provided(self, monkeypatch):
-        """Private repos require ``token ghp_...``. Verify the header
-        actually reaches requests.get so rate-limit-evaders work."""
         captured = {}
 
         def capture(url, headers=None, timeout=None):
@@ -243,22 +199,14 @@ class TestFetchGithubRaw:
         assert captured["headers"].get("Authorization") == "token secret-token"
 
 
-# ---------------------------------------------------------------------------
-# _fetch_github_raw — retry-with-backoff on transient transport failures.
-#
-# Same root-cause pattern as services.audits.text_extraction: prod observed
-# bursts of ConnectionResetError(104) from raw.githubusercontent.com that
-# turned every flake into a permanent ``transport_error``. Retry runs inside
-# the worker so its outcome is settled *before* the hash-level cache memoizes
-# it — otherwise a single flake would poison the URL for the worker's life.
-# ---------------------------------------------------------------------------
+# Prod saw bursts of ConnectionResetError(104) from raw.githubusercontent.com. Retry runs before the hash cache
+# memoizes, or one flake would poison the URL for the worker's life.
 
 
 class TestFetchGithubRawRetry:
     @pytest.mark.parametrize(
         "first_failure, body",
         [
-            # First call RSTs (the prod failure mode), second succeeds: cache the success, not the flake.
             pytest.param(
                 lambda: requests.exceptions.ConnectionError(
                     "Connection aborted.", ConnectionResetError(104, "Connection reset by peer")
@@ -266,9 +214,7 @@ class TestFetchGithubRawRetry:
                 "contract X { function f() public {} }",
                 id="connection-error",
             ),
-            # 503 is transient: retry rather than memoize as ``http_5xx``.
             pytest.param(lambda: _resp(status_code=503, text="Unavailable"), "contract Y {}", id="5xx"),
-            # Slow CDNs surface as ReadTimeout rather than ConnectionError; same treatment.
             pytest.param(lambda: requests.exceptions.ReadTimeout("read timed out"), "contract Z {}", id="read-timeout"),
         ],
     )
@@ -313,8 +259,6 @@ class TestFetchGithubRawRetry:
         assert calls["n"] == 3
 
     def test_404_does_not_retry(self, monkeypatch):
-        """404 means the path is genuinely missing — retrying just wastes
-        the budget. Stays terminal."""
         monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
 
         calls = {"n": 0}
@@ -330,10 +274,6 @@ class TestFetchGithubRawRetry:
         assert calls["n"] == 1
 
     def test_success_after_retry_is_memoized_not_the_flake(self, monkeypatch):
-        """The retry is what makes the hash-level cache safe: without it a flake would be memoized as
-        ``transport_error`` for
-        the worker's life; with it the cache stores the successful content hash.
-        """
         monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
 
         calls = {"n": 0}
@@ -356,23 +296,15 @@ class TestFetchGithubRawRetry:
         assert first.status == "ok"
         assert second.status == "ok"
         assert first.sha256 == _hash_source_text("contract M {}")
-        # Cache hit on the second call: the worker (and requests.get) is not
-        # re-run — only the retried success was memoized, not the flake.
+        # Only the retried success was memoized.
         assert calls["n"] == 2
 
 
-# ---------------------------------------------------------------------------
-# _fetch_github_raw_hash — the process-global cache. It memoizes the content
-# hash (not the file body), so its 4096-entry lru_cache cap is a real memory
-# bound: each row is fixed-size regardless of source-file size.
-# ---------------------------------------------------------------------------
+# The cache holds the content hash, not the body, so its 4096-entry cap is a real memory bound.
 
 
 class TestFetchGithubRawHashCaching:
     def test_caches_content_hash_not_body(self, monkeypatch):
-        """A large body must reduce to its 64-char sha256 in the cache — the
-        raw text is never retained on the cached row (the ~1000× per-entry
-        shrink that bounds the cache)."""
         body = "contract X { /* " + ("A" * 200_000) + " */ }"
         monkeypatch.setattr(
             "services.audits.source_equivalence.requests.get",
@@ -391,7 +323,6 @@ class TestFetchGithubSourceHash:
     @pytest.mark.parametrize(
         "args, expected_sha, expected_status",
         [
-            # Missing repo, commit or path short-circuits with invalid_input and no HTTP fetch.
             pytest.param(("", "abc", "file.sol"), None, "invalid_input", id="missing-repo"),
             pytest.param(("r/n", "", "file.sol"), None, "invalid_input", id="missing-commit"),
             pytest.param(("r/n", "abc", ""), None, "invalid_input", id="missing-path"),
@@ -408,25 +339,18 @@ class TestFetchGithubSourceHash:
         assert got.status == expected_status
 
 
-# ---------------------------------------------------------------------------
-# _candidate_paths_for_name — Etherscan-first, conventional fallback
-# ---------------------------------------------------------------------------
-
-
 class TestCandidatePathsForName:
     @pytest.mark.parametrize(
         "name, paths, expected",
         [
-            # A bundle containing the basename verbatim returns THOSE paths: they reflect the real layout.
             pytest.param(
                 "MyPool",
                 ["contracts/pool/MyPool.sol", "contracts/utils/Other.sol"],
                 ["contracts/pool/MyPool.sol"],
                 id="prefers-matching-etherscan-paths",
             ),
-            # Flattened verifications don't carry the real tree; try ``src/`` and ``contracts/``.
+            # Flattened verifications don't carry the real tree.
             pytest.param("Vault", [], ["src/Vault.sol", "contracts/Vault.sol"], id="conventional-fallback"),
-            # ``.vy`` is the other accepted extension (Curve-style repos).
             pytest.param("pool", ["src/pool.vy"], ["src/pool.vy"], id="matches-vyper-files"),
         ],
     )
@@ -434,15 +358,8 @@ class TestCandidatePathsForName:
         assert _candidate_paths_for_name(name, paths) == expected
 
 
-# ---------------------------------------------------------------------------
-# verify_audit_covers_impl — one test per EquivalenceOutcome.status value
-# ---------------------------------------------------------------------------
-
-
 class TestVerifyAuditCoversImplStatuses:
-    """Each status in EQUIVALENCE_STATUSES maps to a specific failure mode
-    ``_apply_equivalence_http`` will persist on the coverage row. Pin each
-    so a refactor that loses a branch gets caught in CI."""
+    """Each status maps to a failure mode ``_apply_equivalence_http`` persists."""
 
     def _src(self, files: dict[str, str]) -> VerifiedSource:
         return VerifiedSource(contract_name="X", compiler_version="v0.8", files=files)
@@ -462,8 +379,7 @@ class TestVerifyAuditCoversImplStatuses:
         assert len(out.matches) == 1
 
     def test_candidate_path_absent_from_etherscan_bundle_never_fetches_github(self, monkeypatch):
-        """``src/Pool.sol`` / ``contracts/Pool.sol`` are absent from a bundle rooted
-        elsewhere: skip rather than false-positive, without a GitHub hash fetch."""
+        """Skip rather than false-positive, without a GitHub fetch."""
 
         def should_not_be_called(*_a, **_k):
             raise AssertionError("GitHub fetch must not run when path is absent from Etherscan")
@@ -497,8 +413,7 @@ class TestVerifyAuditCoversImplStatuses:
         assert "abc1234"[:8] in out.reason or "src/Pool.sol" in out.reason
 
     def test_commit_not_found_in_repo(self, monkeypatch):
-        """Every candidate path 404s AND the README probe 404s → commit
-        doesn't exist in the repo (audit-reference rot)."""
+        """Audit-reference rot."""
 
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail=f"{path} 404")
@@ -517,8 +432,7 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status == "commit_not_found_in_repo"
 
     def test_candidate_path_missing_when_commit_resolves(self, monkeypatch):
-        """File 404s but README probe succeeds → commit exists, our path
-        heuristic just missed (likely Etherscan flattened the source)."""
+        """The path heuristic missed, likely because Etherscan flattened the source."""
 
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail=f"{path} 404")
@@ -554,8 +468,6 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status == expected_status
 
     def test_github_fetch_failed_on_transient_errors(self, monkeypatch):
-        """Every attempt returns 5xx / transport error → classify as
-        github_fetch_failed so a retry sweep knows to re-run this row."""
 
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_5xx", detail=f"{path} 503")
@@ -568,11 +480,6 @@ class TestVerifyAuditCoversImplStatuses:
             source_repo="r/n",
         )
         assert out.status == "github_fetch_failed"
-
-
-# ---------------------------------------------------------------------------
-# extract_referenced_repos (Phase D)
-# ---------------------------------------------------------------------------
 
 
 class TestExtractReferencedRepos:
@@ -628,11 +535,6 @@ class TestExtractReferencedRepos:
         assert source_equivalence.extract_referenced_repos(text) == expected
 
 
-# ---------------------------------------------------------------------------
-# verify_audit_covers_impl fallback_repos (Phase D)
-# ---------------------------------------------------------------------------
-
-
 class TestFallbackReposBehavior:
     def _src(self, files):
         return source_equivalence.VerifiedSource(contract_name="X", compiler_version="v0.8", files=files)
@@ -666,8 +568,7 @@ class TestFallbackReposBehavior:
         assert "etherfi-protocol/smart-contracts" in calls
 
     def test_hash_mismatch_beats_commit_not_found(self, monkeypatch):
-        """When one repo returns hash_mismatch and another commit_not_found,
-        hash_mismatch wins (real signal about deployed-vs-audited divergence)."""
+        """hash_mismatch is the real signal about deployed-vs-audited divergence."""
 
         def fake_github(repo, commit, path, *, token=None):
             if repo == "repo-with-code":
@@ -709,8 +610,6 @@ class TestFallbackReposBehavior:
 
 
 def test_pinned_commit_overrides_reviewed_commits_in_verification(monkeypatch):
-    """specific_commit narrows verify_audit_covers_impl to exactly that SHA;
-    other commits in reviewed_commits are not attempted."""
     from services.audits import source_equivalence
 
     fetched_commits = []

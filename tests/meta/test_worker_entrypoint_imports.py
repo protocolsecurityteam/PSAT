@@ -1,9 +1,6 @@
-"""Fresh-interpreter import smoke for order-sensitive entrypoints.
+"""A policy/resolution init cycle crashed any process importing ``services.policy`` first; pytest collection hid it.
 
-A services.policy↔services.resolution package-init cycle import-crashed any process that touched ``services.policy``
-FIRST. The offline suite missed it (pytest collection initializes ``services.resolution`` first), but
-``workers.policy_worker`` starts with policy, so deploy died at import and ``start_workers.sh`` looped the whole pool.
-Each case runs in a FRESH interpreter, since in-process imports are no-ops once ``sys.modules`` is warm.
+Each case runs in a fresh interpreter.
 """
 
 from __future__ import annotations
@@ -31,10 +28,7 @@ def _import_in_fresh_interpreter(module: str) -> None:
 @pytest.mark.parametrize(
     "module",
     [
-        # The entrypoint that died in psat-pr-132: its first services import is
-        # the policy package.
         "workers.policy_worker",
-        # The policy-first package order itself (minimal reproducer of the cycle).
         "services.policy",
         "workers.company_pages",
         "workers.web_runtime",

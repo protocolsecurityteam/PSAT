@@ -25,6 +25,7 @@ from db.models import (
 )
 from services.discovery import membership_gate as gate
 from tests.conftest import requires_postgres
+from tests.support.membership_builders import _contract
 
 pytestmark = [requires_postgres]
 
@@ -56,16 +57,8 @@ def _code_fact(session, address: str, *, tx: str | None = _TX, absent: bool = Fa
     session.flush()
 
 
-def _contract(session, address: str, **fields) -> Contract:
-    row = Contract(address=address.lower(), chain=fields.pop("chain", "ethereum"), **fields)
-    session.add(row)
-    session.flush()
-    return row
-
-
 def _anchor(session, protocol: Protocol, address: str, *, deployer: str, **fields) -> Contract:
-    """A PROVEN member of *protocol* deployed by *deployer* — W1 + W6, which
-    is a non-lineage, non-heuristic witness and therefore an anchor."""
+    """W1 + W6 is a non-lineage, non-heuristic witness, so it anchors."""
     row = _contract(
         session, address, protocol_id=protocol.id, nominated_protocol_id=protocol.id, deployer=deployer, **fields
     )
@@ -153,8 +146,7 @@ def test_two_anchors_grant_h_and_admit_the_siblings(db_session):
 
 
 def test_one_anchor_short_grants_nothing(db_session):
-    """The floor is symmetric with ruling 2: no single observation may create a
-    family, exactly as no single observation may revoke one."""
+    """No single observation may create a family, as none may revoke one."""
     protocol = _protocol(db_session)
     deployer = _addr(0xD02)
     _anchor(db_session, protocol, _addr(0xB01), deployer=deployer)
@@ -169,7 +161,6 @@ def test_one_anchor_short_grants_nothing(db_session):
 
 
 def test_affinity_below_floor_grants_nothing(db_session):
-    """Nine own anchors against two foreign ones is 0.818 — below θ."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "other")
     deployer = _addr(0xD03)
@@ -256,8 +247,7 @@ def test_admission_requires_w1_and_a_creation_witness(db_session):
 
 
 def test_one_foreign_anchor_is_one_challenge_row_not_a_collapse(db_session):
-    """Ruling 2, the worked example: a single foreign witness lands as one
-    challenge row. Nothing is revoked, nothing is demoted."""
+    """Ruling 2: a single foreign witness is one challenge row; nothing is revoked."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD07)
@@ -306,8 +296,7 @@ def test_quorum_freezes_admissions_and_keeps_standing_members(db_session):
 
 
 def test_challenge_revoked_with_its_foreign_witness(db_session):
-    """A challenge is derived from a real witness row, never from suspicion:
-    revoking that witness revokes the challenge."""
+    """Revoking the foreign witness revokes the challenge."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD09)
@@ -335,8 +324,6 @@ def test_challenge_revoked_with_its_foreign_witness(db_session):
 
 
 def test_auto_revoke_below_the_hysteresis_floor(db_session):
-    """affinity < 0.5 — the EOA is proven more foreign than ours — auto-revokes
-    the row and demotes exactly the members left with no other witness."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD0A)
@@ -360,9 +347,7 @@ def test_auto_revoke_below_the_hysteresis_floor(db_session):
 
 
 def test_same_run_promotion_recomputes_a_foreign_standing_h_row(db_session):
-    """A proof-round promotion is a fresh FOREIGN anchor against a standing H
-    row keyed by the same EOA under ANOTHER protocol: the third foreign anchor
-    arriving through the promotion auto-revokes (P1, X) in the SAME evaluate."""
+    """The third foreign anchor arrives through a promotion and must auto-revoke in the same evaluate."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD30)
@@ -373,12 +358,10 @@ def test_same_run_promotion_recomputes_a_foreign_standing_h_row(db_session):
     db_session.commit()
     assert sibling.protocol_id == protocol.id
 
-    # Two standing foreign anchors: 2/4 = 0.5 — AT the floor, not below it.
     third_address = _addr(0x2712)
     _anchor(db_session, other, _addr(0x2710), deployer=deployer, implementation=third_address)
     _anchor(db_session, other, _addr(0x2711), deployer=deployer)
-    # The third arrives as a pending candidate of the OTHER protocol; its W2
-    # promotion in the proof rounds pushes affinity to 2/5 = 0.4.
+    # Its promotion pushes affinity to 2/5 = 0.4.
     third = _candidate(db_session, other, third_address, deployer=deployer)
 
     result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(third.id,)))
@@ -393,9 +376,7 @@ def test_same_run_promotion_recomputes_a_foreign_standing_h_row(db_session):
 
 
 def test_entry_delta_member_recomputes_a_foreign_standing_h_row(db_session):
-    """``run_probe_pass`` promotes near-line and hands the members to
-    ``evaluate`` as the entry delta — those members' deployers must reach the
-    W4-H scope, or a should-be-revoked H row of another protocol stands."""
+    """The probe pass's entry-delta members must bring their deployers into W4-H scope."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD31)
@@ -408,8 +389,6 @@ def test_entry_delta_member_recomputes_a_foreign_standing_h_row(db_session):
 
     _anchor(db_session, other, _addr(0x2810), deployer=deployer)
     _anchor(db_session, other, _addr(0x2811), deployer=deployer)
-    # The third foreign anchor was stamped BEFORE this evaluate (the probe-pass
-    # shape) — the delta names the member, never its deployer.
     third = _anchor(db_session, other, _addr(0x2812), deployer=deployer)
 
     result = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(third.id,)))
@@ -422,8 +401,7 @@ def test_entry_delta_member_recomputes_a_foreign_standing_h_row(db_session):
 
 
 def test_suspended_when_anchors_erode(db_session):
-    """Basis erosion is not counterevidence: the row suspends (no new
-    admissions), standing members keep."""
+    """Basis erosion is not counterevidence."""
     protocol = _protocol(db_session)
     deployer = _addr(0xD0B)
     anchors = [_anchor(db_session, protocol, _addr(0x1600 + n), deployer=deployer) for n in range(2)]
@@ -547,8 +525,6 @@ def test_implementation_discovered_after_its_proxy_still_inherits(db_session):
 
 
 def test_late_inherited_w2_falls_with_the_proxys_heuristic_standing(db_session):
-    """An affinity collapse that auto-revokes the H row demotes the proxy, and
-    the late-minted heuristic_via W2 falls with it."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD24)
@@ -577,11 +553,7 @@ def test_late_inherited_w2_falls_with_the_proxys_heuristic_standing(db_session):
 
 
 def test_late_inheritance_refused_off_a_stale_h_row(db_session):
-    """Revocations before inheritance: a late impl candidate WITHOUT deployer
-    attribution names no (protocol, deployer) pair, so only the seed's via
-    members can pull the stale H row into the stratum — the row (live affinity
-    below the auto-revoke floor) is revoked, the via proxy demoted, and the
-    impl NOT admitted off the dead row."""
+    """Without deployer attribution only the seed's via members pull the stale H row into the stratum."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD32)
@@ -593,8 +565,6 @@ def test_late_inheritance_refused_off_a_stale_h_row(db_session):
     db_session.commit()
     assert proxy.protocol_id == protocol.id
 
-    # The row goes stale out-of-band: three foreign anchors written with no
-    # evaluate naming the deployer — live affinity 2/5 = 0.4, recorded active.
     for n in range(3):
         _anchor(db_session, other, _addr(0x2920 + n), deployer=deployer)
 
@@ -702,7 +672,6 @@ def test_proof_class_row_never_accrues_challenges(db_session):
     other = _protocol(db_session, "other")
     deployer = _addr(0xD10)
     anchor = _anchor(db_session, protocol, _addr(0x2001), deployer=deployer)
-    # A real Class-A perimeter fact keeps the row standing through stratum (ii).
     db_session.add(
         ControllerValue(
             contract_id=anchor.id,
@@ -716,9 +685,7 @@ def test_proof_class_row_never_accrues_challenges(db_session):
     assert verdict.trust_class == "A"
     row = gate.register_deployer(db_session, protocol_id=protocol.id, address=deployer, classification=verdict)
 
-    # A foreign anchor the challenge sync would observe: a CANDIDATE of another
-    # protocol attributed to the EOA, holding a non-lineage witness — no member
-    # stamp, so it mints no cross-protocol collision either.
+    # No member stamp, so it mints no cross-protocol collision.
     foreign = _contract(db_session, _addr(0x2002), nominated_protocol_id=other.id, deployer=deployer)
     _code_fact(db_session, foreign.address)
     gate.write_witness(
@@ -728,8 +695,7 @@ def test_proof_class_row_never_accrues_challenges(db_session):
         rule="w6_llama_seed",
         evidence=gate.w6_evidence(adapter_slug="seed", chain_id=1, code_probe_block=50),
     )
-    # A creation-less candidate keeps (protocol, EOA) in the W4-H stratum's
-    # scope without ever settling.
+    # Keeps (protocol, EOA) in scope without ever settling.
     blocked = _contract(db_session, _addr(0x2003), nominated_protocol_id=protocol.id, deployer=deployer)
     _code_fact(db_session, blocked.address, tx=None)
 
@@ -750,8 +716,7 @@ def test_proof_class_row_never_accrues_challenges(db_session):
 
 
 def test_reevaluation_over_unchanged_facts_leaves_evidence_untouched(db_session):
-    """A second evaluate over an unchanged DB is a no-op on the H registry:
-    the recorded evidence — ``computed_at`` included — stays byte-identical."""
+    """``computed_at`` included."""
     protocol = _protocol(db_session)
     deployer = _addr(0xD11)
     _anchor(db_session, protocol, _addr(0x2101), deployer=deployer)

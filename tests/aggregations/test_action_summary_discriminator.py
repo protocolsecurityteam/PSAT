@@ -1,5 +1,5 @@
-"""``action_summary`` ships on two unauthenticated endpoints and no first-party UI
-renders it, so it is the quotable copy of the structured planes.
+"""``action_summary`` is served unauthenticated with no first-party UI, so it is the quotable copy of the structured
+planes.
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from services.aggregations.action_summary import (
 
 
 def test_vacuous_summary_is_labelled_as_restating_nothing():
-    """130 local rows. The sentence is indistinguishable from an evidence-derived
-    one until it is labelled."""
     summary, kind, note = describe_action(VACUOUS_SUMMARY, [])
     assert summary == VACUOUS_SUMMARY
     assert kind == "vacuous"
@@ -23,9 +21,9 @@ def test_vacuous_summary_is_labelled_as_restating_nothing():
 
 
 def test_target_list_summary_discloses_the_write_conflation():
-    """528 local rows. ``effect_targets`` does not separate state-write targets
-    from external-call targets (501 of 1,642 populated rows carry zero
-    state-write evidence), so "Writes or calls into" cannot support "writes"."""
+    """``effect_targets`` mixes state-write and external-call targets, so "Writes or calls into" cannot support
+    "writes".
+    """
     summary, kind, note = describe_action("Writes or calls into: accountantState.", [])
     assert summary == "Writes or calls into: accountantState."
     assert kind == "effect_target_list"
@@ -33,8 +31,7 @@ def test_target_list_summary_discloses_the_write_conflation():
 
 
 def test_a_plain_label_summary_carries_no_note():
-    """NEGATIVE CONTROL: the note is not a blanket hedge. A sentence a specific
-    label produced, with nothing in the claims plane contradicting it, is clean."""
+    """Negative control: the note is not a blanket hedge."""
     summary, kind, note = describe_action("Changes the contract pause state.", [{"claim_id": "pause.set"}])
     assert summary == "Changes the contract pause state."
     assert kind == "effect_label"
@@ -47,9 +44,7 @@ def _exec_claim(constraint=None):
 
 
 def test_proven_unconstrained_destination_keeps_the_arbitrary_sentence():
-    """POSITIVE CONTROL for every narrowing below: when the witness PROVES no
-    mandatory gate pins the destination, "arbitrary" is the right word and must
-    survive."""
+    """Positive control: when the witness proves no mandatory gate pins the destination, "arbitrary" stays."""
     summary, kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim({"state": "unconstrained_proven"})])
     assert summary == ARBITRARY_SUMMARY
     assert kind == "effect_label"
@@ -57,8 +52,6 @@ def test_proven_unconstrained_destination_keeps_the_arbitrary_sentence():
 
 
 def test_a_proven_gate_on_the_destination_narrows_the_sentence():
-    """7 of 20 ``exec.arbitrary`` destinations measured as pinned by a mandatory
-    gate. The structured claim moved earlier; the sentence did not."""
     summary, _kind, note = describe_action(
         ARBITRARY_SUMMARY,
         [_exec_claim({"state": "constrained", "guard": "mapping_allowlist"})],
@@ -72,10 +65,8 @@ def test_a_proven_gate_on_the_destination_narrows_the_sentence():
 @pytest.mark.parametrize(
     "constraint,note_fragment",
     [
-        # Every persisted ``exec.arbitrary`` claim (20/20 rows) carries NO
-        # ``destination_constraint`` key: the verdict predates the key. An absent verdict is
-        # the question being unanswered — the same reading ``claimsVocab.constraintText``
-        # takes — and "arbitrary" asserts an answer.
+        # Persisted ``exec.arbitrary`` claims predate the ``destination_constraint`` key; an absent verdict is
+        # unanswered, and "arbitrary" asserts an answer.
         pytest.param(None, "no destination_constraint verdict", id="absent_verdict"),
         pytest.param({"state": "not_determined"}, "not_determined", id="explicit_not_determined"),
     ],
@@ -89,9 +80,7 @@ def test_an_undetermined_destination_verdict_does_not_publish_arbitrary(constrai
 
 
 def test_a_missing_exec_claim_contradicts_the_sentence():
-    """The claims plane ran (it produced a list) and did not raise the claim.
-    Measured exactly this way on ``LRTSquaredAdmin.rebalance`` — a pure false
-    positive."""
+    """The claims plane ran and did not raise the claim (seen on ``LRTSquaredAdmin.rebalance``)."""
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [], effect_labels=["arbitrary_external_call"])
     assert summary == "Executes external calldata from the contract."
     assert note and "records no exec.arbitrary claim" in note
@@ -99,9 +88,7 @@ def test_a_missing_exec_claim_contradicts_the_sentence():
 
 
 def test_no_claim_list_at_all_is_not_treated_as_a_contradiction():
-    """NEGATIVE CONTROL for the test above: a row with no claims plane output is
-    not evidence against the sentence, and hedging it would hedge every legacy
-    payload on nothing."""
+    """Negative control: no claims-plane output is not evidence against the sentence."""
     summary, _kind, note = describe_action(ARBITRARY_SUMMARY, None)
     assert summary == ARBITRARY_SUMMARY
     assert note and "no claim list" in note

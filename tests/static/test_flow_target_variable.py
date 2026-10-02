@@ -1,13 +1,6 @@
-"""D3: a ``storage_setter`` destination must say WHICH variable, WHO writes it
-inside this unit, and how far that answer reaches.
-
-Besides the name and writers, this publishes the two bounds that stop the writer
-list being read as the closed set: ``target_writer_scan_complete`` (the
-assembly/delegatecall/alias blind-spot gate) and ``writer_surface_closed``
-(permanently ``not_determined``: this stage analyses ONE compilation unit while the
-deployed address may be a proxy or one of several implementations).
-
-Everything asserted comes from a real solc compile through ``build_effects``.
+"""D3: a ``storage_setter`` destination names its variable and in-unit writers, bounded by
+``target_writer_scan_complete`` and ``writer_surface_closed`` (always ``not_determined``: one compilation unit
+can't see proxies or sibling implementations).
 """
 
 from __future__ import annotations
@@ -186,24 +179,17 @@ def _destination(flow: dict) -> dict:
     }
 
 
-# --- the positive, pinned byte-exactly --------------------------------------
-
-
 def test_single_writer_destination_is_named_with_both_bounds(effects):
     assert _destination(_flow(effects, "Router", "sweep(uint256)")) == {
         "target_kind": {"kind": "storage_setter", "tier": "dispositive_ast"},
         "target_variable": "recipientAddress",
         "target_writer_signatures": ["setRecipientAddress(address)"],
         "target_writer_scan_complete": True,
-        # A floor: "redirectable AT LEAST BY these writers' principals". Never
-        # true, and not derivable here — see the module docstring.
         "writer_surface_closed": "not_determined",
     }
 
 
 def test_writer_surface_is_never_closed(effects):
-    """Every row that names a destination variable carries the bound, and no row
-    anywhere carries any other value for it."""
     named = 0
     for artifact in effects.values():
         for info in artifact["functions"].values():
@@ -224,14 +210,8 @@ def test_writer_list_never_travels_without_its_gate(effects):
                     assert "target_variable" in flow, flow
 
 
-# --- fail-closed arms -------------------------------------------------------
-
-
 def test_assembly_sstore_leaves_the_no_setter_proof_unavailable(effects):
-    """A destination with no attributed setter is a proven "fixed destination"
-    ONLY when the write scan was exhaustive. A raw-slot ``sstore`` means it was
-    not, so the kind degrades to ``indeterminate`` — never ``storage_no_setter``
-    — and nothing about the write surface is published at all."""
+    """A raw-slot ``sstore`` means the scan wasn't exhaustive."""
     flow = _flow(effects, "AsmRouter", "sweepDeployTime(uint256)")
     assert flow["target_kind"]["kind"] == "indeterminate"
     assert "target_variable" not in flow
@@ -241,9 +221,6 @@ def test_assembly_sstore_leaves_the_no_setter_proof_unavailable(effects):
 
 
 def test_incomplete_scan_publishes_the_writers_with_the_gate_false(effects):
-    """The same contract's named setter still classifies, but the list is
-    published under a FALSE completeness gate: these writers are some of them,
-    not all of them."""
     assert _destination(_flow(effects, "AsmRouter", "sweep(uint256)")) == {
         "target_kind": {"kind": "storage_setter", "tier": "dispositive_ast"},
         "target_variable": "recipientAddress",
@@ -254,9 +231,7 @@ def test_incomplete_scan_publishes_the_writers_with_the_gate_false(effects):
 
 
 def test_disagreeing_sites_publish_the_member_list_and_no_scalar(effects):
-    """Both sites fold to ``storage_setter``, so agreement on the KIND is not
-    agreement on the destination. Publishing either name would let a consumer
-    read one of two destinations as the whole."""
+    """Agreement on kind is not agreement on the destination."""
     destination = _destination(_flow(effects, "Router", "sweepBoth(uint256)"))
     assert destination == {
         "target_kind": {"kind": "storage_setter", "tier": "dispositive_ast"},
@@ -267,35 +242,27 @@ def test_disagreeing_sites_publish_the_member_list_and_no_scalar(effects):
 
 
 def test_mapping_element_publishes_no_variable(effects):
-    """``routes[id]`` classifies by its base, but the base names one address
-    where there is one per key — the shape whose only honest answer is nothing."""
+    """The base names one address where there is one per key."""
     flow = _flow(effects, "Router", "sweepRoute(uint256,uint256)")
     assert "target_variable" not in flow
     assert "target_variables" not in flow
 
 
 def test_declaration_initialiser_is_a_writer_for_membership_not_for_publication(effects):
-    """Slither's synthetic ``slitherConstructorVariables`` is what makes an
-    inline-initialised variable a ``storage_setter``, and it must keep doing so
-    — demoting it would mint a "fixed destination" negative that was never
-    proven. But it is not callable, so it is not published as a writer, and the
-    key is ABSENT rather than an empty list that claims a completed search."""
+    """``slitherConstructorVariables`` keeps it a ``storage_setter`` but isn't callable, so the key is absent rather
+    than a completed-search ``[]``.
+    """
     destination = _destination(_flow(effects, "Router", "sweepInitialised(uint256)"))
     assert destination["target_kind"]["kind"] == "storage_setter"
     assert destination["target_variable"] == "initialisedAtDeclaration"
     assert "target_writer_signatures" not in destination
     assert "target_writer_scan_complete" not in destination
     assert destination["writer_surface_closed"] == "not_determined"
-    # The two absences carry OPPOSITE risk, so they are not the same key being
-    # missing: an initialiser-only destination is effectively fixed short of an
-    # upgrade, an unattributed storage alias may be redirectable by anyone.
+    # The two absences carry opposite risk.
     assert destination["target_writer_absent_reason"] == "declaration_initialiser_only"
 
 
 def test_empty_writer_list_only_where_the_kind_already_earned_it(effects):
-    """``[]`` means "the scan completed and found no writer", which is exactly
-    what ``storage_no_setter`` asserts. It appears nowhere else, so it can never
-    be confused with "no writer was attributed"."""
     assert _destination(_flow(effects, "Router", "sweepDeployTime(uint256)")) == {
         "target_kind": {"kind": "storage_no_setter", "tier": "dispositive_ast"},
         "target_variable": "deployTimeOnly",
@@ -311,10 +278,7 @@ def test_empty_writer_list_only_where_the_kind_already_earned_it(effects):
 
 
 def test_constant_and_immutable_name_a_variable_but_no_writer(effects):
-    """A declaration class is not a write-surface finding. Neither publishes a
-    writer, and both still carry ``writer_surface_closed`` — behind a proxy an
-    immutable is redirectable by upgrade, which is precisely what the bound
-    refuses to rule out."""
+    """Behind a proxy an immutable is redirectable by upgrade."""
     for signature, kind, variable in (
         ("sweepFixed(uint256)", "immutable", "fixedRecipient"),
         ("sweepBurn(uint256)", "constant", "BURN"),
@@ -327,19 +291,13 @@ def test_constant_and_immutable_name_a_variable_but_no_writer(effects):
 
 
 def test_same_named_declarations_are_not_one_destination(effects):
-    """``LegA.recipient`` and ``LegB.recipient`` are two declarations with two
-    setters and two values. Both routed sites fold to ``storage_setter`` and
-    both name "recipient", so agreement on the NAME would publish the scalar —
-    whose registered meaning is "every contributing site named the same one" —
-    over two different destinations, and skip the member list a consumer is
-    instructed to take the worst of. Members are canonical because bare names
-    cannot tell them apart."""
+    """Two declarations named ``recipient`` must not publish one scalar; members are canonical because bare names
+    can't tell them apart.
+    """
     destination = _destination(_flow(effects, "TwoLegs", "sweep(uint256)"))
     assert destination == {
         "target_kind": {"kind": "storage_setter", "tier": "dispositive_ast"},
         "target_variables": ["LegA.recipient", "LegB.recipient"],
     }
     assert "target_variable" not in destination
-    # In particular the two setters must not be merged into one floor that
-    # reads as the writer set of a single destination.
     assert "target_writer_signatures" not in destination

@@ -1,16 +1,6 @@
-"""Regression pin: OZ v5 (ERC-7201 namespaced-storage) AccessControl role gates.
-
-Mode B of the etherfi controller-recall audit (CumulativeMerkleDrop). A role-gated
-function's caller set is *enumerable* when its writer event (``emit RoleGranted``)
-attaches to the gate's ``mapping_membership`` descriptor as an ``enumeration_hint``.
-OZ v5 reaches roles through an inline-assembly storage pointer (``$._roles[role]``);
-both ``mapping_events.discover_mapping_writer_events`` and
-``predicates._find_index_base`` used to trace the ``REF_*`` temp instead of the
-logical ``_roles`` mapping, so no hint attached, the adapter returned
-``unsupported(no_adapter)`` and the role holders were never surfaced.
-
-The v4 (direct state variable) and v5 (namespaced) cases are both guards that role
-enumeration resolves through either storage layout.
+"""OZ v5 reaches ``_roles`` through an assembly storage pointer, and both writer-event discovery and
+``_find_index_base`` traced the ``REF_*`` temp, so no enumeration hint attached and role holders never surfaced
+(CumulativeMerkleDrop, Mode B).
 """
 
 from __future__ import annotations
@@ -34,7 +24,6 @@ from services.static.contract_analysis_pipeline.predicate_types import Predicate
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree
 from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass
 
-# Same role storage shape, differing only in HOW `_roles` is reached (v4 state var vs v5 ERC-7201 pointer).
 _V4_SRC = """
 pragma solidity ^0.8.20;
 contract AccessV4 {
@@ -124,11 +113,6 @@ def _run_pipeline(tmp_path: Path, source: str, gate_fn: str) -> tuple[list[Any],
     return specs, (leaf.get("set_descriptor") or {})
 
 
-# v4: control -- a direct-state-variable (OZ v4-style) role mapping is recognized end to end: the
-# RoleGranted writer is discovered and the gate carries the enumeration hint the event-indexed
-# adapter needs. v5: the same role logic via ERC-7201 namespaced storage is equally enumerable; the
-# assembly storage-pointer access resolves back to ``_roles``, closing the CumulativeMerkleDrop
-# (Mode B) recall gap.
 @pytest.mark.parametrize(
     "source",
     [

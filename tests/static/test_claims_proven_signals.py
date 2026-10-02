@@ -1,10 +1,5 @@
-"""Claims must rest on what the chain publishes, not on what identifiers say.
-
-Every fixture is deliberately named OFF the conventional vocabulary (the pause latch
-is not ``paused``, the delegation ledger not ``delegates``), so a matcher keyed on
-identifier text cannot pass. Each positive is paired with a same-vocabulary near-miss
-whose published ABI (selector set / topic0) does not match, which must earn no claim
-or a weaker tier. Compiles the real static stack on solc 0.8.27 (the offline CI version).
+"""Fixtures are named off the conventional vocabulary so identifier matching can't pass, each paired with a
+same-vocabulary near-miss whose ABI doesn't match.
 """
 
 from __future__ import annotations
@@ -26,10 +21,7 @@ from tests.support.label_corpus import (
 
 pytestmark = pytest.mark.compile
 
-# --- fixtures ---------------------------------------------------------------
 
-# OZ Pausable's published ABI (pause/unpause/paused) with a latch named nothing
-# like "paused". Only the selector set can recognize this as the standard.
 _OFF_VOCABULARY_PAUSABLE = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -67,10 +59,7 @@ contract OffVocabularyPausable {
 }
 """
 
-# The mirror image: a latch literally named ``paused`` and togglers literally
-# named pause/unpause, but no ``paused()`` in the ABI, so the OZ Pausable entry
-# set is incomplete. The claim must still be minted — the toggle is real — at the
-# idiom tier, never as a standard proof.
+# No ``paused()`` in the ABI, so the toggle claims at the idiom tier, never as a standard proof.
 _NAME_ONLY_PAUSABLE = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -104,8 +93,6 @@ contract NameOnlyPausable {
 }
 """
 
-# Comp/OZ-Votes delegation whose ledgers are named ``_agentOf`` / ``_voteLog``.
-# Only the DelegateChanged topic0 can prove this is the voting-power move.
 _OFF_VOCABULARY_VOTES = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -141,9 +128,7 @@ contract OffVocabularyVotes {
 }
 """
 
-# WETH9's real shape: no supply variable at all, and no ``Transfer`` on wrap
-# (WETH9 emits its own Deposit/Withdrawal). The only honest supply evidence is
-# the observed one-directional balance write.
+# WETH9 has no supply variable and no ``Transfer`` on wrap; only the one-directional balance write is evidence.
 _WETH9_SHAPE = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -200,9 +185,7 @@ contract Weth9Shape {
 }
 """
 
-# A UUPS-free proxy shape whose marker log is NAMED ``Upgraded`` but carries a
-# different argument list, so its topic0 is not EIP-1967's. Nothing else on the
-# contract is a proxy, so the upgrade/admin claims must not fire.
+# Named ``Upgraded`` but a different topic0.
 _WRONG_TOPIC_UPGRADED = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -235,8 +218,6 @@ contract WrongTopicUpgraded {
 }
 """
 
-# The EIP-1967 logs with their published argument lists: same contract shape,
-# real topic0s, so both claims land.
 _RIGHT_TOPIC_UPGRADED = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -268,9 +249,7 @@ contract RightTopicUpgraded {
 }
 """
 
-# ``callee_pointer.rotate`` grants its principal the admin capability, so the
-# pointer test must read the resolved type. ``Config`` is a STRUCT — capitalised,
-# but not callable — while ``hook`` is a real interface reference.
+# The rotate grants admin, so the pointer test must read the resolved type; ``Config`` is a struct.
 _STRUCT_IS_NOT_A_POINTER = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -335,9 +314,7 @@ contract StructIsNotAPointer {
 }
 """
 
-# The WETH gate with nothing minted: a full ERC-20 exposing deposit()/withdraw()
-# that only forwards the native value on. The gate is satisfied and the wrap
-# idiom would "explain" it, but no supply or share balance ever moves.
+# The gate is satisfied, but no supply or share balance moves.
 _WETH_GATE_NO_SUPPLY_MOVE = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -397,9 +374,6 @@ contract ForwardingVault {
 """
 
 
-# --- harness ----------------------------------------------------------------
-
-
 def _claims(source: str, contract_name: str) -> dict[str, list[Any]]:
     from slither import Slither
 
@@ -432,12 +406,7 @@ def _tier(claims: list[Any], claim_id: str) -> str:
     return matches[0]["tier"]
 
 
-# --- pause ------------------------------------------------------------------
-
-
 def test_pause_standard_tier_survives_an_off_vocabulary_flag():
-    """The latch is ``_haltState``; the contract publishes OZ Pausable's entry
-    set. The standard tier must come from the ABI, so it survives the rename."""
     fns = _compiled(_OFF_VOCABULARY_PAUSABLE, "OffVocabularyPausable")
     assert _tier(fns["pause()"], "pause.set") == "standard_exact"
     assert _tier(fns["unpause()"], "pause.unset") == "standard_exact"
@@ -446,21 +415,12 @@ def test_pause_standard_tier_survives_an_off_vocabulary_flag():
 
 
 def test_pause_standard_tier_is_not_earned_by_the_flag_name_alone():
-    """Flag named ``paused``, togglers named pause/unpause — but the flag is
-    private, so ``paused()`` is not in the ABI and OZ Pausable's entry set is
-    incomplete. The toggle is still real, so the claim degrades rather than
-    disappearing."""
     fns = _compiled(_NAME_ONLY_PAUSABLE, "NameOnlyPausable")
     assert _tier(fns["pause()"], "pause.set") == "idiom_structural"
     assert _tier(fns["unpause()"], "pause.unset") == "idiom_structural"
 
 
-# --- gov.delegate -----------------------------------------------------------
-
-
 def test_gov_delegate_proven_by_the_delegate_changed_topic():
-    """Ledgers named ``_agentOf`` / ``_voteLog``: only the published
-    ``DelegateChanged`` topic0 can recognize the delegation."""
     fns = _compiled(_OFF_VOCABULARY_VOTES, "OffVocabularyVotes")
     assert _tier(fns["delegate(address)"], "gov.delegate") == "standard_exact"
     claim = next(c for c in fns["delegate(address)"] if c["claim_id"] == "gov.delegate")
@@ -472,43 +432,26 @@ def test_gov_delegate_near_miss_same_writes_without_the_log():
     assert "gov.delegate" not in _ids(fns["assignAgent(address)"])
 
 
-# --- supply -----------------------------------------------------------------
-
-
 def test_weth9_wrap_unwrap_supply_is_observed_not_assumed():
-    """WETH9 publishes no supply variable and emits no zero-address ``Transfer``
-    on wrap, so both name-independent supply paths are silent; the wrap arm may
-    claim only because the balance write is observed to move one way."""
     fns = _compiled(_WETH9_SHAPE, "Weth9Shape")
     assert _tier(fns["deposit()"], "supply.mint") == "idiom_structural"
     assert _tier(fns["withdraw(uint256)"], "supply.burn") == "idiom_structural"
     for signature, kind in (("deposit()", "supply.mint"), ("withdraw(uint256)", "supply.burn")):
         claim = next(c for c in fns[signature] if c["claim_id"] == kind)
         assert claim["witness"]["kind"] in ("weth_wrap", "weth_unwrap"), claim["witness"]
-    # A ledger move between two holders creates nothing.
     assert not _ids(fns["transferFrom(address,address,uint256)"]) & {"supply.mint", "supply.burn"}
     assert not _ids(fns["approve(address,uint256)"]) & {"supply.mint", "supply.burn"}
 
 
 def test_weth_gate_alone_does_not_mint_a_supply_claim():
-    """The near-miss the corroboration exists for: the wrap/unwrap ABI on a
-    contract that forwards the native value instead of issuing or destroying any
-    balance. The gate is signature-exact, so only observing the (absent) supply
-    move keeps the inference honest."""
+    """The gate is signature-exact, so only the observed supply move keeps the inference honest."""
     fns = _compiled(_WETH_GATE_NO_SUPPLY_MOVE, "ForwardingVault")
     assert not _ids(fns["deposit()"]) & {"supply.mint", "supply.burn"}
     assert not _ids(fns["withdraw(uint256)"]) & {"supply.mint", "supply.burn"}
-    # The user-plane wrap claims are a separate, honest statement about the ABI.
     assert "weth.deposit" in _ids(fns["deposit()"])
 
 
-# --- upgrade / proxy admin --------------------------------------------------
-
-
 def test_upgrade_gate_rejects_a_same_named_event_with_a_different_topic():
-    """``event Upgraded(address,uint256)`` is not EIP-1967's ``Upgraded(address)``
-    — different topic0, so the contract is not a recognizable proxy and the
-    upgrade selector alone earns nothing."""
     fns = _compiled(_WRONG_TOPIC_UPGRADED, "WrongTopicUpgraded")
     assert "upgrade.implementation" not in _ids(fns["upgradeTo(address)"])
     assert "proxy.admin_change" not in _ids(fns["changeAdmin(address)"])
@@ -520,15 +463,8 @@ def test_upgrade_gate_accepts_the_published_1967_topics():
     assert _tier(fns["changeAdmin(address)"], "proxy.admin_change") == "standard_exact"
 
 
-# --- callee_pointer.rotate --------------------------------------------------
-
-
 def test_callee_pointer_reads_the_type_not_the_capitalisation():
-    """``config`` renders as ``StructIsNotAPointer.Config`` and ``mode`` as
-    ``StructIsNotAPointer.Mode`` — capitalised, so a rendered-text test admits
-    both as candidate code pointers. Neither is callable, so neither setter may
-    claim the rotate (whose consumer grants the admin capability), while ``hook``
-    — a real interface reference — does."""
+    """Rendered struct/enum types are capitalised too; only ``hook`` is callable."""
     fns = _compiled(_STRUCT_IS_NOT_A_POINTER, "StructIsNotAPointer")
     assert "callee_pointer.rotate" not in _ids(fns["setConfig(uint64,uint64)"])
     assert "callee_pointer.rotate" not in _ids(fns["setMode(StructIsNotAPointer.Mode)"])

@@ -1,8 +1,3 @@
-"""Tests for uncovered paths in api.py: ``_display_name`` / ``_merge_proxy_impl_entries`` helpers,
-stats and jobs listing, analyze (dapp_urls, defillama_protocol), artifact lookup, analysis-detail
-relational fallbacks, company overview, proxy subscriptions, SPA fallback for /api/* paths.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -14,27 +9,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from tests.support.api_helpers import _admin_headers, _mock_session_ctx
 
 
 def _make_client() -> TestClient:
     import api
 
     return TestClient(api.app)
-
-
-def _admin_headers() -> dict[str, str]:
-    """Header carrying the configured admin key, for now-gated internal reads."""
-    from routers import deps
-
-    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
-
-
-def _mock_session_ctx(mock_session_cls, mock_session):
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
 
 def _fake_job(
@@ -80,11 +61,6 @@ def _fake_job(
     return job
 
 
-# ============================================================================
-# 1. _display_name() unit tests
-# ============================================================================
-
-
 class TestDisplayName:
     def _dn(self, entry):
         from services.governance.proxies import _display_name
@@ -98,7 +74,6 @@ class TestDisplayName:
             pytest.param(
                 {"display_name": "MyVault", "chain": "ethereum"}, "MyVault (ethereum)", id="explicit_with_chain_suffix"
             ),
-            # Idempotent: an existing chain suffix is not doubled.
             pytest.param(
                 {"display_name": "MyVault (ethereum)", "chain": "ethereum"},
                 "MyVault (ethereum)",
@@ -118,11 +93,6 @@ class TestDisplayName:
     )
     def test_display_name(self, entry, expected):
         assert self._dn(entry) == expected
-
-
-# ============================================================================
-# 2. _merge_proxy_impl_entries() unit tests
-# ============================================================================
 
 
 class TestMergeProxyImplEntries:
@@ -198,11 +168,6 @@ class TestMergeProxyImplEntries:
         assert result[0]["rank_score"] == 5
 
 
-# ============================================================================
-# 5. POST /api/analyze - dapp_urls and defillama_protocol paths
-# ============================================================================
-
-
 @patch("routers.deps.SessionLocal")
 @patch("routers.deps.create_job")
 def test_analyze_dapp_urls(mock_create_job, mock_session_cls):
@@ -255,11 +220,6 @@ def test_analyze_rejects_multiple_targets():
     assert response.status_code == 422
 
 
-# ============================================================================
-# 6. GET /api/analyses/{run_name}/artifact/{artifact_name}
-# ============================================================================
-
-
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
@@ -270,8 +230,6 @@ def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    # First execute (by name): returns None
-    # Then session.get (by id): returns job
     call_count = {"n": 0}
 
     def route_execute(stmt, *args, **kwargs):
@@ -312,7 +270,6 @@ def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
         return result
 
     mock_session.execute.side_effect = route_execute
-    # session.get for ID lookup raises (simulating invalid UUID)
     mock_session.get.side_effect = Exception("not a UUID")
 
     mock_get_artifact.return_value = {"found": True}
@@ -344,11 +301,7 @@ def test_artifact_not_found(mock_session_cls, mock_get_artifact):
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_storage_error_returns_503_not_404(mock_session_cls, mock_get_artifact):
-    """INVERTED from ``test_artifact_storage_error_returns_404_not_500``, which pinned the defect:
-    an unreachable backend answered with the same bytes as an artifact the job never produced,
-    and the SPA's ``.catch()`` path draws that as an absence. Now 503, a third answer rather
-    than the second repeated.
-    """
+    """An unreachable backend used to 404, which the SPA draws as an absence; it is now a 503."""
     client = _make_client()
     fake_job = _fake_job(name="test_job")
 
@@ -369,10 +322,7 @@ def test_artifact_storage_error_returns_503_not_404(mock_session_cls, mock_get_a
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_proven_absent_body_still_returns_404(mock_session_cls, mock_get_artifact):
-    """Negative control for the test above: the bucket answering "no object at
-    any candidate" is a determined negative and must stay a 404. A fix that
-    turned every storage exception into 503 would erase the distinction it was
-    written to make."""
+    """Negative control: a determined absence stays a 404."""
     from db.storage import StorageKeyMissing
 
     client = _make_client()
@@ -400,8 +350,7 @@ def test_artifact_upgrade_history_falls_back_to_synthesis(
     mock_get_artifact,
     mock_synth,
 ):
-    """When storage can't serve upgrade_history, rebuild it from UpgradeEvent rows — the source
-    of truth for the count/last_block badges in the company overview."""
+    """UpgradeEvent rows are the source of truth for the overview's upgrade badges."""
     client = _make_client()
     fake_job = _fake_job(name="test_job")
     fake_contract = MagicMock()
@@ -410,7 +359,6 @@ def test_artifact_upgrade_history_falls_back_to_synthesis(
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    # First execute resolves the job, second resolves the Contract row.
     job_exec = MagicMock()
     job_exec.scalar_one_or_none.return_value = fake_job
     contract_exec = MagicMock()
@@ -488,11 +436,6 @@ def test_artifact_job_not_found_returns_404(mock_session_cls):
     assert response.status_code == 404
 
 
-# ============================================================================
-# 7. GET /api/analyses/{run_name} - relational table paths
-# ============================================================================
-
-
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock_get_all_artifacts):
@@ -527,7 +470,6 @@ def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock
     fp.details = {"role": "admin"}
     fp.principal_type = "controller"
     fp.function_id = ef.id
-    # selectinload puts principals on ef.principals; no separate FP query.
     ef.principals = [fp]
 
     call_count = {"n": 0}
@@ -847,11 +789,6 @@ def test_analysis_detail_lookup_by_address(mock_session_cls, mock_get_all_artifa
     assert response.json()["address"] == addr
 
 
-# ============================================================================
-# 9. GET /api/company/{company_name}
-# ============================================================================
-
-
 @patch("routers.deps.SessionLocal")
 def test_company_overview_not_found(mock_session_cls):
     client = _make_client()
@@ -867,7 +804,6 @@ def test_company_overview_not_found(mock_session_cls):
 
 
 def test_company_overview_basic(db_session, api_client):
-    """Basic company overview with one non-proxy contract, on real DB state (robust to query-structure changes)."""
     from db.models import (
         Contract,
         ContractSummary,
@@ -1031,20 +967,10 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
     assert vault["last_audit"]["inherited_contract_address"] == target_addr
 
 
-# ============================================================================
-# 11. SPA fallback for /api/* paths
-# ============================================================================
-
-
 def test_spa_fallback_api_prefix_returns_404():
     client = _make_client()
     response = client.get("/api/nonexistent_endpoint")
     assert response.status_code == 404
-
-
-# ============================================================================
-# 12. GET /api/analyses - company_for_job parent chain walking
-# ============================================================================
 
 
 @patch("routers.deps.SessionLocal")
@@ -1113,20 +1039,9 @@ def test_analyses_company_from_parent_chain(mock_session_cls):
     assert child_entry["company"] == "compound"
 
 
-# ============================================================================
-# 13. GET /api/analyses - proxy with incomplete impl is hidden
-# ============================================================================
-
-
 @patch("routers.deps.SessionLocal")
 def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
-    """A completed proxy is suppressed until its impl child also completes.
-
-    Showing the proxy alone would render a half-populated card (no
-    contract_analysis, generic proxy name) that mutates once the impl
-    lands. jobs_by_address holds completed jobs only, so a missing entry
-    is sufficient to suppress.
-    """
+    """A proxy alone renders a half-populated card that mutates once the impl lands."""
     client = _make_client()
 
     proxy_job = _fake_job(
@@ -1142,7 +1057,6 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    # proxy_type / implementation come from Contract now.
     proxy_contract = SimpleNamespace(
         address="0xaaaa",
         chain=None,
@@ -1186,11 +1100,6 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
     assert response.status_code == 200
     entries = response.json()
     assert not any(e.get("address") == "0xaaaa" for e in entries)
-
-
-# ============================================================================
-# 16. GET /api/analyses/{run_name} - proxy job inherits impl relational tables
-# ============================================================================
 
 
 @patch("routers.deps.get_all_artifacts")
@@ -1306,7 +1215,6 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
     fp_owner.function_id = ef.id
     fp_role.function_id = ef.id
     fp_controller.function_id = ef.id
-    # selectinload puts principals on ef.principals; no separate FP query.
     ef.principals = [fp_owner, fp_role, fp_controller]
 
     def make_result(scalar=None, scalars_all=None):
@@ -1314,13 +1222,11 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
         items = scalars_all or []
         r.scalar_one_or_none.return_value = scalar
         r.scalars.return_value.all.return_value = items
-        # api.py iterates ``Result.scalars()`` directly in the batched
-        # prefetch paths; MagicMock needs explicit __iter__ for that.
+        # The batched prefetch iterates ``Result.scalars()`` directly.
         r.scalars.return_value.__iter__ = lambda s: iter(items)
         return r
 
-    # Calls 0-6: proxy's own relational queries; 7-8: impl job + Contract;
-    # 9+: impl's relational queries (EF eager-loads FP, then CV/CGN/CGE/PL).
+    # Calls 0-6: proxy relational queries; 7-8: impl job + Contract; 9+: impl relational queries.
     call_results = [
         make_result(scalar=proxy_job),  # 0: Job lookup by name
         make_result(scalar=proxy_contract),  # 1: Contract lookup for proxy
@@ -1375,13 +1281,7 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
     assert body["implementation_address"] == impl_addr
 
 
-# ============================================================================
-# 17. GET /api/company - capabilities and roles
-# ============================================================================
-
-
 def test_company_overview_with_proxy_and_effects(db_session, api_client):
-    """Proxy + impl with capability/effect labels on real DB state; asserts capability/role/balance derivation."""
     from db.models import (
         Contract,
         ContractBalance,
@@ -1483,12 +1383,8 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
             price_usd=3000.50,
         )
     )
-    # The discriminating ingredient for the balances lookup: a controller value
-    # on the IMPL swaps the card's governance lookup row to the implementation,
-    # while the balance above is filed under the PROXY row — the writer's
-    # attribution (a proxy's holdings belong to the proxy's own row). Without
-    # this row the two lookup paths coincide and the balances assertion below
-    # holds for the wrong reason.
+    # The impl controller value moves the governance lookup to the impl while the balance stays on the proxy row, so the
+    # two lookup paths differ.
     db_session.add(
         ControllerValue(
             contract_id=impl_contract.id,
@@ -1558,8 +1454,6 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         assert "delegatecall" in c["capabilities"]
         assert c["upgrade_count"] == 1
         assert c["has_timelock"] is True
-        # Functions moved to /api/company/{name}/functions to shrink the
-        # main payload; the entry itself no longer carries them.
         assert "functions" not in c
         functions_body = api_client.get("/api/company/myproj_proxy_test/functions").json()
         proxy_key = f"ethereum::{proxy_addr.lower()}"
@@ -1570,10 +1464,7 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         assert fn["direct_owner"]["address"] == ("0x" + "1" * 40)
         assert fn["authority_roles"] and fn["authority_roles"][0]["role"] == 1
         assert any(p["address"] == "0x" + "3" * 40 for ctrl in fn["controllers"] for p in ctrl["principals"])
-        # The owner surfacing proves the governance lookup read the IMPL's
-        # controller values; the balance surfacing proves the balances lookup
-        # did NOT follow it there — holdings are filed under (and read from)
-        # the proxy's own row.
+        # Owner proves governance read the impl; balance proves holdings stayed on the proxy.
         assert c["owner"] == "0x" + "1" * 40
         assert [b["token_symbol"] for b in c["balances"]] == ["ETH"]
         assert c["total_usd"] == 3000.50
@@ -1584,17 +1475,8 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         db_session.commit()
 
 
-# ============================================================================
-# 13. /audit_coverage top-level counts — unfiltered vs scoped
-# ============================================================================
-
-
 def test_audit_coverage_count_is_unfiltered_reports_on_file(api_client, db_session):
-    """The top-level ``audit_count`` on /audit_coverage counts every report on
-    file — it must equal /audits' count (the hero stat renders one, a click
-    opens the modal rendering the other) and the chat plane's protocol_brief.
-    The scope-extraction filter lives only on ``scoped_audit_count``.
-    """
+    """It must equal /audits' count; the scope filter lives only on ``scoped_audit_count``."""
     from db.models import AuditReport, Protocol
     from services.chat.data import protocol_brief
 
@@ -1642,7 +1524,6 @@ def test_audit_coverage_count_is_unfiltered_reports_on_file(api_client, db_sessi
     assert cov["scoped_audit_count"] == 1
     assert protocol_brief(db_session, name)["audit_count"] == 3
 
-    # audit_reports.protocol_id is ON DELETE CASCADE; dropping the protocol
-    # removes the seeded reports with it.
+    # audit_reports cascade with the protocol.
     db_session.execute(text("DELETE FROM protocols WHERE id = :p"), {"p": proto.id})
     db_session.commit()

@@ -1,13 +1,5 @@
-"""P2 — accept-side 2-step transfer gates are ``resolved_empty`` (empty-by-design).
-
-``claimGovernance`` (``msg.sender == _pendingGovernor()``) and ``acceptDefaultAdminTransfer``
-(``msg.sender == pendingDefaultAdmin().newAdmin``) are uncallable until a transfer is queued.
-P2 lowers the ``pending``-prefixed accessor to ``finite_set([], exact, empty_by_design)``
-instead of a silent ``lower_bound`` gap.
-
-Operand shapes are the REAL ones (compiled from source): A is ``view_call _pendingGovernor()``;
-B is ``state_variable _pendingDefaultAdmin`` member ``newAdmin`` (OZ's public getter is inlined
-by provenance to the struct read, so nothing is read). Pure/offline; the global
+"""P2: accept-side 2-step transfer gates are uncallable until a transfer is queued, so a ``pending``-prefixed
+accessor lowers to ``empty_by_design``. Operand shapes are compiled from source; the global
 ``_stub_live_authority`` fixture is deliberately not used.
 """
 
@@ -29,6 +21,7 @@ from services.resolution.predicate_evaluator import (
     _is_pending_authority_accessor_operand,
     evaluate_tree,
 )
+from tests.support.authority_reads import _Adapter, _Outer, _status
 from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -45,8 +38,7 @@ B_PENDING_DEFAULT_ADMIN = {
     "state_variable_name": "_pendingDefaultAdmin",
     "member_path": ["newAdmin"],
 }
-# Defensive coverage of the detector's other half: a public ``pendingDefaultAdmin()``
-# getter operand (the shape if provenance had NOT inlined it to the struct read).
+# The shape if provenance hadn't inlined the getter to the struct read.
 B_PENDING_DEFAULT_ADMIN_GETTER = {
     "source": "view_call",
     "callee_signature": "pendingDefaultAdmin()",
@@ -55,30 +47,11 @@ B_PENDING_DEFAULT_ADMIN_GETTER = {
 GUARD_OWNER = {"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR}
 
 
-class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
-        self.rpc_url = rpc_url
-        self.contract_address = contract_address
-        self.block = block
-
-
-class _Adapter:
-    def __init__(self, outer: _Outer | None) -> None:
-        if outer is not None:
-            self._outer_ctx = outer
-
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
-
-
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(_Outer(rpc_url, CONTRACT)))
 
 
 def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    """``mode``: ``revert`` (raise), ``empty`` (bare ``0x``), or ``tuple_zero``
-    (two zero words — the ``(address, uint48)`` zero return of an unset
-    ``pendingDefaultAdmin()``)."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         if mode == "revert":
@@ -92,11 +65,6 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
-def _status(cap: CapabilityExpr) -> str | None:
-    cap_dict = capability_to_dict(cap)
-    return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
-
-
 def _assert_empty_by_design(cap: CapabilityExpr) -> None:
     assert cap.kind == "finite_set"
     assert cap.members == []
@@ -106,21 +74,11 @@ def _assert_empty_by_design(cap: CapabilityExpr) -> None:
     assert _status(cap) == "resolved_empty"
 
 
-# --------------------------------------------------------------------------
-# A — claimGovernance: _pendingGovernor() reverts (proxy) and empties (impl).
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("mode", ["revert", "empty"])
 def test_pending_governor_accept_gate_is_resolved_empty(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     _stub_rpc(monkeypatch, mode)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc())
     _assert_empty_by_design(cap)
-
-
-# --------------------------------------------------------------------------
-# B — acceptDefaultAdminTransfer: struct-member operand and public-getter shape.
-# --------------------------------------------------------------------------
 
 
 def test_pending_default_admin_member_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,7 +88,6 @@ def test_pending_default_admin_member_is_resolved_empty(monkeypatch: pytest.Monk
 
 
 def test_pending_default_admin_getter_two_zero_words_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A public ``pendingDefaultAdmin()`` view returning two zero words is still ``resolved_empty``."""
     _stub_rpc(monkeypatch, "tuple_zero")
     cap = evaluate_tree(_eq_tree(B_PENDING_DEFAULT_ADMIN_GETTER), _ctx_with_rpc())
 
@@ -139,10 +96,7 @@ def test_pending_default_admin_getter_two_zero_words_is_resolved_empty(monkeypat
     assert _status(cap) == "resolved_empty"
 
 
-# --------------------------------------------------------------------------
-# Precision guard — a NON-pending owner() that reverts is a real read failure and must
-# stay lower_bound; over-reach re-opens the "open-on-ambiguity" false-positive class.
-# --------------------------------------------------------------------------
+# Over-reach would re-open the open-on-ambiguity false-positive class.
 
 
 def test_non_pending_owner_revert_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,7 +111,6 @@ def test_non_pending_owner_revert_stays_lower_bound(monkeypatch: pytest.MonkeyPa
 
 
 def test_pending_governor_with_active_transfer_resolves_to_principal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pending accessor that reads a live address resolves to that principal."""
     pending = "0x" + "cd" * 20
     monkeypatch.setattr("services.clients.rpc.rpc_request", lambda *a, **k: "0x" + pending[2:].rjust(64, "0"))
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc())
@@ -167,11 +120,7 @@ def test_pending_governor_with_active_transfer_resolves_to_principal(monkeypatch
     assert cap.empty_reason is None
 
 
-# --------------------------------------------------------------------------
-# Surface contract (capability_surface.py): an empty-by-design set is resolved_empty
-# regardless of membership_quality. Built with lower_bound so ONLY the new empty_reason
-# branch can classify it (revert-proof).
-# --------------------------------------------------------------------------
+# Built with lower_bound so only the empty_reason branch can classify it.
 
 
 def test_empty_by_design_is_resolved_empty_regardless_of_quality() -> None:
@@ -191,7 +140,6 @@ def test_lower_bound_without_empty_by_design_is_not_resolved_empty() -> None:
 
 
 def test_resolved_empty_capability_false_for_populated_finite_set() -> None:
-    """A populated finite_set is never 'provably nobody' (members-present short-circuit)."""
     populated = capability_to_dict(CapabilityExpr.finite_set(["0x" + "ab" * 20], quality="exact"))
     assert _is_resolved_empty_capability(populated) is False
 
@@ -217,6 +165,5 @@ def test_detector_matches_pending_shapes_rejects_plain_authority() -> None:
     assert _is_pending_authority_accessor_operand(
         {"source": "state_variable", "state_variable_name": "_pendingDefaultAdmin", "member_path": ["newAdmin"]}
     )
-    # Plain (non-pending) authorities must NOT match — the precision boundary.
     assert not _is_pending_authority_accessor_operand({"source": "view_call", "callee_signature": "owner()"})
     assert not _is_pending_authority_accessor_operand({"source": "state_variable", "state_variable_name": "governor"})

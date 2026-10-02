@@ -1,15 +1,8 @@
-"""Negative-control discipline for the duck-typed address classifier (W6-2).
+"""Negative-control discipline for the duck-typed classifier (W6-2).
 
-An unverified contract with a catch-all fallback answers EVERY selector, so one
-successful probe is not evidence of an interface. Observed on mainnet: 0x008702e6...84
-answered ``getMinDelay()`` and ``0xdeadbeef`` identically and was published as
-``timelock`` with ``details.delay=1`` (full protective credit). A verified
-TimelockController (0x5eb52f8a...) reverts on nonsense selectors.
-
-Before any duck-typed kind is published, a probe of a selector no real contract implements
-must revert/return empty. An answer -> plain ``contract`` + ``duck_type_negative_control =
-'failed'``; a transport error withholds the kind and marks it uncacheable. Single-word
-returns must be exactly 32 bytes. Wire is stubbed, never live-probed.
+A catch-all fallback answers every selector: 0x008702e6 answered ``getMinDelay()`` and ``0xdeadbeef`` alike and
+was published as a timelock with ``delay=1``. A nonsense selector must revert before any duck-typed kind is
+published; an answer means plain ``contract``, a transport error withholds the kind uncached.
 """
 
 from __future__ import annotations
@@ -23,16 +16,10 @@ from services.resolution.tracking import (
     _classify_uncached_batched,
     read_contract_controllers,
 )
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 ADDR = "0x" + "ab" * 20
 OWNER = "0x" + "44" * 20
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
 
 
 def _uint(n: int) -> str:
@@ -44,12 +31,7 @@ def _addr_word(a: str) -> str:
 
 
 def _wire(monkeypatch, probe_map, *, batched: bool):
-    """Stub both classify paths from ONE signature→outcome map.
-
-    Values: raw hex string (successful return), ``"revert"`` (definitive
-    revert), ``"transport"`` (read did not happen). Missing signatures revert —
-    the shape a real contract produces for an unimplemented selector.
-    """
+    """Missing signatures revert, like an unimplemented selector."""
 
     def _outcome(signature: str) -> str:
         return probe_map.get(signature, "revert")
@@ -72,14 +54,11 @@ def _wire(monkeypatch, probe_map, *, batched: bool):
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x6000")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
-    # Stub the batch layer on both parametrizations:
     # classify_resolved_address_with_status always dispatches through the batched path.
     del batched
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch_with_status)
 
 
-# A catch-all fallback answers everything with the same word — including the
-# negative-control selector.
 _CATCH_ALL = {
     "getOwners()": _uint(1),  # not a decodable address[] (offset 1) → safe arm skips
     "getThreshold()": _uint(1),
@@ -90,8 +69,6 @@ _CATCH_ALL = {
     tracking._NEGATIVE_CONTROL_SIG: _uint(1),
 }
 
-# A real TimelockController: getMinDelay answers, everything else — including
-# the negative control — reverts.
 _REAL_TIMELOCK = {
     "getMinDelay()": _uint(86400),
     "owner()": _addr_word(OWNER),
@@ -100,9 +77,6 @@ _REAL_TIMELOCK = {
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_catch_all_fallback_is_not_a_timelock(monkeypatch, batched):
-    """The observed 0x008702e6 shape: every selector answers → the sentinel
-    fires and the address is a plain contract with the definitive marker, never
-    a 'timelock' with a fabricated delay."""
     _wire(monkeypatch, _CATCH_ALL, batched=batched)
     fn = _classify_uncached_batched if batched else _classify_uncached
     kind, details, had_error = fn("https://rpc", ADDR, "latest")
@@ -114,8 +88,6 @@ def test_catch_all_fallback_is_not_a_timelock(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_real_timelock_with_reverting_control_stays_timelock(monkeypatch, batched):
-    """Positive control: the verified-TimelockController shape (answers
-    getMinDelay, reverts on the nonsense selector) keeps its earned type."""
     _wire(monkeypatch, _REAL_TIMELOCK, batched=batched)
     fn = _classify_uncached_batched if batched else _classify_uncached
     kind, details, _had_error = fn("https://rpc", ADDR, "latest")
@@ -126,8 +98,6 @@ def test_real_timelock_with_reverting_control_stays_timelock(monkeypatch, batche
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_catch_all_fallback_is_not_a_safe(monkeypatch, batched):
-    """Same discipline on the safe arm: decodable getOwners()+getThreshold()
-    from an answer-everything address must not mint a Safe."""
     owners_blob = "0x" + format(32, "064x") + format(1, "064x") + OWNER[2:].rjust(64, "0")
     probe_map = dict(_CATCH_ALL)
     probe_map["getOwners()"] = owners_blob
@@ -141,9 +111,7 @@ def test_catch_all_fallback_is_not_a_safe(monkeypatch, batched):
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_control_transport_error_withholds_concrete_type_uncached(monkeypatch, batched):
-    """A control that could not be established is NOT a pass: the concrete type
-    is withheld and the classification is uncacheable (retryable), with no
-    definitive 'failed' marker minted."""
+    """A control that couldn't be established is not a pass."""
     probe_map = dict(_REAL_TIMELOCK)
     probe_map[tracking._NEGATIVE_CONTROL_SIG] = "transport"
     _wire(monkeypatch, probe_map, batched=batched)
@@ -158,8 +126,7 @@ def test_control_transport_error_withholds_concrete_type_uncached(monkeypatch, b
 
 @pytest.mark.parametrize("batched", [False, True])
 def test_oversized_uint_return_is_not_a_delay(monkeypatch, batched):
-    """Returndata-length discipline: a 64-byte blob is not a uint256 answer,
-    so the timelock arm never matches (and the control is never consulted)."""
+    """A 64-byte blob is not a uint256 answer."""
     probe_map = {"getMinDelay()": _uint(1) + "ff" * 32}
     _wire(monkeypatch, probe_map, batched=batched)
     fn = _classify_uncached_batched if batched else _classify_uncached
@@ -169,8 +136,6 @@ def test_oversized_uint_return_is_not_a_delay(monkeypatch, batched):
 
 
 def test_negative_control_probe_tristate(monkeypatch):
-    """The sentinel itself: answered → failed, revert/empty → passed,
-    transport → error."""
     outcomes = {}
 
     def _raw(_rpc_url, _addr, _sig, _block, chain_id=None):
@@ -190,10 +155,7 @@ def test_negative_control_probe_tristate(monkeypatch):
     assert tracking._negative_control_probe("https://rpc", ADDR, "latest") == "error"
 
 
-# ---------------------------------------------------------------------------
-# read_contract_controllers rides the same discipline (its control is a 4th
-# call in the SAME eth_call batch).
-# ---------------------------------------------------------------------------
+# read_contract_controllers's control is a fourth call in the same batch.
 
 
 def _controllers_stub(monkeypatch, answers):
@@ -214,9 +176,7 @@ def _controllers_stub(monkeypatch, answers):
 
 
 def test_catch_all_fallback_yields_no_controller_set(monkeypatch):
-    """An address that answers the nonsense selector answers everything — its
-    owner() 'answer' is not a witnessed control plane. Not determined (None),
-    never a plane set and never the silent []."""
+    """Its owner() answer is not a witnessed control plane."""
     _controllers_stub(
         monkeypatch,
         {
@@ -228,15 +188,11 @@ def test_catch_all_fallback_yields_no_controller_set(monkeypatch):
 
 
 def test_owner_with_reverting_control_is_witnessed(monkeypatch):
-    """Positive control: the ordinary Ownable shape (owner() answers, nonsense
-    reverts) still yields its plane set."""
     _controllers_stub(monkeypatch, {"owner()": _addr_word(OWNER)})
     assert read_contract_controllers("https://rpc", ADDR) == [OWNER]
 
 
 def test_control_transport_error_makes_set_indeterminate(monkeypatch):
-    """If the control read itself did not happen, the plane set is not
-    dispositively known → None (retryable)."""
     _controllers_stub(
         monkeypatch,
         {

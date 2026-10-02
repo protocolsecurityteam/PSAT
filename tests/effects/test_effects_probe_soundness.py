@@ -46,8 +46,7 @@ def _calldata(sig: str, *args: str | int) -> str:
 
 
 class _Recorder:
-    """Replays scripted blocks and keeps every ``(calls, overrides)``, so a test can assert on the
-    OVERRIDES a differential issued, not only its verdict."""
+    """Keeps every ``(calls, overrides)`` so a test can assert on the differential's overrides."""
 
     def __init__(self, *blocks: SimResult) -> None:
         self.blocks = list(blocks)
@@ -91,33 +90,30 @@ def _supply(simulate, calldata: str, **kw):
 
 
 def test_a_mint_whose_asset_slot_held_the_prober_identity_withholds_the_negative():
-    """``enter(address want, uint256)``: ``want`` is in no token vocabulary, so
-    ``token_param_indexes`` is empty and the old gate passed vacuously. With reverting code in the
-    asset slot the mint stops executing, proving the pull WAS on the executed path and the "no
-    inflow" was the prober's doing."""
+    """``want`` is in no token vocabulary, so the old gate passed vacuously; the revert-stub differential proves the
+    pull was on the executed path.
+    """
     sig = "enter(address,uint256)"
     calldata = _calldata(sig, PRINCIPAL, 1)
     sim = _Recorder(
         _supply_block(0, 100, _mint_only()),
-        # Differential: with a revert stub in the asset slot the pull is fatal.
         _supply_block(0, 0, (), mint_ok=False),
     )
     eff = _supply(sim, calldata, token_param_indexes=())
 
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "mint"
-    # ABSENT, not false: the claims bridge reads absence as unmeasured.
+    # Absent, not false: the claims bridge reads absence as unmeasured.
     assert "backing" not in eff.details
     assert "backing_inflow_transfers" not in eff.concrete
-    # Plain reverting code at the prober-supplied address: nothing name-derived took part.
     _calls, overrides = sim.seen[-1]
     assert overrides[PRINCIPAL.lower()]["code"] == recipes._REVERT_STUB_CODE
 
 
 def test_a_mint_unaffected_by_the_stub_still_publishes_the_negative():
-    """The counterpart, and why the fix is a differential rather than a codesize check: an admin
-    mint's recipient is routinely a codeless EOA, and withholding on that alone would delete the
-    unbacked-issuance witness."""
+    """An admin mint's recipient is routinely a codeless EOA, so a codesize check would delete the unbacked-issuance
+    witness.
+    """
     sig = "mint(address,uint256)"
     calldata = _calldata(sig, PRINCIPAL, 1)
     sim = _Recorder(_supply_block(0, 100, _mint_only()), _supply_block(0, 100, _mint_only()))
@@ -129,8 +125,7 @@ def test_a_mint_unaffected_by_the_stub_still_publishes_the_negative():
 
 
 def test_a_differential_that_changes_the_delta_withholds():
-    """The stub must be INERT, not merely survivable: a different supply delta
-    means the prober's address participated in what was measured."""
+    """The stub must be inert, not merely survivable."""
     sig = "enter(address,uint256)"
     sim = _Recorder(_supply_block(0, 100, _mint_only()), _supply_block(0, 40, _mint_only()))
     eff = _supply(sim, _calldata(sig, PRINCIPAL, 1), token_param_indexes=())
@@ -138,8 +133,7 @@ def test_a_differential_that_changes_the_delta_withholds():
 
 
 def test_a_differential_that_cannot_be_run_withholds():
-    """A malformed or absent second block is a non-observation, and a
-    non-observation may not stand in for the proof."""
+    """A non-observation may not stand in for the proof."""
     sim = _Recorder(_supply_block(0, 100, _mint_only()))  # no differential block
     eff = _supply(sim, _calldata("enter(address,uint256)", PRINCIPAL, 1), token_param_indexes=())
     assert eff.verdict == VERDICT_PROVEN
@@ -147,8 +141,7 @@ def test_a_differential_that_cannot_be_run_withholds():
 
 
 def test_an_observed_inflow_needs_no_differential():
-    """Asymmetric burden: ``inflow_observed: true`` is a Transfer log that exists.
-    Only the negative is published as a claim about the function."""
+    """Asymmetric burden: only the negative is a claim about the function."""
     logs = [transfer_log(TOKEN_A, PRINCIPAL, VAULT, 5), *_mint_only()]
     sim = _Recorder(_supply_block(0, 100, logs))
     eff = _supply(sim, _calldata("enter(address,uint256)", PRINCIPAL, 1), token_param_indexes=())
@@ -157,7 +150,6 @@ def test_an_observed_inflow_needs_no_differential():
 
 
 def test_a_mint_with_no_address_argument_at_all_needs_no_differential():
-    """``wrap(uint256)`` gives the prober no address to get wrong."""
     sim = _Recorder(_supply_block(0, 100, _mint_only()))
     eff = _supply(sim, _calldata("wrap(uint256)", 1), token_param_indexes=())
     assert eff.details["backing"]["inflow_observed"] is False
@@ -167,24 +159,16 @@ def test_a_mint_with_no_address_argument_at_all_needs_no_differential():
 def test_prober_supplied_address_args_reads_the_bytes_not_the_types():
     principal = PRINCIPAL
     assert recipes._prober_supplied_address_args(_calldata("f(address)", principal), principal) == [principal.lower()]
-    # A token written into the slot by the seeded retry is a proved contract, not the principal.
     assert recipes._prober_supplied_address_args(_calldata("f(address)", TOKEN_A), principal) == []
     assert recipes._prober_supplied_address_args(_calldata("f(uint256)", 1), principal) == []
     assert recipes._prober_supplied_address_args(_calldata("f(address)", ZERO), None) == []
 
 
 def test_a_named_token_slot_that_never_got_a_token_still_withholds_first():
-    """The cheap gate stays: a slot static PROVED carries a token and did not get
-    one is disqualifying without spending a differential."""
     sim = _Recorder(_supply_block(0, 100, _mint_only()))
     eff = _supply(sim, _calldata("deposit(address,uint256)", PRINCIPAL, 1), token_param_indexes=(0,))
     assert "backing" not in eff.details
     assert len(sim.seen) == 1
-
-
-# ---------------------------------------------------------------------------
-# FIX 2 — a revert is not an observation of absence, and never code-plane
-# ---------------------------------------------------------------------------
 
 
 def test_a_reverted_value_probe_is_not_no_value_observed():
@@ -201,7 +185,6 @@ def test_a_reverted_value_probe_is_not_no_value_observed():
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "value_probe_reverted"
     assert eff.details["observation"] == "reverted"
-    # ...and it must not travel to a bytecode twin on the behavioral hash.
     assert "value_probe_reverted" not in _CACHEABLE_UNKNOWN_REASONS
     assert _is_cacheable(unknown(recipes.EFFECT_CLASS_VALUE_OUT, reason="value_probe_reverted")) is False
     assert _is_cacheable(unknown(recipes.EFFECT_CLASS_VALUE_OUT, reason="no_value_observed")) is True
@@ -247,7 +230,6 @@ def test_a_reverted_upgrade_probe_is_not_impl_slot_unchanged():
 
 
 def test_the_supply_recipe_already_split_revert_from_no_delta():
-    """Guard on the shape the other two were made to match."""
     sim = _Recorder(_supply_block(0, 0, (), mint_ok=False))
     eff = _supply(sim, _calldata("mint(address,uint256)", PRINCIPAL, 1))
     assert eff.reason == "mint_call_reverted"
@@ -255,18 +237,10 @@ def test_the_supply_recipe_already_split_revert_from_no_delta():
     assert "mint_call_reverted" not in _CACHEABLE_UNKNOWN_REASONS
 
 
-# ---------------------------------------------------------------------------
-# FIX 3 — the witness carries its own discriminator
-# ---------------------------------------------------------------------------
-
-
 def test_every_row_carries_an_observation_discriminator():
-    """``workers.effects_worker`` writes ``witness=details`` on unknown rows too,
-    so a payload like ``{"value_moved": false}`` must not be readable as a proven
-    absence without joining on ``verdict``."""
+    """A payload like ``{"value_moved": false}`` must not read as proven absence without joining on ``verdict``."""
     rows: list[Any] = []
 
-    # unsupported capability — nothing ran
     rows.append(
         recipes.value_out(
             simulate=_Recorder(),
@@ -278,7 +252,6 @@ def test_every_row_carries_an_observation_discriminator():
             simulate_supported=False,
         )
     )
-    # reverted
     rows.append(
         recipes.value_out(
             simulate=_Recorder(SimResult(calls=(SimCallResult(False, "0x", "0x", ()),))),
@@ -290,7 +263,6 @@ def test_every_row_carries_an_observation_discriminator():
             simulate_supported=True,
         )
     )
-    # executed, nothing moved
     rows.append(
         recipes.value_out(
             simulate=_Recorder(SimResult(calls=(SimCallResult(True, "0x", None, ()),))),
@@ -302,9 +274,7 @@ def test_every_row_carries_an_observation_discriminator():
             simulate_supported=True,
         )
     )
-    # executed, minted
     rows.append(_supply(_Recorder(_supply_block(0, 100, _mint_only())), _calldata("wrap(uint256)", 1)))
-    # authority change whose mutation reverted
     rows.append(
         recipes.authority_change(
             simulate=_Recorder(
@@ -331,7 +301,6 @@ def test_every_row_carries_an_observation_discriminator():
     seen = {row.details["observation"] for row in rows}
     assert seen == {"not_run", "reverted", "executed"}
     for row in rows:
-        # A ``false`` in the payload only describes F on an executed row.
         if row.verdict == VERDICT_UNKNOWN and row.details.get("value_moved") is False:
             assert row.details["observation"] in ("reverted", "executed")
 
@@ -365,16 +334,9 @@ def test_authority_change_records_the_decoded_mutation_revert():
         randoms=["0x" + "33" * 20, "0x" + "44" * 20],
     )
     assert eff.reason == "mutation_call_reverted"
-    # The decoded reason names the selector (here an undecodable custom error),
-    # and the same string reaches both the witness and the transcript.
     assert eff.transcript is not None
     assert err in eff.details["revert_reason"]
     assert eff.details["revert_reason"] == eff.transcript["mutate_revert"]
-
-
-# ---------------------------------------------------------------------------
-# A burn must never be published as a mint
-# ---------------------------------------------------------------------------
 
 
 def _burn_only(burned_from: str = PRINCIPAL, amount: int = 100):
@@ -382,11 +344,9 @@ def _burn_only(burned_from: str = PRINCIPAL, amount: int = 100):
 
 
 def test_a_burn_that_wrapped_past_zero_reads_as_a_burn():
-    """``unchecked { totalSupply -= amount }`` is the universal ``_burn`` idiom.
-    When the seeded holder balance exceeded the supply, the subtraction wrapped
-    and ``totalSupply`` came back as a number just under ``2^256`` — which a plain
-    Python subtraction reads as an enormous INCREASE, i.e. a mint. Reading the
-    difference as the uint256 word it is restores the sign the EVM computed."""
+    """``unchecked { totalSupply -= amount }`` wraps when the seeded balance exceeds supply; read as a uint256 word
+    the sign is right.
+    """
     before = 26_078_429_092_482
     after = (before - 10**18) % (1 << 256)
     assert after > 1 << 250  # the wrap really happened
@@ -404,11 +364,8 @@ def test_a_burn_that_wrapped_past_zero_reads_as_a_burn():
 
 
 def test_a_sign_contradicted_by_the_transfer_logs_publishes_nothing():
-    """Two independent witnesses of one event: the ``totalSupply`` arithmetic and
-    the zero-address ``Transfer`` logs. When they disagree the stage holds neither
-    — least of all the proven "witnessed dilution" output."""
+    """When the supply arithmetic and the zero-address Transfer logs disagree, neither is held."""
     eff = _supply(
-        # Arithmetic says supply ROSE; the only zero-address transfer is a BURN.
         _Recorder(_supply_block(0, 100, _burn_only())),
         _calldata("exit(uint256)", 1),
         token_param_indexes=(),
@@ -417,15 +374,12 @@ def test_a_sign_contradicted_by_the_transfer_logs_publishes_nothing():
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "supply_sign_contradicted_by_transfers"
     assert eff.details["observation"] == "executed"
-    # Must NOT transfer on the behavioral hash: the contradiction is a property of this probe's
-    # state (which token emitted what, under what seed), and caching it would republish "we could
-    # not read this call" as a fact about every twin.
+    # The contradiction is a property of this probe's state, not every twin.
     assert not _is_cacheable(eff)
 
 
 def test_a_token_that_emits_no_zero_address_transfer_is_not_treated_as_a_contradiction():
-    """Absence of evidence is not evidence of absence: a token that mints without
-    emitting anything is unhelpful, not lying, and its verdict still stands."""
+    """A token that mints without emitting anything is unhelpful, not lying."""
     eff = _supply(
         _Recorder(_supply_block(0, 100, ())),
         _calldata("mint(address,uint256)", PRINCIPAL, 1),
@@ -436,13 +390,7 @@ def test_a_token_that_emits_no_zero_address_transfer_is_not_treated_as_a_contrad
     assert eff.details["supply_delta_sign"] == "mint"
 
 
-# ---------------------------------------------------------------------------
-# The static destination-shape proof — a universal, adjudicated against the fork
-# ---------------------------------------------------------------------------
-
-
 def _facts_with_out_flows(*target_kinds, several_members=None):
-    """FunctionFacts whose out-flows carry the given folded destination kinds."""
     from services.effects.calldata import FunctionFacts
 
     flows = []
@@ -472,28 +420,22 @@ def test_static_destination_shape_is_earned_across_every_out_flow():
     out = frozenset(_OUT_DIRECTIONS)
     shape = static_destination_shape
 
-    # Every site provably fixed.
     assert shape(_facts_with_out_flows("immutable"), out) == "immutable_fixed"
     assert shape(_facts_with_out_flows("constant", "storage_no_setter"), out) == "immutable_fixed"
-    # An admin-settable site downgrades the whole function, never the reverse.
     assert shape(_facts_with_out_flows("immutable", "storage_setter"), out) == "storage_determined"
-    # ONE caller-chosen site and the function is caller-redirectable however fixed the others are.
+    # One caller-chosen site makes the function caller-redirectable.
     assert shape(_facts_with_out_flows("immutable", "param"), out) is None
     assert shape(_facts_with_out_flows("msg_sender"), out) is None
     assert shape(_facts_with_out_flows("indeterminate"), out) is None
     assert shape(_facts_with_out_flows("self"), out) is None
-    # A several is read through its members, worst member first.
     assert shape(_facts_with_out_flows("several", several_members=["immutable", "constant"]), out) == "immutable_fixed"
     assert shape(_facts_with_out_flows("several", several_members=["immutable", "param"]), out) is None
-    # An unreadable several proves nothing.
     assert shape(_facts_with_out_flows("several", several_members=[]), out) is None
-    # No out-flows at all is no claim, not a vacuous "fixed".
     assert shape(_facts_with_out_flows(), out) is None
 
 
 def test_a_proven_fixed_shape_reaches_the_verdict():
-    """The publishing branch was unreachable: it demanded a static ADDRESS, but the static plane
-    classifies destinations by KIND. The shape stands on its own; the address comes from observation."""
+    """The branch demanded a static address, but the static plane classifies by kind."""
     moved = [transfer_log(VAULT, VAULT, TOKEN_A, 5)]
     eff = recipes.value_out(
         simulate=_Recorder(SimResult(calls=(SimCallResult(True, "0x", None, tuple(moved)),))),
@@ -509,13 +451,11 @@ def test_a_proven_fixed_shape_reaches_the_verdict():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == "immutable_fixed"
     assert eff.details["shape_proved_by"] == "static"
-    # The address is the OBSERVED one — static named the shape, not the value.
     assert eff.concrete["destination"] == TOKEN_A.lower()
 
 
 def test_a_landed_sentinel_still_outranks_the_static_shape():
-    """An existential proof that the caller CAN redirect the funds beats a
-    universal argued from the source. If they ever conflict, static is wrong."""
+    """An existential proof of redirection beats a universal argued from the source."""
     eff = recipes.value_out(
         simulate=_Recorder(
             SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
@@ -536,16 +476,10 @@ def test_a_landed_sentinel_still_outranks_the_static_shape():
     assert eff.details["shape_proved_by"] == "simulation"
 
 
-# ---------------------------------------------------------------------------
-# The subject of a caller_arbitrary proof
-# ---------------------------------------------------------------------------
-
-
 def test_a_landed_sentinel_publishes_the_parameter_it_landed_in():
-    """A ``caller_arbitrary`` verdict is a proof about ONE parameter, and the
-    prober is the only thing that can say which. Without the subject the scorer's
-    exec join cannot tell a sentinel that rode the call target from one that rode
-    an executor payload, so it refuses every such verdict."""
+    """Without the subject the scorer's exec join can't tell a call-target sentinel from a payload one, so it refuses
+    every such verdict.
+    """
     eff = recipes.value_out(
         simulate=_Recorder(
             SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
@@ -567,9 +501,7 @@ def test_a_landed_sentinel_publishes_the_parameter_it_landed_in():
 
 
 def test_a_sentinel_that_moved_nothing_still_names_its_subject():
-    """The subject is a fact about the calldata that was ISSUED, not about the
-    outcome. Publishing it only on a landing would leave a reader unable to tell
-    "we probed that slot and it held" from "we never probed that slot"."""
+    """The subject describes the issued calldata, not the outcome."""
     eff = recipes.value_out(
         simulate=_Recorder(
             SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),)),
@@ -591,9 +523,7 @@ def test_a_sentinel_that_moved_nothing_still_names_its_subject():
 
 
 def test_no_sentinel_probe_names_no_subject():
-    """Absence is the third state: no sentinel was issued, so there is no
-    parameter this verdict is a proof about — and a consumer must read that as
-    "unnamed", never as "the destination"."""
+    """No sentinel was issued, which must read as "unnamed", never as "the destination"."""
     eff = recipes.value_out(
         simulate=_Recorder(
             SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(VAULT, VAULT, TOKEN_A, 5),)),))

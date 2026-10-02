@@ -21,8 +21,7 @@ def test_queue_migration_round_trip_seeds_every_existing_source(db_session):
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     connection = db_session.connection()
-    # Both directions happen inside an outer transaction. Rollback restores the
-    # head schema and data; no database creation or global fixture mutation.
+    # Rollback restores the head schema and data.
     with Operations.context(MigrationContext.configure(connection)):
         migration.downgrade()
         assert connection.execute(text("SELECT to_regclass('indexer_work')")).scalar_one() is None

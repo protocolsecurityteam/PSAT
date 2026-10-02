@@ -1,14 +1,9 @@
-"""Real-Slither integration tests for the one-shot initializer projection.
+"""Real-Slither integration for the one-shot initializer projection.
 
-Drives the real ``build_predicate_artifacts`` -> evaluator -> policy-surface stack. Pins:
-  * the A-spine: an OZ v4 ``initializer`` and an OZ v5 ERC-7201 ``initializer`` both
-    surface a ``one_shot`` condition and stamp a latch location;
-  * the transient ``_initializing`` flag keeps the badge role but never a latch location
-    (it reads 0 at rest on consumed and live deployments alike, so a latch would mislead);
-  * structural recall: a custom ``require(!initialized)`` bool latch is a one-shot
-    CANDIDATE, while a reentrancy guard and a capped counter are NOT;
-  * polarity: a re-armable toggle (``require(paused); paused = false``) is never a latch.
-Hermetic: the on-chain consumed/live read is in ``test_one_shot_probe`` with a stubbed wire.
+OZ v4 and v5 ``initializer`` both surface ``one_shot`` with a latch location; the transient ``_initializing`` flag
+never gets one (it reads 0 at rest on consumed and live deployments). A custom ``require(!initialized)`` is a
+candidate, while reentrancy guards, capped counters and re-armable toggles are not latches. The on-chain read is
+in ``test_one_shot_probe``.
 """
 
 from __future__ import annotations
@@ -33,7 +28,6 @@ from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
 
-# Minimal OZ-style Initializable vendored so the fixtures need no remappings.
 OZ_V4_INITIALIZABLE = """
 abstract contract Initializable {
     uint8 private _initialized;
@@ -227,26 +221,20 @@ def test_oz_v4_initializer_surfaces_one_shot(artifacts):
 
 
 def test_oz_v5_namespaced_initializer_surfaces_one_shot(artifacts):
-    """OZ v5 ERC-7201: the latch lives at the fixed namespaced slot, decoded by
-    the struct member byte range — NOT slot-0."""
     tree = _fn_tree(artifacts["OzV5"], "initialize")
     assert "one_shot" in _surface_condition_kinds(tree)
     latch = collect_one_shot_latches(tree)["standard"][0]
     assert latch["standard"] == "oz_v5_namespaced"
-    # ERC-7201 InitializableStorage slot (validated against canonical preimage
-    # in test_one_shot_probe::test_erc7201_slot_matches_canonical_derivation).
+    # Validated in test_one_shot_probe::test_erc7201_slot_matches_canonical_derivation.
     assert latch["slot"] == "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00"
     assert latch["byte_offset"] == 0 and latch["size_bytes"] == 8  # uint64 _initialized
     assert latch["role"] == "version"  # the resolver's decide-invariant anchor
 
 
 def test_oz_v5_transient_initializing_member_carries_no_latch(artifacts):
-    """The ERC-7201 transient ``_initializing`` member — folded into the entry
-    point's tree through the real OZ v5 ``onlyInitializing`` →
-    ``_isInitializing`` chain — keeps the ``one_shot`` badge role but must
-    carry NO latch location, and nothing collected for resolution may target
-    its byte range: at rest the flag reads 0 on consumed and live deployments
-    alike, so a latch there reads an initialized proxy as armed."""
+    """At rest the flag reads 0 on consumed and live deployments alike, so a latch there reads an initialized proxy
+    as armed.
+    """
     tree = _fn_tree(artifacts["OzV5"], "initialize")
     transient_leaves: list[dict] = []
 
@@ -274,9 +262,7 @@ def test_oz_v5_transient_initializing_member_carries_no_latch(artifacts):
 
 
 def test_custom_bool_latch_is_candidate_not_standard(artifacts):
-    """A bool ``require(!initialized); initialized = true`` with NO OZ modifier
-    is a structural candidate (carries a latch) but is not stamped role
-    one_shot — only the on-chain read may promote it."""
+    """Only the on-chain read may promote it."""
     tree = _fn_tree(artifacts["Custom"], "setup")
     latches = collect_one_shot_latches(tree)
     assert not latches["standard"], "custom latch must not be an A-spine standard"
@@ -289,12 +275,10 @@ def test_custom_bool_latch_is_candidate_not_standard(artifacts):
 @pytest.mark.parametrize(
     ("fn_name", "expected_kinds"),
     [
-        # ``require(depositCount < 100); depositCount += 1``: the write is not a constant that
-        # permanently falsifies the guard.
+        # The write doesn't permanently falsify the guard.
         pytest.param("deposit", (), id="capped-counter"),
         pytest.param("swap", ("reentrancy",), id="reentrancy-guard-keeps-reentrancy-kind"),
-        # ``require(paused); paused = false``: a setter re-arms it, so it is not a consuming
-        # one-shot (the monotonic-ascent requirement).
+        # A setter re-arms it.
         pytest.param("unpause", (), id="rearmable-toggle"),
     ],
 )
@@ -306,9 +290,6 @@ def test_custom_non_latches_are_not_a_one_shot(artifacts, fn_name, expected_kind
 
 
 def test_unstructured_storage_getter_link_candidate(artifacts):
-    """Lido/Aragon unstructured-storage one-shot: the guard reads a nullary view
-    that loads a constant slot, and the body writes that same slot via assembly —
-    a getter-linked structural candidate."""
     tree = _fn_tree(artifacts["Unstructured"], "initialize")
     latches = collect_one_shot_latches(tree)
     assert latches["candidate"], "unstructured-storage init should be a candidate"
@@ -318,9 +299,6 @@ def test_unstructured_storage_getter_link_candidate(artifacts):
 
 
 def test_unstructured_storage_modifier_anchor_candidate(artifacts):
-    """When the guard leaf saturates in folding, a require-bearing modifier that
-    reads exactly the constant slot the body writes anchors the candidate on the
-    tree root."""
     trees = artifacts["Unstructured"].get("trees") or {}
     matches = [t for full, t in trees.items() if full.split("(", 1)[0] == "initializeViaModifier"]
     assert len(matches) == 1

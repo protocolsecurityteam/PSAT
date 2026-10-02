@@ -1,5 +1,3 @@
-"""Unit tests for ``utils.logging.record_degraded``."""
-
 from __future__ import annotations
 
 from utils.logging import bind_trace_context, degraded_errors_var, record_degraded
@@ -8,7 +6,6 @@ from utils.logging import bind_trace_context, degraded_errors_var, record_degrad
 def test_record_degraded_outside_job_context_is_noop():
     # No accumulator bound — call must not crash and must not write anywhere.
     record_degraded(phase="x", exc=RuntimeError("nope"))
-    # The contextvar default stays None.
     assert degraded_errors_var.get() is None
 
 

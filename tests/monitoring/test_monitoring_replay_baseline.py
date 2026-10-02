@@ -1,14 +1,7 @@
-"""Differential replay of the recorded 2026-08-01 monitoring scan window.
+"""Differential replay of the recorded 2026-08-01 scan window: 446 unwitnessed ``state_changed`` rows.
 
-The fixture pins what the watcher published for that window before the witness
-taxonomy landed: 446 rows, every one of them a ``state_changed:<controller_id>``
-minted from an event occurrence with no witness behind it. These tests state
-the ADDED/REMOVED story against that recording and keep it from drifting.
-
-Liveness matters as much as the counts here: "0 rows, 446 removed" is also what
-a broken fixture produces, so ``test_member_witness_qualification_republishes_
-the_transfers`` runs the same logs through the same path with one spec
-qualified and requires the rows back.
+"0 rows, 446 removed" is also what a broken fixture produces, so the qualified-spec test requires the rows
+back.
 """
 
 from __future__ import annotations
@@ -39,8 +32,7 @@ GOV_TOKEN = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
 
 
 def test_replay_publishes_nothing_unwitnessed(db_session):
-    """The differential: 446 REMOVED, 0 ADDED. Every recorded row was an open-path writer on
-    an unreadable controller (activity tier), so the honest publication is nothing."""
+    """Every recorded row was an open-path writer on an unreadable controller, so the honest publication is nothing."""
     env = build_replay(db_session)
     env.run()
 
@@ -54,18 +46,12 @@ def test_replay_publishes_nothing_unwitnessed(db_session):
     assert len(removed) == 446
     assert produced == set()
 
-    # Every REMOVED row was an unwitnessed stem — i.e. the differential
-    # removed exactly the claims the taxonomy exists to stop making, and not
-    # some canonical event that got caught in the demotion. (Asserting the
-    # absence of such a stem in ``produced`` would be vacuous: it is empty.)
+    # The differential removed exactly the unwitnessed stems.
     assert all(et.startswith("state_changed:") for _a, et, _t, _l in removed)
 
 
 def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_session):
-    """The pre-taxonomy behaviour, reproduced in-suite: forcing each spec back to
-    ``self_describing`` must reproduce the recording identity-for-identity (all 446 rows,
-    all five event shapes). Load-bearing liveness proof: without it "0 produced / 446
-    removed" is indistinguishable from a fixture whose logs stopped decoding."""
+    """Forcing ``self_describing`` must reproduce the recording exactly, which proves the logs still decode."""
     fixture = copy.deepcopy(load_replay_fixture())
     for contract in fixture["contracts"]:
         for spec in contract["monitoring_config"].get("tracked_topics") or []:
@@ -90,15 +76,11 @@ def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_se
         "state_changed:state_variable:locked": 2,
     }
 
-    # All five decoded ABI shapes in the window actually round-tripped —
-    # Transfer/Approval/DelegateVotesChanged on two tokens, Enter/Exit on one,
-    # Deposit on the teller — so no shape is silently contributing zero.
+    # Every decoded ABI shape actually round-tripped.
     topics_seen = {log["topics"][0] for log in fixture["logs"]}
     assert len(topics_seen) == 6
 
-    # Salience census (c) on the same run: all 446 rows must carry a level AND a non-empty basis. They
-    # are ``self_describing`` so ``notable``; none collapse, since the routine arms need inputs
-    # (``signal_class``, ``safe_exec`` status) no row here has.
+    # Every row must carry a level and a non-empty basis.
     rated = env.persisted_salience()
     assert len(rated) == 446
     assert all(level in SALIENCE_VALUES for _et, level, _basis in rated)
@@ -112,11 +94,9 @@ def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_se
 
 
 def test_replay_classifies_every_window_spec(db_session):
-    """Per-spec adjudication. ``_balances`` and ``locked`` are activity (no poll-decodable
-    read spec; ``locked`` is a private Solmate reentrancy guard). F7 closes that residual
-    from the other end (a latch restored within one call is no controller on re-analysis),
-    but the PERSISTED row pinned here still has it. The two ``authority_updated`` specs stay
-    self_describing and emitted no logs, which is why nothing was ADDED."""
+    """``_balances`` and ``locked`` are activity with no poll-decodable read; the persisted row pinned here predates
+    F7.
+    """
     fixture = load_replay_fixture()
     tiers: dict[str, set[str]] = {}
     for contract in fixture["contracts"]:
@@ -183,8 +163,6 @@ def test_member_witness_qualification_republishes_the_transfers(db_session, open
     if openness == "restricted":
         assert len(produced) == 388
         assert {et for _a, et, _t, _l in produced} == {"member_changed:_balances"}
-        # Census (c) on the qualified arm: a member change is a first-class
-        # control-plane fact and every republished row says so, with its basis.
         rated = env.persisted_salience()
         assert len(rated) == 388
         assert {(level, basis) for _et, level, basis in rated} == {(SALIENCE_ALERT, (BASIS_QUALIFIED_MEMBER_CHANGE,))}

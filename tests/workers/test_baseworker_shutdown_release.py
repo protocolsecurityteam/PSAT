@@ -47,9 +47,6 @@ def test_sigterm_preserves_live_leases(mock_session, _signal):
     mock_session.assert_not_called()
 
 
-# ---- _execute_job registers/deregisters around the lifecycle ----------
-
-
 def _boom(*_a, **_kw):
     raise RuntimeError("boom")
 
@@ -57,11 +54,8 @@ def _boom(*_a, **_kw):
 @pytest.mark.parametrize(
     ("process", "lease_id"),
     [
-        # Later drains must not treat a completed claim as live; workers must not leak entries.
         pytest.param(lambda *_a, **_kw: None, uuid.uuid4(), id="success"),
-        # A raising ``process()`` clears tracking after finalizing its failure.
         pytest.param(_boom, uuid.uuid4(), id="exception"),
-        # Legacy rows / test stubs without a token do not populate claim tracking.
         pytest.param(lambda *_a, **_kw: None, None, id="no-lease-id"),
     ],
 )

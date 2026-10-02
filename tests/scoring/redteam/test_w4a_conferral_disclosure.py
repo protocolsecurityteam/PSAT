@@ -1,5 +1,3 @@
-"""W4a: the disclosure items that ride with the conferral test."""
-
 from __future__ import annotations
 
 from services.scoring import fold as FOLD
@@ -21,11 +19,7 @@ from tests.support.scoring_builders import (
 
 
 def test_w4a_the_citation_cap_shows_evidence_before_prose_and_counts_what_it_hid():
-    """The cap is a display bound; the order it evicts in must not be arbitrary.
-
-    Two transcript-bearing citations were evicted by a prose ``reading`` on a
-    shipped row. Evidence first, prose last, and the total counts what was hidden.
-    """
+    """A prose ``reading`` evicted two transcript-bearing citations on a shipped row."""
     prose = [{"field": "reach_gate_state", "reading": "how to read it", "value": i} for i in range(8)]
     evidence = [{"field": "claims[].witness", "transcript_ptr": "t", "verdict": "proven"}]
     plain = [{"field": "gated_contract_backlink", "value": ["k"]}]
@@ -33,17 +27,12 @@ def test_w4a_the_citation_cap_shows_evidence_before_prose_and_counts_what_it_hid
     assert len(shown) == FOLD.CITATION_CAP
     assert shown[0] is evidence[0]
     assert shown[1] is plain[0]
-    # Stable within a tier: the population order still decides among equals.
     assert [c["value"] for c in shown[2:]] == [0, 1, 2, 3, 4, 5]
     assert FOLD._cited(prose) == prose[: FOLD.CITATION_CAP]
 
 
 def test_w4a_a_walked_hop_says_whether_the_surface_was_read_in_full():
-    """ "No guard was found" over a surface read in part is not the same fact.
-
-    The old census collapsed both into walked_on_analysed_conditions, so a hop
-    resting on one extracted function out of twenty read as a checked hop.
-    """
+    """A hop resting on one extracted function of twenty read as fully checked."""
     fully = P.ConditionPlane()
     fully.by_entity = {KEY_V: (P.DestinationFunction(1, "a", (), True), P.DestinationFunction(2, "b", (), True))}
     assert fully.hop(KEY_C, KEY_V).coverage == P.WALKED_ON_ANALYSED_FULLY
@@ -65,13 +54,7 @@ def test_w4a_a_walked_hop_says_whether_the_surface_was_read_in_full():
 
 
 def test_w4a_the_self_pin_recogniser_only_ever_withholds():
-    """Its breadth is safe in exactly one direction, and this is that direction.
-
-    Both comparators and every caller-named parameter read as a pin, because the
-    stored description carries no polarity. Every over-read moves a hop from
-    walked to not_determined; nothing mints a proven-clear. The whole-word guard
-    keeps ``spender`` out.
-    """
+    """Stored descriptions carry no polarity, so over-reading is safe only because it moves hops to not_determined."""
     pinned = [
         "require(bool)(msg.sender != address(this))",
         "initiator != address(this)",
@@ -86,18 +69,12 @@ def test_w4a_the_self_pin_recogniser_only_ever_withholds():
     plane = P.ConditionPlane()
     plane.by_entity = {KEY_V: (P.DestinationFunction(1, "solve", ("initiator != address(this)",), True),)}
     hop = plane.hop(KEY_C, KEY_V)
-    # The strongest thing a pin can say is not_determined — never a proven no.
     assert hop.state == P.HOP_NOT_DETERMINED
     assert hop.state != "proven_no_reach"
 
 
 def test_w4a_licensed_functions_are_keyed_on_the_entity_the_reach_set_uses(fold):
-    """The join key a consumer joins on, not the raw anchor the walk speaks in.
-
-    ``reach_entities`` is canonical (an implementation folded onto its proxy is
-    one entity under two raw keys); publishing licensed functions under the raw
-    anchor would leave folded destinations silently unjoinable.
-    """
+    """Keyed on the raw anchor, folded destinations would be unjoinable."""
     closure = P.ControlClosure(edges=(_role_edge("roles 3", principal=KEY_C, anchor=KEY_IMPL),))
     plane = conferral_plane(role_functions={(KEY_IMPL, 3): (P.LicensedFunction("0xaaaaaaaa", "pull"),)})
     doc = fold(
@@ -111,18 +88,15 @@ def test_w4a_licensed_functions_are_keyed_on_the_entity_the_reach_set_uses(fold)
     licensed = row["reach_licensed_functions"]
     assert KEY_PROXY in row["reach_entities"], "the implementation folds onto its proxy"
     assert set(licensed) <= set(row["reach_entities"]), "every licensed key must be a reach key"
-    # Structured at the source: the consumer joins on the selector rather than
-    # splitting a string on a space a function name is allowed to contain.
+    # Function names may contain spaces.
     assert licensed == {KEY_PROXY: [{"selector": "0xaaaaaaaa", "name": "pull"}]}
     assert KEY_IMPL not in licensed
 
 
 def test_w4a_a_withheld_frontier_hop_sizes_the_subtree_it_hides(fold):
-    """One published hop can withhold a whole graph, and did.
+    """A row lost 22 entities behind 2 published hops.
 
-    A row losing 22 entities behind 2 published hops named 2 destinations and
-    said nothing about the other 20. The withheld population is sized against
-    the widest walk this fold performs; it is a size, never a claim.
+    The size is measured against the widest walk; it is never a claim.
     """
     a, b, c = KEY_V, KEY_PROXY, KEY_IMPL
     closure = P.ControlClosure(
@@ -142,20 +116,13 @@ def test_w4a_a_withheld_frontier_hop_sizes_the_subtree_it_hides(fold):
     assert row["reach_entities"] == [KEY_C], "the frontier hop runs on an authority of another kind"
     assert len(row["reach_hops_not_determined"]) == 1, "one hop is published"
     behind = row["reach_withheld_behind_hops"]
-    # …and it hides three entities, two of which the hop list never names.
     assert (behind["hops"], behind["entities"]) == (1, 3)
     assert behind["entity_keys"] == sorted([a, b, c])
     assert b not in {hop["destination"] for hop in row["reach_hops_not_determined"]}
 
 
 def test_w4a_a_dangling_function_reference_recovers_on_deployment_and_selector():
-    """A stale foreign key must not read as an extraction that never ran.
-
-    ``function_score_signals.function_id`` is ON DELETE SET NULL and a
-    re-analysis reinserts a contract's functions, so an outliving signal points
-    at nothing and every state-variable hop it gates would degrade to
-    writes-not-extracted. The signal's own (deployment, selector) survives.
-    """
+    """``function_id`` is ON DELETE SET NULL and re-analysis reinserts functions; (deployment, selector) survives."""
     plane = P.ConferralPlane(
         writes_by_function={7: frozenset({"owner"})},
         writes_by_deployment_selector={(KEY_C, "0xabcdef12"): frozenset({"owner"})},
@@ -170,8 +137,7 @@ def test_w4a_a_dangling_function_reference_recovers_on_deployment_and_selector()
     assert recovered.confers(scope, KEY_V).conferred
     assert "recovered" in recovered.basis and "does not resolve" in recovered.basis
 
-    # A key the recovery index does not carry stays unextracted rather than
-    # guessing — the index only holds keys every function agrees under.
+    # The index only holds keys every function agrees under.
     lost = plane.grant_for("ownership.transfer", None, entity=KEY_V, selector="0xabcdef12")
     assert not lost.writes_extracted
     assert lost.confers(scope, KEY_V).outcome == P.CONFERRAL_WRITES_NOT_EXTRACTED

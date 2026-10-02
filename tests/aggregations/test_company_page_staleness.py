@@ -1,5 +1,3 @@
-"""Payload schema goldens, stale limits, split publication, and heartbeat-quiet triggers."""
-
 import gzip
 import json
 import logging
@@ -83,7 +81,6 @@ def test_only_a_stale_section_past_the_limit_is_refused_and_logged_once(prepared
     session.execute(update(Page).values(source_started_at=datetime.now(timezone.utc) - timedelta(seconds=61)))
     session.commit()
     with caplog.at_level(logging.ERROR, logger="services.company_pages"):
-        # A fresh build never expires and is not rebuilt for age.
         assert source(session, protocol.name) == "prepared"
         assert worker.refresh_one(factory) == "idle"
         session.execute(update(Contract).values(contract_name="changed"))

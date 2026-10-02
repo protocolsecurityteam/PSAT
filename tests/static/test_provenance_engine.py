@@ -1,11 +1,4 @@
-"""Unit tests for ``ProvenanceEngine`` over Slither IR.
-
-Each fixture is a tiny Solidity contract; we run the engine on a function and assert
-provenance for specific SSA values, found by semantic position (parameter / state
-read / call return), not Slither's SSA naming. Covers the opcodes the predicate
-builder reads: Assignment/TypeConversion/Phi, Binary/Unary, Index/Member,
-SolidityCall, InternalCall, HighLevelCall. The predicate builder has its own suite.
-"""
+"""Provenance is asserted by semantic position (parameter / state read / call return), not Slither's SSA naming."""
 
 from __future__ import annotations
 
@@ -26,13 +19,7 @@ from services.static.contract_analysis_pipeline.provenance import (  # noqa: E40
     is_top,
     union,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _function(sl: Slither, fn_name: str):
@@ -52,9 +39,6 @@ def _find_source_with_kind(sources, kind: str) -> Source | None:
         if s.kind == kind:
             return s
     return None
-
-
-# Pure lattice tests (no Slither needed).
 
 
 _SENDER = frozenset({Source(kind="msg_sender")})
@@ -78,9 +62,7 @@ def test_lattice_union(left, right, expected):
 
 
 def test_is_top_singleton_invariant():
-    """``is_top`` is O(1) (``_TOP_SOURCE in s``), which only works if every
-    kind="top" Source equals the bare sentinel; ``__post_init__`` enforces it. Pin
-    both halves so a "top with metadata" can't make ``is_top`` silently miss."""
+    """``is_top`` is O(1) only if every top Source equals the bare sentinel."""
     import pytest as _pytest
 
     assert is_top(TOP)
@@ -89,8 +71,7 @@ def test_is_top_singleton_invariant():
     assert not is_top(frozenset({Source(kind="parameter", parameter_index=0)}))
     assert not is_top(frozenset())
 
-    # 3. A top Source with any metadata field set is rejected at construction; one
-    # assertion per field so a broken field is named, not buried in a parametrize id.
+    # One assertion per field so a broken one is named.
     with _pytest.raises(ValueError, match="bare sentinel"):
         Source(kind="top", parameter_index=0)
     with _pytest.raises(ValueError, match="bare sentinel"):
@@ -187,8 +168,6 @@ def test_type_conversion_preserves_source(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # The chain of type conversions should land msg.sender provenance
-    # somewhere reachable.
     has_caller = any(_has_source_kind(srcs, "msg_sender") for srcs in eng.provenance.sources.values())
     assert has_caller, "type conversion chain dropped msg_sender source"
 
@@ -210,8 +189,6 @@ def test_binary_combines_operand_sources(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # The `ok` value should have a `computed` source whose taint
-    # includes both parameter and state_variable.
     found_computed = False
     for sources in eng.provenance.sources.values():
         if (
@@ -242,8 +219,6 @@ def test_index_propagates_base_and_key(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # The reference for balances[msg.sender] should carry both
-    # state_variable (from the mapping base) and msg_sender (from the key).
     has_state_and_caller = any(
         _has_source_kind(srcs, "state_variable") and _has_source_kind(srcs, "msg_sender")
         for srcs in eng.provenance.sources.values()
@@ -285,7 +260,6 @@ def test_solidity_call_keccak_classified_as_computed(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # keccak256 result should be `computed`, not signature_recovery.
     has_computed = any(_has_source_kind(srcs, "computed") for srcs in eng.provenance.sources.values())
     has_sig = any(_has_source_kind(srcs, "signature_recovery") for srcs in eng.provenance.sources.values())
     assert has_computed
@@ -293,7 +267,6 @@ def test_solidity_call_keccak_classified_as_computed(tmp_path):
 
 
 def _keccak_sources(eng) -> frozenset[Source]:
-    """The source set of the outermost ``keccak256`` result in a run."""
     for srcs in eng.provenance.sources.values():
         for source in srcs:
             if source.kind == "computed" and (source.computed_kind or "").startswith("keccak256"):
@@ -302,10 +275,7 @@ def _keccak_sources(eng) -> frozenset[Source]:
 
 
 def test_keccak_binds_the_parameters_it_commits_through_abi_encode(tmp_path):
-    """The un-hedged half of ``..._classified_as_computed``: the hash is
-    ``computed``, AND the parameters it commits are still named. Nesting is what
-    makes this non-trivial — ``x`` reaches ``keccak256`` only through
-    ``abi.encode``, whose own origins have to be spliced in."""
+    """``x`` reaches ``keccak256`` only through ``abi.encode``, whose origins must be spliced in."""
     sl = _compile(
         tmp_path,
         """
@@ -330,16 +300,11 @@ def test_keccak_binds_the_parameters_it_commits_through_abi_encode(tmp_path):
         (1, "to"),
     }
     assert {o.state_variable_name for o in keccak.derived_from if o.kind == "state_variable"} == {"owner"}
-    # The derivation shape survives alongside the binding — a consumer must still
-    # be able to tell a hash commitment from a plain equality against storage.
     assert any(o.kind == "computed" and (o.computed_kind or "").startswith("abi.encode") for o in keccak.derived_from)
-    # Members are stored stripped so the projection can never nest.
     assert all(o.derived_from is None for o in keccak.derived_from)
 
 
 def test_keccak_over_constants_is_determined_empty_not_unknown(tmp_path):
-    """The proven-absent state: nothing but constants reached the hash. This
-    must be distinguishable from "nobody worked it out" (``None``)."""
     sl = _compile(
         tmp_path,
         """
@@ -359,10 +324,9 @@ def test_keccak_over_constants_is_determined_empty_not_unknown(tmp_path):
 
 
 def test_msg_value_computed_source_reports_not_determined(tmp_path):
-    """The third state, live: ``msg.value`` mints a ``computed`` source outside
-    the Solidity-call handler, so its argument provenance is genuinely
-    unpopulated. It must say ``None``, not ``frozenset()`` — the latter would
-    assert that nothing reached it, which is a claim nobody made."""
+    """``msg.value`` mints its source outside the Solidity-call handler; ``frozenset()`` would claim nothing reached
+    it.
+    """
     sl = _compile(
         tmp_path,
         """
@@ -429,14 +393,11 @@ def test_internal_call_recurses_into_callee(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # The return of _helper(msg.sender) should land msg_sender provenance.
     has_caller = any(_has_source_kind(srcs, "msg_sender") for srcs in eng.provenance.sources.values())
     assert has_caller, f"internal call didn't propagate msg_sender. map={dict(eng.provenance.sources)}"
 
 
 def test_internal_call_depth_cap_does_not_crash(tmp_path):
-    """Mutual recursion past the depth cap must terminate cleanly (guards against
-    blowing the stack on adversarial fixtures)."""
     sl = _compile(
         tmp_path,
         """
@@ -453,7 +414,6 @@ def test_internal_call_depth_cap_does_not_crash(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn, internal_call_depth=3)
     eng.run()
-    # Termination only; no specific provenance asserted.
 
 
 def test_block_timestamp_classified(tmp_path):
@@ -481,8 +441,6 @@ def test_block_timestamp_classified(tmp_path):
 @pytest.mark.parametrize(
     ("body", "callee", "extra_kinds"),
     [
-        # ``target.call(data)`` produces a tuple lvalue whose provenance must include external_call AND the
-        # destination/args taint (both parameters here).
         pytest.param(
             """
             function f(address target, bytes calldata data) external returns (bool, bytes memory) {
@@ -504,8 +462,6 @@ def test_block_timestamp_classified(tmp_path):
             (),
             id="staticcall",
         ),
-        # delegatecall is structurally distinguished by callee=='delegatecall'; the destination's provenance
-        # (msg.sender) must travel into the result so a downstream analyzer sees a caller-controlled target.
         pytest.param(
             """
             function f(bytes calldata data) external returns (bool) {
@@ -540,12 +496,7 @@ def test_low_level_call_classified(tmp_path, body, callee, extra_kinds):
 
 
 def test_member_records_field_name(tmp_path):
-    """``s.field`` should produce a ``computed`` source whose
-    ``computed_kind`` is ``member.<field_name>`` AND preserve the
-    base's provenance. Critical for the OZ role-mapping pattern:
-    ``_roles[role].adminRole`` must surface both the parameter taint
-    (so the predicate builder marks it parametric) AND the field name
-    (so the builder can recognize the getRoleAdmin shape)."""
+    """``_roles[role].adminRole`` must surface the parameter taint and the field name for the getRoleAdmin shape."""
     sl = _compile(
         tmp_path,
         """
@@ -562,10 +513,6 @@ def test_member_records_field_name(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # We want a value whose source set has BOTH:
-    #   - parameter taint (from `role`)
-    #   - state_variable taint (from `_roles`)
-    #   - computed source with computed_kind == "member.adminRole"
     found = False
     for srcs in eng.provenance.sources.values():
         member = next((s for s in srcs if s.kind == "computed" and (s.computed_kind or "").startswith("member.")), None)
@@ -589,7 +536,6 @@ def test_env_override_internal_call_depth(monkeypatch):
     reload(prov)
     assert prov.DEFAULT_INTERNAL_CALL_DEPTH == 9
     assert prov.DEFAULT_WORKLIST_ITER_CAP == 37
-    # Bad values fall back to the hard-coded default.
     monkeypatch.setenv("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", "not_a_number")
     monkeypatch.setenv("PSAT_PROVENANCE_WORKLIST_CAP", "-1")
     reload(prov)
@@ -601,8 +547,6 @@ def test_env_override_internal_call_depth(monkeypatch):
 
 
 def test_loop_phi_converges_with_loop_carried_taint(tmp_path):
-    """A loop-carried variable's provenance must converge to a fixed point holding
-    both the entry-block and loop-body sources (no oscillation, no saturation to TOP)."""
     sl = _compile(
         tmp_path,
         """
@@ -622,15 +566,12 @@ def test_loop_phi_converges_with_loop_carried_taint(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # Some SSA value (the converged `acc`) must carry both
-    # state_variable (from `seed`) and parameter (from `vals`) taint.
     found = False
     for srcs in eng.provenance.sources.values():
         if _has_source_kind(srcs, "state_variable") and _has_source_kind(srcs, "parameter"):
             found = True
             break
     assert found, f"loop accumulator didn't converge with both seed+vals taint. map={dict(eng.provenance.sources)}"
-    # The accumulator must NOT saturate to TOP (a monotonic union over a finite set converges).
     seed_sources = eng.provenance.sources
     has_top_in_loop_var = any(is_top(srcs) for srcs in seed_sources.values())
     assert not has_top_in_loop_var, (
@@ -639,8 +580,6 @@ def test_loop_phi_converges_with_loop_carried_taint(tmp_path):
 
 
 def test_loop_iteration_cap_terminates(tmp_path):
-    """A pathologically deep loop body must terminate within the iteration cap; a tiny
-    cap forces the cap-hit path, which must not raise or hang."""
     sl = _compile(
         tmp_path,
         """
@@ -662,11 +601,10 @@ def test_loop_iteration_cap_terminates(tmp_path):
 
 
 def test_sub_engine_memo_collapses_repeated_internal_calls(tmp_path):
-    """The per-engine memo on (callee_full_name, frozenset(bindings.items())) makes
-    repeat InternalCall handling within ONE run() a cache hit; without it the
-    fixed-point worklist re-runs the callee sub-engine on every revisit, compounding
-    quadratically. It only fires for InternalCalls WITH an lvalue, so use a
-    return-value helper."""
+    """Without the memo the fixed-point worklist re-runs the callee sub-engine on every revisit.
+
+    Only InternalCalls with an lvalue hit it.
+    """
     sl = _compile(
         tmp_path,
         """
@@ -687,13 +625,10 @@ def test_sub_engine_memo_collapses_repeated_internal_calls(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # The two `_resolve(u)` call sites have identical bindings; the
-    # memo must collapse them so both are served from one cache entry.
     assert eng._sub_engine_memo, (
         "expected _sub_engine_memo to be populated after a value-returning "
         "internal-call run; the optimization path didn't fire"
     )
-    # Stability across re-runs: keys must not multiply.
     pre_keys = set(eng._sub_engine_memo.keys())
     eng.run()
     assert set(eng._sub_engine_memo.keys()) == pre_keys, (
@@ -702,17 +637,10 @@ def test_sub_engine_memo_collapses_repeated_internal_calls(tmp_path):
 
 
 def test_shared_modifier_phi_does_not_pollute_function_parameter(tmp_path):
-    """Slither shares a modifier's SSA-IR across every caller, so the modifier-entry
-    Phi for a modifier parameter unions ALL call-site arguments. When it shares a NAME
-    with a function parameter (OZ ``onlyRole(bytes32 role)`` + ``revokeRole(bytes32
-    role, ...)``), iterating that Phi would pollute the function's parameter
-    provenance with every OTHER caller's argument.
+    """Slither shares a modifier's SSA across callers, so its entry Phi unions every call site's argument.
 
-    Pre-fix on CumulativeMerkleDrop a 5-IR function saturated the 200-iter cap
-    (~18 s/fn, 17 min per contract): bindings kept growing, so ``_sub_engine_memo``
-    missed every iteration. The fix: ``_iter_nodes`` no longer yields modifier
-    bodies; the cross-fn revert path is handled by ``RevertDetector`` +
-    ``_build_chain_bindings``, so nothing is lost.
+    On CumulativeMerkleDrop this saturated the 200-iter cap (17 min per contract). ``_iter_nodes`` no longer yields
+    modifier bodies; ``RevertDetector`` covers the cross-fn path.
     """
     sl = _compile(
         tmp_path,
@@ -752,8 +680,7 @@ def test_shared_modifier_phi_does_not_pollute_function_parameter(tmp_path):
 
     role_sources = eng.provenance.get("role")
     assert role_sources, "expected `role` parameter to be seeded"
-    # The function's ``role`` is bound to its caller's argument, never a state
-    # variable; seeing the modifier Phi's rvalues (PAUSER_ROLE / OPERATOR_ROLE) means the bug is back.
+    # Seeing PAUSER_ROLE / OPERATOR_ROLE means the bug is back.
     polluted_state_vars = {s.state_variable_name for s in role_sources if s.kind == "state_variable"}
     assert not polluted_state_vars, (
         f"`role`'s provenance was polluted by the modifier-shared Phi: "
@@ -788,8 +715,6 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
         f"unpacked `ok` didn't inherit external_call source. map={dict(eng.provenance.sources)}"
     )
 
-
-# ``callee_args_digest`` is content-stable across processes/seeds.
 
 _DIGEST_SNIPPET = """
 import sys
@@ -827,10 +752,6 @@ def _digests_under_seed(seed: str) -> list[str]:
 
 
 def test_callee_args_digest_is_seed_independent():
-    """The digest of the same SourceSet is byte-identical under different
-    PYTHONHASHSEED values (it is content-derived, not ``hash()``-derived), and
-    two different SourceSets still get different digests (the discriminating
-    role the field exists for)."""
     run_a = _digests_under_seed("0")
     run_b = _digests_under_seed("12345")
     assert run_a == run_b, f"digest varies with hash seed: {run_a} vs {run_b}"
@@ -838,10 +759,7 @@ def test_callee_args_digest_is_seed_independent():
 
 
 def test_operand_tie_break_is_seed_independent():
-    """Two computed Sources tied on every pre-digest sort-key field must resolve to
-    the SAME published operand in every process. Before the fix the winner was
-    ordered by a ``hash()``-seeded digest string; 37-46 operand slots flickered
-    across 25/88 production units."""
+    """A ``hash()``-seeded tie-break flickered 37-46 operand slots across 25/88 production units."""
     import os
     import subprocess
 

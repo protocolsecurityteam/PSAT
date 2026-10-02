@@ -16,8 +16,6 @@ from tests.conftest import requires_postgres
 
 
 def test_resolve_scan_floor_caches_per_address(monkeypatch):
-    # The floor memoizes per (address, chain) so a multi-key fold or sibling
-    # functions never issue duplicate Etherscan lookups.
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -76,7 +74,6 @@ def test_resolve_scan_floor_defers_on_a_failed_witness(monkeypatch):
 
 
 def test_resolve_scan_floor_defers_on_unknown(monkeypatch):
-    # No cursor + no creation block → DEFER (None), never fail-open to 0.
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()

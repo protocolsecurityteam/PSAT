@@ -43,15 +43,8 @@ def _stub_membership_probe(monkeypatch):
     monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
 
 
-# ---------------------------------------------------------------------------
-# project_to_events — proxy-row lookup
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_project_events_keys_to_legacy_null_proxy_row_on_mainnet_subject(db_session, proto_id):
-    """A legacy ``chain=NULL`` proxy row is keyed by a mainnet subject via the coalesced lookup (the old
-    ``chain == 'ethereum'`` predicate skipped it)."""
     from db.models import Contract, UpgradeEvent
     from services.discovery.upgrade_history import project_to_events
 
@@ -98,7 +91,6 @@ def test_project_events_skips_mainnet_proxy_row_for_l2_subject(db_session, proto
 
     proxy_addr = _addr()
     impl_addr = _addr()
-    # Only a mainnet (legacy NULL) proxy row exists for this address.
     mainnet_proxy = Contract(address=proxy_addr, chain=None, protocol_id=proto_id, is_proxy=True)
     db_session.add(mainnet_proxy)
     db_session.commit()
@@ -128,13 +120,7 @@ def test_project_events_skips_mainnet_proxy_row_for_l2_subject(db_session, proto
     db_session.commit()
 
     assert stats["proxies_skipped_no_contract"] == 1
-    # The mainnet proxy row keeps zero events — the Base subject didn't touch it.
     assert db_session.query(UpgradeEvent).filter_by(contract_id=mainnet_proxy.id).count() == 0
-
-
-# ---------------------------------------------------------------------------
-# backfill_historical_impl_contracts — impl-row dedup
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -157,8 +143,7 @@ def test_backfill_adopts_legacy_null_impl_row_on_mainnet(db_session, proto_id, s
     assert len(rows) == 1  # nominated in place, not duplicated
     row = rows[0]
     assert row.chain is None  # no backfill of the legacy value
-    # Membership is the gate's verdict (no member-proxy edge here): the
-    # coalesced dedup shows as an in-place NOMINATION, never a fresh row.
+    # The coalesced dedup shows as an in-place nomination, never a fresh row.
     assert row.nominated_protocol_id == proto_id
     assert "upgrade_history" in (row.discovery_sources or [])
     assert row.contract_name == "ExistingImpl"  # existing name preserved
@@ -182,8 +167,6 @@ def test_backfill_base_does_not_adopt_legacy_null_mainnet_impl_row(db_session, p
 
     rows = db_session.query(Contract).filter(Contract.address == impl_addr).all()
     assert {r.chain for r in rows} == {None, "base"}
-    # The mainnet (NULL) row was left untouched; only the Base row carries
-    # the nomination.
     by_chain = {r.chain: r for r in rows}
     assert by_chain[None].nominated_protocol_id is None
     assert by_chain["base"].nominated_protocol_id == proto_id

@@ -1,9 +1,6 @@
-"""W1 - the two Tier-1 producers acquire a caller, and the caller stays honest.
+"""Wiring only: the firing precondition, the failure domain and call-site provenance.
 
-Producer semantics are tested elsewhere; every arm here is wiring: the precondition that
-decides whether they fire, the failure domain of a failure, and the provenance the call site
-supplies. Producer semantics are asserted only where wiring could pre-empt them (the
-cold-cursor case must reach the table as ``holders`` NULL / ``coverage`` partial).
+The cold-cursor case must still reach the table as ``holders`` NULL.
 """
 
 from __future__ import annotations
@@ -40,8 +37,7 @@ from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVO
 from tests.support.witness_wire import stub_seed_witness
 from workers.resolution_worker import ResolutionWorker
 
-# The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
-# implementation, which emits nothing — the enrollment target is this address.
+# Its ``contracts`` row is keyed at the implementation, which emits nothing.
 EFNM_PROXY = "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"
 EFNM_IMPLEMENTATION = "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05"
 EFNM_CREATION_BLOCK = 17174453
@@ -60,7 +56,6 @@ BLOCK = 25643300
 
 
 def _job_stub() -> Any:
-    """A bare job identity — the plane call site reads only ``id`` (for the log)."""
     return SimpleNamespace(id=uuid.uuid4())
 
 
@@ -110,21 +105,13 @@ def _pubkey_log(node: str, *, emitter: str, log_index: int) -> IndexedEventLog:
 
 @pytest.fixture
 def role_plane_session(db_session):
-    """``db_session`` sweeps neither plane's table; both are swept here."""
     yield db_session
     db_session.rollback()
     db_session.query(RoleHolderPlane).delete()
     db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# 1.1 — the both-cursors precondition
-# ---------------------------------------------------------------------------
-
-
 class TestRoleHolderPlaneFiringCondition:
-    """Both AccessControl cursors, or the producer is never reached."""
-
     def _spy(self, monkeypatch) -> list[dict[str, Any]]:
         calls: list[dict[str, Any]] = []
 
@@ -233,7 +220,7 @@ class TestRoleHolderPlaneFiringCondition:
         db_session.rollback()
 
     def test_no_rows_writes_nothing(self, db_session, monkeypatch):
-        """An empty resolve is row-absence, which is not_determined — not a commit."""
+        """Row absence is not_determined, not a commit."""
         self._spy(monkeypatch)
         persisted: list[Any] = []
         monkeypatch.setattr(
@@ -258,12 +245,8 @@ class TestRoleHolderPlaneFiringCondition:
 
 
 class TestRoleHolderPlaneColdCursor:
-    """The wiring must not pre-empt or post-process the module's withholding."""
-
     def test_cold_cursor_publishes_null_holders_not_an_empty_set(self, role_plane_session, monkeypatch):
         session = role_plane_session
-        # Both cursors enrolled, neither warm — and a real RoleGranted log, so
-        # the module has a role to mint a row for.
         session.add_all(
             [
                 _cursor(REGISTRY, ROLE_GRANTED_TOPIC0, backfill_complete=False),
@@ -288,19 +271,13 @@ class TestRoleHolderPlaneColdCursor:
 
         assert written == 1
         row = session.execute(select(RoleHolderPlane).where(RoleHolderPlane.registry_address == REGISTRY)).scalar_one()
-        # NULL, never ``[]``: the empty list would assert that the floor was
-        # computed and came back empty.
+        # ``[]`` would assert the floor was computed and came back empty.
         assert row.holders is None
         assert row.coverage == ROLE_COVERAGE_PARTIAL
         assert row.holder_set_exhaustive == HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED
         assert row.as_of_block is None
         assert row.candidate_count is None
         assert row.fold_chain_disagreements is None
-
-
-# ---------------------------------------------------------------------------
-# 1.1 — the composition point inside the resolution stage
-# ---------------------------------------------------------------------------
 
 
 def _stub_stage(monkeypatch, **overrides: Any) -> None:
@@ -358,7 +335,6 @@ class TestResolutionStageComposition:
         assert seen[0]["chain_id"] == 1
 
     def test_impl_job_registers_the_proxy_not_the_implementation(self, monkeypatch):
-        """Logs land at the runtime address; the ``contracts`` row does not."""
         seen: list[dict[str, Any]] = []
         _stub_stage(
             monkeypatch,
@@ -390,14 +366,8 @@ class TestResolutionStageComposition:
         ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
 
         assert degraded == ["resolution_role_holder_plane"]
-        # The stage still reached its terminal detail.
         assert any(d.startswith("Resolution complete") for d in details)
         session.rollback.assert_called()
-
-
-# ---------------------------------------------------------------------------
-# 1.2 — the restaking periodic step
-# ---------------------------------------------------------------------------
 
 
 class _RestakingSpies:
@@ -478,8 +448,6 @@ class TestRestakingStepOrder:
         db_session.rollback()
 
     def test_nodes_are_scoped_to_the_emitter_that_enumerated_them(self, db_session, one_protocol, monkeypatch):
-        """``manager_contract_id`` names an enumerating contract, so the node set
-        it is attached to must be that contract's."""
         spies = _RestakingSpies(monkeypatch)
         spies.emitters = [EFNM_PROXY, OTHER_EMITTER]
 
@@ -496,8 +464,7 @@ class TestRestakingStepFailClosed:
 
         assert refresh_restaking_plane(db_session, chain_id=8453, rpc_url="https://rpc.example") == 0
         assert spies.order == []
-        # Every refusal still beats and says which arm refused (a silent return looks like a
-        # wedged loop). A chain with no configured pair is an absence, not a failed observation.
+        # A silent return looks like a wedged loop; an unconfigured chain is an absence, not a failure.
         assert spies.cycles[-1]["note"] == "no_manager_pair"
         assert spies.cycles[-1]["partial"] is False
         db_session.rollback()
@@ -509,13 +476,11 @@ class TestRestakingStepFailClosed:
         assert refresh_restaking_plane(db_session, chain_id=1) == 0
         assert spies.order == []
         assert spies.cycles[-1]["note"] == "no_rpc_route"
-        # An unrouted chain is configuration, like the pair above.
         assert spies.cycles[-1]["partial"] is False
         db_session.rollback()
 
     def test_no_pinned_head_beats_degraded_not_healthy(self, db_session, one_protocol, monkeypatch):
-        """``pinned_head`` returns None only on a failed or inconsistent read; reporting that
-        healthy would let a dead route look like a protocol with no nodes, forever."""
+        """Reporting it healthy would make a dead route look like a protocol with no nodes."""
         spies = _RestakingSpies(monkeypatch)
         monkeypatch.setattr(restaking_cycle, "pinned_head", lambda *_a, **_kw: None)
 
@@ -564,8 +529,7 @@ class TestRestakingStepFailClosed:
         assert failed == [first.id]
         assert written == 1
         assert [p["protocol_id"] for p in spies.persisted] == [second.id]
-        # The survivor's rows publish and the cycle still declares itself partial, else the
-        # skipped protocol's absent rows would read as an answer.
+        # Otherwise the skipped protocol's absent rows would read as an answer.
         assert spies.cycles[-1]["partial"] is True
         assert spies.cycles[-1]["note"] == "1_failed"
         db_session.rollback()
@@ -583,8 +547,6 @@ class TestRestakingStepFailClosed:
 
 
 class TestRestakingFailureDomain:
-    """A restaking failure is confined to the restaking loop."""
-
     def test_a_cycle_exception_never_leaves_the_loop(self, monkeypatch):
         beats: list[tuple[str, str]] = []
         monkeypatch.setattr(
@@ -610,11 +572,6 @@ class TestRestakingFailureDomain:
         run_restaking_loop(0.0, stop)  # must return, not raise
 
         assert beats == [(HEARTBEAT_PROTOCOL_RESTAKING, "degraded")]
-
-
-# ---------------------------------------------------------------------------
-# 1.3 — the enrollment basis reaches the cursor
-# ---------------------------------------------------------------------------
 
 
 class TestEnrollmentBasis:
@@ -649,7 +606,6 @@ class TestFoldScoping:
 
         assert node_addresses_from_fold(db_session, chain_id=1, event_address=EFNM_PROXY) == [NODE_A]
         assert node_addresses_from_fold(db_session, chain_id=1, event_address=OTHER_EMITTER) == [NODE_B]
-        # The unscoped default is unchanged: chain-wide, both emitters.
         assert node_addresses_from_fold(db_session, chain_id=1) == sorted([NODE_A, NODE_B])
         db_session.rollback()
 

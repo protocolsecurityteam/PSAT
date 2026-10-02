@@ -1,8 +1,3 @@
-"""Integration tests for ``services.aggregations.company_overview``.
-
-Real Postgres via ``db_session`` so the resolver's SQLAlchemy queries actually run.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -50,7 +45,6 @@ pytestmark = requires_postgres
 
 
 def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db_session):
-    """Different successful native/token reads keep their own provenance; NFT history is never decoded."""
     p = _add_protocol(db_session, f"fetch-projection-{uuid.uuid4().hex[:8]}")
     addr = _addr("fetch-projection")
     job = _add_job(db_session, address=addr, protocol_id=p.id)
@@ -118,11 +112,7 @@ def test_prefetch_balance_provenance_is_narrow_and_keeps_both_current_fetches(db
 
 
 def test_resolve_company_jobs_protocol_path(db_session):
-    """Modern data: Protocol row, jobs carry ``protocol_id``, and the subject's Contract row matches.
-
-    The Contract row is the authoritative membership signal; ``Job.protocol_id`` alone is
-    insufficient because dependency-expansion jobs inherit it without proving membership.
-    """
+    """``Job.protocol_id`` alone is insufficient: dependency-expansion jobs inherit it without proving membership."""
     p = _add_protocol(db_session, f"alpha-{uuid.uuid4().hex[:8]}")
     addr_a1 = _addr("a1")
     j1 = _add_job(db_session, address=addr_a1, protocol_id=p.id)
@@ -131,14 +121,11 @@ def test_resolve_company_jobs_protocol_path(db_session):
 
     protocol, jobs = resolve_company_jobs(db_session, p.name)
     assert protocol is not None and protocol.id == p.id
-    # Only completed + has-address + has owned-Contract jobs are returned
     assert {j.id for j in jobs} == {j1.id}
 
 
 def test_resolve_company_jobs_collapses_duplicate_entity_jobs(db_session):
-    """Two completed jobs at the same (chain, address) — a re-analysis, or a
-    cascade child that raced the spawn dedup — must yield ONE job (the newest),
-    so the overview renders one card per entity, never per job."""
+    """A re-analysis or a racing cascade child yields one card per entity, never per job."""
     p = _add_protocol(db_session, f"dupent-{uuid.uuid4().hex[:8]}")
     addr = _addr("dupentity")
     older = _add_job(db_session, address=addr[:2] + addr[2:].upper(), protocol_id=p.id, name="older")
@@ -152,9 +139,7 @@ def test_resolve_company_jobs_collapses_duplicate_entity_jobs(db_session):
 
 
 def test_overview_entry_address_is_canonical_lowercase(db_session):
-    """A job stored with a checksummed address (legacy admin submission) must
-    serialize a lowercase card address — node ids and selection keys downstream
-    assume one canonical form."""
+    """Downstream node ids and selection keys assume a lowercase address."""
     p = _add_protocol(db_session, f"csum-{uuid.uuid4().hex[:8]}")
     lower = _addr("checksummed")
     mixed = lower[:2] + lower[2:].upper()
@@ -167,13 +152,8 @@ def test_overview_entry_address_is_canonical_lowercase(db_session):
 
 
 def test_resolve_company_jobs_excludes_orphan_contracts(db_session):
-    """Surface-page leak: a job whose subject Contract row is orphan (protocol_id=NULL) must
-    NOT show under the protocol, even if the job itself carries protocol_id.
-
-    Repro: static analysis of an etherfi contract spawns a dependency-expansion job for WstETH
-    that inherits protocol_id, but WstETH's Contract row stays orphan because the
-    discovery-source gate won't stamp ownership from a low-confidence signal. Pre-fix, the page
-    joined on Job.protocol_id and rendered WstETH as etherfi.
+    """A dependency-expansion job inherits protocol_id while its Contract stays orphan (WstETH under etherfi); the
+    Contract row decides.
     """
     p = _add_protocol(db_session, f"orphan-{uuid.uuid4().hex[:8]}")
     owned_addr = _addr("aa")
@@ -182,7 +162,6 @@ def test_resolve_company_jobs_excludes_orphan_contracts(db_session):
     j_owned = _add_job(db_session, address=owned_addr, protocol_id=p.id)
     _add_contract(db_session, address=owned_addr, job=j_owned, protocol_id=p.id, contract_name="Owned")
 
-    # Dependency-expansion shape: job has protocol_id, Contract does not.
     j_orphan = _add_job(db_session, address=orphan_addr, protocol_id=p.id)
     _add_contract(db_session, address=orphan_addr, job=j_orphan, protocol_id=None, contract_name="WstETH")
 
@@ -215,7 +194,6 @@ def test_prefetch_contracts_address_chain_fallback(db_session):
     addr = _addr("d")
     original = _add_job(db_session, address=addr, protocol_id=p.id)
     newer = _add_job(db_session, address=addr, protocol_id=p.id)
-    # Contract row is keyed to the newer job — original would normally see no row.
     contract = _add_contract(db_session, address=addr, job=newer, protocol_id=p.id, contract_name="Vault")
 
     out = prefetch_contracts(db_session, [original, newer])
@@ -224,7 +202,6 @@ def test_prefetch_contracts_address_chain_fallback(db_session):
 
 
 def test_resolve_implementation_contracts_links_proxy_to_impl(db_session):
-    """Proxy job → impl Contract row keyed by impl address."""
     p = _add_protocol(db_session, f"proxy-resolver-{uuid.uuid4().hex[:8]}")
     proxy_addr = _addr("px")
     impl_addr = _addr("im")
@@ -249,12 +226,9 @@ def test_resolve_implementation_contracts_links_proxy_to_impl(db_session):
         db_session, [proxy_job, impl_job], contracts_by_job
     )
 
-    # impl_job_by_entity is keyed by the composite token of the impl job's own
-    # chain (both proxy and impl default to ethereum here).
     impl_token = _entity_key("ethereum", impl_addr)
     assert impl_token in impl_job_by_entity
     assert impl_job_by_entity[impl_token].id == impl_job.id
-    # contracts_by_job_id picked up the impl contract under its own job id.
     assert contracts_by_job[impl_job.id].id == impl_contract.id
 
 
@@ -264,7 +238,6 @@ def test_build_company_overview_raises_when_unknown(db_session):
 
 
 def test_build_company_overview_omits_functions_field(db_session):
-    """``functions`` is served lazily by ``/api/company/{name}/functions``, not the main payload."""
     p = _add_protocol(db_session, f"e2e-nofn-{uuid.uuid4().hex[:8]}")
     addr = _addr("nofn1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
@@ -287,8 +260,6 @@ def test_build_company_overview_omits_functions_field(db_session):
     payload = build_company_overview(db_session, p.name)
     entry = next(c for c in payload["contracts"] if c["address"] == addr)
     assert "functions" not in entry
-    # value_effects / capabilities should still derive from the lightweight
-    # ef_effects projection — pause_toggle → "pause" capability.
     assert "pause" in entry["capabilities"]
 
 
@@ -297,11 +268,6 @@ def _claim(claim_id: str, tier: str = "standard_exact") -> dict:
 
 
 def test_capability_chips_key_on_claims(db_session):
-    """Capability chips key off Plane-1 claims (incl. ``timelock`` / ``safe`` / ``arbitrary-call``).
-
-    A claim-bearing row's legacy hook_update/external label contributes no chip and claims win
-    over legacy labels; a claim-less row falls back to the legacy map.
-    """
     p = _add_protocol(db_session, f"cap-claims-{uuid.uuid4().hex[:8]}")
     addr = _addr("capc1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Governor")
@@ -323,14 +289,11 @@ def test_capability_chips_key_on_claims(db_session):
             )
         )
 
-    # New chips from claim families that had no legacy label.
     _ef("schedule", "0x01000001", claims=[_claim("timelock.schedule")], effect_labels=["external_contract_call"])
     _ef("addSigner", "0x01000002", claims=[_claim("safe.signer_mgmt")], effect_labels=["hook_update"])
     _ef("manage", "0x01000003", claims=[_claim("exec.arbitrary")], effect_labels=["external_contract_call"])
-    # Claims win over legacy labels on the same row: flow.out → fund-out, and the
-    # ownership_transfer legacy label must NOT surface an "ownership" chip.
+    # Claims win over legacy labels on the same row.
     _ef("sweep", "0x01000004", claims=[_claim("flow.out")], effect_labels=["ownership_transfer"])
-    # A claim-less row falls back to the legacy map (chip + value_effects).
     _ef("pause", "0x01000005", effect_labels=["pause_toggle"])
     _ef("payout", "0x01000006", effect_labels=["asset_send"])
     db_session.commit()
@@ -341,14 +304,10 @@ def test_capability_chips_key_on_claims(db_session):
 
     assert {"timelock", "safe", "arbitrary-call", "fund-out", "pause"} <= caps
     assert "ownership" not in caps
-    # value_effects stays a Plane-0 fact off the legacy labels.
     assert "asset_send" in entry["value_effects"]
 
 
 def test_controls_detail_capabilities_from_claims(db_session):
-    """A principal's ``controls_detail`` chips come from ``fp_function_detail`` Plane-1 claims:
-    a Safe with a ``safe.signer_mgmt`` function gets ``safe``; the legacy hook_update label adds nothing.
-    """
     p = _add_protocol(db_session, f"cap-detail-{uuid.uuid4().hex[:8]}")
     addr = _addr("capd1")
     safe_addr = _addr("capdsafe").lower()
@@ -397,7 +356,6 @@ def test_controls_detail_capabilities_from_claims(db_session):
 
 
 def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
-    """``build_functions_for_protocol`` returns ``{"<chain>::<address>": [function_entries]}``."""
     p = _add_protocol(db_session, f"functions-{uuid.uuid4().hex[:8]}")
     addr = _addr("fn1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
@@ -437,8 +395,6 @@ def test_build_functions_for_protocol_returns_keyed_function_list(db_session):
     assert entry["selector"] == "0xa9059cbb"
     assert entry["effect_labels"] == ["asset_send"]
     assert entry["authority_public"] is True
-    # The FP row was principal_type=authority_role, so it should bucket
-    # under authority_roles rather than direct_owner.
     assert entry["authority_roles"], "authority_roles should be populated"
     assert entry["direct_owner"] is None
 
@@ -472,7 +428,6 @@ def test_build_functions_for_protocol_two_chains_shared_address(db_session):
     base_contract = _add_contract(
         db_session, address=addr, job=base_job, protocol_id=p.id, chain="base", contract_name="Vault"
     )
-    # Same selector, opposite verdict: gated on ethereum, earned-public on base.
     db_session.add(
         EffectiveFunction(
             contract_id=eth_contract.id,
@@ -514,7 +469,6 @@ def test_build_functions_for_protocol_two_chains_shared_address(db_session):
 
 
 def test_build_company_overview_proxy_uses_impl_name(db_session):
-    """A proxy's overview entry inherits the impl's contract name, not the generic proxy template name."""
     p = _add_protocol(db_session, f"e2e-proxy-{uuid.uuid4().hex[:8]}")
     proxy_addr = _addr("px2")
     impl_addr = _addr("im2")
@@ -546,8 +500,7 @@ def _reference_trim_for_contract(
     cv_by_cid_full: dict,
     cgn_by_cid_full: dict,
 ) -> dict:
-    """Pre-SQL-trim reference path: load every CGN/CGE row (unfiltered), build the payloads,
-    then apply ``_trim_control_graph``."""
+    """The pre-SQL-trim path: load every CGN/CGE row, then ``_trim_control_graph``."""
     all_cgn = (
         session.execute(select(ControlGraphNode).where(ControlGraphNode.contract_id == contract_id)).scalars().all()
     )
@@ -577,14 +530,7 @@ def _reference_trim_for_contract(
 
 
 def test_trim_control_graph_sql_parity(db_session):
-    """SQL-prefiltered control_graph queries return the same (nodes, edges) as the old
-    "load everything, trim in Python" path.
-
-    The seed covers every principal_lookup override case: direct principal keep, edge-source
-    keep, analyzed-contract upgrade, cross-contract principal upgrade, ControllerValue upgrade,
-    ``details.delay`` timelock upgrade, no-edge drop, edge-to-dropped-node drop, and an edge to
-    a node outside the contract's CGN (keep).
-    """
+    """The seed covers every principal_lookup override case plus the drop and keep edge cases."""
     p = _add_protocol(db_session, f"trim-parity-{uuid.uuid4().hex[:8]}")
     addr_a = _addr("ca")
     addr_b = _addr("cb")
@@ -614,12 +560,9 @@ def test_trim_control_graph_sql_parity(db_session):
         )
     )
     db_session.add(ControlGraphNode(contract_id=contract_a.id, address=cv_safe, resolved_type="unknown"))
-    # Cross-contract reference: addr_b is an analyzed contract → lookup upgrade.
     db_session.add(ControlGraphNode(contract_id=contract_a.id, address=addr_b.lower(), resolved_type="unknown"))
-    # cross_safe appears as "safe" on contract_b but "unknown" on contract_a.
     db_session.add(ControlGraphNode(contract_id=contract_a.id, address=cross_safe, resolved_type="unknown"))
 
-    # Contract B's CGN — seeds the cross-contract upgrade for cross_safe.
     db_session.add(ControlGraphNode(contract_id=contract_b.id, address=cross_safe, resolved_type="safe"))
 
     db_session.add(
@@ -646,7 +589,6 @@ def test_trim_control_graph_sql_parity(db_session):
             relation="controls",
         )
     )
-    # Edge to external_addr — target not in contract A's CGN, kept.
     db_session.add(
         ControlGraphEdge(
             contract_id=contract_a.id,
@@ -700,9 +642,7 @@ def test_trim_control_graph_sql_parity(db_session):
         f"  only in reference: {reference_edges - actual_edges}"
     )
 
-    # Spot-check the override branches explicitly so a future regression that
-    # silently drops the analyzed-contract address (the largest override class
-    # in production) doesn't get masked by a parallel reference change.
+    # The analyzed-contract upgrade is the largest override class in production.
     assert addr_b.lower() in actual_nodes, "analyzed-contract address must survive (lookup upgrade)"
     assert cv_safe in actual_nodes, "CV-principal address must survive (lookup upgrade)"
     assert cross_safe in actual_nodes, "cross-contract principal address must survive (lookup upgrade)"
@@ -715,8 +655,6 @@ def test_trim_control_graph_sql_parity(db_session):
 
 
 def _normalize_prefetch(result: dict) -> dict:
-    """Reduce ``_prefetch_child_tables`` output to a hashable, order-independent structure
-    (ORM rows as tuples of downstream-read columns, lists sorted) so equality ignores row order."""
 
     def cv_key(cv):
         return (cv.controller_id, cv.value, cv.resolved_type, cv.source, cv.block_number)
@@ -761,20 +699,12 @@ def _normalize_prefetch(result: dict) -> dict:
         "balances": {cid: sorted(bal_key(b) for b in rows) for cid, rows in result["balances"].items()},
         "cgn": {cid: sorted(cgn_key(n) for n in rows) for cid, rows in result["cgn"].items()},
         "cge": {cid: sorted(cge_key(e) for e in rows) for cid, rows in result["cge"].items()},
-        # Keyed by ADDRESS, not contract_id — the terminal walk is a fact about the
-        # address (see ``_terminal_walk``). Included so a parallel-only divergence
-        # in the newest stage is caught by the same parity check as its siblings.
+        # The terminal walk is keyed by address, not contract_id.
         "terminal_walk": {addr: tuple(sorted(record.items())) for addr, record in result["terminal_walk"].items()},
     }
 
 
 def test_prefetch_child_tables_parallel_sequential_parity(db_session):
-    """``_prefetch_child_tables`` output is identical between the parallel fan-out
-    (``max_workers=4``) and sequential (``max_workers=1``) paths.
-
-    Seeds every child-table type across two contracts so a parallel-only merge corruption,
-    dropped row, or row in the wrong contract_id bucket fails.
-    """
     p = _add_protocol(db_session, f"parity-par-{uuid.uuid4().hex[:8]}")
     addr_a = _addr("pa")
     addr_b = _addr("pb")
@@ -884,8 +814,6 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
         )
     )
 
-    # Contract B: a subset, plus a row whose only purpose is to validate
-    # that each contract_id bucket stays separate across threads.
     db_session.add(
         ControllerValue(
             contract_id=contract_b.id,
@@ -938,8 +866,7 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     )
     assert _normalize_prefetch(parallel)["terminal_walk"], "terminal_walk missing its seeded record"
 
-    # Sanity: every dict key has content from the seed so the equality
-    # check above wasn't trivially {} == {}.
+    # Guards against a trivially equal ``{} == {}``.
     norm = _normalize_prefetch(parallel)
     assert norm["controller_values"][contract_a.id], "controller_values missing for contract A"
     assert norm["balances"][contract_a.id], "balances missing for contract A"
@@ -947,20 +874,13 @@ def test_prefetch_child_tables_parallel_sequential_parity(db_session):
     assert norm["cge"][contract_a.id], "cge missing for contract A"
     assert norm["ef_effects"][contract_a.id], "ef_effects missing for contract A"
     assert norm["fp_governance_rows"][contract_a.id], "fp_governance_rows missing for contract A"
-    # The loader now returns the action count together with the basis it rests
-    # on — two events with no receipt facts are two *unwitnessed* actions, and
-    # the count says so rather than presenting itself as complete.
+    # Two events with no receipt facts are two unwitnessed actions.
     assert norm["upgrade_events_count"][contract_a.id]["count"] == 2
     assert norm["upgrade_events_count"][contract_a.id]["basis"]["events_without_tx_hash"] == 2
     assert norm["upgrade_events_last"][contract_a.id]["block"] == 22345
 
 
 def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
-    """The top-level ``reach`` block is the scorer's own computation: a stored
-    authority reaches its anchor at hop 1 and its anchor's onward edges are
-    published as an unwitnessed frontier, while an admin-column holder expands
-    as code control. ``fund_flows`` stays display edges; the claims live here.
-    """
     from services.scoring.reach import (
         AUTHORITY_EXERCISE_NOT_WITNESSED,
         BASIS_CLOSURE_EDGE,
@@ -993,7 +913,7 @@ def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
 
     vault_contract = by_addr[vault_addr]
     downstream_contract = by_addr[downstream_addr]
-    # Stored from=anchor, to=principal (authority direction is the reverse).
+    # Authority direction is the reverse of the stored edge.
     db_session.add(
         ControlGraphEdge(
             contract_id=vault_contract.id,
@@ -1030,7 +950,6 @@ def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
     vault_key = _entity_key("ethereum", vault_addr)
     downstream_key = _entity_key("ethereum", downstream_addr)
 
-    # Stored authority: hop 1 witnessed, no blind expansion past the anchor.
     authority = reach["entities"][_entity_key("ethereum", authority_addr)]
     assert authority["reached"] == {vault_key: {"hop": 1, "basis": BASIS_CLOSURE_EDGE}}
     (entry,) = authority["frontier"]
@@ -1041,28 +960,18 @@ def test_reach_block_carries_the_scorer_verdict_three_state(db_session):
     )
     assert entry["basis"]
 
-    # Admin column: code control, the walk continues past the proxy.
     admin = reach["entities"][_entity_key("ethereum", admin_addr)]
     proxy_key = _entity_key("ethereum", proxy_addr)
     assert admin["reached"][proxy_key] == {"hop": 1, "basis": BASIS_CLOSURE_EDGE}
     assert admin["reached"][vault_key] == {"hop": 2, "basis": BASIS_WALKED_HOP}
     assert admin["parents"][vault_key] == proxy_key
 
-    # An entity with no closure edge and no proven-reach signal is ABSENT —
-    # the fail-closed state the frontend renders as nothing.
+    # No closure edge and no proven-reach signal means absent, which the frontend renders as nothing.
     assert downstream_key not in reach["entities"]
 
 
 def test_fund_flows_principal_requires_authorization_edge(db_session):
-    """A bare ``ControlGraphNode`` row for another in-protocol contract must NOT produce a
-    ``type=principal`` fund_flow.
-
-    Regression for the etherfi/WstETH overreach: the in-contract pass of
-    ``_build_flows_and_principals`` emitted principals for every in-protocol CGN address with
-    no ``relation`` / ``resolved_type`` / ``depth`` filter, and CGN rows include transitive
-    lineage (EtherFi -> ... -> Lido's WstETH). Real authorization needs a ``ControlGraphEdge``
-    with a meaningful relation.
-    """
+    """CGN rows include transitive lineage (EtherFi -> ... -> Lido's WstETH); authorization needs a ControlGraphEdge."""
     p = _add_protocol(db_session, f"principal-overreach-{uuid.uuid4().hex[:8]}")
 
     target_addr = _addr("target")
@@ -1075,8 +984,6 @@ def test_fund_flows_principal_requires_authorization_edge(db_session):
     )
     _add_contract(db_session, address=token_addr, job=token_job, protocol_id=p.id, contract_name="WstETH")
 
-    # Only a CGN row (written for any address in the control graph, incl. transitive nodes):
-    # lineage, not authorization.
     db_session.add(
         ControlGraphNode(
             contract_id=target_contract.id,
@@ -1103,12 +1010,7 @@ def test_fund_flows_principal_requires_authorization_edge(db_session):
 
 
 def test_fund_flows_principal_emitted_for_in_contract_function_principal(db_session):
-    """Positive complement to the CGN-overreach pin above: an in-protocol contract holding a
-    ``FunctionPrincipal`` row on the target's function DOES emit the principal flow.
-
-    The negative test seeds no FP row, so without this the success branch never runs and the
-    fix could regress silently to "always empty". ``authority -> target`` must be in fund_flows.
-    """
+    """Positive complement to the test above, so the fix cannot regress to "always empty"."""
     p = _add_protocol(db_session, f"principal-positive-{uuid.uuid4().hex[:8]}")
 
     target_addr = _addr("target")
@@ -1159,8 +1061,6 @@ def test_fund_flows_principal_emitted_for_in_contract_function_principal(db_sess
 
 
 def _seed_principal_flow(db_session, protocol, *, target_name="Vault", authority_name="Operator"):
-    """Target gated by an in-protocol authority via FunctionPrincipal; returns both addresses
-    plus the target ``Contract``."""
     target_addr = _addr("target")
     authority_addr = _addr("authority")
 
@@ -1208,12 +1108,7 @@ def _principal_flow(payload, from_addr, to_addr):
 
 
 def test_fund_flow_carries_witnessed_relation_and_label(db_session):
-    """A control-graph row for the pair names the hop on the emitted flow.
-
-    ``control_graph_edges`` is written subject-first (from_node = the contract, to_node = the
-    authority holder), the reverse of the holder → contract fund flow; the frontend's reach-path
-    inspector names hops only from these.
-    """
+    """``control_graph_edges`` is stored subject-first, the reverse of the holder -> contract flow."""
     p = _add_protocol(db_session, f"edge-label-{uuid.uuid4().hex[:8]}")
     target, authority, target_contract = _seed_principal_flow(db_session, p)
 
@@ -1245,14 +1140,8 @@ def test_fund_flow_omits_relation_without_a_control_graph_row(db_session):
 
 
 def test_fund_flow_carries_every_claim_and_never_reverses_a_call(db_session):
-    """Two guards in one: a non-authority relation is never reversed onto the
-    flow, and a pair carrying several control claims publishes all of them.
-
-    ``external_call_target`` asserts the from-node CALLS the to-node — reversing
-    it would mint an authority claim nobody proved, so it contributes nothing.
-    The two control rows are both true of the pair (a role grant and a
-    controller-value slot); picking one would publish an arbitrary witness, so
-    the scalar fields give way to the whole set.
+    """A non-authority relation is never reversed onto the flow, and several control claims on one pair are all
+    published.
     """
     p = _add_protocol(db_session, f"edge-multi-{uuid.uuid4().hex[:8]}")
     target, authority, target_contract = _seed_principal_flow(db_session, p)
@@ -1295,13 +1184,8 @@ def test_fund_flow_carries_every_claim_and_never_reverses_a_call(db_session):
 
 
 def test_fund_flows_controller_requires_authorization_relation(db_session):
-    """A ControllerValue row for another in-protocol contract must NOT produce a
-    ``type=controller`` fund_flow unless the variable denotes authorization.
-
-    ``_build_flows_and_principals`` walks ``controllers``, populated from every address-typed
-    tracked variable (authorizers like ``owner``, but also money-routing targets, external deps
-    like ``oracle``, anchors like ``vault``). Emitting ``controller`` for the latter falsely
-    asserts an integration target authorizes its consumer.
+    """Controllers come from every address-typed variable, including oracles and vaults; those do not authorize their
+    consumer.
     """
     p = _add_protocol(db_session, f"controller-overreach-{uuid.uuid4().hex[:8]}")
 
@@ -1315,9 +1199,7 @@ def test_fund_flows_controller_requires_authorization_relation(db_session):
     )
     _add_contract(db_session, address=token_addr, job=token_job, protocol_id=p.id, contract_name="WstETH")
 
-    # controller_id is a non-authorization name (so the owner-substring heuristic can't confound),
-    # the value resolves to an in-protocol contract, and resolved_type is what
-    # ``classify_resolved_address`` writes for a regular token.
+    # A non-authorization name keeps the owner-substring heuristic from confounding.
     db_session.add(
         ControllerValue(
             contract_id=target_contract.id,
@@ -1405,16 +1287,7 @@ def test_fund_flows_controller_admitted_for_reach_witnessed_authority(db_session
 
 
 def test_fund_flows_controller_not_admitted_for_non_reach_witness(db_session):
-    """A witnessed relation the scorer's closure does NOT walk decorates an
-    emitted edge but never admits one.
-
-    ``capability_principal`` is in ``CONTROL_EDGE_RELATIONS`` (it may name a
-    hop on a flow another gate emitted) but the scorer excludes it from reach —
-    it is a FUNCTION-level principal claim, not authority over the anchor entity
-    (see ``planes.UNCONSUMED_REACH_REASONS``, whose earlier budget-gating
-    rationale is withdrawn as refuted) — so admitting the pair here would draw a
-    route the score document does not vouch for.
-    """
+    """``capability_principal`` can name a hop but the scorer excludes it from reach, so it must not admit a route."""
     p = _add_protocol(db_session, f"nonreach-witness-{uuid.uuid4().hex[:8]}")
 
     vault_addr = _addr("vault")
@@ -1442,11 +1315,7 @@ def test_fund_flows_controller_not_admitted_for_non_reach_witness(db_session):
 
 
 def test_fund_flows_carries_in_protocol_admin_edge(db_session):
-    """``Contract.admin`` pointing at an in-protocol contract is carried as a
-    ``type=controller`` fund_flow — ``load_control_closure`` reads the admin
-    column directly (no ControlGraphEdge needed), so the surface graph must
-    carry the same pair to route the reach the scorer publishes.
-    """
+    """The scorer reads the admin column directly, so the surface graph must carry the same pair."""
     p = _add_protocol(db_session, f"admin-edge-{uuid.uuid4().hex[:8]}")
 
     proxy_addr = _addr("proxy")
@@ -1467,14 +1336,7 @@ def test_fund_flows_carries_in_protocol_admin_edge(db_session):
 
 
 def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
-    """The active owner — not pendingOwner — is returned as the contract's ``owner``.
-
-    Regression: the substring heuristic ``"owner" in cv.controller_id.lower()`` also matches
-    ``pendingowner`` / ``previousowner`` and is last-write-wins, so an Ownable2Step contract
-    (both ``owner()`` and ``pendingOwner()`` tracked) latched onto the not-yet-accepted owner.
-    The wrong owner cascades into ``_build_ownership_hierarchy``, the controls flow source, and
-    the ``!= owner`` filter (double-emitting an edge).
-    """
+    """The ``"owner" in controller_id`` heuristic also matches ``pendingowner`` and was last-write-wins."""
     p = _add_protocol(db_session, f"owner-pending-{uuid.uuid4().hex[:8]}")
 
     target_addr = _addr("target")
@@ -1486,9 +1348,7 @@ def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
         db_session, address=target_addr, job=target_job, protocol_id=p.id, contract_name="Vault"
     )
 
-    # ``owner()`` inserted first, ``pendingOwner()`` second. Postgres
-    # returns rows in physical (insertion) order absent an ORDER BY, so
-    # the buggy last-wins iteration assigns owner = pendingOwner.
+    # Insertion order makes last-wins pick pendingOwner.
     db_session.add(
         ControllerValue(
             contract_id=target_contract.id,
@@ -1512,8 +1372,7 @@ def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
     payload = build_company_overview(db_session, p.name)
     target_entry = next(c for c in payload["contracts"] if c["address"] == target_addr)
 
-    # Sanity: both CV rows reached the entry — proves the bug is in the
-    # owner heuristic, not in data loading.
+    # Proves the bug is in the heuristic, not in data loading.
     assert "owner" in target_entry["controllers"], "owner CV row should be in controllers dict"
     assert "pendingOwner" in target_entry["controllers"], "pendingOwner CV row should be in controllers dict"
 
@@ -1524,19 +1383,10 @@ def test_owner_detection_prefers_active_owner_over_pending_owner(db_session):
 
 
 def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
-    """End-to-end pin for the ether.fi Surface ownership regression.
+    """Governance Safe --FP--> Timelock (in-protocol) --FP--> Vault (proxy).
 
-    Shape: governance Safe --FP--> Timelock (in-protocol) --FP--> Vault (proxy). The Timelock is
-    a protocol contract, so never a *principal*; a one-hop FP-membership check attributed
-    nothing and the canvas showed no owner.
-
-    After the fix (protocol-agnostic):
-      1. The Vault's **proxy** address (not the impl its FP rows live on) is attributed to the
-         governance Safe, resolved *through* the Timelock.
-      2. A fee-destination Safe (typed ``safe``, no ``FunctionPrincipal`` row) is FP-gated out of
-         principals: the second-pass CGN walk keeps a safe/eoa/timelock principal only with real
-         call-authority, so this ``payoutAddress`` fee-sink never becomes a principal or
-         appears in any ``controls``.
+    The Vault's proxy address is attributed to the Safe through the Timelock, and a fee-destination Safe with
+    no FunctionPrincipal row never becomes a principal.
     """
     p = _add_protocol(db_session, f"timelock-gov-{uuid.uuid4().hex[:8]}")
 
@@ -1546,7 +1396,7 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
     gov_safe = _addr("govsafe").lower()
     fee_safe = _addr("feesafe").lower()
 
-    # Vault: proxy + implementation (FP rows live on the impl, as in prod).
+    # FP rows live on the impl, as in prod.
     proxy_job = _add_job(db_session, address=proxy_addr, protocol_id=p.id, is_proxy=True, name="Vault")
     impl_job = _add_job(db_session, address=impl_addr, protocol_id=p.id, name="VaultImpl")
     _add_contract(
@@ -1567,8 +1417,7 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
         db_session, address=timelock_addr, job=tl_job, protocol_id=p.id, contract_name="ProtocolTimelock"
     )
 
-    # Vault.setFee is owner-gated; its caller resolves to the Timelock. The FP
-    # row sits on the IMPL contract — the canvas keys off the proxy address.
+    # The canvas keys off the proxy address.
     ef_vault = EffectiveFunction(
         contract_id=impl_contract.id,
         function_name="setFee",
@@ -1588,7 +1437,6 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
         )
     )
 
-    # Timelock.execute caller resolves to the governance Safe.
     ef_tl = EffectiveFunction(
         contract_id=tl_contract.id,
         function_name="execute",
@@ -1608,9 +1456,7 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
         )
     )
 
-    # Typing comes from the control graph: the Timelock is typed ``timelock``
-    # (so it is a pass-through), and both Safes are typed ``safe`` (so they
-    # surface as principals). The fee Safe is deliberately given NO FP row.
+    # The Timelock is typed ``timelock`` so it is a pass-through; the fee Safe deliberately has no FP row.
     db_session.add(
         ControlGraphNode(contract_id=impl_contract.id, address=timelock_addr.lower(), resolved_type="timelock")
     )
@@ -1643,14 +1489,8 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
 
 
 def test_second_pass_cgn_principal_requires_function_principal_authority(db_session):
-    """The second-pass CGN walk in ``_build_flows_and_principals`` FP-gates its principals: a
-    safe/eoa/timelock node earns a ``principals`` entry (and ``controls`` edge) only with a real
-    ``FunctionPrincipal`` call-right on the contract.
-
-    Without the gate, fee/treasury/payout beneficiaries (``treasury`` / ``feeRecipient`` /
-    ``accountantState.payoutAddress``) were listed as controllers (the ether.fi over-attribution).
-    Both branches: ``drop_safe`` (typed ``safe``, NO FP row) is skipped; ``keep_safe`` (typed
-    ``safe`` AND an FP row) survives with ``controls`` containing ONLY that contract.
+    """Fee/treasury/payout beneficiaries were listed as controllers; only a real FunctionPrincipal call-right earns a
+    principal.
     """
     p = _add_protocol(db_session, f"fp-gate-secondpass-{uuid.uuid4().hex[:8]}")
 
@@ -1663,8 +1503,6 @@ def test_second_pass_cgn_principal_requires_function_principal_authority(db_sess
         db_session, address=vault_addr, job=vault_job, protocol_id=p.id, contract_name="Vault"
     )
 
-    # Vault.setFee is owner-gated and resolves, in FunctionPrincipal, to
-    # ``keep_safe`` — a real call-right on this contract.
     ef = EffectiveFunction(
         contract_id=vault_contract.id,
         function_name="setFee",
@@ -1684,7 +1522,6 @@ def test_second_pass_cgn_principal_requires_function_principal_authority(db_sess
         )
     )
 
-    # ``drop_safe`` is a bare beneficiary node (payoutAddress-style fee sink).
     db_session.add(ControlGraphNode(contract_id=vault_contract.id, address=keep_safe, resolved_type="safe"))
     db_session.add(ControlGraphNode(contract_id=vault_contract.id, address=drop_safe, resolved_type="safe"))
     db_session.commit()
@@ -1710,13 +1547,8 @@ def test_second_pass_cgn_principal_requires_function_principal_authority(db_sess
 
 
 def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session):
-    """The faithful ether.fi shape: the governing Safe is **not** a control-graph node; it is
-    known as a Safe only because its ``FunctionPrincipal`` row on the in-protocol Timelock
-    carries ``resolved_type='safe'`` (set by the policy stage's classifier).
-
-    Pins the consumption half of the typing fix: such a Safe must still surface as a principal
-    and, via the Timelock pass-through, own the proxied Vault. If FP typing regresses to NULL,
-    ``_fp_governance`` drops the row and this fails.
+    """The governing Safe is typed only by its FunctionPrincipal row; if FP typing regresses to NULL,
+    ``_fp_governance`` drops it.
     """
     p = _add_protocol(db_session, f"fp-typed-owner-{uuid.uuid4().hex[:8]}")
 
@@ -1744,8 +1576,6 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
         db_session, address=timelock_addr, job=tl_job, protocol_id=p.id, contract_name="ProtocolTimelock"
     )
 
-    # Vault.setFee -> Timelock (caller resolves to the in-protocol timelock; the
-    # finite_set row itself is untyped, exactly as the writer leaves it).
     ef_vault = EffectiveFunction(
         contract_id=impl_contract.id,
         function_name="setFee",
@@ -1765,8 +1595,6 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
         )
     )
 
-    # Timelock.execute -> gov_safe, TYPED 'safe' on the FP row (what the writer
-    # now does). gov_safe has NO control-graph node at all.
     ef_tl = EffectiveFunction(
         contract_id=tl_contract.id,
         function_name="execute",
@@ -1786,8 +1614,6 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
         )
     )
 
-    # Only the Timelock is typed in the control graph (so it is a pass-through);
-    # the Safe is intentionally absent from CGN.
     db_session.add(
         ControlGraphNode(contract_id=impl_contract.id, address=timelock_addr.lower(), resolved_type="timelock")
     )
@@ -1835,8 +1661,6 @@ def test_standalone_twins_do_not_merge_controller_attribution(db_session):
         db_session, address=vault_addr, job=base_job, protocol_id=p.id, chain="base", contract_name="Vault"
     )
 
-    # Each chain's twin has its OWN owner-gated setFee, controlled by a
-    # chain-local Safe (different address per chain).
     for contract, safe, selector in (
         (eth_contract, eth_safe, "0x44444441"),
         (base_contract, base_safe, "0x44444442"),
@@ -1881,17 +1705,13 @@ def test_standalone_twins_do_not_merge_controller_attribution(db_session):
         f"Safe win the shared bare key and empties this one. Got primary_for={sorted(base_primary)}"
     )
 
-    # Additive chain axis (B4a): each principal reports the chain(s) it governs on.
     assert principals[eth_safe].get("chains") == ["ethereum"], principals[eth_safe].get("chains")
     assert principals[base_safe].get("chains") == ["base"], principals[base_safe].get("chains")
 
 
 def test_flows_and_principals_carry_chain_fields(db_session):
-    """Single-chain byte-compat pin for the additive chain axis (B4a): every
-    ``fund_flows`` edge gains ``from_chain``/``to_chain`` and every principal
-    gains ``chains`` — and NOTHING else about their shape changes. A mainnet-only
-    protocol keeps its previous keys verbatim, with the new fields coalesced to
-    ``"ethereum"``.
+    """Byte-compat pin: the chain fields are the only additions, coalesced to ``"ethereum"`` for a mainnet-only
+    protocol.
     """
     p = _add_protocol(db_session, f"chain-fields-{uuid.uuid4().hex[:8]}")
     vault_addr = _addr("cfvault").lower()
@@ -1936,8 +1756,6 @@ def test_flows_and_principals_carry_chain_fields(db_session):
     assert principals, "expected the FP-backed Safe to surface as a principal"
     for pr in principals:
         assert pr.get("chains") == ["ethereum"], (pr.get("address"), pr.get("chains"))
-        # controls_detail rows gain exactly ``chain`` alongside the bare
-        # ``address`` — nothing else about the row shape drifts (byte-compat pin).
         for row in pr.get("controls_detail") or []:
             assert set(row.keys()) == {"address", "functions", "capabilities", "chain"}, (
                 f"controls_detail row shape drifted beyond the additive chain field: {sorted(row.keys())}"
@@ -1971,7 +1789,6 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
         db_session, address=vault_addr, job=base_job, protocol_id=p.id, chain="base", contract_name="Vault"
     )
 
-    # The SAME Safe holds an owner-gated setFee on both chains' twins.
     for contract, selector in ((eth_contract, "0x46464641"), (base_contract, "0x46464642")):
         ef = EffectiveFunction(
             contract_id=contract.id,
@@ -2009,35 +1826,24 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
 
 
 def test_summary_flags_are_three_state_through_the_payload(db_session):
-    """Row ABSENCE is not a proven negative.
-
-    62 of 147 company-overview entries on the local corpus have no
-    ContractSummary row at all, and every one of them used to publish
-    ``is_pausable: false`` / ``has_timelock: false`` / ``is_factory: false`` —
-    three proven negatives derived from never having looked. The three shapes
-    below are the three states, and the payload has to keep them apart.
-    """
+    """Row absence is not a proven negative; the three shapes below are the three states."""
     p = _add_protocol(db_session, f"e2e-3state-{uuid.uuid4().hex[:8]}")
 
-    # 1. No summary row at all — nobody answered, and the reason is row absence.
     a_absent = _addr("3sA")
     job_a = _add_job(db_session, address=a_absent, protocol_id=p.id, name="NoSummary")
     _add_contract(db_session, address=a_absent, job=job_a, protocol_id=p.id, contract_name="NoSummary")
 
-    # 2. Summary row present, every flag NULL — the detectors ran and declined.
     a_null = _addr("3sB")
     job_b = _add_job(db_session, address=a_null, protocol_id=p.id, name="NullFlags")
     c_null = _add_contract(db_session, address=a_null, job=job_b, protocol_id=p.id, contract_name="NullFlags")
     db_session.add(ContractSummary(contract_id=c_null.id, is_pausable=None, has_timelock=None, is_factory=None))
 
-    # 3. Summary row present, every flag proven False — a real negative.
     a_false = _addr("3sC")
     job_c = _add_job(db_session, address=a_false, protocol_id=p.id, name="ProvenPlain")
     c_false = _add_contract(db_session, address=a_false, job=job_c, protocol_id=p.id, contract_name="ProvenPlain")
     db_session.add(ContractSummary(contract_id=c_false.id, is_pausable=False, has_timelock=False, is_factory=False))
 
-    # 4. Summary row present, proven pausable + proven timelock — the positive
-    #    control for every hedge above.
+    # 4. Proven pausable + proven timelock: the positive control.
     a_true = _addr("3sD")
     job_d = _add_job(db_session, address=a_true, protocol_id=p.id, name="ProvenPausable")
     c_true = _add_contract(db_session, address=a_true, job=job_d, protocol_id=p.id, contract_name="ProvenPausable")
@@ -2052,7 +1858,6 @@ def test_summary_flags_are_three_state_through_the_payload(db_session):
     assert absent["has_timelock"] is None
     assert absent["is_factory"] is None
     assert absent["summary_evidence"] == "absent"
-    # The derived fields must not launder the absence into a positive claim.
     assert "pause" not in absent["capabilities"]
     assert absent["role_evidence"] == "not_determined"
 
@@ -2060,8 +1865,7 @@ def test_summary_flags_are_three_state_through_the_payload(db_session):
     assert nulls["is_pausable"] is None
     assert nulls["has_timelock"] is None
     assert nulls["is_factory"] is None
-    # Same answer about the contract, different answer about why — a consumer
-    # deciding whether to re-run the stage or fix the detector needs both.
+    # Re-run the stage vs fix the detector needs the reason too.
     assert nulls["summary_evidence"] == "present"
     assert "pause" not in nulls["capabilities"]
     assert nulls["role_evidence"] == "not_determined"
@@ -2071,8 +1875,7 @@ def test_summary_flags_are_three_state_through_the_payload(db_session):
     assert proven_false["has_timelock"] is False
     assert proven_false["is_factory"] is False
     assert proven_false["summary_evidence"] == "present"
-    # POSITIVE CONTROL for role_evidence: a role derived from ANSWERED flags is
-    # evidence even when the answer is "no" and the role lands on ``utility``.
+    # A role from answered flags is evidence even when it lands on ``utility``.
     assert proven_false["role"] == "utility"
     assert proven_false["role_evidence"] == "witnessed"
 
@@ -2080,17 +1883,16 @@ def test_summary_flags_are_three_state_through_the_payload(db_session):
     assert proven_true["is_pausable"] is True
     assert proven_true["has_timelock"] is True
     assert proven_true["is_factory"] is True
-    # POSITIVE CONTROL: the pause chip and the governance role still fire on a
-    # proven flag — the ``is True`` narrowing must not have removed them.
+    # The ``is True`` narrowing must not remove the positive chips.
     assert "pause" in proven_true["capabilities"]
     assert proven_true["role"] == "governance"
     assert proven_true["role_evidence"] == "witnessed"
 
 
 def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
-    """``_build_principal_lookup`` types a contract ``timelock`` only on a proven
-    flag: ``timelock`` is a SETTLED key (priority 3) for the terminal-controller
-    renderer, and a NULL flag must leave the address a non-terminal way-point."""
+    """``timelock`` is a settled key for the terminal-controller renderer; a NULL flag leaves a non-terminal
+    way-point.
+    """
     p = _add_protocol(db_session, f"e2e-pltl-{uuid.uuid4().hex[:8]}")
     proven_addr = _addr("pltlA")
     unknown_addr = _addr("pltlB")
@@ -2108,20 +1910,13 @@ def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
 
 
 def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
-    """``usd_value: null`` and ``usd_value: 0`` mean opposite things and are one
-    truthiness test apart in the renderer.
-
-    Also pins the holdings-coverage disclosure: at-the-page-cap is the only
-    positive statement available about completeness, and the other arm is
-    not-determined — never "whole".
-    """
+    """``usd_value: null`` and ``0`` mean opposite things; completeness is only ever at-the-cap or not-determined."""
     p = _add_protocol(db_session, f"e2e-bal-{uuid.uuid4().hex[:8]}")
     addr = _addr("bal1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Vault")
     c = _add_contract(db_session, address=addr, job=job, protocol_id=p.id, contract_name="Vault")
     db_session.add_all(
         [
-            # Priced and worth real money.
             ContractBalance(
                 contract_id=c.id,
                 token_address=_addr("bt1"),
@@ -2131,7 +1926,6 @@ def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
                 usd_value=5000,
                 price_usd=5000,
             ),
-            # Priced and worth nothing — a MEASUREMENT.
             ContractBalance(
                 contract_id=c.id,
                 token_address=_addr("bt2"),
@@ -2141,9 +1935,7 @@ def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
                 usd_value=0,
                 price_usd=0,
             ),
-            # Never valued. The producer writes price_usd=0 for "no price known",
-            # so price_usd alone reads this as worthless; usd_value is the honest
-            # discriminator and the payload must publish the state explicitly.
+            # price_usd=0 means "no price known"; usd_value is the discriminator.
             ContractBalance(
                 contract_id=c.id,
                 token_address=_addr("bt3"),
@@ -2170,22 +1962,15 @@ def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):
     cov = entry["holdings_coverage"]
     assert cov["rows"] == 3
     assert cov["unvalued_rows"] == 1
-    # Three stored rows cannot prove a short page: the state is not-determined,
-    # and "complete" is not a member of the vocabulary at all.
+    # "complete" is not a member of the vocabulary.
     assert cov["state"] == "not_determined"
     assert cov["page_cap"] == 100
-    # The total skips the unvalued row, so it is a lower bound — which is exactly
-    # what ``unvalued_rows`` lets a consumer say.
+    # The total skips the unvalued row, so it is a lower bound.
     assert entry["total_usd"] == 5000.0
 
 
 def test_holdings_the_fetch_recorded_at_the_page_cap_are_flagged_as_possibly_incomplete(db_session):
-    """POSITIVE CONTROL for the coverage state.
-
-    The witness is the FETCH's ``asset_set_status``, not a row count: this list is
-    three rows long and is still a prefix, because the fetch that produced it says
-    the endpoint cut it off.
-    """
+    """The witness is the fetch's ``asset_set_status``, not a row count."""
     p = _add_protocol(db_session, f"e2e-cap-{uuid.uuid4().hex[:8]}")
     addr = _addr("cap1")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Whale")
@@ -2316,9 +2101,8 @@ def test_priced_and_unpriced_holdings_remain_visible_without_classification(db_s
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     by_symbol = {b["token_symbol"]: b for b in entry["balances"]}
 
-    # (a) STILL RETURNED. A suppressed row would be an unwitnessed deletion.
+    # A suppressed row would be an unwitnessed deletion.
     assert set(by_symbol) == {"JUNK", "REAL", "UNK", "SPARED"}
-    # Delivery history is not part of the holdings presentation.
     assert all("disposition_state" not in row and "delivery_shape" not in row for row in by_symbol.values())
     assert by_symbol["JUNK"]["usd_value"] is None
     assert "disposed_rows" not in entry["holdings_coverage"]
@@ -2326,13 +2110,8 @@ def test_priced_and_unpriced_holdings_remain_visible_without_classification(db_s
 
 
 def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
-    """The terminal-controller walk is persisted ONLY on ``principal_labels.details``,
-    and ``_build_principal_lookup`` never joined the table — so
-    ``claimsVocab.terminalControllerNote``, the one consumer that handles all six of
-    its statuses, could never receive the data.
-
-    Measured after wiring: 229 control-graph node payloads and 6 function-principal
-    payloads on the real corpus carry the record (0 before).
+    """The terminal-controller walk lives only on ``principal_labels.details``, which ``_build_principal_lookup``
+    never joined.
     """
     p = _add_protocol(db_session, f"e2e-tp-{uuid.uuid4().hex[:8]}")
     addr = _addr("tp1")
@@ -2349,8 +2128,7 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
             details={},
         )
     )
-    # A walk that TERMINATED — the status the fall-through cannot express, and the
-    # one that renders "ultimate key: 0x… · safe" instead of "unresolved".
+    # The terminated status is the one the fall-through cannot express.
     db_session.add(
         PrincipalLabel(
             contract_id=c.id,
@@ -2370,8 +2148,7 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
             },
         )
     )
-    # A principal_labels row for an address the lookup does NOT carry: annotating it
-    # would widen the published principal set, which is a different change.
+    # Annotating an address the lookup does not carry would widen the published principal set.
     db_session.add(
         PrincipalLabel(
             contract_id=c.id,
@@ -2391,12 +2168,9 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
     assert record["status"] == "terminated"
     assert record["address"] == settled
     assert record["resolved_type"] == "safe"
-    # NEGATIVE CONTROL: the stranger address is not published as a node.
     assert _addr("tp4").lower() not in nodes
 
-    # The forwarding is narrow on purpose: ``terminal`` would let one plane's typing
-    # publish a SETTLED key beside another plane's ``resolved_type: contract``, and
-    # the attribution facts have their own hedged copy and their own review.
+    # Forwarding ``terminal`` would publish a settled key beside another plane's ``resolved_type: contract``.
     forwarded = nodes[controller.lower()]["details"]
     assert "terminal" not in forwarded
     assert "signer_overlap" not in forwarded
@@ -2404,8 +2178,6 @@ def test_terminal_principal_walk_reaches_the_principal_payloads(db_session):
 
 
 def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_session):
-    """``setdefault``: this pass adds the fact where it is missing, never replaces
-    one a ControlGraphNode's own ``details`` already carried."""
     p = _add_protocol(db_session, f"e2e-tpo-{uuid.uuid4().hex[:8]}")
     addr = _addr("tpo1")
     controller = _addr("tpo2")
@@ -2439,10 +2211,8 @@ def test_terminal_walk_does_not_overwrite_a_record_that_arrived_with_the_row(db_
 
 
 def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
-    """``upgrade_count`` renders as literal "N upgrades" text, so its unit is
-    exercises of upgrade authority. A within-tx swap-and-restore emits two
-    ``Upgraded`` logs in ONE transaction — it must count once. A poll-detected
-    row (NULL ``tx_hash``) is its own observed upgrade and must still count.
+    """The unit is exercises of upgrade authority: a swap-and-restore in one tx counts once, and a poll-detected row
+    (NULL tx_hash) counts.
     """
     p = _add_protocol(db_session, f"upgcount-{uuid.uuid4().hex[:8]}")
     addr = _addr("upgc")
@@ -2452,7 +2222,6 @@ def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
     swap_tx = "0x" + "a" * 64
     genuine_tx = "0x" + "b" * 64
     events = [
-        # Genuine upgrade, its own tx.
         UpgradeEvent(
             contract_id=c.id,
             proxy_address=addr,
@@ -2462,7 +2231,6 @@ def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
             tx_hash=genuine_tx,
             source="backfill",
         ),
-        # Swap-and-restore: two Upgraded logs, one transaction.
         UpgradeEvent(
             contract_id=c.id,
             proxy_address=addr,
@@ -2481,7 +2249,6 @@ def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
             tx_hash=swap_tx,
             source="backfill",
         ),
-        # Poll-detected: no tx known, still one observed upgrade.
         UpgradeEvent(
             contract_id=c.id,
             proxy_address=addr,
@@ -2504,12 +2271,7 @@ def test_upgrade_count_counts_transactions_not_upgraded_logs(db_session):
 
 
 def test_last_upgrade_pair_comes_from_one_event(db_session):
-    """``last_upgrade_block`` / ``last_upgrade_timestamp`` describe THE last
-    upgrade, so both halves must come from the same row. With a poll-detected
-    row (NULL block by design) newer than a block-carrying one, two
-    independent MAX aggregates would pair the OLD row's block with the poll
-    row's timestamp — a composite describing no event that happened.
-    """
+    """Two independent MAX aggregates would pair an old block with a poll row's timestamp."""
     p = _add_protocol(db_session, f"upglast-{uuid.uuid4().hex[:8]}")
     addr = _addr("upgl")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
@@ -2550,8 +2312,6 @@ def test_last_upgrade_pair_comes_from_one_event(db_session):
 
 
 def test_last_upgrade_pair_block_carrying_control(db_session):
-    """Positive control for the pair-coherence fix: when the newest event
-    carries a block, both halves publish from it unchanged."""
     p = _add_protocol(db_session, f"upgctl-{uuid.uuid4().hex[:8]}")
     addr = _addr("upgx")
     job = _add_job(db_session, address=addr, protocol_id=p.id, name="Proxy", is_proxy=True)
@@ -2617,10 +2377,8 @@ def _add_ef_with_fp(session, contract, fname, selector, labels, fp_addr, fp_type
 
 
 def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
-    """``fund_flows[].capabilities`` states what the edge's SOURCE can do to
-    the target — never the target's own capability union. Two sources with
-    disjoint witnessed rights on one target must publish disjoint edge
-    capabilities, and neither may carry the target-shell ``upgradeable`` flag.
+    """Disjoint witnessed rights on one target publish disjoint edge capabilities, without the target-shell
+    ``upgradeable`` flag.
     """
     p = _add_protocol(db_session, f"edgecaps-{uuid.uuid4().hex[:8]}")
     t_addr = _addr("tgt")
@@ -2639,8 +2397,7 @@ def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
 
     payload = build_company_overview(db_session, p.name)
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
-    # The target's OWN union carries both function caps plus the proxy-shell
-    # flag — the pre-fix value every inbound edge copied.
+    # The target's own union: the value every inbound edge used to copy.
     assert set(target_entry["capabilities"]) == {"pause", "upgrade", "upgradeable"}
 
     flows = {(f["from"], f["to"]): f for f in payload["fund_flows"]}
@@ -2662,11 +2419,7 @@ def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
 
 
 def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_session):
-    """A source whose only witnessed right maps to no capability chip
-    publishes ``[]`` on its edge — not the target's union. The edge itself
-    (its ``type``) still states the relationship; the empty list just makes
-    no positive capability claim.
-    """
+    """An empty list makes no positive capability claim; the edge ``type`` still states the relationship."""
     p = _add_protocol(db_session, f"edgeempty-{uuid.uuid4().hex[:8]}")
     t_addr = _addr("tg2")
     a_addr = _addr("plain")
@@ -2679,9 +2432,7 @@ def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_s
     _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Plain")
     _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Pauser")
 
-    # A's right: a function with no capability-mapped effect label.
     _add_ef_with_fp(db_session, t, "poke", "0xdeadbe01", [], a_addr.lower())
-    # B's right gives the TARGET a non-empty union A must not inherit.
     _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], b_addr.lower())
 
     payload = build_company_overview(db_session, p.name)
@@ -2698,10 +2449,7 @@ def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_s
 
 
 def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
-    """For a principal-source edge, the edge chip and the principal's own
-    ``controls_detail`` row for the same target must state the same
-    capabilities — they are two renderings of one witnessed relationship.
-    """
+    """Two renderings of one witnessed relationship."""
     p = _add_protocol(db_session, f"edgecd-{uuid.uuid4().hex[:8]}")
     t_addr = _addr("tg3")
     safe_addr = _addr("safe")
@@ -2729,8 +2477,6 @@ def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
         f"(source, target) pair: {flow['capabilities']} vs {cd_by_addr}"
     )
     assert flow["capabilities"] == ["pause"]
-    # The target's union additionally carries the proxy-shell flag; the
-    # edge must not.
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
     assert "upgradeable" in target_entry["capabilities"]
     assert "upgradeable" not in flow["capabilities"]

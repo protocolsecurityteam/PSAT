@@ -70,7 +70,6 @@ def test_upsert_is_idempotent_per_slot(api_client, clean_labels):
 
 @requires_postgres
 def test_delete_targets_the_right_row(api_client, clean_labels):
-    """DELETE without chain removes only the global row; the base row survives."""
     api_client.put(f"/api/address_labels/{ADDR}", json={"name": "Global"})
     api_client.put(f"/api/address_labels/{ADDR}?chain=base", json={"name": "Base"})
 
@@ -88,8 +87,7 @@ def test_delete_targets_the_right_row(api_client, clean_labels):
 
 @requires_postgres
 def test_delete_missing_row_404(api_client, clean_labels):
-    # Global row exists; deleting the base override (which does not) is a 404,
-    # not a silent hit on the global row.
+    # Deleting a missing base override is a 404, not a silent hit on the global row.
     api_client.put(f"/api/address_labels/{ADDR}", json={"name": "Global"})
     assert api_client.delete(f"/api/address_labels/{ADDR}?chain=base").status_code == 404
 

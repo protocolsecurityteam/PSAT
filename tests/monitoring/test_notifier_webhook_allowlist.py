@@ -1,5 +1,3 @@
-"""The Discord notifier only POSTs to allowlisted Discord hosts over https."""
-
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -20,9 +18,7 @@ from services.monitoring.notifier import _is_discord_webhook, _send_discord
         ("https://evil.com/api/webhooks/1/abc", False),
         ("https://discord.com.evil.com/x", False),
         ("https://169.254.169.254/x", False),
-        # Parser-divergence bypasses: urlparse reads the host as discord.com, but
-        # urllib3 (the parser requests dials with) connects elsewhere. The gate must
-        # read the dialed host, so both are refused.
+        # urlparse reads discord.com but urllib3 dials elsewhere; the gate reads the dialed host.
         ("https://x\\@discord.com/api/webhooks/1/x", False),  # backslash-authority
         ("https://discord.com@evil.com/api/webhooks/1/x", False),  # userinfo, real host evil.com
     ],
@@ -39,7 +35,6 @@ class _Resp:
 @pytest.mark.parametrize(
     ("url", "posted"),
     [
-        # The gate must refuse before POSTing, even though urlparse would read the authority as discord.com.
         pytest.param("https://x\\@discord.com/api/webhooks/1/x", False, id="backslash_authority_bypass"),
         pytest.param("https://evil.example/webhook", False, id="non_discord_host"),
         pytest.param("https://discord.com/api/webhooks/1/abc", True, id="discord_host_posts"),

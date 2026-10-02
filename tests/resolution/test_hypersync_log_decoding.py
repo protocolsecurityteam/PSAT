@@ -1,5 +1,3 @@
-"""HyperSync response/log decoding shared by the inline resolution scans."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace as NS

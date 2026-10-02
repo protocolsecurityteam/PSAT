@@ -1,9 +1,4 @@
-"""Anvil-based integration tests -- real RPC proxy cache verification.
-
-These tests deploy a minimal EIP-1967 proxy on a local Anvil node and
-exercise the _check_proxy_cache / _apply_proxy_cache / resolve_current_implementation
-code path with real storage slot reads instead of mocks.
-"""
+"""Proxy cache paths against real EIP-1967 slot reads on a local Anvil node."""
 
 from __future__ import annotations
 
@@ -24,18 +19,15 @@ pytestmark = [requires_postgres, pytest.mark.anvil]
 
 @pytest.fixture(autouse=True)
 def _stub_dynamic_tx_fetch(monkeypatch):
-    """Offline: the dependency phase pulls a contract's tx list from Etherscan to
-    seed dynamic-dependency tracing; the cache-upgrade test needs no dynamic deps."""
+    """The cache-upgrade test needs no dynamic deps, so the Etherscan tx-list fetch is stubbed."""
     monkeypatch.setattr(
         "services.discovery.dynamic_dependencies.fetch_contract_transactions",
         lambda *a, **k: [],
     )
 
 
-# EIP-1967 implementation storage slot
 _EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 
-# Two distinct fake implementation addresses
 _ANVIL_IMPL_A = "0x1111111111111111111111111111111111111111"
 _ANVIL_IMPL_B = "0x2222222222222222222222222222222222222222"
 
@@ -48,10 +40,6 @@ def _find_free_port() -> int:
 
 @pytest.fixture()
 def anvil_rpc():
-    """Start a local Anvil instance and return its RPC URL.
-
-    Yields ``http://127.0.0.1:<port>`` and tears down when done.
-    """
     port = _find_free_port()
     proc = subprocess.Popen(
         ["anvil", "--port", str(port), "--silent"],
@@ -60,7 +48,6 @@ def anvil_rpc():
     )
     rpc_url = f"http://127.0.0.1:{port}"
 
-    # Wait for Anvil to be ready (up to 5 seconds)
     import requests
 
     for _ in range(50):
@@ -90,11 +77,7 @@ def anvil_rpc():
 
 
 def _deploy_minimal_contract(rpc_url: str) -> str:
-    """Deploy the smallest possible contract on Anvil and return its address.
-
-    Uses Anvil's first pre-funded account (index 0) to deploy.
-    Bytecode: stores 0x01 at memory[0] and returns 1 byte of runtime code.
-    """
+    """Uses Anvil's pre-funded account 0."""
     import requests
 
     deploy_bytecode = "0x600160005360016000f3"
@@ -119,7 +102,6 @@ def _deploy_minimal_contract(rpc_url: str) -> str:
     )
     tx_hash = resp.json()["result"]
 
-    # Wait for receipt (Anvil auto-mines but be safe)
     for _ in range(10):
         resp = requests.post(
             rpc_url,
@@ -135,7 +117,6 @@ def _deploy_minimal_contract(rpc_url: str) -> str:
 
 
 def _set_storage(rpc_url: str, address: str, slot: str, value: str) -> None:
-    """Set a storage slot on Anvil using anvil_setStorageAt."""
     import requests
 
     padded_value = "0x" + value.replace("0x", "").lower().zfill(64)
@@ -155,8 +136,6 @@ def _set_storage(rpc_url: str, address: str, slot: str, value: str) -> None:
 
 @pytest.mark.skipif(not _HAS_ANVIL, reason="anvil not found")
 class TestAnvilProxyCache:
-    """Integration tests that exercise real EIP-1967 storage slot reads via Anvil."""
-
     def test_resolve_current_implementation_reads_real_slot_and_detects_change(self, anvil_rpc):
         from services.monitoring.proxy_watcher import resolve_current_implementation
 
@@ -268,9 +247,6 @@ class TestAnvilProxyCache:
         assert result is None
 
     def test_dependency_proxy_cache_detects_upgrade_via_anvil(self, db_session, anvil_rpc, monkeypatch, tmp_path):
-        """After a proxy dependency is upgraded on-chain, re-running the
-        dependency phase should detect the stale cached classification and
-        re-classify the dependency with the current implementation address."""
         from db.models import Contract
         from db.queue import create_job, get_artifact, store_artifact
 
@@ -327,7 +303,6 @@ class TestAnvilProxyCache:
             },
         )
 
-        # --- Upgrade the dependency proxy to IMPL_B ---
         _set_storage(anvil_rpc, dep_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_B)
 
         monkeypatch.setattr(
@@ -339,8 +314,7 @@ class TestAnvilProxyCache:
             "workers.static_worker.build_dependency_visualization",
             lambda *a, **kw: {"nodes": [], "edges": [], "metadata": {}},
         )
-        # Step 1 inlined the upgrade-history resolver into _run_dependency_phase;
-        # monkeypatch the underlying builder it now calls instead.
+        # The upgrade-history resolver is inlined into _run_dependency_phase, so patch its builder.
         monkeypatch.setattr("services.discovery.upgrade_history.build_upgrade_history", lambda *a, **kw: None)
 
         from workers.static_worker import StaticWorker

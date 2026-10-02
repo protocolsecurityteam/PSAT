@@ -1,5 +1,3 @@
-"""Chain-awareness of the caching layer: same address on different chains must not cross-contaminate."""
-
 from __future__ import annotations
 
 import uuid
@@ -12,10 +10,6 @@ from tests.cache_helpers import (
 )
 
 pytestmark = requires_postgres
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _create_completed_job_with_chain(session, address, chain, name="TestContract"):
@@ -104,11 +98,6 @@ def _create_completed_company_job_with_inventory(session, company, chain, invent
     return job
 
 
-# ---------------------------------------------------------------------------
-# P1: find_completed_static_cache must respect chain
-# ---------------------------------------------------------------------------
-
-
 class TestStaticCacheChainFiltering:
     def test_cache_hit_same_chain(self, db_session):
         from db.queue import find_completed_static_cache
@@ -125,11 +114,6 @@ class TestStaticCacheChainFiltering:
 
         found = find_completed_static_cache(db_session, ADDR_A, chain="base")
         assert found is None, "Ethereum cache was returned for a Base request — cross-chain contamination"
-
-
-# ---------------------------------------------------------------------------
-# P2: find_previous_company_inventory must respect chain
-# ---------------------------------------------------------------------------
 
 
 class TestCompanyInventoryChainFiltering:
@@ -166,11 +150,6 @@ class TestCompanyInventoryChainFiltering:
             chain="base",
         )
         assert found is None, "Ethereum inventory was returned for Base request — cross-chain contamination"
-
-
-# ---------------------------------------------------------------------------
-# P2: find_existing_job_for_address and is_known_proxy must respect chain
-# ---------------------------------------------------------------------------
 
 
 class TestDedupChainFiltering:
@@ -213,11 +192,6 @@ class TestDedupChainFiltering:
         assert is_known_proxy(db_session, ADDR_A, chain="base") is False, (
             "Ethereum proxy was reported as proxy on Base — cross-chain contamination"
         )
-
-
-# ---------------------------------------------------------------------------
-# P2: copy_static_cache must not steal the source job's contract row
-# ---------------------------------------------------------------------------
 
 
 class TestCopyCachePreservesSource:

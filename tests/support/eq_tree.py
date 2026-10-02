@@ -1,8 +1,6 @@
-"""The ``msg.sender == X`` caller-authority predicate leaf the authority-resolution
-tests build their trees from; each of those modules previously carried a private copy.
+"""The ``msg.sender == X`` leaf the authority-resolution tests build trees from.
 
-The copies differed only in the ``expression`` string, which is descriptive text
-carried through to the witness — hence the parameter rather than a fixed literal.
+``expression`` is descriptive text carried to the witness, hence a parameter.
 """
 
 from __future__ import annotations

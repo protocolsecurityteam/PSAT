@@ -1,20 +1,12 @@
-"""``_build_semantic_control_summary`` semantic signal.
-
-Pins the structural inclusion rule: a function is in ``semantic_functions`` iff its predicate
-tree has a ``caller_authority``/``delegated_authority`` leaf, OR its effects record carries a
-sensitive sink (state_write, external_call, delegatecall, contract_creation, selfdestruct).
-Tree-keys-as-included used to over-include pause / reentrancy / time / business trees.
+"""A function is in ``semantic_functions`` iff it has a caller/delegated authority leaf or a sensitive sink;
+tree-keys-as-included over-included side-condition trees.
 """
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -23,18 +15,11 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
 from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
     _build_semantic_control_summary,
 )
-
-
-def _compile(tmp_path: Path, source: str, contract_name: str = "C"):
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == contract_name)
+from tests.support.slither_compile import _compile_contract  # noqa: E402
 
 
 def _detect(tmp_path, source, contract_name="C"):
-    contract = _compile(tmp_path, source, contract_name)
+    contract = _compile_contract(tmp_path, source, contract_name)
     predicate_trees = build_predicate_artifacts(contract)
     effects = build_effects(contract)
     return _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)
@@ -74,7 +59,6 @@ def test_sensitive_sink_admits_unguarded_function(tmp_path):
 
 
 def test_pause_only_tree_does_not_admit_function(tmp_path):
-    """Pause-only with no sensitive sink is a side-condition, not caller authorization."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -98,9 +82,7 @@ def test_pause_only_tree_does_not_admit_function(tmp_path):
     """
     ac = _detect(tmp_path, source)
     semantic_signatures = {pf["function"] for pf in ac["semantic_functions"]}
-    # ``pause()`` has caller_authority + state_write.
     assert "pause()" in semantic_signatures
-    # ``readOnly()`` has only a pause leaf and no sensitive sink.
     assert "readOnly()" not in semantic_signatures
 
 

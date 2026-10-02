@@ -55,17 +55,13 @@ def test_erpc_url_routing(monkeypatch, call, expected):
 def test_default_rpc_url_does_not_invent_mainnet_for_unknown_chain(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-    # A genuinely-named but unsupported chain has no eRPC route and is never
-    # silently mapped to mainnet — the caller gets None and fails loud.
     assert rpc.default_rpc_url(chain="fantom") is None
 
 
 def test_default_rpc_url_does_not_route_the_unknown_sentinel(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-    # Fail-closed: discovery's "unknown" chain sentinel names no chain, so it
-    # gets no route — not a silent mainnet one — even when a hosted explicit
-    # rpc_url is supplied alongside it.
+    # Discovery's "unknown" sentinel gets no silent mainnet route, even with an explicit rpc_url.
     assert rpc.default_rpc_url(chain="unknown") is None
     assert rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain="unknown") is None
 
@@ -73,16 +69,14 @@ def test_default_rpc_url_does_not_route_the_unknown_sentinel(monkeypatch):
 def test_default_rpc_url_returns_none_without_erpc(monkeypatch):
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
 
-    # No eRPC configured and no local override → no route. There is no ETH_RPC
-    # or public-node fallback.
+    # There is no ETH_RPC or public-node fallback.
     assert rpc.default_rpc_url() is None
 
 
 def test_default_rpc_url_ignores_hosted_explicit_url_in_favor_of_erpc(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-    # Regression: a pinned hosted provider URL must NOT shadow eRPC — that is
-    # exactly what let a direct-Alchemy 429 storm bypass the proxy.
+    # A pinned Alchemy URL shadowing eRPC let a 429 storm bypass the proxy.
     assert (
         rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain_id=1)
         == "https://erpc-proxy.example/main/evm/1"

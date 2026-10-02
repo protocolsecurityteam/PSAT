@@ -1,12 +1,7 @@
-"""The differential's own witness discipline.
+"""A diff's movement claims must rest on rows proven to be the same row.
 
-Every positive movement claim (row appeared, severity moved, band changed) must
-rest on two rows the diff proved are the same row. It failed that two ways: it
-read subsumed rows from the top level only while CLI documents carry them under
-``provenance`` (publishing a whole population as ``added``), and it fuzzy-matched
-on unit addresses even when identities matched, inventing movements between rows
-that were never the same. The pinning property: a document diffed against itself
-moves nothing.
+It once read subsumed rows only at the top level (CLI documents keep them under ``provenance``) and fuzzy-matched on
+addresses even when identities matched. A document diffed against itself moves nothing.
 """
 
 from __future__ import annotations
@@ -75,15 +70,8 @@ def _corpus() -> ScoreDocument:
     )
 
 
-# --------------------------------------------------------------- self-identity
-
-
 def test_self_differential_of_a_written_document_moves_nothing():
-    """The gate property: a document diffed against itself publishes no movement.
-
-    The oracle is what the CLI writes (subsumed rows under ``provenance``), the
-    shape the top-level-only read missed.
-    """
+    """The oracle is the CLI's shape, which the top-level-only read missed."""
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
 
@@ -139,8 +127,7 @@ def test_an_oracle_with_no_subsumed_rows_anywhere_is_its_own_state():
 
 
 def test_an_oracle_carrying_both_shapes_counts_the_population_it_did_not_read():
-    """Top level wins (the author's explicit statement) but the rows that lost
-    are counted, or they come back as ``added`` with no trace they were looked at."""
+    """Top level wins, but the losing rows are counted or they come back as ``added``."""
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
     oracle["subsumed_rows"] = [oracle["provenance"]["subsumed_rows"][0]]
@@ -153,15 +140,10 @@ def test_an_oracle_carrying_both_shapes_counts_the_population_it_did_not_read():
     assert result["counts"]["added"] == 1
 
 
-# ------------------------------------------------------------- identity match
-
-
 def test_identity_match_beats_the_address_set_and_reports_the_real_movement():
     document = _corpus()
     payload = copy.deepcopy(document_json(document))
     oracle = payload
-    # The subsumed via_timelock row of the same unit and capability regained a
-    # magnitude; the direct row did not move at all.
     for row in oracle["provenance"]["subsumed_rows"]:
         if row["access_path"] == "via_timelock_5d":
             row["raw_points"] = 3.5
@@ -178,8 +160,7 @@ def test_identity_match_beats_the_address_set_and_reports_the_real_movement():
     assert moved["raw_before"] == 3.5
     assert moved["raw_after"] == 7.03
     assert moved["matched_by"] == "row_identity"
-    # The identity the match was made on, published so two rows that differ only
-    # by chain or by access path are not one indistinguishable pair to a reader.
+    # Published so rows differing only by chain or access path stay distinguishable.
     assert (moved["principal_unit"], moved["capability"], moved["access_path"]) == (
         "ethereum::0xf8553c85",
         "authority.replace",
@@ -204,8 +185,6 @@ def test_a_new_access_path_is_added_not_a_split_when_the_old_row_still_exists():
 
 
 def test_a_rekeyed_unit_still_splits_and_names_the_row_its_causes_came_from():
-    """The address-set match survives for a unit the two documents name by
-    different members, and the split says which row the causes came from."""
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
     oracle["findings"] = [
@@ -232,9 +211,7 @@ def test_a_rekeyed_unit_still_splits_and_names_the_row_its_causes_came_from():
 def test_a_split_prefers_the_identity_twin_for_its_causes():
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
-    # A degenerate oracle carrying the same identity twice: the first consumes
-    # the twin, the second falls through to the address-set match with the twin
-    # still among its candidates.
+    # A degenerate oracle with a duplicated identity leaves the twin among the address-set candidates.
     twin = _row("ethereum::0xf8553c85", "authority.replace", "direct", raw_points=99.0)
     oracle["findings"] = [
         _row("ethereum::0xf8553c85", "authority.replace", "direct"),
@@ -252,9 +229,7 @@ def test_a_split_prefers_the_identity_twin_for_its_causes():
 
 
 def test_a_claimed_row_is_not_offered_as_another_rows_recovery_single_candidate():
-    """A row the identity pass matched is spoken for; lending it to another old
-    row sharing a unit address publishes a movement neither made AND swallows the
-    disappearance of the row that really went."""
+    """Lending a matched row to another old row fabricates a movement and hides a real disappearance."""
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
     oracle["findings"].append(
@@ -280,8 +255,6 @@ def test_a_claimed_row_is_not_offered_as_another_rows_recovery_single_candidate(
 
 
 def test_a_claimed_row_is_not_offered_as_another_rows_recovery_split():
-    """The same, where the borrowed candidates would publish an access-path split
-    with fabricated arithmetic."""
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
     oracle["findings"].append(
@@ -305,12 +278,8 @@ def test_a_claimed_row_is_not_offered_as_another_rows_recovery_split():
 
 
 def test_a_fuzzy_changed_row_says_when_identity_decided_the_comparison():
-    """``matched_by`` names the witness that paired the rows; a single remaining
-    candidate that IS the row must not be published as an address match."""
     document = _corpus()
     oracle = copy.deepcopy(document_json(document))
-    # Duplicate identity in the oracle: the first claims the twin, the second
-    # falls through to the address-set pass with the twin still available to it.
     oracle["findings"] = [
         _row("base::0x183fe888", "flow.out", "direct", raw_points=0.315, severity_proven=0.1),
         _row("base::0x183fe888", "flow.out", "direct", raw_points=0.5, severity_proven=0.1),
@@ -327,13 +296,8 @@ def test_a_fuzzy_changed_row_says_when_identity_decided_the_comparison():
     assert moved["caused_by"] == ["raw_points 0.5 -> 0.315"]
 
 
-# ------------------------------------------------------------ order invariance
-
-
 def test_the_identity_pass_runs_before_any_address_match_whatever_the_row_order():
-    """An address-overlapping row with no twin, listed FIRST, must not eat the
-    twins: identity is settled over the whole document before any address-set
-    candidate is offered."""
+    """Identity is settled over the whole document before any address-set candidate is offered."""
     document = _corpus()
     payload = copy.deepcopy(document_json(document))
     rekeyed = _row(

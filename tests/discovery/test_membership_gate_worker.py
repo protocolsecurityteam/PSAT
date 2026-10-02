@@ -42,6 +42,7 @@ from services.discovery.deployer_enumeration import (
     session_deployer_enumerator,
 )
 from tests.conftest import ADDR, DATABASE_URL, requires_postgres
+from tests.support.membership_builders import _protocol
 from utils.evm import OWNER_SELECTOR
 from workers.discovery import (
     ENABLED_CHAINS_SEEN_KEY,
@@ -100,13 +101,6 @@ _TX = "0x" + "34" * 32
 _ZERO_WORD = "0x" + "0" * 64
 
 
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
-
-
 def _contract(
     session,
     address: str,
@@ -157,8 +151,7 @@ def _seed_w1(session, contract: Contract, protocol_id: int, *, chain_id: int = 1
 
 
 def _seed_w2(session, contract: Contract, anchor: Contract, protocol_id: int) -> None:
-    # The witness row is a claim; promote re-verifies the via-fact against the
-    # stored resolution, so the anchor's pointer must actually carry the edge.
+    # promote re-verifies the via-fact against the stored resolution.
     anchor.implementation = contract.address
     session.flush()
     gate.write_witness(
@@ -242,9 +235,7 @@ def test_enumeration_collects_direct_creations(monkeypatch):
 
 
 def test_enumeration_unions_internal_creations_with_factory_attribution(monkeypatch):
-    # Etherscan attributes factory-mediated creations to the tx ORIGIN, so the
-    # EOA's own sent calls are resolved per-txhash and unioned with direct
-    # creations.
+    # Etherscan attributes factory-mediated creations to the tx origin, so the EOA's sent calls are resolved per tx.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     eoa = ADDR(0x260)
     tx_hash = "0x" + "45" * 32
@@ -276,8 +267,6 @@ def test_enumeration_internal_only_creation_is_complete(monkeypatch):
 
 
 def test_enumeration_skips_received_failed_and_frameless_txs(monkeypatch):
-    # Only the EOA's own successful calls are resolved (not received/reverted
-    # txs, failed CREATE frames or call frames).
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     eoa = ADDR(0x267)
     resolved = "0x" + "47" * 32
@@ -303,10 +292,7 @@ def test_enumeration_skips_received_failed_and_frameless_txs(monkeypatch):
 
 
 def test_internal_empty_caching_gated_on_tx_maturity(monkeypatch):
-    """A lag-empty must not be frozen: the enumeration attests ``cache_empty``
-    per tx from the txlist record's own ``confirmations`` — only a reading at
-    or past the maturity floor licenses persisting an empty trace answer; a
-    fresh or unreadable field is not_determined, never mature."""
+    """Only a confirmations reading past the maturity floor licenses persisting an empty trace."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     eoa = ADDR(0x26E)
     fresh_hash = "0x" + "4c" * 32
@@ -345,7 +331,6 @@ def test_enumeration_internal_budget_exceeded_is_incomplete(monkeypatch):
     assert created == []
     assert scope == []
     assert complete is False
-    # The budget refusal is decided BEFORE any internal call is spent.
     assert [c for c in calls if c[1] == "txlistinternal"] == []
 
 
@@ -355,13 +340,10 @@ _COMBINED_EOA = ADDR(0x26C)
 _COMBINED_HASH = "0x" + "4b" * 32
 
 
-# A half-enumerated chain must never claim completeness: every case here
-# fails closed. Where a chain is dropped from the recorded scope, the
-# expected scope is [].
+# A half-enumerated chain never claims completeness; a dropped chain leaves the scope empty.
 @pytest.mark.parametrize(
     ("eoa", "txs_by_chain", "internal_by_txhash", "expected"),
     [
-        # EITHER endpoint failing for a chain => that chain out of scope, incomplete.
         pytest.param(
             _FAIL_EOA,
             {1: [_creation_tx(ADDR(0x26A)), _call_tx(_FAIL_EOA, tx_hash=_FAIL_HASH)]},
@@ -369,7 +351,6 @@ _COMBINED_HASH = "0x" + "4b" * 32
             ([], [], False),
             id="internal_failure",
         ),
-        # The cap applies to the COMBINED direct + internal creation set.
         pytest.param(
             _COMBINED_EOA,
             {1: [_creation_tx(ADDR(0x26D)), _call_tx(_COMBINED_EOA, tx_hash=_COMBINED_HASH)]},
@@ -381,8 +362,7 @@ _COMBINED_HASH = "0x" + "4b" * 32
             ([], [], False),
             id="combined_cap",
         ),
-        # A full txlist window is a truncation, never a complete history, and the
-        # truncated chain never enters the recorded scope.
+        # A full txlist window is a truncation.
         pytest.param(
             ADDR(0x2FF),
             {
@@ -404,8 +384,7 @@ def test_enumeration_is_incomplete(monkeypatch, eoa, txs_by_chain, internal_by_t
 
 
 def test_enumeration_zero_tx_chain_stays_in_scope(monkeypatch):
-    # An enabled chain the EOA never acted on is a COMPLETE (empty) answer,
-    # not a failure — it must not bar Class B for the chains it did act on.
+    # An enabled chain the EOA never acted on is a complete empty answer.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     _stub_txlist(monkeypatch, {1: [_creation_tx(ADDR(0x220))], 8453: []})
     created, scope, complete = enumerate_deployer_creations(ADDR(0x221))
@@ -415,8 +394,7 @@ def test_enumeration_zero_tx_chain_stays_in_scope(monkeypatch):
 
 
 def test_enumeration_any_enabled_chain_failing_is_incomplete(monkeypatch):
-    # EOAs are chain-agnostic: completeness requires every enabled chain's
-    # window to come back clean, and the failed chain stays out of scope.
+    # EOAs are chain-agnostic, so every enabled chain's window must come back clean.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     _stub_txlist(monkeypatch, {1: [_creation_tx(ADDR(0x220))], 8453: RuntimeError("boom")})
     created, scope, complete = enumerate_deployer_creations(ADDR(0x221))
@@ -473,7 +451,6 @@ def test_ladder_wire_registers_class_b_with_scope_and_snapshot(db_session, monke
     row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
 
     assert row is not None and row.trust_class == "B"
-    # The evidence names WHAT was enumerated — never a bare complete flag.
     assert row.evidence["enumeration"]["complete"] is True
     assert row.evidence["enumeration"]["chain_ids"] == [1]
     assert sorted(row.evidence["enumeration"]["addresses"]) == sorted(m.address for m in members)
@@ -608,8 +585,7 @@ def test_ladder_wire_class_a_skips_enumeration(db_session, monkeypatch):
 
 
 def test_ladder_wire_skips_enumeration_without_sibling_members(db_session, monkeypatch):
-    # <2 member rows claim the deployer: Class B is unreachable, so the
-    # Etherscan window is never spent.
+    # Class B is unreachable, so the Etherscan window is never spent.
     protocol = _protocol(db_session)
     calls = _stub_txlist(monkeypatch, {})
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=ADDR(0x280)) is None
@@ -617,25 +593,20 @@ def test_ladder_wire_skips_enumeration_without_sibling_members(db_session, monke
 
 
 def _seed_own_member_on_unenumerated_chain(db_session, protocol, eoa, members):
-    # Coverage refusal (scope): a KNOWN creation on a chain outside the
-    # enumerated scope makes the enumeration incomplete — Class C.
+    # A known creation outside the enumerated scope makes it incomplete.
     _contract(db_session, ADDR(0x2B9), chain="base", protocol_id=protocol.id, deployer=eoa)
     return members
 
 
 def _seed_foreign_candidate_on_unenumerated_chain(db_session, protocol, eoa, members):
-    # The scope check spans ANY contracts row claiming the deployer — a
-    # foreign protocol's CANDIDATE on an unenumerated chain refuses too
-    # (classify's collision check only sees foreign MEMBERS).
+    # classify's collision check only sees foreign members, so a foreign candidate must refuse here.
     other = _protocol(db_session)
     _contract(db_session, ADDR(0x2BB), chain="base", nominated_protocol_id=other.id, deployer=eoa)
     return members
 
 
 def _drop_a_known_creation_from_enumeration(db_session, protocol, eoa, members):
-    # Coverage refusal (consistency): a member recorded as this EOA's creation
-    # that the enumeration does not contain is an attribution mismatch
-    # (contractCreator vs txlist) — Class C, never B.
+    # A contractCreator/txlist attribution mismatch is Class C.
     return members[:1]
 
 
@@ -682,8 +653,7 @@ def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch
     )
     db_session.commit()
 
-    # A foreign creation is later observed; the reuse shortcut must not mask
-    # it (the triggering contract is outside the recorded snapshot).
+    # The reuse shortcut must not mask a foreign creation outside the snapshot.
     _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in known] + [_creation_tx(ADDR(0x998))]})
     row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, contract_address=ADDR(0x997))
 
@@ -709,8 +679,6 @@ def test_ladder_wire_coverage_gap_revokes_standing_b_row(db_session, monkeypatch
     assert registry is not None and registry.trust_class == "B"
     db_session.commit()
 
-    # A later creation attributed to the EOA (getcontractcreation) that its
-    # txlist does NOT contain: the standing license provably missed one.
     _contract(db_session, ADDR(0x2E5), nominated_protocol_id=protocol.id, deployer=eoa)
     db_session.flush()
     row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa, contract_address=ADDR(0x2E5))
@@ -790,8 +758,6 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
 
 
 def test_fixpoint_mints_class_b_through_worker_adapter(db_session, monkeypatch):
-    """The fixpoint reaches Class B with the worker's Etherscan-backed
-    adapter — the same enumeration+coverage path the ladder wire uses."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x310)
@@ -829,9 +795,6 @@ def test_fixpoint_mints_class_b_through_worker_adapter(db_session, monkeypatch):
 
 
 def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, monkeypatch):
-    """One Class-B evidence path: for the same fixture the ladder wire and the
-    fixpoint adapter agree — refusal on a coverage gap, Class B once the
-    enumeration covers every known creation."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x316)
@@ -839,7 +802,6 @@ def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, mon
     stray = _contract(db_session, ADDR(0x317), nominated_protocol_id=protocol.id, deployer=eoa)
     # the stray maps only through membership evidence.
     _seed_w2(db_session, stray, _contract(db_session, ADDR(0x318), protocol_id=protocol.id), protocol.id)
-    # The enumerated window misses the stray known creation → coverage gap.
     _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
 
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
@@ -858,11 +820,6 @@ def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, mon
     row = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
     assert parity_verdict.trust_class == "B"
     assert row is not None and row.trust_class == "B"
-
-
-# ---------------------------------------------------------------------------
-# W5 assertion: admin submission end to end
-# ---------------------------------------------------------------------------
 
 
 def test_w5_end_to_end_admin_submission_to_membership(api_client, db_session, monkeypatch):
@@ -895,16 +852,10 @@ def test_w5_end_to_end_admin_submission_to_membership(api_client, db_session, mo
     assert contract.protocol_id is None
     assert contract.nominated_protocol_id == protocol.id
 
-    # The chain becomes routable: the probe supplies W1 and W5 admits.
     monkeypatch.setenv("ERPC_BASE_URL", "http://erpc.test")
     _stub_probe_wire(monkeypatch)
     _gate_intake(db_session, job, contract, request)
     assert contract.protocol_id == protocol.id
-
-
-# ---------------------------------------------------------------------------
-# Gate intake (fetch/cache-hit path)
-# ---------------------------------------------------------------------------
 
 
 def test_gate_intake_promotes_witnessed_candidate_and_never_stamps_otherwise(db_session):
@@ -943,8 +894,7 @@ def test_gate_intake_structural_hint_is_reverified_not_trusted(db_session):
     )
     db_session.flush()
 
-    # Parent whose stored resolution does NOT point at the candidate: the
-    # request flag alone must produce nothing.
+    # The request flag alone must produce nothing.
     liar_job = _job(db_session, protocol_id=protocol.id, address=ADDR(0x2A2))
     _contract(db_session, ADDR(0x2A2), protocol_id=protocol.id, implementation=ADDR(0x2A9)).job_id = liar_job.id
     db_session.flush()
@@ -962,8 +912,6 @@ def test_gate_intake_structural_hint_is_reverified_not_trusted(db_session):
         == 0
     )
 
-    # Parent whose stored implementation IS the candidate: the edge verifies,
-    # the witness lands, and with W1 the row promotes.
     honest_job = _job(db_session, protocol_id=protocol.id, address=ADDR(0x2A3))
     parent = _contract(db_session, ADDR(0x2A3), protocol_id=protocol.id, implementation=candidate.address)
     parent.job_id = honest_job.id
@@ -1079,7 +1027,6 @@ def test_probe_pass_probes_fresh_candidates_and_writes_w1(db_session, monkeypatc
     w1 = db_session.query(ContractMembershipWitness).filter_by(contract_id=fresh.id, rule=WITNESS_RULE_W1_CODE).one()
     assert w1.evidence == {"chain_id": 1, "code_probe_block": 120, "code_present": True}
     assert db_session.query(ContractMembershipWitness).filter_by(contract_id=foreign.id).count() == 0
-    # W1 alone admits nothing.
     assert fresh.protocol_id is None
 
 
@@ -1098,8 +1045,7 @@ def test_probe_pass_promotes_when_probe_completes_the_witness_set(db_session, mo
 
 
 def test_probe_pass_reprobes_error_attempts(db_session, monkeypatch, erpc_env):
-    # An rpc_error / not_routable attempt is an attempt, never a verdict —
-    # the next pass must re-probe instead of parking the row forever.
+    # An rpc_error attempt is not a verdict, so the next pass re-probes.
     protocol = _protocol(db_session)
     stuck = _contract(db_session, ADDR(0x2C8), nominated_protocol_id=protocol.id)
     db_session.add(
@@ -1118,8 +1064,7 @@ def test_probe_pass_reprobes_error_attempts(db_session, monkeypatch, erpc_env):
 
 
 def test_probe_pass_budget_defers_tail_with_named_record(db_session, monkeypatch, erpc_env):
-    """The per-pass probe budget caps wire spend; the tail is a NAMED deferral
-    (degraded record), never a silent drop, and the next pass re-covers it."""
+    """The tail is a named deferral, never a silent drop."""
     from utils.logging import degraded_errors_var
 
     monkeypatch.setenv("PSAT_PROBE_PASS_MAX", "2")
@@ -1144,7 +1089,6 @@ def test_probe_pass_budget_defers_tail_with_named_record(db_session, monkeypatch
     assert len(budget_errors) == 1
     assert budget_errors[0].context == {"protocol_id": protocol.id, "budget": 2, "deferred": 1}
 
-    # Idempotent re-cover: the next pass probes exactly the deferred tail.
     seen2 = _stub_probe_wire(monkeypatch)
     run_probe_pass(db_session, protocol.id)
     assert seen2["probed"] == [c3.address]
@@ -1182,8 +1126,6 @@ def test_probe_pass_retargets_demoted_member_after_revocation(db_session, monkey
 
 
 def test_gate_intake_reprobes_members_demoted_by_counterevidence(db_session, monkeypatch, erpc_env):
-    """The intake's counterevidence revocation feeds the demoted lineage-only
-    member straight back into the probe machinery (bounded, same pass)."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x340)
@@ -1207,8 +1149,7 @@ def test_gate_intake_reprobes_members_demoted_by_counterevidence(db_session, mon
     newcomer = _contract(db_session, ADDR(0x342), nominated_protocol_id=protocol.id, deployer=eoa)
     db_session.commit()
 
-    # One transport stub for both consumers (probes + enumeration share the
-    # etherscan module): the re-enumeration now surfaces a foreign creation.
+    # Probes and enumeration share the etherscan module.
     seen = _stub_probe_wire(monkeypatch)
     foreign_window = [_creation_tx(c.address) for c in (*known, newcomer)] + [_creation_tx(ADDR(0x998))]
 
@@ -1299,8 +1240,7 @@ def test_probe_pass_no_w6(db_session, monkeypatch, erpc_env, address, sources, c
 
 
 def test_gate_intake_seeds_w6_for_already_probed_defillama_row(db_session, monkeypatch, erpc_env):
-    # A row probed before the defillama tag arrived: intake must still seed
-    # W6 from the persisted code fact, not only from a fresh probe.
+    # Intake must seed W6 from the persisted code fact, not only a fresh probe.
     protocol = _protocol(db_session)
     candidate = _contract(db_session, ADDR(0x2F3), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
     db_session.add(
@@ -1321,8 +1261,7 @@ def test_gate_intake_seeds_w6_for_already_probed_defillama_row(db_session, monke
 
 
 def test_listing_seed_mints_w6_only_with_a_code_present_probe(db_session):
-    """The listing ``address`` nomination rides the SAME W6 shape as an adapter
-    hit: the tag alone mints nothing, and a code-absent probe mints nothing."""
+    """The tag alone mints nothing, and a code-absent probe mints nothing."""
     protocol = _protocol(db_session)
     unprobed = _contract(db_session, ADDR(0x2F6), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
     db_session.flush()

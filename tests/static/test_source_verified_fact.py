@@ -1,10 +1,5 @@
-"""``source_verified`` is the FETCH's answer, carried, never inferred from the tree.
-
-``contract_summaries.source_verified`` used to be ``bool(project_dir.rglob("src/**/*.sol"))``,
-which depends on Etherscan's bundle paths, not on verification. The 2026-07-28 run published
-FALSE for 9 of 90 contracts (Lido, FiatTokenV2_2, EndpointV2, ...) that were all verified and
-analysed from that source (bundles use ``contracts/``, ``@openzeppelin/``, ``lib/``). The field
-feeds the frontend data-confidence score and names the contract as unverified.
+"""``source_verified`` used to be ``bool(rglob("src/**/*.sol"))``, which reflects bundle paths, not verification; the
+2026-07-28 run published FALSE for 9 of 90 verified contracts. It feeds the frontend confidence score.
 """
 
 from __future__ import annotations
@@ -32,25 +27,13 @@ contract Subject {
 """
 
 
-# ---------------------------------------------------------------------------
-# 1. the publisher: three states, and none of them read off the tree
-# ---------------------------------------------------------------------------
-
-
 def test_the_fetch_fact_is_carried_verbatim_in_all_three_states():
     assert _source_verified({"source_verified": True}) is True
     assert _source_verified({"source_verified": False}) is False
-    # Key absent — an older workspace or an unreadable meta file. NOT determined, and
-    # therefore not False: the column and the API payload both keep that third state.
+    # An older workspace or unreadable meta file keeps the third state.
     assert _source_verified({}) is None
     assert _source_verified({"source_verified": None}) is None
-    # A non-boolean is not an answer either (a truthy string must not become True).
     assert _source_verified({"source_verified": "true"}) is None
-
-
-# ---------------------------------------------------------------------------
-# 2. the two scaffolders that must carry it
-# ---------------------------------------------------------------------------
 
 
 def test_the_discovery_scaffolder_records_the_payloads_verification_fact(tmp_path: Path):
@@ -68,17 +51,14 @@ def test_the_discovery_scaffolder_records_the_payloads_verification_fact(tmp_pat
     assert meta["source_verified"] is True
     assert _source_verified(meta) is True
 
-    # NEGATIVE CONTROL: ``get_source`` raises before this point on an empty
-    # ``SourceCode``, so this arm is not reachable through ``fetch()`` — but the value
-    # is read off the payload rather than hardcoded, and it says what the payload says.
+    # ``get_source`` raises first on empty ``SourceCode``, but the value is still read off the payload.
     unverified = scaffold("0x1234", {**result, "SourceCode": ""}, tmp_path / "Unverified")
     assert json.loads((unverified / "contract_meta.json").read_text())["source_verified"] is False
 
 
 @requires_postgres
 def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session, monkeypatch):
-    """``contracts.source_verified`` keeps all three values on the corpus (TRUE 230 / FALSE 1 /
-    NULL 410 at writing) and all three must survive into ``contract_meta.json``, especially NULL."""
+    """NULL (410 rows at writing) especially must survive."""
     from db.models import Contract
     from db.queue import create_job, store_source_files
     from workers.static_worker import StaticWorker
@@ -117,11 +97,6 @@ def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session,
         assert _source_verified(captured) is fact
 
 
-# ---------------------------------------------------------------------------
-# 3. end to end: what the analysis artifact publishes
-# ---------------------------------------------------------------------------
-
-
 def _project(tmp_path: Path, src_dir: str, meta_extra: dict) -> Path:
     project_dir = tmp_path / f"proj_{src_dir}"
     (project_dir / src_dir).mkdir(parents=True)
@@ -144,8 +119,6 @@ def _project(tmp_path: Path, src_dir: str, meta_extra: dict) -> Path:
 
 
 def test_a_verified_contract_with_no_src_tree_publishes_verified(tmp_path: Path):
-    """The 9 rows end to end: bundles under ``contracts/`` / ``@openzeppelin/`` / ``lib/``
-    leave NO ``src/`` tree, which is what the old expression measured."""
     project_dir = _project(tmp_path, "contracts", {"source_verified": True})
     assert not list(project_dir.rglob("src/**/*.sol")), "the old expression's input must be empty here"
 
@@ -153,7 +126,6 @@ def test_a_verified_contract_with_no_src_tree_publishes_verified(tmp_path: Path)
 
 
 def test_an_unverified_fetch_still_publishes_false_from_a_foundry_layout(tmp_path: Path):
-    """NEGATIVE CONTROL: the adverse arm still fires; a ``src/`` tree full of Solidity does not rescue it."""
     project_dir = _project(tmp_path, "src", {"source_verified": False})
     assert list(project_dir.rglob("src/**/*.sol")), "the old expression's input must be non-empty here"
 
@@ -161,8 +133,6 @@ def test_an_unverified_fetch_still_publishes_false_from_a_foundry_layout(tmp_pat
 
 
 def test_a_project_with_no_recorded_fact_publishes_not_determined(tmp_path: Path):
-    """The third state end to end: a workspace scaffolded before the fact was carried publishes
-    ``None`` (frontend: "not recorded"), where the old expression gave a confident True/False."""
     project_dir = _project(tmp_path, "src", {})
 
     assert collect_contract_analysis(project_dir)["subject"]["source_verified"] is None

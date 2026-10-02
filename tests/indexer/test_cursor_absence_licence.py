@@ -1,9 +1,5 @@
-"""D4 — what an event cursor proves about absence, and what it does not.
-
-Pins the honest states of the lower bound (a), tracking-plan enrolment (b) and cap-truncated pages (c).
-Load-bearing half: the new evidence must NOT combine into a licence. Enrolling from a tracking plan
-gathers history it could not see before, but must never turn a zero-row fold into "this variable was
-never written" — the plan attributes topics to no variable at all.
+"""D4: enrolling from a tracking plan gathers history but must never turn a zero-row fold into "never written",
+because the plan attributes topics to no variable.
 """
 
 from __future__ import annotations
@@ -50,8 +46,7 @@ from workers.event_log_indexer import (
     index_event_group_steps,
 )
 
-# The lane-D specimen: 0x3994741a…, whose code is empty at 20265588 and present
-# at 20265589 (both reads reproduced against the pinned chain).
+# Code is empty at 20265588 and present at 20265589.
 _ADDR = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
 _SEED = 20_265_588
 _TOPIC_ALLOW_TO = "0x039bcf51833310242b8b7c6aa0fbabf1bf2b5e5270807ee020f1920ef200666b"
@@ -134,15 +129,11 @@ def stub_rpc(monkeypatch):
 
         monkeypatch.setattr(eli, "rpc_request", stub)
         monkeypatch.setattr(eli, "require_rpc_url", lambda **_kw: "http://stub")
-        # The creation block is the SEED the witness grades; it is not the proof,
-        # so it is stubbed separately from the three pinned reads that are.
+        # The creation block is the seed the witness grades, not the proof.
         monkeypatch.setattr(eli, "get_contract_creation_block", lambda *_a, **_k: _SEED + 1)
         return stub
 
     return _install
-
-
-# D4(a) — the persisted lower bound and its three-read witness
 
 
 @requires_postgres
@@ -168,10 +159,7 @@ def test_enrol_persists_the_witnessed_lower_bound_byte_exactly(db_session):
 
 @requires_postgres
 def test_enrol_without_provenance_defaults_to_not_determined(db_session):
-    """Arm 2, fail-closed. ``start_block``'s ``= 0`` default sits directly above
-    the provenance arguments; omitting them must NOT inherit it as a claim that
-    the range is covered from genesis — and the resulting row must actually be
-    refused downstream, not merely labelled."""
+    """``start_block``'s ``= 0`` default must not become a claim of coverage from genesis."""
     assert enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
     db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true, last_indexed_block = 25000000"))
     db_session.commit()
@@ -179,31 +167,27 @@ def test_enrol_without_provenance_defaults_to_not_determined(db_session):
     assert cursor.first_indexed_block is None
     assert cursor.first_indexed_block_basis == "not_determined"
     assert cursor.enrollment_basis == "not_determined"
-    # The label is worth nothing unless the gate acts on it.
     result = _fold(db_session, _TOPIC_ALLOW_TO)
     assert (result.confidence, result.partial_reason) == ("partial", "no_index_cursor")
 
 
 def test_witness_requires_all_three_reads_to_agree(stub_rpc):
-    """The empty→code transition alone is necessary, not proof; all three reads must agree."""
     stub = stub_rpc()
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (_SEED, FIRST_INDEXED_BASIS_CREATION)
     assert [m for m, _ in stub.calls] == ["eth_getCode", "eth_getCode", "eth_getLogs"]
-    # The third read is genesis-anchored, address-scoped, and carries NO topic
-    # filter — any log of any kind below the seed refutes the bound.
+    # Any log of any kind below the seed refutes the bound.
     _method, params = stub.calls[-1]
     assert params == [{"address": _ADDR, "fromBlock": "0x0", "toBlock": hex(_SEED)}]
 
 
 def test_witness_rejects_a_prior_incarnation_and_discards_the_number(stub_rpc):
-    """A2 falsifier. Code at B proves a deployment landed there, not that it was the first (CREATE2
-    redeploy over a pre-Cancun-cleared address). A log below the seed refutes the bound; the block is DISCARDED."""
+    """A CREATE2 redeploy means code at B isn't proof of first deployment."""
     stub_rpc(prior_logs=[{"blockNumber": "0x1"}])
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
 
 
 def test_witness_rejects_an_eip7702_delegation_stub(stub_rpc):
-    """A2 falsifier. A 0xef0100‖address stub is never-deployed code that can be set and cleared, so it dates nothing."""
+    """A 0xef0100 delegation stub can be set and cleared, so it dates nothing."""
     stub_rpc(code_at=_EIP7702_STUB)
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
 
@@ -219,7 +203,6 @@ def test_witness_failure_yields_not_determined_never_a_bound(stub_rpc):
 
 @requires_postgres
 def test_legacy_null_lower_bound_publishes_not_determined_never_zero(db_session):
-    """Arm 5. Read as 0, a pre-column row would assert coverage from genesis, minted from a missing value."""
     enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
     db_session.execute(
         text(
@@ -237,7 +220,6 @@ def test_legacy_null_lower_bound_publishes_not_determined_never_zero(db_session)
 
 @requires_postgres
 def test_migration_left_legacy_rows_unmeasured_not_measured_empty(db_session):
-    """A4. Legacy rows must not read as a completeness measurement; a 0 count would be a measured empty page."""
     db_session.execute(
         text(
             "INSERT INTO indexed_event_cursors (chain_id, event_address, topic0, last_indexed_block, "
@@ -280,26 +262,20 @@ def _monitored(
 
 @requires_postgres
 def test_enrolment_drains_the_whole_fleet_across_passes(db_session, stub_rpc):
-    """R2. The per-pass budget bounds addresses that still NEED a cursor, not rows inspected; bounding rows
-    would re-walk the same head every pass, leaving the tail unenrolled while the counter reported progress."""
+    """Bounding rows would re-walk the same head every pass."""
     stub_rpc()
-    # From 1: ``0x0…0`` is correctly refused by ``_is_enrollable_event_address``
-    # (no creation block, so it would seed at genesis), and counting it here would
-    # make the arm test the guard rather than the draining.
+    # ``0x0…0`` is refused by the enrollability guard, so start from 1.
     for i in range(1, 61):
         _monitored(db_session, [_TOPIC_DENY_TO], address="0x" + f"{i:040x}")
     assert enroll_from_tracked_topics(db_session, limit=50) == 50
-    # Second pass must reach ranks 51-60, not re-inspect the first 50.
     assert enroll_from_tracked_topics(db_session, limit=50) == 10
     assert db_session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one() == 60
-    # Settled: a fully enrolled fleet costs no budget and no RPC.
     assert enroll_from_tracked_topics(db_session, limit=50) == 0
 
 
 @requires_postgres
 def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_rpc):
-    """Arm 9. AllowTo/DenyTo key on the transfer RECIPIENT, so the static pass attaches no hint;
-    only the tracking plan names their writers."""
+    """AllowTo/DenyTo key on the recipient, so only the tracking plan names their writers."""
     stub_rpc()
     _monitored(db_session, _DENYLIST_SURFACE)
     assert enroll_from_tracked_topics(db_session) == 6
@@ -312,7 +288,6 @@ def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_
 
 @requires_postgres
 def test_tracked_topics_enrolment_skips_unresolvable_and_inactive_rows(db_session, stub_rpc):
-    """Arm 9 fail-closed. An unresolvable chain is skipped, not guessed as mainnet."""
     stub_rpc()
     _monitored(db_session, _DENYLIST_SURFACE, chain="not-a-real-chain")
     assert enroll_from_tracked_topics(db_session) == 0
@@ -335,11 +310,8 @@ def test_coverage_gate_reports_missing_writers_and_licenses_nothing(db_session, 
 
 @requires_postgres
 def test_full_surface_fully_witnessed_still_licenses_nothing(db_session):
-    """Arm 7 / A3 falsifier — the one that matters.
-
-    Every checkable condition holds (six writers enrolled, warm, lower bound witnessed, pages under the cap),
-    yet the verdict is false: the caller's belief about which topics write the variable is not a witness
-    (a direct ``_roles[role].members[x] = true`` write or a proxy swap emits none of them).
+    """Every checkable condition holds and the verdict is still false: a direct storage write or proxy swap emits
+    none of the topics.
     """
     for topic in _DENYLIST_SURFACE:
         enroll_event_cursor(
@@ -403,17 +375,13 @@ def test_cold_asserted_cursor_is_named_as_such(db_session):
     "basis",
     [
         ENROLLMENT_BASIS_TRACKED_TOPICS,
-        # The literal default ``enroll_event_cursor`` writes when a caller omits
-        # the argument. A deny-list on the tracking-plan token alone would have
-        # folded this one enumerable — the fail-open was already in the schema.
+        # The literal default ``enroll_event_cursor`` writes.
         "not_determined",
-        # Any token nobody has thought of yet. A new enrolment source is inert
-        # until someone deliberately adds it to the allow-list.
+        # A new enrolment source is inert until allow-listed.
         "code_asserted_pubkey_fold",
     ],
 )
 def test_ineligible_basis_cannot_mint_an_exact_empty(db_session, basis):
-    """R1 falsifier. Warm, at head, zero rows publishes "this event never fired"; only an allow-listed basis may."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -476,7 +444,6 @@ def test_exactness_needs_an_attributed_basis_and_a_witnessed_lower_bound(
 
 @requires_postgres
 def test_refused_cursor_is_not_reported_warm(db_session):
-    """R7. ``warm`` must agree with the gate; a refused cursor reported warm folds as cold."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -496,7 +463,6 @@ def test_refused_cursor_is_not_reported_warm(db_session):
 
 @requires_postgres
 def test_uppercase_topic_is_not_silently_dropped_from_missing(db_session):
-    """R7. Lower-casing after the ``0x`` test dropped uppercase topics, shortening ``missing``."""
     report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_DENY_TO.upper()])
     assert report["write_surface_asserted"] == [_TOPIC_DENY_TO]
     assert report["missing"] == [_TOPIC_DENY_TO]
@@ -504,10 +470,7 @@ def test_uppercase_topic_is_not_silently_dropped_from_missing(db_session):
 
 @requires_postgres
 def test_out_of_band_readers_ignore_refused_cursors(db_session):
-    """R5. A refused cursor that counted would skip the detection that enrols the attributed one and
-    thrash the reconciler with per-pass re-enqueues."""
-    # A real role-STORE topic (AccessControl RoleGranted family) — the set
-    # ``_authority_has_role_store_cursor`` actually looks at.
+    """A refused cursor that counted would skip enrolling the attributed one."""
     role_topic = _ALL_ROLE_STORE_TOPIC0S[0]
     enroll_event_cursor(
         db_session,
@@ -574,7 +537,6 @@ def _fetcher(monkeypatch, rpc, **kwargs) -> RpcEventLogFetcher:
 
 
 def test_page_at_the_cap_bisects_instead_of_advancing(monkeypatch):
-    """Arm 8. A page at the cap is indistinguishable from a truncated one, so it bisects like an error."""
     rpc = _CappedRpc(lambda lo, hi: 100 if (lo, hi) == (0, 99_999) else 1)
     fetcher = _fetcher(monkeypatch, rpc, max_block_range=1_000_000, min_bisect_span=10_000, result_cap=100)
     fetcher.fetch_logs(event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=99_999)
@@ -583,7 +545,6 @@ def test_page_at_the_cap_bisects_instead_of_advancing(monkeypatch):
 
 
 def test_page_at_the_cap_on_the_floor_span_raises(monkeypatch):
-    """Arm 8. At the bisect floor the only honest outcome is to fail, never advance over an unprovable page."""
     rpc = _CappedRpc(lambda lo, hi: 100)
     fetcher = _fetcher(monkeypatch, rpc, max_block_range=1_000_000, min_bisect_span=10_000, result_cap=100)
     with pytest.raises(RuntimeError, match="result cap"):
@@ -603,8 +564,7 @@ def test_page_below_the_cap_is_accepted_and_counted(monkeypatch):
 
 
 def test_unset_cap_never_raises_and_never_claims_completeness(monkeypatch):
-    """A5. ``cap is not None and len(...) >= cap`` must be literal: comparing to None raises TypeError,
-    not RuntimeError, and would escape the bisect."""
+    """Comparing to None raises TypeError, which would escape the bisect."""
     rpc = _CappedRpc(lambda lo, hi: 125_629)
     fetcher = _fetcher(monkeypatch, rpc, min_bisect_span=10_000, result_cap=None)
     stats: list[FetchWindowStat] = []
@@ -615,7 +575,6 @@ def test_unset_cap_never_raises_and_never_claims_completeness(monkeypatch):
 
 @pytest.mark.parametrize("payload", [None, {}, "0x", 0])
 def test_unreadable_page_is_not_recorded_as_zero_logs(monkeypatch, payload):
-    """R3. A non-list 200-OK body is an unreadable page, not zero logs; counting it would mint a proven empty window."""
 
     def _rpc(url, method, params, chain_id=None):
         return payload
@@ -675,10 +634,8 @@ def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
     bisect-and-raise."""
     monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "50000")
     assert default_result_cap() == 50_000
-    # The watcher's construction shape (services/monitoring/unified_watcher.py).
     watcher_fetcher = RpcEventLogFetcher("http://stub", max_block_range=10_000, min_bisect_span=1_000, chain_id=1)
     assert watcher_fetcher.result_cap is None
-    # The indexer's builder is the one place that opts in.
     assert RpcEventLogFetcher("http://stub", chain_id=1, result_cap=default_result_cap()).result_cap == 50_000
 
 
@@ -693,7 +650,6 @@ def test_default_result_cap_is_unset_and_ignores_junk(monkeypatch):
 
 @requires_postgres
 def test_completeness_is_refused_when_the_cap_in_force_changed(db_session):
-    """A5 falsifier. Pages accepted under one cap say nothing about a different cap."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -724,7 +680,6 @@ def test_completeness_is_refused_when_the_cap_in_force_changed(db_session):
 
 
 def test_fetch_without_accumulator_is_byte_identical(monkeypatch):
-    """A6. The watcher passes no accumulator: same requests, same logs, cap unset."""
 
     def _run(**kwargs):
         rpc = _CappedRpc(lambda lo, hi: 3)
@@ -790,7 +745,7 @@ class _NoHash:
     ],
 )
 def test_advancing_records_page_stats_or_downgrades(db_session, fetcher, expected_max, expected_cap, expected_basis):
-    """A fetcher that records nothing downgrades the cursor: absent measurement is not a measurement of absence."""
+    """Absent measurement is not a measurement of absence."""
     enroll_event_cursor(
         db_session,
         chain_id=1,

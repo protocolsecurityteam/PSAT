@@ -1,9 +1,4 @@
-"""U1: the act-as refusal ladder; every reason names the conjunct that failed.
-
-Each case changes exactly one fact about the receiver read and asserts the
-reason moves with it: a reason that fires on its neighbour's shape misstates
-the evidence.
-"""
+"""U1: each case changes one fact about the receiver read, and the refusal reason must move with it."""
 
 from __future__ import annotations
 
@@ -45,34 +40,22 @@ def _ladder(**over: Any) -> P.ActAsPlane:
 
 
 def test_u1_a_read_that_reverted_is_not_a_read_that_never_happened():
-    """The third state, and the two it must never be spelled as.
-
-    A ``controller_values`` row observed via ``eth_call_error`` is a read the
-    pipeline ISSUED and that reverted. Publishing "never read on chain" asserts a
-    coverage gap the row itself disproves.
-    """
+    """An ``eth_call_error`` row is a read that was issued and reverted, not a coverage gap."""
     never = _ladder()
     assert never.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_RECEIVER_NOT_READ
 
     failed = _ladder(read_failures={(KEY_C, "vault"): ("eth_call_error", 25_657_731)})
     assert failed.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_RECEIVER_READ_FAILED
 
-    # ...and a failure record NEVER satisfies the receiver test: it carries no
-    # address, so it cannot witness that the variable holds the destination.
+    # A failure record carries no address, so it cannot witness the destination.
     assert not failed.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).witnessed
 
-    # A failure recorded for ANOTHER variable does not answer for this one.
     other = _ladder(read_failures={(KEY_C, "authority"): ("eth_call_error", 1)})
     assert other.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_RECEIVER_NOT_READ
 
 
 def test_u1_a_renounced_and_a_codeless_pointer_each_earn_their_own_negative():
-    """Two proven-absent classes, kept apart from each other and from the rest.
-
-    ``zero`` is a renounced pointer (address(0) holds no code and never can).
-    ``eoa`` is proven codeless by an empty ``eth_getCode``; CREATE2 can make it
-    a contract tomorrow, so it is NOT the same proof.
-    """
+    """``zero`` is renounced forever; ``eoa`` can become a contract via CREATE2, so it's a weaker proof."""
     read: dict[tuple[str, str], tuple[str, str, int | None]] = {(KEY_C, "vault"): (KEY_PROXY, "eth_call", 25_657_731)}
     cases = {
         "zero": P.ACT_AS_RECEIVER_IS_THE_RENOUNCED_ZERO_ADDRESS,
@@ -85,22 +68,14 @@ def test_u1_a_renounced_and_a_codeless_pointer_each_earn_their_own_negative():
     for kind, expected in cases.items():
         verdict = _ladder(reads=read, read_kinds={(KEY_C, "vault"): kind}).acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR)
         assert verdict.outcome == expected, kind
-        # ...and the refusal carries WHAT it held, so the census can report the
-        # class rather than leave a reader to guess it.
         assert verdict.receiver_resolved_type == kind, kind
-    # A row with no classification at all is a third state and not 'contract'.
     unclassified = _ladder(reads=read).acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR)
     assert unclassified.outcome == P.ACT_AS_RECEIVER_IS_ANOTHER_ADDRESS
     assert unclassified.receiver_resolved_type == "not_determined"
 
 
 def test_u1_a_label_at_the_pointer_never_refuses_a_read_that_holds_the_destination():
-    """The witness is the read and the address comparison, not the label.
-
-    A pointer classified ``safe`` or ``timelock`` that holds D witnesses the
-    step like a ``contract`` one; branching on ``resolved_type`` discards a
-    stored read on the strength of a name.
-    """
+    """Branching on ``resolved_type`` would discard a stored read on the strength of a name."""
     for kind in ("contract", "safe", "timelock", "unknown", None):
         plane = _ladder(
             reads={(KEY_C, "vault"): (KEY_V, "eth_call", 25_657_731)},
@@ -134,12 +109,7 @@ def test_u1_an_undetermined_gate_openness_is_never_published_as_needing_no_gate(
 
 
 def test_u1_the_parameter_bound_arm_reports_the_conjunct_that_actually_failed():
-    """A precondition is not a shortfall.
-
-    Parameter-bound is what makes the destination-ACL shape ADMISSIBLE, never the
-    reason a step was refused. With the ACL present and the gate the only gap,
-    the reason must name the gate.
-    """
+    """Parameter-bound makes the ACL shape admissible; it is never the refusal reason."""
     gate_cases = {
         "open": P.ACT_AS_CALL_SITE_IS_PUBLIC,
         "not_determined": P.ACT_AS_CALL_SITE_OPENNESS_NOT_DETERMINED,
@@ -149,8 +119,6 @@ def test_u1_the_parameter_bound_arm_reports_the_conjunct_that_actually_failed():
             call_sites={(KEY_C, COMPOSED_SELECTOR): (("boringSolve", openness, "", True, CALLING_SELECTOR),)}
         )
         assert plane.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == expected, openness
-    # Two parameter-bound sites, two different shortfalls: the sharpest is
-    # published, and it is still a GATE reason rather than the binding.
     both = _acl_plane(
         call_sites={
             (KEY_C, COMPOSED_SELECTOR): (
@@ -160,8 +128,6 @@ def test_u1_the_parameter_bound_arm_reports_the_conjunct_that_actually_failed():
         }
     )
     assert both.acts_as(KEY_C, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_CALL_SITE_GATE_NOT_DELEGATED
-    # ...and a site that clears every conjunct is admitted even when a sibling
-    # site fails one, so a shortfall never masks a witness.
     mixed = _acl_plane(
         call_sites={
             (KEY_C, COMPOSED_SELECTOR): (
@@ -176,9 +142,7 @@ def test_u1_the_parameter_bound_arm_reports_the_conjunct_that_actually_failed():
 
 
 def test_u1_the_retired_sentinel_is_gone_and_every_reason_is_ranked():
-    """``_rank_outcome`` indexes ``_ACT_AS_RANK`` bare, so an unregistered outcome
-    raises at runtime, not import. Every publishable reason must be in the map
-    and the retired sentinel in neither."""
+    """``_rank_outcome`` indexes ``_ACT_AS_RANK`` bare, so an unregistered outcome raises at runtime."""
     assert not hasattr(P, "ACT_AS_RECEIVER_NOT_A_STATE_VARIABLE")
     ranked = P._ACT_AS_RANK
     for name in dir(P):
@@ -189,32 +153,21 @@ def test_u1_the_retired_sentinel_is_gone_and_every_reason_is_ranked():
 
 
 def test_u1_delegation_is_required_at_hop_1_and_not_past_it():
-    """B3: past the first hop the licence is the previous hop's admitted selector.
-
-    At hop 1 the leverage IS the seized pointer, so only an authority-delegated
-    gate opens. Past hop 1 the principal arrives as whoever the previous hop
-    admitted, so an intermediate gated by a direct ``msg.sender ==`` check is
-    exactly the shape such a chain runs through; refusing it discards a
-    witnessed path.
+    """B3: at hop 1 only an authority-delegated gate opens; past it the principal arrives as whoever the previous hop
+    admitted, so a direct ``msg.sender ==`` intermediate is exactly the chain shape.
     """
     plane = act_as_plane(
         call_sites={(KEY_T, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", False, HOP1_SELECTOR),)},
         reads={(KEY_T, "vault"): (KEY_V, "eth_call", 25_657_731)},
     )
-    # hop 1: the unconstrained question. The delegation witness is required and
-    # this call site carries none.
     assert plane.acts_as(KEY_T, KEY_V, COMPOSED_SELECTOR).outcome == P.ACT_AS_CALL_SITE_GATE_NOT_DELEGATED
-    # hop >= 2: entered under the selector the previous hop admitted.
     past = plane.acts_as(KEY_T, KEY_V, COMPOSED_SELECTOR, via=frozenset({HOP1_SELECTOR}))
     assert past.witnessed and past.step is not None
-    # ...and the relaxation is DISCLOSED, on the step and in its basis, rather
-    # than left as a conjunct that silently stopped being applied.
+    # The relaxation is disclosed, not silently dropped.
     assert past.step.admitted_without_a_delegation_witness is True
     assert past.step.as_json()["admitted_without_a_delegation_witness"] is True
     assert "was NOT tested" not in past.step.as_json()["basis"]
     assert "no witness that" in past.step.as_json()["basis"]
-    # A step that DOES carry the delegation witness publishes false, so the
-    # stored fact is recoverable from the published one at every hop.
     delegated = act_as_plane(
         call_sites={(KEY_T, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True, HOP1_SELECTOR),)},
         reads={(KEY_T, "vault"): (KEY_V, "eth_call", 25_657_731)},
@@ -223,12 +176,7 @@ def test_u1_delegation_is_required_at_hop_1_and_not_past_it():
 
 
 def test_u1_the_openness_conjunct_is_kept_at_every_hop_and_it_is_attribution():
-    """B3, the other half: an OPEN intermediate is refused past hop 1 too.
-
-    Not conservatism but attribution: a function anyone can call moves value the
-    seized gate did not confer, and charging it here publishes as gate-conferred
-    a capability the whole world has. It belongs to that function's own finding.
-    """
+    """Attribution, not conservatism: an open function's value belongs to its own finding."""
     for openness, expected in (
         ("open", P.ACT_AS_CALL_SITE_IS_PUBLIC),
         ("not_determined", P.ACT_AS_CALL_SITE_OPENNESS_NOT_DETERMINED),
@@ -243,12 +191,6 @@ def test_u1_the_openness_conjunct_is_kept_at_every_hop_and_it_is_attribution():
 
 
 def test_u1_case_a_two_hop_chain_composes_through_an_undelegated_intermediate(fold):
-    """B3 end to end, on the whole fold: the dollars appear, once.
-
-    The intermediate is restricted by a direct address check, not a delegation.
-    Hop 1 requires and has the delegation witness; hop 2 does not, and the chain
-    composes with the relaxation named on the step.
-    """
     document = fold(
         _composing_signals(),
         principals=_composing_principals(),
@@ -256,7 +198,6 @@ def test_u1_case_a_two_hop_chain_composes_through_an_undelegated_intermediate(fo
             act_as=act_as_plane(
                 call_sites={
                     (KEY_C, HOP1_SELECTOR): (("finishSolve", "restricted", "", True, CALLING_SELECTOR),),
-                    # the intermediate: gated by msg.sender == solver, no canCall
                     (KEY_T, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", False, HOP1_SELECTOR),),
                 },
                 reads={(KEY_T, "vault"): (KEY_V, "eth_call", 25_657_731)},
@@ -269,8 +210,6 @@ def test_u1_case_a_two_hop_chain_composes_through_an_undelegated_intermediate(fo
     first, second = entry["act_as_chain"]
     assert first["admitted_without_a_delegation_witness"] is False
     assert second["admitted_without_a_delegation_witness"] is True
-    # ...and the same shape at hop 1 still refuses: the seized gate is what the
-    # principal holds there, and only a delegated gate is opened by seizing it.
     refused = fold(
         _composing_signals(),
         principals=_composing_principals(),
@@ -310,21 +249,13 @@ def test_u1_case_an_open_intermediate_is_refused_past_hop_1_with_its_reason_name
         ),
     )
     row = _gate_row(document)
-    # The vault's $5M is not charged to this row — the teller's own open
-    # function is what moves it, and the seized gate conferred nothing there.
     assert [e["entity"] for e in row["reach_composed_magnitudes"]] == []
-    # ...and the refusal is NAMED, with the conjunct that decided it.
     assert row["reach_composition_census"]["act_as_refused"][P.ACT_AS_CALL_SITE_IS_PUBLIC] == 1
 
 
 class _SeedsThatDisownOneMember(set):
-    """A ``seeds`` set that enumerates a node and denies membership in it.
-
-    The only way to drive ``_compose``'s frontier to a caller with an EMPTY
-    ``chains`` entry: the walk's own bookkeeping cannot produce one. ``chains``
-    and ``frontier`` are built by ENUMERATING seeds while the hop-1 test is
-    ``caller in seeds``, so such a member lands on the frontier, non-seed, with
-    no admitted functions.
+    """The only way to put a caller with an empty ``chains`` entry on ``_compose``'s frontier: seeds are enumerated
+    but hop 1 tests ``caller in seeds``.
     """
 
     def __init__(self, members, disowned):
@@ -336,13 +267,9 @@ class _SeedsThatDisownOneMember(set):
 
 
 def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
-    """``fold._compose``'s fail-open, executed.
+    """``_compose`` passes ``frozenset(entries)``, not ``...
 
-    ``_compose`` hands the plane ``frozenset(entries)``, never
-    ``frozenset(entries) or None``. A non-seed node with an EMPTY admitted set
-    is not a hop-1 node; spelling them alike hands it the UNCONSTRAINED
-    question, so the via rule vanishes and the seized gate is spent twice. Empty
-    must reach the plane as a constraint nothing satisfies.
+    or None``: an empty admitted set must be a constraint nothing satisfies, or the seized gate is spent twice.
     """
     magnitude = FOLD._DestinationMagnitude(
         state="proven_exact",
@@ -351,8 +278,6 @@ def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
         execution=EX.not_determined(EX.REASON_NOT_PERSISTED),
     )
     plane = act_as_plane(
-        # A call site that WOULD witness at hop 1 — so the old spelling composes
-        # the vault's $5M here and the new one refuses it.
         call_sites={(KEY_T, COMPOSED_SELECTOR): (("bulkWithdraw", "restricted", "vault", True, HOP1_SELECTOR),)},
         reads={(KEY_T, "vault"): (KEY_V, "eth_call", 25_657_731)},
     )
@@ -373,8 +298,7 @@ def test_u1_an_empty_admitted_set_is_not_the_hop_1_question():
     )
     assert composed == {}
     assert refused == {P.ACT_AS_NO_CALL_SITE_UNDER_THE_ADMITTED_FUNCTION: 1}
-    # ...and the same node, genuinely a seed, gets the hop-1 question and the
-    # $5M — so the refusal above is the empty CONSTRAINT and not a broken case.
+    # The control: as a real seed it composes, so the refusal above is the empty constraint.
     as_seed, _census, _refused, _withheld_seed = FOLD._compose(
         {KEY_C, KEY_T},
         [

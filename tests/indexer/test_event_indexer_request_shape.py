@@ -1,10 +1,8 @@
 """The indexer's request shape against request-metered upstreams.
 
-The getLogs fast lane (Envio HyperRPC behind eRPC) meters a flat 1000 credits per REQUEST (60/min) regardless of
-block range (measured 2026-06-11). The old shape spent ~7 requests per 50k window per topic0 cursor, exhausting the
-lane. Pinned: one ``eth_getLogs`` per (chain, address) window with topic0s OR'd and demuxed; one request per window
-in ``RpcEventLogFetcher``, bisecting only on upstream rejection (upstreams fail loudly, never truncate); block-hash
-stamps only at the confirmed fringe with a per-pass memo, and one head fetch per pass.
+The getLogs fast lane meters per request regardless of range, and the old shape spent ~7 per window per
+cursor. Pinned: one ``eth_getLogs`` per (chain, address) window with topic0s OR'd, bisecting only on upstream
+rejection, and fringe-only block-hash stamps with one head fetch per pass.
 """
 
 from __future__ import annotations
@@ -170,12 +168,9 @@ def test_multi_topic_address_scans_once_per_window_and_demuxes(session):
     assert [topics for topics, _f, _t in fetcher.calls] == [(_TOPIC_A,)] * 2 + [(_TOPIC_A, _TOPIC_B)] * 2
     assert summary.windows_scanned == target // span
 
-    # Demux: each topic's rows land under its own topic0; the drifted cursor
-    # got nothing at or below its position despite the shared scan windows.
     assert _topic_blocks(session, _TOPIC_A) == list(range(density, target + 1, density))
     assert _topic_blocks(session, _TOPIC_B) == list(range(drift + density, target + 1, density))
 
-    # Lockstep: both cursors finish at the confirmed head, complete.
     for topic0 in (_TOPIC_A, _TOPIC_B):
         last, complete, _hash = _cursor(session, topic0)
         assert (last, complete) == (target, True)
@@ -205,8 +200,7 @@ def test_block_hash_and_head_traffic_stays_out_of_the_hot_loop(session):
             max_windows_per_pass=100,
         )
 
-    # Cold drain: 4 fetches, 1 head call, and exactly ONE hash call — the
-    # fringe stamp at the target. The old shape did 2 hash + 1 head per window.
+    # The old shape did 2 hash + 1 head per window.
     run_pass()
     assert len(fetcher.calls) == 4
     assert head.calls == 1
@@ -215,15 +209,11 @@ def test_block_hash_and_head_traffic_stays_out_of_the_hot_loop(session):
     assert (last, complete) == (4_000, True)
     assert stamped == (4_000).to_bytes(32, "big")
 
-    # Warm no-op pass: head is re-read (it's the pass's one per-chain fact),
-    # nothing is fetched, no hash traffic.
     run_pass()
     assert len(fetcher.calls) == 4
     assert head.calls == 2
     assert hashes.calls == [4_000]
 
-    # Head advances less than a window: one pre-check of the stored fringe
-    # stamp (reorg guard), one fetch, one re-stamp at the new target.
     head.head = 4_500 + _CONFIRMATIONS
     run_pass()
     assert len(fetcher.calls) == 5
@@ -233,8 +223,7 @@ def test_block_hash_and_head_traffic_stays_out_of_the_hot_loop(session):
 
 @requires_postgres
 def test_mid_backfill_advance_clears_position_bound_stamp(session):
-    """A legacy per-window stamp is checked once, then cleared on advance: it is position-bound, and carrying it
-    past its block would spuriously rewind."""
+    """A legacy stamp is position-bound, so carrying it past its block would spuriously rewind."""
     span = 1_000
     head = 4_000 + _CONFIRMATIONS
     legacy_last = 2_000
@@ -256,8 +245,6 @@ def test_mid_backfill_advance_clears_position_bound_stamp(session):
         max_windows_per_pass=1,
     )
 
-    # Pre-check ran once (hash matched → no rewind), the single window advanced
-    # the cursor, and the stale stamp is gone rather than re-pointed.
     assert hashes.calls == [legacy_last]
     assert fetcher.calls == [(legacy_last + 1, legacy_last + span)]
     last, complete, stamped = _cursor(session, _TOPIC_A)
@@ -266,8 +253,7 @@ def test_mid_backfill_advance_clears_position_bound_stamp(session):
 
 @requires_postgres
 def test_reorged_fringe_stamp_rewinds_the_whole_group(session):
-    """The delete is address-wide (all topics), so a sibling cursor left ahead would silently empty its indexed
-    range."""
+    """The delete is address-wide, so a sibling cursor left ahead would silently empty its range."""
     from db.models import IndexedEventLog
 
     span = 500
@@ -277,8 +263,6 @@ def test_reorged_fringe_stamp_rewinds_the_whole_group(session):
 
     enroll_event_cursor(session, chain_id=1, event_address=_ADDRESS, topic0=_TOPIC_A)
     enroll_event_cursor(session, chain_id=1, event_address=_ADDRESS, topic0=_TOPIC_B)
-    # A's fringe stamp no longer matches the canonical hash (the deterministic
-    # fetcher returns block-number bytes) — a reorg happened under it.
     _set_cursor(session, _TOPIC_A, last=stamp_pos, block_hash=b"\xff" * 32)
     _set_cursor(session, _TOPIC_B, last=3_000)
     for block in (1_000, 2_900):  # B's indexed rows below and above the rewind point
@@ -309,8 +293,6 @@ def test_reorged_fringe_stamp_rewinds_the_whole_group(session):
         max_windows_per_pass=1,
     )
 
-    # B's row above the rewind point went with the address-wide delete; the row
-    # below survived. Both cursors resumed in lockstep from the rewind point.
     assert _topic_blocks(session, _TOPIC_B) == [1_000]
     last_a, complete_a, _ = _cursor(session, _TOPIC_A)
     last_b, complete_b, _ = _cursor(session, _TOPIC_B)
@@ -354,8 +336,7 @@ def test_rpc_fetcher_sends_one_request_per_window(monkeypatch):
 
 
 def test_rpc_fetcher_bisects_on_loud_range_errors(monkeypatch):
-    """Upstream caps fail loudly, never truncate (HyperRPC -32005 / -32603), so the fetcher halves and merges in block
-    order."""
+    """Upstream caps fail loudly (-32005 / -32603), never truncate."""
     calls: list[tuple[int, int]] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
@@ -370,7 +351,6 @@ def test_rpc_fetcher_bisects_on_loud_range_errors(monkeypatch):
     fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
     logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
 
-    # 400k fails → 2×200k fail → 4×100k succeed: 7 requests, results in order.
     assert len(calls) == 7
     assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]
 
@@ -388,21 +368,17 @@ def test_rpc_fetcher_bisect_floor_propagates_the_error(monkeypatch):
     with pytest.raises(RuntimeError, match="Query timed out"):
         fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=19_999)
 
-    # 20k failed → two 10k halves; the first floor-sized failure propagates.
     assert calls == [20_000, 10_000]
 
 
 def test_client_timeout_retries_the_same_window_before_bisecting(monkeypatch):
-    """A client timeout is this process's wait ending, not an upstream refusal, so it earns ONE retry of the
-    same window; bisecting a merely slow window fans one request into hundreds (measured: 756 getLogs for ~12
-    windows)."""
+    """A client timeout earns one retry; bisecting a slow window fanned out to 756 requests."""
     calls: list[tuple[int, int]] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
         from_block = int(params[0]["fromBlock"], 16)
         to_block = int(params[0]["toBlock"], 16)
         calls.append((from_block, to_block))
-        # The retry succeeds: the window was slow, not unservable.
         if calls.count((from_block, to_block)) == 1:
             raise RpcClientTimeout("RPC request failed for <redacted>: read timed out")
         return [_raw_log(_TOPIC_A, from_block)]
@@ -412,7 +388,6 @@ def test_client_timeout_retries_the_same_window_before_bisecting(monkeypatch):
     fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
     logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
 
-    # Two requests for one window, never a narrower one: no bisect happened.
     assert calls == [(0, 399_999), (0, 399_999)]
     assert [log.block_number for log in logs] == [0]
 
@@ -433,16 +408,13 @@ def test_second_client_timeout_falls_through_to_the_bisect(monkeypatch):
     fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
     logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
 
-    # Each timing-out window is tried twice, then split — the same halves the
-    # error path has always produced.
     assert calls[:2] == [(0, 399_999), (0, 399_999)]
     assert calls[2:4] == [(0, 199_999), (0, 199_999)]
     assert [log.block_number for log in logs] == [0, 100_000, 200_000, 300_000]
 
 
 def test_upstream_reject_bisects_immediately_without_a_retry(monkeypatch):
-    """An upstream reject is a verdict on the query and bisects on first sight; retrying only spends budget.
-    The CLIENT-timeout retry must be the only behaviour change for other RpcEventLogFetcher users."""
+    """The client-timeout retry must be the only behaviour change for other fetcher users."""
     calls: list[tuple[int, int]] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
@@ -457,7 +429,6 @@ def test_upstream_reject_bisects_immediately_without_a_retry(monkeypatch):
     fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
     logs = fetcher.fetch_logs(event_address=_ADDRESS, topics=[_TOPIC_A], from_block=0, to_block=399_999)
 
-    # The pre-existing 7-request shape, byte for byte: no window is repeated.
     assert calls == [
         (0, 399_999),
         (0, 199_999),

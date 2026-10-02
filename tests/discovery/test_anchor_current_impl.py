@@ -1,12 +1,5 @@
-"""Regression tests for the current-impl anchor bug (1B).
-
-The upgrade-history backfill used to stamp ``upgrade_history`` on every impl in a proxy's ``Upgraded`` events,
-including the CURRENT live impl (in the last event), so the anchor predicate excluded it (where the real
-functions + principals live) from analysis, requeue and coverage metrics.
-
-Pins: ``is_superseded_impl`` / ``not_superseded_impl_clause`` treat ``current_implementation`` as live;
-``backfill_historical_impl_contracts`` tags the current impl ``current_implementation`` on both create and
-adopt paths while genuinely-superseded impls stay anchored.
+"""The backfill used to tag the current live impl ``upgrade_history`` too, hiding it from analysis, requeue and
+coverage.
 """
 
 from __future__ import annotations
@@ -22,14 +15,10 @@ def _addr() -> str:
 
 
 def test_is_superseded_impl_predicate():
-    # Superseded-only anchor → excluded.
     assert is_superseded_impl(["upgrade_history"]) is True
-    # Current live impl (also seen in upgrade events) → kept.
     assert is_superseded_impl(["upgrade_history", "current_implementation"]) is False
     assert is_superseded_impl(["current_implementation"]) is False
-    # Ordinary discovered contract → kept.
     assert is_superseded_impl(["deployer_expansion"]) is False
-    # Legacy NULL sources → kept.
     assert is_superseded_impl(None) is False
     assert is_superseded_impl([]) is False
 
@@ -116,8 +105,6 @@ def test_backfill_tags_current_impl_live_create(db_session, monkeypatch):
 
 @requires_postgres
 def test_backfill_tags_current_impl_live_adopt(db_session, monkeypatch):
-    """Adopt path: a pre-existing live impl row gets ``current_implementation`` appended (NOT ``upgrade_history``)
-    so it stops being hidden from anchor-excluding metrics/requeue."""
     from db.models import Contract, Protocol
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
@@ -127,8 +114,7 @@ def test_backfill_tags_current_impl_live_adopt(db_session, monkeypatch):
     db_session.commit()
 
     current = _addr().lower()
-    # Pre-existing row as the analysis pipeline would have written it (low-source
-    # so the ownership gate doesn't fire coverage work).
+    # Low-source so the ownership gate doesn't fire coverage work.
     db_session.add(
         Contract(
             address=current,

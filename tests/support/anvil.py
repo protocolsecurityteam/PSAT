@@ -1,7 +1,3 @@
-"""Shared harness for the Anvil-backed monitoring tests: port allocation, node
-spawn, ``cast``/``forge`` shells, and the Solidity stand-ins the deploy helpers
-compile."""
-
 from __future__ import annotations
 
 import socket
@@ -11,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-# Anvil default account 0.
 PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 
@@ -43,14 +38,8 @@ def _terminate(proc: subprocess.Popen) -> None:
 
 
 def _start_anvil(attempts: int = 5, timeout: float = 15.0) -> tuple[subprocess.Popen, int]:
-    """Spawn anvil on a free port and return ``(process, port)`` once it answers.
-
-    ``_free_port`` reports a port it cannot reserve — the bind is released before
-    anvil execs, so another process may claim it in between. This does not
-    prevent that race, it recovers from it: anvil exits when its own bind fails,
-    so a child that is dead once the port answers means someone else owns the
-    port, and the whole spawn is retried elsewhere. The invariant held is that a
-    returned process is alive and its port is accepting connections.
+    """The port is released before anvil binds, so a dead child once the port answers means someone else owns it;
+    retry elsewhere.
     """
     for _ in range(attempts):
         port = _free_port()
@@ -67,7 +56,6 @@ def _start_anvil(attempts: int = 5, timeout: float = 15.0) -> tuple[subprocess.P
 
 @pytest.fixture()
 def anvil_env(tmp_path):
-    """Start an anvil node and yield ``(rpc_url, tmp_path)``."""
     proc, port = _start_anvil()
     try:
         foundry_toml = tmp_path / "foundry.toml"
@@ -78,7 +66,6 @@ def anvil_env(tmp_path):
 
 
 def materialization_keys(session) -> set[tuple[str, str]]:
-    """Snapshot the ``(chain, address)`` keys already in ``contract_materializations``."""
     from sqlalchemy import select
 
     from db.models import ContractMaterialization
@@ -87,14 +74,8 @@ def materialization_keys(session) -> set[tuple[str, str]]:
 
 
 def purge_materializations(session, keep: set[tuple[str, str]]) -> None:
-    """Drop the ``contract_materializations`` rows a test added, keeping the pre-existing ones.
-
-    Every anvil module deploys from the same funded account into a fresh node, so
-    contract #1 always lands on the same address — and the table is keyed
-    ``(chain, address)``. A row one module leaves behind is a unique violation for
-    the next module that deploys, which makes the two anvil files order-dependent
-    on a shared database. The per-module ``test_db`` cleanups do not reach this
-    table, so it is swept here.
+    """Every module deploys from the same account into a fresh node, so contract #1 lands on the same address and a
+    leftover row is a unique violation; the per-module cleanups don't reach this table.
     """
     from sqlalchemy import select
 
@@ -162,10 +143,6 @@ def _compile_and_deploy(
 
     raise RuntimeError(f"Could not parse address from forge create output:\n{result.stdout}")
 
-
-# ---------------------------------------------------------------------------
-# Solidity test contracts
-# ---------------------------------------------------------------------------
 
 OWNABLE_SOURCE = """
 // SPDX-License-Identifier: MIT

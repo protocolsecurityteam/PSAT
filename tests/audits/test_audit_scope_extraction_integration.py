@@ -1,8 +1,4 @@
-"""End-to-end scope-extraction pipeline against real PostgreSQL, S3-compatible storage and FastAPI TestClient,
-LLM stubbed via ``PSAT_LLM_STUB_DIR``. Each test seeds an ``AuditReport`` (text_extraction_status='success') and
-uploads a per-auditor text fixture under the text worker's key; the scope worker is driven directly, not
-through the poll loop. Needs Postgres + storage (skips without docker).
-"""
+"""The scope worker is driven directly, not through the poll loop."""
 
 from __future__ import annotations
 
@@ -11,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import SessionFactory, requires_postgres, requires_storage
+from tests.conftest import requires_postgres, requires_storage
+from tests.support.audit_fixtures import (
+    api_with_storage,  # noqa: F401  (fixture, registered by import)
+    worker,  # noqa: F401  (fixture, registered by import)
+)
 
 pytestmark = [
     requires_postgres,
@@ -21,10 +21,6 @@ pytestmark = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Fixture paths + LLM stub wiring
-# ---------------------------------------------------------------------------
-
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "scope_extraction"
 AUDITS_DIR = FIXTURE_DIR / "audits"
 STUB_DIR = FIXTURE_DIR / "llm_responses"
@@ -32,9 +28,7 @@ STUB_DIR = FIXTURE_DIR / "llm_responses"
 
 @pytest.fixture()
 def llm_stub_dir(monkeypatch, tmp_path):
-    """Copy stub fixtures to a tmp dir and point the env at it. ``_default.json`` yields Pool/Vault/Strategy/Registry,
-    which every committed audit fixture mentions, so no per-test prompt digest is needed.
-    """
+    """``_default.json`` names contracts every committed fixture mentions, so no per-test prompt digest is needed."""
     committed = STUB_DIR / "_default.json"
     assert committed.exists(), f"missing fixture: {committed}"
     (tmp_path / "_default.json").write_text(committed.read_text())
@@ -46,11 +40,6 @@ def _fixture_text(name: str) -> str:
     path = AUDITS_DIR / name
     assert path.exists(), f"missing audit fixture: {path}"
     return path.read_text()
-
-
-# ---------------------------------------------------------------------------
-# Seed helpers
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -111,49 +100,6 @@ def _seed_scoped_row(
     return audit_id
 
 
-@pytest.fixture()
-def worker(monkeypatch):
-    from unittest.mock import patch
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    import workers.audit_scope_extraction as worker_mod
-    from tests.conftest import DATABASE_URL
-
-    test_engine = create_engine(DATABASE_URL)
-    test_session_factory = sessionmaker(bind=test_engine, expire_on_commit=False)
-    monkeypatch.setattr(worker_mod, "SessionLocal", test_session_factory)
-
-    with patch("signal.signal"):
-        w = worker_mod.AuditScopeExtractionWorker()
-    try:
-        yield w
-    finally:
-        test_engine.dispose()
-
-
-@pytest.fixture()
-def api_with_storage(monkeypatch, db_session, storage_bucket):
-    from fastapi.testclient import TestClient
-
-    import api as api_module
-    from routers import deps
-    from routers.deps import require_admin_key
-
-    monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
-    try:
-        yield TestClient(api_module.app)
-    finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
-
-
-# ---------------------------------------------------------------------------
-# 1. Happy path — Spearbit markdown-table fixture
-# ---------------------------------------------------------------------------
-
-
 def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, seed_protocol, worker, llm_stub_dir):
     from db.models import AuditReport
 
@@ -181,8 +127,7 @@ def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, 
     assert row.scope_storage_key == f"audits/scope/{audit_id}.json"
     assert row.scope_extracted_at is not None
     assert row.scope_extraction_worker is None
-    # Discovery-time date was null — worker should have backfilled from the
-    # fixture's "Delivered: 19 December 2024" title line.
+    # The discovery-time date was null; the worker backfills it from the fixture title.
     assert row.date == "2024-12-19"
 
     import json as _json
@@ -192,11 +137,6 @@ def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, 
     assert payload["contracts"] == list(row.scope_contracts)
     assert payload["method"] == "llm"
     assert payload["prompt_version"]
-
-
-# ---------------------------------------------------------------------------
-# 3. Degenerate fixture — no scope section header → skipped
-# ---------------------------------------------------------------------------
 
 
 def test_worker_skips_body_without_scope_header(db_session, storage_bucket, seed_protocol, worker, llm_stub_dir):
@@ -223,11 +163,6 @@ def test_worker_skips_body_without_scope_header(db_session, storage_bucket, seed
     assert "no scope section found" in row.scope_extraction_error
     assert row.scope_contracts is None or row.scope_contracts == []
     assert row.scope_storage_key is None
-
-
-# ---------------------------------------------------------------------------
-# 4. LLM failure → regex fallback still populates scope_contracts
-# ---------------------------------------------------------------------------
 
 
 def test_worker_falls_back_to_regex_when_llm_fails(
@@ -269,11 +204,6 @@ def test_worker_falls_back_to_regex_when_llm_fails(
     assert payload["method"] == "regex_fallback"
 
 
-# ---------------------------------------------------------------------------
-# 5. Stale-row recovery
-# ---------------------------------------------------------------------------
-
-
 def test_stale_scope_rows_are_recovered(
     db_session,
     storage_bucket,
@@ -308,11 +238,6 @@ def test_stale_scope_rows_are_recovered(
 
     claimed = worker._claim_batch(db_session)
     assert audit_id in {a.id for a in claimed}
-
-
-# ---------------------------------------------------------------------------
-# 6. API — GET /api/audits/{id}/scope
-# ---------------------------------------------------------------------------
 
 
 def test_api_audit_scope_returns_contracts_after_extraction(
@@ -375,11 +300,6 @@ def test_api_audit_scope_returns_409_when_not_extracted(
     assert detail["status"] is None
 
 
-# ---------------------------------------------------------------------------
-# 7. API — GET /api/company/{name}/audit_coverage (the headline query)
-# ---------------------------------------------------------------------------
-
-
 def test_api_audit_coverage_joins_inventory_to_audits(
     db_session,
     storage_bucket,
@@ -416,9 +336,7 @@ def test_api_audit_coverage_joins_inventory_to_audits(
     )
     db_session.commit()
 
-    # Seed two audits — both cover Pool + Vault via the default stub
-    # response, with different dates. The most recent should win
-    # last_audit.
+    # The most recent audit wins last_audit.
     old_id = _seed_scoped_row(
         db_session,
         storage_bucket,
@@ -474,16 +392,9 @@ def test_api_audit_coverage_joins_inventory_to_audits(
     assert by_name["NotAudited"]["last_audit"] is None
 
 
-# ---------------------------------------------------------------------------
-# 8. Idempotency across worker restarts — the caching contract
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def make_fresh_worker(monkeypatch):
-    """Builds independent worker instances to simulate a process restart: the caching contract must rely on DB
-    state, not worker-local caches.
-    """
+    """The caching contract must rely on DB state, not worker-local caches."""
     from unittest.mock import patch
 
     from sqlalchemy import create_engine
@@ -512,10 +423,8 @@ def make_fresh_worker(monkeypatch):
 
 @pytest.fixture()
 def llm_call_counter(monkeypatch):
-    """Wrap ``_llm._call_llm`` with a counter so tests can assert exactly how many LLM calls a run sequence made."""
     counter = {"calls": 0}
-    # Patch ``_call_llm`` at its source (``_llm`` submodule) — patching the
-    # package-level re-export wouldn't intercept calls from inside ``_llm``.
+    # Patching the package re-export wouldn't intercept calls from inside ``_llm``.
     import services.audits.scope_extraction._llm as llm_mod
 
     real = llm_mod._call_llm
@@ -545,14 +454,11 @@ def test_terminal_status_rows_not_reclaimed_across_worker_restart(
     make_fresh_worker,
     llm_stub_dir,
 ):
-    """Terminal-state rows (success / failed / skipped) stay out of the claim query across restarts; DB status is the
-    primary cache.
-    """
+    """DB status is the primary cache."""
     from db.models import AuditReport
 
     protocol_id, _ = seed_protocol
 
-    # Distinct URLs per row so the (protocol_id, url) unique key isn't violated.
     success_id = _seed_scoped_row(
         db_session,
         storage_bucket,
@@ -627,7 +533,7 @@ def test_llm_not_called_again_for_already_scoped_row(
     llm_stub_dir,
     llm_call_counter,
 ):
-    """Restarting after completion must not call the LLM again (guards against a loosened claim predicate)."""
+    """Guards against a loosened claim predicate."""
     protocol_id, _ = seed_protocol
 
     audit_id = _seed_scoped_row(
@@ -655,7 +561,6 @@ def test_content_hash_cache_survives_worker_restart(
     llm_stub_dir,
     llm_call_counter,
 ):
-    """The content-hash cache is pure DB state, so it works when a different worker instance processed the sibling."""
     from db.models import AuditReport
     from workers.audit_scope_extraction import _CacheCopyOutcome
 
@@ -674,7 +579,6 @@ def test_content_hash_cache_survives_worker_restart(
     assert _drive(w1, db_session) == [id_a]
     assert llm_call_counter["calls"] == 1
 
-    # Seed B only after A finishes; a fresh worker's content-hash cache hit must short-circuit the LLM.
     id_b = _seed_scoped_row(
         db_session,
         storage_bucket,
@@ -711,7 +615,6 @@ def test_reextract_endpoint_makes_row_eligible_again(
     llm_call_counter,
     api_with_storage,
 ):
-    """The admin re-extract endpoint resets the row to NULL; a later worker cycle re-claims it and re-calls the LLM."""
     from db.models import AuditReport
 
     protocol_id, _ = seed_protocol
@@ -745,11 +648,6 @@ def test_reextract_endpoint_makes_row_eligible_again(
     assert db_session.get(AuditReport, audit_id).scope_extraction_status == "success"
 
 
-# ---------------------------------------------------------------------------
-# 9. Regression — scope worker's inline coverage refresh runs source-equivalence
-# ---------------------------------------------------------------------------
-
-
 def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
     db_session,
     storage_bucket,
@@ -758,10 +656,9 @@ def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
     llm_stub_dir,
     monkeypatch,
 ):
-    """The scope worker no longer runs source-equivalence inline (#82: inline verify caused Etherscan rate-limit
-    cascades that blocked every other worker); it writes coverage rows with ``equivalence_status='pending'`` for
-    ``CoverageVerifyWorker`` to drain. Pins the synchronous half (pending, no inline HTTP); the deferred half is
-    in ``test_coverage_verify_worker.py``.
+    """Inline verify caused Etherscan rate-limit cascades (#82), so the scope worker only writes 'pending'.
+
+    The deferred half is in ``test_coverage_verify_worker.py``.
     """
     from db.models import AuditContractCoverage, AuditReport, Contract
 
@@ -793,8 +690,7 @@ def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
     audit.source_repo = "example/protocol"
     db_session.commit()
 
-    # The scope worker MUST NOT touch the network on its own — the
-    # verify worker does that asynchronously. Make any HTTP call loud.
+    # The verify worker does the network; any HTTP here is loud.
     import services.audits.source_equivalence as se_mod
 
     def boom_etherscan(_addr):

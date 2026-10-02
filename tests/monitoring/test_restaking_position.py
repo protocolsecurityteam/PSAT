@@ -1,13 +1,8 @@
-"""D1 - per-node restaking position: the record, its bases, and its backstops.
+"""D1 per-node restaking positions, from reads at block 25643300 replayed off the wire.
 
-Every expected value is a read at block 25643300, reproduced independently three times;
-the wire is replayed, never touched. Two shapes are pinned side by side, since pinning one
-alone would ship a rule the measured corpus cannot satisfy:
-
-* node ``0x53e1eb2f…`` - 30e18 shares, 3 active validators, pod native 0;
-* node ``0x05b1e403…`` - an EigenPod, **0 shares, 0 validators**, pod holding 3.578775160 ETH
-  (26 of the 26 enumerated nodes: the column sums to **0 wei** while pods hold
-  **374.148164612 ETH**, ``0x7474b357…`` exactly **320 ETH**).
+Two shapes are pinned side by side: node ``0x53e1eb2f…`` (30e18 shares, 3 validators) and ``0x05b1e403…``
+(0 shares, 0 validators, pod holding 3.578775160 ETH). All 26 enumerated nodes sum to 0 wei of shares while
+pods hold 374 ETH.
 """
 
 from __future__ import annotations
@@ -52,8 +47,7 @@ from utils.restaking_status import (
 BLOCK = 25643300
 BLOCK_HASH = "0x" + "ab" * 32
 
-# The witnessed strategy, written in FULL. The near-miss below answers 0 with
-# success and is eyeball-identical in any elided form.
+# The near-miss below answers 0 with success and looks identical when elided.
 STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeebeac0"
 NEAR_MISS_STRATEGY = "0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
@@ -66,15 +60,13 @@ POD_ZERO_SHARES = "0x81b58cabe3f00cd37e074a133f87d1012341455c"
 
 BEACON_IMPLEMENTATION = "0x556db8c611fe63e694413f718d795f976dcf5881"
 
-# The enumerating emitter (proxy) and the row that carries the manager's NAME
-# (implementation). Provenance must pin to the former.
+# Provenance pins to the proxy, not the named implementation row.
 EFNM_PROXY = "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"
 EFNM_IMPLEMENTATION = "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05"
 
 ZERO_WORD = "0x" + "0" * 64
 
 
-# Distinguishes "caller said nothing" from "caller passed None on purpose".
 _SENTINEL = "<default>"
 
 
@@ -105,7 +97,6 @@ def _reads(**overrides: str | None) -> NodeReads:
 
 
 def _calldata(node: str = NODE_WITH_SHARES, strategy: str = STRATEGY) -> str:
-    """The exact bytes a ``getWithdrawableShares`` read is issued with."""
     return (
         selector("getWithdrawableShares(address,address[])")
         + node.lower().removeprefix("0x").rjust(64, "0")
@@ -135,7 +126,6 @@ def _record(
 
 
 def _skeleton(node: str) -> dict:
-    """The record with every witnessed field at its not-determined state."""
     return {
         "chain_id": 1,
         "node_address": node,
@@ -176,7 +166,6 @@ class TestHappyPathBothShapes:
         }
 
     def test_enumerated_node_zero_shares_with_funded_pod_byte_exact(self):
-        """The 26/26 shape. A published 0 beside a pod holding 3.578775160 ETH."""
         record = position_record(
             chain_id=1,
             node_address=NODE_ZERO_SHARES,
@@ -228,9 +217,7 @@ class TestEigenpodIdentityLegs:
         assert record["shares_strategy"] is None
 
     def test_codeless_node_empty_return_is_not_a_proven_zero(self):
-        """The constructible attack: a codeless node answers ``getEigenPod()`` with ``"0x"`` AND
-        success while EigenLayer's mappings answer zeros; a one-leg reading would mint "proven
-        no eigenpod, 0 shares" for an address whose state was never read."""
+        """A codeless node answers empty with success; a one-leg reading would mint a proven zero from unread state."""
         record = _record(get_eigen_pod="0x", owner_to_pod=ZERO_WORD, has_pod=_word(0))
         assert record == _skeleton(NODE_WITH_SHARES)
 
@@ -245,7 +232,6 @@ class TestEigenpodIdentityLegs:
         assert record["eigenlayer_beacon_shares_wei"] is None
 
     def test_two_agreeing_address_legs_with_bad_has_pod_is_not_determined(self):
-        """``proven_pod_cross_read`` is requirement (i); two of three is not it."""
         for has_pod in ("0x", _word(2), _word(0), None):
             record = _record(has_pod=has_pod)
             assert record["eigenpod_basis"] == EIGENPOD_BASIS_NOT_DETERMINED
@@ -265,7 +251,6 @@ class TestEigenpodIdentityLegs:
 class TestStrategyIsWitnessed:
     def test_unwitnessed_strategy_yields_not_determined(self):
         record = _record(strategy=None)
-        # The pod is still proven; only the quantity is withheld.
         assert record["eigenpod_basis"] == EIGENPOD_BASIS_PROVEN_CROSS_READ
         assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
         assert record["eigenlayer_beacon_shares_wei"] is None
@@ -293,14 +278,12 @@ class TestFailedReadsNeverBecomeZero:
         assert record["eigenlayer_beacon_shares_wei"] is None
 
     def test_zero_with_failed_deposit_leg_cannot_publish_a_zero(self):
-        """(iii) is unevaluable, so the 0 is withheld rather than published."""
         record = _record(withdrawable_shares=_shares_return(0, 0), pod_owner_deposit_shares=None)
         assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
         assert record["eigenlayer_beacon_shares_wei"] is None
 
     def test_dm_deposit_leg_below_withdrawable_is_inconsistent(self):
-        """A PRESENT deposit leg below the withdrawable leg is a real conflict (unlike an ABSENT
-        leg, below): a successful read disproves the accounting model behind the quantity."""
+        """A present deposit leg below withdrawable disproves the accounting model."""
         record = _record(
             pod_owner_deposit_shares=None,
             withdrawable_shares="0x" + "".join(f"{v:064x}" for v in (0x40, 0x80, 1, SHARES_WEI, 1, 0)),
@@ -308,9 +291,7 @@ class TestFailedReadsNeverBecomeZero:
         assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
 
     def test_nonzero_with_failed_epm_deposit_leg_publishes_single_source(self):
-        """INTENDED. An absent deposit leg is not disagreement: suppressing would discard a
-        proven read on the strength of a missing one, so the quantity publishes with a NULL
-        deposit column and a not-determined cross-read."""
+        """Intended: an absent deposit leg isn't disagreement, so the proven read still publishes."""
         record = _record(pod_owner_deposit_shares=None)
         assert record["shares_basis"] == SHARES_BASIS_EIGENLAYER_BEACON_SHARES
         assert record["eigenlayer_beacon_shares_wei"] == SHARES_WEI
@@ -344,8 +325,7 @@ class TestCrossReadPartition:
         assert record["eigenlayer_beacon_shares_wei"] is None
 
     def test_fully_slashed_zero_against_positive_deposit_is_withheld(self):
-        """Intended under-claim: withdrawable 0 with a positive deposit leg fails the zero-only
-        equality and publishes nothing. Recorded so a later reader does not "fix" (iii)."""
+        """Intended under-claim, recorded so nobody "fixes" (iii)."""
         record = _record(
             withdrawable_shares=_shares_return(0, SHARES_WEI),
             pod_owner_deposit_shares=_word(SHARES_WEI),
@@ -359,12 +339,10 @@ class TestDecoders:
         assert decode_int256_word(_word((1 << 256) - 1)) == -1
         assert decode_int256_word(_word((1 << 256) - SHARES_WEI)) == -SHARES_WEI
         assert decode_int256_word(_word(SHARES_WEI)) == SHARES_WEI
-        # The failure mode this closes: unsigned decoding of -1.
         assert decode_int256_word(_word((1 << 256) - 1)) != (1 << 256) - 1
 
     def test_negative_deposit_beside_zero_withdrawable_is_withheld(self):
-        """Decoded as -5, so ``withdrawable > deposit`` fires and the row is withheld; an
-        unsigned read would give ~1.15e77 and publish happily."""
+        """Unsigned decoding would give ~1.15e77 and publish."""
         record = _record(
             pod_owner_deposit_shares=_word((1 << 256) - 5),
             withdrawable_shares=_shares_return(0, 0),
@@ -379,8 +357,7 @@ class TestDecoders:
 
     def test_shares_decoder_asserts_the_whole_abi_shape(self):
         assert decode_withdrawable_shares(_shares_return(7, 9)) == (7, 9)
-        # Wrong head offsets, wrong array lengths, wrong total length: each of
-        # these would otherwise decode an offset or a length AS a quantity.
+        # Each would otherwise decode an offset or length as a quantity.
         assert decode_withdrawable_shares("0x" + "".join(f"{v:064x}" for v in (0x40, 0x80, 2, 1, 1, 1))) == (
             None,
             None,
@@ -390,10 +367,9 @@ class TestDecoders:
 
 
 class TestDecoderStrictness:
-    """A short or non-canonical word must not become a clean number. ``int(s, 16)`` accepts
-    ``_`` separators and strips whitespace, so a 63-nibble return with a trailing newline would
-    pass the length check and decode. Not reachable via ``multicall3_aggregate3`` today (it
-    re-hexes via ``bytes.hex()``), but every decoder here is exported."""
+    """``int(s, 16)`` accepts ``_`` and strips whitespace, so a malformed word could decode; unreachable via
+    ``multicall3_aggregate3`` today, but the decoders are exported.
+    """
 
     def test_whitespace_padded_short_word_is_not_a_zero(self):
         assert decode_word("0x" + "0" * 63 + "\n") is None
@@ -426,7 +402,6 @@ class TestDecoderStrictness:
         assert decode_withdrawable_shares(dirty) == (None, None)
 
     def test_dirty_high_order_bits_are_not_truncated_into_an_address(self):
-        """Wire-reachable: a non-conformant or upgraded callee returns this."""
         dirty = "0x" + "de" * 12 + POD_WITH_SHARES.removeprefix("0x")
         assert decode_address_word(dirty) is None
         assert decode_address_word("0x" + "00" * 12 + POD_WITH_SHARES.removeprefix("0x")) == POD_WITH_SHARES
@@ -438,9 +413,7 @@ class TestDecoderStrictness:
 
 
 class TestStrategyGateIsOnTheIssuedBytes:
-    """The witnessed strategy alone is a calling convention, not a gate: the quantity is
-    licensed by the answer being read AGAINST that strategy and THIS node, checked out of
-    the bytes sent."""
+    """The quantity is licensed by the issued bytes naming this strategy and this node."""
 
     def test_asserted_strategy_must_match_the_calldata(self):
         record = _record(strategy=NEAR_MISS_STRATEGY, calldata=_calldata(NODE_WITH_SHARES, STRATEGY))
@@ -489,9 +462,7 @@ class TestPodFactsRequireAProvenPod:
             (2**31 - 1, 2**63 - 1, (2**31 - 1, 2**63 - 1)),
             (2**31, 2**63 - 1, (None, 2**63 - 1)),
             (3, 2**63, (3, None)),
-            # One malformed pod must not cost every other node its observation: a 2**200 word
-            # would reach the insert as a Numeric the int columns cannot hold
-            # (NumericValueOutOfRange), taking the whole batch down.
+            # A 2**200 word would overflow the int columns and take the whole batch down.
             (2**200, 2**200, (None, None)),
         ],
         ids=["at-both-maxima", "count-over-int4", "timestamp-over-int8", "out-of-range-words-not-an-abort"],
@@ -502,8 +473,6 @@ class TestPodFactsRequireAProvenPod:
 
 
 class TestPinnedHead:
-    """The stored height and hash must name the same block the reads were at."""
-
     def _stub(self, monkeypatch, header):
         calls = {"n": 0}
 
@@ -521,8 +490,7 @@ class TestPinnedHead:
         assert pinned_head(1, "http://stub") == (BLOCK, BLOCK_HASH)
 
     def test_header_for_a_different_height_is_refused(self, monkeypatch):
-        """A racing or load-balanced upstream can answer another block; pairing that hash with
-        this number would make the stored reorg witness name a block the reads never used."""
+        """A racing upstream can answer another block."""
         self._stub(monkeypatch, {"number": hex(BLOCK - 3), "hash": BLOCK_HASH})
         assert pinned_head(1, "http://stub") is None
 
@@ -614,8 +582,7 @@ class TestConstraintsAreABackstop:
         db_session.rollback()
 
     def test_basis_columns_are_not_null_in_the_reflected_schema(self, db_session):
-        """The OR-joined arms are fail-closed only while these are NOT NULL: a NULL basis makes
-        every arm NULL, and a CHECK evaluating to NULL PASSES in Postgres."""
+        """A CHECK evaluating to NULL passes in Postgres."""
         columns = {c["name"]: c for c in inspect(db_session.get_bind()).get_columns("restaking_positions")}
         for name in (
             "shares_basis",
@@ -695,15 +662,13 @@ class TestLatestView:
         db_session.rollback()
 
     def test_node_with_only_non_observing_rows_is_absent_not_zero(self, db_session):
-        """Absence from the view is not_determined, never "no position": a consumer reading a
-        missing row as 0 would reintroduce absent-row-as-$0 at the projection layer."""
+        """A missing row read as 0 would reintroduce absent-row-as-$0."""
         self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_READ_FAILED, shares=None)
         self._insert(db_session, block=BLOCK + 1, basis=SHARES_BASIS_NOT_DETERMINED, shares=None)
         assert self._latest(db_session) == []
         db_session.rollback()
 
     def test_view_partition_includes_chain_id(self, db_session):
-        """The same address on two chains is two entities (cross-chain aliasing)."""
         self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_EIGENLAYER_BEACON_SHARES, shares=SHARES_WEI)
         db_session.add(
             RestakingPosition(
@@ -738,8 +703,7 @@ class TestLatestView:
 @requires_postgres
 class TestPersistence:
     def test_producer_never_attempts_a_violating_insert(self, db_session):
-        """Constraints are a backstop; the producer is the control flow. Every leg outcome here
-        persists without an IntegrityError, so the CHECKs never become a guard the writer leans on."""
+        """The CHECKs are a backstop the writer must never lean on."""
         legs = [
             {},
             {"get_eigen_pod": "0x"},
@@ -812,10 +776,10 @@ class TestPersistence:
 
 @requires_postgres
 def test_the_value_plane_publishes_what_it_read_and_what_it_dropped(db_session):
-    """Every admission rule states where it fired: a position dropped uncounted reads as a
-    node that holds nothing rather than one this plane refused. Lives here because this file
-    is in the plane's licensed import surface for ``RestakingPosition`` (see
-    ``test_restaking_node_fold``'s import-surface guard)."""
+    """A dropped position must read as refused, not as holding nothing.
+
+    Lives here because this file is in the plane's licensed import surface.
+    """
     import uuid
 
     from services.scoring.planes import load_value_plane

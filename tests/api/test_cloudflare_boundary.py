@@ -1,5 +1,3 @@
-"""Local application contracts; no Cloudflare/Fly/prod requests."""
-
 from __future__ import annotations
 
 import io

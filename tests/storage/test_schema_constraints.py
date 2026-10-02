@@ -1,11 +1,4 @@
-"""Schema-level invariants enforced at the DB layer: triggers, checks, indexes.
-
-These exist so that even a direct SQL INSERT (bypassing the Python
-matcher) cannot corrupt the dataset, and so that an index a hot path
-depends on cannot quietly disappear. If someone drops a trigger, relaxes
-a check or drops an index, the corresponding assertion here fires and the
-build breaks — a much louder failure than a silent data drift.
-"""
+"""DB-layer triggers, checks and indexes, so raw SQL can't corrupt data and a hot-path index can't quietly vanish."""
 
 from __future__ import annotations
 
@@ -21,7 +14,6 @@ pytestmark = [requires_postgres]
 
 
 def _fresh_protocol_contract_audit(db_session, *, is_proxy: bool):
-    """Seed one Protocol + Contract + AuditReport row and return their ids."""
     from db.models import AuditReport, Contract, Protocol
 
     suffix = uuid.uuid4().hex[:12]
@@ -66,8 +58,7 @@ def _cleanup(db_session, protocol_id):
 
 @requires_postgres
 def test_coverage_trigger_rejects_proxy_contract_insert(db_session):
-    """Belt-and-suspenders for the app-level candidate filter: even a raw SQL insert
-    can't produce a false-positive proxy coverage row."""
+    """Even a raw insert can't produce a false-positive proxy coverage row."""
     protocol_id, contract_id, audit_id = _fresh_protocol_contract_audit(db_session, is_proxy=True)
     try:
         with pytest.raises((InternalError, ProgrammingError)) as exc_info:
@@ -81,8 +72,7 @@ def test_coverage_trigger_rejects_proxy_contract_insert(db_session):
                 {"cid": contract_id, "aid": audit_id, "pid": protocol_id},
             )
             db_session.commit()
-        # The exception message must name the trigger reason so ops can
-        # diagnose without reading the trigger source.
+        # Ops can diagnose without reading the trigger source.
         assert "proxy" in str(exc_info.value).lower()
     finally:
         _cleanup(db_session, protocol_id)
@@ -90,7 +80,6 @@ def test_coverage_trigger_rejects_proxy_contract_insert(db_session):
 
 @requires_postgres
 def test_coverage_trigger_allows_non_proxy_insert(db_session):
-    """The trigger must not block is_proxy=False (normal coverage target) inserts."""
     from db.models import AuditContractCoverage
 
     protocol_id, contract_id, audit_id = _fresh_protocol_contract_audit(db_session, is_proxy=False)
@@ -111,9 +100,4 @@ def test_coverage_trigger_allows_non_proxy_insert(db_session):
         _cleanup(db_session, protocol_id)
 
 
-# ---------------------------------------------------------------------------
-# Required indexes
-#
-# Postgres does NOT auto-create an index on a foreign-key column, and several
-# hot paths scan those columns.
-# ---------------------------------------------------------------------------
+# Postgres doesn't auto-index foreign-key columns.

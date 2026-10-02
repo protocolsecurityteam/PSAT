@@ -1,5 +1,3 @@
-"""Tests for the generic event-indexed adapter."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -19,7 +17,6 @@ ADDR_C = "0xcccccccccccccccccccccccccccccccccccccccc"
 
 class FakeEventLogRepo:
     def __init__(self, events_by_topic: dict[str, list[tuple[str, str]]]):
-        # events_by_topic: topic0 → list of (direction, member_address)
         self.events_by_topic = events_by_topic
 
     def fold_event_writes(
@@ -134,7 +131,6 @@ def test_postgres_event_repo_folds_add_remove_hints_in_log_order():
         SimpleNamespace(topic0="0xaa", topics=["0xaa", _address_topic(ADDR_B)], data_words=[]),
     ]
     repo = PostgresEventLogRepo(cast(Any, FakeSession(rows)))
-    # The fold gates trust on backfill_complete now, not the raw cursor block.
     repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)
 
     result = repo.fold_event_history(
@@ -182,11 +178,8 @@ def test_event_indexed_backend_error_yields_check_only():
 
 
 def test_event_indexed_caller_keyed_no_cursor_defers_pending_index():
-    # A caller-keyed add/remove ACL with a cold durable cursor (``no_index_cursor``)
-    # defers to external_check_only tagged ``deferred_pending_index`` rather than a live
-    # genesis scan; the reconciler re-resolves once the indexer backfills. The basis
-    # carries ``caller_keyed_membership_allowlist`` (a CALLER_GATE_BASIS_TAGS member) so
-    # earned-public projection stays fail-closed.
+    # A cold cursor defers (``deferred_pending_index``) instead of a live genesis scan; the caller-gate tag keeps
+    # earned-public fail-closed.
     descriptor = {
         "kind": "mapping_membership",
         "key_sources": [{"source": "msg_sender"}],
@@ -209,8 +202,6 @@ def test_event_indexed_caller_keyed_no_cursor_defers_pending_index():
 
 
 def test_event_indexed_non_caller_keyed_no_cursor_defers_without_caller_gate_tag():
-    # A parameter-keyed ACL still defers on a cold cursor, but without the caller-gate
-    # tag: the deferral is index-driven, not a caller-discriminating gate.
     descriptor = {
         "kind": "mapping_membership",
         "key_sources": [{"source": "parameter", "parameter_index": 0}],
@@ -228,7 +219,7 @@ def test_event_indexed_non_caller_keyed_no_cursor_defers_without_caller_gate_tag
 
 
 def test_event_indexed_cold_cursor_performs_no_live_scan(monkeypatch):
-    # The cold-cursor branch must NOT reach the live hypersync replay (a genesis scan is the 429-storm source).
+    # A genesis scan is the 429-storm source.
     import services.resolution.mapping_enumerator as mapping_enumerator
 
     def boom(*_args, **_kwargs):
@@ -247,8 +238,7 @@ def test_event_indexed_cold_cursor_performs_no_live_scan(monkeypatch):
     assert cap.kind == "external_check_only"
 
 
-# Same-topic0 add/remove conflict (G2 HIT 1): direction is a property of the EVENT
-# PAYLOAD, never of hint-list order.
+# G2 HIT 1: direction comes from the event payload, never hint order.
 
 _CONFLICT_TOPIC = "0xf93f9a76c1bf3444d22400a00cb9fe990e6abe9dbb333fda48859cfee864543d"
 
@@ -258,7 +248,6 @@ def _bool_word(value: bool) -> str:
 
 
 def _conflict_rows():
-    """WhitelistUpdated(address indexed user, bool value): ADDR_B set true; ADDR_C true then false."""
     return [
         SimpleNamespace(
             topic0=_CONFLICT_TOPIC,
@@ -322,8 +311,7 @@ def test_same_topic_conflict_without_value_position_fails_closed():
 
 
 def test_same_topic_conflict_unreadable_payload_word_fails_closed():
-    # value_position points past the row's data words: the payload can't be read, so
-    # the fold must not decide membership.
+    # The payload can't be read, so the fold must not decide membership.
     result = _run_conflict_fold(_conflict_hints(5))
     assert result.confidence == "partial"
     assert result.partial_reason == "ambiguous_event_direction"
@@ -367,5 +355,4 @@ def test_event_indexed_ambiguous_direction_settles_to_gated_check():
     assert cap.check is not None
     basis = (cap.check.extra or {}).get("basis") or []
     assert "ambiguous_event_direction" in basis
-    # An undecided caller-keyed allowlist is still an allowlist: the caller-gate tag keeps it gated.
     assert "caller_keyed_membership_allowlist" in basis

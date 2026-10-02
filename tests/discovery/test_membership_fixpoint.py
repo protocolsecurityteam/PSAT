@@ -22,6 +22,7 @@ from db.models import (
 )
 from services.discovery import membership_gate as gate
 from tests.conftest import requires_postgres
+from tests.support.membership_builders import _contract
 
 pytestmark = [requires_postgres]
 
@@ -39,13 +40,6 @@ def _addr(n: int) -> str:
     return "0x" + hex(n)[2:].zfill(40)
 
 
-def _contract(session, address: str, **fields) -> Contract:
-    row = Contract(address=address.lower(), chain=fields.pop("chain", "ethereum"), **fields)
-    session.add(row)
-    session.flush()
-    return row
-
-
 def _code_fact(session, address: str, *, chain_id: int = 1, tx: str | None = None, absent: bool = False) -> None:
     session.add(
         ContractCreationWitness(
@@ -61,7 +55,6 @@ def _code_fact(session, address: str, *, chain_id: int = 1, tx: str | None = Non
 
 
 def _member(session, protocol: Protocol, address: str, **fields) -> Contract:
-    """A proven member: stamp + W1 + W5 witness rows (the anchor shape)."""
     row = _contract(session, address, protocol_id=protocol.id, nominated_protocol_id=protocol.id, **fields)
     _code_fact(session, address)
     gate.write_witness(
@@ -105,8 +98,6 @@ def _probe_read(session, subject: Contract, value: str) -> None:
 
 
 def _owner_edge(session, subject: Contract, value: str) -> ControllerValue:
-    """The subject's resolved owner on both derivations the gate reads: the
-    static caller-gate row and the probe read that admits under D2."""
     row = ControllerValue(
         contract_id=subject.id, controller_id="owner", value=value.lower(), authority_provenance="caller_gate"
     )
@@ -123,15 +114,7 @@ def _active_rules(session, contract: Contract) -> set[str]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Fixpoint: multi-round promotion chain
-# ---------------------------------------------------------------------------
-
-
 def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
-    """One evaluate call settles a three-hop chain: the member's impl admits
-    via W2; the shared deployer then earns Class B (corroborated by the fresh
-    member, enumeration complete); the sibling admits via W4."""
     protocol = _protocol(db_session, "chain")
     deployer = _addr(0x1D0)
     member = _member(db_session, protocol, _addr(0x1A0), implementation=_addr(0x1A1), deployer=deployer)
@@ -178,11 +161,9 @@ def test_fixpoint_multi_round_chain_w2_then_class_b_then_w4(db_session):
     assert impl.protocol_id == protocol.id
     assert sibling.protocol_id == protocol.id
     assert _active_rules(db_session, impl) == {"w1_code", "w2_structural"}
-    # The stale W2 row stays active-but-unverified; W4 is what admitted.
     assert _active_rules(db_session, sibling) == {"w1_code", "w2_structural", "w4_deployer"}
     registry = db_session.query(ProtocolDeployer).filter_by(protocol_id=protocol.id, address=deployer).one()
     assert registry.trust_class == "B" and registry.revoked_at is None
-    # The enumeration is fetched once, then cached across rounds.
     assert calls == [deployer]
 
 
@@ -218,16 +199,12 @@ def test_fixpoint_without_enumerator_never_mints_class_b(db_session):
 
 
 def test_revocation_cascade_demotes_exactly_the_witnessless(db_session):
-    """Deployer revocation cascades through via-facts to quiescence: the
-    lineage-only member falls, the member resting on IT falls next, and the
-    member with an independent witness is untouched."""
     protocol = _protocol(db_session, "cascade")
     deployer = _addr(0x3D0)
     registry = ProtocolDeployer(protocol_id=protocol.id, address=deployer, trust_class="B", evidence={"x": 1})
     db_session.add(registry)
     db_session.flush()
 
-    # A: member via W4 only; its stored impl pointer backs B's W2.
     a = _contract(
         db_session,
         _addr(0x3A0),
@@ -248,7 +225,6 @@ def test_revocation_cascade_demotes_exactly_the_witnessless(db_session):
         ),
         via_address=deployer,
     )
-    # B: member via W2 resting on A only.
     b = _contract(db_session, _addr(0x3A1), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
     gate.write_witness(
         db_session,
@@ -260,7 +236,6 @@ def test_revocation_cascade_demotes_exactly_the_witnessless(db_session):
         ),
         via_address=a.address,
     )
-    # C: member via W2 on A AND an independent W5.
     c = _contract(db_session, _addr(0x3A2), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
     gate.write_witness(
         db_session,
@@ -302,7 +277,6 @@ def test_revocation_cascade_demotes_exactly_the_witnessless(db_session):
 
 
 def _confluence_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contract]]:
-    """Member M points at impl X; X points at impl Y (chain of W2 edges)."""
     protocol = _protocol(db_session, "confl")
     m = _member(db_session, protocol, _addr(base), implementation=_addr(base + 1))
     x = _contract(
@@ -353,8 +327,7 @@ def test_fixpoint_confluent_across_arrival_orders(db_session):
 
 
 def test_fixpoint_terminates_on_cyclic_pointers(db_session):
-    """Mutually pointing proxies (P1.impl = C2, C2.impl = P1) settle in
-    finitely many rounds — each admission consumes a strictly new witness."""
+    """Each admission consumes a strictly new witness."""
     protocol = _protocol(db_session, "cycle")
     _member(db_session, protocol, _addr(0x600), implementation=_addr(0x601))
     p1 = _contract(db_session, _addr(0x601), nominated_protocol_id=protocol.id, implementation=_addr(0x602))
@@ -376,10 +349,7 @@ def test_fixpoint_terminates_on_cyclic_pointers(db_session):
 
 
 def test_externals_in_member_graph_are_never_admitted(db_session):
-    """Lido/EigenLayer-core/USDC/WETH9 shape: externals present as a member's
-    dependencies (``regular`` / ``library`` / typed-``proxy``) — even when a
-    source nominated them — never admit. Presence in a graph is not a
-    control/lineage edge."""
+    """Presence in a member's dependency graph is not a control or lineage edge."""
     protocol = _protocol(db_session, "overreach")
     member = _member(db_session, protocol, _addr(0x700))
     externals = {
@@ -414,9 +384,7 @@ def test_externals_in_member_graph_are_never_admitted(db_session):
 
 
 def test_dependency_typed_proxy_is_not_a_structural_edge(db_session):
-    """The stETH trap: ``relationship_type='proxy'`` says the dependency IS a
-    proxy, not that it is the member's proxy. Only the member's own stored
-    pointer admits."""
+    """The stETH trap: ``relationship_type='proxy'`` says the dependency is a proxy, not the member's proxy."""
     protocol = _protocol(db_session, "steth")
     member = _member(db_session, protocol, _addr(0x710), implementation=_addr(0x712))
     steth = _contract(db_session, _addr(0x711), nominated_protocol_id=protocol.id)
@@ -439,19 +407,15 @@ def test_dependency_typed_proxy_is_not_a_structural_edge(db_session):
 
 
 def test_shared_operator_two_hop_kill(db_session):
-    """Third-party ops Safe S controls member X of P and also foreign W.
-    S itself admits (D2) — but S is NON-TRANSITIVE (foreign observation
-    breaks exclusivity), so candidate Y whose owner is S must not admit."""
+    """S admits via D2 but is non-transitive once a foreign observation breaks exclusivity."""
     protocol = _protocol(db_session, "twohop")
     foreign_protocol = _protocol(db_session, "foreignq")
     safe = _contract(db_session, _addr(0x720), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
     member_x = _member(db_session, protocol, _addr(0x721))
     _owner_edge(db_session, member_x, safe.address)
-    # Foreign vault the SAME operator controls — the two-hop shape's tell.
     foreign_w = _contract(db_session, _addr(0x722), protocol_id=foreign_protocol.id)
     _owner_edge(db_session, foreign_w, safe.address)
-    # Candidate Y of P whose resolved owner is the shared operator.
     y = _contract(db_session, _addr(0x723), nominated_protocol_id=protocol.id)
     _code_fact(db_session, y.address)
     _owner_edge(db_session, y, safe.address)
@@ -459,18 +423,14 @@ def test_shared_operator_two_hop_kill(db_session):
     result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id, y.id)))
     db_session.commit()
 
-    # S admits as a D2 controller of member X…
     assert safe.protocol_id == protocol.id
     assert _active_rules(db_session, safe) == {"w1_code", "w3_control"}
-    # …but licenses nothing: Y stays a candidate.
     assert y.protocol_id is None
     assert y.id not in result.promoted_contract_ids
     assert _active_rules(db_session, y) == set()
 
 
 def test_exclusive_d2_controller_is_transitive(db_session):
-    """Positive control for the kill: with no foreign observation, the D2
-    controller is proven exclusive and the second vault admits via D1."""
     protocol = _protocol(db_session, "exclusive")
     safe = _contract(db_session, _addr(0x730), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
@@ -495,8 +455,6 @@ def test_exclusive_d2_controller_is_transitive(db_session):
 
 
 def test_demoting_the_via_revokes_dependent_d1(db_session):
-    """Revocability of the transitive license: when the operator's member
-    status falls, the D1 members resting on it are re-checked and demoted."""
     protocol = _protocol(db_session, "revoked1")
     safe = _contract(db_session, _addr(0x740), nominated_protocol_id=protocol.id)
     _code_fact(db_session, safe.address)
@@ -509,8 +467,6 @@ def test_demoting_the_via_revokes_dependent_d1(db_session):
     db_session.commit()
     assert safe.protocol_id == protocol.id and y.protocol_id == protocol.id
 
-    # The control edge that admitted S disappears (owner rotated away) — on
-    # both derivations the gate reads.
     db_session.delete(x_cv)
     db_session.get(ContractProbeAttempt, (member_x.id, 1)).results = {"status": "probed", "reads": {}}
     db_session.flush()
@@ -520,11 +476,6 @@ def test_demoting_the_via_revokes_dependent_d1(db_session):
     assert safe.protocol_id is None
     assert y.protocol_id is None
     assert set(demoted) == {safe.id, y.id}
-
-
-# ---------------------------------------------------------------------------
-# Event-2 delta targeting per hook (transport stubbed / none needed)
-# ---------------------------------------------------------------------------
 
 
 def test_resolution_hook_promotes_controller_of_member(db_session):
@@ -551,9 +502,7 @@ def test_resolution_hook_promotes_controller_of_member(db_session):
 
 
 def test_resolution_hook_removed_controller_revokes_class_a_row(db_session):
-    """F5: a re-resolution that drops the controller value a Class-A registry
-    row is anchored on must revoke the row in the SAME evaluate — the removed
-    address rides the hook's delta as a changed deployer."""
+    """F5: the removed address rides the hook's delta as a changed deployer."""
     from workers.resolution_worker import _membership_gate_controller_hook
 
     protocol = _protocol(db_session, "reshook-rm")
@@ -592,8 +541,6 @@ def test_resolution_hook_removed_controller_revokes_class_a_row(db_session):
 
 
 def test_static_hook_edge_addresses_admit_member_proxys_impl(db_session):
-    """The proxy-classification delta carries the freshly stored pointer
-    addresses; a nominated candidate AT a member proxy's impl address admits."""
     protocol = _protocol(db_session, "statichook")
     proxy = _member(db_session, protocol, _addr(0x810), implementation=_addr(0x811))
     impl = _contract(db_session, _addr(0x811), nominated_protocol_id=protocol.id)
@@ -611,10 +558,8 @@ def test_static_hook_edge_addresses_admit_member_proxys_impl(db_session):
 
 
 def test_evaluate_committed_swallows_failures(db_session, monkeypatch):
-    """A gate failure inside a hook rolls back and returns None — the
-    pipeline stage never fails on the gate."""
-    # ``evaluate`` calls ``_target_candidates`` inside the ``fixpoint``
-    # submodule, so the patch must land on the defining module.
+    """The pipeline stage never fails on the gate."""
+    # ``evaluate`` calls ``_target_candidates`` inside the ``fixpoint`` submodule.
     monkeypatch.setattr(
         gate.fixpoint, "_target_candidates", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
     )
@@ -639,7 +584,6 @@ def test_w5_assertion_candidate_until_w1_then_member(db_session):
     assert row.protocol_id is None
     assert _active_rules(db_session, row) == {"w5_human"}
 
-    # The probe fact lands; the next targeted evaluation binds W1 + promotes.
     _code_fact(db_session, row.address)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(row.id,)))
     db_session.commit()
@@ -670,7 +614,6 @@ def test_human_assertion_request_round_trip():
     payload = gate.human_assertion_request_payload(assertion)
     parsed = gate.human_assertion_from_request({gate.HUMAN_ASSERTION_REQUEST_KEY: payload})
     assert parsed == assertion
-    # Malformed payloads parse to None — never a defaulted actor/timestamp.
     assert gate.human_assertion_from_request(None) is None
     assert gate.human_assertion_from_request({}) is None
     assert gate.human_assertion_from_request({gate.HUMAN_ASSERTION_REQUEST_KEY: {"actor": " "}}) is None
@@ -678,11 +621,6 @@ def test_human_assertion_request_round_trip():
         gate.human_assertion_from_request({gate.HUMAN_ASSERTION_REQUEST_KEY: {"actor": "a", "asserted_at": "nope"}})
         is None
     )
-
-
-# ---------------------------------------------------------------------------
-# Pruned rows never admit
-# ---------------------------------------------------------------------------
 
 
 def test_proven_code_absent_candidate_never_promotes(db_session):
@@ -699,14 +637,8 @@ def test_proven_code_absent_candidate_never_promotes(db_session):
     assert gate.resolve_membership_state(db_session, phantom) == "pruned"
 
 
-# ---------------------------------------------------------------------------
-# Review round 1: promotion-expansion targeting (finding 1)
-# ---------------------------------------------------------------------------
-
-
 def _proxy_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contract]]:
-    """Member M0 points at impl X; candidate proxy PR points at X — PR is
-    reachable only through its OWN stored pointer once X promotes."""
+    """PR is reachable only through its own stored pointer once X promotes."""
     protocol = _protocol(db_session, "proxchain")
     m0 = _member(db_session, protocol, _addr(base), implementation=_addr(base + 1))
     x = _contract(db_session, _addr(base + 1), nominated_protocol_id=protocol.id)
@@ -730,8 +662,6 @@ def _role_state(session, protocol: Protocol, rows: dict[str, Contract]) -> dict[
 
 
 def test_promotion_expands_to_candidate_proxy_pointing_at_new_member(db_session):
-    """A member promoting INSIDE the fixpoint reaches the candidate proxy
-    whose own pointer names it — same settled state as a recheck-after."""
     p1, u1 = _proxy_chain_universe(db_session, 0xB00)
     single = gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(u1["m0"].id,)))
     db_session.commit()
@@ -747,8 +677,6 @@ def test_promotion_expands_to_candidate_proxy_pointing_at_new_member(db_session)
 
 
 def _d1_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contract]]:
-    """Member M0; candidate S is M0's resolved controller (D2 fuel); candidate
-    Y's own stored ControllerValue names S (D1 fuel once S promotes)."""
     protocol = _protocol(db_session, "d1chain")
     m0 = _member(db_session, protocol, _addr(base))
     s = _contract(db_session, _addr(base + 1), nominated_protocol_id=protocol.id)
@@ -761,8 +689,6 @@ def _d1_chain_universe(db_session, base: int) -> tuple[Protocol, dict[str, Contr
 
 
 def test_promotion_expands_to_stored_cv_naming_new_member(db_session):
-    """S promoting inside the fixpoint reaches Y via Y's own STORED
-    ControllerValue row — no probe needed; both orders settle identically."""
     p1, u1 = _d1_chain_universe(db_session, 0xB20)
     single = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u1["s"].id,)))
     db_session.commit()
@@ -777,15 +703,8 @@ def test_promotion_expands_to_stored_cv_naming_new_member(db_session):
     assert _role_state(db_session, p1, u1) == _role_state(db_session, p2, u2)
 
 
-# ---------------------------------------------------------------------------
-# Review round 1: Class B revocation on fresh counterevidence (finding 2)
-# ---------------------------------------------------------------------------
-
-
 def test_fresh_foreign_enumeration_revokes_class_b_and_blocks_w4(db_session):
-    """A fresh enumeration naming a foreign creation revokes the standing
-    Class B row (later-foreign-observation rule), demotes the lineage-only
-    member, and the same run mints no new W4 for the sibling."""
+    """The later-foreign-observation rule revokes the Class B row in the same run."""
     protocol = _protocol(db_session, "b-foreign")
     deployer = _addr(0xC00)
     registry = ProtocolDeployer(protocol_id=protocol.id, address=deployer, trust_class="B", evidence={"x": 1})
@@ -875,15 +794,7 @@ def test_collision_revokes_other_protocols_standing_row(db_session):
     assert db_session.query(ProtocolDeployer).filter_by(protocol_id=protocol_q.id, address=deployer).count() == 0
 
 
-# ---------------------------------------------------------------------------
-# Review round 1: D1 revocability on fresh foreign observations (finding 3)
-# ---------------------------------------------------------------------------
-
-
 def test_foreign_cv_write_revokes_dependent_d1(db_session):
-    """A foreign protocol's resolution writes a controller value naming the
-    exclusive operator S: the edge delta seeds S into the revocation stratum,
-    exclusivity re-checks, and the D1 member resting on S is demoted."""
     protocol = _protocol(db_session, "d1revoke")
     foreign_protocol = _protocol(db_session, "d1foreign")
     safe = _contract(db_session, _addr(0xC20), nominated_protocol_id=protocol.id)
@@ -897,8 +808,6 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
     db_session.commit()
     assert safe.protocol_id == protocol.id and y.protocol_id == protocol.id
 
-    # The foreign observation arrives exactly as a hook would deliver it: a
-    # fresh CV row on another protocol's member naming S as its controller.
     foreign_w = _contract(db_session, _addr(0xC23), protocol_id=foreign_protocol.id)
     _owner_edge(db_session, foreign_w, safe.address)
     result = gate.evaluate(
@@ -909,23 +818,15 @@ def test_foreign_cv_write_revokes_dependent_d1(db_session):
 
     assert y.protocol_id is None
     assert y.id in result.demoted_contract_ids
-    # The admitting D1 is revoked; the W1 probe fact stays (it still holds).
     assert _active_rules(db_session, y) == {"w1_code"}
-    # S itself still holds its D2 edge to member X — untouched.
     assert safe.protocol_id == protocol.id
 
-    # Reconcile parity: re-running the same delta over the settled state
-    # finds zero drift.
+    # Reconcile parity: zero drift on a re-run.
     again = gate.evaluate(
         db_session,
         gate.FactsDelta(new_edge_addresses=(safe.address,), recheck_contract_ids=(foreign_w.id,)),
     )
     assert again.promoted_contract_ids == () and again.demoted_contract_ids == ()
-
-
-# ---------------------------------------------------------------------------
-# Review round 1: W5 write gating + stale-W1 guard (findings 4 + 5)
-# ---------------------------------------------------------------------------
 
 
 def test_foreign_assertion_never_writes_w5_on_member(db_session):
@@ -940,7 +841,6 @@ def test_foreign_assertion_never_writes_w5_on_member(db_session):
     assert row.protocol_id == p1.id
     assert db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id, protocol_id=p2.id).count() == 0
 
-    # The member's OWN protocol still accepts the assertion.
     gate.nominate(db_session, contract=row, protocol_id=p1.id, source_tag="", human_assertion=assertion)
     db_session.flush()
     w5 = db_session.query(ContractMembershipWitness).filter_by(contract_id=row.id, protocol_id=p1.id).one()
@@ -948,8 +848,6 @@ def test_foreign_assertion_never_writes_w5_on_member(db_session):
 
 
 def test_stale_w1_cannot_promote_after_code_absent_probe(db_session):
-    """A later code-absent probe is proven-absent; an older active W1 witness
-    row cannot outrank it at promotion time."""
     protocol = _protocol(db_session, "stalew1")
     row = _contract(db_session, _addr(0xC40), nominated_protocol_id=protocol.id)
     gate.write_witness(
@@ -966,16 +864,10 @@ def test_stale_w1_cannot_promote_after_code_absent_probe(db_session):
         rule="w5_human",
         evidence=gate.w5_evidence(actor="admin_api_key", asserted_at=datetime(2026, 8, 24, tzinfo=timezone.utc)),
     )
-    # The LATEST probe proves the address empty at its block.
     _code_fact(db_session, row.address, absent=True)
 
     assert gate.promote(db_session, contract=row, protocol_id=protocol.id) is False
     assert row.protocol_id is None
-
-
-# ---------------------------------------------------------------------------
-# Review round 1: case-folded secondary-impl match (finding 8)
-# ---------------------------------------------------------------------------
 
 
 def test_secondary_impl_edge_matches_case_insensitively(db_session):
@@ -1009,8 +901,6 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
     protocol = _protocol(db_session, "anchorloss")
     deployer = _addr(0xD10)
     seed = _member(db_session, protocol, _addr(0xD11), implementation=_addr(0xD12))
-    # Anchor member: sole support is the W2 edge from the seed; it carries the
-    # Class A perimeter fact (a resolved controller value naming the EOA).
     anchor = _contract(db_session, _addr(0xD12), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
     _code_fact(db_session, anchor.address)
     gate.write_witness(
@@ -1045,7 +935,6 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
         evidence={"perimeter_fact": {"kind": "controller_value", "contract_id": None}, "checked_at": "2026-01-01"},
     )
     db_session.add(registry)
-    # W4 member resting only on the registry row's lineage.
     w4_member = _contract(
         db_session, _addr(0xD13), protocol_id=protocol.id, nominated_protocol_id=protocol.id, deployer=deployer
     )
@@ -1071,7 +960,6 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
         ),
         via_address=deployer,
     )
-    # The seed loses its status out-of-band (honestly: witnesses revoked too).
     for witness in gate.active_witnesses(db_session, contract_id=seed.id, protocol_id=protocol.id):
         gate.revoke_witness(db_session, witness, reason="test_seed_loss")
     gate.demote_member(db_session, contract=seed, reason="test_seed_loss")
@@ -1080,8 +968,6 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
     result = gate.evaluate(db_session, gate.FactsDelta(new_edge_addresses=(seed.address,)))
     db_session.commit()
 
-    # Stratum (i) demotes the anchor (via-fact gone); the SAME run's stratum
-    # (ii) loss check then revokes the Class-A row and demotes the W4 member.
     assert anchor.protocol_id is None and w4_member.protocol_id is None
     assert {anchor.id, w4_member.id} <= set(result.demoted_contract_ids)
     db_session.refresh(registry)
@@ -1090,9 +976,7 @@ def test_demotion_voiding_class_a_anchor_revokes_registry_same_run(db_session):
 
 
 def test_w4h_auto_revoke_subtracts_the_same_runs_promotion(db_session):
-    """A contract promoted in the proof rounds and then demoted by the W4-H
-    stratum's auto-revoke cascade is published as a demotion, never as a
-    promotion, and stays queued for re-probe."""
+    """It is published as a demotion, never a promotion, and stays queued for re-probe."""
     protocol = _protocol(db_session, "w4h-fold")
     other = _protocol(db_session, "w4h-foreign")
     deployer = _addr(0xD20)
@@ -1105,10 +989,8 @@ def test_w4h_auto_revoke_subtracts_the_same_runs_promotion(db_session):
     assert sibling.protocol_id == protocol.id
     assert "w4h_deployer_affinity" in _active_rules(db_session, sibling)
 
-    # The sibling loses its stamp while its w4h witness stays active — the
-    # standing witness re-admits it in the next run's proof rounds.
+    # The standing w4h witness re-admits it in the next run.
     gate.demote_member(db_session, contract=sibling, reason="test_stamp_loss")
-    # Three foreign anchors push affinity to 2/5 = 0.4, below the 0.5 floor.
     for n in range(3):
         _member(db_session, other, _addr(0x2620 + n), deployer=deployer)
     db_session.flush()

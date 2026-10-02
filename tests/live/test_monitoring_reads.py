@@ -1,4 +1,4 @@
-"""Monitoring read endpoints — shape checks only (row counts depend on preview history)."""
+"""Shape checks only; row counts depend on preview history."""
 
 from __future__ import annotations
 

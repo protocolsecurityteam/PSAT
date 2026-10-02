@@ -1,5 +1,3 @@
-"""Round 2: attacking the fixes."""
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -34,11 +32,7 @@ from utils.scoring_status import VALUE_BOUND_EXACT
 
 
 def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
-    """Subsumption removes a row's POINTS, never the unit's reach.
-
-    Dropping a vault only a subsumed row reaches publishes a smaller exposure
-    for a unit that got no smaller.
-    """
+    """Dropping a vault only a subsumed row reaches shrinks exposure for a unit that didn't shrink."""
     top = sig(
         function_name="upgradeTo",
         deployment_address=C,
@@ -69,7 +63,6 @@ def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
     assert finding["capability"] == "upgrade.implementation"
     assert KEY_V in finding["subsumed_exclusive_value_by_entity"]
     assert KEY_V in finding["exposure_entities_charged"]
-    # The subsumed row's exclusive vault is charged once, at the unit's finding.
     assert finding["exposure_usd"] > 1_000_000.0
     assert finding["subsumed_capabilities"][0]["value_at_stake_usd"] == 14_757_365.89
 
@@ -109,7 +102,6 @@ def test_b1_an_entity_both_rows_reach_is_still_charged_once(fold):
     ],
 )
 def test_b2_a_malformed_list_payload_withholds_its_row_and_not_the_fold(fold, payload):
-    """One bad JSONB on one function must not cost the protocol its score."""
     hostile = pause_sig(
         function_name="pause",
         deployment_address=VAULT,
@@ -202,8 +194,6 @@ def test_b4_unresolved_contracts_lower_confidence(fold):
     assert answered_only.confidence_pct is not None
     assert with_unresolved.confidence_pct is not None
     assert with_unresolved.confidence_pct < 100.0
-    # Analysing MORE cannot raise the figure above what the perimeter licenses,
-    # and the three unresolved contracts are visible in it either way.
     assert with_unresolved.confidence_pct <= answered_only.confidence_pct
     detail = with_unresolved.model_parameters["confidence_detail"]
     assert detail["perimeter_entities"] == 4
@@ -211,7 +201,6 @@ def test_b4_unresolved_contracts_lower_confidence(fold):
 
 
 def test_b4_an_unpriced_contract_is_in_its_own_denominator(fold):
-    """The A5 shape: three unresolved contracts must MATERIALLY lower the figure."""
     vault = sig(
         function_name="upgradeTo",
         deployment_address=VAULT,
@@ -267,7 +256,6 @@ def test_s8_a_proven_no_reach_instance_is_not_counted_as_undetermined(fold):
 
 
 def test_s7_the_destination_free_allow_list_exists_in_the_claims_registry():
-    """A renamed claim must not silently become 'destination-free'."""
     from services.static.claims.matchers import discover
     from services.static.claims.registry import registry
     from utils.scoring_status import DESTINATION_FREE_CLAIMS
@@ -279,11 +267,7 @@ def test_s7_the_destination_free_allow_list_exists_in_the_claims_registry():
 
 
 def test_r3_subsumed_value_is_charged_at_the_contributing_rows_fraction(fold):
-    """The delayed path's value keeps the delayed path's fraction.
-
-    Charging the subsumed row's value at the TOP row's fraction re-merges
-    undelayed and delayed reach, at up to the full undelayed rate.
-    """
+    """The top row's fraction would re-merge undelayed and delayed reach."""
     population = [
         sig(
             claim_id=claim,
@@ -340,7 +324,6 @@ def test_r3_subsumed_value_is_charged_at_the_contributing_rows_fraction(fold):
     exclusive = top["subsumed_exclusive_value_by_entity"]
     assert KEY_V in exclusive
     subsumed = top["subsumed_capabilities"][0]
-    # The carried fraction is the SUBSUMED row's, not the top row's.
     assert exclusive[KEY_V]["fraction"] == round(subsumed["weakness"] * 1.0, 6)
     assert exclusive[KEY_V]["fraction"] < top["severity_proven"] * top["weakness"]
 
@@ -404,14 +387,12 @@ def _signal_row(**over: Any):
     ],
 )
 def test_r3_a_malformed_persisted_row_withholds_itself(monkeypatch, fold, column, over):
-    """One bad column costs its own row, never the protocol's score."""
     from services.scoring import population as POP
 
     healthy = _signal_row(selector="0x11111111", function_name="healthy")
     hostile = _signal_row(selector="0x22222222", function_name="hostile", **over)
     monkeypatch.setattr(POP, "current_signal_rows", lambda session, protocol_id: [healthy, hostile])
 
-    # ``current_signal_rows`` is stubbed, so the session is never touched.
     signals, faults = POP.current_signals_with_faults(cast(Any, None), 1)
     assert [s.function_name for s in signals] == ["healthy"]
     assert [f["column"] for f in faults] == [column]

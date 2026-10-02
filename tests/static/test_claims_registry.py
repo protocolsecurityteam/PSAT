@@ -1,12 +1,3 @@
-"""Registry-side tests for the Plane-1 claims subsystem.
-
-Drives the real production classes — ``build_claims``, ``ClaimContext``, the
-registry, ``emit_claim``, and the shipped ``contract_deployment`` matcher — over
-the documented Plane-0 facts interface (an ``effects``-shaped dict is input
-data, not a faked collaborator). No Slither/DB, so these run in every offline
-suite.
-"""
-
 from __future__ import annotations
 
 import json
@@ -14,9 +5,7 @@ from pathlib import Path
 
 import pytest
 
-# Importing the policy-site module registers its policy-tier claim
-# (``transfer_policy.configure``) so the registry invariants below see it
-# deterministically regardless of test order.
+# Registers ``transfer_policy.configure`` regardless of test order.
 import services.effects.claims_bridge
 import services.static.cross_contract  # noqa: F401
 from services.static.claims import (
@@ -37,8 +26,6 @@ from services.static.claims.registry import _REGISTRY
 
 
 def _facts(*, with_creation: bool = True) -> dict:
-    """An ``effects``-shaped facts artifact: a factory fn (creation sink) and a
-    plain state-writing fn (no sink of interest)."""
     deploy_sinks = (
         [
             {
@@ -78,11 +65,6 @@ def _facts(*, with_creation: bool = True) -> dict:
             },
         },
     }
-
-
-# ---------------------------------------------------------------------------
-# Registry + emit_claim (the anti-creep contract)
-# ---------------------------------------------------------------------------
 
 
 def test_emit_claim_valid_copies_witness():
@@ -149,11 +131,6 @@ def test_register_rejects_duplicate():
         _REGISTRY.pop("test.dup_claim", None)
 
 
-# ---------------------------------------------------------------------------
-# ClaimContext (tolerant facts view)
-# ---------------------------------------------------------------------------
-
-
 def test_claim_context_accessors():
     trees = {
         "trees": {"deploy()": {"op": "LEAF", "leaf": {"authority_role": "caller_authority"}}},
@@ -179,11 +156,6 @@ def test_claim_context_tolerates_degraded_effects():
     assert ctx.effect_labels("anything()") == []
     assert ctx.selector("anything()") == ""
     assert ctx.canonical_signature("anything()") is None
-
-
-# ---------------------------------------------------------------------------
-# build_claims / attach_claims_to_effects
-# ---------------------------------------------------------------------------
 
 
 def test_build_claims_emits_contract_deployment_only_for_creation_sink():
@@ -212,14 +184,11 @@ def test_attach_claims_merges_onto_effects_records():
 
 
 def test_attach_claims_tolerates_degraded_effects():
-    # Must not raise on an errored artifact with no functions dict.
     attach_claims_to_effects({"schema_version": "semantic", "error": "boom"}, {"functions": {}})
     attach_claims_to_effects(None, {"functions": {}})
 
 
 def test_build_claims_isolates_a_failing_matcher():
-    """A matcher that raises forfeits only its own claims; the shipped
-    contract_deployment matcher still fires."""
 
     def _boom(_ctx: ClaimContext, _fn: str) -> ClaimEvidence | None:
         raise RuntimeError("matcher blew up")
@@ -241,26 +210,14 @@ def test_build_claims_isolates_a_failing_matcher():
     assert all(c["claim_id"] != "test.raising_matcher" for c in artifact["functions"]["deploy()"])
 
 
-# ---------------------------------------------------------------------------
-# Consumer-coverage invariant (registry-side)
-# ---------------------------------------------------------------------------
-
-
 def test_consumer_referenced_ids_are_subset_of_registry():
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     assert CONSUMER_REFERENCED_CLAIM_IDS <= set(registry())
 
 
-# The produced-side half of the coverage invariant: registry ids must
-# appear in the frozen-corpus fixture output or carry a documented exemption.
 _GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "label_corpus" / "golden.json"
 
-# Registry claim ids the reduced corpus does not exercise, each mapped to the
-# test that DOES cover it (positive + negative). Keep this minimal and honest: an
-# id that starts producing on the corpus must be removed here (the test fails
-# otherwise). The five-contract corpus deliberately compiles only a handful of
-# real sources, so the auth / upgrade / exec / timelock / safe families are
-# covered by the synthetic-facts and small-fixture matcher suites instead.
+# Ids the reduced corpus doesn't exercise, mapped to the test that does. An id that starts producing must be removed.
 _SAFE_EXEMPTION = "no Gnosis Safe in the label corpus; covered by test_claims_upgrade_exec_matchers (safe_wallet.sol)."
 _AUTH_MATCHERS_EXEMPTION = "no compiled corpus positive; covered by test_claims_auth_matchers (synthetic facts)."
 _UPGRADE_EXEC_EXEMPTION = (
@@ -291,9 +248,7 @@ CORPUS_EXEMPT_CLAIM_IDS = {
     "safe.signer_mgmt": _SAFE_EXEMPTION,
     "safe.module_mgmt": _SAFE_EXEMPTION,
     "safe.set_guard": _SAFE_EXEMPTION,
-    # exec.arbitrary is produced by the corpus: cast_wrapped_pull.sol's execBatch is
-    # a DIRECT targets[i].call(data[i]) executor (a true executor, not a
-    # fixed-destination library forwarder), so it mints the claim in the golden.
+    # cast_wrapped_pull.sol's execBatch is a direct executor, so the golden produces exec.arbitrary.
     "transfer_policy.configure": (
         "policy-tier claim: minted only downstream from sibling facts, so the "
         "single-contract static corpus never produces it; covered by "
@@ -318,9 +273,7 @@ def _golden_produced_claim_ids() -> set[str]:
 
 
 def test_every_registry_id_is_produced_by_the_corpus_or_exempt():
-    """Produced-side coverage invariant: every registered claim appears in the frozen-corpus
-    golden or carries a documented exemption, so a dead claim is a build failure rather
-    than silent rot."""
+    """A dead claim is a build failure rather than silent rot."""
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     registry_ids = set(registry())
     produced = _golden_produced_claim_ids()
@@ -337,14 +290,7 @@ def test_every_registry_id_is_produced_by_the_corpus_or_exempt():
     assert exempt <= registry_ids, f"exemptions for unregistered ids: {sorted(exempt - registry_ids)}"
 
 
-# ---------------------------------------------------------------------------
-# Per-function precedence/dedup rule (standard_exact beats idiom_structural)
-# ---------------------------------------------------------------------------
-
-
 def test_precedence_keeps_strongest_tier_of_the_same_claim():
-    """Two witnesses for the SAME claim on one function collapse to the strongest
-    tier — a standard proof supersedes a structural idiom / policy derivation."""
     claims: list[Claim] = [
         {"claim_id": "upgrade.implementation", "tier": "idiom_structural", "witness": {"w": 1}},
         {"claim_id": "upgrade.implementation", "tier": "standard_exact", "witness": {"w": 2}},
@@ -357,8 +303,6 @@ def test_precedence_keeps_strongest_tier_of_the_same_claim():
 
 
 def test_precedence_preserves_distinct_sibling_claims_in_one_family():
-    """Sibling operations in a namespace are different sentences, never collapsed:
-    pause.set and pause.unset both survive even at different tiers."""
     claims: list[Claim] = [
         {"claim_id": "pause.unset", "tier": "idiom_structural", "witness": {}},
         {"claim_id": "pause.set", "tier": "standard_exact", "witness": {}},
@@ -377,23 +321,17 @@ def test_precedence_output_is_deterministically_sorted():
     assert [c["claim_id"] for c in resolved] == ["authority.replace", "supply.mint"]
 
 
-# ---------------------------------------------------------------------------
-# The canonical ABI selector is computed at build time and stamped at
-# attach time — the value the cross-contract join keys on.
-# ---------------------------------------------------------------------------
+# The canonical ABI selector is what the cross-contract join keys on.
 
 
 def _sweep_effects() -> dict:
     return {
         "contract_name": "AssetRecovery",
         "functions": {
-            # Declared signature carries an interface-typed param: its keccak
-            # (0x38541c00) is NOT the dispatched selector (0x0aeef8c8).
+            # The interface-typed keccak (0x38541c00) is not the dispatched selector (0x0aeef8c8).
             "sweepTo(IERC20,address,uint256)": {"selector": "0x38541c00", "sinks": []},
-            # Elementary signature: canonical == declared.
             "sweep(address)": {"selector": "0x01681a62", "sinks": []},
-            # No selector by construction; hashing the rendered name would
-            # manufacture one.
+            # Hashing the rendered name would manufacture one.
             "receive()": {"selector": "", "sinks": []},
             "fallback()": {"selector": "", "sinks": []},
         },
@@ -412,17 +350,13 @@ def test_build_claims_records_the_canonical_abi_selector():
 
 
 def test_build_claims_never_fabricates_a_selector():
-    """Three not-determined shapes, all OMITTED from the map (absence is the
-    not-determined state — a consumer must fall back, never infer):
-    fallback/receive (no selector exists), and a user-typed signature with no
-    canonical mapping and no Slither subject to lower it."""
+    """Absence is the not-determined state; a consumer must fall back."""
     artifact = build_claims(None, _sweep_effects(), {})  # no canonical map
     assert "abi_selectors" in artifact
     selectors = artifact.get("abi_selectors") or {}
     assert "receive()" not in selectors
     assert "fallback()" not in selectors
     assert "sweepTo(IERC20,address,uint256)" not in selectors
-    # The elementary signature is still lowerable from its own text.
     assert selectors["sweep(address)"] == "0x01681a62"
 
 
@@ -433,14 +367,11 @@ def test_attach_stamps_abi_selector_beside_the_declared_one():
     record = effects["functions"]["sweepTo(IERC20,address,uint256)"]
     assert record["abi_selector"] == "0x0aeef8c8"
     assert record["selector"] == "0x38541c00"  # the declared form stays
-    # Not-determined stays ABSENT, never null and never fabricated.
     assert "abi_selector" not in effects["functions"]["receive()"]
     assert "abi_selector" not in effects["functions"]["fallback()"]
 
 
 def test_attach_tolerates_an_artifact_without_the_selector_map():
-    """Claims artifacts minted before ``abi_selectors`` existed attach exactly
-    as before — key absent on every record."""
     effects = _sweep_effects()
     artifact = build_claims(None, effects, _SWEEP_TREES)
     del artifact["abi_selectors"]

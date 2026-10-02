@@ -81,9 +81,7 @@ def _cleanup(session: Session) -> None:
         session.execute(delete(Job).where(Job.protocol_id == proto.id))
         session.execute(delete(Contract).where(Contract.protocol_id == proto.id))
         session.delete(proto)
-    # Controller rows enrolled onto other protocols carry our sentinel address.
     session.execute(delete(MonitoredContract).where(MonitoredContract.address == CONTROLLER_ADDR))
-    # Discovery-adoption sentinel contract may be left un-adopted (protocol NULL).
     stray_ids = list(session.execute(select(Contract.id).where(Contract.address == DISCOVERY_ADDR)).scalars())
     if stray_ids:
         session.execute(delete(Job).where(Job.address == DISCOVERY_ADDR))
@@ -113,8 +111,6 @@ def _make_protocol(session: Session, suffix: str = "") -> Protocol:
 
 
 def _seed_protocol_with_controller(session: Session) -> Protocol:
-    """Seed the canonical pipeline shape so ``controllers_for_protocol`` surfaces CONTROLLER_ADDR as a governing Safe
-    (completed job, a CGN labeling the Safe, an FP granting call authority)."""
     proto = _make_protocol(session, "ctrl")
     vault = Contract(
         address=VAULT_ADDR.lower(),
@@ -146,7 +142,6 @@ def _seed_protocol_with_controller(session: Session) -> Protocol:
 
 @pytest.fixture()
 def wired_drain(monkeypatch):
-    """Point the drain's ``SessionLocal`` at the test DB and stub the RPC wire so the drain runs offline."""
     engine = _engine()
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(reconciler, "SessionLocal", factory)
@@ -359,7 +354,6 @@ def test_mark_then_drain_enrolls_controllers(qsession, wired_drain):
     assert ctrl.is_active is True
     assert ctrl.contract_type == "safe"
 
-    # Queue row consumed; reconcile timestamp stamped.
     assert (
         qsession.execute(
             select(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id)
@@ -373,13 +367,10 @@ def test_mark_then_drain_enrolls_controllers(qsession, wired_drain):
 
 
 def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
-    """e2e: a fast-path skip (sibling holds the advisory lock) enqueues the protocol via mark-dirty-on-skip, and the
-    drain enrolls what the holder's snapshot missed."""
     from services.monitoring.enrollment import maybe_enroll_protocol
 
     proto = _seed_protocol_with_controller(qsession)
 
-    # A sibling holds the enrollment lock, so the fast path must skip.
     holder_engine = _engine()
     holder = Session(holder_engine, expire_on_commit=False)
     holder.execute(
@@ -389,7 +380,6 @@ def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
     try:
         fired = maybe_enroll_protocol(qsession, proto.id, "http://rpc", "ethereum")
         assert fired is False
-        # Nothing enrolled yet — but a dirty row was queued by the skip.
         enrolled_now = (
             qsession.execute(select(MonitoredContract).where(MonitoredContract.protocol_id == proto.id)).scalars().all()
         )
@@ -419,7 +409,6 @@ def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
         .scalars()
         .all()
     )
-    # The vault contract the skipped fast path missed is now enrolled.
     addrs = {mc.address for mc in enrolled}
     assert VAULT_ADDR.lower() in addrs
 
@@ -436,8 +425,6 @@ def test_concurrent_drain_exclusivity(qsession):
         claimed_a = claim_due_enrollments(sess_a, lease_ttl_s=900, limit=8)
         assert [c.protocol_id for c in claimed_a] == [proto.id]
 
-        # The row is leased and unexpired; a second independent drainer sees
-        # nothing due.
         claimed_b = claim_due_enrollments(sess_b, lease_ttl_s=900, limit=8)
         assert claimed_b == []
     finally:
@@ -459,7 +446,6 @@ def test_lease_expiry_mid_build_steal(qsession):
         claimed_a = claim_due_enrollments(sess_a, lease_ttl_s=900, limit=8)
         assert len(claimed_a) == 1
 
-        # Simulate a build that outran its lease TTL: age the lease into the past.
         sess_a.execute(
             text(
                 "UPDATE monitoring_enrollment_queue SET lease_expires_at = NOW() - INTERVAL '1 second' "
@@ -486,7 +472,6 @@ def test_redirty_during_build_survives_success_delete(qsession):
     claims = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)
     claim = claims[0]
 
-    # A new mark lands while the build is in flight: dirty_at advances.
     mark_enrollment_dirty(qsession, proto.id, "audit_added")
     qsession.commit()
 
@@ -497,15 +482,8 @@ def test_redirty_during_build_survives_success_delete(qsession):
     ).scalar_one_or_none()
     assert row is not None, "re-dirtied row must survive the dirty_at-guarded delete"
     assert row.reason == "audit_added"
-    # Our lease was released so the next tick can re-claim it.
     assert row.lease_id is None
     assert row.lease_expires_at is None
-
-
-# The unchanged-row delete + reconcile-stamp path of ``_finish_success`` is
-# covered end-to-end by ``test_mark_then_drain_enrolls_controllers`` (queue row
-# consumed, ``last_enrollment_reconcile_at`` stamped); the re-dirtied branch is
-# ``test_redirty_during_build_survives_success_delete`` above.
 
 
 def test_poisoned_protocol_backoff_pushes_dirty_at_forward(qsession):
@@ -521,17 +499,14 @@ def test_poisoned_protocol_backoff_pushes_dirty_at_forward(qsession):
     ).scalar_one()
     assert row.attempts == 1
     assert row.lease_id is None
-    # dirty_at pushed into the future (2^1 * 60 = 120s), so it is no longer due.
     future = qsession.execute(
         text("SELECT dirty_at > NOW() FROM monitoring_enrollment_queue WHERE protocol_id = :pid"),
         {"pid": proto.id},
     ).scalar_one()
     assert future is True
 
-    # A poisoned row is not claimable until its backoff elapses.
     assert claim_due_enrollments(qsession, lease_ttl_s=900, limit=8) == []
 
-    # A second failure grows attempts and the backoff.
     qsession.execute(
         text(
             "UPDATE monitoring_enrollment_queue SET dirty_at = NOW(), lease_id = NULL, lease_expires_at = NULL "
@@ -540,8 +515,7 @@ def test_poisoned_protocol_backoff_pushes_dirty_at_forward(qsession):
         {"pid": proto.id},
     )
     qsession.commit()
-    # The raw SQL clock adjustment bypasses the identity map. Production claims
-    # use a fresh session; refresh here so claim2 captures the actual dirty_at.
+    # The raw SQL clock adjustment bypasses the identity map.
     qsession.expire_all()
     claim2 = claim_due_enrollments(qsession, lease_ttl_s=900, limit=8)[0]
     reconciler._finish_failure(qsession, claim2)
@@ -599,8 +573,7 @@ def test_sweep_enqueues_k_oldest_nulls_first(qsession):
     never = _make_protocol(qsession, "sweep_never")  # last_enrollment_reconcile_at NULL
     old = _make_protocol(qsession, "sweep_old")
     recent = _make_protocol(qsession, "sweep_recent")
-    # Park every other protocol at NOW() so ordering over the whole table is
-    # deterministic — our NULL row sorts first, then the 10-day-old one.
+    # Park every other protocol at NOW() so ordering is deterministic.
     qsession.execute(
         text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() WHERE id NOT IN (:a, :b, :c)"),
         {"a": never.id, "b": old.id, "c": recent.id},
@@ -617,7 +590,6 @@ def test_sweep_enqueues_k_oldest_nulls_first(qsession):
 
     enqueued = sweep_enqueue_stale(qsession, k=2)
 
-    # NULLS FIRST then oldest-dated: exactly the never + old pair.
     assert set(enqueued) == {never.id, old.id}
     assert recent.id not in enqueued
     for pid in enqueued:
@@ -638,7 +610,6 @@ def test_unchanged_protocol_stays_idle_until_repair_due(qsession, wired_drain, m
     monkeypatch.setattr(reconciler, "enroll_protocol_contracts", enroll)
 
     assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 1, "failed": 0}
-    # Simulate successive idle ticks, including just before the daily cutoff.
     for age_s in (600, 1200, 3600, 23 * 3600):
         qsession.execute(
             text(
@@ -744,7 +715,6 @@ def test_final_completion_rearms_enrollment_after_early_drain(qsession, wired_dr
     ctrl = qsession.execute(select(MonitoredContract).where(MonitoredContract.address == CONTROLLER_ADDR)).scalar_one()
     assert ctrl.is_active
 
-    # An idempotent completion must not schedule another unchanged build.
     complete_job(qsession, job.id)
     qsession.expire_all()
     assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
@@ -792,16 +762,10 @@ def test_unscoped_completion_does_not_enqueue(qsession, has_address, has_protoco
         qsession.commit()
 
 
-# The NULLS-FIRST-then-oldest ordering is asserted through the real
-# ``sweep_enqueue_stale`` in ``test_sweep_enqueues_k_oldest_nulls_first`` above;
-# a raw ``order_by`` re-assertion here would only re-test SQLAlchemy.
-
-
 def test_policy_worker_marks_dirty(qsession, monkeypatch):
     from workers.policy_worker import PolicyWorker
 
     proto = _make_protocol(qsession)
-    # A completed sibling job makes maybe_enroll_protocol return True.
     qsession.add(Job(address="0x" + "a2" * 20, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
     job = Job(
         address="0x" + "b3" * 20,
@@ -837,7 +801,6 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
     )
     monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda self, *a, **kw: {})
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", lambda *a, **kw: "0x100")
-    # Stub the DeFiLlama fetch so the initial-TVL block doesn't touch the network.
     monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda *a, **kw: None)
 
     PolicyWorker().process(qsession, job)
@@ -850,8 +813,7 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
 
 
 def test_discovery_gate_promotion_marks_dirty(qsession, monkeypatch):
-    """Membership goes through the gate: a candidate already satisfying W1 + an admitting rule is promoted during
-    intake, and the PROMOTION (not the worker) marks the queue dirty."""
+    """The promotion, not the worker, marks the queue dirty."""
     from db.models import WITNESS_RULE_W1_CODE, WITNESS_RULE_W2_STRUCTURAL, ContractProbeAttempt
     from services.discovery import membership_gate as gate
     from workers.discovery import DiscoveryWorker
@@ -883,7 +845,6 @@ def test_discovery_gate_promotion_marks_dirty(qsession, monkeypatch):
     qsession.add_all([anchor, existing, session_job])
     qsession.commit()
     existing_id = existing.id
-    # Probe already ran (event 1) — the intake must not re-probe.
     qsession.add(
         ContractProbeAttempt(contract_id=existing_id, chain_id=1, block_number=100, results={"status": "probed"})
     )
@@ -996,16 +957,8 @@ def test_add_audit_route_marks_dirty(api_client, db_session):
         db_session.commit()
 
 
-# The drain-level failure path (drain returns ``{"drained":0,"failed":1}``,
-# attempts bumped, lease cleared) and the sweep's skip-already-queued branch
-# (``dirty_at`` and ``reason`` preserved for a backed-off row) are both asserted
-# by ``test_poisoned_protocol_not_redrained_each_tick`` below, which drives the
-# same drain+sweep sequence with strictly stronger assertions.
-
-
 def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkeypatch):
-    """After a build fails and backs the row off, the next sweep must NOT pull ``dirty_at`` back to now(), or the
-    poisoned protocol is rebuilt every tick."""
+    """Otherwise a poisoned protocol is rebuilt every tick."""
     proto = _seed_protocol_with_controller(qsession)
     mark_enrollment_dirty(qsession, proto.id, "policy_complete")
     qsession.commit()
@@ -1015,7 +968,6 @@ def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkey
 
     monkeypatch.setattr("services.monitoring.reconciler.enroll_protocol_contracts", _boom)
 
-    # Tick 1: drain fails -> attempts=1, dirty_at pushed ~120s into the future.
     assert drain_enrollment_queue("http://rpc.invalid", "ethereum") == {"drained": 0, "failed": 1}
     before = qsession.execute(
         text("SELECT dirty_at, reason, attempts FROM monitoring_enrollment_queue WHERE protocol_id = :pid"),
@@ -1023,7 +975,6 @@ def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkey
     ).one()
     assert before.attempts == 1
 
-    # Tick 2 sweep: must skip the backed-off row (it's already queued).
     enqueued = sweep_enqueue_stale(qsession, k=50)
     collateral = [pid for pid in enqueued if pid != proto.id]
     if collateral:
@@ -1038,7 +989,6 @@ def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkey
     assert after.reason == "policy_complete", "sweep must not overwrite the poisoned row's reason"
     assert after.attempts == 1, "poisoned row must not have been re-attempted this tick"
 
-    # And the drain still finds nothing due for it (backoff intact).
     still_due = qsession.execute(
         text(
             "SELECT COUNT(*) FROM monitoring_enrollment_queue "

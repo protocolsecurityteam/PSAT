@@ -1,5 +1,3 @@
-"""Unit tests for services.discovery.run_discovery orchestrator."""
-
 from __future__ import annotations
 
 import pytest
@@ -7,8 +5,7 @@ import pytest
 from services.discovery import audit_enrichment as ae
 from services.discovery import run_discovery as rd
 
-# offline: discovery validates/resolves contract chains via Alchemy (chain_resolver)
-# and probes bytecode via eth_getCode — stub both so the pipeline runs without a wire.
+# Offline: stub the chain resolver and eth_getCode.
 pytestmark = pytest.mark.usefixtures("_stub_chain_resolver", "_stub_rpc_bytecode")
 
 
@@ -19,17 +16,11 @@ def _clear_cache():
     rd.reset_cache()
 
 
-# ---------------------------------------------------------------------------
-# _Budget
-# ---------------------------------------------------------------------------
-
-
 def test_budget_charge_search_increments_and_costs():
     b = rd._Budget()
     b.charge_search("auto")
     b.charge_search("deep-lite")
     assert b.search_calls == 2
-    # 0.007 + 0.012 = 0.019
     assert abs(b.estimated_cost_usd - 0.019) < 1e-9
 
 
@@ -51,16 +42,10 @@ def test_budget_research_cap_trips():
 
 def test_budget_circuit_breaker_trips_on_cost():
     b = rd._Budget()
-    # Each research is $0.20; the breaker is $2.00. Push cost over without
-    # hitting the call cap by inflating cost manually.
+    # The breaker is $2.00; inflate cost without hitting the call cap.
     b.estimated_cost_usd = 1.95
     with pytest.raises(RuntimeError, match="circuit breaker"):
         b.charge_research()
-
-
-# ---------------------------------------------------------------------------
-# _make_search_fn
-# ---------------------------------------------------------------------------
 
 
 def test_search_fn_returns_seeds_on_research_plus_first_call(monkeypatch):
@@ -76,7 +61,6 @@ def test_search_fn_returns_seeds_on_research_plus_first_call(monkeypatch):
 
 
 def test_search_fn_calls_exa_after_first_research_plus(monkeypatch):
-    """Subsequent research_plus calls hit exa.search and charge as 'auto'."""
     captured = []
     monkeypatch.setattr(rd.exa, "search", lambda q, max_results, mode: captured.append(mode) or [{"url": "https://x"}])
     seeds = [{"url": "https://seed"}]
@@ -110,11 +94,6 @@ def test_search_fn_records_errors_on_exa_exception(monkeypatch):
     assert errors[0]["provider"] == "exa"
 
 
-# ---------------------------------------------------------------------------
-# patch / restore + classify wrapper
-# ---------------------------------------------------------------------------
-
-
 def test_patch_classify_with_seeds_appends_unseen_urls():
     original = rd.audit_reports_mod.classify_search_results
     seeds = [
@@ -134,11 +113,6 @@ def test_patch_classify_with_seeds_appends_unseen_urls():
         assert added["confidence"] == 1.0
     finally:
         rd.audit_reports_mod.classify_search_results = original
-
-
-# ---------------------------------------------------------------------------
-# known_docs / SPA overrides
-# ---------------------------------------------------------------------------
 
 
 def test_load_known_docs_missing_file(monkeypatch, tmp_path):
@@ -186,11 +160,6 @@ def test_apply_spa_overrides_injects(monkeypatch):
     assert aud["reports"][0]["confidence"] == 1.0
 
 
-# ---------------------------------------------------------------------------
-# _needs_dependency_pass
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "protocol,contracts,audits,llm_reply,expected,prompt_fragment",
     [
@@ -214,7 +183,6 @@ def test_apply_spa_overrides_injects(monkeypatch):
             "FooToken",
             id="false_from_llm",
         ),
-        # A garbage response fails to False.
         pytest.param("foo", [{"name": "FooToken"}], [], "not json", False, "FooToken", id="unparseable_llm_response"),
     ],
 )
@@ -237,11 +205,6 @@ def test_needs_dependency_pass_no_evidence_skips_llm(monkeypatch):
 
     monkeypatch.setattr(rd.llm, "chat", fail)
     assert rd._needs_dependency_pass("foo", contracts=[], audits=[]) is False
-
-
-# ---------------------------------------------------------------------------
-# _cached_deep_research
-# ---------------------------------------------------------------------------
 
 
 def test_cached_deep_research_caches_by_instructions(monkeypatch):
@@ -273,11 +236,6 @@ def test_cached_deep_research_invalidates_on_schema_change(monkeypatch):
     assert r2["data"]["s"] == {"v": 2}
 
 
-# ---------------------------------------------------------------------------
-# _dependency_research
-# ---------------------------------------------------------------------------
-
-
 def test_dependency_research_pass1_failure_returns_empty(monkeypatch):
     def fail(*a, **kw):
         raise RuntimeError("pass 1 down")
@@ -288,7 +246,6 @@ def test_dependency_research_pass1_failure_returns_empty(monkeypatch):
 
 
 def test_dependency_research_full_flow(monkeypatch):
-    """Pass 1 yields components; pass 2 yields per-component audits."""
 
     def fake(instructions, schema=None):
         if "third-party" in instructions or "third party" in instructions:
@@ -333,7 +290,6 @@ def test_dependency_research_pass2_failure_skipped(monkeypatch):
 
 
 def test_dependency_research_breaks_when_budget_exhausted(monkeypatch):
-    """Once research budget cap is hit during pass 2, the loop stops."""
     state = {"calls": 0}
 
     def fake(instructions, schema=None):
@@ -344,20 +300,13 @@ def test_dependency_research_breaks_when_budget_exhausted(monkeypatch):
 
     monkeypatch.setattr(rd, "_cached_deep_research", fake)
 
-    # Pre-spent budget: only 1 research call left after pass 1.
     b = rd._Budget()
     b.research_calls = rd.MAX_RESEARCH_CALLS_PER_PROTOCOL - 1  # pass 1 will tip into the cap
     out = rd._dependency_research("p", b)
     assert len(out) <= 1
 
 
-# ---------------------------------------------------------------------------
-# run_discovery — end-to-end with all underlying modules mocked
-# ---------------------------------------------------------------------------
-
-
 def _stub_discovery_modules(monkeypatch, *, audit_reports=None, address_contracts=None):
-    """Replace the heavy pipeline functions with cheap stubs."""
     calls = {}
 
     def fake_search_audit_reports(protocol, official_domain=None, max_queries=4, debug=False):
@@ -480,7 +429,6 @@ def test_run_discovery_triggers_dependency_pass(monkeypatch):
 
 
 def test_run_discovery_audit_seed_failure_does_not_abort(monkeypatch):
-    """Deep Research failure on audit seeds is logged but pipeline continues."""
     _stub_discovery_modules(monkeypatch)
 
     def fake_dr(instructions, schema=None):
@@ -543,7 +491,6 @@ def test_reset_cache_clears_entries(monkeypatch):
 
 
 def test_research_cache_evicts_at_max(monkeypatch):
-    """Distinct instructions past the cap evict, keeping the cache size-bounded."""
     monkeypatch.setattr(rd, "_RESEARCH_CACHE_MAX", 4)
     monkeypatch.setattr(
         rd.exa,
@@ -556,7 +503,6 @@ def test_research_cache_evicts_at_max(monkeypatch):
 
 
 def test_research_cache_ttl_expiry_reprobes(monkeypatch):
-    """An entry past the TTL is dropped on read and the research re-run."""
     calls: list[str] = []
     monkeypatch.setattr(
         rd.exa,
@@ -570,7 +516,6 @@ def test_research_cache_ttl_expiry_reprobes(monkeypatch):
 
 
 def test_research_cache_pressure_state_set_and_cleared(monkeypatch):
-    """Crossing 50% records pressure; reset_cache forgets it."""
     from utils import memory
 
     monkeypatch.setattr(rd, "_RESEARCH_CACHE_MAX", 4)

@@ -1,8 +1,6 @@
-"""Regression: the effective-permissions function set covers every state-changing
-external/public ABI entry point, even when the authority gate and state writes live
-in inline assembly (Solady ``EnumerableRoles`` shape) that yields neither a sink
-nor a predicate tree. Such functions must surface as ``unsupported`` rows with no
-principals, not be silently dropped. Runs real Slither -> effects -> permissions."""
+"""Assembly-only gates (Solady ``EnumerableRoles``) yield no sink or tree, so these must surface as ``unsupported``
+rows, not be dropped.
+"""
 
 from __future__ import annotations
 
@@ -20,8 +18,6 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     build_predicate_artifacts,
 )
 
-# Solady EnumerableRoles-style: role-storage writes and the owner gate are all inline
-# assembly, so no state_write sink and no caller_authority predicate leaf.
 _SOLADY_ROLES_SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -75,9 +71,6 @@ contract MiniEnumerableRoles {
 """
 
 
-# EIP-1967-style proxy: state write and fallback delegatecall are inline assembly, and
-# ``takeOver`` has NO high-level caller gate. Routes through the assembly-sink path,
-# not the predicate-tree path the Solady fixture exercises.
 _TAKEOVER_PROXY_SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -151,8 +144,6 @@ def test_assembly_only_mutators_surface_as_unsupported_rows(roles_artifacts):
     payload = _build(roles_artifacts)
     by_selector = {fn["selector"]: fn for fn in payload["functions"]}
 
-    # Either unsupported reason means an unresolved gate; the function stays visible,
-    # gated, and principal-free.
     unsupported_gate_reasons = {
         "assembly_only_authority_not_extracted",
         "missing_semantic_capability_for_predicate_tree",
@@ -167,14 +158,11 @@ def test_assembly_only_mutators_surface_as_unsupported_rows(roles_artifacts):
         fn = by_selector[sel]
         assert fn.get("status") == "unsupported"
         assert fn["authority_public"] is False
-        # No principals auto-attached — the gate is unresolved, not public.
         assert fn["controllers"] == []
         assert fn.get("capability_expr", {}).get("unsupported_reason") in unsupported_gate_reasons
 
 
 def test_abi_only_state_changer_uses_assembly_reason(roles_artifacts):
-    """A state-changer with no sink, tree, or capability is included via the ABI
-    mutability surface with the assembly-only reason — never projected public."""
     effects, _ = roles_artifacts
     analysis = {"subject": {"address": "0x000000000000000000000000000000000000dead", "name": "Stub"}}
     effects_no_sink = {
@@ -226,16 +214,10 @@ def test_state_changing_flag_tracks_solidity_mutability(roles_artifacts):
 
 
 def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifacts):
-    """An assembly state writer whose gate is not extractable as a predicate tree must
-    route through the assembly-sink guard (``assembly_only_signatures``).
-
-    Without that guard it projects ``public`` (verified manually). The structural
-    asserts pin the routing so the test can't pass via a different unsupported branch.
-    """
+    """Without the assembly-sink guard it projects ``public``; the structural asserts pin the routing."""
     effects, predicate_trees = takeover_artifacts
     analysis = {"subject": {"address": "0x000000000000000000000000000000000000dead", "name": "TakeOverProxy"}}
 
-    # Structural preconditions that force the assembly-sink branch:
     take = effects["functions"]["takeOver(address)"]
     assert any(
         s["kind"] == "state_write" and s["target"].startswith("assembly_storage:") for s in take.get("sinks") or []
@@ -259,21 +241,15 @@ def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifact
 
 
 def test_inline_assembly_sstore_and_delegatecall_surface_as_sinks(takeover_artifacts):
-    """Assembly ``sstore`` and ``delegatecall`` fallback must each surface as a sink
-    (writer selector populated, delegatecall-execution recovered); fails if the
-    effects.py SolidityCall branches are reverted."""
+    """Fails if the effects.py SolidityCall branches are reverted."""
     effects, _ = takeover_artifacts
     functions = effects["functions"]
 
-    # Assembly sstore -> state_write sink keyed by the slot, writer monitorable
-    # by selector.
     take = functions["takeOver(address)"]
     write_sinks = [s for s in take.get("sinks") or [] if s["kind"] == "state_write"]
     assert any(s["target"].startswith("assembly_storage:") for s in write_sinks), take.get("sinks")
     assert take.get("writer_selectors"), "assembly sstore must populate writer_selectors"
 
-    # Assembly delegatecall fallback -> delegatecall sink + delegatecall_execution
-    # capability + the matching summary.
     fb = functions["fallback()"]
     dc_sinks = [s for s in fb.get("sinks") or [] if s["kind"] == "delegatecall"]
     assert any(s["target"].startswith("assembly_delegatecall:") for s in dc_sinks), fb.get("sinks")
@@ -300,10 +276,8 @@ class _StubFn:
         (_StubFn(name="hashLeaf", visibility="public", pure=True), False),
         (_StubFn(is_fallback=True), False),
         (_StubFn(is_receive=True), False),
-        # fallback/receive identified by name even when the boolean flags are absent.
         (_StubFn(name="fallback"), False),
         (_StubFn(name="receive"), False),
-        # internal/private functions are not part of the ABI mutability surface.
         (_StubFn(name="helper", visibility="internal"), False),
         (_StubFn(name="helper", visibility="private"), False),
     ],

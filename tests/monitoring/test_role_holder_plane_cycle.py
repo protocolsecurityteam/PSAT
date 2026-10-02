@@ -1,9 +1,5 @@
-"""The role-holder plane's periodic refresher: selection, bounds, failure domain.
-
-Producer semantics are asserted elsewhere. Load-bearing arm: a per-role table cannot say
-whether a REGISTRY was ever folded (one whose fold proposed nothing is absent exactly like
-one no pass reached), so ``TestRefreshTrigger`` pins that "ran and found nothing" stops
-re-selecting and "never ran" never stops.
+"""A per-role table can't tell a registry folded to nothing from one never reached, so ``TestRefreshTrigger`` pins
+that "ran and found nothing" stops re-selecting and "never ran" never stops.
 """
 
 from __future__ import annotations
@@ -96,7 +92,6 @@ def _enrolled(address: str, *, warm: bool = True) -> list[IndexedEventCursor]:
 
 @pytest.fixture
 def plane_session(db_session):
-    """``db_session`` sweeps neither the plane nor its watermark; both are swept here."""
     yield db_session
     db_session.rollback()
     db_session.query(RoleHolderPlane).delete()
@@ -106,7 +101,6 @@ def plane_session(db_session):
 
 @pytest.fixture
 def confirming_reads(monkeypatch):
-    """Every ``hasRole`` probe answers true — the wire, stubbed."""
 
     def fake_batch(_rpc_url, calls, block_tag, *, headers=None, chain_id=None):
         assert block_tag == hex(PROBE.number), "every probe must be pinned at one block"
@@ -133,11 +127,6 @@ def _planes(session) -> list[RoleHolderPlane]:
     return list(session.execute(select(RoleHolderPlane)).scalars())
 
 
-# ---------------------------------------------------------------------------
-# Selection universe
-# ---------------------------------------------------------------------------
-
-
 class TestSelectionUniverse:
     def test_a_cursor_bearing_registry_with_logs_is_folded_and_persisted(self, plane_session, confirming_reads):
         session = plane_session
@@ -158,7 +147,6 @@ class TestSelectionUniverse:
         assert mark.trigger_log_block == BLOCK - 100
 
     def test_a_registry_with_no_cursor_is_never_selected(self, plane_session, confirming_reads):
-        """Logs alone do not license a read: the cursor table is the universe."""
         session = plane_session
         session.add(_log(UNENROLLED))
         session.commit()
@@ -171,7 +159,6 @@ class TestSelectionUniverse:
         assert _planes(session) == []
 
     def test_a_half_enrolled_registry_is_gate_closed_not_refreshed(self, plane_session, confirming_reads):
-        """One topic of the pair proves nothing, and leaves no watermark to expire."""
         session = plane_session
         session.add_all([_cursor(HALF_ENROLLED, ROLE_GRANTED_TOPIC0), _log(HALF_ENROLLED)])
         session.commit()
@@ -206,16 +193,8 @@ class TestSelectionUniverse:
         assert _pass(session).registries_considered == 0
 
 
-# ---------------------------------------------------------------------------
-# The three durable states
-# ---------------------------------------------------------------------------
-
-
 class TestRefreshTrigger:
     def test_confirmed_nothing_is_recorded_and_not_reselected(self, plane_session, confirming_reads):
-        """A registry whose fold proposed nothing is durably distinct from one
-        no pass ever reached — and does not re-select forever on the strength of
-        having produced no row."""
         session = plane_session
         session.add_all(_enrolled(REGISTRY))
         session.commit()
@@ -260,8 +239,7 @@ class TestRefreshTrigger:
         assert _marks(session)[REGISTRY].trigger_log_block == BLOCK - 50
 
     def test_a_first_log_reopens_a_confirmed_nothing_registry(self, plane_session, confirming_reads):
-        """``trigger_log_block`` NULL is an observation of the index, not a
-        claim that the registry emits nothing."""
+        """NULL is an observation of the index, not a claim the registry emits nothing."""
         session = plane_session
         session.add_all(_enrolled(REGISTRY))
         session.commit()
@@ -274,8 +252,6 @@ class TestRefreshTrigger:
         assert _pass(session).rows == 1
 
     def test_cursors_going_warm_reopens_a_registry_folded_cold(self, plane_session, confirming_reads):
-        """A floor withheld against a cold surface must not be frozen there when
-        the surface warms without a further log landing."""
         session = plane_session
         session.add_all([*_enrolled(REGISTRY, warm=False), _log(REGISTRY)])
         session.commit()
@@ -292,7 +268,6 @@ class TestRefreshTrigger:
         assert _planes(session)[0].holders == [GRANTEE]
 
     def test_an_aged_floor_is_reread(self, plane_session, confirming_reads):
-        """``holders`` cites a block; the citation ages even where no log lands."""
         session = plane_session
         session.add_all([*_enrolled(REGISTRY), _log(REGISTRY)])
         session.commit()
@@ -304,11 +279,6 @@ class TestRefreshTrigger:
 
         assert [c.due_reason for c in collect_candidates(session, chain_id=1, max_age_s=60)] == [DUE_MAX_AGE]
         assert [c.due_reason for c in collect_candidates(session, chain_id=1, max_age_s=10**7)] == [None]
-
-
-# ---------------------------------------------------------------------------
-# Per-pass bounds
-# ---------------------------------------------------------------------------
 
 
 class TestPassBounds:
@@ -323,7 +293,6 @@ class TestPassBounds:
 
         assert (counters.due, counters.refreshed, counters.budget_exhausted) == (5, 2, True)
         assert len(_marks(session)) == 2
-        # The rest stayed due rather than being recorded as observed.
         assert _pass(session, limit=2).refreshed == 2
 
     def test_the_read_budget_stops_the_pass_and_leaves_the_rest_due(self, plane_session, confirming_reads):
@@ -340,8 +309,7 @@ class TestPassBounds:
         assert len(_marks(session)) == 1
 
     def test_a_registry_larger_than_the_whole_budget_still_runs(self, plane_session, confirming_reads):
-        """Stopping at the over-budget registry, rather than stepping over it,
-        is what keeps it from starving behind cheaper ones forever."""
+        """Stepping over it would starve it behind cheaper ones forever."""
         session = plane_session
         session.add_all(_enrolled(REGISTRY))
         for index in range(6):
@@ -352,11 +320,6 @@ class TestPassBounds:
 
         assert counters.refreshed == 1
         assert counters.rows == 6
-
-
-# ---------------------------------------------------------------------------
-# Failure domain
-# ---------------------------------------------------------------------------
 
 
 class TestFailureDomain:
@@ -381,7 +344,6 @@ class TestFailureDomain:
         assert counters.failures == 1
         assert counters.refreshed == 1
         marks = _marks(session)
-        # No watermark for the failure: it stays due next pass.
         assert set(marks) == {OTHER_REGISTRY}
         assert [row.registry_address for row in _planes(session)] == [OTHER_REGISTRY]
 
@@ -433,11 +395,6 @@ class TestFailureDomain:
         run_role_holder_plane_loop(0.0, stop)  # must return, not raise
 
         assert beats == [(HEARTBEAT_ROLE_HOLDER_PLANE, "degraded")]
-
-
-# ---------------------------------------------------------------------------
-# Observability — both call sites, every outcome
-# ---------------------------------------------------------------------------
 
 
 class TestCycleObservability:
@@ -494,9 +451,6 @@ class TestCycleObservability:
 
 
 class TestResolutionStageObservability:
-    """Follow-up #6 — the stage call site records all three shapes, not just the
-    one that wrote rows."""
-
     def _metrics(self, monkeypatch) -> dict[str, Any]:
         recorded: dict[str, Any] = {}
         monkeypatch.setattr(

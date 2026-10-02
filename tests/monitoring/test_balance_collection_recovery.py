@@ -1,5 +1,3 @@
-"""Publication, overlap and outage regressions for the current-state collector."""
-
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -158,8 +156,7 @@ def test_native_success_token_failure_survives_and_retries_only_failed_class(db_
 
 
 def test_shared_entity_read_reused_without_duplicate_observations(db_session, monkeypatch):
-    # Entity observations have one canonical identity even when two protocols
-    # independently include the same proven EOA in their analysis perimeter.
+    # One canonical identity even when two protocols include the same EOA.
     address = "0x" + uuid4().hex + "00000000"
     target = CollectionSubject(ObservationSubject.of_entity("ethereum", address), 1)
     factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
@@ -345,7 +342,6 @@ def test_aggregate_failure_does_not_rollback_or_refetch_successful_observations(
 
 @pytest.mark.parametrize("limit", [2, 64])
 def test_tight_hourly_budget_eventually_attempts_every_account_and_class(db_session, monkeypatch, limit):
-    """Successful native batches must not continually jump ahead of unread tokens."""
     import services.monitoring.balance_collection as collector
     from services.clients.request_budget import RequestBudget, charge_attempt
 
@@ -376,7 +372,6 @@ def test_tight_hourly_budget_eventually_attempts_every_account_and_class(db_sess
         budget = RequestBudget(limit=4)
         collect_balances(targets, writer="tvl", session_factory=factory, budget=budget)
         assert sum(budget.attempts.values()) <= 4
-        # Advance a full monitoring interval while preserving relative attempt order.
         db_session.expire_all()
         for state in db_session.scalars(select(BalanceCollectionState)):
             for name in ("last_attempt_at", "next_attempt_at", "observed_at"):

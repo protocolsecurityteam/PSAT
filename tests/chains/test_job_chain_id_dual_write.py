@@ -41,11 +41,6 @@ def session():
 ADDR = "0x" + "ab" * 20
 
 
-# ---------------------------------------------------------------------------
-# Pure derivation logic (no DB) — mirrors the migration backfill rules.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "chain_value,address,expected",
     [
@@ -62,7 +57,6 @@ ADDR = "0x" + "ab" * 20
         ("unknown", ADDR, 1),  # discovery sentinel → mainnet fallback
         ("nonsense-l2", ADDR, 1),  # unrecognized → mainnet fallback
         (12345, ADDR, 1),  # non-string → fallback (guarded by chain_by_name)
-        # Address-less company/root jobs never carry a chain id.
         ("ethereum", None, None),
         (None, None, None),
         ("base", None, None),
@@ -72,21 +66,13 @@ def test_derive_chain_id(chain_value, address, expected):
     assert derive_job_chain_id(chain_value, address) == expected
 
 
-# ---------------------------------------------------------------------------
-# Dual-write through create_job (the single funnel for every enqueue path).
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_create_job_base_address_gets_8453(session):
     job = create_job(session, {"address": ADDR, "chain": "base", "name": "base"})
     assert job.chain_id == 8453
 
 
-# ---------------------------------------------------------------------------
-# Model-level insert default: direct Job() construction (bypassing create_job)
-# still derives chain_id from its own request, so no path violates the CHECK.
-# ---------------------------------------------------------------------------
+# Direct Job() construction still derives chain_id, so no path violates the CHECK.
 
 
 @requires_postgres
@@ -97,10 +83,7 @@ def test_orm_default_derives_chain_id_for_direct_construction(session):
     assert job.chain_id == 8453
 
 
-# ---------------------------------------------------------------------------
-# CHECK constraint at the DB level. Raw INSERT bypasses the ORM default so the
-# constraint itself is exercised (the ORM default would otherwise fill it).
-# ---------------------------------------------------------------------------
+# A raw INSERT bypasses the ORM default so the constraint itself is exercised.
 
 
 @requires_postgres
@@ -138,11 +121,6 @@ def test_check_constraint_rejects_address_without_chain_id(session):
 def test_check_constraint_allows(session, insert_sql, params):
     session.execute(text(insert_sql), params)
     session.commit()  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# Migration backfill rules (pure, no DB) — loaded from the migration module.
-# ---------------------------------------------------------------------------
 
 
 def _load_migration():

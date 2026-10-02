@@ -1,12 +1,7 @@
-"""C1: the Safe module/guard protection probe on the resolution classifier.
+"""C1: the Safe module/guard probe.
 
-Two storage words plus ``VERSION()``, fired after an address classifies as a Safe. The
-register once published "modules empty on all 9 Safes, so k/n is exact", but one of 19
-Safes (``0x21f73d42...``) has an enabled module. Words were re-read at block 25643300.
-
-Load-bearing negative: the head word can prove the module list EMPTY (head == sentinel)
-but never enumerate it; a non-sentinel head is ``module_set: not_determined`` +
-``protection_is_upper_bound: true``, never a one-element list.
+One of 19 corpus Safes has an enabled module, contrary to an earlier "modules empty" claim. The head word can prove the
+list empty but never enumerate it, so a non-sentinel head is ``not_determined`` and an upper bound.
 """
 
 from __future__ import annotations
@@ -22,22 +17,20 @@ from services.resolution.tracking import (
     _classify_uncached_batched,
     _resolve_pinned_block,
 )
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 
 def _protection(details: dict) -> dict:
-    """The nested protection witness, typed for the checker."""
     return cast(dict, details["safe_protection"])
 
 
 PROBE_BLOCK = 25643300
 
-# Real addresses, pinned at PROBE_BLOCK.
 MODULE_FREE_SAFE = "0x427989bb12f4a390d11e7647d467dea02b9d2ee3"  # VERSION() 1.4.1
 MODULE_BEARING_SAFE = "0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca"  # VERSION() 1.1.1
 
 SENTINEL_WORD = "0x" + "0" * 63 + "1"
 ZERO_WORD = "0x" + "0" * 64
-# The real word read at modules[SENTINEL] on MODULE_BEARING_SAFE.
 MODULE_BEARING_HEAD_WORD = "0x0000000000000000000000002e1b5a40edc922bce489668b11749b8eabd67f6b"
 ENABLED_MODULE = "0x2e1b5a40edc922bce489668b11749b8eabd67f6b"
 
@@ -45,8 +38,7 @@ OWNER = "0x" + "11" * 20
 
 
 def test_slot_preimages_recomputed():
-    """The two probed slots equal the keccak of the preimages the deployed Safe
-    singletons carry; recomputed here rather than copied from the module."""
+    """Recomputed rather than copied from the module."""
     modules_head = "0x" + keccak((1).to_bytes(32, "big") + (1).to_bytes(32, "big")).hex()
     guard = "0x" + keccak(text="guard_manager.guard.address").hex()
     module_guard = "0x" + keccak(text="module_manager.module_guard.address").hex()
@@ -57,9 +49,8 @@ def test_slot_preimages_recomputed():
 
     assert tracking._SAFE_MODULES_HEAD_SLOT == modules_head
     assert tracking._SAFE_GUARD_SLOT == guard
-    # module_manager.module_guard.address exists only from Safe 1.5.0 and reads
-    # zero on all 19 corpus Safes, which is "feature absent", not "no guard".
-    # Nothing is published about it, so it is not probed.
+    # ``module_guard`` exists only from Safe 1.5.0 and reads zero on every corpus Safe, which is "feature absent", so
+    # nothing is published about it.
     assert module_guard not in (tracking._SAFE_MODULES_HEAD_SLOT, tracking._SAFE_GUARD_SLOT)
 
 
@@ -80,13 +71,6 @@ def _abi_encode_string(s: str) -> str:
     return "0x" + format(32, "064x") + format(len(raw), "064x") + raw.hex() + ("00" * pad)
 
 
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
-
-
 def _wire(
     monkeypatch,
     *,
@@ -97,9 +81,7 @@ def _wire(
     storage_raises: bool = False,
     pinned_block: int | None = PROBE_BLOCK,
 ):
-    """Stub the classifier's wire. Both the batched and sequential paths route
-    through ``_eth_call_raw`` / ``_rpc_batch_request_with_status`` /
-    ``_get_storage_at``, so one wiring drives both."""
+    """Both classify paths route through the same three helpers."""
     calls: list[tuple[str, str]] = []
 
     responses = {
@@ -149,8 +131,7 @@ def _both_paths(monkeypatch, address, **kwargs):
 
 
 def test_module_free_safe_141_publishes_proven_empty(monkeypatch):
-    """Head == sentinel is the ONLY thing that earns ``module_set: []``, and it
-    carries its basis and the block it was true at."""
+    """Head == sentinel is the only thing that earns ``module_set: []``."""
     kind, details, _cacheable = _both_paths(
         monkeypatch,
         MODULE_FREE_SAFE,
@@ -176,9 +157,7 @@ def test_module_free_safe_141_publishes_proven_empty(monkeypatch):
 
 
 def test_module_bearing_safe_111_publishes_upper_bound_not_a_list(monkeypatch):
-    """The real 1.1.1 Safe. ``module_set`` stays not_determined — the head word
-    proves a module EXISTS, never how many — and the guard slot's zero is
-    ``feature_absent`` because 1.1.1 has no guard, not ``proven_zero``."""
+    """The head word proves a module exists, never how many; 1.1.1 has no guard feature."""
     kind, details, _cacheable = _both_paths(
         monkeypatch,
         MODULE_BEARING_SAFE,
@@ -231,12 +210,8 @@ def test_guard_zero_on_130_is_proven_zero(monkeypatch):
     assert _protection(details)["guard"] == "proven_zero"
 
 
-# --- fail-closed arms ------------------------------------------------------
-
-
 def test_unknown_version_leaves_guard_not_determined(monkeypatch):
-    """A version whose deployed source was never read cannot tell a zero word's
-    "no guard set" from "no guard feature". Includes the 1.3.0 variant suffix."""
+    """A version whose source was never read can't tell "no guard" from "no guard feature"."""
     for version in ("1.3.0+L2", "1.5.0", "9.9.9"):
         tracking.clear_classify_cache()
         _, details, _ = _both_paths(
@@ -266,8 +241,6 @@ def test_absent_version_leaves_guard_not_determined(monkeypatch):
 
 
 def test_nonzero_guard_word_on_a_guardless_version_is_not_determined(monkeypatch):
-    """1.1.1 has no guard feature, so a nonzero word at that slot is
-    unexplained — neither ``feature_absent`` nor ``proven_address``."""
     _, details, _ = _both_paths(
         monkeypatch,
         MODULE_BEARING_SAFE,
@@ -281,8 +254,6 @@ def test_nonzero_guard_word_on_a_guardless_version_is_not_determined(monkeypatch
 
 
 def test_storage_read_failure_yields_not_determined_never_empty(monkeypatch):
-    """A failed read is the exact shape the fail-open series closed: it must not
-    read as "no modules" or "no guard"."""
     _, details, _ = _both_paths(
         monkeypatch,
         MODULE_FREE_SAFE,
@@ -303,8 +274,7 @@ def test_storage_read_failure_yields_not_determined_never_empty(monkeypatch):
 
 
 def test_zero_head_word_is_not_an_empty_module_set(monkeypatch):
-    """An unwritten ``modules[SENTINEL]`` entry (Safe never set up) is not a
-    terminated list. Absence of the sentinel is not proof of emptiness."""
+    """An unwritten entry is not a terminated list."""
     _, details, _ = _both_paths(
         monkeypatch,
         MODULE_FREE_SAFE,
@@ -319,8 +289,6 @@ def test_zero_head_word_is_not_an_empty_module_set(monkeypatch):
 
 
 def test_head_word_that_is_not_an_address_is_not_determined(monkeypatch):
-    """Top 12 bytes set ⇒ the word is not a left-padded address ⇒ nothing about
-    the list is established."""
     _, details, _ = _both_paths(
         monkeypatch,
         MODULE_FREE_SAFE,
@@ -335,8 +303,6 @@ def test_head_word_that_is_not_an_address_is_not_determined(monkeypatch):
 
 
 def test_unresolvable_block_suppresses_the_probe_entirely(monkeypatch):
-    """No pinned height ⇒ a now-fact with no block ⇒ nothing published, and no
-    storage read is even issued."""
     calls = _wire(
         monkeypatch,
         version="1.4.1",
@@ -359,8 +325,6 @@ def test_unresolvable_block_suppresses_the_probe_entirely(monkeypatch):
 
 
 def test_probe_reads_are_pinned_to_the_resolved_height(monkeypatch):
-    """Not ``latest``: every protection read carries the same explicit height
-    that is published as ``probe_block``."""
     calls = _wire(monkeypatch, version="1.4.1", head_word=SENTINEL_WORD, guard_word=ZERO_WORD)
     _classify_uncached_batched("https://rpc", MODULE_FREE_SAFE, "latest")
     protection_reads = [
@@ -371,8 +335,6 @@ def test_probe_reads_are_pinned_to_the_resolved_height(monkeypatch):
 
 
 def test_non_safe_addresses_carry_no_protection_keys(monkeypatch):
-    """The classifier must not attach Safe fields to a timelock or a plain
-    contract."""
 
     def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
         if signature == "getMinDelay()":
@@ -395,9 +357,6 @@ def test_non_safe_addresses_carry_no_protection_keys(monkeypatch):
     kind, details, _ = _classify_uncached_batched("https://rpc", "0x" + "cd" * 20, "latest")
     assert kind == "timelock"
     assert "safe_protection" not in details
-
-
-# --- block resolution ------------------------------------------------------
 
 
 def test_resolve_pinned_block_uses_an_explicit_quantity_tag(monkeypatch):
@@ -428,15 +387,8 @@ def test_resolve_pinned_block_rejects_an_unrecognised_tag(monkeypatch):
     assert _resolve_pinned_block("https://rpc", "") is None
 
 
-# --- strict word decoding --------------------------------------------------
-#
-# ``eth_getStorageAt`` answering something that is not a 32-byte word is not an
-# observation of storage. The decode is delegated to
-# ``restaking_reads.decode_word`` so that a short, empty, whitespace-bearing or
-# underscore-bearing body reaches ``not_determined`` for the WHOLE probe. Under a
-# left-pad-then-length-check decoder none of these can be rejected: ``"0x"``
-# padded is the zero word ("guard proven_zero") and ``"0x1"`` padded is the
-# modules sentinel ("module_set: []", which licenses a k/n reading).
+# A non-32-byte answer is not an observation of storage. A left-pad-then-check decoder would turn ``"0x"`` into "no
+# guard" and ``"0x1"`` into the modules sentinel.
 
 _ALL_NOT_DETERMINED = {
     "modules_head": "not_determined",
@@ -460,8 +412,6 @@ def _malformed(monkeypatch, word: str) -> dict:
 
 
 def test_empty_storage_return_is_not_a_zero_word(monkeypatch):
-    """``"0x"`` is what a node returns when it gave us nothing. Padded, it is the
-    zero word — i.e. "no guard is set" on a release that has the feature."""
     protection = _malformed(monkeypatch, "0x")
     assert protection["guard"] == "not_determined"
     assert protection["guard"] != "proven_zero"
@@ -471,8 +421,6 @@ def test_empty_storage_return_is_not_a_zero_word(monkeypatch):
 
 
 def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
-    """``"0x1"`` left-padded IS ``address(0x1)``, the modules sentinel, which is
-    the single word that earns ``module_set: []`` + a terminated-list basis."""
     protection = _malformed(monkeypatch, "0x1")
     assert protection["module_set"] == "not_determined"
     assert protection["module_set"] != []
@@ -484,15 +432,12 @@ def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
 @pytest.mark.parametrize(
     "word",
     [
-        # 64 spaces has the right LENGTH; ``bytes.fromhex`` would ignore every one
-        # of them and hand back an empty bytes.
+        # ``bytes.fromhex`` ignores whitespace.
         pytest.param("0x" + " " * 64, id="whitespace_body"),
-        # The shape a bare length check lets through: 63 nibbles + a newline is 64
-        # characters, and 62 nibbles + two spaces decodes to a clean 31 bytes.
+        # The shape a bare length check lets through.
         pytest.param("0x" + "0" * 62 + "1" + "\n", id="short_body_trailing_newline"),
         pytest.param("0x" + "0" * 61 + "1" + "  ", id="short_body_trailing_spaces"),
-        # ``int("1_000...", 16)`` parses; ``bytes.fromhex`` does not. The separator
-        # is why this decoder never routes through ``int``.
+        # ``int()`` accepts separators, which is why this decoder avoids it.
         pytest.param("0x" + "1_" + "0" * 62, id="underscore_body"),
     ],
 )
@@ -503,8 +448,6 @@ def test_malformed_word_body_is_rejected(monkeypatch, word):
 
 
 def test_uppercase_hex_digits_still_decode(monkeypatch):
-    """A full-width word whose digits are uppercase is well-formed; the published
-    address is normalised to lowercase, as before."""
     guard_addr = "0x" + "ab" * 20
     _, details, _ = _both_paths(
         monkeypatch,

@@ -1,8 +1,3 @@
-"""Unit tests for DiscoveryWorker._process_address() — mocked sessions, no Postgres.
-
-Network calls are mocked via monkeypatch.
-"""
-
 from __future__ import annotations
 
 import json
@@ -13,10 +8,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from workers.discovery import DiscoveryWorker
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _job(**overrides) -> Any:
@@ -48,13 +39,10 @@ def _etherscan_result(**overrides):
 
 
 def _patch_discovery(monkeypatch, etherscan_result):
-    """Monkeypatch fetch/store_*/update_detail; returns (source_calls, artifact_calls) for inspection."""
     monkeypatch.setattr(
         "workers.discovery.fetch",
         lambda _addr, **_kw: etherscan_result,
     )
-    # Deployer expansion probes Etherscan (getcontractcreation) for the creator;
-    # these tests assert on the parsed source/contract, not deployer data.
     monkeypatch.setattr("workers.discovery._batch_get_creators", lambda addresses, **kw: {})
 
     source_calls: list[tuple] = []
@@ -70,11 +58,6 @@ def _patch_discovery(monkeypatch, etherscan_result):
     )
 
     return source_calls, artifact_calls
-
-
-# ---------------------------------------------------------------------------
-# 1. Happy path
-# ---------------------------------------------------------------------------
 
 
 def test_happy_path_stores_sources_and_artifacts(monkeypatch):
@@ -129,8 +112,7 @@ def test_happy_path_does_not_overwrite_existing_job_name(monkeypatch):
     assert job.name == "AlreadySet"
 
 
-# source_format is 'standard_json' when 'sources' is in the first 10 chars. Single-brace ``{"sources":...}`` puts it at
-# index 2; Etherscan's double-brace format overflows the window, so this variant exercises the branch.
+# ``source_format`` sniffs the first 10 chars; Etherscan's double-brace format overflows that window.
 _STANDARD_JSON_SOURCE = json.dumps(
     {
         "sources": {"contracts/Token.sol": {"content": "pragma solidity ^0.8.0; contract Token {}"}},
@@ -154,8 +136,7 @@ assert "sources" in _STANDARD_JSON_SOURCE[:10]
             {"language": "vyper"},
             id="vyper-from-compiler-version",
         ),
-        # is_vyper_result checks for "vyper" in the compiler string; "v0." alone does not match unless the source starts
-        # with "# @version", which it does here, so this hits the source-comment fallback.
+        # This hits the ``# @version`` source-comment fallback.
         pytest.param(
             {
                 "CompilerVersion": "v0.3.7+commit.abc",
@@ -180,7 +161,6 @@ assert "sources" in _STANDARD_JSON_SOURCE[:10]
             {"EVMVersion": "Default"}, (), {"evm_version": "shanghai"}, id="evm-version-default-defaults-to-shanghai"
         ),
         pytest.param({"EVMVersion": "cancun"}, (), {"evm_version": "cancun"}, id="evm-version-explicit-preserved"),
-        # EVMVersion key missing from the Etherscan result entirely.
         pytest.param({}, ("EVMVersion",), {"evm_version": "shanghai"}, id="evm-version-key-missing"),
         pytest.param(
             {"SourceCode": _STANDARD_JSON_SOURCE, "ContractName": "Token"},
@@ -223,8 +203,6 @@ def test_process_address_contract_fields(monkeypatch, overrides, drop_keys, expe
 
 
 def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
-    """Double-brace standard-JSON: parse_sources still extracts all files and
-    remappings although source_format falls back to 'flat' (the [:10] window)."""
     inner = json.dumps(
         {
             "sources": {
@@ -238,7 +216,6 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
             "settings": {"remappings": ["@openzeppelin/=node_modules/@openzeppelin/"]},
         }
     )
-    # Etherscan wraps standard-json in one extra '{' / '}' on each side.
     source_code = "{" + inner + "}"
 
     result = _etherscan_result(SourceCode=source_code, ContractName="Token")
@@ -262,15 +239,7 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
     assert "@openzeppelin/=node_modules/@openzeppelin/" in contract.remappings
 
 
-# ---------------------------------------------------------------------------
-# Step 4 fan-out: fetch + _batch_get_creators run as concurrent Etherscan calls
-# via parallel_get. Both must execute, and the deployer flows through.
-# ---------------------------------------------------------------------------
-
-
 def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
-    """Both Etherscan calls fire under the parallel_get fan-out; deployer
-    derived from creators is recorded on the Contract row."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -295,9 +264,7 @@ def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
-    # Non-mainnet job: the creators lookup must ask the JOB's chain, not
-    # default to mainnet — a Base-only address answers nothing on chain 1,
-    # which nulled the deployer and starved deployer-cascade adoption.
+    # A Base-only address answers nothing on chain 1, which nulled the deployer and starved deployer-cascade adoption.
     job = _job(chain_id=8453)
 
     worker._process_address(session, job)
@@ -309,8 +276,6 @@ def test_process_address_fanout_invokes_fetch_and_creators(monkeypatch):
 
 
 def test_process_address_fanout_swallows_creators_exception(monkeypatch):
-    """A failing creators lookup must not abort the discovery pipeline —
-    parallel_get returns the exception in-place; deployer stays None."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -377,8 +342,6 @@ def test_cache_hit_routes_row_through_gate_intake(monkeypatch):
 
 
 def test_fetch_path_routes_existing_row_through_gate_intake(monkeypatch):
-    """The fetch path's existing-row branch hands the row to the gate with the
-    request it arrived on — no direct protocol_id write anywhere in the path."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -407,7 +370,6 @@ def test_fetch_path_routes_existing_row_through_gate_intake(monkeypatch):
 
     assert len(intake_calls) == 1
     assert intake_calls[0][0] is existing_row
-    # The stamp is the gate's alone: the fetch path never set it.
     assert existing_row.protocol_id is None
 
 
@@ -445,9 +407,7 @@ def test_fetch_path_never_stamps_protocol_id_at_write(monkeypatch):
 
 
 def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
-    """A failed creators refetch must not erase a previously-witnessed
-    deployer on an existing Contract row — None means the lookup answered
-    nothing, never that the contract has no deployer."""
+    """None means the lookup answered nothing, not that there is no deployer."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()
@@ -477,8 +437,6 @@ def test_process_address_failed_creators_keeps_prior_deployer(monkeypatch):
 
 
 def test_process_address_fanout_propagates_fetch_exception(monkeypatch):
-    """A failing source fetch must propagate so the worker marks the job
-    failed; partial state is not committed."""
     from services.concurrency import RpcExecutor
 
     RpcExecutor.reset_for_tests()

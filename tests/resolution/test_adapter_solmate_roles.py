@@ -1,14 +1,10 @@
-"""Solmate ``RolesAuthority`` adapter — resolves ``canCall`` from REAL events.
+"""Solmate ``RolesAuthority`` resolves ``canCall`` from real events.
 
-Fixture ``tests/fixtures/solmate/roles_authority_3994741a.json`` holds the actual
-role/capability logs of etherfi's RolesAuthority ``0x3994741a…`` (authority for
-``TellerWithMultiAssetSupport`` ``0xe2acf9f8…``). Ground truth verified on-chain via ``canCall``:
+The fixture holds etherfi RolesAuthority ``0x3994741a…``'s logs. Ground truth, verified on-chain:
 
-    pause / unpause      -> role 9 -> 4/6 Safe 0xcea8039076…
+    pause / unpause        -> role 9 -> 4/6 Safe 0xcea8039076…
     addAsset / removeAsset -> role 8 -> 4/6 Safe 0xcea8039076…
-    setShareLockPeriod   -> no role + owner renounced -> genuinely empty
-
-Pins that the adapter recovers the real controller, not a heuristic empty ``finite_set``.
+    setShareLockPeriod     -> no role + owner renounced -> genuinely empty
 """
 
 from __future__ import annotations
@@ -60,8 +56,6 @@ def _rows(fixture: dict) -> list[SimpleNamespace]:
 
 
 class FixtureRepo:
-    """In-memory ``iter_event_rows`` over the captured logs (already in log order)."""
-
     def __init__(self, rows: list[SimpleNamespace], indexed_block: int | None = 21_000_000):
         self.rows = rows
         self.indexed_block = indexed_block
@@ -114,7 +108,6 @@ def test_solmate_selector_resolves_to_governing_safe(selector):
 
 
 def test_solmate_unroled_function_is_exact_empty_not_unknown():
-    # No role capability + renounced owner => callable by nobody: an EXACT empty set, not a heuristic miss.
     fixture = _load()
     cap = SolmateRolesAuthorityAdapter().enumerate(
         _descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), SET_SHARE_LOCK)
@@ -125,7 +118,6 @@ def test_solmate_unroled_function_is_exact_empty_not_unknown():
 
 
 def test_solmate_unindexed_events_defer_to_probe_not_false_empty():
-    # Events not durably indexed: an empty result must NOT be exact "nobody" — fall back to a probe.
     fixture = _load()
     cap = SolmateRolesAuthorityAdapter().enumerate(
         _descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture), indexed_block=None), SET_SHARE_LOCK)
@@ -134,9 +126,7 @@ def test_solmate_unindexed_events_defer_to_probe_not_false_empty():
 
 
 def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
-    # Indexed (cursor present) but NONE of the three RolesAuthority events emitted, e.g. a
-    # custom Authority exposing canCall: only a confirmed RolesAuthority may assert exact-empty,
-    # so it fails closed to a probe.
+    # Only a confirmed RolesAuthority may assert exact-empty.
     fixture = _load()
 
     class IndexedButNoRoleEventsRepo:
@@ -153,10 +143,7 @@ def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
 
 
 def test_solmate_renounced_zero_authority_settles_not_deferred():
-    # A renounced/unset authority resolves to 0x0 → authority_unresolved (a SETTLED external
-    # check), never a cold-index deferral: no 0x0 cursor will ever exist, so
-    # deferred_pending_index would never clear. NO cursor (min_indexed_block=None) proves the
-    # 0x0 short-circuit fires BEFORE the index check.
+    # No 0x0 cursor will ever exist, so a deferral would never clear; no cursor proves the short-circuit fires first.
     fixture = _load()
     ctx = EvaluationContext(
         chain_id=1,
@@ -176,8 +163,6 @@ _AUTHORITY = "0x" + "a1" * 20
 
 
 class _FakeBytecode:
-    """BytecodeRepo whose has_selector is True only for the given selectors."""
-
     def __init__(self, *, selectors):
         self._selectors = {s.lower() for s in selectors}
 
@@ -206,9 +191,8 @@ def _ctx_for_matches(bytecode=None) -> EvaluationContext:
     "bytecode,score",
     [
         pytest.param(_FakeBytecode(selectors=_ROLES_AUTHORITY_MARKER_SELECTORS), 90, id="confirmed_rolesauthority"),
-        # OZ AccessManager shares canCall's selector; Solmate must DECLINE (0) so that adapter can win the tie.
+        # OZ AccessManager shares the selector, so Solmate declines.
         pytest.param(_FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS), 0, id="different_cancall_standard"),
-        # No bytecode repo → can't confirm → provisional (< a confirmed adapter's 90) but > 0.
         pytest.param(None, 40, id="provisional_when_unprobeable"),
     ],
 )
@@ -225,8 +209,7 @@ def test_registry_prefers_confirmed_solmate_over_generic_event_adapter():
 
 
 def test_second_cancall_standard_not_starved_when_solmate_declines():
-    # F1: though registered FIRST, Solmate declines (0) for an OZ AccessManager authority and
-    # a confirmed AccessManager adapter wins — the registry can host two standards sharing canCall.
+    # F1: two standards sharing canCall can coexist in the registry.
     class _ConfirmedAccessManagerAdapter:
         @classmethod
         def matches(cls, descriptor, ctx):

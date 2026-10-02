@@ -1,5 +1,3 @@
-"""Retained accepted amounts must not erase newer incomplete observations."""
-
 import uuid
 from datetime import datetime, timedelta, timezone
 

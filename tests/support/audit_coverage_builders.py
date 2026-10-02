@@ -1,12 +1,6 @@
-"""Seeding builders for the audit-coverage tests.
+"""Shared by ``test_audit_coverage.py`` and ``test_audit_coverage_integration.py``.
 
-The matcher tests (``tests/audits/test_audit_coverage.py``) and the API-level
-timeline tests (``tests/audits/test_audit_coverage_integration.py``) seed the
-same shapes — a throwaway protocol, contracts under it, audit reports with a
-scope list, upgrade events on a proxy. One definition, imported by both.
-
-``seed_protocol`` is a ``@pytest.fixture``; importing the name into a test
-module registers it there.
+``seed_protocol`` is a fixture, so importing it registers it.
 """
 
 from __future__ import annotations
@@ -19,7 +13,6 @@ import pytest
 
 @pytest.fixture()
 def seed_protocol(db_session):
-    """Fresh, unique-named Protocol + cascading cleanup."""
     from db.models import AuditContractCoverage, AuditReport, Contract, Protocol, UpgradeEvent
 
     name = f"cov-test-{uuid.uuid4().hex[:12]}"
@@ -30,8 +23,6 @@ def seed_protocol(db_session):
     try:
         yield protocol_id, name
     finally:
-        # Cascade order matters: coverage refs contract+audit, upgrade
-        # refs contract, so delete children first.
         db_session.query(AuditContractCoverage).filter_by(protocol_id=protocol_id).delete()
         contract_ids = [c.id for c in db_session.query(Contract).filter_by(protocol_id=protocol_id).all()]
         if contract_ids:
@@ -54,7 +45,6 @@ def _add_contract(
     implementation: str | None = None,
     chain: str = "ethereum",
 ):
-    """Create a Contract row and return it (already committed)."""
     from db.models import Contract
 
     c = Contract(
@@ -80,7 +70,6 @@ def _add_audit(
     scope: list[str] | None = None,
     status: str | None = "success",
 ):
-    """Create an AuditReport with scope_contracts + status='success' by default."""
     from db.models import AuditReport
 
     ar = AuditReport(
@@ -109,7 +98,6 @@ def _add_upgrade_event(
     timestamp: datetime | None = None,
     tx_hash: str | None = None,
 ):
-    """Append an UpgradeEvent row on the proxy's contract_id."""
     from db.models import UpgradeEvent
 
     ev = UpgradeEvent(
@@ -131,12 +119,7 @@ def _ts(year: int, month: int = 1, day: int = 1) -> datetime:
 
 
 def _stub_get_code(code_map: dict[str, str]):
-    """Return a ``get_code(rpc_url, address)`` stand-in served from a dict.
-
-    Lets tests exercise ``_fetch_bytecode_keccak`` / ``_apply_bytecode_anchor``
-    without an RPC. Keys are lowercased addresses; value is the code hex
-    string the RPC would return (including ``'0x'`` for EOAs).
-    """
+    """Keys are lowercased addresses; values include ``'0x'`` for EOAs."""
 
     def fake_get_code(rpc_url, addr):
         return code_map.get((addr or "").lower(), "0x")

@@ -1,14 +1,7 @@
-"""The sheet ceiling resolver: what a node's own balance sheet bounds.
+"""``planes.ceiling_for`` is pinned over hand-built planes because the corpus can't exercise every reason.
 
-``planes.ceiling_for`` is the value-side half of the code-control ceiling rule, and
-the corpus cannot exercise all of it (no ambiguous alias, no airdrop-determined
-sheet), so every reason is pinned over hand-built planes.
-
-The one that matters most is ``proven_empty``: a sheet whose every quantity is
-witnessed zero is an EARNED NEGATIVE ($0 provably), and both obvious admission
-tests get it wrong — ``total() is not None`` admits it without recording that the
-$0 was proven, ``sheet_state() == SHEET_PRICED`` refuses it. It must be admitted
-under its own token.
+``proven_empty`` is an earned $0 that both obvious tests get wrong: ``total() is not None`` admits it unlabelled and
+``sheet_state() == SHEET_PRICED`` refuses it.
 """
 
 from __future__ import annotations
@@ -56,15 +49,9 @@ def _priced() -> P.ValuePlane:
     )
 
 
-# The completeness witness a proven-empty sheet cannot be published without: the
-# chain's own transfer history, read to a named block. Every builder that wants
-# an empty sheet has to carry it, which is the point — a plane that never scanned
-# answers ``unpriced`` and not $0.
+# A plane that never scanned answers ``unpriced``, not $0.
 SCANNED = {
     "source": "chain_log_sweep",
-    # Both figures, as the plane publishes them: a sheet is whole only where
-    # every account it folds was scanned, so the denominator travels with the
-    # numerator.
     "accounts_scanned": 1,
     "accounts_folded": 1,
     "accounts": ["0x" + "a" * 40],
@@ -94,12 +81,7 @@ def _no_rows() -> P.ValuePlane:
 
 
 def _ambiguous() -> P.ValuePlane:
-    """An implementation two proxies share, holding a priced balance of its own.
-
-    Priced on purpose: the ambiguity must refuse a sheet that would otherwise
-    have admitted, or the conjunct is only ever exercised where it changes
-    nothing.
-    """
+    """Priced so the ambiguity refuses a sheet that would otherwise admit."""
     return _plane(
         per_asset={KEY: {"weth": 3_000_000.0}},
         per_asset_state={KEY: {"weth": P.ASSET_PRICED}},
@@ -108,10 +90,6 @@ def _ambiguous() -> P.ValuePlane:
 
 
 def _truncated() -> P.ValuePlane:
-    """A PRICED sheet whose asset list was read at the endpoint's page cap.
-
-    Priced on purpose, for the reason ``_ambiguous`` is.
-    """
     return _plane(
         per_asset={KEY: {"weth": 3_000_000.0}},
         per_asset_state={KEY: {"weth": P.ASSET_PRICED}},
@@ -119,8 +97,6 @@ def _truncated() -> P.ValuePlane:
     )
 
 
-# The carrier record a disposed reading is published from — the delivery
-# evidence's own stored fields, not a sentence written here.
 DELIVERED = {
     "shape": "fan_out_all",
     "fan_out_threshold_k": 25,
@@ -134,11 +110,7 @@ DELIVERED = {
 
 
 def _airdrop_determined() -> P.ValuePlane:
-    """A sheet whose only reading arrived as a mass distribution.
-
-    The claim is DELIVERY SHAPE: this says how the holding arrived and never
-    that it is worth nothing — real tokens have been measured arriving this way.
-    """
+    """Delivery shape, never worthlessness: real tokens have arrived this way."""
     return _plane(
         per_asset_state={KEY: {"junk": P.ASSET_AIRDROP_DELIVERED}},
         asset_disposition={KEY: {"junk": DELIVERED}},
@@ -165,17 +137,12 @@ def test_every_sheet_shape_answers_under_its_own_reason(shape: str):
 
 
 def test_the_eight_shapes_cover_the_whole_vocabulary():
-    """No reason may ship without a case: an unexercised token is a claim."""
     assert {reason for _, _, reason in ALL_SHAPES.values()} == set(P.CEILING_REASONS)
 
 
 @pytest.mark.parametrize("shape", sorted(ALL_SHAPES))
 def test_a_number_is_returned_on_exactly_the_admitting_reasons(shape: str):
-    """``usd is not None`` and the reason token must never disagree.
-
-    A refusal carrying a figure would publish a not_determined magnitude as a bound;
-    an admit carrying ``None`` would make a proven $0 ceiling vanish.
-    """
+    """A refusal with a figure would publish a bound; an admit with ``None`` would make a proven $0 vanish."""
     build, _, _ = ALL_SHAPES[shape]
     usd, reason = P.ceiling_for(build(), KEY)
     assert reason in P.CEILING_REASONS
@@ -183,7 +150,6 @@ def test_a_number_is_returned_on_exactly_the_admitting_reasons(shape: str):
 
 
 def test_a_proven_empty_sheet_admits_a_zero_rather_than_refusing():
-    """The earned negative, stated as the two shortcuts that get it wrong."""
     plane = _proven_empty()
     assert plane.sheet_state(KEY) == P.SHEET_PROVEN_EMPTY
     assert plane.sheet_state(KEY) != P.SHEET_PRICED
@@ -197,12 +163,7 @@ def test_a_proven_empty_sheet_admits_a_zero_rather_than_refusing():
 
 
 def test_an_ambiguous_implementation_refuses_however_the_key_was_folded():
-    """The refusal survives the caller's canonicalisation.
-
-    An implementation two proxies share is aliased onto nothing, so
-    ``canonical()`` is the identity on it and folding first cannot launder the
-    ambiguity away. The caller passes a canonical key; this is why that is safe.
-    """
+    """``canonical()`` is the identity on a shared implementation, so folding first can't launder it."""
     plane = _ambiguous()
     assert plane.canonical(KEY) == KEY
     assert P.ceiling_for(plane, KEY) == (None, P.CEILING_ALIAS_AMBIGUOUS)
@@ -210,7 +171,6 @@ def test_an_ambiguous_implementation_refuses_however_the_key_was_folded():
 
 
 def test_the_ceiling_is_read_at_the_canonical_key():
-    """An implementation's ceiling is the proxy's sheet, counted once."""
     plane = _plane(
         per_asset={OTHER: {"weth": 12.0}},
         per_asset_state={OTHER: {"weth": P.ASSET_PRICED}},
@@ -221,11 +181,7 @@ def test_the_ceiling_is_read_at_the_canonical_key():
 
 
 def test_a_truncated_asset_list_refuses_the_sheet_that_would_otherwise_admit():
-    """A page-capped list is a FLOOR over the holdings, never an at-most.
-
-    Read whole and read cut off both answer ``priced``, so truncation has to refuse
-    ahead of the state or a prefix gets published as a bound on the whole list.
-    """
+    """Whole and cut-off lists both read ``priced``, so truncation must refuse ahead of the state."""
     plane = _truncated()
     assert plane.sheet_state(KEY) == P.SHEET_PRICED
     assert plane.total(KEY) == 3_000_000.0
@@ -236,11 +192,6 @@ def test_a_truncated_asset_list_refuses_the_sheet_that_would_otherwise_admit():
 
 
 def test_a_truncated_list_refuses_a_proven_empty_sheet_too():
-    """The earned negative is earned over the list that was READ.
-
-    "Every asset witnessed zero" is not "holds nothing" when the sheet stops at
-    entry 100, so the $0 admit is refused under the same token as the priced one.
-    """
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
         asset_set_proven_complete={KEY: SCANNED},
@@ -251,7 +202,6 @@ def test_a_truncated_list_refuses_a_proven_empty_sheet_too():
 
 
 def test_truncation_is_read_at_the_canonical_key_in_both_directions():
-    """One sheet, so one truncation: it cannot be laundered by which key is asked."""
     plane = _plane(
         per_asset={OTHER: {"weth": 12.0}},
         per_asset_state={OTHER: {"weth": P.ASSET_PRICED}},
@@ -266,29 +216,16 @@ def test_truncation_is_read_at_the_canonical_key_in_both_directions():
 def test_an_unregistered_sheet_state_raises_instead_of_refusing_under_a_borrowed_reason(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A sixth sheet state must not inherit a fifth state's disclosure.
-
-    ``_CEILING_REFUSALS`` is read without a default for this reason: a ``.get``
-    fallback would publish "no rows were ever observed" about a fact nobody has
-    classified, and the refusal tokens are the pipeline work list.
-    """
+    """``_CEILING_REFUSALS`` has no default because a borrowed reason would misdirect the pipeline work list."""
     monkeypatch.setattr(P.ValuePlane, "sheet_state", lambda self, key: "sheet_state_nobody_registered")
     with pytest.raises(ValueError, match="no registered ceiling reason"):
         P.ceiling_for(_no_rows(), KEY)
 
 
-# --- the empty claim's own conjuncts ----------------------------------------
-# ``proven_empty`` is the only state on this plane that publishes a NUMBER out of
-# an absence, so it is the one with a set conjunct beside its quantity conjunct.
-# Each refusal below is a different missing witness, closed by different work.
+# ``proven_empty`` is the only state that publishes a number from an absence, so it has a set conjunct too.
 
 
 def test_the_quantities_alone_do_not_publish_an_empty_sheet():
-    """Zeros over a list nobody established say nothing about the entity.
-
-    "Every asset is zero" is a claim about a set, and the scan supplies the set. The
-    refusal publishes ``unpriced`` (fail-closed), never a $0.
-    """
     plane = _plane(per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}})
     assert plane.per_asset_state[KEY]["weth"] == P.ASSET_PROVEN_ZERO
     assert plane.proven_empty_refusal(KEY) == P.EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE
@@ -304,7 +241,6 @@ def test_the_quantities_alone_do_not_publish_an_empty_sheet():
 
 
 def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_question():
-    """One sheet, one asset list: the fold decides where the witness applies."""
     plane = _plane(
         per_asset_state={OTHER: {"weth": P.ASSET_PROVEN_ZERO}},
         alias={KEY: OTHER},
@@ -325,10 +261,7 @@ def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_questi
         ({"address": "0x1", "kind": "typed", "quantity_readable": "yes", "quantity": "0"}, False),
         ({"address": "0x1"}, False),
         ("not a record", False),
-        # A quantity SUMMED OVER TOKEN IDS is an all-quantifier over an inventory,
-        # so it says nothing at all unless the record also says the inventory is
-        # whole. A per-id zero over a prefix of the ids is the shape that would
-        # publish "holds nothing" over ids nobody read.
+        # A per-id zero over a prefix of the ids would publish "holds nothing" over ids nobody read.
         (
             {
                 "address": "0x1",
@@ -372,8 +305,6 @@ def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_questi
             },
             False,
         ),
-        # An ADDRESS-level read covers the holder's whole position, so no
-        # inventory stands behind it and none is asked for.
         (
             {
                 "address": "0x1",
@@ -388,23 +319,12 @@ def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_questi
     ],
 )
 def test_only_a_readable_zero_resolves_a_typed_receipt(entry, resolved: bool):
-    """An ERC-721/1155 arrival is immutable; whether it is still HELD is not.
-
-    Only a holding read back as zero closes it. An unreadable ``balanceOf``
-    (ERC-1155 has none taking an address alone) is not_determined, a non-zero count
-    is a held item, a malformed record is unreadable evidence, and a
-    truthy-but-not-``True`` flag is not a witness either.
-    """
+    """Only a holding read back as zero closes a typed receipt; ERC-1155 has no address-only ``balanceOf``."""
     assert P.typed_receipt_is_resolved(entry) is resolved
 
 
 def test_an_unresolved_typed_receipt_refuses_the_empty_sheet_and_publishes_unpriced():
-    """ "Holds nothing" is false while a typed token may still be held.
-
-    The count is not a value either — ``balanceOf`` on a 721 answers a number of
-    ITEMS — so the entity publishes ``unpriced`` rather than a dollar figure in
-    either direction.
-    """
+    """``balanceOf`` on a 721 counts items, not value."""
     unreadable = {"address": "0xnft", "kind": "typed", "quantity_readable": False, "quantity": None}
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
@@ -419,12 +339,7 @@ def test_an_unresolved_typed_receipt_refuses_the_empty_sheet_and_publishes_unpri
 
 
 def test_a_typed_receipt_with_no_fungible_reading_is_not_no_rows():
-    """``no_rows`` says nothing was observed, and a receipt IS an observation.
-
-    Left as ``no_rows`` the entity would refuse its ceiling under "no balance was
-    ever observed", which sends the operator to the wrong pipeline: the balance
-    WAS observed and the typed holding is the part nobody answered.
-    """
+    """``no_rows`` would send the operator to the wrong pipeline."""
     plane = _plane(
         asset_set_proven_complete={KEY: SCANNED},
         typed_receipts_unresolved={KEY: [{"address": "0xnft", "quantity_readable": False, "quantity": None}]},
@@ -435,12 +350,8 @@ def test_a_typed_receipt_with_no_fungible_reading_is_not_no_rows():
 
 
 def test_an_unpriced_restaking_position_refuses_the_empty_sheet():
-    """The cross-plane gate: a $0 here would contradict a plane in the same document.
-
-    The restaking plane carries quantities with no USD column at this node, so
-    the priced sheet being all zeros is a fact about the priced sheet and not
-    about the node. Publishing the $0 would also let the fold bound a magnitude
-    at zero over holdings nobody priced.
+    """The restaking plane has no USD column here, so a $0 would contradict it and bound a magnitude over unpriced
+    holdings.
     """
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
@@ -453,7 +364,6 @@ def test_an_unpriced_restaking_position_refuses_the_empty_sheet():
 
 
 def test_every_refusal_token_has_a_case_and_they_do_not_collapse():
-    """The refusals are the work list, so an unexercised token is a claim."""
     seen = set()
     for refusal, plane in (
         (P.EMPTY_REFUSED_ASSET_SET_NOT_PROVEN_COMPLETE, _plane(per_asset_state={KEY: {"w": P.ASSET_PROVEN_ZERO}})),
@@ -507,8 +417,6 @@ def test_the_native_fact_consumer_reads_the_same_answer_from_either_witness():
         answer = P.native_value_state(plane, KEY)
         assert (answer.is_determined, answer.state, answer.value) == (True, "proven_zero", 0.0)
 
-    # A nonzero holding keeps the plain label, and a fetch record that proves
-    # nothing keeps not_determined — neither moves.
     held = _plane(per_asset={KEY: {P.NATIVE_ASSET: 12.5}}, per_asset_state={KEY: {P.NATIVE_ASSET: P.ASSET_PRICED}})
     assert P.native_value_state(held, KEY).state == "proven"
     blank = _plane()
@@ -517,12 +425,7 @@ def test_the_native_fact_consumer_reads_the_same_answer_from_either_witness():
 
 
 def test_an_account_of_the_sheet_nobody_scanned_refuses_it_under_its_own_token():
-    """A scan that covered one of two addresses did not cover the sheet.
-
-    "Nobody has scanned this entity" waits on the escalation reaching it;
-    "one folded account was never read" is closed by one producer cycle over a named
-    list — so the addresses are published and the token is its own.
-    """
+    """One folded account unread is closed by one producer cycle, so it gets its own token and names the addresses."""
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
         asset_set_accounts_unscanned={KEY: ["0x" + "c" * 40]},
@@ -533,7 +436,6 @@ def test_an_account_of_the_sheet_nobody_scanned_refuses_it_under_its_own_token()
     assert plane.total(KEY) is None
     assert P.ceiling_for(plane, KEY) == (None, P.CEILING_UNPRICED)
 
-    # Scanned at last: the same sheet, the same readings, and now an admit.
     plane.asset_set_accounts_unscanned.clear()
     plane.asset_set_proven_complete[KEY] = SCANNED
     assert plane.proven_empty_refusal(KEY) is None
@@ -541,12 +443,7 @@ def test_an_account_of_the_sheet_nobody_scanned_refuses_it_under_its_own_token()
 
 
 def test_the_typed_cause_is_named_ahead_of_the_completeness_it_caused():
-    """The published token has to aim a reader at the pipeline that closes it.
-
-    A producer withholds the scan's completeness BECAUSE a typed receipt had no
-    readable holding, so a sheet carrying both is refused for the receipt. Saying
-    "nobody scanned this" there points at a scan that ran.
-    """
+    """The producer withheld completeness because of the receipt, so "nobody scanned" would point at a scan that ran."""
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
         typed_receipts_unresolved={KEY: [{"address": "0xnft", "quantity_readable": False, "quantity": None}]},

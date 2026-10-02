@@ -1,5 +1,3 @@
-"""Dispatch-chain tests for semantic event-indexed resolution."""
-
 from __future__ import annotations
 
 import pytest

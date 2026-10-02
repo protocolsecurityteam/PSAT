@@ -1,6 +1,3 @@
-"""Tests for cache lookup (find_completed_static_cache), copy_static_cache,
-copy_row, data isolation, idempotency, and no-duplicate guarantees."""
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -16,10 +13,6 @@ from tests.cache_helpers import (
 )
 
 pytestmark = requires_postgres
-
-# ---------------------------------------------------------------------------
-# 1. Cache lookup tests
-# ---------------------------------------------------------------------------
 
 
 def test_find_completed_static_cache_hit(db_session):
@@ -78,9 +71,8 @@ def test_find_completed_static_cache_miss_no_analysis(db_session):
 
 
 def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_session):
-    """Regression: proxies never produce ``contract_analysis`` on their own job
-    (only the impl child does). The cache lookup must still return the proxy's
-    completed job, or every re-discovery re-fetches and re-slithers every proxy.
+    """Proxies never produce ``contract_analysis`` (the impl child does), so without this every re-discovery
+    re-slithers every proxy.
     """
     from db.models import Contract, ContractSummary, JobStage, JobStatus
     from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
@@ -103,8 +95,6 @@ def test_find_completed_static_cache_hit_for_proxy_without_contract_analysis(db_
     db_session.add(ContractSummary(contract_id=contract.id))
     db_session.commit()
     store_source_files(db_session, job.id, {"src/Proxy.sol": "contract P {}"})
-    # Proxy jobs write contract_flags (is_proxy=True + proxy_type) instead
-    # of contract_analysis — the latter lives on the impl child's job.
     store_artifact(db_session, job.id, "contract_flags", data={"is_proxy": True, "proxy_type": "eip1967"})
 
     found = find_completed_static_cache(db_session, ADDR_A)
@@ -161,11 +151,6 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     assert found.id == new_job.id
 
 
-# ---------------------------------------------------------------------------
-# 2. Cache copy tests
-# ---------------------------------------------------------------------------
-
-
 def test_copy_static_cache(db_session):
     from sqlalchemy import select
 
@@ -209,16 +194,9 @@ def test_copy_static_cache(db_session):
     assert get_artifact(db_session, target_job.id, "contract_analysis") is not None
     assert get_artifact(db_session, target_job.id, "predicate_trees") == predicate_trees
     assert get_artifact(db_session, target_job.id, "effects") == effects
-    # slither_results / analysis_report were removed from the static-artifact
-    # cache copy set when the Slither CLI subprocess was excised — they no
-    # longer participate in caching since they're no longer produced.
+    # slither_results / analysis_report are no longer produced, so they aren't in the copy set.
     assert get_artifact(db_session, target_job.id, "control_tracking_plan") is not None
     assert get_artifact(db_session, target_job.id, "contract_flags") is None
-
-
-# ---------------------------------------------------------------------------
-# Data isolation
-# ---------------------------------------------------------------------------
 
 
 def test_data_isolation_after_cache_copy(db_session):
@@ -251,11 +229,6 @@ def test_data_isolation_after_cache_copy(db_session):
     assert get_artifact(db_session, target_job.id, "contract_analysis") is not None
 
 
-# ---------------------------------------------------------------------------
-# Idempotency
-# ---------------------------------------------------------------------------
-
-
 def test_copy_returns_early_if_target_already_populated(db_session):
     from sqlalchemy import func, select
 
@@ -280,11 +253,6 @@ def test_copy_returns_early_if_target_already_populated(db_session):
         select(func.count()).select_from(ContractSummary).where(ContractSummary.contract_id == id1)
     ).scalar()
     assert summary_count == 1, f"Expected 1 summary after double copy, got {summary_count}"
-
-
-# ---------------------------------------------------------------------------
-# No duplicate rows
-# ---------------------------------------------------------------------------
 
 
 def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
@@ -326,11 +294,6 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
     for artifact_name in ["contract_analysis", "control_tracking_plan"]:
         art = get_artifact(db_session, new_job.id, artifact_name)
         assert isinstance(art, dict), f"Missing artifact {artifact_name}"
-
-
-# ---------------------------------------------------------------------------
-# copy_row unit tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(

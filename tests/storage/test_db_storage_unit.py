@@ -1,8 +1,6 @@
-"""Unit tests for ``db.storage`` that don't touch a real bucket.
+"""``get_many`` returns ``None`` per failed key so a flaky bucket can't take down ``/api/analyses``.
 
-The boto3 wire path is in ``test_artifact_storage_integration.py``. These pin the in-memory
-contract the API layer relies on: ``get_many`` surfaces per-key transport failures as ``None``
-rather than raising, so a flaky bucket can't take down ``/api/analyses`` or stage_timings.
+The boto3 path is in ``test_artifact_storage_integration.py``.
 """
 
 from __future__ import annotations
@@ -21,7 +19,6 @@ from db.storage import (
 
 
 def _bare_client() -> StorageClient:
-    """A StorageClient built without ``__init__`` (no boto3); tests stub ``self.get`` / ``self.bucket``."""
     client = StorageClient.__new__(StorageClient)
     client.bucket = "test-bucket"
     client._client = MagicMock()
@@ -36,8 +33,7 @@ def test_get_many_returns_none_for_missing_key() -> None:
 
 
 def test_get_many_swallows_transport_errors_per_key() -> None:
-    """A transport failure on one key must not raise out of get_many: it returns ``None`` and other
-    keys still resolve. It used to raise ``StorageUnavailable`` and ``stage_timings`` forgot to wrap it."""
+    """``stage_timings`` forgot to wrap the old raise."""
     client = _bare_client()
 
     def fake_get(k: str) -> bytes:
@@ -78,14 +74,8 @@ def test_get_many_empty_input_no_pool_spawned() -> None:
     mock_pool.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# Storage-key prefix normalisation
-#
-# Rows record the writing environment's ARTIFACT_STORAGE_PREFIX verbatim. Read
-# from an environment with a different prefix, every one of those keys names an
-# object that was never written there. The read path retries prefix-stripped —
-# narrowly, so that a genuinely absent object stays absent.
-# ---------------------------------------------------------------------------
+# Rows record the writer's ARTIFACT_STORAGE_PREFIX, so reads retry prefix-stripped, narrowly enough that a real absence
+# stays absent.
 
 
 def test_preview_prefix_yields_a_stripped_candidate() -> None:
@@ -104,8 +94,7 @@ def test_preview_prefix_yields_a_stripped_candidate() -> None:
 
 
 def test_audits_keys_are_never_stripped() -> None:
-    """NEGATIVE CONTROL: ``audits/`` keys are written unprefixed and must resolve on the first
-    attempt with no fallback, so a genuinely gone audit object stays reported as gone."""
+    """``audits/`` keys are written unprefixed."""
     for key in ("audits/text/183.txt", "audits/scope/183.json", "audits/text/15.txt"):
         assert storage_key_candidates(key) == [key]
 
@@ -116,8 +105,6 @@ def test_other_bucket_namespaces_are_never_stripped() -> None:
 
 
 def test_non_prefix_leading_segments_are_never_stripped() -> None:
-    """Only an environment-scope-shaped head over a known namespace is
-    removable. Anything else would let the fallback invent a resolution."""
     assert storage_key_candidates("customer-a/artifacts/j/n") == ["customer-a/artifacts/j/n"]
     assert storage_key_candidates("pr-160/mystery/j/n") == ["pr-160/mystery/j/n"]
     assert storage_key_candidates("pr-abc/artifacts/j/n") == ["pr-abc/artifacts/j/n"]
@@ -144,8 +131,6 @@ def test_get_falls_back_to_the_stripped_key() -> None:
 
 
 def test_get_raises_and_names_every_key_it_tried() -> None:
-    """POSITIVE CONTROL shape: with no candidate holding an object the failure is loud and names
-    every key tried; a fallback must never convert proven-absent into silence."""
     client = _bare_client()
     with patch.object(client, "_get_one", side_effect=lambda k: (_ for _ in ()).throw(StorageKeyMissing(k))):
         with pytest.raises(StorageKeyMissing) as excinfo:
@@ -164,8 +149,6 @@ def test_get_on_an_unstripped_key_reports_one_attempt() -> None:
 
 
 def test_transport_failure_is_never_reported_as_absence() -> None:
-    """A 500/timeout on the first candidate must propagate, not advance to the
-    fallback and end up as 'the object is not there'."""
     client = _bare_client()
     with patch.object(client, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         with pytest.raises(StorageUnavailable):
@@ -192,8 +175,7 @@ def test_get_many_logs_a_missing_object_instead_of_dropping_it(caplog) -> None:
 
 
 def test_get_many_results_keeps_absence_and_outage_apart() -> None:
-    """Absence and outage stay apart at the batch layer too: ``get_many`` flattens both to ``None``,
-    which is why ``get_all_artifacts`` could not tell "gone" from "unreachable" from "no such artifact"."""
+    """``get_many`` flattens both to ``None``, which is why ``get_all_artifacts`` couldn't tell them apart."""
     client = _bare_client()
 
     def _fake(key: str) -> bytes:
@@ -216,7 +198,6 @@ def test_get_many_results_keeps_absence_and_outage_apart() -> None:
     assert reads["artifacts/j/outage"].not_determined
     assert not reads["artifacts/j/outage"].proven_absent
 
-    # The flattened view a cause-independent caller still gets.
     with patch.object(client, "get", side_effect=_fake):
         assert client.get_many(["artifacts/j/gone", "artifacts/j/outage"]) == {
             "artifacts/j/gone": None,
