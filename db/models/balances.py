@@ -482,6 +482,9 @@ CURSOR_BASIS_NOT_DETERMINED = "not_determined"
 # Whether the row carries a variable attribution.
 ENROLLMENT_BASIS_PREDICATE_HINT = "predicate_tree_hint"
 ENROLLMENT_BASIS_TRACKED_TOPICS = "tracked_topics_asserted"
+# A tracked cursor whose rows the operator's retire tool is deleting: never upgraded, never eligible, so a partly
+# deleted row set can't back an exact answer.
+ENROLLMENT_BASIS_RETIRING = "retiring"
 # Allowlist: exactness (a zero-row fold published as "never fired") only for bases known to attribute a variable. A
 # denylist would fail open, e.g. on the ``not_determined`` that ``enroll_event_cursor`` stores by default. NULL
 # (pre-column rows) stays eligible.

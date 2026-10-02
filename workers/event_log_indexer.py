@@ -30,6 +30,7 @@ from db.floor_witnesses import (
 from db.models import (
     CURSOR_BASIS_NOT_DETERMINED,
     ENROLLMENT_BASIS_PREDICATE_HINT,
+    ENROLLMENT_BASIS_RETIRING,
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
@@ -436,7 +437,7 @@ def _upgrade_to_predicate_hint(session: Session, *, chain_id: int, address: str,
         .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
         .where(IndexedEventCursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION)
         .where(IndexedEventCursor.enrollment_basis.is_not(None))
-        .where(IndexedEventCursor.enrollment_basis.not_in(eligible))
+        .where(IndexedEventCursor.enrollment_basis.not_in([*eligible, ENROLLMENT_BASIS_RETIRING]))
         .values(enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT)
         .execution_options(synchronize_session=False)
     )

@@ -82,17 +82,6 @@ def session():
         engine.dispose()
 
 
-@pytest.fixture(autouse=True)
-def _no_network(monkeypatch):
-    import services.clients.rpc as rpc
-
-    def _boom(*_a, **_k):
-        raise RuntimeError("network disabled in test")
-
-    monkeypatch.setattr(rpc, "rpc_request", _boom, raising=False)
-    monkeypatch.setattr(rpc, "rpc_batch_request_with_status", _boom, raising=False)
-
-
 def _job(session, address: str, trees: dict, controllers: dict[str, str]):
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus
     from db.queue import store_artifact
@@ -249,7 +238,7 @@ def _abis(fixture: dict):
     return lambda _chain_id, address: by_address.get(address)
 
 
-def _resolve_all(session, fixture: dict, jobs) -> dict[str, Any]:
+def _resolve_all(session, _fixture: dict, jobs) -> dict[str, Any]:
     from services.resolution.capability_resolver import resolve_contract_capabilities
     from services.resolution.creation_block_floor import clear_scan_floor_cache
 
@@ -305,3 +294,156 @@ def test_retiring_tracked_cursors_leaves_every_capability_expression_unchanged(s
         fixture["role_events"]
     )
     assert _resolve_all(session, fixture, jobs) == before
+
+
+# A gate whose bool check targets a registry with no predicate trees, so the resolver materializes the caller set from
+# whatever rows are indexed at the registry, and a void check on a second registry.
+_REGISTRY = "0x" + "4b" * 20
+_HOOK = "0x" + "4c" * 20
+_ROOT = "0x" + "4d" * 20
+_MINTER_A = "0x" + "e1" * 20
+_MINTER_B = "0x" + "e2" * 20
+_IS_MINTER = "isMinter(address)"
+_BEFORE_MINT = "beforeMint(address)"
+
+
+def _selector(signature: str) -> str:
+    from eth_utils.crypto import keccak
+
+    return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _caller_check(state_variable: str, signature: str) -> dict[str, Any]:
+    return {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "external_bool",
+            "operator": "truthy",
+            "authority_role": "delegated_authority",
+            "operands": [{"source": "msg_sender"}],
+            "set_descriptor": {
+                "kind": "external_set",
+                "authority_contract": {
+                    "address_source": {"source": "state_variable", "state_variable_name": state_variable}
+                },
+                "callee_signature": signature,
+                "callee_selector": _selector(signature),
+            },
+            "references_msg_sender": True,
+            "parameter_indices": [],
+            "expression": f"{state_variable}.{signature.split('(')[0]}(msg.sender)",
+            "basis": [],
+        },
+    }
+
+
+def _registry_rows(session, address: str, members: list[str]) -> None:
+    _cursor(session, address, _TRANSFER, ENROLLMENT_BASIS_TRACKED_TOPICS)
+    for i, member in enumerate(members):
+        session.add(
+            IndexedEventLog(
+                chain_id=1,
+                event_address=address,
+                topic0=_TRANSFER,
+                tx_hash=(50_000 + i).to_bytes(32, "big"),
+                log_index=i,
+                block_number=20_000_000 + i,
+                block_hash=b"\x06" * 32,
+                transaction_index=0,
+                topics=[_TRANSFER, _word(member), _word(member)],
+                data_words=[],
+            )
+        )
+
+
+@pytest.fixture
+def materializer_wire(monkeypatch):
+    """The materializer's eth_call batch: ``isMinter`` answers true for every candidate, the void ``beforeMint``
+    returns nothing, as on chain. HyperSync (its fallback candidate source) has nothing."""
+    import services.resolution.external_check_materializer as materializer
+
+    calls: list[tuple[str, str]] = []
+
+    def batch(_rpc_url, batch_calls):
+        out = []
+        for _method, params in batch_calls:
+            call = params[0]
+            calls.append((call["to"], call["data"][:10]))
+            void = call["data"].startswith(_selector(_BEFORE_MINT))
+            out.append(("0x" if void else "0x" + "0" * 63 + "1", False))
+        return out
+
+    monkeypatch.setattr(materializer, "rpc_batch_request_with_status", batch)
+    monkeypatch.setattr(materializer, "_candidate_addresses_from_hypersync", lambda **_k: [])
+    return calls
+
+
+def _seed_materialized(session):
+    root_trees = {
+        "trees": {
+            "mint(address,uint256)": _caller_check("registry", _IS_MINTER),
+            "mintWithHook(address,uint256)": _caller_check("hook", _BEFORE_MINT),
+        }
+    }
+    root = _job(session, _ROOT, root_trees, {"external_contract:registry": _REGISTRY, "external_contract:hook": _HOOK})
+    root.request = {**(root.request or {}), "rpc_url": "http://rpc.stub"}
+    for address in (_REGISTRY, _HOOK):
+        _job(session, address, {"trees": {}, "check_trees": {}}, {})
+    _registry_rows(session, _REGISTRY, [_MINTER_A, _MINTER_B])
+    _registry_rows(session, _HOOK, [_MINTER_A])
+    _monitor(session, _REGISTRY, [{"topic0": _TRANSFER, "witness_tier": "activity"}])
+    _monitor(session, _HOOK, [{"topic0": _TRANSFER, "witness_tier": "activity"}])
+    session.flush()
+    for address in (_REGISTRY, _HOOK):
+        record_floor_witness(session, chain_id=1, address=address, outcome=WITNESS_PROVEN, first_indexed_block=1)
+    session.commit()
+    return root
+
+
+def _materialized_abis(_chain_id: int, address: str) -> list[dict[str, Any]] | None:
+    entry = {"type": "function", "inputs": [{"type": "address"}]}
+    if address == _REGISTRY:
+        return [{**entry, "name": "isMinter", "outputs": [{"type": "bool"}]}]
+    if address == _HOOK:
+        return [{**entry, "name": "beforeMint", "outputs": []}]
+    return None
+
+
+def _members(caps: dict[str, Any], function: str) -> set[str]:
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for member in node.get("members") or []:
+                if isinstance(member, str):
+                    found.add(member.lower())
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(caps[function])
+    return found
+
+
+@requires_postgres
+def test_retire_keeps_rows_a_bool_check_materializes_from_and_drops_only_void_check_rows(session, materializer_wire):
+    root = _seed_materialized(session)
+
+    before = _resolve_all(session, {}, [root])
+    # The registry's tracked rows are the materializer's candidates: they reach the published caller set.
+    assert {_MINTER_A, _MINTER_B} <= _members(before[_ROOT], "mint(address,uint256)")
+    assert (_REGISTRY, _selector(_IS_MINTER)) in materializer_wire
+    assert (_HOOK, _selector(_BEFORE_MINT)) in materializer_wire
+
+    retired = retire.apply_retirement(session, addresses=[_REGISTRY, _HOOK], abi_lookup=_materialized_abis)
+    assert {(v.address, v.topic0) for v in retired} == {(_HOOK, _TRANSFER)}
+    assert _resolve_all(session, {}, [root]) == before
+
+    # Had gate 5′ let the bool-check target's rows go, the published caller set would shrink.
+    session.execute(delete(IndexedEventLog).where(IndexedEventLog.event_address == _REGISTRY))
+    session.commit()
+    stripped = _resolve_all(session, {}, [root])
+    assert stripped != before
+    assert not {_MINTER_A, _MINTER_B} & _members(stripped[_ROOT], "mint(address,uint256)")

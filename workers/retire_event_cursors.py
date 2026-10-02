@@ -5,7 +5,8 @@
 
 A cursor is retirable only when every gate holds, each with its evidence printed:
 
-1. ``tracked_basis``: its ``enrollment_basis`` is ``tracked_topics_asserted``;
+1. ``tracked_basis``: its ``enrollment_basis`` is ``tracked_topics_asserted`` (or ``retiring``, left by an interrupted
+   apply);
 2. ``no_indexed_spec``: no active monitored contract on its chain names its (address, topic0) with a tier that is
    indexed (anything but ``activity`` / ``hint``, so an unstamped spec blocks);
 3. ``no_predicate_hint``: no completed job's predicate trees resolve to its (chain, address, topic0), replayed through
@@ -15,6 +16,9 @@ A cursor is retirable only when every gate holds, each with its evidence printed
    returns nothing (an empty return decodes as false, so such a check never reads the rows); a callee whose outputs
    can't be read blocks;
 6. ``floor_witness_kept``: when it is its address's last cursor, an ``address_floor_witnesses`` row exists.
+
+An external check whose target no controller value names can't be placed by gate 5; the dry run lists every such check
+and ``--apply`` refuses to run while any exist unless given ``--acknowledge-unresolved-checks``.
 
 ``--apply`` deletes only retirable cursors at the listed addresses, re-evaluating every gate at apply time. Rows go in
 transactions of at most 5,000; the cursor is deleted in the same transaction as its final batch. The log-delete
@@ -32,14 +36,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Sequence
 
 from eth_utils.crypto import keccak
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.orm import Session
 
 from db.models import (
+    ENROLLMENT_BASIS_RETIRING,
     ENROLLMENT_BASIS_TRACKED_TOPICS,
     AddressFloorWitness,
     IndexedEventCursor,
     IndexedEventLog,
+    Job,
     MonitoredContract,
     SessionLocal,
 )
@@ -61,6 +67,8 @@ from workers.event_log_indexer import (
 logger = logging.getLogger("workers.retire_event_cursors")
 
 DELETE_BATCH_ROWS = 5_000
+# A ``retiring`` cursor is one an interrupted apply left behind; retiring it again finishes the job.
+_RETIRABLE_BASES = (ENROLLMENT_BASIS_TRACKED_TOPICS, ENROLLMENT_BASIS_RETIRING)
 
 GATES = (
     "tracked_basis",
@@ -169,11 +177,14 @@ class _Evidence:
     hint_keys: dict[tuple[int, str, str], list[str]] = field(default_factory=lambda: defaultdict(list))
     role_store_addresses: dict[tuple[int, str], list[str]] = field(default_factory=lambda: defaultdict(list))
     checks: dict[tuple[int, str], list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))
-    unresolved_checks: int = 0
+    unresolved_checks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _replay_jobs(session: Session) -> _Evidence:
-    """Predicate-hint keys and external check targets over every completed job, read-only."""
+    """Predicate-hint keys over every completed job, and external check targets over every job with predicate trees,
+    read-only."""
+    from services.resolution.capability_resolver import _load_state_var_values
+
     evidence = _Evidence()
     for job in session.execute(completed_jobs_query()).scalars():
         job_ref = str(job.id)
@@ -183,13 +194,20 @@ def _replay_jobs(session: Session) -> _Evidence:
                 continue
             for topic0 in target.topics:
                 evidence.hint_keys[(target.chain_id, target.address, topic0.lower())].append(job_ref)
+    # A job still in the pipeline resolves its checks too, so every job with trees counts here.
+    for job in session.execute(select(Job).where(Job.address.isnot(None)).order_by(Job.id)).scalars():
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
         chain_id = job_chain(job)
         if chain_id is None:
             continue
-        values = _state_var_values_for_job(session, job)
+        # Both sources a resolution may read the target from: the job's own controller values and the
+        # deployment-scoped ones; a check counts against every address either names.
+        value_sets = [
+            _state_var_values_for_job(session, job),
+            _load_state_var_values(session, str(job.address), job_id=job.id),
+        ]
         for tree_key in ("trees", "check_trees"):
             trees = artifact.get(tree_key)
             if not isinstance(trees, dict):
@@ -202,19 +220,28 @@ def _replay_jobs(session: Session) -> _Evidence:
                         selector = _selector(signature)
                     if not isinstance(selector, str):
                         continue
-                    target = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
-                    if not isinstance(target, str):
-                        # No resolved target address: the materializer has no checker rows to read for it.
-                        evidence.unresolved_checks += 1
-                        continue
-                    evidence.checks[(chain_id, target.lower())].append(
-                        {
-                            "job_id": job_ref,
-                            "function": function,
-                            "callee_signature": signature,
-                            "callee_selector": selector.lower(),
-                        }
-                    )
+                    check = {
+                        "job_id": str(job.id),
+                        "function": function,
+                        "callee_signature": signature,
+                        "callee_selector": selector.lower(),
+                    }
+                    targets = {
+                        target.lower()
+                        for values in value_sets
+                        if isinstance(
+                            target := _event_address_for_descriptor(
+                                descriptor, {}, job, values, allow_job_fallback=False
+                            ),
+                            str,
+                        )
+                    }
+                    if not targets:
+                        evidence.unresolved_checks.append(
+                            {**check, "chain_id": chain_id, "authority_contract": descriptor.get("authority_contract")}
+                        )
+                    for target in sorted(targets):
+                        evidence.checks[(chain_id, target)].append(check)
     return evidence
 
 
@@ -255,8 +282,13 @@ def plan_retirement(
     chain_id: int | None = None,
     addresses: Sequence[str] | None = None,
     abi_lookup: AbiLookup | None = None,
+    unresolved_checks: list[dict[str, Any]] | None = None,
 ) -> list[CursorVerdict]:
-    """Every cursor in scope with its gate evidence. Read-only."""
+    """Every cursor in scope with its gate evidence. Read-only.
+
+    ``unresolved_checks`` receives the external checks whose target address no controller value names: gate 5′ can't
+    place them, so they are shown rather than assumed harmless.
+    """
     query = select(
         IndexedEventCursor.chain_id,
         func.lower(IndexedEventCursor.event_address),
@@ -324,11 +356,8 @@ def plan_retirement(
         cursors_per_group[(int(c), str(a))] += 1
     specs = _monitored_specs(session)
     replay = _replay_jobs(session)
-    if replay.unresolved_checks:
-        logger.info(
-            "external checks whose target address is unresolved; the materializer reads no rows for them",
-            extra={"checks": replay.unresolved_checks},
-        )
+    if unresolved_checks is not None:
+        unresolved_checks[:] = replay.unresolved_checks
     role_store_topics = {t.lower() for t in all_topic0s()}
     abi_cache: dict[tuple[int, str], list[dict[str, Any]] | None] = {}
     lookup = abi_lookup if abi_lookup is not None else etherscan_abi
@@ -363,7 +392,7 @@ def plan_retirement(
         verdict = CursorVerdict(chain_id=key[0], address=key[1], topic0=key[2], enrollment_basis=basis, rows=0)
         verdict.rows = row_counts.get(key, 0)
         verdict.gates["tracked_basis"] = {
-            "pass": basis == ENROLLMENT_BASIS_TRACKED_TOPICS,
+            "pass": basis in _RETIRABLE_BASES,
             "evidence": {"enrollment_basis": basis},
         }
         key_specs = specs.get(key, [])
@@ -404,8 +433,13 @@ def plan_retirement(
     return verdicts
 
 
-def _retire_cursor(session: Session, verdict: CursorVerdict, *, batch_rows: int) -> int:
-    """Delete one cursor's rows in bounded transactions, the cursor with the final batch; returns rows deleted."""
+def _retire_cursor(session: Session, verdict: CursorVerdict, *, batch_rows: int) -> int | None:
+    """Delete one cursor's rows in bounded transactions, the cursor with the final batch; returns rows deleted, or
+    ``None`` when the cursor is no longer a tracked one at its first lock (nothing is deleted then).
+
+    The first transaction marks the cursor ``retiring`` under its row lock, so no enrolment upgrade can make the partly
+    deleted cursor eligible between batches.
+    """
     cursor_filter = (
         (IndexedEventCursor.chain_id == verdict.chain_id)
         & (func.lower(IndexedEventCursor.event_address) == verdict.address)
@@ -419,10 +453,28 @@ def _retire_cursor(session: Session, verdict: CursorVerdict, *, batch_rows: int)
     deleted = 0
     while True:
         # The cursor lock first, as every indexer write takes it, so no page lands rows behind the final batch.
-        held = session.execute(select(IndexedEventCursor.topic0).where(cursor_filter).with_for_update()).first()
+        held = session.execute(
+            select(IndexedEventCursor.enrollment_basis).where(cursor_filter).with_for_update()
+        ).first()
         if held is None:
             session.rollback()
             return deleted
+        if held[0] not in _RETIRABLE_BASES:
+            session.rollback()
+            logger.warning(
+                "cursor basis changed since its gates were evaluated; not retired",
+                extra={
+                    "chain_id": verdict.chain_id,
+                    "event_address": verdict.address,
+                    "topic0": verdict.topic0,
+                    "enrollment_basis": held[0],
+                },
+            )
+            return None
+        if held[0] != ENROLLMENT_BASIS_RETIRING:
+            session.execute(
+                update(IndexedEventCursor).where(cursor_filter).values(enrollment_basis=ENROLLMENT_BASIS_RETIRING)
+            )
         keys = session.execute(
             select(
                 IndexedEventLog.chain_id,
@@ -462,15 +514,29 @@ def apply_retirement(
     chain_id: int | None = None,
     abi_lookup: AbiLookup | None = None,
     batch_rows: int = DELETE_BATCH_ROWS,
+    acknowledge_unresolved_checks: bool = False,
 ) -> list[CursorVerdict]:
-    """Retire the retirable cursors at ``addresses``, re-evaluating every gate first; returns the retired set."""
+    """Retire the retirable cursors at ``addresses``, re-evaluating every gate first; returns the retired set.
+
+    Refuses to delete anything while an external check has no resolvable target, unless the operator acknowledges
+    having reviewed them.
+    """
     if not addresses:
         raise ValueError("--apply needs an explicit address list")
-    verdicts = plan_retirement(session, chain_id=chain_id, addresses=addresses, abi_lookup=abi_lookup)
+    unresolved: list[dict[str, Any]] = []
+    verdicts = plan_retirement(
+        session, chain_id=chain_id, addresses=addresses, abi_lookup=abi_lookup, unresolved_checks=unresolved
+    )
     session.rollback()
-    retired = [v for v in verdicts if v.retirable]
-    for verdict in retired:
-        verdict.rows = _retire_cursor(session, verdict, batch_rows=batch_rows)
+    if unresolved and not acknowledge_unresolved_checks:
+        raise UnresolvedChecks(unresolved)
+    retired = []
+    for verdict in (v for v in verdicts if v.retirable):
+        rows = _retire_cursor(session, verdict, batch_rows=batch_rows)
+        if rows is None:
+            continue
+        verdict.rows = rows
+        retired.append(verdict)
         logger.info(
             "retired event cursor",
             extra={
@@ -481,6 +547,15 @@ def apply_retirement(
             },
         )
     return retired
+
+
+class UnresolvedChecks(RuntimeError):
+    def __init__(self, checks: list[dict[str, Any]]) -> None:
+        super().__init__(
+            f"{len(checks)} external check(s) have no resolvable target; review them in the dry run and pass "
+            "--acknowledge-unresolved-checks"
+        )
+        self.checks = checks
 
 
 def _summary(verdicts: Sequence[CursorVerdict], *, applied: bool) -> dict[str, Any]:
@@ -509,19 +584,42 @@ def main(argv: Sequence[str] | None = None, *, session_factory: Callable[[], Ses
     mode.add_argument("--apply", action="store_true", help="retire the retirable cursors at --addresses")
     parser.add_argument("--addresses", default="", help="comma-separated addresses; required with --apply")
     parser.add_argument("--chain-id", type=int, default=None)
+    parser.add_argument(
+        "--acknowledge-unresolved-checks",
+        action="store_true",
+        help="apply even though some external checks have no resolvable target (listed by the dry run)",
+    )
     args = parser.parse_args(argv)
     addresses = [a.strip().lower() for a in args.addresses.split(",") if a.strip()]
     if args.apply and not addresses:
         parser.error("--apply needs --addresses")
+    unresolved: list[dict[str, Any]] = []
     with session_factory() as session:
         if args.apply:
-            verdicts = apply_retirement(session, addresses=addresses, chain_id=args.chain_id)
+            try:
+                verdicts = apply_retirement(
+                    session,
+                    addresses=addresses,
+                    chain_id=args.chain_id,
+                    acknowledge_unresolved_checks=args.acknowledge_unresolved_checks,
+                )
+            except UnresolvedChecks as exc:
+                print(json.dumps({"unresolved_external_checks": exc.checks}, sort_keys=True, default=str))
+                print(json.dumps({"error": str(exc)}))
+                return 2
         else:
-            verdicts = plan_retirement(session, chain_id=args.chain_id, addresses=addresses or None)
+            verdicts = plan_retirement(
+                session, chain_id=args.chain_id, addresses=addresses or None, unresolved_checks=unresolved
+            )
             session.rollback()
     for verdict in verdicts:
         print(json.dumps(verdict.to_json(), sort_keys=True, default=str))
-    print(json.dumps({"summary": _summary(verdicts, applied=args.apply)}, sort_keys=True))
+    if not args.apply:
+        print(json.dumps({"unresolved_external_checks": unresolved}, sort_keys=True, default=str))
+    summary = _summary(verdicts, applied=args.apply)
+    if not args.apply:
+        summary["unresolved_external_checks"] = len(unresolved)
+    print(json.dumps({"summary": summary}, sort_keys=True))
     return 0
 
 

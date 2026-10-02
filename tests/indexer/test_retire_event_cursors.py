@@ -118,13 +118,15 @@ def _monitored(session, address: str, specs: list[dict[str, Any]], *, chain: str
     session.flush()
 
 
-def _job(session, trees: dict[str, Any], *, chain_id: int = 1, address: str = _Y) -> None:
+def _job(
+    session, trees: dict[str, Any], *, chain_id: int = 1, address: str = _Y, status: JobStatus = JobStatus.completed
+) -> None:
     job = Job(
         address=address,
         chain_id=chain_id,
         request={"address": address},
-        status=JobStatus.completed,
-        stage=JobStage.done,
+        status=status,
+        stage=JobStage.done if status == JobStatus.completed else JobStage.policy,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -322,7 +324,7 @@ def test_dry_run_writes_nothing_and_names_exactly_the_apply_set(db_session, monk
     assert retire.main(["--dry-run", "--addresses", _X], session_factory=factory) == 0
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert _snapshot(db_session) == before
-    planned = {(v["chain_id"], v["address"], v["topic0"]) for v in lines[:-1] if v["retirable"]}
+    planned = {(v["chain_id"], v["address"], v["topic0"]) for v in lines if v.get("retirable")}
     assert planned == {(1, _X, _A)}
     assert lines[-1]["summary"]["retirable_rows"] == 3
 
@@ -390,3 +392,134 @@ def test_apply_requires_an_address_list(db_session):
         retire.main(["--apply"], session_factory=lambda: Session(db_session.get_bind()))
     with pytest.raises(ValueError):
         retire.apply_retirement(db_session, addresses=[])
+
+
+def test_no_upgrade_can_make_a_partly_retired_cursor_eligible(db_session):
+    from db.models import cursor_permits_exactness
+    from workers.event_log_indexer import _upgrade_to_predicate_hint
+
+    _cursor(db_session, _X, _A, ENROLLMENT_BASIS_TRACKED_TOPICS)
+    _rows(db_session, _X, _A, 12_001)
+    _cursor(db_session, _X, _H, ENROLLMENT_BASIS_PREDICATE_HINT)
+    db_session.commit()
+    upgrades: list[tuple[bool, bool]] = []
+
+    def enrol_between_batches(_session) -> None:
+        if upgrades:
+            return
+        with Session(db_session.get_bind()) as enrolment:
+            upgraded = _upgrade_to_predicate_hint(enrolment, chain_id=1, address=_X, topic0=_A)
+            enrolment.commit()
+            cursor = enrolment.execute(
+                select(IndexedEventCursor).where(
+                    IndexedEventCursor.event_address == _X, IndexedEventCursor.topic0 == _A
+                )
+            ).scalar_one()
+            upgrades.append(
+                (upgraded, cursor_permits_exactness(cursor.enrollment_basis, cursor.first_indexed_block_basis))
+            )
+
+    session = Session(db_session.get_bind())
+    event.listen(session, "after_commit", enrol_between_batches)
+    try:
+        retired = retire.apply_retirement(session, addresses=[_X], abi_lookup=_Abis())
+    finally:
+        session.close()
+    assert upgrades == [(False, False)]
+    assert [(v.topic0, v.rows) for v in retired] == [(_A, 12_001)]
+
+
+def test_a_cursor_whose_basis_changed_before_its_first_lock_is_left_whole(db_session):
+    _scene(db_session)
+    verdict = _verdict(db_session, _Abis({_X: _abi([])}))
+    assert verdict.retirable
+    db_session.execute(
+        update(IndexedEventCursor)
+        .where(IndexedEventCursor.topic0 == _A)
+        .values(enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT)
+    )
+    db_session.commit()
+    assert retire._retire_cursor(db_session, verdict, batch_rows=2) is None
+    db_session.expire_all()
+    assert (
+        db_session.execute(
+            select(func.count()).select_from(IndexedEventLog).where(IndexedEventLog.topic0 == _A)
+        ).scalar_one()
+        == 3
+    )
+
+
+def test_an_interrupted_apply_can_be_finished(db_session):
+    _scene(db_session)
+    db_session.execute(
+        update(IndexedEventCursor).where(IndexedEventCursor.topic0 == _A).values(enrollment_basis="retiring")
+    )
+    db_session.commit()
+    retired = retire.apply_retirement(db_session, addresses=[_X], abi_lookup=_Abis({_X: _abi([])}))
+    assert [(v.topic0, v.rows) for v in retired] == [(_A, 3)]
+
+
+def test_gate_5_counts_checks_from_jobs_still_in_the_pipeline(db_session):
+    _scene(db_session)
+    bool_check = _leaf(
+        {"kind": "external_set", "authority_contract": {"address": _X}, "callee_signature": "isOperator(address)"},
+        kind="external_bool",
+    )
+    _job(db_session, {"f(address)": bool_check}, address="0x" + "9a" * 20, status=JobStatus.processing)
+    db_session.commit()
+    abi = [
+        *_abi([]),
+        {"type": "function", "name": "isOperator", "inputs": [{"type": "address"}], "outputs": [{"type": "bool"}]},
+    ]
+    verdict = _verdict(db_session, _Abis({_X: abi}))
+    assert _failing(verdict) == {"no_materializable_check"}
+    blocking = [c for c in verdict.gates["no_materializable_check"]["evidence"]["checks"] if c["blocks"]]
+    assert [c["callee_signature"] for c in blocking] == ["isOperator(address)"]
+
+
+def test_unresolved_checks_are_listed_and_apply_needs_them_acknowledged(db_session, capsys):
+    _scene(db_session)
+    unplaced = _leaf(
+        {
+            "kind": "external_set",
+            "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "gate"}},
+            "callee_signature": _CHECK,
+        },
+        kind="external_bool",
+    )
+    _job(db_session, {"g(address)": unplaced}, address="0x" + "9b" * 20)
+    db_session.commit()
+    abis = _Abis({_X: _abi([])})
+    factory = lambda: Session(db_session.get_bind())  # noqa: E731
+    import workers.retire_event_cursors as module
+
+    original = module.etherscan_abi
+    module.etherscan_abi = abis
+    try:
+        assert retire.main(["--addresses", _X], session_factory=factory) == 0
+        lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        listed = next(line["unresolved_external_checks"] for line in lines if "unresolved_external_checks" in line)
+        assert [(c["function"], c["callee_signature"]) for c in listed] == [("g(address)", _CHECK)]
+        assert lines[-1]["summary"]["unresolved_external_checks"] == 1
+
+        assert retire.main(["--apply", "--addresses", _X], session_factory=factory) == 2
+        assert "acknowledge" in capsys.readouterr().out
+        db_session.expire_all()
+        assert (
+            db_session.execute(
+                select(func.count()).select_from(IndexedEventLog).where(IndexedEventLog.topic0 == _A)
+            ).scalar_one()
+            == 3
+        )
+
+        args = ["--apply", "--addresses", _X, "--acknowledge-unresolved-checks"]
+        assert retire.main(args, session_factory=factory) == 0
+    finally:
+        module.etherscan_abi = original
+    db_session.expire_all()
+    assert (
+        db_session.execute(
+            select(func.count()).select_from(IndexedEventLog).where(IndexedEventLog.topic0 == _A)
+        ).scalar_one()
+        == 0
+    )
