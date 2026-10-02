@@ -96,6 +96,8 @@ def drain_enrollment(
         except Exception as exc:
             deferred += 1
             session.rollback()
+            # A verdict cached by the rolled-back work has no witness row; a later source must witness again.
+            caches.witnesses.clear()
             finish(session, claim, success=False)
             logger.warning(
                 "indexer enrollment deferred",

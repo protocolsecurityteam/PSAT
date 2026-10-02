@@ -16,10 +16,15 @@ from db.models import (
     AddressFloorWitness,
     IndexedEventCursor,
     IndexerWork,
+    Job,
+    JobStage,
+    JobStatus,
     cursor_permits_exactness,
 )
+from db.queue import store_artifact
 from services.resolution import indexer_scheduler
 from services.resolution.creation_block_floor import clear_scan_floor_cache, resolve_scan_floor_with_basis
+from services.resolution.indexer_work import mark_dirty
 from tests.conftest import requires_postgres
 from workers.event_log_indexer import (
     EnrollmentCaches,
@@ -321,3 +326,43 @@ def test_enrolment_drain_runs_the_retry_step_and_reports_it(db_session, wire):
     indexer_scheduler.drain_enrollment(db_session, on_rewitness=reported.append)
     assert reported == [1]
     assert _row(db_session, _A).outcome == "proven"
+
+
+def _hinting_job(session, address: str, topic0: str) -> Job:
+    job = Job(
+        address=address, chain_id=1, request={"address": address}, status=JobStatus.completed, stage=JobStage.done
+    )
+    session.add(job)
+    session.flush()
+    leaf = {"op": "LEAF", "leaf": {"set_descriptor": {"enumeration_hint": [{"topic0": topic0}]}}}
+    store_artifact(session, job.id, "predicate_trees", data={"trees": {"f()": leaf}})
+    return job
+
+
+def test_a_rolled_back_source_leaves_no_witness_verdict_for_the_next_one(db_session, wire, monkeypatch):
+    import workers.event_log_indexer as eli
+
+    jobs = [_hinting_job(db_session, _A, topic0) for topic0 in (_T1, _T2)]
+    db_session.execute(delete(IndexerWork))
+    for job in jobs:
+        mark_dirty(db_session, "job", str(job.id))
+    db_session.commit()
+    real_enroll = eli.enroll_event_cursor
+    inserts: list[str] = []
+
+    def fail_first_insert(session, **kwargs):
+        inserts.append(kwargs["topic0"])
+        if len(inserts) == 1:
+            raise RuntimeError("connection lost after the witness was graded")
+        return real_enroll(session, **kwargs)
+
+    monkeypatch.setattr(eli, "enroll_event_cursor", fail_first_insert)
+
+    indexer_scheduler.drain_enrollment(db_session, tracked_limit=0, witness_budget=0)
+
+    (cursor,) = db_session.execute(select(IndexedEventCursor)).scalars().all()
+    assert cursor.topic0 == inserts[1]
+    assert (cursor.first_indexed_block, cursor.first_indexed_block_basis) == (_SEED, FIRST_INDEXED_BASIS_CREATION)
+    row = _row(db_session, _A)
+    assert (row.outcome, row.first_indexed_block) == ("proven", _SEED)
+    assert [method for method, _address in wire.rpc].count("eth_getLogs") == 2
