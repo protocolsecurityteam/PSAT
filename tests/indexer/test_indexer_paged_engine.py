@@ -364,13 +364,22 @@ def test_a_query_timeout_caps_the_next_visit_below_the_refused_span(db_session, 
     assert _cursor(db_session).request_span_limit is None
 
 
-def test_a_transient_upstream_error_bisects_but_sets_no_span_limit(db_session, sim):
+@pytest.mark.parametrize(
+    "error",
+    [
+        "{'code': -32000, 'message': 'upstream unavailable'}",
+        "{'code': -32005, 'message': 'rate limit exceeded'}",
+        "{'code': -32000, 'message': 'requested block range is not synced yet'}",
+    ],
+    ids=["outage", "rate_limit", "not_synced"],
+)
+def test_a_transient_upstream_error_bisects_but_sets_no_span_limit(db_session, sim, error):
     failed: list[int] = []
 
     def flaky(_chain, lo, hi):
         if not failed:
             failed.append(hi - lo + 1)
-            return "{'code': -32000, 'message': 'upstream unavailable'}"
+            return error
         return None
 
     sim.refuse = flaky
@@ -388,7 +397,7 @@ def test_a_persisted_span_limit_never_falls_below_the_bisect_floor(db_session, s
     sim.refuse = lambda _chain, lo, hi: _QUERY_TIMED_OUT if hi - lo + 1 > 3_000 else None
     sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
     _enroll(db_session, seed=_SEED)
-    limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=50_000)
+    limits = PageLimits(max_block_span=20_000, initial_span=20_000, target_page_logs=2_000, max_page_logs=50_000)
     fetchers, heads, hashes = _fetchers()
     cast(RpcEventLogFetcher, fetchers[1]).min_bisect_span = 1_000
 
@@ -398,11 +407,15 @@ def test_a_persisted_span_limit_never_falls_below_the_bisect_floor(db_session, s
         head_fetchers=heads,
         block_hash_fetchers=hashes,
         page_limits=limits,
-        max_windows_per_cursor=1,
+        max_windows_per_cursor=12,
     )
 
-    # Bisection reached 3,000-block pages, but the next visit's limit stays at the floor.
-    assert sim.getlogs[-1]["to"] - sim.getlogs[-1]["from"] + 1 <= 3_000
+    # Bisection reached pages under 3,000 blocks, but neither the rest of the visit nor the next one shrinks below the
+    # floor: each later chunk is requested at 10,000 blocks.
+    spans = [r["to"] - r["from"] + 1 for r in sim.getlogs]
+    assert min(spans) <= 3_000
+    first_accepted = next(i for i, r in enumerate(sim.getlogs) if r["served"] is not None)
+    assert 10_000 in spans[first_accepted + 1 :]
     assert _cursor(db_session).request_span_limit == 10_000
 
 
@@ -434,7 +447,9 @@ def test_a_local_ceiling_discard_is_not_an_upstream_refusal(sim):
     assert pages[0].rejected == 1 and pages[0].rejected_span is None
 
 
-def _merged_wide_range_sim(sim, *, lo: int, hi: int, logs: int, refuse_over: int) -> None:
+def _merged_wide_range_sim(
+    sim, *, lo: int, hi: int, logs: int, refuse_over: int, error: str = "Limit exceeded: More than {n} logs returned"
+) -> None:
     """The upstream serves exactly ``[lo, hi]`` whole (an aggregator merging its split sub-requests) but refuses any
     other request holding more than ``refuse_over`` logs."""
     every = (hi - lo + 1) // logs
@@ -444,7 +459,7 @@ def _merged_wide_range_sim(sim, *, lo: int, hi: int, logs: int, refuse_over: int
     def refuse(_chain, a, b):
         if (a, b) == (lo, hi) or len(lane.between(a, b)) <= refuse_over:
             return None
-        return "{'code': -32005, 'message': 'Limit exceeded'}"
+        return "{'code': -32005, 'message': '" + error.format(n=refuse_over) + "'}"
 
     sim.refuse = refuse
 
@@ -462,6 +477,16 @@ def test_a_refusal_below_the_floor_after_a_ceiling_split_keeps_bisecting(sim):
     assert all(a.to_block + 1 == b.from_block for a, b in zip(pages, pages[1:]))
     assert sum(len(p.logs) for p in pages) == 3_000
     assert max(p.to_block - p.from_block + 1 for p in pages) < 10_000
+
+
+def test_a_non_size_error_below_the_floor_raises_even_after_a_ceiling_split(sim):
+    lo, hi = _SEED + 1, _SEED + 20_000
+    _merged_wide_range_sim(sim, lo=lo, hi=hi, logs=3_000, refuse_over=600, error="upstream unavailable")
+    fetcher = RpcEventLogFetcher("https://erpc.example/main/evm/1", chain_id=1, min_bisect_span=10_000)
+    with pytest.raises(RuntimeError, match="upstream unavailable"):
+        list(fetcher.iter_pages(event_address=_ADDR, topics=[_T1], from_block=lo, to_block=hi, max_page_logs=1_000))
+    # Only the wide request and one ceiling-split half: an outage isn't chased down to single blocks.
+    assert [r["to"] - r["from"] + 1 for r in sim.getlogs] == [20_000, 10_000]
 
 
 def test_a_refusal_at_the_floor_without_a_ceiling_split_still_raises(sim):

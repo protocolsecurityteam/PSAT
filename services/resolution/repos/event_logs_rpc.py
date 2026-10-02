@@ -334,7 +334,8 @@ class RpcEventLogFetcher:
     ) -> Any:
         """The response for one range, or ``_REJECTED`` / ``_REFUSED_FOR_SIZE`` when it must be bisected.
 
-        ``below_floor`` lets a refusal bisect under ``min_bisect_span``, down to one block.
+        ``below_floor`` lets a size refusal bisect under ``min_bisect_span``, down to one block; any other error there
+        is raised.
         """
         log_filter: dict[str, Any] = {"topics": topic_filter, "fromBlock": hex(lo), "toBlock": hex(hi)}
         # Omit the key rather than send null: absence is the spec's "any emitter", explicit null isn't.
@@ -354,7 +355,7 @@ class RpcEventLogFetcher:
         except RuntimeError as exc:
             # Upstream cap or timeout: halve; at the floor it's a real error.
             span = hi - lo + 1
-            if span <= (1 if below_floor else self.min_bisect_span):
+            if span <= (1 if below_floor and _is_size_refusal(exc) else self.min_bisect_span):
                 raise
             logger.debug(
                 "eth_getLogs window rejected; bisecting",
@@ -474,10 +475,10 @@ class RpcEventLogFetcher:
 _REJECTED: Any = object()
 _REFUSED_FOR_SIZE: Any = object()
 
-# How upstreams word a refusal of the range itself: eRPC's too-large class and size limits, a log-count limit, and
-# HyperRPC's query timeout on a wide range. Anything else (an outage, a transient internal error) still bisects but
-# says nothing about how wide the next request may be.
-_SIZE_REFUSAL_MARKERS = ("timed out", "timeout", "too large", "toolarge", "limit exceeded", "-32005", "-32012", "range")
+# How upstreams word a refusal of the range itself: eRPC's too-large class, a log-count limit ("More than N logs
+# returned"), a response-size limit, and HyperRPC's query timeout on a wide range. Anything else (an outage, a rate
+# limit, a block not yet synced) still bisects above the floor but says nothing about how wide a request may be.
+_SIZE_REFUSAL_MARKERS = ("timed out", "timeout", "too large", "toolarge", "more than", "response size", "-32012")
 
 
 def _is_size_refusal(exc: BaseException) -> bool:

@@ -886,10 +886,12 @@ def _initial_span(densities: Sequence[float | None], limits: PageLimits, *, neve
 
 
 def _refused_span_limit(page: LogPage) -> int | None:
-    """Half the narrowest range the upstream refused on the way to ``page``: the size bisection then had served."""
+    """Half the narrowest range the upstream refused for its size on the way to ``page`` (the size bisection then had
+    served), never below ``MIN_REQUEST_SPAN_LIMIT``: a refusal deep inside one dense stretch would otherwise shrink
+    every later request of the visit to a few blocks."""
     if page.rejected_span is None:
         return None
-    return max(1, page.rejected_span // 2)
+    return max(page.rejected_span // 2, settings.MIN_REQUEST_SPAN_LIMIT)
 
 
 def _next_span(page: LogPage, limits: PageLimits) -> int:
@@ -1142,11 +1144,10 @@ def run_plan(
                         if density is not None:
                             cursor.recent_logs_per_block = density
                         if refused_limit is not None:
-                            # Persisted no lower than the bisect floor: a split below it says more about one dense
-                            # stretch than about the cursor's next visit.
-                            floored = max(refused_limit, settings.MIN_REQUEST_SPAN_LIMIT)
                             stored = cursor.request_span_limit
-                            cursor.request_span_limit = floored if stored is None else min(int(stored), floored)
+                            cursor.request_span_limit = (
+                                refused_limit if stored is None else min(int(stored), refused_limit)
+                            )
                     # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the
                     # evaluated block is judged by position, and only a reorg rewind resets the flag.
                     if int(cursor.last_indexed_block or 0) >= target:
