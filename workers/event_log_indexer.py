@@ -1828,7 +1828,10 @@ def rewitness_due_floors(
             _record_seed_unknown(session, chain_id=chain_id, address=address)
         else:
             caches.witnesses.pop((chain_id, address), None)
-            _witness_seed_block(address, seed, caches.witnesses, chain_id=chain_id, session=session)
+            _floor, basis = _witness_seed_block(address, seed, caches.witnesses, chain_id=chain_id, session=session)
+            if basis == FIRST_INDEXED_BASIS_CREATION:
+                # Live scans deferred on this floor rerun on the mark, even where no cursor is upgraded.
+                mark_dirty(session, "reconcile", str(chain_id))
         session.commit()
     apply_proven_floors(session)
     session.commit()

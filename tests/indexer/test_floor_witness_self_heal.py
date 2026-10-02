@@ -7,9 +7,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 
-from db.floor_witnesses import WITNESS_PRIOR_INCARNATION, WITNESS_PROVEN, record_floor_witness
+from db.floor_witnesses import WITNESS_FAILED, WITNESS_PRIOR_INCARNATION, WITNESS_PROVEN, record_floor_witness
 from db.models import (
     ENROLLMENT_BASIS_PREDICATE_HINT,
     FIRST_INDEXED_BASIS_CREATION,
@@ -166,6 +166,26 @@ def test_transient_failure_is_retried_after_backoff_and_heals_floor_and_cursor(d
     assert _reconcile_revision(db_session) != before
     assert db_session.get(IndexerWork, ("reconcile", "1")).dirty
     assert resolve_scan_floor_with_basis(_A, 1, session=db_session) == (_SEED, "cursor_first_indexed")
+
+
+def test_a_proven_retry_at_an_address_with_no_cursor_marks_reconciliation(db_session, wire):
+    record_floor_witness(db_session, chain_id=1, address=_A, outcome=WITNESS_FAILED)
+    db_session.commit()
+    _make_due(db_session, _A)
+    db_session.execute(delete(IndexerWork))
+    db_session.commit()
+
+    wire.fail = True
+    assert rewitness_due_floors(db_session) == 1
+    assert _row(db_session, _A).outcome == "failed"
+    assert _reconcile_revision(db_session) is None
+
+    wire.fail = False
+    _make_due(db_session, _A)
+    assert rewitness_due_floors(db_session) == 1
+    assert _row(db_session, _A).outcome == "proven"
+    assert db_session.scalar(select(func.count()).select_from(IndexedEventCursor)) == 0
+    assert db_session.get(IndexerWork, ("reconcile", "1")).dirty
 
 
 def test_repeated_failure_backs_off_and_never_touches_a_proven_row(db_session, wire):
