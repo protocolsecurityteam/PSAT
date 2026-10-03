@@ -244,13 +244,11 @@ def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[st
     Safe ``execTransaction`` checks owners' signatures. Module-exec entries get nothing: their gate only allowlists the
     caller, so the tree walk answers.
     """
-    from ._gates import SAFE_EXEC_TRANSACTION, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
+    from ._gates import TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate
 
     selector = ctx.canonical_selector(function)
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
         return {"state": "constrained", "guard": "hash_commitment", "pins": True, "binding": "standard_gate"}
-    if selector == SAFE_EXEC_TRANSACTION and is_safe_gate(ctx):
-        return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
     return None
 
 
@@ -328,6 +326,9 @@ def _is_external_callee_leaf(leaf: dict[str, Any]) -> bool:
     """A leaf whose truth includes another contract's answer (checked external bool, signature check, or statement
     call).
     """
+    descriptor = leaf.get("set_descriptor") or {}
+    if leaf.get("kind") == "signature_auth" and descriptor.get("kind") == "signature_threshold":
+        return False
     if leaf.get("kind") in ("external_bool", "signature_auth"):
         return True
     if leaf.get("gate_kind") in _EXTERNAL_GATE_KINDS:

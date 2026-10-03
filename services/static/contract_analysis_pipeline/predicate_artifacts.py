@@ -18,6 +18,7 @@ from eth_utils.crypto import keccak
 
 from utils.logging import record_stage_metric
 
+from .authorization import apply_authorization_pass
 from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
@@ -298,6 +299,8 @@ def build_predicate_artifacts_with_pause_info(
 
         trees = {sig: all_trees[sig] for sig in trees}
         check_trees = {sig: all_trees[check_tree_keys[sig]] for sig in check_trees}
+
+    apply_authorization_pass(contract, trees)
 
     # Attempted vs built: unguarded functions produce no tree, so the gap is normal, not degradation.
     record_stage_metric("predicate_fns_attempted", fns_attempted)

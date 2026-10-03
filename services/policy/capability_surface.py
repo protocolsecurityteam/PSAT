@@ -624,7 +624,11 @@ def _rows_for_threshold_group(
         signers = []
     owners = [s.lower() for s in signers if isinstance(s, str) and s.startswith("0x") and len(s) == 42]
     safe_address = None
-    if safe_address_lookup:
+    for step in cap_dict.get("trace") or []:
+        if isinstance(step, dict) and step.get("step") == "source_signature_threshold":
+            safe_address = step.get("contract")
+            break
+    if not safe_address and safe_address_lookup:
         if function_signature and function_signature in safe_address_lookup:
             safe_address = safe_address_lookup[function_signature]
         elif "default" in safe_address_lookup:

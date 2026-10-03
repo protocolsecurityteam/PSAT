@@ -211,13 +211,6 @@
       "detection_patterns": ["near_miss", "no_proxy_gate", "claim_negative"]
     },
     {
-      "path": "claims_upgrade_exec/safe_wallet.sol",
-      "category": "claims_upgrade_exec",
-      "contract_name": "SafeWallet",
-      "description": "Safe positive (SafeL2-class): getThreshold+getOwners+execTransaction gate yields safe.signer_mgmt/module_mgmt/set_guard plus exec.arbitrary on the execute entries.",
-      "detection_patterns": ["safe", "signer_mgmt", "module_mgmt", "set_guard", "claim_exec_arbitrary"]
-    },
-    {
       "path": "claims_upgrade_exec/oz_timelock.sol",
       "category": "claims_upgrade_exec",
       "contract_name": "TimelockController",

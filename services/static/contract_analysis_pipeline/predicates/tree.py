@@ -113,6 +113,7 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
     for gate in gates:
         subtree = _build_subtree_from_gate(gate, prov, function)
         if subtree is not None:
+            _stamp_gate_scope(subtree, gate, function)
             subtrees.append(subtree)
         elif uncertain_out is not None and _gate_condition_is_caller_eq_neq(gate, prov, function):
             caller_eq_unmodeled = True
@@ -126,6 +127,15 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
     tree = make_and_node(subtrees)
     apply_confidence_to_tree(tree)
     return tree
+
+
+def _stamp_gate_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
+    leaf = tree.get("leaf")
+    if leaf is not None:
+        leaf["source_function"] = (gate.containing_function or function).full_name
+        leaf["source_node_id"] = gate.node.node_id
+    for child in tree.get("children") or []:
+        _stamp_gate_scope(child, gate, function)
 
 
 def _gate_condition_is_caller_eq_neq(gate: RevertGate, prov: ProvenanceMap, function: Any) -> bool:

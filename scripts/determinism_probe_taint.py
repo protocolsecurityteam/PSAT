@@ -40,7 +40,7 @@ TARGET = ("exec_arbitrary_binding.sol", "ExecBinding")
 
 PREAMBLE_FIXTURES: dict[str, tuple[str, str]] = {
     "boring": ("boring_vault_manage.sol", "BoringVault"),
-    "safe": ("safe_wallet.sol", "SafeWallet"),
+    "safe": ("../authorization/generic_quorum_wallet.sol", "GenericQuorumWallet"),
     "timelock": ("oz_timelock.sol", "TimelockController"),
     "plain": ("plain_transfer_call.sol", "PlainTransfer"),
 }

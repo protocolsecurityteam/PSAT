@@ -31,6 +31,7 @@ from utils.logging import record_degraded, record_stage_metric
 
 from . import indexer_settings
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
+from .adapters.authorization import AuthorizationAdapter
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
 from .adapters.event_indexed import EventIndexedAdapter
 from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
@@ -303,6 +304,7 @@ def resolve_contract_capabilities(
     chain_id = ctx_chain.chain_id
 
     registry = AdapterRegistry()
+    registry.register(AuthorizationAdapter)
     # Named standard adapters first (higher matches() scores win); event-indexed is the fallback.
     registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EnumerableRoleStoreAdapter)
