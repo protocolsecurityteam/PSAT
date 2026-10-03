@@ -33,6 +33,7 @@ from services.static.claims.registry import (
     resolve_claim_precedence,
 )
 from services.static.claims.types import STATIC_TIER_WITNESS_KEY, TIER_PRECEDENCE, Claim, Tier
+from utils import claim_ids as C
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 
@@ -40,7 +41,7 @@ from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 # resolves every id below.
 discover()
 
-AUTHORITY_GRANT = "authority.grant"
+AUTHORITY_GRANT = C.AUTHORITY_GRANT
 
 OBSERVED_TIER: Tier = WITNESS_TIER_BEHAVIORAL_OBSERVED
 
@@ -72,21 +73,21 @@ def _claim_id_for(verdict: VerdictLike) -> str | None:
     """The claim id for a proven verdict's class, or ``None`` if it carries no present-tense claim."""
     ec = verdict.effect_class
     if ec == EFFECT_CLASS_CODE_UPGRADE:
-        return "upgrade.implementation"
+        return C.UPGRADE_IMPLEMENTATION
     if ec == EFFECT_CLASS_VALUE_OUT:
-        return "flow.out"
+        return C.FLOW_OUT
     if ec == EFFECT_CLASS_SUPPLY:
         # The recorded sign is the label; absent or unknown fails closed.
         witness = verdict.witness or {}
         sign = witness.get("supply_delta_sign") if isinstance(witness, dict) else None
         if sign == "mint":
-            return "supply.mint"
+            return C.SUPPLY_MINT
         if sign == "burn":
-            return "supply.burn"
+            return C.SUPPLY_BURN
         return None
     if ec == EFFECT_CLASS_FREEZE_PAUSE:
         # The pause recipe only witnesses freezes, so it's always ``pause.set``; ``pause.unset`` stays static-only.
-        return "pause.set"
+        return C.PAUSE_SET
     if ec == EFFECT_CLASS_AUTHORITY_CHANGE:
         return AUTHORITY_GRANT
     return None

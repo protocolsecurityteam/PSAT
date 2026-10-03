@@ -7,6 +7,7 @@ from services.scoring import constants as K
 from services.scoring import planes as P
 from services.scoring.fold.gates import SINGLE_ASSET_CLASSES, _gate, _signal_identity
 from services.scoring.schema import FunctionSignal, entity_key
+from utils import claim_ids as C
 from utils.scoring_status import OPENNESS_OPEN, PRINCIPAL_STATE_ENUMERATED, VALUE_STATE_PROVEN_REACH
 
 
@@ -177,7 +178,7 @@ def _confidence(
             reach[key][0] += 1
         if answered and signal.enters_grade:
             scored[key][0] += 1
-        if signal.claim_id == "flow.out":
+        if signal.claim_id == C.FLOW_OUT:
             # Unpriceable reach is a real gap; omitting it would make unpriceable value free.
             priced[key][1] += 1
             asset_class = _gate(signal, "asset_class")

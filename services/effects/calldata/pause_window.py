@@ -6,6 +6,8 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from utils import claim_ids as C
+
 if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
     from services.static.contract_analysis_pipeline.predicate_types import (
         OperandAbsorption,
@@ -58,7 +60,7 @@ def _claim_latch_pairs(session: Session, function_id: int) -> set[tuple[str, str
     if not isinstance(claims, list):
         return out
     for claim in claims:
-        if not isinstance(claim, dict) or claim.get("claim_id") != "pause.set":
+        if not isinstance(claim, dict) or claim.get("claim_id") != C.PAUSE_SET:
             continue
         witness = claim.get("witness")
         if not isinstance(witness, dict) or witness.get("kind") != "pause_flag":

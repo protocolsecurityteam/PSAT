@@ -6,6 +6,8 @@ vocabulary carries it explicitly.
 
 from __future__ import annotations
 
+from utils import claim_ids as C
+
 NOT_DETERMINED = "not_determined"
 
 # No "proven_absent": a proven zero is ``proven`` with 0.0, distinct from unreadable.
@@ -108,19 +110,19 @@ DESTINATION_SHAPE_NOT_APPLICABLE = "not_applicable"
 
 # Capabilities that have a destination, so ``not_applicable`` is never truthful for them; the schema CHECK enforces it.
 DESTINATION_BEARING_CLAIMS = (
-    "flow.out",
-    "delegatecall.execute",
-    "exec.arbitrary",
+    C.FLOW_OUT,
+    C.DELEGATECALL_EXECUTE,
+    C.EXEC_ARBITRARY,
 )
 
 # The only capabilities a distiller may stamp ``not_applicable`` from; everything outside both tuples is
 # ``not_determined``. Membership is justified per member:
 DESTINATION_FREE_CLAIMS = (
-    "pause.set",
-    "pause.unset",
-    "ownership.renounce",
-    "timelock.set_delay",
-    "rate_limit.consume",
+    C.PAUSE_SET,
+    C.PAUSE_UNSET,
+    C.OWNERSHIP_RENOUNCE,
+    C.TIMELOCK_SET_DELAY,
+    C.RATE_LIMIT_CONSUME,
 )
 
 # ``not_licensed`` is a reachability verdict only; it never types the holder.

@@ -148,6 +148,7 @@ def main() -> int:
     parser.add_argument("--preamble", default="")
     args = parser.parse_args()
 
+    from utils import claim_ids as C
     from utils.logging import configure_logging
 
     # So library logs go through the JSON handler rather than lastResort (WARNING-only, unscrubbed).
@@ -164,7 +165,7 @@ def main() -> int:
     binding: dict[str, Any] = {}
     for signature, record in (effects.get("functions") or {}).items():
         for claim in record.get("claims") or []:
-            if claim.get("claim_id") == "exec.arbitrary":
+            if claim.get("claim_id") == C.EXEC_ARBITRARY:
                 binding[signature] = claim.get("witness")
 
     if not binding:

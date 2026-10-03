@@ -67,6 +67,7 @@ from services.scoring.fold.types import (
 )
 from services.scoring.population import current_signals_with_faults
 from services.scoring.schema import NOT_DETERMINED, FunctionSignal, ScoreDocument, entity_key
+from utils import claim_ids as C
 from utils import execution_record as EX
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
@@ -508,7 +509,7 @@ class _UnitResolver:
         by_role: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"schedule": set(), "execute": set()})
         facts_by_key: dict[str, P.PrincipalFacts] = {}
         for signal in sorted(signals, key=lambda s: (s.chain, s.deployment_address, s.selector, s.claim_id)):
-            role = {"timelock.schedule": "schedule", "timelock.execute": "execute"}.get(signal.claim_id)
+            role = {C.TIMELOCK_SCHEDULE: "schedule", C.TIMELOCK_EXECUTE: "execute"}.get(signal.claim_id)
             if role is None:
                 continue
             timelock_key = entity_key(signal.chain, signal.deployment_address)
@@ -679,7 +680,7 @@ def _recovery_refs(signals: list[FunctionSignal]) -> list[Any]:
     out: list[Any] = []
     for signal in signals:
         # Repeats the malformed check, since this runs first.
-        if signal.claim_id != "pause.set" or _malformed_gates(signal):
+        if signal.claim_id != C.PAUSE_SET or _malformed_gates(signal):
             continue
         gate = _gate(signal, "freeze_recovery_principals")
         if not gate.is_determined or not isinstance(gate.value, list):
@@ -709,7 +710,7 @@ def _fold_severity(
     severity = signal.severity.require(SEVERITY_STATE_PROVEN)
     basis = tuple(signal.severity_basis)
     notes: set[str] = set()
-    if signal.claim_id != "pause.set" or principal is None:
+    if signal.claim_id != C.PAUSE_SET or principal is None:
         return severity, basis, notes
 
     verdict, coalition, note = _keyset_independence(signal, principal, principal_facts)
@@ -780,7 +781,7 @@ def _instance(
     pricing_blocked = None
     native_only = False
     asset_identity_undecidable = False
-    if signal.claim_id == "flow.out":
+    if signal.claim_id == C.FLOW_OUT:
         if _gate(signal, "token_identity").is_determined:
             # One non-fungible token moves; pricing it from a fungible sheet is forbidden.
             pricing_blocked = "token_identity(non-fungible; pricing forbidden)"

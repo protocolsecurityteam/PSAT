@@ -39,6 +39,7 @@ from services.scoring.fold.types import (
     _WithheldComposition,
 )
 from services.scoring.schema import FunctionSignal, entity_key
+from utils import claim_ids as C
 from utils import execution_record as EX
 
 
@@ -539,7 +540,7 @@ def _destination_magnitudes(signals: list[FunctionSignal]) -> dict[tuple[str, st
     """
     out: dict[tuple[str, str], _DestinationMagnitude] = {}
     for signal in signals:
-        if signal.claim_id != "flow.out" or not signal.selector.startswith("0x"):
+        if signal.claim_id != C.FLOW_OUT or not signal.selector.startswith("0x"):
             continue
         magnitude = _gate(signal, "reach_magnitude_usd")
         if not magnitude.is_determined or not _is_number(magnitude.value):

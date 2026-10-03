@@ -17,6 +17,7 @@ from services.scoring.schema import (
     coalesce_chain,
     entity_key,
 )
+from utils import claim_ids as C
 from utils import execution_record as EX
 from utils.logging import record_degraded, record_stage_metric
 from utils.scoring_status import (
@@ -381,7 +382,7 @@ def _registry_owner(controller_values: list[Any]) -> dict[str, Any] | None:
 def _pause_unset_principals(facts: _ContractFacts) -> list[dict[str, Any]]:
     seen: dict[str, dict[str, Any]] = {}
     for func in facts.functions:
-        if not _claim_ids(func).intersection({"pause.unset"}):
+        if not _claim_ids(func).intersection({C.PAUSE_UNSET}):
             continue
         for principal in facts.principals.get(func.id, []):
             address = _lower(principal.address)
