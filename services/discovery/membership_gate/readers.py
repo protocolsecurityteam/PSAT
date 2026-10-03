@@ -497,7 +497,8 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
 
 def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: str):
     """Every perimeter observation of *address*, as ``(fact, anchoring_member_id)``; the caller checks
-    anchoring.
+    anchoring. Principal observations count only on functions whose permission grants control
+    (:func:`_function_grants_control`).
     """
     members = _member_ids_subquery(protocol_id)
     for member_id, controller_id in session.execute(
@@ -511,8 +512,10 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
     ):
         yield {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}, member_id
     # Only authority-derived principals are perimeter observations.
-    for fp_id, function_id, member_id in session.execute(
-        select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
+    for fp_id, function_id, member_id, claims in session.execute(
+        select(
+            FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id, EffectiveFunction.claims
+        )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(
             EffectiveFunction.contract_id.in_(members),
@@ -521,11 +524,16 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         )
         .order_by(FunctionPrincipal.id)
     ):
-        yield {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}, member_id
+        if _function_grants_control(claims):
+            yield {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}, member_id
     # Match owners in Python; the SQL ``ilike`` prefilter keeps large Safe registries off the wire.
     safe_rows = session.execute(
         select(
-            FunctionPrincipal.id, FunctionPrincipal.address, FunctionPrincipal.details, EffectiveFunction.contract_id
+            FunctionPrincipal.id,
+            FunctionPrincipal.address,
+            FunctionPrincipal.details,
+            EffectiveFunction.contract_id,
+            EffectiveFunction.claims,
         )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(
@@ -536,9 +544,9 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         )
         .order_by(FunctionPrincipal.id)
     ).all()
-    for fp_id, safe_address, details, member_id in safe_rows:
+    for fp_id, safe_address, details, member_id, claims in safe_rows:
         owners = details.get("owners") if isinstance(details, dict) else None
-        if not isinstance(owners, list):
+        if not isinstance(owners, list) or not _function_grants_control(claims):
             continue
         if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
             yield (

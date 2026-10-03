@@ -584,3 +584,94 @@ def test_w4h_auto_revoke_subtracts_the_same_runs_promotion(db_session):
     assert sibling.id in result.demoted_contract_ids
     assert sibling.id not in result.promoted_contract_ids
     assert sibling.id in result.reprobe_contract_ids
+
+
+def test_policy_rerun_revokes_a_class_a_deployer_whose_principal_grant_turned_operational(db_session):
+    """A Class-A row resting on a function principal falls, with its W4 children, when the policy stage rewrites that
+    function's claims to an operational grant, even though the principal itself is still there."""
+    from db.models import EffectiveFunction, FunctionPrincipal
+
+    protocol = _protocol(db_session, "perimeter-grant")
+    host = _member(db_session, protocol, _addr(0xE00))
+    deployer = _addr(0xE01)
+    fn = EffectiveFunction(
+        contract_id=host.id,
+        function_name="setOperator",
+        claims=[{"claim_id": "roles.grant", "tier": "standard_exact", "witness": {}}],
+    )
+    db_session.add(fn)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=fn.id,
+            address=deployer,
+            resolved_type="eoa",
+            details={"resolver_path": ["live_getter_resolution"]},
+        )
+    )
+    db_session.flush()
+    registry = gate.register_deployer(
+        db_session,
+        protocol_id=protocol.id,
+        address=deployer,
+        classification=gate.classify_deployer(db_session, protocol_id=protocol.id, address=deployer),
+    )
+    assert registry is not None and registry.trust_class == "A"
+    child = _contract(db_session, _addr(0xE02), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, child.address, tx=_TX)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
+    db_session.commit()
+    assert child.protocol_id == protocol.id
+    assert "w4_deployer" in _active_rules(db_session, child)
+
+    fn.claims = [
+        {"claim_id": "value_router", "tier": "standard_exact", "witness": {}},
+        {"claim_id": "flow.in", "tier": "idiom_structural", "witness": {}},
+    ]
+    db_session.commit()
+    gate.evaluate_principal_change(db_session, contract_id=host.id, addresses={deployer}, context="test")
+
+    db_session.refresh(registry)
+    assert registry.revoked_at is not None and registry.revocation_reason == "perimeter_fact_lost"
+    assert child.protocol_id is None
+    assert _active_rules(db_session, child) <= {"w1_code"}
+
+
+def test_policy_rerun_registers_a_principal_that_gains_a_control_grant(db_session):
+    """The admission side of the same trigger: once the rewrite gives the principal a control grant, it is registered
+    Class A and its nominated children are admitted on that policy run."""
+    from db.models import EffectiveFunction, FunctionPrincipal
+
+    protocol = _protocol(db_session, "perimeter-gain")
+    host = _member(db_session, protocol, _addr(0xE10))
+    deployer = _addr(0xE11)
+    fn = EffectiveFunction(
+        contract_id=host.id,
+        function_name="bulkDeposit",
+        claims=[{"claim_id": "value_router", "tier": "standard_exact", "witness": {}}],
+    )
+    db_session.add(fn)
+    db_session.flush()
+    db_session.add(
+        FunctionPrincipal(
+            function_id=fn.id,
+            address=deployer,
+            resolved_type="eoa",
+            details={"resolver_path": ["live_getter_resolution"]},
+        )
+    )
+    child = _contract(db_session, _addr(0xE12), nominated_protocol_id=protocol.id, deployer=deployer)
+    _code_fact(db_session, child.address, tx=_TX)
+    gate.evaluate_principal_change(db_session, contract_id=host.id, addresses={deployer}, context="test")
+    assert child.protocol_id is None
+
+    fn.claims = [{"claim_id": "roles.grant", "tier": "standard_exact", "witness": {}}]
+    db_session.commit()
+    gate.evaluate_principal_change(db_session, contract_id=host.id, addresses={deployer}, context="test")
+
+    registry = (
+        db_session.query(ProtocolDeployer).filter_by(protocol_id=protocol.id, address=deployer, revoked_at=None).one()
+    )
+    assert registry.trust_class == "A"
+    assert child.protocol_id == protocol.id
+    assert "w4_deployer" in _active_rules(db_session, child)
