@@ -218,7 +218,7 @@ def test_consumer_referenced_ids_are_subset_of_registry():
 _GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "label_corpus" / "golden.json"
 
 # Ids the reduced corpus doesn't exercise, mapped to the test that does. An id that starts producing must be removed.
-_SAFE_EXEMPTION = "no Gnosis Safe in the label corpus; covered by test_claims_upgrade_exec_matchers (safe_wallet.sol)."
+_SAFE_EXEMPTION = "no Safe in the label corpus; canonical Safe and its broken twin are in test_safe_authentication_e2e."
 _AUTH_MATCHERS_EXEMPTION = "no compiled corpus positive; covered by test_claims_auth_matchers (synthetic facts)."
 _UPGRADE_EXEC_EXEMPTION = (
     "no compiled corpus positive; covered by test_claims_upgrade_exec_matchers (small synthetic .sol fixtures)."

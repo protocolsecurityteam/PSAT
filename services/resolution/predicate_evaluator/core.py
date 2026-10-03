@@ -371,6 +371,9 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         return _resolve_external_bool(leaf, ctx)
 
     if kind == "signature_auth":
+        descriptor = leaf.get("set_descriptor")
+        if descriptor is not None:
+            return ctx.adapter.enumerate(descriptor, ctx.contract_address)
         signer = _resolve_signer_from_leaf(leaf, ctx)
         return CapabilityExpr.signature_witness(signer)
 

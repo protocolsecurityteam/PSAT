@@ -138,6 +138,7 @@ class SetDescriptor(TypedDict):
     callee_function: NotRequired[str | None]
     callee_signature: NotRequired[str | None]
     callee_selector: NotRequired[str | None]
+    source_identity: NotRequired[str]
 
 
 LeafKind = Literal[

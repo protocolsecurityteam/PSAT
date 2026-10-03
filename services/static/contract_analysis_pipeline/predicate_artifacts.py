@@ -24,6 +24,7 @@ from .one_shot import apply_one_shot_pass
 from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
+from .safe_authentication import apply_safe_authentication_pass
 from .writer_gate import apply_writer_gate_pass
 
 logger = logging.getLogger(__name__)
@@ -298,6 +299,8 @@ def build_predicate_artifacts_with_pause_info(
 
         trees = {sig: all_trees[sig] for sig in trees}
         check_trees = {sig: all_trees[check_tree_keys[sig]] for sig in check_trees}
+
+    apply_safe_authentication_pass(contract, trees)
 
     # Attempted vs built: unguarded functions produce no tree, so the gap is normal, not degradation.
     record_stage_metric("predicate_fns_attempted", fns_attempted)

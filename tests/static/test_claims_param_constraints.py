@@ -424,6 +424,20 @@ def _safe_ctx() -> ClaimContext:
     return ClaimContext(None, {"contract_name": "SafeWallet", "functions": functions}, {"trees": trees})
 
 
+def test_safe_abi_alone_does_not_prove_a_signature_commitment():
+    ctx = _safe_ctx()
+    exec_tx = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    assert _facts.standard_destination_commitment(ctx, exec_tx) is None
+    for index in range(10):
+        verdict = _facts.param_constraint(ctx, exec_tx, index, mode="external_call")
+        assert verdict == {"state": "not_determined"}
+    for module_fn in (
+        "execTransactionFromModule(address,uint256,bytes,uint8)",
+        "execTransactionFromModuleReturnData(address,uint256,bytes,uint8)",
+    ):
+        assert _facts.standard_destination_commitment(ctx, module_fn) is None
+
+
 def test_a_module_exec_gate_pins_the_caller_not_the_destination():
     """The gate proves the destination free; an enabled module calls any target, so never ``pins: True``."""
     ctx = _safe_ctx()
