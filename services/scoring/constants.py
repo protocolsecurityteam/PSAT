@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # typing-only: scoring reads static's persisted JSON, not its modules
     from services.static.contract_analysis_pipeline.predicate_types import StateVarTargetKind
 
+from services.static.claims import claim_ids_of_class
+from utils import claim_ids as C
 from utils.scoring_status import MODEL_VERSION
 
 SEV_SCALE = 60.0
@@ -94,24 +96,13 @@ DELAY_DISCOUNT_SATURATION_DAYS = 30.0
 
 # Code control replaces what the node does: expansion covers its whole closure (bounded by each destination's caller
 # conditions).
-CODE_CONTROL_CAPABILITIES = frozenset(
-    {
-        "upgrade.implementation",
-        "exec.arbitrary",
-        "delegatecall.execute",
-    }
-)
+CODE_CONTROL_CAPABILITIES: frozenset[str] = claim_ids_of_class("control.code")
 
 # Gate control replaces who may call: expansion only through edges the gate is witnessed to confer; undetermined scope
-# confers nothing and the hop is published as not_determined.
-GATE_CONTROL_CAPABILITIES = frozenset(
-    {
-        "authority.replace",
-        "ownership.transfer",
-        "roles.grant",
-        "roles.configure",
-        "authorized_caller.rotate",
-    }
+# confers nothing and the hop is published as not_determined. The ``control.gate`` claims that hand control to a named
+# party; revocation, acceptance and Safe/timelock housekeeping don't.
+GATE_CONTROL_CAPABILITIES: frozenset[str] = frozenset(
+    {C.AUTHORITY_REPLACE, C.OWNERSHIP_TRANSFER, C.ROLES_GRANT, C.ROLES_CONFIGURE, C.AUTHORIZED_CALLER_ROTATE}
 )
 
 TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES

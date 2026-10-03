@@ -27,6 +27,7 @@ from services.static.claims import (
     single_contract_static_tier,
 )
 from services.static.claims.registry import _REGISTRY
+from utils.claim_ids import ALL_CLAIM_IDS
 
 
 @pytest.fixture(autouse=True)
@@ -262,6 +263,10 @@ def test_grant_classes_match_the_ruled_table():
         _RULED_GRANT_CLASSES
     )
     assert not claim_ids_of_class("exemption"), "exemption is reserved until a producer proves a bypassed check"
+
+
+def test_claim_id_constants_name_exactly_the_registered_ids():
+    assert ALL_CLAIM_IDS == claim_ids_of_class(*GRANT_CLASSES)
 
 
 def test_class_lookups_fail_closed():
