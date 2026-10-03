@@ -9,6 +9,7 @@ exception.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -174,6 +175,19 @@ def test_every_named_claim_id_is_a_listed_consumer_reference():
     assert named <= CONSUMER_REFERENCED_CLAIM_IDS, sorted(named - CONSUMER_REFERENCED_CLAIM_IDS)
 
 
+# The frontend projects claims through its own vocabulary and drops any id it doesn't know.
+FRONTEND_CLAIM_VOCABULARY = "site/src/vocab/claimVocab.data.js"
+
+
+def _frontend_claim_ids(source: str) -> set[str]:
+    block = source.split("export const CLAIM_VOCAB = {", 1)[1].split("\n};", 1)[0]
+    return set(re.findall(r'^  "?([a-z0-9_.]+)"?: \{$', block, re.MULTILINE))
+
+
+def test_frontend_claim_vocabulary_names_exactly_the_registered_ids():
+    assert _frontend_claim_ids(_read(FRONTEND_CLAIM_VOCABULARY)) == _claim_ids()
+
+
 def test_allow_list_entries_still_present():
     claim_ids = _claim_ids()
     stale = [
@@ -200,6 +214,12 @@ def test_detectors_catch_planted_violations():
     labels = 'PRIVILEGED = frozenset({"pause_toggle", "mint"})\nif "authority_update" in labels:\n    pass\n'
     assert _privilege_label_uses(labels) == [(1, ("pause_toggle",)), (2, ("authority_update",))]
     assert _privilege_label_uses('SIGNS = ("mint", "burn")\n') == []
+
+    frontend = (
+        'export const CLAIM_VOCAB = {\n  "pause.set": {\n  },\n  value_router: {\n  },\n};\n'
+        'const X = {\n  "flow.out": {\n'
+    )
+    assert _frontend_claim_ids(frontend) == {"pause.set", "value_router"}
 
     aliased = "from utils import claim_ids as C\nfrom utils.claim_ids import FLOW_IN\nX = {C.PAUSE_SET, FLOW_IN}\n"
     assert _referenced_claim_id_constants(aliased) == {"PAUSE_SET", "FLOW_IN"}
