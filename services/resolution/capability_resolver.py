@@ -33,6 +33,7 @@ from . import indexer_settings
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
 from .adapters.event_indexed import EventIndexedAdapter
+from .adapters.safe_authorization import SafeAuthorizationAdapter
 from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
 from .capabilities import CapabilityExpr, Condition
 from .differential_probe import ProbeResult, differential_probe_enabled, run_differential_probe
@@ -303,6 +304,7 @@ def resolve_contract_capabilities(
     chain_id = ctx_chain.chain_id
 
     registry = AdapterRegistry()
+    registry.register(SafeAuthorizationAdapter)
     # Named standard adapters first (higher matches() scores win); event-indexed is the fallback.
     registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EnumerableRoleStoreAdapter)

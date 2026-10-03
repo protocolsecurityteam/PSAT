@@ -250,7 +250,10 @@ def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[st
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
         return {"state": "constrained", "guard": "hash_commitment", "pins": True, "binding": "standard_gate"}
     if selector == SAFE_EXEC_TRANSACTION and is_safe_gate(ctx):
-        return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
+        from services.static.contract_analysis_pipeline.safe_authentication import safe_source_identity
+
+        if safe_source_identity(ctx.contract) is not None:
+            return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
     return None
 
 
