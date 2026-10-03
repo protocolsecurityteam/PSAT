@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from utils import claim_ids as C
+from utils.clock_gate import CLOCK_KINDS, SECONDS_CLOCK_KINDS, clock_kinds
 
 if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
     from services.static.contract_analysis_pipeline.predicate_types import (
@@ -143,11 +144,6 @@ _OPERAND_ABSORPTION_RECORDED: "OperandAbsorption" = "recorded"
 # sources (state vars, constants, params, callers, ``block_context``) aren't opaque; a stored timestamp isn't a clock.
 _OPAQUE_OPERAND_SOURCES = frozenset({"computed", "top", "view_call", "external_call"})
 
-# ``now`` is ``block.timestamp``. Demotion counts any self-advancing clock (``block.number`` lifts a freeze too), but
-# the seconds harvest counts only seconds: a block-number constant is a block count.
-_SECONDS_CLOCK_KINDS = frozenset({"timestamp", "now"})
-_CLOCK_KINDS = frozenset({"timestamp", "now", "number"})
-
 # Operators under which a constant bounds its other side from above, keyed by the constant's slot (IR left-right order).
 # ``eq``/``ne``/``truthy``/``falsy`` bound nothing. Every persisted leaf carries an operator, so absence is read as
 # undecidable.
@@ -194,12 +190,11 @@ def _window_ceiling_constant(leaf: Mapping[str, Any], latch_vars: set[str]) -> i
     raw_absorbed = leaf.get("absorbed_operands")
     absorbed = [op for op in raw_absorbed if isinstance(op, dict)] if isinstance(raw_absorbed, list) else []
     # Clock and latch must be in one additive group.
-    if all(str(op.get("block_context_kind") or "") not in _SECONDS_CLOCK_KINDS for op in absorbed):
+    if clock_kinds(absorbed).isdisjoint(SECONDS_CLOCK_KINDS):
         return None
     if all(str(op.get("state_variable_name") or "") not in latch_vars for op in absorbed):
         return None
-    clock_kinds = {str(op.get("block_context_kind") or "") for op in (*operands, *absorbed)}
-    if clock_kinds & (_CLOCK_KINDS - _SECONDS_CLOCK_KINDS):
+    if clock_kinds((*operands, *absorbed)) & (CLOCK_KINDS - SECONDS_CLOCK_KINDS):
         return None
     operator = str(leaf.get("operator") or "")
     best: int | None = None
@@ -253,8 +248,8 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
         tree_holds_opaque_operand = False
         for leaf in _all_leaves(tree):
             operands = _compared_operands(leaf)
-            clock_kinds = {str(op.get("block_context_kind") or "") for op in operands}
-            leaf_reads_clock = not clock_kinds.isdisjoint(_CLOCK_KINDS)
+            leaf_clocks = clock_kinds(operands)
+            leaf_reads_clock = bool(leaf_clocks)
             tree_reads_clock = tree_reads_clock or leaf_reads_clock
             if any(op.get("source") in _OPAQUE_OPERAND_SOURCES for op in operands):
                 tree_holds_opaque_operand = True
@@ -262,7 +257,7 @@ def _duration_from_trees(trees: Mapping[str, Any], latch_vars: set[str]) -> tupl
                 continue
             tree_reads_latch = True
             saw_latch_guard = True
-            if clock_kinds.isdisjoint(_SECONDS_CLOCK_KINDS):
+            if leaf_clocks.isdisjoint(SECONDS_CLOCK_KINDS):
                 continue
             saw_timed_latch_guard = True
             value = _window_ceiling_constant(leaf, latch_vars)
