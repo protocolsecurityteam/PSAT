@@ -576,6 +576,54 @@ def test_an_observed_claim_keeps_the_static_witness_it_superseded(db_session, pr
     assert candidate.protocol_id == protocol.id
 
 
+# etherfi's ``pauseUntil`` as the timestamp-latch matcher emits it (pinned in tests/static/test_claims_pause_until.py).
+PAUSE_UNTIL_STATIC = _claim(
+    "pause.set",
+    "idiom_structural",
+    kind="pause_flag",
+    flags=[{"var": "PAUSABLE_UNTIL_STORAGE_SLOT", "member": "pausedUntil", "latch": "timestamp"}],
+    polarity="set",
+)
+
+
+def test_a_contract_principal_on_pause_until_is_admitted(db_session, protocol):
+    """The fork's freeze verdict supersedes the static timestamp-latch claim and carries its tier, so the guardian Safe
+    on ``pauseUntil`` admits through the unchanged rule. Before the static claim existed the row was observed-only."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from services.effects.claims_bridge import merge_observed_claims
+    from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, TIER_FORK, VERDICT_PROVEN
+    from services.static.claims.types import Claim
+
+    verdict = SimpleNamespace(
+        id=7,
+        effect_class=EFFECT_CLASS_FREEZE_PAUSE,
+        verdict=VERDICT_PROVEN,
+        tier=TIER_FORK,
+        behavior_hash="bh",
+        current_check_passed=None,
+        witness={"pause_effective": True, "auto_expiry": None, "duration_bound_source": "not_determined"},
+        observed_residue=None,
+    )
+    claims = merge_observed_claims([cast(Claim, PAUSE_UNTIL_STATIC)], [verdict])
+    assert [(c["claim_id"], c["tier"], c["witness"].get("static_tier")) for c in claims] == [
+        ("pause.set", "behavioral_observed", "idiom_structural")
+    ]
+
+    eeth = _anchored_member(db_session, protocol, ADDR(0x9350))
+    safe = _contract(db_session, ADDR(0x9351), nominated=protocol.id)
+    row = _principal(db_session, eeth, safe.address, resolved_type="safe", name="pauseUntil", claims=claims)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id,)))
+    db_session.flush()
+
+    assert safe.protocol_id == protocol.id
+    witness = _witness(db_session, safe, protocol, WITNESS_RULE_W3_CONTROL, "d2")
+    assert witness.via_address == eeth.address
+    assert witness.evidence["principal_fact"]["function_principal_id"] == row.id
+
+
 def test_an_operational_eoa_principal_licenses_no_perimeter_transitivity(db_session, protocol):
     """The D1 perimeter arm reads the same rows: an EOA depositor isn't a perimeter principal, so the queue it owns
     doesn't admit until the EOA holds a control grant."""

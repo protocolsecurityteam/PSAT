@@ -57,6 +57,27 @@
       "detection_patterns": ["interprocedural_sink", "owner_guard", "pause_control"]
     },
     {
+      "path": "pause/pause_until_namespaced.sol",
+      "category": "pause",
+      "contract_name": "NamespacedPauseUntil",
+      "description": "etherfi's ERC-7201 PausableUntil: a uint timestamp latch armed to now + a stored window, beside a bool latch.",
+      "detection_patterns": ["timestamp_latch", "namespaced_storage", "pause_control"]
+    },
+    {
+      "path": "pause/pause_until_plain.sol",
+      "category": "pause",
+      "contract_name": "PlainPauseUntil",
+      "description": "A plain-storage uint64 timestamp latch armed to now + a caller-chosen window and lifted by delete.",
+      "detection_patterns": ["timestamp_latch", "owner_guard", "pause_control"]
+    },
+    {
+      "path": "pause/pause_until_negatives.sol",
+      "category": "pause",
+      "contract_name": "TimelockEta",
+      "description": "Timestamp state that is not a pause (eta, cooldown, rate limit, deadline, vesting, schedules, initializer, unguarded writer), one contract per excluded shape.",
+      "detection_patterns": ["timestamp_latch_negative"]
+    },
+    {
       "path": "upgrade/direct_admin_upgrade.sol",
       "category": "upgrade",
       "contract_name": "DirectAdminUpgrade",
