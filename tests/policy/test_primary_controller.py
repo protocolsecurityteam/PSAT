@@ -21,8 +21,8 @@ def _p(addr: str, ptype: str) -> dict:
     return {"address": addr, "type": ptype}
 
 
-def _fn(callers: set[str], labels: set[str] | None = None, *, claims: list[str] | None = None) -> dict:
-    fn: dict = {"callers": set(callers), "labels": set(labels or ())}
+def _fn(callers: set[str], *, claims: list[str] | None = None) -> dict:
+    fn: dict = {"callers": set(callers)}
     if claims is not None:
         fn["claims"] = list(claims)
     return fn

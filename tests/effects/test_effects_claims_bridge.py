@@ -19,6 +19,7 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.static.claims.types import Claim
+from utils import claim_ids as C
 
 
 def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> Claim:
@@ -100,11 +101,11 @@ def test_a_duration_bound_never_reaches_the_scorer_without_its_fork_qualifier():
 def test_authority_change_maps_to_registered_authority_grant():
     # No existing id is honest for a mechanism-agnostic gate-open.
     claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_AUTHORITY_CHANGE, witness={"gate_mutation": True}))
-    assert claim is not None and claim["claim_id"] == claims_bridge.AUTHORITY_GRANT
+    assert claim is not None and claim["claim_id"] == C.AUTHORITY_GRANT
     from services.static.claims.registry import is_registered, legacy_projections
 
-    assert is_registered(claims_bridge.AUTHORITY_GRANT)
-    assert legacy_projections()[claims_bridge.AUTHORITY_GRANT] == "authority_update"
+    assert is_registered(C.AUTHORITY_GRANT)
+    assert legacy_projections()[C.AUTHORITY_GRANT] == "authority_update"
 
 
 def test_unknown_verdict_mints_nothing():

@@ -306,15 +306,13 @@ def _member_principal_rows(
     address: str,
     chain_key: str,
     exclude_contract_id: int | None,
-    safe_owners: bool,
 ):
     """Resolved-principal observations of *address* on this protocol's members, by principal row id, as
-    ``(function_principal_id, function_id, resolved_type, safe_address, member)``.
+    ``(function_principal_id, function_id, resolved_type, member)``.
 
-    ``safe_owners=True`` reads Safe principals whose signer set contains it. Same-chain members only; authority-derived
-    principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since caller-set enumerations aren't control; and only
-    on functions whose permission grants control (:func:`_function_grants_control`), since a privileged depositor
-    isn't a controller.
+    Same-chain members only; authority-derived principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since
+    caller-set enumerations aren't control; and only on functions whose permission grants control
+    (:func:`_function_grants_control`), since a privileged depositor isn't a controller.
     """
     member_scope = [
         Contract.protocol_id == protocol_id,
@@ -323,48 +321,21 @@ def _member_principal_rows(
     ]
     if exclude_contract_id is not None:
         member_scope.append(Contract.id != exclude_contract_id)
-    if not safe_owners:
-        for fp_id, function_id, resolved_type, claims, member in session.execute(
-            select(
-                FunctionPrincipal.id,
-                FunctionPrincipal.function_id,
-                FunctionPrincipal.resolved_type,
-                EffectiveFunction.claims,
-                Contract,
-            )
-            .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
-            .join(Contract, EffectiveFunction.contract_id == Contract.id)
-            .where(*member_scope, func.lower(FunctionPrincipal.address) == address)
-            .order_by(FunctionPrincipal.id)
-        ):
-            if _function_grants_control(claims):
-                yield fp_id, function_id, resolved_type, None, member
-        return
-    # Match owners in Python so casing can't hide a signer; SQL ``ilike`` is a superset prefilter.
-    for fp_id, function_id, safe_address, details, claims, member in session.execute(
+    for fp_id, function_id, resolved_type, claims, member in session.execute(
         select(
             FunctionPrincipal.id,
             FunctionPrincipal.function_id,
-            FunctionPrincipal.address,
-            FunctionPrincipal.details,
+            FunctionPrincipal.resolved_type,
             EffectiveFunction.claims,
             Contract,
         )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .join(Contract, EffectiveFunction.contract_id == Contract.id)
-        .where(
-            *member_scope,
-            FunctionPrincipal.resolved_type == "safe",
-            jsonb_has_payload(FunctionPrincipal.details),
-            FunctionPrincipal.details.op("->")("owners").cast(Text).ilike(f"%{address}%"),
-        )
+        .where(*member_scope, func.lower(FunctionPrincipal.address) == address)
         .order_by(FunctionPrincipal.id)
     ):
-        owners = details.get("owners") if isinstance(details, dict) else None
-        if not isinstance(owners, list) or not _function_grants_control(claims):
-            continue
-        if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
-            yield fp_id, function_id, "safe", (safe_address or "").lower(), member
+        if _function_grants_control(claims):
+            yield fp_id, function_id, resolved_type, member
 
 
 def _function_principal_fact(
@@ -394,13 +365,12 @@ def _principal_perimeter_fact(
     """Class-A reading for the D1-principal arm: *address* is a resolved EOA principal of a member hosting a
     non-D2 admitting witness (F2). Smallest principal row wins.
     """
-    for fp_id, function_id, resolved_type, _safe_address, member in _member_principal_rows(
+    for fp_id, function_id, resolved_type, member in _member_principal_rows(
         session,
         protocol_id=protocol_id,
         address=address,
         chain_key=chain_key,
         exclude_contract_id=exclude_contract_id,
-        safe_owners=False,
     ):
         if resolved_type != W3_PERIMETER_PRINCIPAL_TYPE:
             continue
@@ -417,13 +387,12 @@ def _d2_principal_facts(
     member, members by id.
     """
     facts: dict[int, tuple[Contract, dict[str, Any]]] = {}
-    for fp_id, function_id, resolved_type, _safe, member in _member_principal_rows(
+    for fp_id, function_id, resolved_type, member in _member_principal_rows(
         session,
         protocol_id=protocol_id,
         address=address,
         chain_key=chain_key,
         exclude_contract_id=exclude_contract_id,
-        safe_owners=False,
     ):
         if resolved_type not in W3_PRINCIPAL_CONTROLLER_TYPES or member.id in facts:
             continue

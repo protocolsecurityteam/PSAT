@@ -41,8 +41,6 @@ from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 # resolves every id below.
 discover()
 
-AUTHORITY_GRANT = C.AUTHORITY_GRANT
-
 OBSERVED_TIER: Tier = WITNESS_TIER_BEHAVIORAL_OBSERVED
 
 
@@ -89,7 +87,7 @@ def _claim_id_for(verdict: VerdictLike) -> str | None:
         # The pause recipe only witnesses freezes, so it's always ``pause.set``; ``pause.unset`` stays static-only.
         return C.PAUSE_SET
     if ec == EFFECT_CLASS_AUTHORITY_CHANGE:
-        return AUTHORITY_GRANT
+        return C.AUTHORITY_GRANT
     return None
 
 

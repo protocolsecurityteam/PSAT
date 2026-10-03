@@ -20,7 +20,6 @@ _ROOT = Path(__file__).resolve().parents[2]
 # Where the vocabulary is defined, so where its strings may be spelled.
 VOCABULARY_HOMES: tuple[str, ...] = (
     "services/static/claims/",
-    "services/static/cross_contract.py",
     "utils/claim_ids.py",
 )
 
