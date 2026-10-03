@@ -28,14 +28,11 @@ from services.effects.config import (
 )
 from services.static.claims.matchers import discover
 from services.static.claims.registry import (
-    RegistryEntry,
     emit_claim,
-    is_registered,
     legacy_projections,
-    register,
     resolve_claim_precedence,
 )
-from services.static.claims.types import TIER_PRECEDENCE, Claim, Tier
+from services.static.claims.types import STATIC_TIER_WITNESS_KEY, TIER_PRECEDENCE, Claim, Tier
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 
@@ -43,31 +40,7 @@ from utils.scoring_status import WITNESS_TIER_BEHAVIORAL_OBSERVED
 # resolves every id below.
 discover()
 
-# The authority-change recipe proves only that calling F opens a gate to previously rejected callers. No static
-# authority claim says exactly that (``roles.grant``, ``authority.replace``, ``authorized_caller.rotate`` each assert a
-# mechanism), so it gets its own id, minted only here.
 AUTHORITY_GRANT = "authority.grant"
-
-
-def _no_static_gate(_ctx: Any) -> bool:
-    return False
-
-
-def _no_static_trigger(_ctx: Any, _function: str) -> None:
-    return None
-
-
-if not is_registered(AUTHORITY_GRANT):
-    register(
-        RegistryEntry(
-            claim_id=AUTHORITY_GRANT,
-            sentence="lets a caller pass a permission gate that previously rejected it",
-            gate=_no_static_gate,
-            trigger=_no_static_trigger,
-            legacy_projection="authority_update",
-            consumer_family="control_plane",
-        )
-    )
 
 OBSERVED_TIER: Tier = WITNESS_TIER_BEHAVIORAL_OBSERVED
 
@@ -314,7 +287,7 @@ def _carry_forward_static_witness(donor: Claim, observed: dict[str, Any]) -> dic
     if not carried:
         return observed
     merged = dict(carried)
-    merged["static_tier"] = static.get("static_tier", donor.get("tier"))
+    merged[STATIC_TIER_WITNESS_KEY] = static.get(STATIC_TIER_WITNESS_KEY, donor.get("tier"))
     merged.update(observed)
     return merged
 

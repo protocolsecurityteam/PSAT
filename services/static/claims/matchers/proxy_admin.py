@@ -15,6 +15,7 @@ from ._gates import CHANGE_ADMIN, is_admin_change_gate
     sentence="changes the proxy admin who can upgrade this deployment",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_admin_change_gate,
 )
 def proxy_admin_change(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

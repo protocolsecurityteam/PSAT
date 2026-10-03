@@ -156,6 +156,8 @@ SCORE_TRIGGERS = (
 
 # The two disclosures ride every proven verdict (G7), so excluded rows carry them too.
 SELF_SERVICE_STATE_PROVEN = "proven_self_service"
+# W2 earned by the clearing write dominating every external call (the verified-guard alternative is a separate proof).
+W2_BASIS_CLEAR_DOMINATES_CALLS = "clear_dominates_calls"
 SELF_SERVICE_BASIS_BOUNDED = "proven_self_service_bounded"
 SELF_SERVICE_DISCLOSE_UPGRADE = "self_service_bound_conditional_on_upgrade_authority"
 SELF_SERVICE_DISCLOSE_SIBLING = "self_service_sibling_function_residual_not_proven"

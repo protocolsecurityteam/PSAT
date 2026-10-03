@@ -1,8 +1,8 @@
 """The claim registry: claims are only constructible through :func:`emit_claim`, and an unregistered ``claim_id`` is
 a hard error, so an unevidenced label is unrepresentable.
 
-Each entry pairs a claim sentence with its ``gate`` and ``trigger`` evidence predicates, its legacy label, and its
-consumer family. Matchers register through ``@claim_matcher``.
+Each entry pairs a claim sentence with its ``gate`` and ``trigger`` evidence predicates, its legacy label, its consumer
+family, and its grant class. Matchers register through ``@claim_matcher``.
 """
 
 from __future__ import annotations
@@ -10,15 +10,20 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Any
 
 from .context import ClaimContext
 from .types import (
     CONSUMER_FAMILIES,
+    GRANT_CLASSES,
+    SINGLE_CONTRACT_STATIC_TIERS,
+    STATIC_TIER_WITNESS_KEY,
     TIER_PRECEDENCE,
     TIERS,
     Claim,
     ClaimEvidence,
     ConsumerFamily,
+    GrantClass,
     Tier,
     Witness,
 )
@@ -35,6 +40,7 @@ class RegistryEntry:
     trigger: Trigger
     legacy_projection: str | None
     consumer_family: ConsumerFamily
+    grant_class: GrantClass
 
 
 _REGISTRY: dict[str, RegistryEntry] = {}
@@ -53,6 +59,11 @@ def register(entry: RegistryEntry) -> RegistryEntry:
             f"claim {entry.claim_id!r} has unknown consumer_family {entry.consumer_family!r}; "
             f"must be one of {sorted(CONSUMER_FAMILIES)}"
         )
+    if entry.grant_class not in GRANT_CLASSES:
+        raise ValueError(
+            f"claim {entry.claim_id!r} has unknown grant_class {entry.grant_class!r}; "
+            f"must be one of {sorted(GRANT_CLASSES)}"
+        )
     if not callable(entry.gate) or not callable(entry.trigger):
         raise TypeError(f"claim {entry.claim_id!r} gate/trigger must be callables")
     _REGISTRY[entry.claim_id] = entry
@@ -69,6 +80,45 @@ def is_registered(claim_id: str) -> bool:
 
 def entry_for(claim_id: str) -> RegistryEntry:
     return _REGISTRY[claim_id]
+
+
+def _registered_vocabulary() -> dict[str, RegistryEntry]:
+    """The registry with every matcher module imported, so a class lookup can't depend on import order."""
+    from .matchers import discover
+
+    discover()
+    return _REGISTRY
+
+
+def grant_class_of(claim_id: str) -> GrantClass | None:
+    """The grant class of a registered claim; ``None`` for an unregistered id, which grants nothing."""
+    entry = _registered_vocabulary().get(claim_id)
+    return entry.grant_class if entry is not None else None
+
+
+def claim_ids_of_class(*grant_classes: str) -> frozenset[str]:
+    """Every registered claim id in one of *grant_classes*."""
+    unknown = set(grant_classes) - GRANT_CLASSES
+    if unknown:
+        raise ValueError(f"unknown grant_class {sorted(unknown)}; must be one of {sorted(GRANT_CLASSES)}")
+    return frozenset(
+        claim_id for claim_id, entry in _registered_vocabulary().items() if entry.grant_class in grant_classes
+    )
+
+
+def single_contract_static_tier(claim: Mapping[str, Any]) -> str | None:
+    """The tier of the single-contract static evidence behind *claim*, or ``None`` when it has none.
+
+    An observed claim that superseded a static one carries the static tier on its witness.
+    """
+    tier = claim.get("tier")
+    if tier in SINGLE_CONTRACT_STATIC_TIERS:
+        return tier
+    witness = claim.get("witness")
+    carried = witness.get(STATIC_TIER_WITNESS_KEY) if isinstance(witness, Mapping) else None
+    if tier == "behavioral_observed" and carried in SINGLE_CONTRACT_STATIC_TIERS:
+        return carried
+    return None
 
 
 def legacy_projections() -> dict[str, str | None]:

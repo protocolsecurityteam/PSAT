@@ -16,11 +16,8 @@ from utils.evm import EIP1967_IMPL_SLOT
 
 from .claims import (
     Claim,
-    RegistryEntry,
     discover,
     emit_claim,
-    is_registered,
-    register,
     registry,
     resolve_claim_precedence,
 )
@@ -34,28 +31,6 @@ CALLEE_POINTER_ROTATE = "callee_pointer.rotate"
 
 # Proxy types whose implementation the classifier reads from a storage slot.
 _SLOT_CONFIRMED_PROXY_TYPES = frozenset({"eip1967", "eip1822", "beacon_proxy", "oz_legacy"})
-
-
-def _no_static_gate(_ctx: Any) -> bool:
-    # Policy-tier claims have no single-contract evidence; registered only so the policy stage can mint them.
-    return False
-
-
-def _no_static_trigger(_ctx: Any, _function: str) -> None:
-    return None
-
-
-if not is_registered(TRANSFER_POLICY_CONFIGURE):
-    register(
-        RegistryEntry(
-            claim_id=TRANSFER_POLICY_CONFIGURE,
-            sentence="changes another contract's transfer gating",
-            gate=_no_static_gate,
-            trigger=_no_static_trigger,
-            legacy_projection=None,
-            consumer_family="control_plane",
-        )
-    )
 
 
 def _compute_selector(signature: str) -> str | None:

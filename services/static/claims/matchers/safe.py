@@ -23,6 +23,7 @@ def _safe_evidence(selector: str) -> ClaimEvidence:
     sentence="changes the Safe signer set or approval threshold",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_safe_gate,
 )
 def safe_signer_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -37,6 +38,7 @@ def safe_signer_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="grants or revokes Safe module execution rights",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_safe_gate,
 )
 def safe_module_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -51,6 +53,7 @@ def safe_module_mgmt(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="sets the Safe transaction guard hook",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_safe_gate,
 )
 def safe_set_guard(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

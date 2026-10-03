@@ -25,6 +25,32 @@ TIER_PRECEDENCE: dict[str, int] = {
 ConsumerFamily = Literal["control_plane", "flow", "exec", "user_plane", "fact"]
 CONSUMER_FAMILIES: frozenset[str] = frozenset(get_args(ConsumerFamily))
 
+# What holding a gated function's permission grants. ``control.*`` changes who controls, the code, the pause state,
+# enforced policy, or value the caller doesn't own; ``operational`` moves only the caller's own value or others' on
+# terms they set. ``exemption`` is reserved: no claim proves a bypassed check yet.
+GrantClass = Literal[
+    "control.gate",
+    "control.code",
+    "control.pause",
+    "control.config",
+    "control.funds",
+    "operational",
+    "exemption",
+    "user",
+    "fact",
+]
+GRANT_CLASSES: frozenset[str] = frozenset(get_args(GrantClass))
+CONTROL_GRANT_CLASSES: frozenset[str] = frozenset(
+    {"control.gate", "control.code", "control.pause", "control.config", "control.funds"}
+)
+
+# Tiers minted from one contract's own static facts; ``policy_derived`` needs a sibling's facts and
+# ``behavioral_observed`` a fork run.
+SINGLE_CONTRACT_STATIC_TIERS: frozenset[str] = frozenset({"standard_exact", "idiom_structural"})
+
+# Stamped on an observed claim's witness when it supersedes a static one: the superseded claim's tier.
+STATIC_TIER_WITNESS_KEY = "static_tier"
+
 # A replayable pointer to the evidence (tree leaf path, sink id, selector plus gate...), shaped per tier.
 Witness = dict[str, Any]
 

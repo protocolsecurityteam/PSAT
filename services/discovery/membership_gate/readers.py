@@ -24,6 +24,7 @@ from db.models import (
     UpgradeEvent,
 )
 from services.clients.rpc import chain_id_for_chain_name
+from services.static.claims import CONTROL_GRANT_CLASSES, grant_class_of, single_contract_static_tier
 from utils.chains import canonical_chain
 
 from .rules import (
@@ -282,6 +283,22 @@ def _authority_derived_principal():
     )
 
 
+def _function_grants_control(claims: Any) -> bool:
+    """Whether a gated function carries a ``control.*`` claim earned by single-contract static analysis.
+
+    Claims minted after the policy stage are excluded so admission can't depend on sibling timing. Anything else
+    (operational or user grants, no claims) is not_determined and never admits.
+    """
+    if not isinstance(claims, list):
+        return False
+    return any(
+        isinstance(claim, dict)
+        and grant_class_of(str(claim.get("claim_id"))) in CONTROL_GRANT_CLASSES
+        and single_contract_static_tier(claim) is not None
+        for claim in claims
+    )
+
+
 def _member_principal_rows(
     session: Session,
     *,
@@ -295,7 +312,9 @@ def _member_principal_rows(
     ``(function_principal_id, function_id, resolved_type, safe_address, member)``.
 
     ``safe_owners=True`` reads Safe principals whose signer set contains it. Same-chain members only; authority-derived
-    principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since caller-set enumerations aren't control.
+    principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since caller-set enumerations aren't control; and only
+    on functions whose permission grants control (:func:`_function_grants_control`), since a privileged depositor
+    isn't a controller.
     """
     member_scope = [
         Contract.protocol_id == protocol_id,
@@ -305,22 +324,30 @@ def _member_principal_rows(
     if exclude_contract_id is not None:
         member_scope.append(Contract.id != exclude_contract_id)
     if not safe_owners:
-        for fp_id, function_id, resolved_type, member in session.execute(
-            select(FunctionPrincipal.id, FunctionPrincipal.function_id, FunctionPrincipal.resolved_type, Contract)
+        for fp_id, function_id, resolved_type, claims, member in session.execute(
+            select(
+                FunctionPrincipal.id,
+                FunctionPrincipal.function_id,
+                FunctionPrincipal.resolved_type,
+                EffectiveFunction.claims,
+                Contract,
+            )
             .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
             .join(Contract, EffectiveFunction.contract_id == Contract.id)
             .where(*member_scope, func.lower(FunctionPrincipal.address) == address)
             .order_by(FunctionPrincipal.id)
         ):
-            yield fp_id, function_id, resolved_type, None, member
+            if _function_grants_control(claims):
+                yield fp_id, function_id, resolved_type, None, member
         return
     # Match owners in Python so casing can't hide a signer; SQL ``ilike`` is a superset prefilter.
-    for fp_id, function_id, safe_address, details, member in session.execute(
+    for fp_id, function_id, safe_address, details, claims, member in session.execute(
         select(
             FunctionPrincipal.id,
             FunctionPrincipal.function_id,
             FunctionPrincipal.address,
             FunctionPrincipal.details,
+            EffectiveFunction.claims,
             Contract,
         )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -334,7 +361,7 @@ def _member_principal_rows(
         .order_by(FunctionPrincipal.id)
     ):
         owners = details.get("owners") if isinstance(details, dict) else None
-        if not isinstance(owners, list):
+        if not isinstance(owners, list) or not _function_grants_control(claims):
             continue
         if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
             yield fp_id, function_id, "safe", (safe_address or "").lower(), member

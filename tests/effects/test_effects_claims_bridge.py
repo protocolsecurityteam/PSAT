@@ -272,3 +272,17 @@ def test_a_damaged_row_is_repaired_by_the_next_policy_rerun():
     assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
     assert witness["sink_ids"] == ["sink-1"]
     assert witness["effect_verdict_id"] == 1
+
+
+def test_superseding_a_static_claim_keeps_the_tier_membership_admits_on():
+    """Membership admits an observed claim only on the static tier it superseded; dropping the stamp would revoke
+    standing members after the next effects run."""
+    from services.discovery.membership_gate.readers import _function_grants_control
+
+    merged = claims_bridge.merge_observed_claims(
+        [_static("pause.set", "idiom_structural", kind="pause_latch")], [_verdict(EFFECT_CLASS_FREEZE_PAUSE)]
+    )
+
+    assert [(c["claim_id"], c["tier"]) for c in merged] == [("pause.set", "behavioral_observed")]
+    assert merged[0]["witness"]["static_tier"] == "idiom_structural"
+    assert _function_grants_control(merged)

@@ -13,9 +13,9 @@ from utils.scoring_status import (
     SELF_SERVICE_DISCLOSE_SIBLING,
     SELF_SERVICE_DISCLOSE_UPGRADE,
     SELF_SERVICE_STATE_PROVEN,
+    W2_BASIS_CLEAR_DOMINATES_CALLS,
 )
 
-from ...contract_analysis_pipeline.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Keyed by the per-contract ClaimContext.

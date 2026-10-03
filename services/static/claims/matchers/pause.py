@@ -59,6 +59,7 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     sentence="sets a flag that blocks other state-changing entry points of this contract (pauses it)",
     legacy_projection="pause_toggle",
     consumer_family="control_plane",
+    grant_class="control.pause",
 )
 def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _pause_evidence(ctx, function, "set")
@@ -69,6 +70,7 @@ def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="clears a flag that blocks other state-changing entry points of this contract (unpauses it)",
     legacy_projection="pause_toggle",
     consumer_family="control_plane",
+    grant_class="control.pause",
 )
 def pause_unset(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _pause_evidence(ctx, function, "unset")
