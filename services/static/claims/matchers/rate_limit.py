@@ -58,6 +58,7 @@ def _mandatory_callee_names(ctx: ClaimContext, function: str) -> set[str]:
     sentence="passes an amount through a bucket rate limiter",
     legacy_projection=None,
     consumer_family="fact",
+    grant_class="fact",
 )
 def rate_limit_consume(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sinks = [

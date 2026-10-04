@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # typing-only: scoring reads static's persisted JSON, not its modules
     from services.static.contract_analysis_pipeline.predicate_types import StateVarTargetKind
 
+from services.static.claims import claim_ids_of_class
+from utils import claim_ids as C
 from utils.scoring_status import MODEL_VERSION
 
 SEV_SCALE = 60.0
@@ -30,21 +32,21 @@ UNPRICED_BAND = 0.15
 # What the claim's proven existence licenses; refined only downward by mitigating witnesses, never raised by their
 # absence.
 BASE_SEVERITY: dict[str, float] = {
-    "upgrade.implementation": 1.0,
-    "authority.replace": 0.75,
-    "roles.grant": 0.55,
-    "roles.revoke": 0.4,
-    "roles.configure": 0.55,
-    "authorized_caller.rotate": 0.55,
-    "ownership.transfer": 0.55,
-    "pause.set": 0.0,  # built up from proven components only
-    "transfer_policy.configure": 0.25,
-    "timelock.set_delay": 0.3,
-    "lz_oapp.set_peer": 0.3,
-    "lz_oapp.set_delegate": 0.3,
-    "delegatecall.execute": 1.0,
-    "exec.arbitrary": 1.0,
-    "flow.out": 0.9,
+    C.UPGRADE_IMPLEMENTATION: 1.0,
+    C.AUTHORITY_REPLACE: 0.75,
+    C.ROLES_GRANT: 0.55,
+    C.ROLES_REVOKE: 0.4,
+    C.ROLES_CONFIGURE: 0.55,
+    C.AUTHORIZED_CALLER_ROTATE: 0.55,
+    C.OWNERSHIP_TRANSFER: 0.55,
+    C.PAUSE_SET: 0.0,  # built up from proven components only
+    C.TRANSFER_POLICY_CONFIGURE: 0.25,
+    C.TIMELOCK_SET_DELAY: 0.3,
+    C.LZ_OAPP_SET_PEER: 0.3,
+    C.LZ_OAPP_SET_DELEGATE: 0.3,
+    C.DELEGATECALL_EXECUTE: 1.0,
+    C.EXEC_ARBITRARY: 1.0,
+    C.FLOW_OUT: 0.9,
 }
 
 # Only on a proven destination state; an unread destination yields no severity.
@@ -94,29 +96,18 @@ DELAY_DISCOUNT_SATURATION_DAYS = 30.0
 
 # Code control replaces what the node does: expansion covers its whole closure (bounded by each destination's caller
 # conditions).
-CODE_CONTROL_CAPABILITIES = frozenset(
-    {
-        "upgrade.implementation",
-        "exec.arbitrary",
-        "delegatecall.execute",
-    }
-)
+CODE_CONTROL_CAPABILITIES: frozenset[str] = claim_ids_of_class("control.code")
 
 # Gate control replaces who may call: expansion only through edges the gate is witnessed to confer; undetermined scope
-# confers nothing and the hop is published as not_determined.
-GATE_CONTROL_CAPABILITIES = frozenset(
-    {
-        "authority.replace",
-        "ownership.transfer",
-        "roles.grant",
-        "roles.configure",
-        "authorized_caller.rotate",
-    }
+# confers nothing and the hop is published as not_determined. The ``control.gate`` claims that hand control to a named
+# party; revocation, acceptance and Safe/timelock housekeeping don't.
+GATE_CONTROL_CAPABILITIES: frozenset[str] = frozenset(
+    {C.AUTHORITY_REPLACE, C.OWNERSHIP_TRANSFER, C.ROLES_GRANT, C.ROLES_CONFIGURE, C.AUTHORIZED_CALLER_ROTATE}
 )
 
 TRANSITIVE_CAPABILITIES = CODE_CONTROL_CAPABILITIES | GATE_CONTROL_CAPABILITIES
 
-DESTINATION_BEARING_SEVERITY = frozenset({"flow.out", "delegatecall.execute", "exec.arbitrary"})
+DESTINATION_BEARING_SEVERITY = frozenset({C.FLOW_OUT, C.DELEGATECALL_EXECUTE, C.EXEC_ARBITRARY})
 
 # Proven-0.0 bases that are uncharged product surface: kept for confidence, excluded from findings. The fold requires
 # both token and value 0.0, since ``pause.set`` also starts at zero.
@@ -131,25 +122,25 @@ UNCHARGED_PRODUCT_BASES = frozenset(
 # Scored only where permissionlessness is proven; undetermined openness is warned.
 PRODUCT_CLAIMS = frozenset(
     {
-        "flow.in",
-        "erc20.approve",
-        "erc20.transfer",
-        "erc20.transfer_from",
-        "gov.delegate",
-        "pause.unset",
-        "supply.mint",
-        "supply.burn",
-        "ownership.accept",
-        "ownership.renounce",
-        "timelock.execute",
-        "timelock.schedule",
-        "timelock.cancel",
-        "rate_limit.consume",
+        C.FLOW_IN,
+        C.ERC20_APPROVE,
+        C.ERC20_TRANSFER,
+        C.ERC20_TRANSFER_FROM,
+        C.GOV_DELEGATE,
+        C.PAUSE_UNSET,
+        C.SUPPLY_MINT,
+        C.SUPPLY_BURN,
+        C.OWNERSHIP_ACCEPT,
+        C.OWNERSHIP_RENOUNCE,
+        C.TIMELOCK_EXECUTE,
+        C.TIMELOCK_SCHEDULE,
+        C.TIMELOCK_CANCEL,
+        C.RATE_LIMIT_CONSUME,
     }
 )
 
 # No severity model yet; excluded with a warning, not judged benign.
-UNMODELLED_CLAIMS = frozenset({"value_router", "contract_deployment", "callee_pointer.rotate"})
+UNMODELLED_CLAIMS = frozenset({C.VALUE_ROUTER, C.CONTRACT_DEPLOYMENT, C.CALLEE_POINTER_ROTATE})
 
 FIXED_TARGET_KINDS: frozenset[StateVarTargetKind] = frozenset({"immutable", "constant", "storage_no_setter"})
 # Type-only import of the static plane's Literal, so vocabulary drift is a pyright error.

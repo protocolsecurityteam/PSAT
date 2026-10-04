@@ -227,6 +227,7 @@ def test_build_company_overview_omits_functions_field(db_session):
             selector="0xabcdef01",
             abi_signature="pause()",
             effect_labels=["pause_toggle"],
+            claims=[_claim("pause.set")],
             effect_targets=[],
             action_summary="pause",
             authority_public=False,
@@ -272,6 +273,7 @@ def test_capability_chips_key_on_claims(db_session):
     _ef("manage", "0x01000003", claims=[_claim("exec.arbitrary")], effect_labels=["external_contract_call"])
     # Claims win over legacy labels on the same row.
     _ef("sweep", "0x01000004", claims=[_claim("flow.out")], effect_labels=["ownership_transfer"])
+    # A label without a claim earns no chip.
     _ef("pause", "0x01000005", effect_labels=["pause_toggle"])
     _ef("payout", "0x01000006", effect_labels=["asset_send"])
     db_session.commit()
@@ -280,8 +282,8 @@ def test_capability_chips_key_on_claims(db_session):
     entry = next(e for e in payload["contracts"] if e["address"] == addr)
     caps = set(entry["capabilities"])
 
-    assert {"timelock", "safe", "arbitrary-call", "fund-out", "pause"} <= caps
-    assert "ownership" not in caps
+    assert {"timelock", "safe", "arbitrary-call", "fund-out"} <= caps
+    assert not caps & {"ownership", "pause"}
     assert "asset_send" in entry["value_effects"]
 
 
@@ -2321,13 +2323,14 @@ def test_last_upgrade_pair_block_carrying_control(db_session):
     assert entry["last_upgrade_timestamp"] == "2024-09-01T00:00:00+00:00"
 
 
-def _add_ef_with_fp(session, contract, fname, selector, labels, fp_addr, fp_type=None):
+def _add_ef_with_fp(session, contract, fname, selector, labels, fp_addr, fp_type=None, claims=None):
     ef = EffectiveFunction(
         contract_id=contract.id,
         function_name=fname,
         selector=selector,
         abi_signature=f"{fname}()",
         effect_labels=labels,
+        claims=claims,
         effect_targets=[],
         action_summary=fname,
         authority_public=False,
@@ -2365,8 +2368,18 @@ def test_fund_flow_capabilities_are_source_scoped_not_target_union(db_session):
     _add_contract(db_session, address=a_addr, job=a_job, protocol_id=p.id, contract_name="Pauser")
     _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Upgrader")
 
-    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], a_addr.lower())
-    _add_ef_with_fp(db_session, t, "upgradeTo", "0x3659cfe6", ["implementation_update"], b_addr.lower())
+    _add_ef_with_fp(
+        db_session, t, "pause", "0x8456cb59", ["pause_toggle"], a_addr.lower(), claims=[_claim("pause.set")]
+    )
+    _add_ef_with_fp(
+        db_session,
+        t,
+        "upgradeTo",
+        "0x3659cfe6",
+        ["implementation_update"],
+        b_addr.lower(),
+        claims=[_claim("upgrade.implementation")],
+    )
 
     payload = build_company_overview(db_session, p.name)
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
@@ -2406,7 +2419,9 @@ def test_fund_flow_capabilities_empty_when_source_has_no_capability_witness(db_s
     _add_contract(db_session, address=b_addr, job=b_job, protocol_id=p.id, contract_name="Pauser")
 
     _add_ef_with_fp(db_session, t, "poke", "0xdeadbe01", [], a_addr.lower())
-    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], b_addr.lower())
+    _add_ef_with_fp(
+        db_session, t, "pause", "0x8456cb59", ["pause_toggle"], b_addr.lower(), claims=[_claim("pause.set")]
+    )
 
     payload = build_company_overview(db_session, p.name)
     target_entry = next(c for c in payload["contracts"] if c["address"] == t_addr)
@@ -2430,7 +2445,16 @@ def test_fund_flow_capabilities_agree_with_controls_detail(db_session):
     t_job = _add_job(db_session, address=t_addr, protocol_id=p.id, name="Vault", is_proxy=True)
     t = _add_contract(db_session, address=t_addr, job=t_job, protocol_id=p.id, is_proxy=True, contract_name="Vault")
 
-    _add_ef_with_fp(db_session, t, "pause", "0x8456cb59", ["pause_toggle"], safe_addr.lower(), fp_type="safe")
+    _add_ef_with_fp(
+        db_session,
+        t,
+        "pause",
+        "0x8456cb59",
+        ["pause_toggle"],
+        safe_addr.lower(),
+        fp_type="safe",
+        claims=[_claim("pause.set")],
+    )
     db_session.add(
         ControlGraphNode(
             contract_id=t.id,

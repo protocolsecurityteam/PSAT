@@ -71,11 +71,9 @@ from .flows import (
     static_destination_shape,
 )
 from .pause_window import (
-    _CLOCK_KINDS,
     _CONSTANT_IS_UPPER_BOUND,
     _OPAQUE_OPERAND_SOURCES,
     _OPERAND_ABSORPTION_RECORDED,
-    _SECONDS_CLOCK_KINDS,
     _absorption_recorded,
     _claim_latch_pairs,
     _compared_operands,
@@ -196,7 +194,6 @@ __all__ = [
     "_AMOUNT_WORDS",
     "_ARRAY_TYPE",
     "_AUTHORITY_ROLES",
-    "_CLOCK_KINDS",
     "_CONSTANT_IS_UPPER_BOUND",
     "_ERC20_BALANCE_OF_SIGNATURE",
     "_ERC20_TRANSFER_SELECTOR",
@@ -221,7 +218,6 @@ __all__ = [
     "_ProbeInputs",
     "_RECIPIENT_WORDS",
     "_RESOLVED_ADDRESS",
-    "_SECONDS_CLOCK_KINDS",
     "_SUPPLY_DIRECTIONS",
     "_SUPPLY_LATTICE_DIRECTIONS",
     "_TOKEN_METHOD_WORDS",

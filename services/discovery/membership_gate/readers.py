@@ -24,6 +24,7 @@ from db.models import (
     UpgradeEvent,
 )
 from services.clients.rpc import chain_id_for_chain_name
+from services.static.claims import CONTROL_GRANT_CLASSES, grant_class_of, single_contract_static_tier
 from utils.chains import canonical_chain
 
 from .rules import (
@@ -282,6 +283,22 @@ def _authority_derived_principal():
     )
 
 
+def _function_grants_control(claims: Any) -> bool:
+    """Whether a gated function carries a ``control.*`` claim earned by single-contract static analysis.
+
+    Claims minted after the policy stage are excluded so admission can't depend on sibling timing. Anything else
+    (operational or user grants, no claims) is not_determined and never admits.
+    """
+    if not isinstance(claims, list):
+        return False
+    return any(
+        isinstance(claim, dict)
+        and grant_class_of(str(claim.get("claim_id"))) in CONTROL_GRANT_CLASSES
+        and single_contract_static_tier(claim) is not None
+        for claim in claims
+    )
+
+
 def _member_principal_rows(
     session: Session,
     *,
@@ -289,13 +306,13 @@ def _member_principal_rows(
     address: str,
     chain_key: str,
     exclude_contract_id: int | None,
-    safe_owners: bool,
 ):
     """Resolved-principal observations of *address* on this protocol's members, by principal row id, as
-    ``(function_principal_id, function_id, resolved_type, safe_address, member)``.
+    ``(function_principal_id, function_id, resolved_type, member)``.
 
-    ``safe_owners=True`` reads Safe principals whose signer set contains it. Same-chain members only; authority-derived
-    principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since caller-set enumerations aren't control.
+    Same-chain members only; authority-derived principals only (:data:`W3_PRINCIPAL_AUTHORITY_RESOLVERS`), since
+    caller-set enumerations aren't control; and only on functions whose permission grants control
+    (:func:`_function_grants_control`), since a privileged depositor isn't a controller.
     """
     member_scope = [
         Contract.protocol_id == protocol_id,
@@ -304,40 +321,21 @@ def _member_principal_rows(
     ]
     if exclude_contract_id is not None:
         member_scope.append(Contract.id != exclude_contract_id)
-    if not safe_owners:
-        for fp_id, function_id, resolved_type, member in session.execute(
-            select(FunctionPrincipal.id, FunctionPrincipal.function_id, FunctionPrincipal.resolved_type, Contract)
-            .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
-            .join(Contract, EffectiveFunction.contract_id == Contract.id)
-            .where(*member_scope, func.lower(FunctionPrincipal.address) == address)
-            .order_by(FunctionPrincipal.id)
-        ):
-            yield fp_id, function_id, resolved_type, None, member
-        return
-    # Match owners in Python so casing can't hide a signer; SQL ``ilike`` is a superset prefilter.
-    for fp_id, function_id, safe_address, details, member in session.execute(
+    for fp_id, function_id, resolved_type, claims, member in session.execute(
         select(
             FunctionPrincipal.id,
             FunctionPrincipal.function_id,
-            FunctionPrincipal.address,
-            FunctionPrincipal.details,
+            FunctionPrincipal.resolved_type,
+            EffectiveFunction.claims,
             Contract,
         )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .join(Contract, EffectiveFunction.contract_id == Contract.id)
-        .where(
-            *member_scope,
-            FunctionPrincipal.resolved_type == "safe",
-            jsonb_has_payload(FunctionPrincipal.details),
-            FunctionPrincipal.details.op("->")("owners").cast(Text).ilike(f"%{address}%"),
-        )
+        .where(*member_scope, func.lower(FunctionPrincipal.address) == address)
         .order_by(FunctionPrincipal.id)
     ):
-        owners = details.get("owners") if isinstance(details, dict) else None
-        if not isinstance(owners, list):
-            continue
-        if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
-            yield fp_id, function_id, "safe", (safe_address or "").lower(), member
+        if _function_grants_control(claims):
+            yield fp_id, function_id, resolved_type, member
 
 
 def _function_principal_fact(
@@ -367,13 +365,12 @@ def _principal_perimeter_fact(
     """Class-A reading for the D1-principal arm: *address* is a resolved EOA principal of a member hosting a
     non-D2 admitting witness (F2). Smallest principal row wins.
     """
-    for fp_id, function_id, resolved_type, _safe_address, member in _member_principal_rows(
+    for fp_id, function_id, resolved_type, member in _member_principal_rows(
         session,
         protocol_id=protocol_id,
         address=address,
         chain_key=chain_key,
         exclude_contract_id=exclude_contract_id,
-        safe_owners=False,
     ):
         if resolved_type != W3_PERIMETER_PRINCIPAL_TYPE:
             continue
@@ -390,13 +387,12 @@ def _d2_principal_facts(
     member, members by id.
     """
     facts: dict[int, tuple[Contract, dict[str, Any]]] = {}
-    for fp_id, function_id, resolved_type, _safe, member in _member_principal_rows(
+    for fp_id, function_id, resolved_type, member in _member_principal_rows(
         session,
         protocol_id=protocol_id,
         address=address,
         chain_key=chain_key,
         exclude_contract_id=exclude_contract_id,
-        safe_owners=False,
     ):
         if resolved_type not in W3_PRINCIPAL_CONTROLLER_TYPES or member.id in facts:
             continue
@@ -501,7 +497,8 @@ def _perimeter_fact(session: Session, *, protocol_id: int, address: str) -> dict
 
 def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: str):
     """Every perimeter observation of *address*, as ``(fact, anchoring_member_id)``; the caller checks
-    anchoring.
+    anchoring. Principal observations count only on functions whose permission grants control
+    (:func:`_function_grants_control`).
     """
     members = _member_ids_subquery(protocol_id)
     for member_id, controller_id in session.execute(
@@ -515,8 +512,10 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
     ):
         yield {"kind": "controller_value", "contract_id": member_id, "controller_id": controller_id}, member_id
     # Only authority-derived principals are perimeter observations.
-    for fp_id, function_id, member_id in session.execute(
-        select(FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id)
+    for fp_id, function_id, member_id, claims in session.execute(
+        select(
+            FunctionPrincipal.id, FunctionPrincipal.function_id, EffectiveFunction.contract_id, EffectiveFunction.claims
+        )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(
             EffectiveFunction.contract_id.in_(members),
@@ -525,11 +524,16 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         )
         .order_by(FunctionPrincipal.id)
     ):
-        yield {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}, member_id
+        if _function_grants_control(claims):
+            yield {"kind": "function_principal", "function_principal_id": fp_id, "function_id": function_id}, member_id
     # Match owners in Python; the SQL ``ilike`` prefilter keeps large Safe registries off the wire.
     safe_rows = session.execute(
         select(
-            FunctionPrincipal.id, FunctionPrincipal.address, FunctionPrincipal.details, EffectiveFunction.contract_id
+            FunctionPrincipal.id,
+            FunctionPrincipal.address,
+            FunctionPrincipal.details,
+            EffectiveFunction.contract_id,
+            EffectiveFunction.claims,
         )
         .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
         .where(
@@ -540,9 +544,9 @@ def _perimeter_fact_candidates(session: Session, *, protocol_id: int, address: s
         )
         .order_by(FunctionPrincipal.id)
     ).all()
-    for fp_id, safe_address, details, member_id in safe_rows:
+    for fp_id, safe_address, details, member_id, claims in safe_rows:
         owners = details.get("owners") if isinstance(details, dict) else None
-        if not isinstance(owners, list):
+        if not isinstance(owners, list) or not _function_grants_control(claims):
             continue
         if any(isinstance(owner, str) and owner.lower() == address for owner in owners):
             yield (

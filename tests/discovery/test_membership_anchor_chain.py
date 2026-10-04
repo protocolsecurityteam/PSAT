@@ -128,8 +128,8 @@ def _caller_gate(db_session, subject, value, controller_id="owner"):
     _probe_read(db_session, subject, value)
 
 
-def _principal(db_session, host, address, *, resolved_type=None, details=None, function_name="admin"):
-    fn = EffectiveFunction(contract_id=host.id, function_name=f"{function_name}-{uuid.uuid4().hex[:6]}")
+def _principal(db_session, host, address, *, resolved_type=None, details=None, function_name="admin", claims=None):
+    fn = EffectiveFunction(contract_id=host.id, function_name=f"{function_name}-{uuid.uuid4().hex[:6]}", claims=claims)
     db_session.add(fn)
     db_session.flush()
     row = FunctionPrincipal(function_id=fn.id, address=address.lower(), resolved_type=resolved_type, details=details)
@@ -424,6 +424,36 @@ def test_singleton_link_still_roots_at_a_perimeter_principal(db_session, protoco
     chain = _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]
     assert chain["links"][0]["kind"] == "owner_or_authority"
     assert chain["anchor_kind"] == "perimeter_principal"
+
+
+def test_a_perimeter_anchor_needs_a_control_grant_under_the_principal(db_session, protocol):
+    """A singleton owner roots at a perimeter principal only where its permission on the anchored member grants
+    control; a depositor role roots nothing."""
+    anchor = _anchored_member(db_session, protocol, ADDR(0x1501))
+    registry = _d2_member(db_session, protocol, ADDR(0x1502), controls=anchor)
+    owner = ADDR(0x1503)
+    _caller_gate(db_session, registry, owner)
+    authority = {"resolver_path": ["live_getter_resolution"]}
+    deposit = [
+        {"claim_id": "value_router", "tier": "standard_exact", "witness": {}},
+        {"claim_id": "flow.in", "tier": "idiom_structural", "witness": {}},
+    ]
+    _principal(
+        db_session, anchor, owner, resolved_type="eoa", details=authority, function_name="bulkDeposit", claims=deposit
+    )
+
+    ward = _contract(db_session, ADDR(0x1504), nominated=protocol.id)
+    _caller_gate(db_session, ward, registry.address)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
+    db_session.flush()
+    assert ward.protocol_id is None
+
+    pause = [{"claim_id": "pause.set", "tier": "idiom_structural", "witness": {}}]
+    _principal(db_session, anchor, owner, resolved_type="eoa", details=authority, function_name="pause", claims=pause)
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(ward.id,)))
+    db_session.flush()
+    assert ward.protocol_id == protocol.id
+    assert _d1_witness(db_session, ward, protocol).evidence["anchor_chain"]["anchor_kind"] == "perimeter_principal"
 
 
 def test_anchor_resting_on_the_controller_itself_is_refused_then_admitted_independently(db_session, protocol):

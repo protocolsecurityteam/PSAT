@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from services.scoring import constants as K
+from utils import claim_ids as C
 from utils.scoring_status import (
     WITNESS_TIER_BEHAVIORAL_OBSERVED,
     WITNESS_TIER_IDIOM_STRUCTURAL,
@@ -79,7 +80,7 @@ def _considered_out_flows(claims: list[dict[str, Any]]) -> tuple[list[dict[str, 
     considered: list[dict[str, Any]] = []
     for claim in claims:
         claim_id = str(claim.get("claim_id"))
-        if claim_id not in ("flow.out", "value_router"):
+        if claim_id not in (C.FLOW_OUT, C.VALUE_ROUTER):
             continue
         if claim.get("tier") == "policy_derived":
             return [], "blocked_policy_derived"
@@ -88,7 +89,7 @@ def _considered_out_flows(claims: list[dict[str, Any]]) -> tuple[list[dict[str, 
         if flows is None:
             return [], "blocked_no_flows"
         # ``direction`` lives on the witness, not the flow entry.
-        direction = str(witness.get("direction") or ("value_router" if claim_id == "value_router" else "out"))
+        direction = str(witness.get("direction") or ("value_router" if claim_id == C.VALUE_ROUTER else "out"))
         if direction not in ("out", "eth_out", "value_router"):
             continue
         considered.extend(f for f in flows if isinstance(f, dict))
@@ -124,7 +125,7 @@ def _static_destination_shape(claims: list[dict[str, Any]]) -> tuple[str | None,
 def _amount_kinds(claims: list[dict[str, Any]]) -> set[str]:
     kinds: set[str] = set()
     for claim in claims:
-        if str(claim.get("claim_id")) != "flow.out":
+        if str(claim.get("claim_id")) != C.FLOW_OUT:
             continue
         for flow in (claim.get("witness") or {}).get("flows") or []:
             if not isinstance(flow, dict):

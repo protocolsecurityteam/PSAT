@@ -2,7 +2,8 @@
 
 standard_exact: the full OZ Pausable ABI (``pause()``, ``unpause()``, ``paused()``, where a public bool counts), never
 the flag's name. idiom_structural: a guarded write to a bool that another entry point reads as a mandatory revert gate,
-excluding one-shot initializer latches.
+or to a timestamp latch (``_facts.timestamp_latches``) armed to ``block.timestamp + x`` or cleared to 0, excluding
+one-shot initializer latches.
 """
 
 from __future__ import annotations
@@ -23,13 +24,26 @@ def _oz_pausable_standard(ctx: ClaimContext) -> bool:
 
 
 def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidence | None:
-    targets = _facts.function_pause_targets(ctx, function)
-    if not targets:
-        return None
     tree = ctx.predicate_tree(function)
     if tree is None or not _facts.tree_is_authority_gated(tree) or _facts.tree_is_one_shot(tree):
         return None
+    bool_flags = _bool_flags(ctx, function, want)
+    matched = bool_flags + _timestamp_flags(ctx, function, want)
+    if not matched:
+        return None
 
+    # The OZ Pausable ABI describes a bool flag; a timestamp latch alone stays idiom-tier.
+    standard = bool(bool_flags) and ctx.canonical_selector(function) in _TOGGLE_SELECTORS and _oz_pausable_standard(ctx)
+    return ClaimEvidence(
+        tier="standard_exact" if standard else "idiom_structural",
+        witness={"kind": "pause_flag", "flags": matched, "polarity": want},
+    )
+
+
+def _bool_flags(ctx: ClaimContext, function: str, want: str) -> list[dict[str, str | None]]:
+    targets = _facts.function_pause_targets(ctx, function)
+    if not targets:
+        return []
     fn = _facts.contract_function(ctx, function)
     gate_reads = _facts.mandatory_gate_reads(ctx)
     namespaced = _facts.namespaced_write_vars(ctx, function)
@@ -44,14 +58,16 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
             continue
         if polarity in (want, "both"):
             matched.append({"var": var, "member": member})
-    if not matched:
-        return None
+    return matched
 
-    standard = ctx.canonical_selector(function) in _TOGGLE_SELECTORS and _oz_pausable_standard(ctx)
-    return ClaimEvidence(
-        tier="standard_exact" if standard else "idiom_structural",
-        witness={"kind": "pause_flag", "flags": matched, "polarity": want},
-    )
+
+def _timestamp_flags(ctx: ClaimContext, function: str, want: str) -> list[dict[str, str | None]]:
+    matched: list[dict[str, str | None]] = []
+    for var, member in sorted(_facts.timestamp_latches(ctx), key=lambda pair: (pair[0], pair[1] or "")):
+        polarity = _facts.timestamp_latch_polarity(ctx, function, (var, member))
+        if polarity in (want, "both"):
+            matched.append({"var": var, "member": member, "latch": "timestamp"})
+    return matched
 
 
 @claim_matcher(
@@ -59,6 +75,7 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     sentence="sets a flag that blocks other state-changing entry points of this contract (pauses it)",
     legacy_projection="pause_toggle",
     consumer_family="control_plane",
+    grant_class="control.pause",
 )
 def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _pause_evidence(ctx, function, "set")
@@ -69,6 +86,7 @@ def pause_set(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="clears a flag that blocks other state-changing entry points of this contract (unpauses it)",
     legacy_projection="pause_toggle",
     consumer_family="control_plane",
+    grant_class="control.pause",
 )
 def pause_unset(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _pause_evidence(ctx, function, "unset")

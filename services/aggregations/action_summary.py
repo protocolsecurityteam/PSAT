@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from utils import claim_ids as C
 from utils.scoring_status import DESTINATION_STATE_UNCONSTRAINED_PROVEN, NOT_DETERMINED
 
 # Matched as strings: what's classified is the sentence that ships, not a re-derivation of the producer's branch.
@@ -25,7 +26,7 @@ def _exec_arbitrary_claim(claims: Any) -> dict[str, Any] | None:
     if not isinstance(claims, list):
         return None
     for claim in claims:
-        if isinstance(claim, dict) and claim.get("claim_id") == "exec.arbitrary":
+        if isinstance(claim, dict) and claim.get("claim_id") == C.EXEC_ARBITRARY:
             return claim
     return None
 

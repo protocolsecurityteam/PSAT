@@ -6,12 +6,12 @@ import pytest
 from eth_utils.crypto import keccak
 
 from services.static.cross_contract import (
-    TRANSFER_POLICY_CONFIGURE,
     build_callee_claim_map,
     derive_cross_contract_claims,
     proxy_provenance_from_classifications,
     sibling_transfer_hook_links,
 )
+from utils import claim_ids as C
 
 TOKEN = "0x1111111111111111111111111111111111111111"
 VAULT = "0x2222222222222222222222222222222222222222"
@@ -90,7 +90,7 @@ def test_transfer_policy_configure_on_bool_mapping_setter():
         sibling_transfer_hooks=links,
     )
     claim = out["allowFrom(address)"][0]
-    assert claim["claim_id"] == TRANSFER_POLICY_CONFIGURE
+    assert claim["claim_id"] == C.TRANSFER_POLICY_CONFIGURE
     assert claim["tier"] == "policy_derived"
     assert claim["witness"]["configures"] == VAULT
     assert claim["witness"]["set_vars"] == ["allowlist"]

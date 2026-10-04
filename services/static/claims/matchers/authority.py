@@ -17,6 +17,7 @@ from . import _authcommon as ac
     sentence="replaces the external authority contract consulted for permission checks",
     legacy_projection="authority_update",
     consumer_family="control_plane",
+    grant_class="control.gate",
 )
 def authority_replace(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if ac.canonical_selector(ctx, function) != ac.SET_AUTHORITY:

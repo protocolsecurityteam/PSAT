@@ -12,7 +12,7 @@ from typing import Any, TypedDict
 
 from typing_extensions import NotRequired
 
-from utils.scoring_status import NOT_DETERMINED
+from utils.scoring_status import NOT_DETERMINED, W2_BASIS_CLEAR_DOMINATES_CALLS
 
 from .revert_detect import _ir_is_assert, _ir_is_require
 
@@ -23,8 +23,6 @@ FLAG_FLIP_CLEARING_ENABLED = True
 
 PROVEN = "proven_ordering"
 
-# The verified-guard alternative is a separate proof.
-W2_BASIS_CLEAR_DOMINATES_CALLS = "clear_dominates_calls"
 
 # Dominance inside a loop body proves per-iteration ordering only.
 DISCLOSURE_CROSS_ITERATION = "cross_iteration_ordering_not_proven"

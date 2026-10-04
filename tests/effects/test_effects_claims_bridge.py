@@ -19,6 +19,7 @@ from services.effects.config import (
     VERDICT_UNKNOWN,
 )
 from services.static.claims.types import Claim
+from utils import claim_ids as C
 
 
 def _static(claim_id: str, tier: str = "standard_exact", **witness: Any) -> Claim:
@@ -100,11 +101,11 @@ def test_a_duration_bound_never_reaches_the_scorer_without_its_fork_qualifier():
 def test_authority_change_maps_to_registered_authority_grant():
     # No existing id is honest for a mechanism-agnostic gate-open.
     claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_AUTHORITY_CHANGE, witness={"gate_mutation": True}))
-    assert claim is not None and claim["claim_id"] == claims_bridge.AUTHORITY_GRANT
+    assert claim is not None and claim["claim_id"] == C.AUTHORITY_GRANT
     from services.static.claims.registry import is_registered, legacy_projections
 
-    assert is_registered(claims_bridge.AUTHORITY_GRANT)
-    assert legacy_projections()[claims_bridge.AUTHORITY_GRANT] == "authority_update"
+    assert is_registered(C.AUTHORITY_GRANT)
+    assert legacy_projections()[C.AUTHORITY_GRANT] == "authority_update"
 
 
 def test_unknown_verdict_mints_nothing():
@@ -272,3 +273,17 @@ def test_a_damaged_row_is_repaired_by_the_next_policy_rerun():
     assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
     assert witness["sink_ids"] == ["sink-1"]
     assert witness["effect_verdict_id"] == 1
+
+
+def test_superseding_a_static_claim_keeps_the_tier_membership_admits_on():
+    """Membership admits an observed claim only on the static tier it superseded; dropping the stamp would revoke
+    standing members after the next effects run."""
+    from services.discovery.membership_gate.readers import _function_grants_control
+
+    merged = claims_bridge.merge_observed_claims(
+        [_static("pause.set", "idiom_structural", kind="pause_latch")], [_verdict(EFFECT_CLASS_FREEZE_PAUSE)]
+    )
+
+    assert [(c["claim_id"], c["tier"]) for c in merged] == [("pause.set", "behavioral_observed")]
+    assert merged[0]["witness"]["static_tier"] == "idiom_structural"
+    assert _function_grants_control(merged)

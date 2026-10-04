@@ -42,6 +42,7 @@ from db.models import (
 )
 from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
 from services.monitoring.balance_reads import positive_raw_balance
+from utils import claim_ids as C
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
     USD_CRUMB_THRESHOLD,
@@ -55,17 +56,17 @@ _NODE_PREFIX = "address:"
 
 # Claim families that re-enroll an already-claimed function: ``flow.*`` needs the value-reach probe, ``supply.*`` the
 # mint-backing probe. Other families are already explained.
-_FLOW_CLAIM_PREFIX = "flow."
-_SUPPLY_CLAIM_PREFIX = "supply."
+_FLOW_CLAIMS = frozenset({C.FLOW_OUT, C.FLOW_IN})
+_SUPPLY_CLAIMS = frozenset({C.SUPPLY_MINT, C.SUPPLY_BURN})
 
 # Claims that don't explain value/supply behaviour (``rate_limit.consume`` is a zero-weight fact,
 # ``delegatecall.execute`` names code provenance). Filtered before :func:`_enrolled_families`, so a row carrying only
 # these stays blank (full synthesis). A zero-weight fact must never remove a function from evidence gathering.
-_ENROLLMENT_TRANSPARENT_CLAIM_IDS = frozenset({"rate_limit.consume", "delegatecall.execute"})
+_ENROLLMENT_TRANSPARENT_CLAIM_IDS = frozenset({C.RATE_LIMIT_CONSUME, C.DELEGATECALL_EXECUTE})
 
 # Claims that admit a public function (see :func:`_cascade_rows`): value leaving or units printed, where "anyone may
 # call" is the security question. ``flow.in`` (a wrapper's purpose) and ``value_router`` are excluded.
-_PUBLIC_ADMISSION_CLAIM_IDS = ("flow.out", "supply.mint")
+_PUBLIC_ADMISSION_CLAIM_IDS = (C.FLOW_OUT, C.SUPPLY_MINT)
 
 _MAX_TOKEN_ARG_CANDIDATES = 2
 
@@ -862,9 +863,9 @@ def _enrolled_families(claims: Any) -> frozenset[str] | None:
         cid = claim.get("claim_id")
         if not isinstance(cid, str):
             continue
-        if cid.startswith(_FLOW_CLAIM_PREFIX):
+        if cid in _FLOW_CLAIMS:
             families.add(EFFECT_CLASS_VALUE_OUT)
-        elif cid.startswith(_SUPPLY_CLAIM_PREFIX):
+        elif cid in _SUPPLY_CLAIMS:
             families.add(EFFECT_CLASS_SUPPLY)
     return frozenset(families)
 

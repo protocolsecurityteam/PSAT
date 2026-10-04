@@ -15,6 +15,7 @@ from ..types import ClaimEvidence
     sentence="deploys a new contract",
     legacy_projection="contract_deployment",
     consumer_family="exec",
+    grant_class="operational",
 )
 def contract_deployment(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sink_ids = ctx.sink_ids(function, "contract_creation")

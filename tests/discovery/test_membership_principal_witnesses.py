@@ -29,6 +29,7 @@ from db.models import (
     Protocol,
 )
 from services.discovery import membership_gate as gate
+from services.discovery.membership_gate import readers
 from tests.conftest import ADDR, requires_postgres
 
 pytestmark = [requires_postgres]
@@ -150,6 +151,13 @@ AUTHORITY_PATH = ["enumerable_role_store"]
 #: membership of a mapping the contract's own writers populate, not authority.
 
 
+def _claim(claim_id, tier="standard_exact", **witness):
+    return {"claim_id": claim_id, "tier": tier, "witness": witness}
+
+
+ADMIN_CLAIMS = [_claim("ownership.transfer")]
+
+
 def _principal(
     db_session,
     host,
@@ -160,8 +168,14 @@ def _principal(
     name="admin",
     selector=None,
     resolver_path=AUTHORITY_PATH,
+    claims=ADMIN_CLAIMS,
 ):
-    fn = EffectiveFunction(contract_id=host.id, function_name=f"{name}-{uuid.uuid4().hex[:6]}", selector=selector)
+    fn = EffectiveFunction(
+        contract_id=host.id,
+        function_name=f"{name}-{uuid.uuid4().hex[:6]}",
+        selector=selector,
+        claims=[dict(claim) for claim in claims] if claims is not None else None,
+    )
     db_session.add(fn)
     db_session.flush()
     merged = dict(details or {})
@@ -481,3 +495,212 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     assert (WITNESS_RULE_W3_CONTROL, "d1") not in _rules(db_session, factory, protocol)
     assert child.protocol_id is None, "a D2-only member anchors no factory lineage"
     assert grandchild.protocol_id is None, "and the cascade follows"
+
+
+# ---------------------------------------------------------------------------
+# (h) Control screen — a principal admits only where its permission grants control
+# ---------------------------------------------------------------------------
+
+# Pendle SY on an etherfi teller: ``bulkDeposit`` routes the caller's own deposit; a privileged depositor isn't a
+# controller.
+DEPOSIT_CLAIMS = [_claim("value_router"), _claim("flow.in", "idiom_structural")]
+
+
+def test_contract_principal_on_an_operational_function_is_not_admitted(db_session, protocol):
+    teller = _anchored_member(db_session, protocol, ADDR(0x9000))
+    depositor = _contract(db_session, ADDR(0x9001), nominated=protocol.id)
+    _principal(
+        db_session, teller, depositor.address, resolved_type="contract", name="bulkDeposit", claims=DEPOSIT_CLAIMS
+    )
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(depositor.id,)))
+    db_session.flush()
+
+    assert depositor.protocol_id is None
+    assert _admitting_rules(db_session, depositor, protocol) == set()
+
+
+def test_contract_principal_on_a_pause_function_is_admitted(db_session, protocol):
+    teller = _anchored_member(db_session, protocol, ADDR(0x9100))
+    pauser = _contract(db_session, ADDR(0x9101), nominated=protocol.id)
+    row = _principal(
+        db_session,
+        teller,
+        pauser.address,
+        resolved_type="contract",
+        name="pause",
+        claims=[_claim("pause.set", "idiom_structural")],
+    )
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(pauser.id,)))
+    db_session.flush()
+
+    assert pauser.protocol_id == protocol.id
+    witness = _witness(db_session, pauser, protocol, WITNESS_RULE_W3_CONTROL, "d2")
+    assert witness.via_address == teller.address
+    assert witness.evidence["principal_fact"]["function_principal_id"] == row.id
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        pytest.param([_claim("flow.out", "policy_derived")], id="control-minted-after-the-gate"),
+        pytest.param([_claim("pause.set", "behavioral_observed", effect_verdict_id=7)], id="observed-without-static"),
+        pytest.param([_claim("erc20.transfer"), _claim("rate_limit.consume")], id="user-and-fact"),
+        pytest.param([], id="no-claims"),
+        pytest.param(None, id="claims-not-written"),
+    ],
+)
+def test_a_function_without_static_control_never_admits(db_session, protocol, claims):
+    host = _anchored_member(db_session, protocol, ADDR(0x9200))
+    candidate = _contract(db_session, ADDR(0x9201), nominated=protocol.id)
+    _principal(db_session, host, candidate.address, resolved_type="contract", claims=claims)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
+    db_session.flush()
+
+    assert candidate.protocol_id is None
+
+
+def test_an_observed_claim_keeps_the_static_witness_it_superseded(db_session, protocol):
+    """The effects bridge replaces a static claim with its observed one; the carried static tier still admits, so a
+    later re-check can't flip on whether the fork ran."""
+    host = _anchored_member(db_session, protocol, ADDR(0x9300))
+    candidate = _contract(db_session, ADDR(0x9301), nominated=protocol.id)
+    observed = _claim("pause.set", "behavioral_observed", effect_verdict_id=7, static_tier="idiom_structural")
+    _principal(db_session, host, candidate.address, resolved_type="contract", claims=[observed])
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
+    db_session.flush()
+
+    assert candidate.protocol_id == protocol.id
+
+
+# etherfi's ``pauseUntil`` as the timestamp-latch matcher emits it (pinned in tests/static/test_claims_pause_until.py).
+PAUSE_UNTIL_STATIC = _claim(
+    "pause.set",
+    "idiom_structural",
+    kind="pause_flag",
+    flags=[{"var": "PAUSABLE_UNTIL_STORAGE_SLOT", "member": "pausedUntil", "latch": "timestamp"}],
+    polarity="set",
+)
+
+
+def _pause_until_claims(history: str) -> list:
+    """``pauseUntil``'s claims as each analysis leaves them.
+
+    ``fresh``: the static claim alone (a static ``pause.set`` keeps the row out of fork probing). ``observed``: the
+    bridge's claim over it. ``reanalysed``: prod's path, where the policy writer carries the old observed-only claim and
+    its relinked verdict into the merge beside the new static claim.
+    """
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from services.effects.claims_bridge import merge_observed_claims, verdict_to_claim
+    from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, TIER_FORK, VERDICT_PROVEN
+    from services.static.claims.types import Claim
+
+    if history == "fresh":
+        return [PAUSE_UNTIL_STATIC]
+    verdict: Any = SimpleNamespace(
+        id=7,
+        effect_class=EFFECT_CLASS_FREEZE_PAUSE,
+        verdict=VERDICT_PROVEN,
+        tier=TIER_FORK,
+        behavior_hash="bh",
+        current_check_passed=None,
+        witness={"pause_effective": True, "auto_expiry": None, "duration_bound_source": "not_determined"},
+        observed_residue=None,
+    )
+    prior: list[Claim] = [cast(Claim, PAUSE_UNTIL_STATIC)]
+    if history == "reanalysed":
+        observed_only = verdict_to_claim(verdict)
+        assert observed_only is not None and "static_tier" not in observed_only["witness"]
+        prior.append(observed_only)
+    claims = merge_observed_claims(prior, [verdict])
+    assert [(c["claim_id"], c["tier"], c["witness"].get("static_tier")) for c in claims] == [
+        ("pause.set", "behavioral_observed", "idiom_structural")
+    ]
+    return list(claims)
+
+
+@pytest.mark.parametrize("history", ["fresh", "observed", "reanalysed"])
+def test_a_contract_principal_on_pause_until_is_admitted(db_session, protocol, history):
+    """The guardian Safe on etherfi's ``pauseUntil`` admits through the unchanged rule. Before the static claim existed
+    the row was observed-only and admitted nothing."""
+    eeth = _anchored_member(db_session, protocol, ADDR(0x9350))
+    safe = _contract(db_session, ADDR(0x9351), nominated=protocol.id)
+    row = _principal(
+        db_session, eeth, safe.address, resolved_type="safe", name="pauseUntil", claims=_pause_until_claims(history)
+    )
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id,)))
+    db_session.flush()
+
+    assert safe.protocol_id == protocol.id
+    witness = _witness(db_session, safe, protocol, WITNESS_RULE_W3_CONTROL, "d2")
+    assert witness.via_address == eeth.address
+    assert witness.evidence["principal_fact"]["function_principal_id"] == row.id
+
+
+def test_an_operational_eoa_principal_licenses_no_perimeter_transitivity(db_session, protocol):
+    """The D1 perimeter arm reads the same rows: an EOA depositor isn't a perimeter principal, so the queue it owns
+    doesn't admit until the EOA holds a control grant."""
+    member = _anchored_member(db_session, protocol, ADDR(0x9400))
+    depositor_eoa = ADDR(0x9401)
+    _principal(db_session, member, depositor_eoa, resolved_type="eoa", name="bulkDeposit", claims=DEPOSIT_CLAIMS)
+    queue = _contract(db_session, ADDR(0x9402), nominated=protocol.id)
+    _caller_gate(db_session, queue, depositor_eoa)
+
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(queue.id,)))
+    db_session.flush()
+    assert queue.protocol_id is None
+
+    _principal(db_session, member, depositor_eoa, resolved_type="eoa", name="pause", claims=[_claim("pause.set")])
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(queue.id,)))
+    db_session.flush()
+    assert queue.protocol_id == protocol.id
+    assert _witness(db_session, queue, protocol, WITNESS_RULE_W3_CONTROL, "d1").evidence["principal_fact"]
+
+
+def test_teller_policy_rerun_revokes_the_operational_cascade(db_session, protocol, monkeypatch):
+    """Pendle witnesses a DB already holds fall on the teller's next policy run: the SY proxy's principal witness,
+    then its implementation's W2, then the governance proxy's probe witness, then the governance implementation's W2.
+    """
+    teller = _anchored_member(db_session, protocol, ADDR(0x9500))
+    sy_proxy = _contract(db_session, ADDR(0x9501), nominated=protocol.id)
+    sy_impl = _contract(db_session, ADDR(0x9502), nominated=protocol.id)
+    governance = _contract(db_session, ADDR(0x9503), nominated=protocol.id)
+    governance_impl = _contract(db_session, ADDR(0x9504), nominated=protocol.id)
+    sy_proxy.implementation = sy_impl.address
+    governance.implementation = governance_impl.address
+    _caller_gate(db_session, sy_proxy, governance.address, controller_id="admin")
+    _unclaimed_ward(db_session, governance)
+    _principal(
+        db_session, teller, sy_proxy.address, resolved_type="contract", name="bulkDeposit", claims=DEPOSIT_CLAIMS
+    )
+    cascade = (sy_proxy, sy_impl, governance, governance_impl)
+
+    with monkeypatch.context() as unscreened:
+        unscreened.setattr(readers, "_function_grants_control", lambda _claims: True)
+        gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=tuple(row.id for row in cascade)))
+        db_session.flush()
+    assert all(row.protocol_id == protocol.id for row in cascade)
+    assert _witness(db_session, sy_proxy, protocol, WITNESS_RULE_W3_CONTROL, "d2").evidence["source"] == (
+        "function_principal"
+    )
+    assert _witness(db_session, sy_impl, protocol, "w2_structural").via_address == sy_proxy.address
+    assert _witness(db_session, governance, protocol, WITNESS_RULE_W3_CONTROL, "d2").evidence["source"] == "probe"
+    assert _witness(db_session, governance_impl, protocol, "w2_structural").via_address == governance.address
+
+    gate.evaluate_principal_change(
+        db_session,
+        contract_id=teller.id,
+        addresses=gate.principal_addresses(db_session, [teller.id]),
+        context="test_teller_policy_rerun",
+    )
+
+    assert teller.protocol_id == protocol.id
+    for row in cascade:
+        assert row.protocol_id is None, row.address
+        assert _admitting_rules(db_session, row, protocol) == set(), row.address

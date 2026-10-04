@@ -12,6 +12,7 @@ from services.scoring.schema import (
     NOT_DETERMINED,
     Tri,
 )
+from utils import claim_ids as C
 from utils.scoring_status import (
     DESTINATION_STATE_CONSTRAINED_PROVEN,
     DESTINATION_STATE_NOT_APPLICABLE,
@@ -80,7 +81,7 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
             )
         # Keyed on target kind: ``constrained`` means a guard exists, not that the destination is this contract.
         severity = (
-            K.DEST_SEVERITY_DELEGATECALL_SELF if claim_id == "delegatecall.execute" else K.DEST_SEVERITY_EXEC_SELF
+            K.DEST_SEVERITY_DELEGATECALL_SELF if claim_id == C.DELEGATECALL_EXECUTE else K.DEST_SEVERITY_EXEC_SELF
         )
         # Only a literal self-binding corroborates; ``destination_operand`` is equally true of a foreign operand.
         corroborated = constraint.get("binding") in ("literal_self", "self") or constraint.get("guard") in (

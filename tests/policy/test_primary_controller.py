@@ -7,18 +7,22 @@ from __future__ import annotations
 import pytest
 
 from services.governance.primary_controller import (
+    _UNCHIPPED_CONTROL_CLAIMS,
+    CLAIM_CAPABILITY,
     assign_co_controllers,
     assign_operand_render_groups,
     assign_primary_controllers,
+    function_capabilities,
 )
+from services.static.claims import CONTROL_GRANT_CLASSES, claim_ids_of_class
 
 
 def _p(addr: str, ptype: str) -> dict:
     return {"address": addr, "type": ptype}
 
 
-def _fn(callers: set[str], labels: set[str] | None = None, *, claims: list[str] | None = None) -> dict:
-    fn: dict = {"callers": set(callers), "labels": set(labels or ())}
+def _fn(callers: set[str], *, claims: list[str] | None = None) -> dict:
+    fn: dict = {"callers": set(callers)}
     if claims is not None:
         fn["claims"] = list(claims)
     return fn
@@ -78,7 +82,7 @@ def test_partial_claim_coverage_does_not_read_as_veto_only():
         vault: [_fn({tl}, claims=["upgrade.implementation"])],
         tl: [
             _fn({canceller, prop}, claims=["timelock.cancel"]),
-            _fn({prop}, {"role_management"}),  # claim-less privileged row
+            _fn({prop}),  # claim-less row: driving power not determined
         ],
     }
     result = assign_primary_controllers(
@@ -119,7 +123,7 @@ def test_delegatecall_is_governing_tier():
     fp = {"0xc1": {dc, granter}}
     detail = {
         "0xc1": [
-            _fn({dc}, {"delegatecall_execution"}),
+            _fn({dc}, claims=["delegatecall.execute"]),
             _fn({granter}, claims=["roles.grant"]),
         ]
     }
@@ -166,7 +170,7 @@ def test_mediator_plurality_tolerates_stray_operands():
 
 def test_co_controller_non_principal_types_ignored():
     contract = "0xc1"
-    detail = {contract: [_fn({"0xinner", "0xsafe"}, {"pause_toggle"})]}
+    detail = {contract: [_fn({"0xinner", "0xsafe"}, claims=["pause.set"])]}
     result = assign_co_controllers([_p("0xinner", "contract"), _p("0xsafe", "safe")], detail, {"0xsafe": []})
     assert "0xinner" not in result
     assert result["0xsafe"] == [contract]
@@ -181,6 +185,8 @@ def test_co_controller_non_principal_types_ignored():
             {"0xsafecontract": ["safe.signer_mgmt"], "0xtlcontract": ["timelock.schedule"]},
             id="new-claim-families",
         ),
+        pytest.param({"0xkernel": ["delegatecall.execute"]}, id="delegatecall"),
+        pytest.param({"0xtoken": ["transfer_policy.configure"]}, id="transfer-policy-config"),
     ],
 )
 def test_co_controller_privileged_claims(claims_by_contract):
@@ -192,3 +198,39 @@ def test_co_controller_privileged_claims(claims_by_contract):
     result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
     assert sorted(result[guardian]) == contracts
     assert result[big] == []
+
+
+def test_every_control_claim_is_chipped_or_deliberately_unchipped():
+    """A control claim added to the registry must be given a chip or an explicit exclusion."""
+    control = claim_ids_of_class(*CONTROL_GRANT_CLASSES)
+    assert control - _UNCHIPPED_CONTROL_CLAIMS <= set(CLAIM_CAPABILITY)
+    assert _UNCHIPPED_CONTROL_CLAIMS <= control
+
+
+@pytest.mark.parametrize(
+    ("claims", "chips"),
+    [
+        (["delegatecall.execute"], {"delegatecall"}),
+        (["transfer_policy.configure"], {"config"}),
+        (["value_router", "flow.in"], {"fund-in"}),
+        (["callee_pointer.rotate", "erc20.transfer"], set()),
+        ([], set()),
+    ],
+)
+def test_function_capabilities_come_from_claims(claims, chips):
+    assert function_capabilities(claims) == chips
+
+
+def test_transfer_policy_setter_is_privileged_but_not_governing():
+    """Config is control, so a wide caller set still co-controls; it grants no governing tier."""
+    token, owner, setter = "0xc1", "0xzzz", "0xaaa"
+    detail = {
+        token: [
+            _fn({owner}, claims=["ownership.transfer"]),
+            _fn({setter}, claims=["transfer_policy.configure"]),
+        ]
+    }
+    result = assign_primary_controllers(
+        [_p(owner, "safe"), _p(setter, "safe")], {token: {owner, setter}}, fp_function_detail_by_contract=detail
+    )
+    assert result == {owner: [token], setter: []}

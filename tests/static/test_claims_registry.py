@@ -1,28 +1,38 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-# Registers ``transfer_policy.configure`` regardless of test order.
-import services.effects.claims_bridge
-import services.static.cross_contract  # noqa: F401
 from services.static.claims import (
     CONSUMER_REFERENCED_CLAIM_IDS,
+    GRANT_CLASSES,
     Claim,
     ClaimContext,
     ClaimEvidence,
     RegistryEntry,
     attach_claims_to_effects,
     build_claims,
+    claim_ids_of_class,
+    discover,
     emit_claim,
+    grant_class_of,
     is_registered,
     register,
     registry,
     resolve_claim_precedence,
+    single_contract_static_tier,
 )
 from services.static.claims.registry import _REGISTRY
+from utils.claim_ids import ALL_CLAIM_IDS
+
+
+@pytest.fixture(autouse=True)
+def _registered_matchers():
+    discover()
 
 
 def _facts(*, with_creation: bool = True) -> dict:
@@ -97,6 +107,8 @@ def test_emit_claim_rejects_invalid_input(claim_id, tier, match):
         (lambda e: {**e, "claim_id": ""}, "non-empty"),
         (lambda e: {**e, "sentence": "  "}, "written sentence"),
         (lambda e: {**e, "consumer_family": "nonsense"}, "consumer_family"),
+        (lambda e: {**e, "grant_class": "control"}, "grant_class"),
+        (lambda e: {**e, "grant_class": None}, "grant_class"),
         (lambda e: {**e, "gate": "not-callable"}, "callables"),
     ],
 )
@@ -108,6 +120,7 @@ def test_register_enforces_entry_contract(mutate, match):
         trigger=lambda _ctx, _fn: None,
         legacy_projection=None,
         consumer_family="control_plane",
+        grant_class="control.gate",
     )
     with pytest.raises((ValueError, TypeError), match=match):
         register(RegistryEntry(**mutate(base)))
@@ -122,6 +135,7 @@ def test_register_rejects_duplicate():
         trigger=lambda _ctx, _fn: None,
         legacy_projection=None,
         consumer_family="control_plane",
+        grant_class="control.gate",
     )
     register(entry)
     try:
@@ -200,6 +214,7 @@ def test_build_claims_isolates_a_failing_matcher():
         trigger=_boom,
         legacy_projection=None,
         consumer_family="control_plane",
+        grant_class="control.gate",
     )
     register(entry)
     try:
@@ -213,6 +228,84 @@ def test_build_claims_isolates_a_failing_matcher():
 def test_consumer_referenced_ids_are_subset_of_registry():
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     assert CONSUMER_REFERENCED_CLAIM_IDS <= set(registry())
+
+
+_CONTROL_GATE = (
+    "ownership.transfer ownership.renounce ownership.accept roles.grant roles.revoke roles.configure authority.replace "
+    "authority.grant authorized_caller.rotate callee_pointer.rotate proxy.admin_change safe.signer_mgmt "
+    "safe.module_mgmt safe.set_guard timelock.schedule timelock.execute timelock.cancel timelock.set_delay "
+    "lz_oapp.set_peer lz_oapp.set_delegate"
+)
+# The owner-ruled class of every claim. A new registration must be classed here deliberately.
+_RULED_GRANT_CLASSES = {
+    **dict.fromkeys(_CONTROL_GATE.split(), "control.gate"),
+    **dict.fromkeys(("upgrade.implementation", "exec.arbitrary", "delegatecall.execute"), "control.code"),
+    **dict.fromkeys(("pause.set", "pause.unset"), "control.pause"),
+    "transfer_policy.configure": "control.config",
+    **dict.fromkeys(("flow.out", "supply.mint", "supply.burn"), "control.funds"),
+    **dict.fromkeys(("flow.in", "value_router", "contract_deployment"), "operational"),
+    **dict.fromkeys(
+        ("erc20.approve", "erc20.transfer", "erc20.transfer_from", "weth.deposit", "weth.withdraw", "gov.delegate"),
+        "user",
+    ),
+    "rate_limit.consume": "fact",
+}
+
+
+def test_every_registered_claim_has_a_valid_grant_class():
+    every_id = claim_ids_of_class(*GRANT_CLASSES)
+    assert every_id == set(registry())
+    assert all(registry()[claim_id].grant_class in GRANT_CLASSES for claim_id in every_id)
+
+
+def test_grant_classes_match_the_ruled_table():
+    assert {claim_id: grant_class_of(claim_id) for claim_id in claim_ids_of_class(*GRANT_CLASSES)} == (
+        _RULED_GRANT_CLASSES
+    )
+    assert not claim_ids_of_class("exemption"), "exemption is reserved until a producer proves a bypassed check"
+
+
+def test_claim_id_constants_name_exactly_the_registered_ids():
+    assert ALL_CLAIM_IDS == claim_ids_of_class(*GRANT_CLASSES)
+
+
+def test_class_lookups_fail_closed():
+    assert grant_class_of("not.a.claim") is None
+    with pytest.raises(ValueError, match="unknown grant_class"):
+        claim_ids_of_class("control")
+
+
+def test_class_lookups_load_no_slither():
+    """The membership gate and the monitor's scorer look classes up in processes that never analyze."""
+    code = (
+        "import sys; from services.static.claims import claim_ids_of_class; claim_ids_of_class('control.code'); "
+        "assert 'slither' not in sys.modules"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
+@pytest.mark.parametrize(
+    ("claim", "expected"),
+    [
+        ({"tier": "standard_exact", "witness": {}}, "standard_exact"),
+        ({"tier": "idiom_structural", "witness": {}}, "idiom_structural"),
+        ({"tier": "policy_derived", "witness": {}}, None),
+        ({"tier": "policy_derived", "witness": {"static_tier": "standard_exact"}}, None),
+        ({"tier": "behavioral_observed", "witness": {"effect_verdict_id": 1}}, None),
+        ({"tier": "behavioral_observed", "witness": {"static_tier": "idiom_structural"}}, "idiom_structural"),
+        ({"tier": "behavioral_observed", "witness": {"static_tier": "policy_derived"}}, None),
+        ({"tier": "behavioral_observed", "witness": None}, None),
+    ],
+)
+def test_single_contract_static_tier(claim, expected):
+    assert single_contract_static_tier(claim) == expected
 
 
 _GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "label_corpus" / "golden.json"

@@ -835,6 +835,10 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         selector="0x8456cb59",
         abi_signature="pause()",
         effect_labels=["pause_toggle", "asset_pull", "delegatecall_execution"],
+        claims=[
+            {"claim_id": claim_id, "tier": "standard_exact", "witness": {}}
+            for claim_id in ("pause.set", "flow.in", "delegatecall.execute")
+        ],
         effect_targets=[],
         action_summary="Pauses",
         authority_public=False,

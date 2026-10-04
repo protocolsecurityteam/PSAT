@@ -29,6 +29,7 @@ def _timelock_evidence(selector: str) -> ClaimEvidence:
     sentence="schedules a timelocked operation",
     legacy_projection="timelock_operation",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_oz_timelock_gate,
 )
 def timelock_schedule(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -43,6 +44,7 @@ def timelock_schedule(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="executes a matured timelocked operation",
     legacy_projection="timelock_operation",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_oz_timelock_gate,
 )
 def timelock_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -57,6 +59,7 @@ def timelock_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="cancels a scheduled timelocked operation",
     legacy_projection="timelock_operation",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_oz_timelock_gate,
 )
 def timelock_cancel(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -70,6 +73,7 @@ def timelock_cancel(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="changes the timelock minimum delay",
     legacy_projection="timelock_operation",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=is_oz_timelock_gate,
 )
 def timelock_set_delay(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

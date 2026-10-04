@@ -168,6 +168,14 @@ MANIFEST: list[dict[str, Any]] = [
         "source_path": "tests/fixtures/contracts/label_corpus/self_service_payout.sol",
     },
     {
+        # etherfi's ERC-7201 PausableUntil: a timestamp latch beside the bool one, so the golden pins both witnesses.
+        "address": "0x0000000000000000000000000000000000000130",
+        "name": "NamespacedPauseUntil",
+        "chain": "synthetic",
+        "solc_version": "0.8.27",
+        "source_path": "tests/fixtures/contracts/pause/pause_until_namespaced.sol",
+    },
+    {
         # The only ``policy_derived`` producer. The AssetRecovery row joins only through ``abi_selector``; if it goes
         # empty the canonical join regressed.
         "address": "0x0000000000000000000000000000000000000100",

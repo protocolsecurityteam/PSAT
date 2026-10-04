@@ -6,16 +6,18 @@ Per-contract derivations are memoized per ``ClaimContext`` so a ``build_claims``
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from utils.clock_gate import SECONDS_CLOCK_KINDS, clock_kinds
 from utils.scoring_status import (
     SELF_SERVICE_DISCLOSE_SIBLING,
     SELF_SERVICE_DISCLOSE_UPGRADE,
     SELF_SERVICE_STATE_PROVEN,
+    W2_BASIS_CLEAR_DOMINATES_CALLS,
 )
 
-from ...contract_analysis_pipeline.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Keyed by the per-contract ClaimContext.
@@ -902,7 +904,12 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
                 lvalue = getattr(ir, "lvalue", None)
                 if member is None:
                     named = _base_name(getattr(lvalue, "name", None)) == var
-                    aliased = bool(alias_members) and (ref_pair.get(id(lvalue)) or ("", ""))[1] in alias_members
+                    # A member matched by name alone must be a bool: 0 written to a uint member isn't ``false``.
+                    aliased = (
+                        bool(alias_members)
+                        and (ref_pair.get(id(lvalue)) or ("", ""))[1] in alias_members
+                        and str(getattr(lvalue, "type", "")) == "bool"
+                    )
                     if not (named or aliased):
                         continue
                 elif lvalue is None or ref_pair.get(id(lvalue)) != (var, member):
@@ -941,6 +948,425 @@ def _constant_bool_polarity(rvalue: Any) -> str | None:
     if text in ("true", "1"):
         return "set"
     if text in ("false", "0"):
+        return "unset"
+    return None
+
+
+# Timestamp pause latches (``pausedUntil``): a uint the guard holds against the clock instead of a bool flag. A gate
+# ``latch < block.timestamp`` blocks while the latch is ahead of the clock, so arming it to ``block.timestamp + d``
+# freezes every entry point that gate covers and writing 0 lifts the freeze.
+
+_Location = tuple[str, str | None]
+
+_TIMESTAMP_LATCHES: WeakKeyDictionary[ClaimContext, frozenset[_Location]] = WeakKeyDictionary()
+_STORAGE_ACCESS: WeakKeyDictionary[ClaimContext, dict[tuple[str, bool], _StorageAccess]] = WeakKeyDictionary()
+
+_UINT_TYPE = re.compile(r"uint\d*")
+_CLOCK_VARIABLES = frozenset({"block.timestamp", "now"})
+
+_LATCH_WRITE_CLOCK_SUM = "clock_sum"
+_LATCH_WRITE_CLEARED = "cleared"
+_LATCH_WRITE_OTHER = "other"
+
+# A member reached through a storage pointer whose slot isn't proven.
+_UNRESOLVED_BASE = "?"
+
+# The leaf records the condition that lets the call through: with the latch on the small side it blocks until the clock
+# passes the latch, on the large side it is open only until then.
+_LATCH_BELOW_CLOCK_OPERATORS = {0: frozenset({"lt", "lte"}), 1: frozenset({"gt", "gte"})}
+_LATCH_ABOVE_CLOCK_OPERATORS = {0: frozenset({"gt", "gte"}), 1: frozenset({"lt", "lte"})}
+
+
+def _clock_compared_latch(leaf: dict[str, Any], operators_by_slot: dict[int, frozenset[str]]) -> _Location | None:
+    """The ``(var, member)`` a leaf compares directly against the seconds clock under ``operators_by_slot``, or
+    ``None``.
+
+    An absorbed additive group (``start + CLIFF <= block.timestamp``) is refused: the recorder doesn't keep the sign, so
+    the direction against the latch isn't proven.
+    """
+    if leaf.get("kind") != "comparison" or leaf.get("absorbed_operands"):
+        return None
+    operands = [op for op in leaf.get("operands") or [] if isinstance(op, dict)]
+    if len(operands) != 2:
+        return None
+    operator = leaf.get("operator")
+    for latch_slot, operators in operators_by_slot.items():
+        if operator not in operators:
+            continue
+        latch, clock = operands[latch_slot], operands[1 - latch_slot]
+        clocks = clock_kinds([clock])
+        if not clocks or not clocks <= SECONDS_CLOCK_KINDS:
+            continue
+        name = latch.get("state_variable_name")
+        member_path = latch.get("member_path") or []
+        if latch.get("source") != "state_variable" or not isinstance(name, str) or len(member_path) > 1:
+            continue
+        return name, (str(member_path[0]) if member_path else None)
+    return None
+
+
+def _demands_latch_armed(leaf: dict[str, Any], pair: _Location) -> bool:
+    """True when the leaf only lets the call through once the latch is non-zero: a schedule that must be set before
+    its action runs, not a freeze that is open at rest.
+    """
+    operands = [op for op in leaf.get("operands") or [] if isinstance(op, dict)]
+    slots = [
+        index
+        for index, op in enumerate(operands)
+        if op.get("source") == "state_variable"
+        and (op.get("state_variable_name"), (op.get("member_path") or [None])[0]) == pair
+    ]
+    if not slots:
+        return False
+    operator = leaf.get("operator")
+    if operator == "truthy" and len(operands) == 1:
+        return True
+    if len(operands) != 2:
+        return False
+    slot = slots[0]
+    other = operands[1 - slot]
+    if other.get("source") != "constant" or str(other.get("constant_value")) != "0":
+        return False
+    return operator == "ne" or operator == ("gt" if slot == 0 else "lt")
+
+
+def _is_uint_latch_slot(value: Any) -> bool:
+    return _UINT_TYPE.fullmatch(str(getattr(value, "type", "") or "")) is not None
+
+
+def _latch_value_classifier(unit: Any) -> Callable[[Any], frozenset[str]]:
+    """Classify the values a latch write can take in one function body.
+
+    ``clock`` is ``block.timestamp``, ``clock_sum`` an addition with a clock summand, ``zero`` the constant 0; anything
+    else is ``other``. A local assigned on several paths unions its classes, so a sum only counts when every value of
+    the clock summand is a clock.
+    """
+    from slither.core.declarations.solidity_variables import SolidityVariable
+    from slither.slithir.operations import Assignment, Binary, TypeConversion
+    from slither.slithir.variables import Constant
+
+    classes: dict[int, frozenset[str]] = {}
+
+    def of(value: Any) -> frozenset[str]:
+        if isinstance(value, SolidityVariable):
+            return frozenset({"clock"}) if value.name in _CLOCK_VARIABLES else frozenset({_LATCH_WRITE_OTHER})
+        if isinstance(value, Constant):
+            return frozenset({"zero"}) if getattr(value, "value", None) == 0 else frozenset({_LATCH_WRITE_OTHER})
+        return classes.get(id(value), frozenset({_LATCH_WRITE_OTHER}))
+
+    irs = [ir for node in getattr(unit, "nodes", []) or [] for ir in getattr(node, "irs", []) or []]
+    # Each pass only widens a set, and assignment chains are a few links deep.
+    for _ in range(8):
+        changed = False
+        for ir in irs:
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is None:
+                continue
+            if isinstance(ir, Assignment):
+                value = of(ir.rvalue)
+            elif isinstance(ir, TypeConversion):
+                value = of(ir.variable)
+            elif isinstance(ir, Binary):
+                value = _sum_class(ir, of)
+            else:
+                value = frozenset({_LATCH_WRITE_OTHER})
+            merged = classes.get(id(lvalue), frozenset()) | value
+            if merged != classes.get(id(lvalue)):
+                classes[id(lvalue)] = merged
+                changed = True
+        if not changed:
+            break
+    return of
+
+
+def _sum_class(ir: Any, of: Callable[[Any], frozenset[str]]) -> frozenset[str]:
+    from slither.slithir.operations import BinaryType
+
+    if ir.type == BinaryType.ADDITION and any(
+        of(summand) <= {"clock", _LATCH_WRITE_CLOCK_SUM} for summand in (ir.variable_left, ir.variable_right)
+    ):
+        return frozenset({_LATCH_WRITE_CLOCK_SUM})
+    return frozenset({_LATCH_WRITE_OTHER})
+
+
+def _slot_of_getter(callee: Any) -> str | None:
+    """The slot constant a storage-pointer getter binds (``assembly { $.slot := SLOT }``), when it binds exactly one."""
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.operations import Assignment
+
+    slots = {
+        ir.rvalue.name
+        for node in getattr(callee, "nodes", []) or []
+        for ir in getattr(node, "irs", []) or []
+        if isinstance(ir, Assignment)
+        and getattr(ir.lvalue, "is_storage", False)
+        and isinstance(ir.rvalue, StateVariable)
+        and ir.rvalue.is_constant
+    }
+    return next(iter(slots)) if len(slots) == 1 else None
+
+
+def _pointer_slots(unit: Any) -> dict[int, str]:
+    """``id(storage pointer) -> slot constant`` for one function body, or :data:`_UNRESOLVED_BASE` when a pointer may
+    bind more than one slot, or one it can't prove.
+
+    Flow-insensitive over every binding in the body, so a rebind after use (in a loop, on a later path) still counts.
+    """
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.operations import Assignment
+
+    proven: dict[int, str] = {}
+    copies: list[tuple[int, Any]] = []
+    for node in getattr(unit, "nodes", []) or []:
+        for ir in getattr(node, "irs", []) or []:
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is None:
+                continue
+            if type(ir).__name__ == "InternalCall":
+                callee = getattr(ir, "function", None)
+                slot = _slot_of_getter(callee) if callee is not None else None
+                if slot is not None:
+                    proven[id(lvalue)] = slot
+            elif isinstance(ir, Assignment) and getattr(lvalue, "is_storage", False):
+                rvalue = ir.rvalue
+                if isinstance(rvalue, StateVariable) and rvalue.is_constant and isinstance(rvalue.name, str):
+                    copies.append((id(lvalue), rvalue.name))
+                else:
+                    copies.append((id(lvalue), rvalue))
+    bound: dict[int, set[str | None]] = {key: {slot} for key, slot in proven.items()}
+    # Each pass only widens a set; copy chains are a few links deep.
+    for _ in range(8):
+        changed = False
+        for key, source in copies:
+            if isinstance(source, str):
+                values: set[str | None] = {source}
+            else:
+                values = bound.get(id(source)) or {None}
+            merged = bound.get(key, set()) | values
+            if merged != bound.get(key):
+                bound[key] = merged
+                changed = True
+        if not changed:
+            break
+    slots: dict[int, str] = {}
+    for key, values in bound.items():
+        slot = next(iter(values)) if len(values) == 1 else None
+        slots[key] = slot if slot is not None else _UNRESOLVED_BASE
+    return slots
+
+
+class _StorageAccess:
+    """Storage locations one entry point touches, following internal callees.
+
+    A location is ``(state variable, struct member)``. An ERC-7201 member is keyed by the slot constant its pointer is
+    proven to bind, which is how predicate leaves name it; a member reached through an unproven pointer is keyed by
+    :data:`_UNRESOLVED_BASE`. Element writes (``map[k] = v``) are recorded against the collection, never as a write of
+    the scalar.
+    """
+
+    def __init__(self) -> None:
+        self.latch_writes: dict[_Location, set[str]] = {}
+        self.writes: set[_Location] = set()
+        self.refs: set[_Location] = set()
+
+
+def _storage_access(ctx: ClaimContext, signature: str, *, modifiers: bool) -> _StorageAccess:
+    memo = _STORAGE_ACCESS.setdefault(ctx, {})
+    cached = memo.get((signature, modifiers))
+    if cached is None:
+        cached = memo[(signature, modifiers)] = _collect_storage_access(ctx, signature, modifiers=modifiers)
+    return cached
+
+
+def _collect_storage_access(ctx: ClaimContext, signature: str, *, modifiers: bool) -> _StorageAccess:
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.operations import Assignment, Binary, Delete, Index, Member
+
+    access = _StorageAccess()
+    fn = contract_function(ctx, signature)
+    if fn is None:
+        return access
+    visited: set[int] = set()
+
+    def state_location(value: Any) -> _Location | None:
+        if isinstance(value, StateVariable) and not value.is_constant and isinstance(value.name, str):
+            return value.name, None
+        return None
+
+    def walk(unit: Any) -> None:
+        if id(unit) in visited:
+            return
+        visited.add(id(unit))
+        of = _latch_value_classifier(unit)
+        pointers = _pointer_slots(unit)
+        refs: dict[int, tuple[_Location, bool]] = {}
+
+        def located(value: Any) -> tuple[_Location, bool] | None:
+            direct = state_location(value)
+            return (direct, False) if direct is not None else refs.get(id(value))
+
+        for node in getattr(unit, "nodes", []) or []:
+            for ir in getattr(node, "irs", []) or []:
+                lvalue = getattr(ir, "lvalue", None)
+                if isinstance(ir, Member):
+                    field = str(getattr(ir.variable_right, "name", None))
+                    base = ir.variable_left
+                    if id(base) in pointers:
+                        refs[id(lvalue)] = ((pointers[id(base)], field), False)
+                    elif (outer := located(base)) is not None:
+                        (var, member), indexed = outer
+                        refs[id(lvalue)] = ((var, member if member is not None else field), indexed)
+                    else:
+                        refs[id(lvalue)] = ((_UNRESOLVED_BASE, field), False)
+                    access.refs.add(refs[id(lvalue)][0])
+                    continue
+                if isinstance(ir, Index):
+                    outer = located(ir.variable_left)
+                    if outer is not None:
+                        refs[id(lvalue)] = (outer[0], True)
+                        access.refs.add(outer[0])
+                    continue
+                for read in getattr(ir, "read", []) or []:
+                    if (location := state_location(read)) is not None:
+                        access.refs.add(location)
+                target = ir.variable if isinstance(ir, Delete) else lvalue
+                written = located(target) if target is not None else None
+                if written is None:
+                    continue
+                location, indexed = written
+                access.writes.add(location)
+                access.refs.add(location)
+                if indexed or location[0] == _UNRESOLVED_BASE or not _is_uint_latch_slot(target):
+                    continue
+                if isinstance(ir, Delete):
+                    value = frozenset({"zero"})
+                elif isinstance(ir, Assignment):
+                    value = of(ir.rvalue)
+                elif isinstance(ir, Binary):
+                    value = _sum_class(ir, of)
+                else:
+                    value = frozenset({_LATCH_WRITE_OTHER})
+                if value == {"zero"}:
+                    kind = _LATCH_WRITE_CLEARED
+                elif value == {_LATCH_WRITE_CLOCK_SUM}:
+                    kind = _LATCH_WRITE_CLOCK_SUM
+                else:
+                    kind = _LATCH_WRITE_OTHER
+                access.latch_writes.setdefault(location, set()).add(kind)
+            for ir in getattr(node, "irs", []) or []:
+                if type(ir).__name__ not in ("InternalCall", "LibraryCall"):
+                    continue
+                if not modifiers and _is_modifier_call(ir):
+                    continue
+                callee = getattr(ir, "function", None)
+                if callee is not None and getattr(callee, "nodes", None):
+                    walk(callee)
+
+    walk(fn)
+    return access
+
+
+def _overlaps(a: _Location, b: _Location) -> bool:
+    """Whether two locations may name the same storage; an unresolved base or a whole-variable access errs to yes."""
+    (var_a, member_a), (var_b, member_b) = a, b
+    if member_a is not None and member_b is not None and member_a != member_b:
+        return False
+    if var_a == var_b:
+        return True
+    return member_a is not None and member_a == member_b and _UNRESOLVED_BASE in (var_a, var_b)
+
+
+def latch_writes(ctx: ClaimContext, signature: str, pair: _Location) -> frozenset[str]:
+    """How ``signature`` (with its modifiers and internal callees) writes the uint latch ``pair``: ``clock_sum``,
+    ``cleared`` (0 or ``delete``) or ``other``. Empty when it never writes it.
+    """
+    return frozenset(_storage_access(ctx, signature, modifiers=True).latch_writes.get(pair, ()))
+
+
+def _may_write(ctx: ClaimContext, signature: str, pair: _Location) -> bool:
+    return any(_overlaps(pair, written) for written in _storage_access(ctx, signature, modifiers=True).writes)
+
+
+def _authority_writer(ctx: ClaimContext, signature: str) -> bool:
+    tree = ctx.predicate_tree(signature)
+    return tree is not None and tree_is_authority_gated(tree) and not tree_is_one_shot(tree)
+
+
+def timestamp_latches(ctx: ClaimContext) -> frozenset[_Location]:
+    """Scalar ``(var, member)`` latches proven to work as a timed pause (cached). Every conjunct is required:
+
+    - gated readers: entry points holding a mandatory gate closed while the latch is ahead of the clock that neither may
+      write the latch nor require it armed (a scalar schedule's ``execute`` does one or the other);
+    - no entry point that leaves the latch alone is open only while it is ahead of the clock (a sale or auction window);
+    - authority-gated, non-initializer functions both arm it to ``block.timestamp + x`` and clear it: a timer that can
+      only run out is a schedule, not a pause;
+    - no gated reader touches other state the armers write (a commit/apply timelock stages the value its ``apply``
+      reads).
+
+    Mapping-keyed timestamps (timelock ``eta``, per-user cooldowns) never qualify: their writes go through an index, not
+    the scalar.
+    """
+    cached = _TIMESTAMP_LATCHES.get(ctx)
+    if cached is not None:
+        return cached
+    signatures = list(ctx.function_signatures())
+    gated: dict[_Location, set[str]] = {}
+    opened: dict[_Location, set[str]] = {}
+    for signature in signatures:
+        tree = ctx.predicate_tree(signature)
+        if tree is None:
+            continue
+        leaves = [leaf for leaf, _path in _mandatory_leaves_with_paths(tree)]
+        for leaf in leaves:
+            pair = _clock_compared_latch(leaf, _LATCH_BELOW_CLOCK_OPERATORS)
+            if pair is not None and not any(_demands_latch_armed(other, pair) for other in leaves):
+                gated.setdefault(pair, set()).add(signature)
+        for leaf in _iter_leaves(tree):
+            pair = _clock_compared_latch(leaf, _LATCH_ABOVE_CLOCK_OPERATORS)
+            if pair is not None:
+                opened.setdefault(pair, set()).add(signature)
+    proven: set[_Location] = set()
+    for pair, candidates in gated.items():
+        readers = [reader for reader in sorted(candidates) if not _may_write(ctx, reader, pair)]
+        if not readers or any(not _may_write(ctx, other, pair) for other in opened.get(pair, ())):
+            continue
+        writers = [signature for signature in signatures if _authority_writer(ctx, signature)]
+        armers = [signature for signature in writers if _LATCH_WRITE_CLOCK_SUM in latch_writes(ctx, signature, pair)]
+        if not armers or not any(_LATCH_WRITE_CLEARED in latch_writes(ctx, signature, pair) for signature in writers):
+            continue
+        # The armer's own body: a reentrancy guard set by its modifier is not state it stages.
+        staged = {
+            location
+            for armer in armers
+            for location in _storage_access(ctx, armer, modifiers=False).writes
+            if location != pair
+        }
+        if any(
+            _overlaps(location, touched)
+            for reader in readers
+            for touched in _storage_access(ctx, reader, modifiers=True).refs
+            if touched != pair
+            for location in staged
+        ):
+            continue
+        proven.add(pair)
+    frozen = frozenset(proven)
+    _TIMESTAMP_LATCHES[ctx] = frozen
+    return frozen
+
+
+def timestamp_latch_polarity(ctx: ClaimContext, function: str, pair: _Location) -> str | None:
+    """``"set"`` (arms to ``block.timestamp + x``), ``"unset"`` (clears), ``"both"``, or ``None`` when this function
+    writes the latch neither way.
+    """
+    writes = latch_writes(ctx, function, pair)
+    arms = _LATCH_WRITE_CLOCK_SUM in writes
+    clears = _LATCH_WRITE_CLEARED in writes
+    if arms and clears:
+        return "both"
+    if arms:
+        return "set"
+    if clears:
         return "unset"
     return None
 

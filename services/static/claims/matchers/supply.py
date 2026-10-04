@@ -77,6 +77,7 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
     sentence="increases token supply or share balances",
     legacy_projection="mint",
     consumer_family="flow",
+    grant_class="control.funds",
 )
 def supply_mint(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _supply_evidence(ctx, function, "mint")
@@ -87,6 +88,7 @@ def supply_mint(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="decreases token supply or share balances",
     legacy_projection="burn",
     consumer_family="flow",
+    grant_class="control.funds",
 )
 def supply_burn(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _supply_evidence(ctx, function, "burn")

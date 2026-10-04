@@ -17,6 +17,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from services.static.claims import CONTROL_GRANT_CLASSES, claim_ids_of_class
+from utils import claim_ids as C
+
 PRINCIPAL_PRIORITY: dict[str, int] = {
     "safe": 4,
     "timelock": 3,
@@ -24,73 +27,66 @@ PRINCIPAL_PRIORITY: dict[str, int] = {
     "proxy_admin": 1,
 }
 
-# One effect->chip vocabulary for contract chips, controller detail and tier ranking, so a power reads the same
-# everywhere. Claims win per function. ``external_contract_call`` isn't a claim and ``callee_pointer.rotate`` is
-# deliberately unmapped; those functions show by name.
+# One claim->chip vocabulary for contract chips, controller detail and tier ranking, so a power reads the same
+# everywhere. Unmapped control claims (:data:`_UNCHIPPED_CONTROL_CLAIMS`) show by name.
 CLAIM_CAPABILITY: dict[str, str] = {
-    "pause.set": "pause",
-    "pause.unset": "pause",
-    "ownership.transfer": "ownership",
-    "ownership.renounce": "ownership",
-    "ownership.accept": "ownership",
-    "authorized_caller.rotate": "authority",
-    "authority.replace": "authority",
-    "roles.grant": "roles",
-    "roles.revoke": "roles",
-    "roles.configure": "roles",
-    "upgrade.implementation": "upgrade",
-    "proxy.admin_change": "upgrade",
-    "timelock.schedule": "timelock",
-    "timelock.execute": "timelock",
-    "timelock.cancel": "timelock",
-    "timelock.set_delay": "timelock",
-    "safe.signer_mgmt": "safe",
-    "safe.module_mgmt": "safe",
-    "safe.set_guard": "safe",
-    "flow.out": "fund-out",
-    "flow.in": "fund-in",
-    "supply.mint": "mint",
-    "supply.burn": "burn",
-    "exec.arbitrary": "arbitrary-call",
-    "contract_deployment": "deploy",
+    C.PAUSE_SET: "pause",
+    C.PAUSE_UNSET: "pause",
+    C.OWNERSHIP_TRANSFER: "ownership",
+    C.OWNERSHIP_RENOUNCE: "ownership",
+    C.OWNERSHIP_ACCEPT: "ownership",
+    C.AUTHORIZED_CALLER_ROTATE: "authority",
+    C.AUTHORITY_REPLACE: "authority",
+    C.ROLES_GRANT: "roles",
+    C.ROLES_REVOKE: "roles",
+    C.ROLES_CONFIGURE: "roles",
+    C.UPGRADE_IMPLEMENTATION: "upgrade",
+    C.PROXY_ADMIN_CHANGE: "upgrade",
+    C.TIMELOCK_SCHEDULE: "timelock",
+    C.TIMELOCK_EXECUTE: "timelock",
+    C.TIMELOCK_CANCEL: "timelock",
+    C.TIMELOCK_SET_DELAY: "timelock",
+    C.SAFE_SIGNER_MGMT: "safe",
+    C.SAFE_MODULE_MGMT: "safe",
+    C.SAFE_SET_GUARD: "safe",
+    C.TRANSFER_POLICY_CONFIGURE: "config",
+    C.FLOW_OUT: "fund-out",
+    C.FLOW_IN: "fund-in",
+    C.SUPPLY_MINT: "mint",
+    C.SUPPLY_BURN: "burn",
+    C.EXEC_ARBITRARY: "arbitrary-call",
+    C.DELEGATECALL_EXECUTE: "delegatecall",
+    C.CONTRACT_DEPLOYMENT: "deploy",
 }
+_UNCHIPPED_CONTROL_CLAIMS: frozenset[str] = frozenset(
+    {C.CALLEE_POINTER_ROTATE, C.LZ_OAPP_SET_PEER, C.LZ_OAPP_SET_DELEGATE, C.AUTHORITY_GRANT}
+)
 
-# Legacy fallback for claim-less rows. ``delegatecall_execution`` has no claim projection, so it only surfaces here.
-EFFECT_CAPABILITY: dict[str, str] = {
-    "pause_toggle": "pause",
-    "ownership_transfer": "ownership",
-    "role_management": "roles",
-    "implementation_update": "upgrade",
-    "asset_send": "fund-out",
-    "asset_pull": "fund-in",
-    "mint": "mint",
-    "burn": "burn",
-    "delegatecall_execution": "delegatecall",
-    "authority_update": "authority",
-    "contract_deployment": "deploy",
-    "arbitrary_external_call": "arbitrary-call",
+
+def function_capabilities(claim_ids: Iterable[str]) -> set[str]:
+    """Chips for one function's claims. A claim-less function earns none."""
+    return {CLAIM_CAPABILITY[cid] for cid in claim_ids if cid in CLAIM_CAPABILITY}
+
+
+# Tier 3 governs (replaces or executes code, reassigns control, or drives a timelock); tier 2 grants access; tier 1
+# operates. An operational Safe must never outrank the actual owner.
+_GOVERNING_CLAIMS: frozenset[str] = claim_ids_of_class("control.code") | {
+    C.OWNERSHIP_TRANSFER,
+    C.OWNERSHIP_RENOUNCE,
+    C.OWNERSHIP_ACCEPT,
+    C.AUTHORITY_REPLACE,
+    C.AUTHORIZED_CALLER_ROTATE,
+    C.PROXY_ADMIN_CHANGE,
+    C.TIMELOCK_SCHEDULE,
+    C.TIMELOCK_EXECUTE,
 }
+_GRANTING_CLAIMS: frozenset[str] = frozenset({C.ROLES_GRANT, C.ROLES_REVOKE, C.ROLES_CONFIGURE})
 
 
-def function_capabilities(labels: Iterable[str], claim_ids: Iterable[str]) -> set[str]:
-    """Claims win when present, else legacy labels. Coarse effects without a clean chip drop out."""
-    claim_id_set = set(claim_ids)
-    if claim_id_set:
-        return {CLAIM_CAPABILITY[cid] for cid in claim_id_set if cid in CLAIM_CAPABILITY}
-    return {EFFECT_CAPABILITY[label] for label in labels if label in EFFECT_CAPABILITY}
-
-
-# Tier 3 governs (replace code / reassign control, or drive a timelock); tier 2 grants access; tier 1 operates. An
-# operational Safe must never outrank the actual owner.
-_GOVERNING_CAPS: frozenset[str] = frozenset({"upgrade", "ownership", "authority", "arbitrary-call", "delegatecall"})
-_GRANTING_CAPS: frozenset[str] = frozenset({"roles"})
-_GOVERNING_CLAIMS: frozenset[str] = frozenset({"timelock.schedule", "timelock.execute"})
-
-
-def _authority_tier(caps: set[str], claim_ids: set[str]) -> int:
-    if (caps & _GOVERNING_CAPS) or (claim_ids & _GOVERNING_CLAIMS):
+def _authority_tier(claim_ids: set[str]) -> int:
+    if claim_ids & _GOVERNING_CLAIMS:
         return 3
-    if caps & _GRANTING_CAPS:
+    if claim_ids & _GRANTING_CLAIMS:
         return 2
     return 1
 
@@ -143,9 +139,8 @@ def assign_primary_controllers(
         fp_graph.setdefault(contract_addr.lower(), set()).update((a or "").lower() for a in fp_addrs)
     passthrough = {(a or "").lower() for a in (governance_passthrough or ())}
 
-    # Per (contract, caller): capabilities and claim ids, plus ``significant_on`` and ``driver_on``. Caller keys
-    # normalized via ``_addr_of`` so a keyspace mismatch can't silently disable the gates.
-    caps_on: dict[tuple[str, str], set[str]] = {}
+    # Per (contract, caller): claim ids, plus ``significant_on`` and ``driver_on``. Caller keys normalized via
+    # ``_addr_of`` so a keyspace mismatch can't silently disable the gates.
     claims_on: dict[tuple[str, str], set[str]] = {}
     with_rows: set[tuple[str, str]] = set()
     significant_on: set[tuple[str, str]] = set()
@@ -154,20 +149,13 @@ def assign_primary_controllers(
         c_lc = contract_addr.lower()
         for fn in functions:
             fn_claims = {c for c in fn.get("claims") or () if isinstance(c, str) and c}
-            labels_lc = {(label or "").lower() for label in fn.get("labels") or ()}
-            fn_caps = function_capabilities(labels_lc, fn_claims)
             callers = {_addr_of((a or "").lower()) for a in fn.get("callers", ())} - {""}
-            significant = (
-                _function_is_privileged(list(fn_claims), labels_lc, PRIVILEGED_EFFECT_LABELS)
-                or len(callers) <= _MAX_GATE_CALLERS
-            )
+            significant = _function_is_privileged(list(fn_claims)) or len(callers) <= _MAX_GATE_CALLERS
             drives = (
                 not fn_claims  # claim-less row: driving power not determined
-                or bool(fn_claims & _GOVERNING_CLAIMS)
-                or bool(fn_caps & (_GOVERNING_CAPS | _GRANTING_CAPS))
+                or bool(fn_claims & (_GOVERNING_CLAIMS | _GRANTING_CLAIMS))
             )
             for la in callers:
-                caps_on.setdefault((c_lc, la), set()).update(fn_caps)
                 claims_on.setdefault((c_lc, la), set()).update(fn_claims)
                 with_rows.add((c_lc, la))
                 if significant:
@@ -177,7 +165,7 @@ def assign_primary_controllers(
 
     def _tier_on(contract_lc: str, caller_token: str) -> int:
         key = (contract_lc, _addr_of(caller_token))
-        return _authority_tier(caps_on.get(key, set()), claims_on.get(key, set()))
+        return _authority_tier(claims_on.get(key, set()))
 
     def _has_governance_on(contract_lc: str, caller_token: str) -> bool:
         """No detail rows stays eligible: absence isn't proof of a broad whitelist."""
@@ -306,54 +294,17 @@ def assign_operand_render_groups(
     return out
 
 
-# Holding one of these makes a non-primary caller a real co-controller. ``external_contract_call`` / ``hook_update`` are
-# absent: permissionless callers bear them too (``createBid``).
-PRIVILEGED_EFFECT_LABELS: frozenset[str] = frozenset(
-    {
-        "pause_toggle",
-        "ownership_transfer",
-        "role_management",
-        "implementation_update",
-        "asset_send",
-        "asset_pull",
-        "mint",
-        "burn",
-        "delegatecall_execution",
-        "authority_update",
-        "contract_deployment",
-    }
-)
-
-# Claims mirror of :data:`PRIVILEGED_EFFECT_LABELS`, with the same exclusions.
-_PRIVILEGED_CLAIM_PREFIXES = (
-    "ownership.",
-    "roles.",
-    "authority.",
-    "upgrade.",
-    "timelock.",
-    "safe.",
-    "pause.",
-    "proxy.",
-    "authorized_caller.",
-    "lz_oapp.",
-    "flow.",
-    "supply.",
-    "exec.",
-)
-_PRIVILEGED_CLAIM_IDS: frozenset[str] = frozenset({"contract_deployment"})
-_EXCLUDED_CLAIM_IDS: frozenset[str] = frozenset({"callee_pointer.rotate"})
+# Holding one of these makes a non-primary caller a real co-controller. ``callee_pointer.rotate`` and ``value_router``
+# are absent: permissionless callers bear them too (``createBid``).
+_PRIVILEGED_CLAIMS: frozenset[str] = (claim_ids_of_class(*CONTROL_GRANT_CLASSES) - {C.CALLEE_POINTER_ROTATE}) | {
+    C.FLOW_IN,
+    C.CONTRACT_DEPLOYMENT,
+}
 
 
-def _function_is_privileged(claims: Any, labels_lc: set[str], privileged_labels: frozenset[str]) -> bool:
-    """Claims win when present, else legacy labels."""
+def _function_is_privileged(claims: Any) -> bool:
     claim_ids = {c for c in claims if isinstance(c, str) and c} if isinstance(claims, list) else set()
-    if claim_ids:
-        return any(
-            cid not in _EXCLUDED_CLAIM_IDS
-            and (cid in _PRIVILEGED_CLAIM_IDS or cid.startswith(_PRIVILEGED_CLAIM_PREFIXES))
-            for cid in claim_ids
-        )
-    return bool(labels_lc & privileged_labels)
+    return bool(claim_ids & _PRIVILEGED_CLAIMS)
 
 
 # ``createBid`` has ~33 callers; real admin gates have 1–3. Anything in [3, 32] separates them; 4 leaves margin.
@@ -366,14 +317,13 @@ def assign_co_controllers(
     primary_for: Mapping[str, list[str]],
     *,
     max_gate_callers: int = _MAX_GATE_CALLERS,
-    privileged_labels: frozenset[str] = PRIVILEGED_EFFECT_LABELS,
 ) -> dict[str, list[str]]:
     """Per principal, contracts it co-controls: real authority without being primary (a pause/recovery guardian Safe
     that lost the contest would otherwise vanish from canvas and monitoring).
 
-    ``P`` co-controls ``C`` iff it can call a significant function of ``C``: privileged by label/claim, or gated to at
-    most *max_gate_callers*. The gate arm catches weakly-labeled admin functions (``setCapacity``); the label arm keeps
-    privileged ones with large role sets. Never lists a contract ``P`` already primary-controls. Same return shape as
+    ``P`` co-controls ``C`` iff it can call a significant function of ``C``: privileged by claim, or gated to at most
+    *max_gate_callers*. The gate arm catches unclaimed admin functions (``setCapacity``); the claim arm keeps privileged
+    ones with large role sets. Never lists a contract ``P`` already primary-controls. Same return shape as
     :func:`assign_primary_controllers`.
     """
     principal_addrs: set[str] = set()
@@ -392,10 +342,7 @@ def assign_co_controllers(
         c_lc = (contract_addr or "").lower()
         for fn in functions:
             callers = {(a or "").lower() for a in fn.get("callers", ())}
-            labels = {(label or "").lower() for label in fn.get("labels", ())}
-            significant = (
-                _function_is_privileged(fn.get("claims"), labels, privileged_labels) or len(callers) <= max_gate_callers
-            )
+            significant = _function_is_privileged(fn.get("claims")) or len(callers) <= max_gate_callers
             if not significant:
                 continue
             for caller in callers:

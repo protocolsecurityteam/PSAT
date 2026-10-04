@@ -270,6 +270,10 @@ def _seed_w5_witness(db_session, member: Contract, protocol_id: int) -> None:
     )
 
 
+def _claim(claim_id: str, tier: str = "standard_exact") -> dict:
+    return {"claim_id": claim_id, "tier": tier, "witness": {}}
+
+
 def test_classify_deployer_class_a_safe_signer(db_session):
     from db.models import EffectiveFunction, FunctionPrincipal
 
@@ -277,7 +281,7 @@ def test_classify_deployer_class_a_safe_signer(db_session):
     member = _contract(db_session, ADDR(52), protocol_id=protocol.id)
     _seed_w5_witness(db_session, member, protocol.id)
     eoa = ADDR(53)
-    fn = EffectiveFunction(contract_id=member.id, function_name="upgradeTo")
+    fn = EffectiveFunction(contract_id=member.id, function_name="upgradeTo", claims=[_claim("upgrade.implementation")])
     db_session.add(fn)
     db_session.flush()
     db_session.add(
@@ -304,7 +308,9 @@ def test_classify_deployer_principal_fact_requires_authority_derivation(db_sessi
     member = _contract(db_session, ADDR(55), protocol_id=protocol.id)
     _seed_w5_witness(db_session, member, protocol.id)
     eoa = ADDR(56)
-    fn = EffectiveFunction(contract_id=member.id, function_name="safeTransferFrom")
+    fn = EffectiveFunction(
+        contract_id=member.id, function_name="transferOwnership", claims=[_claim("ownership.transfer")]
+    )
     db_session.add(fn)
     db_session.flush()
     principal = FunctionPrincipal(
@@ -325,6 +331,43 @@ def test_classify_deployer_principal_fact_requires_authority_derivation(db_sessi
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
     assert verdict.trust_class == "A"
     assert verdict.evidence["perimeter_fact"]["kind"] == "function_principal"
+
+
+def test_classify_deployer_ignores_principals_on_operational_functions(db_session):
+    """A depositor role, held directly or through a Safe, places no one in the control graph."""
+    from db.models import EffectiveFunction, FunctionPrincipal
+
+    protocol = _protocol(db_session)
+    member = _contract(db_session, ADDR(57), protocol_id=protocol.id)
+    _seed_w5_witness(db_session, member, protocol.id)
+    depositor, signer = ADDR(58), ADDR(59)
+    deposit_claims = [_claim("value_router"), _claim("flow.in", "idiom_structural")]
+    deposit = EffectiveFunction(contract_id=member.id, function_name="bulkDeposit", claims=deposit_claims)
+    db_session.add(deposit)
+    db_session.flush()
+    db_session.add_all(
+        [
+            FunctionPrincipal(
+                function_id=deposit.id,
+                address=depositor,
+                resolved_type="eoa",
+                details={"resolver_path": ["live_getter_resolution"]},
+            ),
+            FunctionPrincipal(
+                function_id=deposit.id, address=ADDR(0x5A), resolved_type="safe", details={"owners": [signer]}
+            ),
+        ]
+    )
+    db_session.flush()
+
+    for address in (depositor, signer):
+        assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=address) is None
+        assert gate.classify_deployer(db_session, protocol_id=protocol.id, address=address).trust_class is None
+
+    deposit.claims = [*deposit_claims, _claim("pause.set", "idiom_structural")]
+    db_session.flush()
+    for address in (depositor, signer):
+        assert gate.classify_deployer(db_session, protocol_id=protocol.id, address=address).trust_class == "A"
 
 
 def _seed_class_b_members(db_session, protocol, eoa: str) -> list[Contract]:

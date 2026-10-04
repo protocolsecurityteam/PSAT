@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from utils import claim_ids as C
+
 if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime import graph
     pass
 
@@ -29,7 +31,7 @@ logger = logging.getLogger("services.effects.calldata")
 
 # ``exec.arbitrary`` means F forwards a caller-supplied destination and calldata (from the IR read set), naming both
 # parameters. ``low_level_value_call`` with a ``param`` destination is the flow lattice's half of the same statement.
-_EXEC_ARBITRARY_CLAIM = "exec.arbitrary"
+_EXEC_ARBITRARY_CLAIM = C.EXEC_ARBITRARY
 _LOW_LEVEL_CALL_KIND = "low_level_value_call"
 _ERC20_TRANSFER_SELECTOR = "0xa9059cbb"
 

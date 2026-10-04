@@ -241,6 +241,7 @@ def _explained_by_upgrade(ctx: ClaimContext, function: str) -> bool:
     sentence="executes foreign code in this contract's storage context (delegatecall)",
     legacy_projection="delegatecall_execution",
     consumer_family="exec",
+    grant_class="control.code",
 )
 def delegatecall_execute(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sink_ids = [
