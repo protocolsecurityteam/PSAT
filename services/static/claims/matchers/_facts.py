@@ -904,7 +904,12 @@ def toggle_polarity(function: Any, var: str, member: str | None, *, alias_member
                 lvalue = getattr(ir, "lvalue", None)
                 if member is None:
                     named = _base_name(getattr(lvalue, "name", None)) == var
-                    aliased = bool(alias_members) and (ref_pair.get(id(lvalue)) or ("", ""))[1] in alias_members
+                    # A member matched by name alone must be a bool: 0 written to a uint member isn't ``false``.
+                    aliased = (
+                        bool(alias_members)
+                        and (ref_pair.get(id(lvalue)) or ("", ""))[1] in alias_members
+                        and str(getattr(lvalue, "type", "")) == "bool"
+                    )
                     if not (named or aliased):
                         continue
                 elif lvalue is None or ref_pair.get(id(lvalue)) != (var, member):
