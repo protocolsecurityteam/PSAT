@@ -956,8 +956,10 @@ def _constant_bool_polarity(rvalue: Any) -> str | None:
 # ``latch < block.timestamp`` blocks while the latch is ahead of the clock, so arming it to ``block.timestamp + d``
 # freezes every entry point that gate covers and writing 0 lifts the freeze.
 
-_TIMESTAMP_LATCHES: WeakKeyDictionary[ClaimContext, frozenset[tuple[str, str | None]]] = WeakKeyDictionary()
-_LATCH_WRITES: WeakKeyDictionary[ClaimContext, dict[tuple[str, str, str | None], frozenset[str]]] = WeakKeyDictionary()
+_Location = tuple[str, str | None]
+
+_TIMESTAMP_LATCHES: WeakKeyDictionary[ClaimContext, frozenset[_Location]] = WeakKeyDictionary()
+_STORAGE_ACCESS: WeakKeyDictionary[ClaimContext, dict[tuple[str, bool], _StorageAccess]] = WeakKeyDictionary()
 
 _UINT_TYPE = re.compile(r"uint\d*")
 _CLOCK_VARIABLES = frozenset({"block.timestamp", "now"})
@@ -966,15 +968,21 @@ _LATCH_WRITE_CLOCK_SUM = "clock_sum"
 _LATCH_WRITE_CLEARED = "cleared"
 _LATCH_WRITE_OTHER = "other"
 
-# The leaf records the condition that lets the call through, so the latch blocks when it sits on the small side.
+# A member reached through a storage pointer whose slot isn't proven.
+_UNRESOLVED_BASE = "?"
+
+# The leaf records the condition that lets the call through: with the latch on the small side it blocks until the clock
+# passes the latch, on the large side it is open only until then.
 _LATCH_BELOW_CLOCK_OPERATORS = {0: frozenset({"lt", "lte"}), 1: frozenset({"gt", "gte"})}
+_LATCH_ABOVE_CLOCK_OPERATORS = {0: frozenset({"gt", "gte"}), 1: frozenset({"lt", "lte"})}
 
 
-def _clock_gated_latch(leaf: dict[str, Any]) -> tuple[str, str | None] | None:
-    """The ``(var, member)`` this leaf keeps closed until the seconds clock passes it, or ``None``.
+def _clock_compared_latch(leaf: dict[str, Any], operators_by_slot: dict[int, frozenset[str]]) -> _Location | None:
+    """The ``(var, member)`` a leaf compares directly against the seconds clock under ``operators_by_slot``, or
+    ``None``.
 
-    Only the direct comparison of a scalar against the clock. An absorbed additive group (``start + CLIFF <=
-    block.timestamp``) is refused: the recorder doesn't keep the sign, and an offset read is the vesting-cliff shape.
+    An absorbed additive group (``start + CLIFF <= block.timestamp``) is refused: the recorder doesn't keep the sign, so
+    the direction against the latch isn't proven.
     """
     if leaf.get("kind") != "comparison" or leaf.get("absorbed_operands"):
         return None
@@ -982,7 +990,7 @@ def _clock_gated_latch(leaf: dict[str, Any]) -> tuple[str, str | None] | None:
     if len(operands) != 2:
         return None
     operator = leaf.get("operator")
-    for latch_slot, operators in _LATCH_BELOW_CLOCK_OPERATORS.items():
+    for latch_slot, operators in operators_by_slot.items():
         if operator not in operators:
             continue
         latch, clock = operands[latch_slot], operands[1 - latch_slot]
@@ -997,7 +1005,7 @@ def _clock_gated_latch(leaf: dict[str, Any]) -> tuple[str, str | None] | None:
     return None
 
 
-def _demands_latch_armed(leaf: dict[str, Any], pair: tuple[str, str | None]) -> bool:
+def _demands_latch_armed(leaf: dict[str, Any], pair: _Location) -> bool:
     """True when the leaf only lets the call through once the latch is non-zero: a schedule that must be set before
     its action runs, not a freeze that is open at rest.
     """
@@ -1081,58 +1089,116 @@ def _sum_class(ir: Any, of: Callable[[Any], frozenset[str]]) -> frozenset[str]:
     return frozenset({_LATCH_WRITE_OTHER})
 
 
-def latch_writes(ctx: ClaimContext, signature: str, pair: tuple[str, str | None]) -> frozenset[str]:
-    """How ``signature`` (with the internal callees it reaches) writes the uint latch ``pair``: ``clock_sum``,
-    ``cleared`` (0 or ``delete``) or ``other``. Empty when it never writes it.
+def _slot_of_getter(callee: Any) -> str | None:
+    """The slot constant a storage-pointer getter binds (``assembly { $.slot := SLOT }``), when it binds exactly one."""
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.operations import Assignment
 
-    A namespaced member is written through a local storage pointer, so it is matched by member name, and only in a
-    function whose recorded writes include that slot; a plain latch must be the state variable itself.
+    slots = {
+        ir.rvalue.name
+        for node in getattr(callee, "nodes", []) or []
+        for ir in getattr(node, "irs", []) or []
+        if isinstance(ir, Assignment)
+        and getattr(ir.lvalue, "is_storage", False)
+        and isinstance(ir.rvalue, StateVariable)
+        and ir.rvalue.is_constant
+    }
+    return next(iter(slots)) if len(slots) == 1 else None
+
+
+class _StorageAccess:
+    """Storage locations one entry point touches, following internal callees.
+
+    A location is ``(state variable, struct member)``. An ERC-7201 member is keyed by the slot constant its pointer is
+    proven to bind, which is how predicate leaves name it; a member reached through an unproven pointer is keyed by
+    :data:`_UNRESOLVED_BASE`. Element writes (``map[k] = v``) are recorded against the collection, never as a write of
+    the scalar.
     """
-    memo = _LATCH_WRITES.setdefault(ctx, {})
-    key = (signature, *pair)
-    cached = memo.get(key)
+
+    def __init__(self) -> None:
+        self.latch_writes: dict[_Location, set[str]] = {}
+        self.writes: set[_Location] = set()
+        self.refs: set[_Location] = set()
+
+
+def _storage_access(ctx: ClaimContext, signature: str, *, modifiers: bool) -> _StorageAccess:
+    memo = _STORAGE_ACCESS.setdefault(ctx, {})
+    cached = memo.get((signature, modifiers))
     if cached is None:
-        cached = memo[key] = _latch_writes(ctx, signature, pair)
+        cached = memo[(signature, modifiers)] = _collect_storage_access(ctx, signature, modifiers=modifiers)
     return cached
 
 
-def _latch_writes(ctx: ClaimContext, signature: str, pair: tuple[str, str | None]) -> frozenset[str]:
-    var, member = pair
+def _collect_storage_access(ctx: ClaimContext, signature: str, *, modifiers: bool) -> _StorageAccess:
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.operations import Assignment, Binary, Delete, Index, Member
+
+    access = _StorageAccess()
     fn = contract_function(ctx, signature)
     if fn is None:
-        return frozenset()
-    namespaced = var in namespaced_write_vars(ctx, signature)
-    if member is None and namespaced:
-        return frozenset()
-    from slither.core.variables.state_variable import StateVariable
-    from slither.slithir.operations import Assignment, Binary, Delete, Member
-
-    writes: set[str] = set()
+        return access
     visited: set[int] = set()
+
+    def state_location(value: Any) -> _Location | None:
+        if isinstance(value, StateVariable) and not value.is_constant and isinstance(value.name, str):
+            return value.name, None
+        return None
 
     def walk(unit: Any) -> None:
         if id(unit) in visited:
             return
         visited.add(id(unit))
         of = _latch_value_classifier(unit)
-        member_refs: dict[int, tuple[str, str]] = {}
+        pointers: dict[int, str] = {}
+        refs: dict[int, tuple[_Location, bool]] = {}
+
+        def located(value: Any) -> tuple[_Location, bool] | None:
+            direct = state_location(value)
+            return (direct, False) if direct is not None else refs.get(id(value))
+
         for node in getattr(unit, "nodes", []) or []:
             for ir in getattr(node, "irs", []) or []:
+                lvalue = getattr(ir, "lvalue", None)
                 if isinstance(ir, Member):
-                    member_refs[id(ir.lvalue)] = (
-                        str(getattr(ir.variable_left, "name", None)),
-                        str(getattr(ir.variable_right, "name", None)),
-                    )
+                    field = str(getattr(ir.variable_right, "name", None))
+                    base = ir.variable_left
+                    if id(base) in pointers:
+                        refs[id(lvalue)] = ((pointers[id(base)], field), False)
+                    elif (outer := located(base)) is not None:
+                        (var, member), indexed = outer
+                        refs[id(lvalue)] = ((var, member if member is not None else field), indexed)
+                    else:
+                        refs[id(lvalue)] = ((_UNRESOLVED_BASE, field), False)
+                    access.refs.add(refs[id(lvalue)][0])
                     continue
-                target = ir.variable if isinstance(ir, Delete) else getattr(ir, "lvalue", None)
-                if target is None or not _is_uint_latch_slot(target):
+                if isinstance(ir, Index):
+                    outer = located(ir.variable_left)
+                    if outer is not None:
+                        refs[id(lvalue)] = (outer[0], True)
+                        access.refs.add(outer[0])
                     continue
-                if member is None:
-                    hit = isinstance(target, StateVariable) and target.name == var
-                else:
-                    ref = member_refs.get(id(target))
-                    hit = ref is not None and (ref[1] == member if namespaced else ref == (var, member))
-                if not hit:
+                if type(ir).__name__ == "InternalCall" and lvalue is not None:
+                    callee = getattr(ir, "function", None)
+                    slot = _slot_of_getter(callee) if callee is not None else None
+                    if slot is not None:
+                        pointers[id(lvalue)] = slot
+                if isinstance(ir, Assignment) and getattr(lvalue, "is_storage", False):
+                    rvalue = ir.rvalue
+                    if isinstance(rvalue, StateVariable) and rvalue.is_constant and isinstance(rvalue.name, str):
+                        pointers[id(lvalue)] = rvalue.name
+                    elif id(rvalue) in pointers:
+                        pointers[id(lvalue)] = pointers[id(rvalue)]
+                for read in getattr(ir, "read", []) or []:
+                    if (location := state_location(read)) is not None:
+                        access.refs.add(location)
+                target = ir.variable if isinstance(ir, Delete) else lvalue
+                written = located(target) if target is not None else None
+                if written is None:
+                    continue
+                location, indexed = written
+                access.writes.add(location)
+                access.refs.add(location)
+                if indexed or location[0] == _UNRESOLVED_BASE or not _is_uint_latch_slot(target):
                     continue
                 if isinstance(ir, Delete):
                     value = frozenset({"zero"})
@@ -1143,28 +1209,61 @@ def _latch_writes(ctx: ClaimContext, signature: str, pair: tuple[str, str | None
                 else:
                     value = frozenset({_LATCH_WRITE_OTHER})
                 if value == {"zero"}:
-                    writes.add(_LATCH_WRITE_CLEARED)
+                    kind = _LATCH_WRITE_CLEARED
                 elif value == {_LATCH_WRITE_CLOCK_SUM}:
-                    writes.add(_LATCH_WRITE_CLOCK_SUM)
+                    kind = _LATCH_WRITE_CLOCK_SUM
                 else:
-                    writes.add(_LATCH_WRITE_OTHER)
+                    kind = _LATCH_WRITE_OTHER
+                access.latch_writes.setdefault(location, set()).add(kind)
             for ir in getattr(node, "irs", []) or []:
-                if type(ir).__name__ in ("InternalCall", "LibraryCall"):
-                    callee = getattr(ir, "function", None)
-                    if callee is not None and getattr(callee, "nodes", None):
-                        walk(callee)
+                if type(ir).__name__ not in ("InternalCall", "LibraryCall"):
+                    continue
+                if not modifiers and _is_modifier_call(ir):
+                    continue
+                callee = getattr(ir, "function", None)
+                if callee is not None and getattr(callee, "nodes", None):
+                    walk(callee)
 
     walk(fn)
-    return frozenset(writes)
+    return access
 
 
-def timestamp_latches(ctx: ClaimContext) -> frozenset[tuple[str, str | None]]:
+def _overlaps(a: _Location, b: _Location) -> bool:
+    """Whether two locations may name the same storage; an unresolved base or a whole-variable access errs to yes."""
+    (var_a, member_a), (var_b, member_b) = a, b
+    if member_a is not None and member_b is not None and member_a != member_b:
+        return False
+    if var_a == var_b:
+        return True
+    return member_a is not None and member_a == member_b and _UNRESOLVED_BASE in (var_a, var_b)
+
+
+def latch_writes(ctx: ClaimContext, signature: str, pair: _Location) -> frozenset[str]:
+    """How ``signature`` (with its modifiers and internal callees) writes the uint latch ``pair``: ``clock_sum``,
+    ``cleared`` (0 or ``delete``) or ``other``. Empty when it never writes it.
+    """
+    return frozenset(_storage_access(ctx, signature, modifiers=True).latch_writes.get(pair, ()))
+
+
+def _may_write(ctx: ClaimContext, signature: str, pair: _Location) -> bool:
+    return any(_overlaps(pair, written) for written in _storage_access(ctx, signature, modifiers=True).writes)
+
+
+def _authority_writer(ctx: ClaimContext, signature: str) -> bool:
+    tree = ctx.predicate_tree(signature)
+    return tree is not None and tree_is_authority_gated(tree) and not tree_is_one_shot(tree)
+
+
+def timestamp_latches(ctx: ClaimContext) -> frozenset[_Location]:
     """Scalar ``(var, member)`` latches proven to work as a timed pause (cached). Every conjunct is required:
 
-    - another entry point holds a mandatory gate closed while the latch is ahead of the clock
-      (:func:`_clock_gated_latch`), and that entry point neither writes the latch nor requires it armed (a scalar
-      schedule's ``execute`` does one or the other, a freeze is open at rest);
-    - an authority-gated, non-initializer function arms it to ``block.timestamp + x``.
+    - gated readers: entry points holding a mandatory gate closed while the latch is ahead of the clock that neither may
+      write the latch nor require it armed (a scalar schedule's ``execute`` does one or the other);
+    - no entry point that leaves the latch alone is open only while it is ahead of the clock (a sale or auction window);
+    - authority-gated, non-initializer functions both arm it to ``block.timestamp + x`` and clear it: a timer that can
+      only run out is a schedule, not a pause;
+    - no gated reader touches other state the armers write (a commit/apply timelock stages the value its ``apply``
+      reads).
 
     Mapping-keyed timestamps (timelock ``eta``, per-user cooldowns) never qualify: their writes go through an index, not
     the scalar.
@@ -1172,36 +1271,53 @@ def timestamp_latches(ctx: ClaimContext) -> frozenset[tuple[str, str | None]]:
     cached = _TIMESTAMP_LATCHES.get(ctx)
     if cached is not None:
         return cached
-    readers: dict[tuple[str, str | None], set[str]] = {}
-    for signature in ctx.function_signatures():
+    signatures = list(ctx.function_signatures())
+    gated: dict[_Location, set[str]] = {}
+    opened: dict[_Location, set[str]] = {}
+    for signature in signatures:
         tree = ctx.predicate_tree(signature)
         if tree is None:
             continue
         leaves = [leaf for leaf, _path in _mandatory_leaves_with_paths(tree)]
         for leaf in leaves:
-            pair = _clock_gated_latch(leaf)
-            if pair is None or any(_demands_latch_armed(other, pair) for other in leaves):
-                continue
-            readers.setdefault(pair, set()).add(signature)
-    proven: set[tuple[str, str | None]] = set()
-    for pair, gated in readers.items():
-        if all(latch_writes(ctx, reader, pair) for reader in gated):
+            pair = _clock_compared_latch(leaf, _LATCH_BELOW_CLOCK_OPERATORS)
+            if pair is not None and not any(_demands_latch_armed(other, pair) for other in leaves):
+                gated.setdefault(pair, set()).add(signature)
+        for leaf in _iter_leaves(tree):
+            pair = _clock_compared_latch(leaf, _LATCH_ABOVE_CLOCK_OPERATORS)
+            if pair is not None:
+                opened.setdefault(pair, set()).add(signature)
+    proven: set[_Location] = set()
+    for pair, candidates in gated.items():
+        readers = [reader for reader in sorted(candidates) if not _may_write(ctx, reader, pair)]
+        if not readers or any(not _may_write(ctx, other, pair) for other in opened.get(pair, ())):
             continue
-        if any(_arms_latch(ctx, signature, pair) for signature in ctx.function_signatures()):
-            proven.add(pair)
+        writers = [signature for signature in signatures if _authority_writer(ctx, signature)]
+        armers = [signature for signature in writers if _LATCH_WRITE_CLOCK_SUM in latch_writes(ctx, signature, pair)]
+        if not armers or not any(_LATCH_WRITE_CLEARED in latch_writes(ctx, signature, pair) for signature in writers):
+            continue
+        # The armer's own body: a reentrancy guard set by its modifier is not state it stages.
+        staged = {
+            location
+            for armer in armers
+            for location in _storage_access(ctx, armer, modifiers=False).writes
+            if location != pair
+        }
+        if any(
+            _overlaps(location, touched)
+            for reader in readers
+            for touched in _storage_access(ctx, reader, modifiers=True).refs
+            if touched != pair
+            for location in staged
+        ):
+            continue
+        proven.add(pair)
     frozen = frozenset(proven)
     _TIMESTAMP_LATCHES[ctx] = frozen
     return frozen
 
 
-def _arms_latch(ctx: ClaimContext, signature: str, pair: tuple[str, str | None]) -> bool:
-    tree = ctx.predicate_tree(signature)
-    if tree is None or not tree_is_authority_gated(tree) or tree_is_one_shot(tree):
-        return False
-    return _LATCH_WRITE_CLOCK_SUM in latch_writes(ctx, signature, pair)
-
-
-def timestamp_latch_polarity(ctx: ClaimContext, function: str, pair: tuple[str, str | None]) -> str | None:
+def timestamp_latch_polarity(ctx: ClaimContext, function: str, pair: _Location) -> str | None:
     """``"set"`` (arms to ``block.timestamp + x``), ``"unset"`` (clears), ``"both"``, or ``None`` when this function
     writes the latch neither way.
     """

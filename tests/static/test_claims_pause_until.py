@@ -31,12 +31,17 @@ Artifacts = tuple[Any, Mapping[str, Any], Mapping[str, Any], Mapping[str, list[A
 
 NEGATIVES = {
     "TimelockEta": "mapping-keyed eta read only by execute",
+    "TimelockGetterEta": "OZ v4 timelock eta read through getters, cleared by cancel",
     "PerUserCooldown": "per-account cooldown mapping",
     "RateLimitInterval": "the gated entry point re-arms the latch itself",
+    "NamespacedRateLimit": "the gated entry point's modifier re-arms the namespaced latch",
     "DeadlineSale": "the gate opens while the timestamp is ahead of the clock",
+    "SaleWindow": "another entry point is open only while the timestamp is ahead",
     "VestingCliff": "a bare clock stamp read with an offset",
     "VestingScheduled": "the latch is read with an offset",
     "VestingLock": "only the constructor arms it",
+    "StakingRewardsPeriod": "the period can only run out, nothing clears it",
+    "CommitApplyCancel": "the gated reader applies the value the armer staged",
     "ClockStampGuard": "the writer stamps the bare clock, never ahead of it",
     "DelayedAdminTransfer": "the reader requires the schedule set and clears it",
     "ArmedSchedule": "the reader requires the schedule set",
@@ -44,6 +49,8 @@ NEGATIVES = {
     "NoOtherReader": "no other entry point is gated by it",
     "UnguardedPauseUntil": "anyone can arm it",
     "BlockNumberGate": "armed in seconds, compared against the block number",
+    "NamespacedMemberAlias": "only a per-user member of the same name is armed",
+    "NamespacedTwoSlots": "only another namespace's member of the same name is armed",
 }
 
 
@@ -129,6 +136,14 @@ def test_plain_latch_set_unset_and_both(plain):
     assert {c["tier"] for c in both.values()} == {"idiom_structural"}
     for signature in ("deposit()", "withdraw(uint256)"):
         assert _pause_claims(claims, signature) == {}
+
+
+def test_the_oz_pausable_abi_over_a_timestamp_latch_stays_idiom_tier():
+    """The standard tier rests on the OZ Pausable ABI, which describes a bool flag."""
+    claims = _artifacts("pause_until_plain.sol", "OzAbiPauseUntil")[3]
+    pause = _pause_claims(claims, "pause()")["pause.set"]
+    assert (pause["tier"], pause["witness"]["flags"]) == ("idiom_structural", [PLAIN_FLAG])
+    assert _pause_claims(claims, "unpause()")["pause.unset"]["tier"] == "idiom_structural"
 
 
 @pytest.mark.parametrize("contract", sorted(NEGATIVES), ids=sorted(NEGATIVES))

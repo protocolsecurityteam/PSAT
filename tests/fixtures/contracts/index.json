@@ -74,7 +74,7 @@
       "path": "pause/pause_until_negatives.sol",
       "category": "pause",
       "contract_name": "TimelockEta",
-      "description": "Timestamp state that is not a pause (eta, cooldown, rate limit, deadline, vesting, schedules, initializer, unguarded writer), one contract per excluded shape.",
+      "description": "Timestamp state that is not a pause (timelock eta, cooldown, rate limit, deadline, sale window, vesting, reward period, commit/apply, schedules, initializer, unguarded writer, namespaced aliases), one contract per excluded shape.",
       "detection_patterns": ["timestamp_latch_negative"]
     },
     {

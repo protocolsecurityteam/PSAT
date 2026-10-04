@@ -586,17 +586,23 @@ PAUSE_UNTIL_STATIC = _claim(
 )
 
 
-def test_a_contract_principal_on_pause_until_is_admitted(db_session, protocol):
-    """The fork's freeze verdict supersedes the static timestamp-latch claim and carries its tier, so the guardian Safe
-    on ``pauseUntil`` admits through the unchanged rule. Before the static claim existed the row was observed-only."""
-    from types import SimpleNamespace
-    from typing import cast
+def _pause_until_claims(history: str) -> list:
+    """``pauseUntil``'s claims as each analysis leaves them.
 
-    from services.effects.claims_bridge import merge_observed_claims
+    ``fresh``: the static claim alone (a static ``pause.set`` keeps the row out of fork probing). ``observed``: the
+    bridge's claim over it. ``reanalysed``: prod's path, where the policy writer carries the old observed-only claim and
+    its relinked verdict into the merge beside the new static claim.
+    """
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from services.effects.claims_bridge import merge_observed_claims, verdict_to_claim
     from services.effects.config import EFFECT_CLASS_FREEZE_PAUSE, TIER_FORK, VERDICT_PROVEN
     from services.static.claims.types import Claim
 
-    verdict = SimpleNamespace(
+    if history == "fresh":
+        return [PAUSE_UNTIL_STATIC]
+    verdict: Any = SimpleNamespace(
         id=7,
         effect_class=EFFECT_CLASS_FREEZE_PAUSE,
         verdict=VERDICT_PROVEN,
@@ -606,14 +612,27 @@ def test_a_contract_principal_on_pause_until_is_admitted(db_session, protocol):
         witness={"pause_effective": True, "auto_expiry": None, "duration_bound_source": "not_determined"},
         observed_residue=None,
     )
-    claims = merge_observed_claims([cast(Claim, PAUSE_UNTIL_STATIC)], [verdict])
+    prior: list[Claim] = [cast(Claim, PAUSE_UNTIL_STATIC)]
+    if history == "reanalysed":
+        observed_only = verdict_to_claim(verdict)
+        assert observed_only is not None and "static_tier" not in observed_only["witness"]
+        prior.append(observed_only)
+    claims = merge_observed_claims(prior, [verdict])
     assert [(c["claim_id"], c["tier"], c["witness"].get("static_tier")) for c in claims] == [
         ("pause.set", "behavioral_observed", "idiom_structural")
     ]
+    return list(claims)
 
+
+@pytest.mark.parametrize("history", ["fresh", "observed", "reanalysed"])
+def test_a_contract_principal_on_pause_until_is_admitted(db_session, protocol, history):
+    """The guardian Safe on etherfi's ``pauseUntil`` admits through the unchanged rule. Before the static claim existed
+    the row was observed-only and admitted nothing."""
     eeth = _anchored_member(db_session, protocol, ADDR(0x9350))
     safe = _contract(db_session, ADDR(0x9351), nominated=protocol.id)
-    row = _principal(db_session, eeth, safe.address, resolved_type="safe", name="pauseUntil", claims=claims)
+    row = _principal(
+        db_session, eeth, safe.address, resolved_type="safe", name="pauseUntil", claims=_pause_until_claims(history)
+    )
 
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(safe.id,)))
     db_session.flush()
