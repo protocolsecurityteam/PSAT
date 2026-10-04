@@ -51,6 +51,7 @@ NEGATIVES = {
     "BlockNumberGate": "armed in seconds, compared against the block number",
     "NamespacedMemberAlias": "only a per-user member of the same name is armed",
     "NamespacedTwoSlots": "only another namespace's member of the same name is armed",
+    "NamespacedRebindRateLimit": "the gated entry point re-arms through a pointer it may rebind",
 }
 
 
@@ -151,6 +152,18 @@ def test_timestamp_state_that_is_not_a_pause_claims_nothing(contract):
     _subject, _effects, _trees, claims = _artifacts("pause_until_negatives.sol", contract)
     minted = {sig: sorted(c["claim_id"] for c in rows if c["claim_id"] in PAUSE_IDS) for sig, rows in claims.items()}
     assert {sig: ids for sig, ids in minted.items() if ids} == {}, NEGATIVES[contract]
+
+
+def test_an_element_write_never_writes_the_scalar():
+    """Leaves can name a mapping bare (OZ v4 ``TimelockController`` reads ``_timestamps`` through getters), so the eta
+    write must stay an element write, never an arm or a clear of a scalar of that name."""
+    from services.static.claims.context import ClaimContext
+    from services.static.claims.matchers import _facts
+
+    subject, effects, trees, _claims = _artifacts("pause_until_negatives.sol", "TimelockEta")
+    ctx = ClaimContext(subject, effects, trees)
+    assert _facts.latch_writes(ctx, "schedule(bytes32)", ("eta", None)) == frozenset()
+    assert _facts._may_write(ctx, "schedule(bytes32)", ("eta", None))
 
 
 def test_the_pause_window_stays_not_determined(namespaced, plain):

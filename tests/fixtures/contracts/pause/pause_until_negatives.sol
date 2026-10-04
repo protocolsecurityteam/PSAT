@@ -504,3 +504,43 @@ contract TimelockGetterEta is Owned {
         require(isOperationReady(id), "TimelockController: operation is not ready");
     }
 }
+
+// A rate limit whose gated entry point re-arms through a pointer it may rebind to another namespace.
+contract NamespacedRebindRateLimit is Owned {
+    struct Window {
+        uint256 until;
+    }
+
+    bytes32 private constant A_SLOT = 0x7777777777777777777777777777777777777777777777777777777777777777;
+    bytes32 private constant B_SLOT = 0x8888888888888888888888888888888888888888888888888888888888888888;
+
+    function _a() internal pure returns (Window storage $) {
+        assembly {
+            $.slot := A_SLOT
+        }
+    }
+
+    function _b() internal pure returns (Window storage $) {
+        assembly {
+            $.slot := B_SLOT
+        }
+    }
+
+    function reset() external onlyOwner {
+        _a().until = block.timestamp + 1 hours;
+    }
+
+    function clear() external onlyOwner {
+        _a().until = 0;
+    }
+
+    function consume(address to, uint256 amount, bool useB) external {
+        require(_a().until < block.timestamp, "rate limited");
+        Window storage window = _a();
+        if (useB) {
+            window = _b();
+        }
+        window.until = block.timestamp + 1 hours;
+        _move(to, amount);
+    }
+}

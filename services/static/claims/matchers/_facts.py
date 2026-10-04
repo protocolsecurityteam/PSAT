@@ -1150,7 +1150,16 @@ def _collect_storage_access(ctx: ClaimContext, signature: str, *, modifiers: boo
         visited.add(id(unit))
         of = _latch_value_classifier(unit)
         pointers: dict[int, str] = {}
+        bindings: dict[int, str | None] = {}
         refs: dict[int, tuple[_Location, bool]] = {}
+
+        def bind(pointer: Any, slot: str | None) -> None:
+            # Bindings are flow-insensitive: a pointer bound to two slots, or to one it can't prove, is unresolved.
+            key = id(pointer)
+            if key in bindings and bindings[key] != slot:
+                slot = None
+            bindings[key] = slot
+            pointers[key] = slot if slot is not None else _UNRESOLVED_BASE
 
         def located(value: Any) -> tuple[_Location, bool] | None:
             direct = state_location(value)
@@ -1181,13 +1190,14 @@ def _collect_storage_access(ctx: ClaimContext, signature: str, *, modifiers: boo
                     callee = getattr(ir, "function", None)
                     slot = _slot_of_getter(callee) if callee is not None else None
                     if slot is not None:
-                        pointers[id(lvalue)] = slot
+                        bind(lvalue, slot)
                 if isinstance(ir, Assignment) and getattr(lvalue, "is_storage", False):
                     rvalue = ir.rvalue
                     if isinstance(rvalue, StateVariable) and rvalue.is_constant and isinstance(rvalue.name, str):
-                        pointers[id(lvalue)] = rvalue.name
-                    elif id(rvalue) in pointers:
-                        pointers[id(lvalue)] = pointers[id(rvalue)]
+                        bind(lvalue, rvalue.name)
+                    else:
+                        bound = pointers.get(id(rvalue))
+                        bind(lvalue, bound if bound != _UNRESOLVED_BASE else None)
                 for read in getattr(ir, "read", []) or []:
                     if (location := state_location(read)) is not None:
                         access.refs.add(location)
