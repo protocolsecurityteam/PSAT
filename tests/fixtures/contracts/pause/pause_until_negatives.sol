@@ -544,3 +544,43 @@ contract NamespacedRebindRateLimit is Owned {
         _move(to, amount);
     }
 }
+
+// The same rate limit, re-armed through a pointer rebound after its first use inside a loop.
+contract NamespacedLoopRebindRateLimit is Owned {
+    struct Window {
+        uint256 until;
+    }
+
+    bytes32 private constant A_SLOT = 0x7777777777777777777777777777777777777777777777777777777777777777;
+    bytes32 private constant B_SLOT = 0x8888888888888888888888888888888888888888888888888888888888888888;
+
+    function _a() internal pure returns (Window storage $) {
+        assembly {
+            $.slot := A_SLOT
+        }
+    }
+
+    function _b() internal pure returns (Window storage $) {
+        assembly {
+            $.slot := B_SLOT
+        }
+    }
+
+    function reset() external onlyOwner {
+        _a().until = block.timestamp + 1 hours;
+    }
+
+    function clear() external onlyOwner {
+        _a().until = 0;
+    }
+
+    function consume(address to, uint256 amount, uint256 rounds) external {
+        require(_a().until < block.timestamp, "rate limited");
+        Window storage window = _b();
+        for (uint256 i = 0; i < rounds; i++) {
+            window.until = block.timestamp + 1 hours;
+            window = _a();
+        }
+        _move(to, amount);
+    }
+}

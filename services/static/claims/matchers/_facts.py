@@ -1106,6 +1106,55 @@ def _slot_of_getter(callee: Any) -> str | None:
     return next(iter(slots)) if len(slots) == 1 else None
 
 
+def _pointer_slots(unit: Any) -> dict[int, str]:
+    """``id(storage pointer) -> slot constant`` for one function body, or :data:`_UNRESOLVED_BASE` when a pointer may
+    bind more than one slot, or one it can't prove.
+
+    Flow-insensitive over every binding in the body, so a rebind after use (in a loop, on a later path) still counts.
+    """
+    from slither.core.variables.state_variable import StateVariable
+    from slither.slithir.operations import Assignment
+
+    proven: dict[int, str] = {}
+    copies: list[tuple[int, Any]] = []
+    for node in getattr(unit, "nodes", []) or []:
+        for ir in getattr(node, "irs", []) or []:
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is None:
+                continue
+            if type(ir).__name__ == "InternalCall":
+                callee = getattr(ir, "function", None)
+                slot = _slot_of_getter(callee) if callee is not None else None
+                if slot is not None:
+                    proven[id(lvalue)] = slot
+            elif isinstance(ir, Assignment) and getattr(lvalue, "is_storage", False):
+                rvalue = ir.rvalue
+                if isinstance(rvalue, StateVariable) and rvalue.is_constant and isinstance(rvalue.name, str):
+                    copies.append((id(lvalue), rvalue.name))
+                else:
+                    copies.append((id(lvalue), rvalue))
+    bound: dict[int, set[str | None]] = {key: {slot} for key, slot in proven.items()}
+    # Each pass only widens a set; copy chains are a few links deep.
+    for _ in range(8):
+        changed = False
+        for key, source in copies:
+            if isinstance(source, str):
+                values: set[str | None] = {source}
+            else:
+                values = bound.get(id(source)) or {None}
+            merged = bound.get(key, set()) | values
+            if merged != bound.get(key):
+                bound[key] = merged
+                changed = True
+        if not changed:
+            break
+    slots: dict[int, str] = {}
+    for key, values in bound.items():
+        slot = next(iter(values)) if len(values) == 1 else None
+        slots[key] = slot if slot is not None else _UNRESOLVED_BASE
+    return slots
+
+
 class _StorageAccess:
     """Storage locations one entry point touches, following internal callees.
 
@@ -1149,17 +1198,8 @@ def _collect_storage_access(ctx: ClaimContext, signature: str, *, modifiers: boo
             return
         visited.add(id(unit))
         of = _latch_value_classifier(unit)
-        pointers: dict[int, str] = {}
-        bindings: dict[int, str | None] = {}
+        pointers = _pointer_slots(unit)
         refs: dict[int, tuple[_Location, bool]] = {}
-
-        def bind(pointer: Any, slot: str | None) -> None:
-            # Bindings are flow-insensitive: a pointer bound to two slots, or to one it can't prove, is unresolved.
-            key = id(pointer)
-            if key in bindings and bindings[key] != slot:
-                slot = None
-            bindings[key] = slot
-            pointers[key] = slot if slot is not None else _UNRESOLVED_BASE
 
         def located(value: Any) -> tuple[_Location, bool] | None:
             direct = state_location(value)
@@ -1186,18 +1226,6 @@ def _collect_storage_access(ctx: ClaimContext, signature: str, *, modifiers: boo
                         refs[id(lvalue)] = (outer[0], True)
                         access.refs.add(outer[0])
                     continue
-                if type(ir).__name__ == "InternalCall" and lvalue is not None:
-                    callee = getattr(ir, "function", None)
-                    slot = _slot_of_getter(callee) if callee is not None else None
-                    if slot is not None:
-                        bind(lvalue, slot)
-                if isinstance(ir, Assignment) and getattr(lvalue, "is_storage", False):
-                    rvalue = ir.rvalue
-                    if isinstance(rvalue, StateVariable) and rvalue.is_constant and isinstance(rvalue.name, str):
-                        bind(lvalue, rvalue.name)
-                    else:
-                        bound = pointers.get(id(rvalue))
-                        bind(lvalue, bound if bound != _UNRESOLVED_BASE else None)
                 for read in getattr(ir, "read", []) or []:
                     if (location := state_location(read)) is not None:
                         access.refs.add(location)

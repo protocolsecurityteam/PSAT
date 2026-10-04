@@ -52,6 +52,7 @@ NEGATIVES = {
     "NamespacedMemberAlias": "only a per-user member of the same name is armed",
     "NamespacedTwoSlots": "only another namespace's member of the same name is armed",
     "NamespacedRebindRateLimit": "the gated entry point re-arms through a pointer it may rebind",
+    "NamespacedLoopRebindRateLimit": "the gated entry point re-arms through a pointer rebound after use in a loop",
 }
 
 
