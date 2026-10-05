@@ -56,7 +56,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     },
     "workers/policy_worker.py": {
         # The reanalysis completed before the notifier; recording would mark it degraded.
-        918: "Notifier side-effect; reanalysis already completed before this fired.",
+        920: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # A resource side-effect, not a degraded verdict.

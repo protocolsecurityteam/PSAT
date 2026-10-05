@@ -179,6 +179,33 @@ def _derive_value_flow_claims(
     return enriched
 
 
+def unresolved_callees(
+    target_effects: Any,
+    controller_values: Any,
+    callees_with_facts: set[str],
+    *,
+    target_address: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Body calls whose callee resolves to an address with no facts to derive from: ``{function_signature: [{sink_id,
+    selector, callee}]}``. Value-flow claims for these calls are not determined, which is not "none".
+    """
+    var_to_address = _var_to_address(controller_values)
+    target = (target_address or "").lower()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for fn_sig, sinks in _body_external_calls(target_effects).items():
+        gaps = []
+        for sink in sinks:
+            callee = var_to_address.get(str(sink.get("target", "")).lower().split(".", 1)[0])
+            # The zero address is a burn sentinel, not a contract that could have facts.
+            if not callee or callee == target or callee in callees_with_facts or not callee[2:].strip("0"):
+                continue
+            selector = str(sink.get("selector", "")).lower()
+            gaps.append({"sink_id": sink.get("id"), "selector": selector, "callee": callee})
+        if gaps:
+            out[fn_sig] = gaps
+    return out
+
+
 def _is_bool_mapping(declared_type: Any) -> bool:
     """A ``mapping(... => bool)`` allow/deny list (nested maps to bool count)."""
     if not isinstance(declared_type, str):

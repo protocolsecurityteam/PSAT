@@ -599,6 +599,8 @@ def test_only_the_job_whose_facts_are_read_marks_siblings(pipeline):
     owner = p.job(TOKEN_A)
     p.land_facts(owner, _token_effects(proves_flow=False), _snapshot({}))
     p.run(owner)
+    # The owner's facts answer the caller's gap on TOKEN_A.
+    p.settle()
     # Another job for the same address (another deployment's context) holds different facts, but siblings read the
     # owner's.
     other = p.job(TOKEN_A)
@@ -780,6 +782,8 @@ def test_refresh_waits_for_a_disabled_chain(pipeline, monkeypatch):
 def test_an_ambiguous_row_is_judged_as_the_own_pass_writes_it(pipeline):
     """The own pass skips a function matching several rows, so the check must not call it stale either."""
     p = pipeline()
+    token = p.job(TOKEN_A)
+    p.land_facts(token, _token_effects(), _snapshot({}))
     caller = p.job(CALLER)
     p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
     p.run(caller)
@@ -795,8 +799,121 @@ def test_an_ambiguous_row_is_judged_as_the_own_pass_writes_it(pipeline):
         )
     )
     p.session.commit()
-    token = p.job(TOKEN_A)
 
-    p.land_facts(token, _token_effects(), _snapshot({}))
+    p.land_facts(token, *p.facts[token.id])
 
     assert p.stale() == set()
+
+
+def _gaps(p: _Pipeline, job: Job) -> dict[str, Any]:
+    p.session.expire_all()
+    contract = p.session.query(Contract).filter(Contract.job_id == job.id).one()
+    rows = p.session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).all()
+    return {row.abi_signature: row.cross_contract_gaps for row in rows}
+
+
+def _artifact_gaps(p: _Pipeline, job: Job) -> dict[str, Any]:
+    payload = get_artifact(p.session, job.id, "effective_permissions")
+    assert isinstance(payload, dict)
+    return {fn["function"]: fn.get("cross_contract_gaps") for fn in payload["functions"]}
+
+
+def test_a_call_into_a_callee_without_facts_is_recorded_as_not_determined(pipeline):
+    p = pipeline()
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    gap = {
+        "sink_id": "s0",
+        "selector": _selector(TRANSFER),
+        "callee": TOKEN_A,
+        "reason": "not_analyzed",
+        "callee_job_id": None,
+    }
+    assert p.row_claims(caller)[SWEEP] == []
+    assert _gaps(p, caller) == {SWEEP: [gap]}
+    assert _artifact_gaps(p, caller) == {SWEEP: [gap]}
+
+
+@pytest.mark.parametrize(
+    ("callee_state", "reason"),
+    [
+        ("pending", "analysis_pending"),
+        ("failed", "analysis_failed"),
+        ("no_facts", "facts_not_stored"),
+        ("other_scope", "outside_sibling_scope"),
+    ],
+)
+def test_a_gap_names_why_the_callee_had_no_facts(pipeline, callee_state, reason):
+    p = pipeline()
+    callee = (pipeline() if callee_state == "other_scope" else p).job(TOKEN_A)
+    if callee_state == "failed":
+        callee.status = JobStatus.failed_terminal
+    elif callee_state == "no_facts":
+        callee.status = JobStatus.completed
+    elif callee_state == "other_scope":
+        store_artifact(p.session, callee.id, "effects", data=_token_effects())
+        store_artifact(p.session, callee.id, "control_snapshot", data=_snapshot({}))
+    p.session.commit()
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["reason"], gap["callee_job_id"]) == (reason, str(callee.id))
+
+
+def test_proven_absent_callee_facts_are_a_gap(pipeline, monkeypatch):
+    from db.storage import StorageKeyMissing
+
+    p = pipeline()
+    token = p.job(TOKEN_A)
+    p.land_facts(token, _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    monkeypatch.setattr(
+        "services.policy.cross_contract_enrichment.get_artifact", _unreadable_for(token.id, StorageKeyMissing("gone"))
+    )
+    p.run(caller)
+
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["reason"], gap["callee_job_id"]) == ("facts_unreadable", str(token.id))
+
+
+@pytest.mark.parametrize("proves_flow", [True, False])
+def test_a_gap_heals_when_the_callee_s_facts_land(pipeline, proves_flow):
+    p = pipeline()
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+    assert _gaps(p, caller)[SWEEP]
+    token = p.job(TOKEN_A)
+
+    p.land_facts(token, _token_effects(proves_flow=proves_flow), _snapshot({}))
+    assert p.stale() == {str(caller.id)}
+    p.settle()
+
+    # Determined either way: a derived claim, or a proven absence of one.
+    assert _gaps(p, caller) == {SWEEP: []}
+    assert _ids(p.row_claims(caller)[SWEEP]) == ([("flow.out", "policy_derived")] if proves_flow else [])
+    assert _artifact_gaps(p, caller) == {SWEEP: []}
+
+
+def test_rows_without_unresolved_calls_are_evaluated_empty(pipeline):
+    p = pipeline()
+    token = p.job(TOKEN_A)
+    p.land_facts(token, _token_effects(), _snapshot({}))
+    p.run(token)
+
+    assert _gaps(p, token) == {TRANSFER: []}
+
+
+def test_no_gap_for_a_burn_address_or_a_self_call(pipeline):
+    p = pipeline()
+    caller = p.job(CALLER)
+    zero = "0x" + "00" * 20
+    p.land_facts(caller, _caller_effects(("tokenA", "tokenB")), _snapshot({"tokenA": zero, "tokenB": CALLER}))
+    p.run(caller)
+
+    assert _gaps(p, caller) == {SWEEP: []}

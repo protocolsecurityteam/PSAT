@@ -12,7 +12,10 @@ finished first:
   now derive (a claim to add, or one it no longer supports), the sibling is marked stale and its policy re-runs with
   every stage after it, so every consumer of the claims sees them.
 
-A sibling with no stored facts contributes nothing: a claim it would have produced is absent, not disproven.
+A body call whose callee resolves to an address with no readable facts is recorded on the function as a
+``cross_contract_gaps`` entry: its claims are not determined, never "none". The callee's facts landing marks the job
+stale, so the gap heals. A sibling the target can't know about (a hook pointing at it from an unanalysed contract)
+leaves no gap.
 """
 
 from __future__ import annotations
@@ -252,6 +255,114 @@ def fetch_sibling_facts(
     return facts
 
 
+def _gap_reason(session: Session, callee: str, *, chain_id: int, facts: SiblingFacts) -> tuple[str, Any]:
+    """Why the callee had no facts to derive from, with the job that tells (the newest) or ``None``."""
+    if callee in facts.unreadable:
+        return "facts_unreadable", facts.job_for_address.get(callee)
+
+    def _has(name: str):
+        return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
+
+    jobs = session.execute(
+        select(Job.id, Job.status, _has("effects") & _has("control_snapshot"))
+        .where(
+            func.lower(Job.address) == callee,
+            Job.chain_id == chain_id,
+            Job.request["effects_resume_work_id"].astext.is_(None),
+        )
+        .order_by(Job.created_at.desc(), Job.id.desc())
+    ).all()
+    if not jobs:
+        return "not_analyzed", None
+    for job_id, _status, has_facts in jobs:
+        if has_facts:
+            return "outside_sibling_scope", job_id
+    for job_id, status, _has_facts in jobs:
+        if status in (JobStatus.queued, JobStatus.processing):
+            return "analysis_pending", job_id
+    for job_id, status, _has_facts in jobs:
+        if status in (JobStatus.failed, JobStatus.failed_terminal):
+            return "analysis_failed", job_id
+    return "facts_not_stored", jobs[0][0]
+
+
+def describe_gaps(
+    session: Session,
+    gaps_by_function: dict[str, list[dict[str, Any]]],
+    *,
+    chain_id: int,
+    facts: SiblingFacts,
+) -> dict[str, list[dict[str, Any]]]:
+    """Each gap with the reason its callee had no facts, as observed now; it heals when the callee's facts land."""
+    reasons = {
+        callee: _gap_reason(session, callee, chain_id=chain_id, facts=facts)
+        for callee in sorted({gap["callee"] for gaps in gaps_by_function.values() for gap in gaps})
+    }
+    return {
+        fn_sig: sorted(
+            (
+                {
+                    **gap,
+                    "reason": reasons[gap["callee"]][0],
+                    "callee_job_id": str(reasons[gap["callee"]][1]) if reasons[gap["callee"]][1] else None,
+                }
+                for gap in gaps
+            ),
+            key=lambda gap: (str(gap.get("sink_id")), gap["selector"], gap["callee"]),
+        )
+        for fn_sig, gaps in gaps_by_function.items()
+    }
+
+
+def write_gaps(
+    session: Session,
+    *,
+    contract_id: int,
+    deployment_address: str | None,
+    function_records: list[dict] | None,
+    gaps: dict[str, list[dict[str, Any]]],
+    payload: dict | None,
+) -> None:
+    """Set every row's and payload record's ``cross_contract_gaps``: its function's gaps, ``[]`` when it has none.
+    Doesn't commit.
+    """
+    selector_for = selector_by_function_key(function_records)
+    by_selector: dict[str, list[dict[str, Any]]] = {}
+    for fn_sig, fn_gaps in gaps.items():
+        selector = selector_for.get(fn_sig)
+        if selector:
+            by_selector.setdefault(selector, []).extend(fn_gaps)
+    rows = session.execute(
+        select(EffectiveFunction).where(
+            EffectiveFunction.contract_id == contract_id,
+            deployment_scope(EffectiveFunction.deployment_address, deployment_address),
+        )
+    ).scalars()
+    for row in rows:
+        row.cross_contract_gaps = by_selector.get((row.selector or "").lower(), gaps.get(row.abi_signature or "", []))
+    for record in (payload or {}).get("functions", []):
+        fn_sig = record.get("function") or record.get("abi_signature")
+        record["cross_contract_gaps"] = gaps.get(fn_sig, []) if fn_sig else []
+
+
+def jobs_with_gaps_on(session: Session, job_ids: Iterable[Any], callee: str) -> set[Any]:
+    """Which of ``job_ids`` own rows recording a gap on ``callee``."""
+    ids = list(job_ids)
+    if not ids:
+        return set()
+    return set(
+        session.execute(
+            select(Contract.job_id)
+            .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+            .where(
+                Contract.job_id.in_(ids),
+                EffectiveFunction.cross_contract_gaps.op("@>")(cast([{"callee": callee}], JSONB)),
+            )
+            .distinct()
+        ).scalars()
+    )
+
+
 def _attributed_to(claim: Any, source_address: str) -> bool:
     """A stored ``policy_derived`` claim the source's facts produced: its witness names the source."""
     if not isinstance(claim, dict) or claim.get("tier") != "policy_derived":
@@ -317,10 +428,13 @@ def contribution_is_stale(
     )
     selector_for = selector_by_function_key(payload.get("functions"))
     derived: dict[int, list[Claim]] = {}
+    # Rows the own pass can't single out; it leaves them alone, so they're no evidence either way.
+    unjudged: set[int] = set()
     for fn_sig, claims in sorted(contribution.items()):
         selector = selector_for.get(fn_sig)
         matches = [row for row in rows if (row.selector == selector if selector else row.abi_signature == fn_sig)]
         if len(matches) != 1:
+            unjudged.update(row.id for row in matches)
             continue
         row = matches[0]
         derived.setdefault(row.id, []).extend(claims)
@@ -329,6 +443,7 @@ def contribution_is_stale(
     return any(
         _attributed_to(claim, source_address) and claim not in derived.get(row.id, [])
         for row in rows
+        if row.id not in unjudged
         for claim in row.claims or []
     )
 
@@ -390,6 +505,8 @@ def _mark_stale_dependents(
     callee_claim_map = build_callee_claim_map({source_address: source_effects})
     target_ids = [job_id for job_id, _ in targets]
     holding = jobs_holding_claims_from(session, target_ids, source_address)
+    # A gap on this address is now answerable.
+    awaiting = jobs_with_gaps_on(session, target_ids, source_address)
     # A target mid-policy has wiped its rows but may be writing claims derived from the facts these replaced; only a
     # mark makes it re-read them.
     replacing = replaced_facts or _other_job_held_facts(session, job, chain_id=chain_id)
@@ -397,7 +514,7 @@ def _mark_stale_dependents(
 
     marked = 0
     for target_job_id, address in targets:
-        if address in facts.unreadable:
+        if address in facts.unreadable or target_job_id in awaiting:
             stale = True
         else:
             snapshot = facts.snapshots[address]

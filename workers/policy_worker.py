@@ -38,10 +38,12 @@ from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materi
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.cross_contract_enrichment import (
     apply_claims_to_payload,
+    describe_gaps,
     fetch_sibling_facts,
     related_jobs_with_facts,
     selector_by_function_key,
     write_claims_to_rows,
+    write_gaps,
 )
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
@@ -958,6 +960,7 @@ class PolicyWorker(BaseWorker):
             derive_cross_contract_claims,
             proxy_provenance_from_classifications,
             sibling_transfer_hook_links,
+            unresolved_callees,
         )
 
         request = job.request if isinstance(job.request, dict) else {}
@@ -990,31 +993,60 @@ class PolicyWorker(BaseWorker):
                     deployment_address, get_artifact(session, job.id, "classifications")
                 ),
             )
+            gaps = describe_gaps(
+                session,
+                unresolved_callees(
+                    target_effects,
+                    control_snapshot.get("controller_values", {}),
+                    set(facts.effects),
+                    target_address=target_address,
+                ),
+                chain_id=_chain_id_for_job(job),
+                facts=facts,
+            )
             ph["siblings"] = len(facts.effects)
             ph["functions_enriched"] = len(enriched)
+            ph["functions_with_gaps"] = len(gaps)
             if enriched:
                 logger.info(
                     "Job %s: cross-contract enrichment added policy claims: %s",
                     job.id,
                     {fn_sig: [c["claim_id"] for c in claims] for fn_sig, claims in enriched.items()},
                 )
-                contract_row = session.execute(
-                    select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
-                ).scalar_one_or_none()
-                if contract_row is not None:
-                    # An impl row can back several deployments; these claims belong to the deployment the writer tagged,
-                    # derived the same way.
-                    write_claims_to_rows(
-                        session,
-                        contract_id=contract_row.id,
-                        deployment_address=normalize_deployment(request.get("proxy_address")),
-                        selector_for=selector_by_function_key(function_records),
-                        enriched=enriched,
-                        job_id=job.id,
-                    )
-                if ep_data is not None:
-                    apply_claims_to_payload(ep_data, enriched)
-                    store_artifact(session, job.id, "effective_permissions", data=ep_data)
+            if gaps:
+                logger.info(
+                    "Job %s: cross-contract claims not determined for callees without facts: %s",
+                    job.id,
+                    {fn_sig: sorted({(g["callee"], g["reason"]) for g in fn_gaps}) for fn_sig, fn_gaps in gaps.items()},
+                )
+            contract_row = session.execute(
+                select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
+            ).scalar_one_or_none()
+            # An impl row can back several deployments; these belong to the deployment the writer tagged, derived the
+            # same way.
+            row_deployment = normalize_deployment(request.get("proxy_address"))
+            if contract_row is not None and enriched:
+                write_claims_to_rows(
+                    session,
+                    contract_id=contract_row.id,
+                    deployment_address=row_deployment,
+                    selector_for=selector_by_function_key(function_records),
+                    enriched=enriched,
+                    job_id=job.id,
+                )
+            if ep_data is not None:
+                apply_claims_to_payload(ep_data, enriched)
+            if contract_row is not None:
+                write_gaps(
+                    session,
+                    contract_id=contract_row.id,
+                    deployment_address=row_deployment,
+                    function_records=function_records,
+                    gaps=gaps,
+                    payload=ep_data,
+                )
+            if ep_data is not None:
+                store_artifact(session, job.id, "effective_permissions", data=ep_data)
             session.commit()
 
         return enriched
