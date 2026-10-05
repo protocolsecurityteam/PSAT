@@ -56,6 +56,11 @@ def _var_to_address(controller_values: Any) -> dict[str, str]:
     return out
 
 
+def controller_addresses(controller_values: Any) -> set[str]:
+    """Every address a control snapshot's state variables hold: what its derivations can join on."""
+    return set(_var_to_address(controller_values).values())
+
+
 def _is_flow_family(claim_id: str) -> bool:
     entry = registry().get(claim_id)
     return entry is not None and entry.consumer_family == "flow"

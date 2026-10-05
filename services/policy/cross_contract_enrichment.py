@@ -31,7 +31,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
-from db.models import Artifact, Contract, EffectiveFunction, Job, JobStage, JobStatus
+from db.models import Artifact, Contract, ControllerValue, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import get_artifact
 from services.concurrency import parallel_map
 from services.policy.stale_policy import mark_policy_stale
@@ -39,6 +39,7 @@ from services.static.claims import Claim, resolve_claim_precedence
 from services.static.cross_contract import (
     build_callee_claim_map,
     claim_sort_key,
+    controller_addresses,
     derive_cross_contract_claims,
     sibling_transfer_hook_links,
 )
@@ -210,6 +211,32 @@ def holds_facts_for_its_address(session: Session, job: Job, *, chain_id: int) ->
     return row is not None and row[0] == job.id
 
 
+def relevant_siblings(
+    session: Session, job: Job, targets: list[tuple[Any, str]], *, snapshot: Any
+) -> list[tuple[Any, str]]:
+    """The siblings a derivation between this job and them can involve: one side's state variables hold the other's
+    address. A sibling without a contract row has no controller-value rows to consult, so it's kept.
+    """
+    ids = [job_id for job_id, _ in targets]
+    if not ids:
+        return []
+    named_here = controller_addresses(snapshot.get("controller_values") if isinstance(snapshot, dict) else None)
+    owning = set(session.execute(select(Contract.job_id).where(Contract.job_id.in_(ids))).scalars())
+    naming_this = set(
+        session.execute(
+            select(Contract.job_id)
+            .join(ControllerValue, ControllerValue.contract_id == Contract.id)
+            .where(Contract.job_id.in_(ids), func.lower(ControllerValue.value) == (job.address or "").lower())
+            .distinct()
+        ).scalars()
+    )
+    return [
+        (job_id, address)
+        for job_id, address in targets
+        if address in named_here or job_id in naming_this or job_id not in owning
+    ]
+
+
 @dataclass
 class SiblingFacts:
     effects: dict[str, dict] = field(default_factory=dict)
@@ -262,6 +289,21 @@ def _gap_reason(session: Session, callee: str, *, chain_id: int, facts: SiblingF
 
     def _has(name: str):
         return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
+
+    # Facts are keyed by the implementation's address; a call through its proxy can't join them yet.
+    implementation = session.execute(
+        select(Job.id)
+        .where(
+            func.lower(Job.request["proxy_address"].astext) == callee,
+            Job.chain_id == chain_id,
+            _has("effects"),
+            _has("control_snapshot"),
+        )
+        .order_by(Job.created_at.desc(), Job.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if implementation is not None:
+        return "callee_is_proxy", implementation
 
     jobs = session.execute(
         select(Job.id, Job.status, _has("effects") & _has("control_snapshot"))
@@ -323,8 +365,8 @@ def write_gaps(
     gaps: dict[str, list[dict[str, Any]]],
     payload: dict | None,
 ) -> None:
-    """Set every row's and payload record's ``cross_contract_gaps``: its function's gaps, ``[]`` when it has none.
-    Doesn't commit.
+    """Set each evaluated row's and payload record's ``cross_contract_gaps``: its function's gaps, ``[]`` when it has
+    none. A row no payload record names stays NULL (not evaluated). Doesn't commit.
     """
     selector_for = selector_by_function_key(function_records)
     by_selector: dict[str, list[dict[str, Any]]] = {}
@@ -332,6 +374,10 @@ def write_gaps(
         selector = selector_for.get(fn_sig)
         if selector:
             by_selector.setdefault(selector, []).extend(fn_gaps)
+    evaluated_selectors = set(selector_for.values())
+    evaluated_signatures = {
+        key for record in function_records or [] for key in (record.get("function"), record.get("abi_signature")) if key
+    }
     rows = session.execute(
         select(EffectiveFunction).where(
             EffectiveFunction.contract_id == contract_id,
@@ -339,7 +385,11 @@ def write_gaps(
         )
     ).scalars()
     for row in rows:
-        row.cross_contract_gaps = by_selector.get((row.selector or "").lower(), gaps.get(row.abi_signature or "", []))
+        selector = (row.selector or "").lower()
+        if selector in evaluated_selectors:
+            row.cross_contract_gaps = by_selector.get(selector, [])
+        elif row.abi_signature in evaluated_signatures:
+            row.cross_contract_gaps = gaps.get(row.abi_signature or "", [])
     for record in (payload or {}).get("functions", []):
         fn_sig = record.get("function") or record.get("abi_signature")
         record["cross_contract_gaps"] = gaps.get(fn_sig, []) if fn_sig else []
@@ -501,21 +551,37 @@ def _mark_stale_dependents(
         return 0
     source_job_id = job.id
     targets = related_jobs_with_facts(session, job, chain_id=chain_id)
-    facts = fetch_sibling_facts(targets, session_factory=session_factory)
-    callee_claim_map = build_callee_claim_map({source_address: source_effects})
     target_ids = [job_id for job_id, _ in targets]
+    relevant = {job_id for job_id, _ in relevant_siblings(session, job, targets, snapshot=source_snapshot)}
     holding = jobs_holding_claims_from(session, target_ids, source_address)
     # A gap on this address is now answerable.
     awaiting = jobs_with_gaps_on(session, target_ids, source_address)
-    # A target mid-policy has wiped its rows but may be writing claims derived from the facts these replaced; only a
-    # mark makes it re-read them.
+    # A target mid-policy may have read its siblings before these facts landed, and its rows hold neither the claims nor
+    # the gaps it is about to write; only a mark makes it read again. When these facts replace earlier ones, any
+    # target mid-policy may be writing claims derived from them.
     replacing = replaced_facts or _other_job_held_facts(session, job, chain_id=chain_id)
-    in_policy = _jobs_processing_policy(session, target_ids) if replacing else set()
+    in_policy = {
+        job_id
+        for job_id in _jobs_processing_policy(session, target_ids)
+        if replacing or job_id in relevant or job_id in holding
+    }
+    to_check = [
+        (job_id, address)
+        for job_id, address in targets
+        if job_id in relevant or job_id in holding or job_id in awaiting or job_id in in_policy
+    ]
+    facts = fetch_sibling_facts(to_check, session_factory=session_factory)
+    callee_claim_map = build_callee_claim_map({source_address: source_effects})
 
     marked = 0
-    for target_job_id, address in targets:
-        if address in facts.unreadable or target_job_id in awaiting:
-            stale = True
+    for target_job_id, address in to_check:
+        reason: str | None = None
+        if address in facts.unreadable:
+            reason = "facts_unreadable"
+        elif target_job_id in awaiting:
+            reason = "gap_answerable"
+        elif target_job_id in in_policy:
+            reason = "target_mid_policy"
         else:
             snapshot = facts.snapshots[address]
             contribution = derive_cross_contract_claims(
@@ -527,35 +593,31 @@ def _mark_stale_dependents(
                 ),
             )
             if not contribution and target_job_id not in holding:
-                if target_job_id not in in_policy:
-                    continue
-                stale = True
-            else:
-                try:
-                    stale = target_job_id in in_policy or contribution_is_stale(
-                        session,
-                        target_job_id=target_job_id,
-                        source_address=source_address,
-                        contribution=contribution,
-                    )
-                except Exception as exc:
-                    session.rollback()
-                    record_degraded(
-                        phase="cross_contract_dependents",
-                        exc=exc,
-                        context={"sibling_address": address, "sibling_job_id": str(target_job_id)},
-                    )
-                    stale = True
-        if not stale:
+                continue
+            try:
+                if contribution_is_stale(
+                    session, target_job_id=target_job_id, source_address=source_address, contribution=contribution
+                ):
+                    reason = "claims_changed"
+            except Exception as exc:
+                session.rollback()
+                record_degraded(
+                    phase="cross_contract_dependents",
+                    exc=exc,
+                    context={"sibling_address": address, "sibling_job_id": str(target_job_id)},
+                )
+                reason = "check_failed"
+        if reason is None:
             continue
         mark_policy_stale(session, target_job_id)
         session.commit()
         marked += 1
         logger.info(
-            "Job %s: marked sibling job %s stale for cross-contract claims",
+            "Job %s: marked sibling job %s stale for cross-contract claims (%s)",
             source_job_id,
             target_job_id,
-            extra={"phase": "cross_contract_dependents", "sibling_job_id": str(target_job_id)},
+            reason,
+            extra={"phase": "cross_contract_dependents", "sibling_job_id": str(target_job_id), "reason": reason},
         )
     return marked
 

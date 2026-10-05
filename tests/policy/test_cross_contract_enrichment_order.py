@@ -13,7 +13,7 @@ from eth_utils.crypto import keccak
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import sessionmaker
 
-from db.models import Contract, EffectiveFunction, IndexerWork, Job, JobStage, JobStatus, Protocol
+from db.models import Contract, ControllerValue, EffectiveFunction, IndexerWork, Job, JobStage, JobStatus, Protocol
 from db.queue import get_artifact, store_artifact
 from services.policy.cross_contract_enrichment import (
     fetch_sibling_facts,
@@ -151,11 +151,25 @@ class _Pipeline:
         return job
 
     def land_facts(self, job: Job, effects: dict, snapshot: dict) -> None:
-        """Static stores ``effects``; resolution stores ``control_snapshot`` and runs the staleness check."""
+        """Discovery creates the address's contract row (one per address); static stores ``effects``; resolution
+        stores ``control_snapshot``, rewrites the owner's controller values and runs the staleness check.
+        """
         replaced = job.id in self.facts
         self.facts[job.id] = (effects, snapshot)
+        contract = self.session.query(Contract).filter(Contract.job_id == job.id).one_or_none()
+        if contract is None and self.session.query(Contract).filter(Contract.address == job.address).first() is None:
+            contract = Contract(job_id=job.id, address=job.address, contract_name=job.name)
+            self.session.add(contract)
+            self.session.flush()
         store_artifact(self.session, job.id, "effects", data=effects)
         store_artifact(self.session, job.id, "control_snapshot", data=snapshot)
+        if contract is not None:
+            self.session.query(ControllerValue).filter(ControllerValue.contract_id == contract.id).delete()
+            for controller_id, value in snapshot["controller_values"].items():
+                self.session.add(
+                    ControllerValue(contract_id=contract.id, controller_id=controller_id, value=value["value"])
+                )
+            self.session.commit()
         mark_stale_dependents(
             self.session, job, chain_id=1, session_factory=self.session_factory, replaced_facts=replaced
         )
@@ -641,6 +655,9 @@ def test_sibling_scope_is_chain_and_relation_bound(pipeline, db_session):
     for job in (stale, same_company, other_chain, child_elsewhere, unrelated, same_address, recovery):
         p.land_facts(job, _token_effects(), _snapshot({}))
     store_artifact(db_session, no_facts.id, "effects", data=_token_effects())
+    # No job owns a contract row, so the newest job per address holds its facts.
+    db_session.query(Contract).delete()
+    db_session.commit()
 
     related = related_jobs_with_facts(db_session, target, chain_id=1)
 
@@ -917,3 +934,108 @@ def test_no_gap_for_a_burn_address_or_a_self_call(pipeline):
     p.run(caller)
 
     assert _gaps(p, caller) == {SWEEP: []}
+
+
+def test_a_callee_landing_during_the_own_pass_does_not_leave_a_permanent_gap(pipeline, monkeypatch):
+    p = pipeline()
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+    token = p.job(TOKEN_A)
+
+    def _read_then_land(targets, *, session_factory):
+        facts = fetch_sibling_facts(targets, session_factory=session_factory)
+        p.land_facts(token, _token_effects(proves_flow=False), _snapshot({}))
+        return facts
+
+    monkeypatch.setattr("workers.policy_worker.fetch_sibling_facts", _read_then_land)
+    p.run_policy(caller)
+    monkeypatch.setattr("workers.policy_worker.fetch_sibling_facts", fetch_sibling_facts)
+    p.complete(caller)
+
+    assert p.stale() == {str(caller.id)}
+    p.settle()
+    assert _gaps(p, caller) == {SWEEP: []}
+
+
+def test_a_call_through_a_proxy_names_the_implementation_job(pipeline):
+    p = pipeline()
+    implementation = p.job(TOKEN_B)
+    implementation.request = {"proxy_address": TOKEN_A}
+    p.session.commit()
+    p.land_facts(implementation, _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["reason"], gap["callee_job_id"]) == ("callee_is_proxy", str(implementation.id))
+
+
+def test_gaps_stay_null_where_nothing_was_evaluated(pipeline):
+    p = pipeline()
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+    contract = p.session.query(Contract).filter(Contract.job_id == caller.id).one()
+    p.session.add(
+        EffectiveFunction(
+            contract_id=contract.id,
+            function_name="unlisted",
+            selector=_selector("unlisted()"),
+            abi_signature="unlisted()",
+            effect_labels=[],
+            claims=[],
+        )
+    )
+    p.session.commit()
+    payload = get_artifact(p.session, caller.id, "effective_permissions")
+    assert isinstance(payload, dict)
+    effects, snapshot = p.facts[caller.id]
+    PolicyWorker()._enrich_cross_contract(
+        p.session,
+        caller,
+        {},
+        snapshot,
+        function_records=payload["functions"],
+        ep_data=payload,
+        target_effects=effects,
+    )
+    gaps = _gaps(p, caller)
+    assert gaps["unlisted()"] is None
+    assert gaps[SWEEP] and gaps[SWEEP][0]["callee"] == TOKEN_A
+
+    bare = p.job(TOKEN_B)
+    p.session.add(Contract(job_id=bare.id, address=TOKEN_B, contract_name="Bare"))
+    p.session.commit()
+    contract = p.session.query(Contract).filter(Contract.job_id == bare.id).one()
+    write_effective_function_rows(
+        p.session,
+        contract_id=contract.id,
+        function_records=[{"function": SWEEP, "abi_signature": SWEEP, "selector": _selector(SWEEP)}],
+        capability_by_function={},
+    )
+    p.session.commit()
+    PolicyWorker()._enrich_cross_contract(p.session, bare, {}, _snapshot({"tokenA": TOKEN_A}))
+    assert _gaps(p, bare) == {SWEEP: None}
+
+
+def test_the_own_pass_reads_only_siblings_it_can_join_with(pipeline, monkeypatch):
+    p = pipeline()
+    unrelated = p.job(VAULT)
+    p.land_facts(unrelated, _token_effects(), _snapshot({}))
+    token = p.job(TOKEN_A)
+    p.land_facts(token, _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    read: list[str] = []
+
+    def _record(targets, *, session_factory):
+        read.extend(address for _job_id, address in targets)
+        return fetch_sibling_facts(targets, session_factory=session_factory)
+
+    monkeypatch.setattr("workers.policy_worker.fetch_sibling_facts", _record)
+    p.run(caller)
+
+    assert read == [TOKEN_A]
+    assert _ids(p.row_claims(caller)[SWEEP]) == [("flow.out", "policy_derived")]

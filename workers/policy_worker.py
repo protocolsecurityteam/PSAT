@@ -41,6 +41,7 @@ from services.policy.cross_contract_enrichment import (
     describe_gaps,
     fetch_sibling_facts,
     related_jobs_with_facts,
+    relevant_siblings,
     selector_by_function_key,
     write_claims_to_rows,
     write_gaps,
@@ -974,7 +975,12 @@ class PolicyWorker(BaseWorker):
             clear_policy_stale(session, job.id)
             session.commit()
             facts = fetch_sibling_facts(
-                related_jobs_with_facts(session, job, chain_id=_chain_id_for_job(job)),
+                relevant_siblings(
+                    session,
+                    job,
+                    related_jobs_with_facts(session, job, chain_id=_chain_id_for_job(job)),
+                    snapshot=control_snapshot,
+                ),
                 session_factory=SessionLocal,
             )
             for exc in facts.unreadable.values():
@@ -1036,7 +1042,8 @@ class PolicyWorker(BaseWorker):
                 )
             if ep_data is not None:
                 apply_claims_to_payload(ep_data, enriched)
-            if contract_row is not None:
+            # Without its own facts the job has no calls to judge: its gaps stay NULL (not evaluated).
+            if contract_row is not None and target_effects is not None:
                 write_gaps(
                     session,
                     contract_id=contract_row.id,

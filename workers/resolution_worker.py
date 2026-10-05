@@ -219,11 +219,6 @@ class ResolutionWorker(BaseWorker):
         )
         # The policy stage reads this artifact.
         store_artifact(session, job.id, "control_snapshot", data=snapshot)
-        # This job's facts are complete now; siblings whose claims they change re-run policy.
-        with log_timed_phase(logger, "cross_contract_dependents") as ph:
-            ph["marked_stale"] = mark_stale_dependents(
-                session, job, chain_id=chain_id, session_factory=SessionLocal, replaced_facts=replaced_facts
-            )
         # Reverting reads are NULL ``eth_call_error`` entries; count them separately so the resolved metric is honest.
         _controller_values = snapshot.get("controller_values", {})
         _controllers_errored = sum(
@@ -272,6 +267,13 @@ class ResolutionWorker(BaseWorker):
             # committed controllers are the gate's W3 fuel (plus the subject itself).
             _membership_gate_controller_hook(
                 session, contract_row, snapshot.get("controller_values", {}), removed_values=pre_rewrite_values
+            )
+
+        # This job's facts are complete now, with the controller-value rows siblings filter on; siblings whose claims
+        # they change re-run policy.
+        with log_timed_phase(logger, "cross_contract_dependents") as ph:
+            ph["marked_stale"] = mark_stale_dependents(
+                session, job, chain_id=chain_id, session_factory=SessionLocal, replaced_facts=replaced_facts
             )
 
         logger.info(
