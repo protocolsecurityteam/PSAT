@@ -25,6 +25,7 @@ from .one_shot import apply_one_shot_pass
 from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
+from .structural_evidence import structural_scope
 from .writer_gate import apply_writer_gate_pass
 
 logger = logging.getLogger(__name__)
@@ -202,7 +203,14 @@ def build_predicate_artifacts(contract: Any) -> dict[str, Any]:
     return artifact
 
 
-def build_predicate_artifacts_with_pause_info(
+def build_predicate_artifacts_with_pause_info(contract: Any) -> tuple[dict[str, Any], PauseInfo]:
+    with structural_scope(contract) as evidence:
+        artifact, pause_info = _build_predicate_artifacts_with_pause_info(contract)
+        artifact["structural_evidence"] = evidence.publish()
+        return artifact, pause_info
+
+
+def _build_predicate_artifacts_with_pause_info(
     contract: Any,
 ) -> tuple[dict[str, Any], PauseInfo]:
     """The predicate artifact plus ``PauseInfo`` for ``_detect_pausability``, with per-function timing logs above

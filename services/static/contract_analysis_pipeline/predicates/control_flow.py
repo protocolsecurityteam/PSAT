@@ -239,7 +239,7 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
 
     # Per-IF facts: condition (``None`` if unmodelable, still detectable as an unattributable guard), reach sets per
     # son, and whether the true son allows.
-    if_facts: list[tuple[Any, set[int], set[int], bool]] = []
+    if_facts: list[tuple[Any, set[int], set[int], bool, Any]] = []
     for if_node in nodes:
         if not _node_is_type(if_node, "NodeType.IF"):
             continue
@@ -253,6 +253,7 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
                 _forward_reachable_node_ids(son_true),
                 _forward_reachable_node_ids(son_false),
                 _branch_value_is_only_true(son_true),
+                if_node,
             )
         )
 
@@ -305,7 +306,7 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
                     _build_subtree_from_value(
                         req_cond,
                         sub_prov,
-                        _return_guard_gate(gate, req_cond, "allowed_when_true", node, callee),
+                        _return_guard_gate(gate, req_cond, "allowed_when_true", req_node, callee),
                         callee,
                     )
                 )
@@ -313,7 +314,7 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
                 # No dominators but require guards exist: can't rule out a dropped guard.
                 unmodeled_guard = True
 
-            for cond_value, t_ids, f_ids, t_is_allow in if_facts:
+            for cond_value, t_ids, f_ids, t_is_allow, condition_node in if_facts:
                 t_reach = rid in t_ids
                 f_reach = rid in f_ids
                 if t_reach == f_reach:
@@ -327,7 +328,10 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
                 polarity: Polarity = "allowed_when_true" if t_reach else "allowed_when_false"
                 guards.append(
                     _build_subtree_from_value(
-                        cond_value, sub_prov, _return_guard_gate(gate, cond_value, polarity, node, callee), callee
+                        cond_value,
+                        sub_prov,
+                        _return_guard_gate(gate, cond_value, polarity, condition_node, callee),
+                        callee,
                     )
                 )
 

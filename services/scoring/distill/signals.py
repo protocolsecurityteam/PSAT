@@ -108,6 +108,36 @@ def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> l
 
     signals: list[FunctionSignal] = []
     for claim_id in sorted(grouped):
+        scoped_authorities = [(e.get("witness") or {}).get("effect_authority") for e in grouped[claim_id]]
+        scoped_openness, scoped_principals = openness, principals
+        scoped_empty, scoped_empty_notes = exact_empty, exact_empty_notes
+        if any(a is not None for a in scoped_authorities):
+            from services.policy.effect_authority import authority_identity
+
+            identities = {authority_identity(a["capability"]) for a in scoped_authorities if a is not None}
+            if any(a is None for a in scoped_authorities) or len(identities) != 1:
+                scoped_openness, scoped_principals = OPENNESS_NOT_DETERMINED, []
+            else:
+                scoped_openness, expected_principals = next(iter(identities))
+                scoped_principals = [
+                    p
+                    for p in principals
+                    if any(
+                        _lower(p.address) == address
+                        and (threshold is None or (p.details or {}).get("threshold") == threshold)
+                        and (not owners or tuple(sorted((p.details or {}).get("owners") or [])) == owners)
+                        for address, threshold, owners in expected_principals
+                    )
+                ]
+            scoped_empty = Tri[dict[str, Any]].not_determined()
+            scoped_empty_notes = set()
+            if len(identities) == 1 and all(a is not None for a in scoped_authorities):
+                from types import SimpleNamespace
+
+                scoped_authority = next(a for a in scoped_authorities if a is not None)
+                scoped_empty, scoped_empty_notes = _exact_empty_gate(
+                    SimpleNamespace(capability_expr=scoped_authority["capability"]), scoped_principals
+                )
         signals.append(
             _build_signal(
                 facts,
@@ -117,10 +147,10 @@ def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> l
                 all_claims=claims,
                 deployment_address=deployment_address,
                 acting_key=acting_key,
-                openness=openness,
-                principals=principals,
-                exact_empty=exact_empty,
-                exact_empty_notes=exact_empty_notes,
+                openness=scoped_openness,
+                principals=scoped_principals,
+                exact_empty=scoped_empty,
+                exact_empty_notes=scoped_empty_notes,
                 latch=latch,
                 job_id=job_id,
             )

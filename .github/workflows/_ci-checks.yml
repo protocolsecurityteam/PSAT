@@ -200,6 +200,7 @@ jobs:
         run: |
           uv run solc-select install 0.8.27
           uv run solc-select install 0.8.25
+          uv run solc-select install 0.7.6
           uv run solc-select use 0.8.27
       # The browser download (Playwright CDN) and the --with-deps apt run both
       # stall intermittently on hosted runners, and a stalled connection has no

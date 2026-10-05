@@ -362,6 +362,7 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
                 data_param, data_kind = None, "not_determined"
             fragments.append(
                 {
+                    "source_site": {"declaration": function.canonical_name, "node": node.node_id},
                     "destination_param": dest_param,
                     "destination_kind": dest_kind,
                     "destination_basis": basis if dest_kind == "param" else None,
@@ -376,7 +377,8 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
     # the calldata slot the same way, then body order.
     dest_rank = {"param": 2, "not_determined": 1, "state_var": 0}
     data_rank = {"param": 2, "not_determined": 1, "call_argument": 0}
-    return max(
+    result = max(
         fragments,
         key=lambda f: (dest_rank.get(f["destination_kind"], 1), data_rank.get(f["calldata_kind"], 1)),
     )
+    return {**result, "source_sites": [f["source_site"] for f in fragments]}

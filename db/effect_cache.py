@@ -40,7 +40,7 @@ class EffectVerdictUnlinked(Exception):
 # changes (claim witnesses, predicate trees, candidate ordering, plane splits). Not tied to a git SHA, so unrelated
 # deploys don't cold-miss. The reason for each bump is in the commit history; if a change moves a probe input and you
 # decide not to bump, record why in the commit.
-EFFECT_CACHE_SCHEMA_VERSION = 35
+EFFECT_CACHE_SCHEMA_VERSION = 37
 
 # A sentinel rather than NULL keeps the UniqueConstraint portable; matches ``server_default=""``.
 KERNEL_SURFACE_SENTINEL = ""

@@ -116,7 +116,7 @@ def test_an_or_escape_means_the_leaf_is_not_mandatory():
         "op": "OR",
         "children": [
             _leaf(operands=[_param(0), STATE_VAR], parameter_indices=[0]),
-            _leaf(operator="truthy", operands=[CONSTANT]),
+            _leaf(operator="truthy", operands=[{"source": "constant", "constant_value": "True", "value_type": "bool"}]),
         ],
     }
     assert _facts.param_constraint(_ctx(tree), "f(address,uint256)", 0)["state"] == "unconstrained_proven"
@@ -479,3 +479,14 @@ def test_the_signed_entry_alone_would_be_opaque_without_the_standard():
     ctx = ClaimContext(None, {"contract_name": "NotASafe", "functions": functions}, {"trees": {exec_tx: tree}})
     assert _facts.standard_destination_commitment(ctx, exec_tx) is None
     assert _facts.param_constraint(ctx, exec_tx, 0, mode="external_call") == {"state": "not_determined"}
+
+
+def test_unknown_constant_is_not_evidence_of_a_public_escape():
+    tree = {
+        "op": "OR",
+        "children": [
+            _leaf(operands=[_param(0), STATE_VAR], parameter_indices=[0]),
+            _leaf(operator="truthy", operands=[CONSTANT]),
+        ],
+    }
+    assert _facts.param_constraint(_ctx(tree), "f(address,uint256)", 0)["state"] == "not_determined"

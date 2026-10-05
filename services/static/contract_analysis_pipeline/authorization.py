@@ -7,17 +7,14 @@ uncertainty. Storage/getter facts describe the registry the code actually consul
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from typing import Any
 
 from .predicate_types import PredicateTree, make_and_node
-from .revert_detect import RevertDetector
 from .slither_compat import (
     Assignment,
     Binary,
-    Condition,
     Constant,
+    Delete,
     HighLevelCall,
     Index,
     InternalCall,
@@ -26,181 +23,30 @@ from .slither_compat import (
     SolidityCall,
     StateVariable,
     TypeConversion,
+    Unary,
 )
-
-
-@dataclass
-class Frame:
-    function: Any
-    bindings: dict
-    chain: tuple = ()
-    positive: tuple = ()
-
-
-def base(value: Any) -> Any:
-    return getattr(value, "non_ssa_version", value)
-
-
-def same(a: Any, b: Any) -> bool:
-    return base(a) is base(b)
-
-
-def operations(fn: Any) -> list[tuple[Any, Any]]:
-    return [(node, ir) for node in fn.nodes for ir in node.irs]
-
-
-def definition(value: Any, fn: Any) -> Any:
-    found = [ir for _, ir in operations(fn) if getattr(ir, "lvalue", None) is value]
-    return found[0] if len(found) == 1 else None
-
-
-def integer(value: Any, fn: Any, seen: tuple[int, ...] = ()) -> int | None:
-    if id(value) in seen:
-        return None
-    if isinstance(value, Constant):
-        try:
-            return int(str(value.value), 0)
-        except ValueError:
-            return None
-    if isinstance(value, StateVariable) and value.is_constant:
-        expr = value.expression
-        # Slither expression literals are separate from SlithIR Constants. Peel exact conversion syntax rather than
-        # interpreting arbitrary source text as a number.
-        literal = getattr(expr, "expression", None)
-        raw = getattr(literal, "value", None)
-        if raw is None:
-            match = re.fullmatch(r"(?:address|uint\d*)\((0x[0-9a-fA-F]+|\d+)\)", str(expr))
-            raw = match.group(1) if match else None
-        try:
-            return int(str(getattr(expr, "converted_value", None) or getattr(expr, "value", None) or raw), 0)
-        except (TypeError, ValueError):
-            return None
-    ir = definition(value, fn)
-    if isinstance(ir, TypeConversion):
-        return integer(ir.variable, fn, (*seen, id(value)))
-    if isinstance(ir, Assignment):
-        return integer(ir.rvalue, fn, (*seen, id(value)))
-    return None
-
-
-def unwrap(value: Any, fn: Any, seen: tuple[int, ...] = ()) -> Any:
-    if id(value) in seen:
-        return value
-    ir = definition(value, fn)
-    if isinstance(ir, TypeConversion):
-        return unwrap(ir.variable, fn, (*seen, id(value)))
-    if isinstance(ir, Assignment):
-        return unwrap(ir.rvalue, fn, (*seen, id(value)))
-    return value
-
-
-def relation(ir: Any) -> str:
-    return getattr(getattr(ir, "type", None), "name", "")
-
-
-def conjuncts(value, fn):
-    ir = definition(value, fn)
-    if isinstance(ir, Binary) and relation(ir) == "ANDAND":
-        return conjuncts(ir.variable_left, fn) + conjuncts(ir.variable_right, fn)
-    return [ir] if ir is not None else []
-
-
-def guards(fn):
-    out = []
-    for gate in RevertDetector(fn).run():
-        condition = None
-        for ir in gate.node.irs:
-            if isinstance(ir, SolidityCall) and ir.function.name.startswith(("require(", "assert(")):
-                condition = ir.arguments[0]
-                break
-            if isinstance(ir, Condition):
-                condition = ir.value
-        if condition is not None:
-            out.append((gate.node, condition, gate.polarity))
-    return out
-
-
-_INVERTED_RELATION = {
-    "EQUAL": "NOT_EQUAL",
-    "NOT_EQUAL": "EQUAL",
-    "GREATER": "LESS_EQUAL",
-    "GREATER_EQUAL": "LESS",
-    "LESS": "GREATER_EQUAL",
-    "LESS_EQUAL": "GREATER",
-}
-
-
-def mandatory_atoms(value, fn, polarity):
-    """Atomic conjuncts of the allowed condition; None where normalization would create alternatives."""
-    ir = definition(value, fn)
-    if not isinstance(ir, Binary):
-        return [(ir, None)] if ir is not None else []
-    op = relation(ir)
-    if (polarity == "allowed_when_true" and op == "ANDAND") or (polarity == "allowed_when_false" and op == "OROR"):
-        return mandatory_atoms(ir.variable_left, fn, polarity) + mandatory_atoms(ir.variable_right, fn, polarity)
-    if op in ("ANDAND", "OROR"):
-        return None
-    return [(ir, _INVERTED_RELATION.get(op, op) if polarity == "allowed_when_false" else op)]
-
-
-def slot(contract, var):
-    try:
-        index, offset = contract.compilation_unit.storage_layout_of(contract, var)
-        typ = str(var.type)
-        size = int(typ.removeprefix("uint")) // 8 if typ.startswith("uint") and typ[4:].isdigit() else 32
-        return {"slot": hex(index), "byte_offset": offset, "size_bytes": size, "variable": var.name}
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return None
-
-
-def scalar(value, frame, seen=()):
-    """The storage/constant/caller parameter a threshold reads, including bound helper formals."""
-    if id(value) in seen:
-        return None
-    if str(value) == "msg.sender":
-        return {"kind": "caller"}
-    if isinstance(value, StateVariable) and not value.is_constant:
-        return {"kind": "storage", "variable_object": value}
-    literal = integer(value, frame.function)
-    if literal is not None:
-        return {"kind": "constant", "value": literal}
-    for parameter in frame.function.parameters:
-        if same(parameter, value):
-            return frame.bindings.get(parameter.name)
-    ir = definition(value, frame.function)
-    if isinstance(ir, Assignment):
-        return scalar(ir.rvalue, frame, (*seen, id(value)))
-    if isinstance(ir, TypeConversion):
-        return scalar(ir.variable, frame, (*seen, id(value)))
-    return None
-
-
-def scalar_key(item):
-    if item is None:
-        return None
-    return item.get("kind"), id(item.get("variable_object")) if item.get("kind") == "storage" else item.get(
-        "value", item.get("index")
-    )
-
-
-def exits(fn):
-    return [n for n in fn.nodes if not n.sons or any(isinstance(ir, Return) for ir in n.irs)]
-
-
-def mandatory(node, fn):
-    return bool(exits(fn)) and all(node in n.dominators for n in exits(fn))
-
-
-def loop_region(header):
-    todo = [header.son_true]
-    seen = set()
-    while todo:
-        node = todo.pop()
-        if node is None or node is header or node in seen or getattr(node.type, "name", "") == "ENDLOOP":
-            continue
-        seen.add(node)
-        todo.extend(node.sons)
-    return seen
+from .structural_evidence import evidence_for, storage_cell
+from .structural_ir import (
+    _INVERTED_RELATION,
+    Frame,
+    call_result_required_true,
+    definition,
+    denied_return,
+    exits,
+    frame_guards,
+    guards,
+    integer,
+    loop_region,
+    mandatory,
+    mandatory_atoms,
+    operations,
+    relation,
+    same,
+    scalar,
+    scalar_key,
+    slot,
+    unwrap,
+)
 
 
 def payload_parameters(value, fn, bindings, seen=(), depth=0):
@@ -231,6 +77,9 @@ def payload_parameters(value, fn, bindings, seen=(), depth=0):
                 return set()
         return payload_parameters(ir.variable, fn, bindings, nxt, depth + 1)
     if isinstance(ir, SolidityCall) and ir.function.name.startswith(("abi.encode", "keccak256(")):
+        if ir.function.name.startswith("keccak256(") and len(ir.arguments) == 2:
+            # Yul arguments are a memory pointer and a length, not encoded message fields.
+            return _assembly_hash_parameters(value, fn, bindings, seen)
         if ir.function.name.startswith("abi.encodePacked"):
             dynamic = sum(
                 str(getattr(a, "type", "")) in ("bytes", "string") or "[]" in str(getattr(a, "type", ""))
@@ -269,20 +118,34 @@ def _memory_offset(value, fn, seen=()):
             base_pointer = _memory_offset(pointer, fn, nxt)
             amount = integer(delta, fn)
             if base_pointer is not None and amount is not None:
-                return base_pointer[0], base_pointer[1] + amount
+                offset = base_pointer[1] + amount
+                return (base_pointer[0], offset) if 0 <= offset < 1 << 256 else None
     return None
 
 
-def _assembly_hash_parameters(value, fn, bindings, seen=()):
-    """Parameters stored into a memory range that is subsequently hashed and returned.
+def _reaches(start, end):
+    todo, seen = [start], set()
+    while todo:
+        node = todo.pop()
+        if node is end:
+            return True
+        if node in seen:
+            continue
+        seen.add(node)
+        todo.extend(node.sons)
+    return False
 
-    This is deliberately narrower than assembly taint: one free-memory root, constant offsets/lengths, mstore or
-    calldatacopy writes inside the hashed interval, and a returned keccak. Unknown pointer arithmetic yields no proof.
+
+def _assembly_hash_parameters(value, fn, bindings, seen=()):
+    """Credit complete, surviving words in a bounded memory hash.
+
+    Writes must dominate the hash and share a proved memory root. Overlapping later writes invalidate earlier
+    bindings, even when the later value is opaque. Copies invalidate their destination but do not bind their offset
+    or length arguments. Unknown aliasing/control flow yields no proof.
     """
     if id(value) in seen:
         return set()
-    unwrapped = unwrap(value, fn)
-    call = definition(unwrapped, fn)
+    call = definition(unwrap(value, fn), fn)
     if not isinstance(call, SolidityCall) or not call.function.name.startswith("keccak256("):
         return set()
     if len(call.arguments) != 2:
@@ -293,22 +156,54 @@ def _assembly_hash_parameters(value, fn, bindings, seen=()):
         return set()
     root, start = window
     end = start + length
-    found = set()
-    for _, write in operations(fn):
-        if not isinstance(write, SolidityCall) or not write.arguments:
+    ops = operations(fn)
+    hash_node = next(n for n, ir in ops if ir is call)
+    root_node = next(n for n, ir in ops if id(ir) == root)
+    root_ir = next(ir for _, ir in ops if id(ir) == root)
+    if root_node not in hash_node.dominators:
+        return set()
+    writes = []
+    for node, write in ops:
+        if node is hash_node and node.irs.index(write) >= node.irs.index(call):
             continue
-        name = write.function.name
-        location = _memory_offset(write.arguments[0], fn)
-        if location is None or location[0] != root or not start <= location[1] < end:
+        if node is root_node and node.irs.index(write) <= node.irs.index(root_ir):
             continue
-        if name.startswith("mstore(") and len(write.arguments) == 2:
-            stored = write.arguments[1]
-            found |= payload_parameters(stored, fn, bindings)
-            found |= _assembly_hash_parameters(stored, fn, bindings, (*seen, id(value)))
-        elif name.startswith("calldatacopy("):
-            for argument in write.arguments[1:]:
-                found |= payload_parameters(argument, fn, bindings)
-    return found
+        if not _reaches(root_node, node) or not _reaches(node, hash_node):
+            continue
+        if isinstance(write, (InternalCall, LibraryCall, HighLevelCall)):
+            return set()  # unknown memory effects between allocation and hashing
+        if not isinstance(write, SolidityCall):
+            continue
+        name = write.function.name.split("(", 1)[0]
+        if name in {"call", "delegatecall", "staticcall", "callcode"}:
+            return set()
+        if name not in {"mstore", "mstore8", "calldatacopy", "returndatacopy", "codecopy", "extcodecopy", "mcopy"}:
+            continue
+        if node not in hash_node.dominators:
+            return set()
+        # A loop can revisit these writes in a different order.
+        if any(_reaches(son, node) for son in node.sons):
+            return set()
+        destination_index = 1 if name == "extcodecopy" else 0
+        location = _memory_offset(write.arguments[destination_index], fn)
+        size = 32 if name == "mstore" else 1 if name == "mstore8" else integer(write.arguments[-1], fn)
+        if location is None or location[0] != root or size is None or size < 0:
+            return set()
+        writes.append((node, write, name, location[1], size))
+    writes.sort(key=lambda item: (len(item[0].dominators), item[0].irs.index(item[1])))
+    live = []
+    for _, write, name, offset, size in writes:
+        if not size:
+            continue
+        stop = offset + size
+        live = [(lo, hi, params) for lo, hi, params in live if stop <= lo or offset >= hi]
+        if name != "mstore" or offset < start or stop > end:
+            continue
+        stored = write.arguments[1]
+        params = payload_parameters(stored, fn, bindings, (*seen, id(value)))
+        params |= _assembly_hash_parameters(stored, fn, bindings, (*seen, id(value)))
+        live.append((offset, stop, params))
+    return set().union(*(params for _, _, params in live))
 
 
 def inventory(contract, registry):
@@ -390,7 +285,81 @@ def _parameter_index(value, fn):
     return next((index for index, parameter in enumerate(fn.parameters) if same(value, parameter)), None)
 
 
-def _value_is_bound_to_payload(value, payload, fn, before_node):
+def _value_origin(value, frame, seen=()):
+    """Follow exact assignments and actual/formal bindings, retaining the defining frame.
+
+    Parameter taint sets are insufficient here: two encodings can mention the same parameters without being the
+    same signed message. Ambiguous definitions and conversions deliberately remain opaque.
+    """
+    key = id(value), id(frame)
+    if key in seen:
+        return value, frame
+    nxt = (*seen, key)
+    index = _parameter_index(value, frame.function)
+    if index is not None and frame.parent is not None and index < len(frame.arguments):
+        return _value_origin(frame.arguments[index], frame.parent, nxt)
+    ir = definition(value, frame.function)
+    if isinstance(ir, Assignment):
+        return _value_origin(ir.rvalue, frame, nxt)
+    return value, frame
+
+
+def _same_origin(left, right):
+    return left[1] is right[1] and same(left[0], right[0])
+
+
+def _message_is_unchanged(origin, frame, seen=()):
+    """Reject writes through aliases of the message, including helpers receiving that memory object.
+
+    This deliberately checks the whole frame, rather than guessing whether a mutation precedes hashing. Assembly
+    memory writes have no alias proof here and therefore withhold. Calldata/ABI construction itself is read-only.
+    """
+    if frame.function in seen or len(seen) > 8:
+        return False
+    for _, ir in operations(frame.function):
+        written = getattr(ir, "lvalue", None)
+        target = written if isinstance(ir, Delete) else getattr(written, "points_to_origin", None)
+        if target is None and isinstance(ir, Assignment) and definition(written, frame.function) is None:
+            target = written  # multiple definitions cannot establish a time-independent message identity
+        if isinstance(ir, (Assignment, Binary, Delete)) and target is not None:
+            if _same_origin(origin, _value_origin(target, frame)):
+                return False
+        if isinstance(ir, SolidityCall) and ir.function.name.split("(", 1)[0] in {
+            "mstore",
+            "mstore8",
+            "calldatacopy",
+            "returndatacopy",
+            "codecopy",
+            "extcodecopy",
+            "mcopy",
+        }:
+            return False
+        if isinstance(ir, (InternalCall, LibraryCall)) and any(
+            _same_origin(origin, _value_origin(arg, frame)) for arg in ir.arguments
+        ):
+            if not getattr(ir.function, "nodes", None):
+                return False
+            child = Frame(ir.function, {}, parent=frame, arguments=tuple(ir.arguments))
+            if not _message_is_unchanged(origin, child, (*seen, frame.function)):
+                return False
+    return True
+
+
+def _value_is_bound_to_payload(value, payload, frame, before_node):
+    fn = frame.function
+    origin = _value_origin(value, frame)
+    digest = _value_origin(payload, frame)
+    if _same_origin(origin, digest):
+        return True
+    hashed = definition(digest[0], digest[1].function)
+    if (
+        isinstance(hashed, SolidityCall)
+        and hashed.function.name.startswith("keccak256(")
+        and len(hashed.arguments) == 1
+        and _same_origin(origin, _value_origin(hashed.arguments[0], digest[1]))
+        and _message_is_unchanged(origin, origin[1])
+    ):
+        return True
     if same(unwrap(value, fn), payload):
         return True
     value_index = _parameter_index(unwrap(value, fn), fn)
@@ -445,23 +414,22 @@ def _writer_is_signer_gated(writer, signer_registry, write_node):
     return False
 
 
-def _approval_registry_is_self_service(registry, signer_registry, contract):
-    found = False
-    for writer in contract.functions:
-        for node, write in operations(writer):
-            if not isinstance(write, Assignment):
-                continue
-            chain = _index_chain(write.lvalue, writer)
-            if not chain or not same(chain[-1].variable_left, registry):
-                continue
-            found = True
-            # Outer key is the approving identity. Only that identity may write, and it must already be a member of
-            # the signer registry; otherwise a public caller could manufacture an authorization.
-            if str(unwrap(chain[-1].variable_right, writer)) != "msg.sender":
-                return False
-            if not _writer_is_signer_gated(writer, signer_registry, node):
-                return False
-    return found
+def _approval_registry_is_self_service(registry, signer_registry, contract, signer_key_index=0):
+    """Only authority-enabling writes need a grant proof. Consumption cannot manufacture a nonzero approval."""
+    writes = evidence_for(contract).writes_to(registry)
+    grants = []
+    for write in writes:
+        if write.transition() == "revokes":
+            continue
+        grants.append(write)
+        if len(write.cell.keys) != 2 or write.cell.members:
+            return False
+        key = write.cell.keys[signer_key_index]
+        if str(unwrap(key, write.function)) != "msg.sender":
+            return False
+        if not _writer_is_signer_gated(write.function, signer_registry, write.node):
+            return False
+    return bool(grants)
 
 
 def _is_caller(value, frame):
@@ -472,7 +440,16 @@ def _is_caller(value, frame):
 def approves(condition, signer, frame, payload, signer_registry, guard_node, polarity="allowed_when_true"):
     """A mandatory accepted-identity check on a raw signer definition, not a verifier's name."""
     fn = frame.function
+    condition = unwrap(condition, fn)
     ir = definition(condition, fn)
+    if isinstance(ir, Unary) and getattr(ir.type, "name", "") == "BANG":
+        opposite = "allowed_when_false" if polarity == "allowed_when_true" else "allowed_when_true"
+        return approves(ir.rvalue, signer, frame, payload, signer_registry, guard_node, opposite)
+    if isinstance(ir, HighLevelCall) and polarity == "allowed_when_true":
+        if same(unwrap(ir.destination, fn), signer) and any(
+            _value_is_bound_to_payload(arg, payload, frame, guard_node) for arg in ir.arguments
+        ):
+            return {"external"}
     if not isinstance(ir, Binary):
         return None
     op = relation(ir)
@@ -496,38 +473,36 @@ def approves(condition, signer, frame, payload, signer_registry, guard_node, pol
                 and integer(constant, fn) is not None
             ):
                 # Delegated approval is not assumed cryptographic; contract owners remain indeterminate at resolution.
-                if any(_value_is_bound_to_payload(a, payload, fn, guard_node) for a in call.arguments):
+                if any(_value_is_bound_to_payload(a, payload, frame, guard_node) for a in call.arguments):
                     return {"external"}
     if op == "NOT_EQUAL":
         for indexed, constant in ((ir.variable_left, ir.variable_right), (ir.variable_right, ir.variable_left)):
-            inner = definition(indexed, fn)
-            if not isinstance(inner, Index) or integer(constant, fn) != 0 or not same(inner.variable_right, payload):
+            cell = storage_cell(unwrap(indexed, fn), fn)
+            if cell is None or len(cell.keys) != 2 or cell.members or integer(constant, fn) != 0:
                 continue
-            outer = definition(inner.variable_left, fn)
-            if (
-                not isinstance(outer, Index)
-                or not same(outer.variable_right, signer)
-                or not isinstance(outer.variable_left, StateVariable)
-            ):
-                continue
-            registry = outer.variable_left
-            if _approval_registry_is_self_service(registry, signer_registry, fn.contract):
-                return {"approval_hash"}
+            for identity_index, key in enumerate(cell.keys):
+                if same(unwrap(key, fn), signer) and same(
+                    unwrap(cell.keys[1 - identity_index], fn), unwrap(payload, fn)
+                ):
+                    if _approval_registry_is_self_service(cell.variable, signer_registry, fn.contract, identity_index):
+                        return {"approval_hash"}
+
     return None
 
 
 def authenticated_paths(start, stop, signer, frame, payload, signer_registry, region):
-    fn = frame.function
     todo = [(start, False)]
     seen = set()
     modes = set()
     guard_nodes = set()
-    requirements = {node: (condition, polarity) for node, condition, polarity in guards(fn)}
+    requirements = {node: (condition, polarity) for node, condition, polarity in frame_guards(frame)}
     while todo:
         node, accepted = todo.pop()
         if (node, accepted) in seen:
             continue
         seen.add((node, accepted))
+        if denied_return(node, frame):
+            continue
         if node is stop:
             if not accepted:
                 return None
@@ -570,6 +545,8 @@ def _internal_authentication(call, signer, frame, payload, signer_registry):
         {parameter.name: scalar(argument, frame) for parameter, argument in zip(callee.parameters, call.arguments)},
         (*frame.chain, frame.function),
         frame.positive,
+        frame,
+        tuple(call.arguments),
     )
     child_signer = callee.parameters[signer_index]
     child_payload = callee.parameters[payload_index]
@@ -583,18 +560,52 @@ def _internal_authentication(call, signer, frame, payload, signer_registry):
     return modes or None
 
 
+def _signature_result(value, function, bindings, seen=()):
+    """Interpret a returned identity through reusable helper summaries, preserving its message bindings."""
+    if id(value) in seen or len(seen) > 12:
+        return None
+    ir = definition(value, function)
+    if isinstance(ir, Assignment):
+        return _signature_result(ir.rvalue, function, bindings, (*seen, id(value)))
+    if isinstance(ir, SolidityCall) and ir.function.name.startswith("ecrecover("):
+        return ir, payload_parameters(ir.arguments[0], function, bindings)
+    if isinstance(ir, (InternalCall, LibraryCall)) and getattr(ir.function, "nodes", None):
+        callee: Any = ir.function
+        summary = evidence_for(function.contract).summary(callee)
+        if len(summary.returns) != 1 or len(summary.returns[0][1]) != 1:
+            return None
+        actuals = {p.name: payload_parameters(a, function, bindings) for p, a in zip(callee.parameters, ir.arguments)}
+        return _signature_result(summary.returns[0][1][0], ir.function, actuals, (*seen, id(value)))
+    return None
+
+
 def loop_witness(frame, contract, parameter_bindings):
     fn = frame.function
     ops = operations(fn)
     for header, cond in ops:
         if getattr(header.type, "name", "") != "IFLOOP" or not isinstance(cond, Binary) or relation(cond) != "LESS":
             continue
+        successful_exits = exits(fn)
+        if frame.return_checked:
+            successful_exits = [
+                n
+                for n in successful_exits
+                if not any(
+                    isinstance(ir, Return)
+                    and len(ir.values) == 1
+                    and isinstance(ir.values[0], Constant)
+                    and ir.values[0].value is False
+                    for ir in n.irs
+                )
+            ]
+        if not successful_exits or not all(header in n.dominators for n in successful_exits):
+            continue
         counter, bound = cond.variable_left, cond.variable_right
         threshold = scalar(bound, frame)
         if threshold is None:
             continue
         positive = set(frame.positive)
-        for positive_guard, positive_condition, positive_polarity in guards(fn):
+        for positive_guard, positive_condition, positive_polarity in frame_guards(frame):
             if positive_guard not in header.dominators:
                 continue
             for test, normalized in mandatory_atoms(positive_condition, fn, positive_polarity) or []:
@@ -623,7 +634,7 @@ def loop_witness(frame, contract, parameter_bindings):
             for n, ir in ops
         ):
             continue
-        for guard, value, polarity in guards(fn):
+        for guard, value, polarity in frame_guards(frame):
             if guard not in region or guard not in increment.dominators:
                 continue
             parts = mandatory_atoms(value, fn, polarity)
@@ -641,16 +652,19 @@ def loop_witness(frame, contract, parameter_bindings):
                 enumerator = inventory(contract, registry)
                 if enumerator is None:
                     continue
-                ordering = next(
+                ordering_fact = next(
                     (
-                        ir
-                        for ir, normalized in parts or []
+                        (other_guard, ir)
+                        for other_guard, other_value, other_polarity in frame_guards(frame)
+                        if other_guard in region and other_guard in increment.dominators
+                        for ir, normalized in mandatory_atoms(other_value, fn, other_polarity) or []
                         if isinstance(ir, Binary) and normalized == "GREATER" and same(ir.variable_left, signer)
                     ),
                     None,
                 )
-                if ordering is None:
+                if ordering_fact is None:
                     continue
+                ordering_guard, ordering = ordering_fact
                 previous = ordering.variable_right
                 if not any(
                     isinstance(ir, Assignment)
@@ -661,22 +675,30 @@ def loop_witness(frame, contract, parameter_bindings):
                     for n, ir in ops
                 ):
                     continue
+                previous_writes = [
+                    ir
+                    for n, ir in ops
+                    if n in region and isinstance(ir, (Assignment, Binary)) and same(ir.lvalue, previous)
+                ]
+                if len(previous_writes) != 1:
+                    continue
                 # Every signer-defining branch must authenticate; merely seeing one ecrecover is insufficient.
                 assignments = [
                     (n, ir) for n, ir in ops if isinstance(ir, Assignment) and same(ir.lvalue, signer) and n in region
                 ]
                 if not assignments:
                     continue
-                modes, consumed, signed_sets = set(), {guard.node_id}, []
+                modes, consumed, signed_sets = set(), {guard.node_id, ordering_guard.node_id}, []
                 valid = True
                 payload = None
                 recoveries = []
                 for node, assign in assignments:
-                    recovered = definition(unwrap(assign.rvalue, fn), fn)
-                    if isinstance(recovered, SolidityCall) and recovered.function.name.startswith("ecrecover("):
+                    recovery = _signature_result(assign.rvalue, fn, parameter_bindings)
+                    if recovery is not None:
+                        recovered, committed = recovery
                         recoveries.append(recovered)
                         modes.add("ecdsa")
-                        signed_sets.append(payload_parameters(recovered.arguments[0], fn, parameter_bindings))
+                        signed_sets.append(committed)
                         if payload is None:
                             payload = unwrap(recovered.arguments[0], fn)
                 # Recoveries under an eth_sign prefix use a hash wrapper; use the common bytes32 formal for approval.
@@ -689,8 +711,7 @@ def loop_witness(frame, contract, parameter_bindings):
                 # recovered hash so one strong ECDSA arm cannot lend bindings to a weaker alternate signer mode.
                 signed_sets.append(set(parameter_bindings.get(payload.name, set())))
                 for node, assign in assignments:
-                    recovered = definition(unwrap(assign.rvalue, fn), fn)
-                    if isinstance(recovered, SolidityCall) and recovered.function.name.startswith("ecrecover("):
+                    if _signature_result(assign.rvalue, fn, parameter_bindings) is not None:
                         continue
                     accepted = authenticated_paths(node, guard, signer, frame, payload, registry, region)
                     if accepted is None:
@@ -712,7 +733,7 @@ def loop_witness(frame, contract, parameter_bindings):
                     "threshold": threshold_json,
                     "modes": sorted(modes),
                     "bound_parameters": sorted(set.intersection(*signed_sets)) if signed_sets else [],
-                    "source_function": fn.full_name,
+                    "source_function": fn.canonical_name,
                     "consumed_nodes": sorted(consumed),
                     "source_loop": header.node_id,
                     "requires_positive": scalar_key(threshold) in positive,
@@ -730,11 +751,13 @@ def quorum_witness(entry, contract):
         frame, bindings = todo.pop()
         if len(frame.chain) > 5 or frame.function in frame.chain:
             continue
-        key = frame.function.full_name, repr(frame.bindings)
+        key = id(frame.function), repr(frame.bindings), repr(bindings)
         if key in seen:
             continue
         seen.add(key)
-        witness = loop_witness(frame, contract, bindings)
+        from .approval_counts import count_witness
+
+        witness = loop_witness(frame, contract, bindings) or count_witness(frame, contract, bindings)
         if witness is not None:
             return witness
         for node, call in operations(frame.function):
@@ -743,6 +766,7 @@ def quorum_witness(entry, contract):
             callee: Any = call.function
             if not getattr(callee, "nodes", None):
                 continue
+            checked = call_result_required_true(call, frame.function, frame.return_checked)
             positive = list(frame.positive)
             for guard, condition, polarity in guards(frame.function):
                 if guard not in node.dominators:
@@ -760,11 +784,24 @@ def quorum_witness(entry, contract):
                 p.name: payload_parameters(a, frame.function, bindings)
                 for p, a in zip(callee.parameters, call.arguments)
             }
-            todo.append((Frame(callee, child, (*frame.chain, frame.function), tuple(positive)), bound))
+            todo.append(
+                (
+                    Frame(
+                        callee,
+                        child,
+                        (*frame.chain, frame.function),
+                        tuple(positive),
+                        frame,
+                        tuple(call.arguments),
+                        checked,
+                    ),
+                    bound,
+                )
+            )
     return None
 
 
-def apply_authorization_pass(contract, trees):
+def attach_membership_inventories(contract, trees):
     # Source inventories also help ordinary caller-keyed membership gates, without a quorum or signature API.
     state_variables = getattr(contract, "state_variables", None)
     if state_variables is None:
@@ -777,12 +814,18 @@ def apply_authorization_pass(contract, trees):
     }
 
     def attach(tree):
+        if not isinstance(tree, dict):
+            return
         leaf = tree.get("leaf") or {}
         descriptor = leaf.get("set_descriptor") or {}
+        keys = descriptor.get("key_sources") or []
+        if leaf.get("kind") == "membership" and any(k.get("source") == "signature_recovery" for k in keys):
+            # Membership of a recovered identity is evidence of authentication, not a caller inventory. Only a
+            # complete quorum witness can consume it; the resolver must withhold when recognition fails.
+            leaf["authority_role"] = "caller_authority"
         found = inventories.get(descriptor.get("storage_var"))
         if found is not None and leaf.get("kind") == "membership" and leaf.get("operator") == "truthy":
-            keys = descriptor.get("key_sources") or []
-            if len(keys) == 1 and keys[0].get("source") in ("msg_sender", "tx_origin", "signature_recovery"):
+            if len(keys) == 1 and keys[0].get("source") in ("msg_sender", "tx_origin"):
                 descriptor["membership_inventory"] = found
                 leaf["authority_role"] = "caller_authority"
         for child in tree.get("children") or []:
@@ -790,6 +833,12 @@ def apply_authorization_pass(contract, trees):
 
     for tree in trees.values():
         attach(tree)
+
+
+def apply_authorization_pass(contract, trees):
+    if getattr(contract, "state_variables", None) is None:
+        return
+    attach_membership_inventories(contract, trees)
     for fn in contract.functions_entry_points:
         witness = quorum_witness(fn, contract)
         if witness is None:
@@ -815,9 +864,14 @@ def apply_authorization_pass(contract, trees):
         quorum_leaf: PredicateTree = {
             "op": "LEAF",
             "leaf": {
-                "kind": "signature_auth",
+                "kind": "signature_auth" if witnessed["kind"] == "signature_threshold" else "authorization",
                 "operator": "truthy",
                 "authority_role": "caller_authority",
+                "authority_proof": {
+                    "state": "not_determined" if witnessed["kind"] == "authorization_unresolved" else "proven",
+                    "requirements": witnessed.get("missing", []),
+                    "source_function": witnessed["source_function"],
+                },
                 "operands": [],
                 "references_msg_sender": False,
                 "parameter_indices": witnessed["bound_parameters"],

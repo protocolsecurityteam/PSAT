@@ -214,6 +214,22 @@ def _threshold_descriptor(tree):
     return None
 
 
+def _assert_authorization_unresolved(safe, tree):
+    registry = AdapterRegistry()
+    registry.register(AuthorizationAdapter)
+    ctx = EvaluationContext(
+        chain_id=1,
+        contract_address=safe.address,
+        rpc_url=safe.url,
+        block=int(rpc(safe.url, "eth_blockNumber", []), 16),
+    )
+    cap = capability_to_dict(evaluate_tree_with_registry(tree, registry, ctx))
+    surface = project_capability_surface(cap)
+    assert capability_surface_openness(cap, surface) == "not_determined", cap
+    assert not surface.principal_rows
+    assert not surface.public_paths
+
+
 def test_generic_recognizer_ignores_contract_function_and_variable_names(safe_pair, tmp_path):
     safe, _ = safe_pair
     tree = _variant_trees(
@@ -248,6 +264,8 @@ def test_quorum_credit_requires_membership_and_distinctness(safe_pair, tmp_path,
     safe, _ = safe_pair
     tree = _variant_trees(safe, tmp_path, [(old, new)])
     assert _threshold_descriptor(tree) is None
+    if old == "currentOwner > lastOwner && ":
+        _assert_authorization_unresolved(safe, tree)
 
 
 def test_quorum_reports_the_loop_bound_the_code_actually_enforces(safe_pair, tmp_path):
@@ -289,6 +307,7 @@ def test_every_signer_mode_must_be_authenticated_and_payload_bound(safe_pair, tm
     safe, _ = safe_pair
     tree = _variant_trees(safe, tmp_path, [(old, new)])
     assert _threshold_descriptor(tree) is None
+    _assert_authorization_unresolved(safe, tree)
 
 
 def test_broken_twin_really_allows_unsigned_execution(safe_pair):
@@ -376,3 +395,11 @@ def test_real_execution_agrees_with_persisted_and_scored_authority(
     else:
         assert score.findings
         assert all(f["principal_kind"] == "safe" for f in score.findings)
+
+
+def test_delegated_signer_code_does_not_receive_unproved_quorum_credit(safe_pair):
+    safe, _ = safe_pair
+    # A code-bearing registry member has an additional authorization mechanism whose policy is not proved here.
+    rpc(safe.url, "anvil_setCode", [safe.owners[0], "0x600160005260206000f3"])
+    tree = next(t for sig, t in safe.trees["trees"].items() if sig.startswith("execTransaction("))
+    _assert_authorization_unresolved(safe, tree)

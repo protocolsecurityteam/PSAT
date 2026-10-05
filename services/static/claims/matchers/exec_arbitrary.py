@@ -87,13 +87,33 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
         return None
     taint = arbitrary_exec_taint(ctx, function)
     if taint is None:
-        return None
+        sites = [
+            s
+            for s in ctx.effect_record(function).get("effect_scopes", [])
+            if s.get("forwarded_parameters") and s.get("origin") == "body" and s.get("kind") == "external_call"
+        ]
+        if not sites:
+            return None
+        fn = _slither_function(ctx, function)
+        if fn is None:
+            return None
+        forwarded = sites[0]["forwarded_parameters"]
+        taint = {
+            "destination_kind": "param",
+            "calldata_kind": "param",
+            "destination_param": fn.parameters[forwarded["destination"]].name,
+            "calldata_param": fn.parameters[forwarded["payload"]].name,
+            "destination_basis": "bound_effect_site",
+            "calldata_basis": "bound_effect_site",
+            "source_sites": [{"declaration": s["declaration"], "node": s["node"]} for s in sites],
+        }
     if taint["destination_kind"] == "state_var":
         # Every candidate op's destination is storage-held (``LRTSquaredAdmin.rebalance``: address params are arguments
         # to a fixed call, not destinations). The witness would contradict the claim.
         return None
     witness = {
         "kind": "param_taint",
+        "source_sites": taint.get("source_sites", []),
         "sink_ids": sink_ids,
         # ``*_param`` is only non-null when ``*_kind`` is ``param``; the kind separates the three states.
         "destination_param": taint["destination_param"],

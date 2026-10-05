@@ -1285,11 +1285,14 @@
               "claim_id": "value_router",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "payGateway(IERC20,uint256)/AssetRecovery.payGateway(IERC20,uint256)/1/external_call/token.safeTransferFrom"
+                ],
                 "direction": "value_router",
                 "flows": [
                   {
                     "amount_constraint": {
-                      "state": "unconstrained_proven"
+                      "state": "not_determined"
                     },
                     "amount_kind": {
                       "kind": "param",
@@ -1411,6 +1414,9 @@
               "claim_id": "value_router",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "payGatewayDirect(IERC20,address,uint256)/AssetRecovery.payGatewayDirect(IERC20,address,uint256)/1/external_call/token.transferFrom"
+                ],
                 "direction": "value_router",
                 "flows": [
                   {
@@ -1519,11 +1525,15 @@
               "claim_id": "flow.in",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "pull(IERC20,address,uint256)/AssetRecovery.pull(IERC20,address,uint256)/1/external_call/token.safeTransferFrom",
+                  "pull(IERC20,address,uint256)/1/SafeTransferLib.safeTransferFrom(IERC20,address,address,uint256)/3/external_call/TMP_9.call"
+                ],
                 "direction": "in",
                 "flows": [
                   {
                     "amount_constraint": {
-                      "state": "unconstrained_proven"
+                      "state": "not_determined"
                     },
                     "amount_kind": {
                       "kind": "param",
@@ -1633,6 +1643,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "recoverERC721(IERC721,address,uint256)/AssetRecovery.recoverERC721(IERC721,address,uint256)/1/external_call/collection.safeTransferFrom"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -1763,6 +1776,12 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "splitPay(IERC20,address,uint256,uint256)/AssetRecovery.splitPay(IERC20,address,uint256,uint256)/1/external_call/token.safeTransfer",
+                  "splitPay(IERC20,address,uint256,uint256)/1/SafeTransferLib.safeTransfer(IERC20,address,uint256)/3/external_call/TMP_2.call",
+                  "splitPay(IERC20,address,uint256,uint256)/AssetRecovery.splitPay(IERC20,address,uint256,uint256)/2/external_call/token.safeTransfer",
+                  "splitPay(IERC20,address,uint256,uint256)/2/SafeTransferLib.safeTransfer(IERC20,address,uint256)/3/external_call/TMP_2.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -1892,6 +1911,10 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "sweep(IERC20)/AssetRecovery.sweep(IERC20)/1/external_call/token.safeTransfer",
+                  "sweep(IERC20)/1/SafeTransferLib.safeTransfer(IERC20,address,uint256)/3/external_call/TMP_2.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -2019,11 +2042,15 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "sweepTo(IERC20,address,uint256)/AssetRecovery.sweepTo(IERC20,address,uint256)/1/external_call/token.safeTransfer",
+                  "sweepTo(IERC20,address,uint256)/1/SafeTransferLib.safeTransfer(IERC20,address,uint256)/3/external_call/TMP_2.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
                     "amount_constraint": {
-                      "state": "unconstrained_proven"
+                      "state": "not_determined"
                     },
                     "amount_kind": {
                       "kind": "param",
@@ -2034,7 +2061,7 @@
                     "kind": "callee_erc20_selector",
                     "selector": "0xd0c407e1",
                     "target_constraint": {
-                      "state": "unconstrained_proven"
+                      "state": "not_determined"
                     },
                     "target_kind": {
                       "kind": "param",
@@ -2189,6 +2216,9 @@
               "claim_id": "value_router",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "deposit(IERC20,uint256)/4/Teller._enter(IERC20,uint256,address)/1/external_call/vault.enter"
+                ],
                 "direction": "value_router",
                 "flows": [
                   {
@@ -2299,6 +2329,9 @@
               "claim_id": "value_router",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "depositFor(IERC20,uint256,address)/1/Teller._enter(IERC20,uint256,address)/1/external_call/vault.enter"
+                ],
                 "direction": "value_router",
                 "flows": [
                   {
@@ -2414,6 +2447,9 @@
               "claim_id": "value_router",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "redeem(address,IERC20,uint256)/Teller.redeem(address,IERC20,uint256)/2/external_call/vault.exit"
+                ],
                 "direction": "value_router",
                 "flows": [
                   {
@@ -2569,6 +2605,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "drainToCap(address)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -2659,6 +2698,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "payDisagree(address,uint256)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -2741,6 +2783,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "payEcho(address,uint256)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -2826,6 +2871,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "payEither(uint256)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -2908,6 +2956,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "payGovernor(uint256)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -2996,6 +3047,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "payGovernorTwoHop(uint256)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -3084,6 +3138,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "payTreasury(uint256)/1/HelperReturns._send(address,uint256)/2/external_call/TMP_15.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -3208,6 +3265,9 @@
               "claim_id": "flow.in",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "deposit(uint256)/1/SafeERC20.safeTransferFrom(IERC20,address,address,uint256)/1/external_call/token.transferFrom"
+                ],
                 "direction": "in",
                 "flows": [
                   {
@@ -3327,6 +3387,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execBatch(address[],bytes[])/CastWrappedPull.execBatch(address[],bytes[])/6/external_call/REF_4.call"
+                ],
                 "calldata_basis": "call_destination",
                 "calldata_kind": "param",
                 "calldata_param": "data",
@@ -3339,6 +3402,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "execBatch(address[],bytes[]):sink0:external_call:REF_4.call"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "CastWrappedPull.execBatch(address[],bytes[])",
+                    "node": 6
+                  }
                 ]
               }
             }
@@ -3424,6 +3493,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "payAllowlisted(IERC20,address,uint256)/ConstrainedDestinations.payAllowlisted(IERC20,address,uint256)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -3540,6 +3612,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "payAnyone(IERC20,address,uint256)/ConstrainedDestinations.payAnyone(IERC20,address,uint256)/1/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -3648,6 +3723,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "payCommitted(IERC20,address,uint256,bytes32)/ConstrainedDestinations.payCommitted(IERC20,address,uint256,bytes32)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -3763,6 +3841,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "payTreasuryOnly(IERC20,address,uint256)/ConstrainedDestinations.payTreasuryOnly(IERC20,address,uint256)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -3961,6 +4042,10 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execBothModules(bytes)/DelegatecallRoutes.execBothModules(bytes)/2/delegatecall/module",
+                  "execBothModules(bytes)/DelegatecallRoutes.execBothModules(bytes)/5/delegatecall/sideModule"
+                ],
                 "destination": {
                   "sites": 2,
                   "target_kind": "storage_setter",
@@ -4023,6 +4108,9 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execFixedSlot(bytes)/DelegatecallRoutes.execFixedSlot(bytes)/5/delegatecall/assembly_delegatecall:TMP_28"
+                ],
                 "destination": {
                   "storage_slot_variable": "FIXED_IMPL_SLOT",
                   "target_kind": "storage_no_setter"
@@ -4072,6 +4160,9 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execModule(bytes)/DelegatecallRoutes.execModule(bytes)/2/delegatecall/module"
+                ],
                 "destination": {
                   "target_kind": "storage_setter",
                   "variable": "module",
@@ -4124,6 +4215,9 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execModuleViaLibrary(bytes)/1/AddressLib.functionDelegateCall(address,bytes)/3/delegatecall/target"
+                ],
                 "destination": {
                   "target_kind": "storage_setter",
                   "variable": "module",
@@ -4194,6 +4288,9 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execSelf(bytes)/DelegatecallRoutes.execSelf(bytes)/2/delegatecall/TMP_36"
+                ],
                 "destination": {
                   "target_kind": "self"
                 },
@@ -4244,6 +4341,9 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execSelfViaLibrary(bytes)/1/AddressLib.functionDelegateCall(address,bytes)/3/delegatecall/target"
+                ],
                 "destination": {
                   "target_kind": "self"
                 },
@@ -4313,6 +4413,9 @@
               "claim_id": "delegatecall.execute",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execUserModule(bytes)/DelegatecallRoutes.execUserModule(bytes)/2/delegatecall/REF_5"
+                ],
                 "destination": {
                   "reason": "mapping_or_array_element",
                   "target_kind": "indeterminate"
@@ -4502,6 +4605,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "branchedParams(address,address,bytes,bool)/ExecBinding.branchedParams(address,address,bytes,bool)/5/external_call/t.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -4511,6 +4617,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "branchedParams(address,address,bytes,bool):sink0:external_call:t.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.branchedParams(address,address,bytes,bool)",
+                    "node": 5
+                  }
                 ]
               }
             }
@@ -4562,6 +4674,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "branchedStateOrParam(address,bytes,bool)/ExecBinding.branchedStateOrParam(address,bytes,bool)/5/external_call/t.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -4571,6 +4686,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "branchedStateOrParam(address,bytes,bool):sink0:external_call:t.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.branchedStateOrParam(address,bytes,bool)",
+                    "node": 5
+                  }
                 ]
               }
             }
@@ -4622,6 +4743,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "compose(address,address,bytes,bytes)/ExecBinding.compose(address,address,bytes,bytes)/1/external_call/to.compose"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -4634,6 +4758,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "compose(address,address,bytes,bytes):sink0:external_call:to.compose"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.compose(address,address,bytes,bytes)",
+                    "node": 1
+                  }
                 ]
               }
             }
@@ -4685,6 +4815,10 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "execThenGuard(address,bytes)/ExecBinding.execThenGuard(address,bytes)/2/external_call/target.call",
+                  "execThenGuard(address,bytes)/ExecBinding.execThenGuard(address,bytes)/4/external_call/fallbackRoute.exec"
+                ],
                 "calldata_basis": "call_destination",
                 "calldata_kind": "param",
                 "calldata_param": "data",
@@ -4698,6 +4832,16 @@
                 "sink_ids": [
                   "execThenGuard(address,bytes):sink0:external_call:target.call",
                   "execThenGuard(address,bytes):sink1:external_call:fallbackRoute.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.execThenGuard(address,bytes)",
+                    "node": 2
+                  },
+                  {
+                    "declaration": "ExecBinding.execThenGuard(address,bytes)",
+                    "node": 4
+                  }
                 ]
               }
             }
@@ -4757,6 +4901,10 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "guardThenExec(address,bytes)/ExecBinding.guardThenExec(address,bytes)/1/external_call/fallbackRoute.exec",
+                  "guardThenExec(address,bytes)/ExecBinding.guardThenExec(address,bytes)/3/external_call/target.call"
+                ],
                 "calldata_basis": "call_destination",
                 "calldata_kind": "param",
                 "calldata_param": "data",
@@ -4770,6 +4918,16 @@
                 "sink_ids": [
                   "guardThenExec(address,bytes):sink0:external_call:fallbackRoute.exec",
                   "guardThenExec(address,bytes):sink1:external_call:target.call"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.guardThenExec(address,bytes)",
+                    "node": 1
+                  },
+                  {
+                    "declaration": "ExecBinding.guardThenExec(address,bytes)",
+                    "node": 3
+                  }
                 ]
               }
             }
@@ -4829,6 +4987,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "manageReversed(address,bytes)/ExecBinding.manageReversed(address,bytes)/1/external_call/data.send"
+                ],
                 "calldata_basis": "library_forwarder",
                 "calldata_kind": "param",
                 "calldata_param": "data",
@@ -4842,6 +5003,12 @@
                 "sink_ids": [
                   "manageReversed(address,bytes):sink0:external_call:data.send",
                   "manageReversed(address,bytes):sink1:external_call:target.call"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.manageReversed(address,bytes)",
+                    "node": 1
+                  }
                 ]
               }
             }
@@ -4900,6 +5067,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "manageViaAssembly(address,bytes)/ExecBinding.manageViaAssembly(address,bytes)/1/external_call/target.callContract"
+                ],
                 "calldata_basis": "library_forwarder",
                 "calldata_kind": "param",
                 "calldata_param": "data",
@@ -4911,13 +5081,26 @@
                 "destination_param": "target",
                 "kind": "param_taint",
                 "sink_ids": [
-                  "manageViaAssembly(address,bytes):sink0:external_call:target.callContract"
+                  "manageViaAssembly(address,bytes):sink0:external_call:target.callContract",
+                  "manageViaAssembly(address,bytes):sink1:external_call:assembly_call:target"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.manageViaAssembly(address,bytes)",
+                    "node": 1
+                  }
                 ]
               }
             }
           ],
           "value_flows": [],
           "external_calls": [
+            {
+              "target": "assembly_call:target",
+              "selector": "",
+              "origin": "body",
+              "receiver": null
+            },
             {
               "target": "target.callContract",
               "selector": "0x24d78c05",
@@ -4936,6 +5119,7 @@
           ],
           "delegatecall_sinks": [],
           "effect_targets": [
+            "assembly_call:target",
             "target.callContract"
           ],
           "predicate_tree": {
@@ -4964,6 +5148,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "manageViaLibrary(address,bytes,uint256)/ExecBinding.manageViaLibrary(address,bytes,uint256)/1/external_call/target.functionCallWithValue"
+                ],
                 "calldata_basis": "library_forwarder",
                 "calldata_kind": "param",
                 "calldata_param": "data",
@@ -4977,6 +5164,12 @@
                 "sink_ids": [
                   "manageViaLibrary(address,bytes,uint256):sink0:external_call:target.functionCallWithValue",
                   "manageViaLibrary(address,bytes,uint256):sink1:external_call:target.call"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.manageViaLibrary(address,bytes,uint256)",
+                    "node": 1
+                  }
                 ]
               }
             },
@@ -4984,6 +5177,9 @@
               "claim_id": "flow.out",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "manageViaLibrary(address,bytes,uint256)/1/AddressLib.functionCallWithValue(address,bytes,uint256)/3/external_call/target.call"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -5087,6 +5283,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "manageViaTwoStepLibrary(address,bytes)/ExecBinding.manageViaTwoStepLibrary(address,bytes)/1/external_call/target.functionCall"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "not_determined",
                 "calldata_param": null,
@@ -5097,6 +5296,12 @@
                 "sink_ids": [
                   "manageViaTwoStepLibrary(address,bytes):sink0:external_call:target.functionCall",
                   "manageViaTwoStepLibrary(address,bytes):sink1:external_call:target.call"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.manageViaTwoStepLibrary(address,bytes)",
+                    "node": 1
+                  }
                 ]
               }
             }
@@ -5155,6 +5360,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "paramWrittenAfterCall(address,address,bytes)/ExecBinding.paramWrittenAfterCall(address,address,bytes)/1/external_call/a.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -5164,6 +5372,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "paramWrittenAfterCall(address,address,bytes):sink0:external_call:a.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.paramWrittenAfterCall(address,address,bytes)",
+                    "node": 1
+                  }
                 ]
               }
             }
@@ -5215,6 +5429,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "reassignedLocal(address,address,bytes)/ExecBinding.reassignedLocal(address,address,bytes)/3/external_call/t.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -5224,6 +5441,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "reassignedLocal(address,address,bytes):sink0:external_call:t.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.reassignedLocal(address,address,bytes)",
+                    "node": 3
+                  }
                 ]
               }
             }
@@ -5318,6 +5541,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "singlyAssignedLocal(address,bytes)/ExecBinding.singlyAssignedLocal(address,bytes)/2/external_call/t.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -5330,6 +5556,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "singlyAssignedLocal(address,bytes):sink0:external_call:t.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.singlyAssignedLocal(address,bytes)",
+                    "node": 2
+                  }
                 ]
               }
             }
@@ -5381,6 +5613,10 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "stateVarThenBranched(address,address,bytes,bool)/ExecBinding.stateVarThenBranched(address,address,bytes,bool)/1/external_call/fallbackRoute.exec",
+                  "stateVarThenBranched(address,address,bytes,bool)/ExecBinding.stateVarThenBranched(address,address,bytes,bool)/6/external_call/t.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -5391,6 +5627,16 @@
                 "sink_ids": [
                   "stateVarThenBranched(address,address,bytes,bool):sink0:external_call:fallbackRoute.exec",
                   "stateVarThenBranched(address,address,bytes,bool):sink1:external_call:t.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.stateVarThenBranched(address,address,bytes,bool)",
+                    "node": 1
+                  },
+                  {
+                    "declaration": "ExecBinding.stateVarThenBranched(address,address,bytes,bool)",
+                    "node": 6
+                  }
                 ]
               }
             }
@@ -5458,6 +5704,9 @@
               "claim_id": "exec.arbitrary",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "stateWrittenAfterCall(address,bytes)/ExecBinding.stateWrittenAfterCall(address,bytes)/1/external_call/fallbackRoute.exec"
+                ],
                 "calldata_basis": null,
                 "calldata_kind": "call_argument",
                 "calldata_param": null,
@@ -5467,6 +5716,12 @@
                 "kind": "param_taint",
                 "sink_ids": [
                   "stateWrittenAfterCall(address,bytes):sink0:external_call:fallbackRoute.exec"
+                ],
+                "source_sites": [
+                  {
+                    "declaration": "ExecBinding.stateWrittenAfterCall(address,bytes)",
+                    "node": 1
+                  }
                 ]
               }
             }
@@ -6106,6 +6361,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "withdrawDecoy(address,uint256)/RateLimitedFlow.withdrawDecoy(address,uint256)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -6232,6 +6490,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "withdrawLimited(address,uint256)/RateLimitedFlow.withdrawLimited(address,uint256)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -6278,6 +6539,9 @@
               "claim_id": "rate_limit.consume",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "withdrawLimited(address,uint256)/RateLimitedFlow.withdrawLimited(address,uint256)/1/external_call/limiter.consume"
+                ],
                 "bounds_total_extraction": {
                   "source": "chain_state",
                   "state": "not_determined"
@@ -6396,6 +6660,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "withdrawTokenLimited(address,uint256)/RateLimitedFlow.withdrawTokenLimited(address,uint256)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -6442,6 +6709,9 @@
               "claim_id": "rate_limit.consume",
               "tier": "idiom_structural",
               "witness": {
+                "authority_scope_ids": [
+                  "withdrawTokenLimited(address,uint256)/RateLimitedFlow.withdrawTokenLimited(address,uint256)/1/external_call/limiter.consumeToken"
+                ],
                 "bounds_total_extraction": {
                   "source": "chain_state",
                   "state": "not_determined"
@@ -6560,6 +6830,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "withdrawUnlimited(address,uint256)/RateLimitedFlow.withdrawUnlimited(address,uint256)/1/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -6676,6 +6949,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "cancelBid(uint256)/SelfServicePayout.cancelBid(uint256)/4/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {
@@ -6806,6 +7082,9 @@
               "claim_id": "flow.out",
               "tier": "standard_exact",
               "witness": {
+                "authority_scope_ids": [
+                  "rescueTokens(address,uint256)/SelfServicePayout.rescueTokens(address,uint256)/2/external_call/token.transfer"
+                ],
                 "direction": "out",
                 "flows": [
                   {

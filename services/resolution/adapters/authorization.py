@@ -19,7 +19,7 @@ class AuthorizationAdapter:
     @classmethod
     def matches(cls, descriptor: dict, ctx: EvaluationContext) -> int:
         del ctx
-        if descriptor.get("kind") == "signature_threshold" and descriptor.get("registry"):
+        if descriptor.get("kind") in ("signature_threshold", "authorization_threshold") and descriptor.get("registry"):
             return 100
         if descriptor.get("kind") == "mapping_membership" and descriptor.get("membership_inventory"):
             return 95
@@ -45,12 +45,35 @@ class AuthorizationAdapter:
         if key in cache:
             return cache[key]
         try:
-            if descriptor.get("kind") == "signature_threshold":
+            if descriptor.get("kind") in ("signature_threshold", "authorization_threshold"):
                 registry = descriptor["registry"]
                 members = _read_inventory(rpc_url, address, block, registry, ctx.chain_id)
                 threshold = _read_scalar(rpc_url, address, block, descriptor["threshold"], ctx.chain_id)
                 if not members or threshold <= 0 or threshold > len(members):
                     return fallback
+                if "external" in descriptor.get("modes", []):
+                    # A signer contract may accept messages without any private authorization. Its address is
+                    # membership evidence, not proof that its delegated validation is independently controlled.
+                    for member in members:
+                        code_key = ("authorization_member_code", member, block, ctx.chain_id)
+                        if code_key not in cache:
+                            cache[code_key] = rpc_request(
+                                rpc_url, "eth_getCode", [member, hex(block)], retries=1, chain_id=ctx.chain_id
+                            )
+                        if cache[code_key] != "0x":
+                            return replace(
+                                fallback,
+                                check=ExternalCheck(
+                                    target_address=member,
+                                    target_call_selector=None,
+                                    extra={
+                                        "basis": [
+                                            "caller_tainted_authority_unresolved",
+                                            "delegated_signer_control_unresolved",
+                                        ]
+                                    },
+                                ),
+                            )
                 cap = CapabilityExpr.threshold_group(threshold, members)
                 step = "source_signature_threshold"
             else:

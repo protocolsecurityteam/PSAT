@@ -102,21 +102,28 @@ class SafeDeployment:
         assert int(receipt["status"], 16) == 1
 
 
-def deploy_safe(root: Path, url: str, *, broken: bool) -> SafeDeployment:
-    manifest = json.loads((FIXTURE / "manifest.json").read_text())
+def deploy_safe(
+    root: Path, url: str, *, broken: bool, version: str = "1.4.1", l2: bool = False, compiler: str = "0.8.25"
+) -> SafeDeployment:
+    fixture = FIXTURE.parent / ("safe_v" + version.replace(".", "_"))
+    name = "GnosisSafe" if version == "1.3.0" else "Safe"
+    proxy_name = name + "Proxy"
+    manifest = json.loads((fixture / "manifest.json").read_text())
     for relative, digest in manifest["sha256"].items():
-        assert hashlib.sha256((FIXTURE / relative).read_bytes()).hexdigest() == digest, relative
+        assert hashlib.sha256((fixture / relative).read_bytes()).hexdigest() == digest, relative
     project = root / ("broken" if broken else "canonical")
-    shutil.copytree(FIXTURE / "contracts", project / "src")
+    shutil.copytree(fixture / "contracts", project / "src")
+    if not l2:
+        (project / "src" / (name + "L2.sol")).unlink(missing_ok=True)
     shutil.copy(FIXTURE / "ControlledTarget.sol", project / "src")
     if broken:
-        source = project / "src" / "Safe.sol"
+        source = project / "src" / (name + ".sol")
         text = source.read_text()
         gate = "checkSignatures(txHash, txHashData, signatures);"
         assert text.count(gate) == 1
         source.write_text(text.replace(gate, "/* authentication removed by regression mutation */"))
-    solc = _solc_select_binary("0.8.25")
-    assert solc.is_file(), "Install solc 0.8.25; CI provisions it and this regression must not skip"
+    solc = _solc_select_binary(compiler)
+    assert solc.is_file(), f"Install solc {compiler}; CI provisions it and this regression must not skip"
     (project / "foundry.toml").write_text(
         '[profile.default]\nsrc = "src"\nsolc = "' + str(solc) + '"\noffline = true\noptimizer = true\n'
     )
@@ -130,8 +137,9 @@ def deploy_safe(root: Path, url: str, *, broken: bool) -> SafeDeployment:
         assert int(receipt["status"], 16) == 1
         return receipt["contractAddress"].lower()
 
-    singleton = deploy("Safe.sol", "Safe")
-    address = deploy("SafeProxy.sol", "SafeProxy", ["address"], [singleton])
+    contract_name = name + ("L2" if l2 else "")
+    singleton = deploy(contract_name + ".sol", contract_name)
+    address = deploy(proxy_name + ".sol", proxy_name, ["address"], [singleton])
     setup = calldata(
         "setup(address[],uint256,address,bytes,address,address,uint256,address)",
         [accounts[:8], 3, ZERO, b"", ZERO, ZERO, 0, ZERO],
@@ -142,8 +150,8 @@ def deploy_safe(root: Path, url: str, *, broken: bool) -> SafeDeployment:
         json.dumps(
             {
                 "address": address,
-                "contract_name": "Safe",
-                "compiler_version": "v0.8.25",
+                "contract_name": contract_name,
+                "compiler_version": "v" + compiler,
                 "source_verified": True,
             }
         )

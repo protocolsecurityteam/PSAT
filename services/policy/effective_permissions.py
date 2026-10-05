@@ -609,6 +609,8 @@ def build_effective_permissions(
     )
 
     functions: list[EffectiveFunctionPermission] = []
+    from .effect_authority import scope_claim_authority
+
     for function_record in function_records:
         abi_signature, selector = _abi_signature_and_selector(function_record["function"], canonical_signatures)
         controller_refs = sorted(set(function_record.get("controller_refs", [])))
@@ -636,6 +638,7 @@ def build_effective_permissions(
         claims_out = (
             list(semantic_claims) if isinstance(semantic_claims, list) else list(function_record.get("claims", []))
         )
+        claims_out = scope_claim_authority(claims_out, capability_dicts.get(fn_signature))
         effect_targets_out = (
             list(semantic_effect_targets)
             if isinstance(semantic_effect_targets, list)

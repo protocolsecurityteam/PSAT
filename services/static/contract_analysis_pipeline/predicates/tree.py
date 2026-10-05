@@ -33,6 +33,7 @@ from ..slither_compat import (
     Unary,
     UnaryType,
 )
+from ..structural_evidence import evidence_for
 from ._helpers import (
     _binary_op,
     _find_defining_ir,
@@ -64,7 +65,7 @@ _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.Contex
 )
 
 # Callees being gate-inlined, breaking mutual recursion and bounding depth.
-_inline_gate_callee_stack: _contextvars.ContextVar[tuple[str, ...]] = _contextvars.ContextVar(
+_inline_gate_callee_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
     "psat_predicate_inline_gate_callee_stack", default=()
 )
 
@@ -80,7 +81,7 @@ def _inline_helper_revert_gates_enabled() -> bool:
 def _cache_key_for(callee: Any, bindings: dict[str, Any]) -> tuple | None:
     """A hashable cache key from callee and bindings, or None (a miss) if something isn't hashable."""
     try:
-        callee_id = getattr(callee, "full_name", None) or getattr(callee, "name", None)
+        callee_id = id(callee)
         if callee_id is None:
             return None
         items = tuple((name, bindings[name]) for name in sorted(bindings))
@@ -131,9 +132,15 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
 
 def _stamp_gate_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
     leaf = tree.get("leaf")
-    if leaf is not None:
-        leaf["source_function"] = (gate.containing_function or function).full_name
+    if leaf is not None and "source_function" not in leaf:
+        leaf["source_function"] = (gate.containing_function or function).canonical_name
         leaf["source_node_id"] = gate.node.node_id
+        owner = gate.containing_function or function
+        summary = evidence_for(owner.contract).summary(owner)
+        leaf["structural_predicate"] = {
+            "polarity": gate.polarity,
+            "value": summary.expression(gate.condition_value),
+        }
     for child in tree.get("children") or []:
         _stamp_gate_scope(child, gate, function)
 
@@ -597,7 +604,7 @@ def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[Pr
     callee = getattr(ir, "function", None)
     if callee is None:
         return []
-    callee_id = getattr(callee, "full_name", None) or getattr(callee, "name", None)
+    callee_id = id(callee)
     if not callee_id:
         return []
     stack = _inline_gate_callee_stack.get()
