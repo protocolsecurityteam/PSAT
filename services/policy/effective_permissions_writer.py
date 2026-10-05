@@ -295,7 +295,8 @@ def write_effective_function_rows(
                 verdict.function_id = ef.id
 
         # No UNIQUE constraint, so dedup in memory.
-        seen: set[tuple[int, str, str, str]] = set()
+        seen: set[tuple] = set()
+        from .effect_authority import principal_identity
 
         if cap_dict is not None:
             semantic_rows = _principal_rows_for_capability(
@@ -303,12 +304,19 @@ def write_effective_function_rows(
                 safe_address_lookup=safe_address_lookup,
                 function_signature=fn_signature,
             )
+            for scope in cap_dict.get("effect_capabilities") or []:
+                semantic_rows.extend(
+                    _principal_rows_for_capability(
+                        scope["capability"], safe_address_lookup=safe_address_lookup, function_signature=fn_signature
+                    )
+                )
             for row in semantic_rows:
                 key = (
                     ef.id,
                     row["address"],
                     row.get("origin") or "",
                     row.get("principal_type") or "",
+                    principal_identity(row["address"], row.get("details")),
                 )
                 if key in seen:
                     continue

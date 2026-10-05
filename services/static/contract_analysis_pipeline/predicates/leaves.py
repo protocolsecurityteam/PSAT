@@ -29,6 +29,7 @@ from ..slither_compat import (
     Send,
     SolidityCall,
     Transfer,
+    TypeConversion,
     UnaryType,
     Unpack,
     Variable,
@@ -266,7 +267,13 @@ def _try_membership_via_value_compare(
     if base_var is not None:
         descriptor["storage_var"] = getattr(base_var, "name", None)
 
-    membership_op: LeafOperator = "truthy" if operator == "eq" else "falsy"
+    # Nonzero membership is an allowlist; equality to the default zero is its absence. The value predicate already
+    # carries revert polarity, so an address(0) conversion must not turn membership into a public exclusion.
+    zero = str(const_value).lower() in {"0", "false", "0x0", "0x" + "0" * 40}
+    if mask_hex is not None:
+        membership_op: LeafOperator = "truthy" if operator == "eq" else "falsy"
+    else:
+        membership_op = "truthy" if (operator == "ne" if zero else operator == "eq") else "falsy"
     leaf = _make_leaf(
         kind="membership",
         operator=membership_op,
@@ -282,6 +289,11 @@ def _find_index_value_pair(a: Any, b: Any, function: Any) -> tuple[Any | None, A
     """``(index_ir, const_value, mask_hex)`` when ``a`` is an Index lvalue (optionally masked) and ``b`` a constant,
     literal or constant/immutable state var; else Nones. Covers equality, masked and threshold forms.
     """
+    for _ in range(3):
+        conversion = _find_defining_ir(b, None, function)
+        if not isinstance(conversion, TypeConversion):
+            break
+        b = conversion.variable
     if not _is_mask_operand(b):
         return None, None, None
     const_value = _coerce_constant_value(b)

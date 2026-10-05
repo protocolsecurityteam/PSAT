@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from typing_extensions import NotRequired
 
@@ -150,6 +150,7 @@ class ValueFlow(TypedDict):
 
 
 class EffectInfo(TypedDict):
+    effect_scopes: NotRequired[list[dict[str, Any]]]
     function: str
     selector: str
     abi_signature: str

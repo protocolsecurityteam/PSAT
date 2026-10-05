@@ -63,6 +63,10 @@ class Operand(TypedDict):
 
 
 SetKind = Literal[
+    "signature_threshold",
+    "authorization_threshold",
+    "state_authority",
+    "authorization_unresolved",
     "mapping_membership",
     "array_contains",
     "external_set",
@@ -138,6 +142,8 @@ class SetDescriptor(TypedDict):
     callee_function: NotRequired[str | None]
     callee_signature: NotRequired[str | None]
     callee_selector: NotRequired[str | None]
+    membership_inventory: NotRequired[dict[str, Any]]
+    writer_scope_ids: NotRequired[list[str]]
 
 
 LeafKind = Literal[
@@ -146,6 +152,7 @@ LeafKind = Literal[
     "comparison",
     "external_bool",
     "signature_auth",
+    "authorization",
     "unsupported",
 ]
 
@@ -189,6 +196,10 @@ class LeafPredicate(TypedDict):
     parameter_indices: list[int]
     expression: str
     basis: list[str]
+    source_function: NotRequired[str]
+    source_node_id: NotRequired[int]
+    structural_predicate: NotRequired[dict[str, Any]]
+    authority_proof: NotRequired[dict[str, Any]]
     # Caller-taint discriminators, absent on older trees. Callee mutability: ``view``/``pure``, ``nonview`` (effectful
     # external, including wrapper libraries that make external calls), or ``nonview_library`` (effectful, own storage
     # only).

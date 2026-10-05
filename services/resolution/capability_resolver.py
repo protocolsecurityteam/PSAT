@@ -31,6 +31,7 @@ from utils.logging import record_degraded, record_stage_metric
 
 from . import indexer_settings
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
+from .adapters.authorization import AuthorizationAdapter
 from .adapters.enumerable_role_store import EnumerableRoleStoreAdapter
 from .adapters.event_indexed import EventIndexedAdapter
 from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
@@ -303,6 +304,7 @@ def resolve_contract_capabilities(
     chain_id = ctx_chain.chain_id
 
     registry = AdapterRegistry()
+    registry.register(AuthorizationAdapter)
     # Named standard adapters first (higher matches() scores win); event-indexed is the fallback.
     registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EnumerableRoleStoreAdapter)
@@ -345,7 +347,10 @@ def resolve_contract_capabilities(
     # Resolved lazily on the first one-shot row so passes without initializers make no extra calls.
     one_shot_block_cell: list[Any] = [probe_block if probe_block is not None else _UNRESOLVED_BLOCK]
     one_shot_pass_cache: dict[tuple[Any, ...], LatchReadResult] = {}
-    for fn_signature, tree in (artifact["trees"] or {}).items():
+    function_trees = dict(artifact["trees"] or {})
+    for signature in artifact.get("effect_scopes") or {}:
+        function_trees.setdefault(signature, None)
+    for fn_signature, tree in function_trees.items():
         ctx = EvaluationContext(
             chain_id=chain_id,
             contract_address=runtime_addr,
@@ -376,7 +381,19 @@ def resolve_contract_capabilities(
                 rpc_url=rpc_url,
                 block=probe_block,
             )
+        scoped = (artifact.get("effect_scopes") or {}).get(fn_signature)
+        scope_records = []
+        if scoped:
+            from .effect_scopes import resolve_effect_scopes
+
+            aggregate, scope_records = resolve_effect_scopes(
+                scoped, registry, ctx, base_cap=cap, all_scopes=artifact.get("effect_scopes")
+            )
+            if aggregate is not None:
+                cap = aggregate
         cap_dict = capability_to_dict(cap)
+        if scope_records:
+            cap_dict["effect_capabilities"] = scope_records
         if one_shot_enabled and rpc_url:
             _maybe_one_shot_probe(
                 cap_dict,

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # tracking-plan or predicate-tree output shape changes; not tied to a git SHA, which would rebuild every multi-MB bundle
 # on unrelated deploys. If the change also moves an effects probe input, consider ``EFFECT_CACHE_SCHEMA_VERSION``
 # (db/effect_cache.py). Bump reasons are in the commit history.
-ANALYSIS_SCHEMA_VERSION = 6
+ANALYSIS_SCHEMA_VERSION = 9
 
 
 # Who produced a row and from which job; provenance requires the source job for anything monitoring enrolls from.

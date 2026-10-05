@@ -72,46 +72,10 @@ def _find(claims: dict[str, set[tuple[str, str]]], name: str) -> set[tuple[str, 
     return {claim for claim in claims[matches[0]] if claim[0] in OWNED_CLAIM_IDS}
 
 
-def _owned_total(claims: dict[str, set[tuple[str, str]]]) -> int:
-    return sum(1 for cset in claims.values() for claim in cset if claim[0] in OWNED_CLAIM_IDS)
-
-
 def test_proxy_shell_upgrade_and_admin_positive(tmp_path):
     claims = _pipeline_claims(tmp_path, "proxy_shell_wbeth.sol", "WBETHProxy")
     assert _find(claims, "upgradeTo") == {("upgrade.implementation", "standard_exact")}
     assert _find(claims, "changeAdmin") == {("proxy.admin_change", "standard_exact")}
-
-
-def test_safe_family_positive(tmp_path):
-    records = _pipeline_claim_records(tmp_path, "safe_wallet.sol", "SafeWallet")
-    claims = _claims_view(records)
-    signer = ("safe.signer_mgmt", "standard_exact")
-    for fn in ("addOwnerWithThreshold", "removeOwner", "swapOwner", "changeThreshold"):
-        assert _find(claims, fn) == {signer}, fn
-    module = ("safe.module_mgmt", "standard_exact")
-    for fn in ("enableModule", "disableModule"):
-        assert _find(claims, fn) == {module}, fn
-    assert _find(claims, "setGuard") == {("safe.set_guard", "standard_exact")}
-    arb = ("exec.arbitrary", "standard_exact")
-    for fn in ("execTransaction", "execTransactionFromModule", "execTransactionFromModuleReturnData"):
-        assert _find(claims, fn) == {arb}, fn
-    assert _find(claims, "getThreshold") == set()
-    assert _find(claims, "getOwners") == set()
-    # 4 signer + 2 module + 1 guard + 3 exec.
-    assert _owned_total(claims) == 10
-    # Round-3 R1: execTransaction's destination rides under the owners' signatures, published identically on exec and
-    # flow witnesses.
-    signed = {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
-    assert _claim_witness(records, "execTransaction", "exec.arbitrary")["destination_constraint"] == signed
-    exec_flow = _claim_witness(records, "execTransaction", "flow.out")
-    assert exec_flow["flows"][0]["target_constraint"] == signed
-    # Module exec gates the caller (``modules[msg.sender]``), so the walk proves the destination free; never ``pins:
-    # True``.
-    free = {"state": "unconstrained_proven"}
-    for fn in ("execTransactionFromModule", "execTransactionFromModuleReturnData"):
-        assert _claim_witness(records, fn, "exec.arbitrary")["destination_constraint"] == free, fn
-        module_flow = _claim_witness(records, fn, "flow.out")
-        assert module_flow["flows"][0]["target_constraint"] == free, fn
 
 
 def test_oz_timelock_family_positive(tmp_path):

@@ -523,6 +523,15 @@ class ProvenanceEngine:
         field_name: str | None = None
         if field is not None:
             field_name = getattr(field, "value", None) or getattr(field, "name", None) or str(field)
+        from slither.core.declarations import Enum as EnumDeclaration
+
+        if isinstance(base, EnumDeclaration) and field_name in base.values:
+            return self.provenance.set(
+                self._var_name(ir.lvalue),
+                frozenset(
+                    {Source(kind="constant", constant_value=str(base.values.index(field_name)), value_type="uint256")}
+                ),
+            )
         if not field_name or is_top(base_sources):
             return self.provenance.set(self._var_name(ir.lvalue), base_sources)
         projected_sources = frozenset(

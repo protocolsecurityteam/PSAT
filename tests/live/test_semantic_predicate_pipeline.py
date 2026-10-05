@@ -5,7 +5,8 @@ from typing import Any
 
 import pytest
 
-from tests.live.conftest import DEFAULT_COMPANY_TIMEOUT, DEFAULT_POLL_INTERVAL, LiveClient
+from tests.live.conftest import DEFAULT_COMPANY_TIMEOUT, DEFAULT_POLL_INTERVAL, DEFAULT_TEST_COMPANY, LiveClient
+from tests.support.live_helpers import company_analysis_job_ids, finite_alternative_members
 
 EXPECTED_LEAF_KINDS = {
     "membership",
@@ -97,10 +98,15 @@ def _poll_descendants_until_done(
 @pytest.fixture(scope="module")
 def guarded_company_child(analyzed_company, live_client: LiveClient) -> dict[str, Any]:
     descendants = _poll_descendants_until_done(live_client, analyzed_company["job_id"])
-    completed = [job for job in descendants if job.get("status") == "completed" and job.get("name")]
+    overview = live_client.company_overview(DEFAULT_TEST_COMPANY)
+    candidate_ids = company_analysis_job_ids(descendants, overview.get("contracts") or [])
     diagnostics: list[str] = []
 
-    for job in completed:
+    for job_id in candidate_ids:
+        job = live_client.poll_job_until_done(job_id)
+        if job.get("status") != "completed":
+            diagnostics.append(f"{job_id}: {job.get('status')} {job.get('error')}")
+            continue
         artifact = live_client.artifact(job["job_id"], "predicate_trees")
         if not isinstance(artifact, dict):
             diagnostics.append(f"{job.get('name')} {job.get('address')}: missing predicate_trees")
@@ -115,8 +121,8 @@ def guarded_company_child(analyzed_company, live_client: LiveClient) -> dict[str
         diagnostics.append(f"{job.get('name')} {job.get('address')}: no authority leaves")
 
     pytest.fail(
-        "analyzed_company produced no completed guarded descendant with semantic predicate trees; "
-        f"checked={len(completed)} descendants={len(descendants)} diagnostics={diagnostics[:10]}"
+        "analyzed_company has no completed guarded analysis with semantic predicate trees; "
+        f"candidates={len(candidate_ids)} descendants={len(descendants)} diagnostics={diagnostics[:10]}"
     )
 
 
@@ -214,6 +220,15 @@ def test_effective_function_principal_consistent_with_capability_expr(
                 f"but {len(principals)} principal rows"
             )
             checked_any = True
+        elif kind == "OR":
+            expected_members = finite_alternative_members(cap)
+            if expected_members is not None:
+                actual_members = {(principal.get("address") or "").lower() for principal in principals}
+                assert actual_members == expected_members, (
+                    f"OR capability for {fn.get('function')!r} expected principals "
+                    f"{sorted(expected_members)}, got {sorted(actual_members)}"
+                )
+                checked_any = True
         elif kind == "threshold_group":
             assert len(principals) == 1, (
                 f"threshold_group for {fn.get('function')!r} expected exactly 1 principal, got {len(principals)}"

@@ -225,6 +225,9 @@ def _classify_node_irs(
             arguments = list(getattr(ir, "arguments", []) or [])
             if function_name.startswith("selfdestruct("):
                 out.append(("selfdestruct", "selfdestruct", None, None))
+            elif function_name.startswith(("call(", "callcode(", "staticcall(")):
+                target = str(arguments[1]) if len(arguments) > 1 else "unknown"
+                out.append(("external_call", f"assembly_call:{target}", None, None))
             elif function_name.startswith("sstore("):
                 # Slither doesn't record assembly writes in ``state_variables_written``; key by the slot expression.
                 slot = str(arguments[0]) if arguments else "unknown"
