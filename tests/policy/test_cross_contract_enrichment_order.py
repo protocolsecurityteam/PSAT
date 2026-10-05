@@ -1039,3 +1039,46 @@ def test_the_own_pass_reads_only_siblings_it_can_join_with(pipeline, monkeypatch
 
     assert read == [TOKEN_A]
     assert _ids(p.row_claims(caller)[SWEEP]) == [("flow.out", "policy_derived")]
+
+
+@pytest.mark.parametrize("order", ["vault_facts_first", "teller_first"])
+def test_a_hook_holder_is_read_when_only_its_pointer_names_the_target(pipeline, order):
+    """The teller names no vault; only the vault's hook pointer joins them."""
+    p = pipeline()
+    vault, teller = p.job(VAULT), p.job(TELLER)
+    if order == "vault_facts_first":
+        p.land_facts(vault, _vault_effects(), _snapshot({"hook": TELLER}))
+        p.land_facts(teller, _teller_effects(), _snapshot({}))
+        p.run(teller)
+        p.run(vault)
+    else:
+        p.land_facts(teller, _teller_effects(), _snapshot({}))
+        p.run(teller)
+        p.land_facts(vault, _vault_effects(), _snapshot({"hook": TELLER}))
+        p.run(vault)
+    p.settle()
+
+    assert _ids(p.row_claims(teller)[DENY_ALL]) == [(C.TRANSFER_POLICY_CONFIGURE, "policy_derived")]
+
+
+def test_a_hook_holder_read_before_its_controller_rows_exist_still_reaches_the_target(pipeline):
+    p = pipeline()
+    vault, teller = p.job(VAULT), p.job(TELLER)
+    p.land_facts(teller, _teller_effects(), _snapshot({}))
+    contract = Contract(job_id=vault.id, address=VAULT, contract_name="Vault")
+    p.session.add(contract)
+    p.session.commit()
+    # Resolution has stored the vault's facts but not yet rewritten its controller-value rows.
+    store_artifact(p.session, vault.id, "effects", data=_vault_effects())
+    store_artifact(p.session, vault.id, "control_snapshot", data=_snapshot({"hook": TELLER}))
+    p.facts[vault.id] = (_vault_effects(), _snapshot({"hook": TELLER}))
+    p.run(teller)
+    assert p.row_claims(teller)[DENY_ALL] == []
+
+    p.session.add(ControllerValue(contract_id=contract.id, controller_id="state_variable:hook", value=TELLER))
+    p.session.commit()
+    mark_stale_dependents(p.session, vault, chain_id=1, session_factory=p.session_factory)
+    assert p.stale() == {str(teller.id)}
+    p.settle()
+
+    assert _ids(p.row_claims(teller)[DENY_ALL]) == [(C.TRANSFER_POLICY_CONFIGURE, "policy_derived")]
