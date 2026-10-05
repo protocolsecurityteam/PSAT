@@ -38,8 +38,10 @@ def rpc(url, method, params):
     return body["result"]
 
 
-def send(url, sender, data, to=None):
+def send(url, sender, data, to=None, *, value=0):
     tx = {"from": sender, "data": data, "gas": hex(8_000_000)}
+    if value:
+        tx["value"] = hex(value)
     if to is not None:
         tx["to"] = to
     tx_hash = rpc(url, "eth_sendTransaction", [tx])

@@ -43,20 +43,8 @@ def test_execution_and_scoring_preserve_effect_specific_authority(tmp_path, db_s
             return receipt["contractAddress"]
 
         address, target = deploy("StructuralControls"), deploy("Target")
-        tx = rpc(
-            url,
-            "eth_sendTransaction",
-            [
-                {
-                    "from": accounts[1],
-                    "to": address,
-                    "data": calldata("deposit()"),
-                    "value": hex(100),
-                    "gas": hex(200000),
-                }
-            ],
-        )
-        assert int(rpc(url, "eth_getTransactionReceipt", [tx])["status"], 16) == 1
+        receipt = send(url, accounts[1], calldata("deposit()"), address, value=100)
+        assert int(receipt["status"], 16) == 1
         signature = "mixed(bool,address,bytes,uint256)"
         payload = bytes.fromhex(calldata("setValue(uint256)", [42])[2:])
         with pytest.raises(RuntimeError):
