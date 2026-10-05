@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -542,7 +543,9 @@ class PolicyWorker(BaseWorker):
         deployment_address = normalize_deployment(
             (job.request if isinstance(job.request, dict) else {}).get("proxy_address")
         )
-        contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
+        contract_row = session.execute(
+            select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
+        ).scalar_one_or_none()
         # Every DB write below needs contract_row; without one the job succeeds with zero rows, so make that visible.
         record_stage_metric("rows_written", contract_row is not None)
         if contract_row is None:
@@ -747,6 +750,19 @@ class PolicyWorker(BaseWorker):
         finally:
             _persist_spawn_summary(session, job, spawn_result)
 
+        # Mint policy-derived claims from sibling facts, and hand this job's facts to siblings that already ran. Before
+        # labeling, which reads the claims.
+        self._enrich_cross_contract(
+            session,
+            job,
+            contract_analysis,
+            control_snapshot,
+            function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
+            ep_data=ep_data,
+            target_effects=effects_artifact if isinstance(effects_artifact, dict) else None,
+            durations_ms=durations_ms,
+        )
+
         self.update_detail(session, job, "Labeling principals")
         with log_timed_phase(logger, "principal_labels", durations_ms=durations_ms) as ph:
             pl_data = build_principal_labels(
@@ -806,18 +822,6 @@ class PolicyWorker(BaseWorker):
             job.id,
             job.address or "0x0",
             job.name or "Contract",
-        )
-
-        # Mint policy-derived claims from sibling facts, and hand this job's facts to siblings that already ran.
-        self._enrich_cross_contract(
-            session,
-            job,
-            contract_analysis,
-            control_snapshot,
-            function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
-            ep_data=ep_data,
-            target_effects=effects_artifact if isinstance(effects_artifact, dict) else None,
-            durations_ms=durations_ms,
         )
 
         self.update_detail(
@@ -967,7 +971,7 @@ class PolicyWorker(BaseWorker):
 
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms) as ph:
             contract_row = session.execute(
-                select(Contract).where(Contract.job_id == job.id).limit(1)
+                select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
             ).scalar_one_or_none()
             if contract_row is not None:
                 lock_contract_claims(session, [contract_row.id])
@@ -1038,42 +1042,52 @@ class PolicyWorker(BaseWorker):
         callee_claim_map = build_callee_claim_map(source_effects)
         redistill = effects_stage_enabled()
         passes = 0
-        for address, sibling_effects in sorted(facts.effects.items()):
-            if address == source_address:
-                continue
-            sibling_snapshot = facts.snapshots.get(address) or {}
-            contribution = derive_cross_contract_claims(
-                sibling_effects,
-                sibling_snapshot.get("controller_values", {}),
-                callee_claim_map,
-                sibling_transfer_hooks=sibling_transfer_hook_links(address, source_effects, source_snapshots),
+
+        def _contribution(sibling_address: str, sibling_effects: Any, sibling_snapshot: Any) -> dict[str, list[Claim]]:
+            if not isinstance(sibling_effects, dict):
+                return {}
+            controller_values = (
+                sibling_snapshot.get("controller_values", {}) if isinstance(sibling_snapshot, dict) else {}
             )
-            if not contribution:
+            return derive_cross_contract_claims(
+                sibling_effects,
+                controller_values,
+                callee_claim_map,
+                sibling_transfer_hooks=sibling_transfer_hook_links(sibling_address, source_effects, source_snapshots),
+            )
+
+        for address, sibling_effects in sorted(facts.effects.items()):
+            if address == source_address or not _contribution(address, sibling_effects, facts.snapshots.get(address)):
                 continue
             sibling_job_id = facts.job_for_address[address]
             passes += 1
-            try:
-                enrich_dependent(
-                    session,
-                    dependent_job_id=sibling_job_id,
-                    enriched=contribution,
-                    source_job_id=job.id,
-                    redistill=redistill,
-                )
-            except Exception as exc:
-                session.rollback()
-                record_degraded(
-                    phase="cross_contract_dependents",
-                    exc=exc,
-                    context={"sibling_address": address, "sibling_job_id": str(sibling_job_id)},
-                )
-                logger.warning(
-                    "Job %s: cross-contract claims for sibling %s failed: %s",
-                    job.id,
-                    address,
-                    exc,
-                    extra={"exc_type": type(exc).__name__},
-                )
+            for attempt in (1, 2):
+                try:
+                    enrich_dependent(
+                        session,
+                        dependent_job_id=sibling_job_id,
+                        contribution_for=functools.partial(_contribution, address),
+                        source_job_id=job.id,
+                        redistill=redistill,
+                    )
+                    break
+                except Exception as exc:
+                    session.rollback()
+                    if attempt == 1:
+                        continue
+                    # Nothing re-runs this pass; the sibling keeps its claims without this job's contribution.
+                    record_degraded(
+                        phase="cross_contract_dependents",
+                        exc=exc,
+                        context={"sibling_address": address, "sibling_job_id": str(sibling_job_id)},
+                    )
+                    logger.warning(
+                        "Job %s: cross-contract claims for sibling %s failed: %s",
+                        job.id,
+                        address,
+                        exc,
+                        extra={"exc_type": type(exc).__name__, "sibling_job_id": str(sibling_job_id)},
+                    )
         return passes
 
     def _resolve_authority(

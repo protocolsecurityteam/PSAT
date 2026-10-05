@@ -20,14 +20,13 @@ a claim it would have produced is absent, not disproven.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import exists, or_, select, text
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope
@@ -35,6 +34,7 @@ from db.models import Artifact, EffectiveFunction, Job
 from db.queue import get_artifact
 from services.concurrency import parallel_map
 from services.static.claims import Claim, resolve_claim_precedence
+from services.static.cross_contract import claim_sort_key
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -55,13 +55,9 @@ def lock_contract_claims(session: Session, contract_ids: Iterable[int]) -> None:
         session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": claims_writer_lock_key(contract_id)})
 
 
-def _claim_sort_key(claim: Claim) -> str:
-    return json.dumps(claim, sort_keys=True, default=str)
-
-
 def merge_claims(existing: Iterable[Claim] | None, additions: Iterable[Claim]) -> list[Claim]:
     """Precedence merge whose tie-break between equal tiers doesn't depend on which side arrived first."""
-    return resolve_claim_precedence(sorted([*(existing or []), *additions], key=_claim_sort_key))
+    return resolve_claim_precedence(sorted([*(existing or []), *additions], key=claim_sort_key))
 
 
 def apply_claims_to_payload(payload: dict, enriched: dict[str, list[Claim]]) -> bool:
@@ -160,7 +156,8 @@ def _parent_job_uuid(job: Job) -> uuid.UUID | None:
 
 
 def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> list[tuple[Any, str]]:
-    """``[(job_id, address)]`` of the job's siblings on its chain that have both fact artifacts, oldest first.
+    """``[(job_id, address)]`` of the job's siblings on its chain that have both fact artifacts, the newest job per
+    address.
 
     Sibling is symmetric: same company, same parent, or parent and child. The child direction matters because a
     child's facts can feed its parent's derivation.
@@ -176,8 +173,9 @@ def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> lis
     def _has(name: str):
         return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
 
+    address = func.lower(Job.address)
     rows = session.execute(
-        select(Job.id, Job.address)
+        select(Job.id, address)
         .where(
             Job.id != job.id,
             Job.address.isnot(None),
@@ -185,16 +183,16 @@ def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> lis
             or_(*related),
             *(_has(name) for name in FACT_ARTIFACTS),
         )
-        .order_by(Job.created_at, Job.id)
+        .distinct(address)
+        .order_by(address, Job.created_at.desc(), Job.id.desc())
     ).all()
-    return [(job_id, address.lower()) for job_id, address in rows if address]
+    return [(job_id, addr) for job_id, addr in rows if addr]
 
 
 @dataclass
 class SiblingFacts:
     effects: dict[str, dict] = field(default_factory=dict)
     snapshots: dict[str, dict] = field(default_factory=dict)
-    # The job whose facts are held for each address; the newest wins when an address has several.
     job_for_address: dict[str, Any] = field(default_factory=dict)
 
 
@@ -259,14 +257,16 @@ def enrich_dependent(
     session: Session,
     *,
     dependent_job_id: Any,
-    enriched: dict[str, list[Claim]],
+    contribution_for: Callable[[Any, Any], dict[str, list[Claim]]],
     source_job_id: Any,
     redistill: bool,
 ) -> bool:
     """Merge one sibling's contribution into a job that already ran its own pass; returns whether anything changed.
 
-    Ends the session's transaction. A job without a published ``effective_permissions`` artifact is skipped: its own
-    pass hasn't taken the lock yet and will see the sibling.
+    ``contribution_for(effects, control_snapshot)`` derives it from the job's facts as read under the lock, so a
+    re-analysis that replaced them since the sibling's fetch is honoured. Ends the session's transaction. A job
+    without a published ``effective_permissions`` artifact is skipped: its own pass hasn't taken the lock yet and will
+    see the sibling.
     """
     from db.deployment import normalize_deployment
     from db.models import Contract
@@ -279,13 +279,23 @@ def enrich_dependent(
         return False
     lock_contract_claims(session, contract_ids)
     payload = get_artifact(session, dependent_job_id, "effective_permissions")
-    if not isinstance(payload, dict):
+    enriched = (
+        contribution_for(
+            get_artifact(session, dependent_job_id, "effects"),
+            get_artifact(session, dependent_job_id, "control_snapshot"),
+        )
+        if isinstance(payload, dict)
+        else {}
+    )
+    if not isinstance(payload, dict) or not enriched:
         session.commit()
         return False
 
     request = job.request if isinstance(job.request, dict) else {}
     # The same contract row the policy writer chose.
-    contract_row = session.execute(select(Contract).where(Contract.job_id == dependent_job_id).limit(1)).scalar_one()
+    contract_row = session.execute(
+        select(Contract).where(Contract.job_id == dependent_job_id).order_by(Contract.id).limit(1)
+    ).scalar_one()
     rows_changed = write_claims_to_rows(
         session,
         contract_id=contract_row.id,

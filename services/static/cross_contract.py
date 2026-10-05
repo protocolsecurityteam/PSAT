@@ -7,6 +7,7 @@ call boundary otherwise.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -358,4 +359,13 @@ def derive_cross_contract_claims(
     ):
         for fn_sig, claims in derivation.items():
             merged.setdefault(fn_sig, []).extend(claims)
-    return {fn_sig: resolve_claim_precedence(claims) for fn_sig, claims in merged.items() if claims}
+    # Sorted so equal-tier ties don't depend on sink or sibling order.
+    return {
+        fn_sig: resolve_claim_precedence(sorted(claims, key=claim_sort_key))
+        for fn_sig, claims in merged.items()
+        if claims
+    }
+
+
+def claim_sort_key(claim: Claim) -> str:
+    return json.dumps(claim, sort_keys=True, default=str)

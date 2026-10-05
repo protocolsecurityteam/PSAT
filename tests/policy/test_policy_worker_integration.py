@@ -134,6 +134,61 @@ class TestProcessSemanticInputs:
         assert semantic_errors[0]["context"]["missing_artifacts"] == ["effects", "predicate_trees"]
 
 
+class TestCrossContractEnrichmentWiring:
+    def test_enrichment_gets_this_job_s_facts_and_runs_before_labeling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        worker = PolicyWorker()
+        session = MagicMock()
+        session.execute.return_value.scalar_one_or_none.return_value = None
+        job = _job()
+        effects = {"functions": {"mintRewards()": {"selector": "0x12345678", "claims": []}}}
+        artifacts = {
+            "contract_analysis": _minimal_contract_analysis(),
+            "control_snapshot": _minimal_snapshot({}),
+            "resolved_control_graph": _graph_with_nodes([]),
+            "control_tracking_plan": {"schema_version": "0.1", "contract_address": TARGET_ADDRESS},
+            "predicate_trees": {"trees": {}},
+            "effects": effects,
+        }
+        stored: list[str] = []
+        monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
+        monkeypatch.setattr(
+            "workers.policy_worker.store_artifact", lambda _s, _j, name, data=None, text_data=None: stored.append(name)
+        )
+        monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
+        monkeypatch.setattr(
+            "workers.policy_worker.build_effective_permissions",
+            lambda *a, **kw: {"functions": [{"function": "mintRewards()", "claims": []}]},
+        )
+        monkeypatch.setattr(
+            "workers.policy_worker.resolve_control_graph", lambda **kw: ({"nodes": [], "edges": []}, {})
+        )
+        calls: list[dict[str, Any]] = []
+        policy_claim = {"claim_id": "transfer_policy.configure", "tier": "policy_derived", "witness": {}}
+
+        def fake_enrich(self, session, job, contract_analysis, control_snapshot, **kw):
+            calls.append({"stored_before": list(stored), **kw})
+            kw["ep_data"]["functions"][0]["claims"] = [policy_claim]
+            return {"mintRewards()": [policy_claim]}
+
+        labeled_claims: list[Any] = []
+
+        def fake_labels(ep_data, **kw):
+            labeled_claims.append(ep_data["functions"][0]["claims"])
+            return {"principals": []}
+
+        monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", fake_enrich)
+        monkeypatch.setattr("workers.policy_worker.build_principal_labels", fake_labels)
+
+        worker.process(session, cast(Any, job))
+
+        assert len(calls) == 1
+        assert calls[0]["target_effects"] is effects
+        assert calls[0]["ep_data"] is not None
+        # The published payload is the readiness mark a later sibling's dependent pass looks for.
+        assert "effective_permissions" in calls[0]["stored_before"]
+        assert labeled_claims == [[policy_claim]]
+
+
 # PSAT_RPC_FANOUT=1 vs =8 must store identical artifacts, and the classify cache must collapse repeats.
 
 

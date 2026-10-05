@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import get_artifact, store_artifact
 from services.policy.cross_contract_enrichment import (
     claims_writer_lock_key,
+    fetch_sibling_facts,
     lock_contract_claims,
     merge_claims,
     related_jobs_with_facts,
@@ -96,12 +98,12 @@ def _token_effects() -> dict:
     return {"functions": {TRANSFER: {"selector": _selector(TRANSFER), "claims": [_std("flow.out")]}}}
 
 
-def _caller_effects() -> dict:
+def _caller_effects(sinks: tuple[str, ...] = ("tokenA", "tokenB")) -> dict:
     return {
         "functions": {
             SWEEP: {
                 "selector": _selector(SWEEP),
-                "sinks": [_sink("tokenA.transfer", TRANSFER, "s0"), _sink("tokenB.transfer", TRANSFER, "s1")],
+                "sinks": [_sink(f"{var}.transfer", TRANSFER, f"s{i}") for i, var in enumerate(sinks)],
                 "claims": [],
             }
         }
@@ -233,15 +235,17 @@ def test_teller_claims_are_identical_across_orders(pipeline):
     assert _run_teller_vault(pipeline(), "teller_first") == _run_teller_vault(pipeline(), "vault_first")
 
 
-def _run_company_siblings(p: _Pipeline, order: list[str]) -> tuple[dict, dict]:
+def _run_company_siblings(
+    p: _Pipeline, order: list[str], sinks: tuple[str, ...] = ("tokenA", "tokenB")
+) -> tuple[dict, dict]:
     """The caller and two tokens are company siblings with no parent link, landing in ``order``."""
     caller = p.job(CALLER)
     tokens = {"tokenA": (TOKEN_A, p.job(TOKEN_A)), "tokenB": (TOKEN_B, p.job(TOKEN_B))}
     caller_snapshot = _snapshot({"tokenA": TOKEN_A, "tokenB": TOKEN_B})
     for name in order:
         if name == "caller":
-            p.land_facts(caller, _caller_effects(), caller_snapshot)
-            p.run_policy(caller, _caller_effects(), caller_snapshot)
+            p.land_facts(caller, _caller_effects(sinks), caller_snapshot)
+            p.run_policy(caller, _caller_effects(sinks), caller_snapshot)
         else:
             _addr, token = tokens[name]
             p.land_facts(token, _token_effects(), _snapshot({}))
@@ -258,12 +262,13 @@ def _run_company_siblings(p: _Pipeline, order: list[str]) -> tuple[dict, dict]:
         ["caller", "tokenB", "tokenA"],
     ],
 )
-def test_a_sibling_that_lands_later_reaches_a_job_that_already_ran(pipeline, order):
-    rows, artifact = _run_company_siblings(pipeline(), order)
-    reference_rows, reference_artifact = _run_company_siblings(pipeline(), ["tokenA", "tokenB", "caller"])
+@pytest.mark.parametrize("sinks", [("tokenA", "tokenB"), ("tokenB", "tokenA")])
+def test_a_sibling_that_lands_later_reaches_a_job_that_already_ran(pipeline, order, sinks):
+    rows, artifact = _run_company_siblings(pipeline(), order, sinks)
+    reference_rows, reference_artifact = _run_company_siblings(pipeline(), ["tokenA", "tokenB", "caller"], sinks)
 
     assert _ids(rows[SWEEP]) == [("flow.out", "policy_derived")]
-    # Two callees each prove flow.out; which witness is kept must not depend on arrival order.
+    # Two callees each prove flow.out; which witness is kept must not depend on arrival or sink order.
     assert rows == reference_rows
     assert artifact == reference_artifact
     assert artifact[SWEEP] == rows[SWEEP]
@@ -324,14 +329,29 @@ def test_sibling_scope_is_chain_and_relation_bound(pipeline, db_session):
     child_elsewhere = pipeline(f"other-{uuid.uuid4()}").job(VAULT, parent=target)
     unrelated = pipeline(f"other-{uuid.uuid4()}").job(TELLER)
     no_facts = p.job("0x" + "ee" * 20)
+    stale = p.job(TOKEN_A)
+    stale.created_at = same_company.created_at - timedelta(days=1)
     db_session.commit()
-    for job in (same_company, other_chain, child_elsewhere, unrelated):
+    for job in (stale, same_company, other_chain, child_elsewhere, unrelated):
         p.land_facts(job, _token_effects(), _snapshot({}))
     store_artifact(db_session, no_facts.id, "effects", data=_token_effects())
 
     related = related_jobs_with_facts(db_session, target, chain_id=1)
 
+    # ``stale`` shares TOKEN_A with the newer ``same_company`` job; only the newest job per address is read.
     assert {job_id for job_id, _ in related} == {same_company.id, child_elsewhere.id}
+
+
+def test_sibling_scope_follows_the_parent_link_without_a_company(pipeline, db_session):
+    p = pipeline(f"other-{uuid.uuid4()}")
+    parent = p.job(VAULT)
+    child = pipeline(f"other-{uuid.uuid4()}").job(TELLER, parent=parent)
+    sibling = pipeline(f"other-{uuid.uuid4()}").job(TOKEN_A, parent=parent)
+    for job in (parent, child, sibling):
+        p.land_facts(job, _token_effects(), _snapshot({}))
+
+    assert {job_id for job_id, _ in related_jobs_with_facts(db_session, child, chain_id=1)} == {parent.id, sibling.id}
+    assert {job_id for job_id, _ in related_jobs_with_facts(db_session, parent, chain_id=1)} == {child.id, sibling.id}
 
 
 def test_provenance_runs_without_siblings(pipeline, db_session):
@@ -418,3 +438,58 @@ def test_merge_tie_break_is_order_independent():
     assert merge_claims([a], [b]) == merge_claims([b], [a])
     assert merge_claims(merge_claims([], [b]), [a]) == merge_claims(merge_claims([], [a]), [b])
     assert merge_claims([exact], [a, b]) == [exact]
+
+
+def test_dependent_pass_derives_from_the_target_s_facts_as_stored_under_the_lock(pipeline, db_session, monkeypatch):
+    p = pipeline()
+    caller = p.job(CALLER)
+    wired = _snapshot({"tokenA": TOKEN_A, "tokenB": TOKEN_B})
+    p.land_facts(caller, _caller_effects(), wired)
+    p.run_policy(caller, _caller_effects(), wired)
+    token = p.job(TOKEN_A)
+    p.land_facts(token, _token_effects(), _snapshot({}))
+    other_session = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+
+    def _fetch_then_rewire(targets, *, session_factory):
+        facts = fetch_sibling_facts(targets, session_factory=session_factory)
+        # A re-analysis rewires the caller after the token's pass fetched its facts.
+        with other_session() as s:
+            store_artifact(s, caller.id, "control_snapshot", data=_snapshot({"tokenA": "0x" + "de" * 20}))
+        return facts
+
+    monkeypatch.setattr("workers.policy_worker.fetch_sibling_facts", _fetch_then_rewire)
+    p.run_policy(token, _token_effects(), _snapshot({}))
+
+    assert p.row_claims(caller)[SWEEP] == []
+    assert p.artifact_claims(caller)[SWEEP] == []
+
+
+def test_effects_bridge_takes_the_claims_lock_and_rereads_rows(pipeline, db_session):
+    from workers.effects_worker import EffectsWorker
+
+    p = pipeline()
+    job = p.job(CALLER)
+    p.land_facts(job, _caller_effects(), _snapshot({}))
+    p.run_policy(job, _caller_effects(), _snapshot({}))
+    contract = db_session.query(Contract).filter(Contract.job_id == job.id).one()
+    row = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).one()
+    assert row.claims == []
+    db_session.commit()
+
+    other = create_engine(DATABASE_URL)
+    try:
+        with other.begin() as conn:
+            conn.execute(
+                text("UPDATE effective_functions SET claims = CAST(:c AS jsonb) WHERE id = :id"),
+                {"c": '[{"claim_id": "flow.out", "tier": "policy_derived", "witness": {}}]', "id": row.id},
+            )
+        EffectsWorker()._lock_claim_writers(db_session, job, function_ids=[row.id])
+        with other.connect() as conn:
+            acquired = conn.execute(
+                text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": claims_writer_lock_key(contract.id)}
+            ).scalar()
+        assert acquired is False
+        assert [c["claim_id"] for c in row.claims] == ["flow.out"]
+    finally:
+        db_session.rollback()
+        other.dispose()
