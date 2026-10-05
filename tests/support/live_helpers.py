@@ -13,6 +13,47 @@ from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT
 _TERMINAL_STATUSES = ("completed", "failed", "failed_terminal")
 
 
+def company_analysis_job_ids(descendants: list[dict[str, Any]], contracts: list[dict[str, Any]]) -> list[str]:
+    """Include explicit company inventory references when selection reuses prior analyses.
+
+    The semantic live suite reads Ethereum capability endpoints. Discovery-only jobs
+    and contracts on other chains cannot supply those contract artifacts.
+    """
+    job_ids: dict[str, None] = {}
+    for job in descendants:
+        if job.get("address") and ((job.get("request") or {}).get("chain") or "ethereum") == "ethereum":
+            if isinstance(job_id := job.get("job_id"), str):
+                job_ids[job_id] = None
+    for contract in contracts:
+        if not contract.get("address") or (contract.get("chain") or "ethereum") != "ethereum":
+            continue
+        for key in ("job_id", "impl_job_id"):
+            if isinstance(job_id := contract.get(key), str):
+                job_ids[job_id] = None
+    return list(job_ids)
+
+
+def finite_alternative_members(capability: dict[str, Any]) -> set[str] | None:
+    """Expected address inventory for finite alternatives and opaque external checks.
+
+    Return None for compositions requiring a different principal shape or set algebra.
+    """
+    kind = capability.get("kind")
+    if kind == "finite_set":
+        return {member.lower() for member in capability.get("members") or []}
+    if kind == "external_check_only":
+        return set()
+    if kind != "OR":
+        return None
+    members: set[str] = set()
+    for child in capability.get("children") or []:
+        alternative = finite_alternative_members(child)
+        if alternative is None:
+            return None
+        members.update(alternative)
+    return members
+
+
 class _ClientLike(Protocol):
     """A Protocol so ``tests/meta/test_live_impl_job_resolution.py`` can pass a stub."""
 
