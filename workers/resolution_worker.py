@@ -15,10 +15,12 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
+    Artifact,
     Contract,
     ControllerValue,
     Job,
     JobStage,
+    SessionLocal,
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
@@ -37,6 +39,7 @@ from services.monitoring.role_holder_cycle import (
     OUTCOME_ROWS_WRITTEN,
     access_control_gate_open,
 )
+from services.policy.cross_contract_enrichment import mark_stale_dependents
 from services.resolution.capability_resolver import (
     find_analysis_job_for_address,
     find_dependency_provider_job_for_address,
@@ -56,7 +59,7 @@ from services.resolution.role_holder_plane import (
 from services.resolution.tracking import build_control_snapshot
 from utils.balance_status import BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
-from utils.logging import record_degraded, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
 logger = logging.getLogger("workers.resolution_worker")
@@ -208,8 +211,19 @@ class ResolutionWorker(BaseWorker):
             "resolution phase complete: control snapshot",
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "control_snapshot"},
         )
+        replaced_facts = (
+            session.execute(
+                select(Artifact.id).where(Artifact.job_id == job.id, Artifact.name == "control_snapshot").limit(1)
+            ).first()
+            is not None
+        )
         # The policy stage reads this artifact.
         store_artifact(session, job.id, "control_snapshot", data=snapshot)
+        # This job's facts are complete now; siblings whose claims they change re-run policy.
+        with log_timed_phase(logger, "cross_contract_dependents") as ph:
+            ph["marked_stale"] = mark_stale_dependents(
+                session, job, chain_id=chain_id, session_factory=SessionLocal, replaced_facts=replaced_facts
+            )
         # Reverting reads are NULL ``eth_call_error`` entries; count them separately so the resolved metric is honest.
         _controller_values = snapshot.get("controller_values", {})
         _controllers_errored = sum(

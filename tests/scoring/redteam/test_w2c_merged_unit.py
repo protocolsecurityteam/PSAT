@@ -292,3 +292,18 @@ def test_w3_a_repoint_never_upgrades_an_unscored_capability():
     )
     assert reach.state != VALUE_STATE_PROVEN_REACH
     assert reach.basis == "capability_not_scored(not_determined)"
+
+
+@pytest.mark.parametrize(
+    ("stamp", "admitted"),
+    [("policy_derived", False), ("standard_exact", True), ("invented_tier", False)],
+)
+def test_a_carried_named_entity_takes_the_tier_it_was_carried_from(stamp, admitted):
+    """An observed claim's ``callee`` was copied from the static claim it superseded, so the observation's tier
+    doesn't vouch for it."""
+    entry = {"tier": "behavioral_observed", "witness": {"callee": VAULT, "static_tier": stamp}}
+
+    keys, _bases, refused = D._repointed_entities(entry, _repoint_facts())
+
+    assert keys == ([KEY_V] if admitted else [])
+    assert bool(refused) is not admitted

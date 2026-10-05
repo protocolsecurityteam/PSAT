@@ -287,3 +287,40 @@ def test_superseding_a_static_claim_keeps_the_tier_membership_admits_on():
     assert [(c["claim_id"], c["tier"]) for c in merged] == [("pause.set", "behavioral_observed")]
     assert merged[0]["witness"]["static_tier"] == "idiom_structural"
     assert _function_grants_control(merged)
+
+
+def _policy_flow_out() -> Claim:
+    return _static(
+        "flow.out", "policy_derived", kind="cross_contract_join", callee="0x" + "ab" * 20, selector="0x12345678"
+    )
+
+
+def test_policy_derived_detail_is_never_carried_onto_an_observation():
+    """The observed claim must be the same whether the sibling-derived claim landed before the bridge or after."""
+    from services.policy.cross_contract_enrichment import merge_claims
+
+    early = claims_bridge.merge_observed_claims([_policy_flow_out()], [_executed()])
+    late = merge_claims(claims_bridge.merge_observed_claims([], [_executed()]), [_policy_flow_out()])
+
+    assert [c["tier"] for c in early] == ["behavioral_observed"]
+    assert "callee" not in early[0]["witness"]
+    assert "static_tier" not in early[0]["witness"]
+    assert late == early
+
+
+def test_an_observation_carrying_policy_derived_detail_is_rebuilt_without_it():
+    carried = _static(
+        "flow.out", "behavioral_observed", callee="0x" + "ab" * 20, static_tier="policy_derived", effect_verdict_id=1
+    )
+
+    merged = claims_bridge.merge_observed_claims([carried], [_executed()])
+
+    assert len(merged) == 1
+    assert "callee" not in merged[0]["witness"]
+    assert "static_tier" not in merged[0]["witness"]
+
+
+def test_policy_derived_claims_do_not_project_effect_labels():
+    claims = [_policy_flow_out(), _static("flow.in", "policy_derived"), _static("pause.set", "idiom_structural")]
+
+    assert claims_bridge.reproject_effect_labels(["role_management"], claims) == ["pause_toggle", "role_management"]

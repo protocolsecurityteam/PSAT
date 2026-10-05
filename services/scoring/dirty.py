@@ -25,7 +25,6 @@ SCORE_DIRTY_COVERAGE_VERIFY = "coverage_equivalence_flip"
 SCORE_DIRTY_REANALYSIS = "reanalysis_queued"
 SCORE_DIRTY_MANUAL = "manual"
 SCORE_DIRTY_MEMBERSHIP = "membership_change"
-SCORE_DIRTY_CROSS_CONTRACT = "cross_contract_enrichment"
 # Written by the loop itself when a sweep-selected protocol fails to fold and needs a queue row for backoff; listed so
 # the column has one vocabulary.
 SCORE_DIRTY_STALENESS_SWEEP = "staleness_sweep"
@@ -37,7 +36,6 @@ SCORE_DIRTY_REASONS = frozenset(
         SCORE_DIRTY_REANALYSIS,
         SCORE_DIRTY_MANUAL,
         SCORE_DIRTY_MEMBERSHIP,
-        SCORE_DIRTY_CROSS_CONTRACT,
         SCORE_DIRTY_STALENESS_SWEEP,
     }
 )
@@ -80,7 +78,6 @@ def mark_protocol_score_dirty(session: Session, protocol_id: Any, reason: str) -
 
 __all__ = [
     "SCORE_DIRTY_COVERAGE",
-    "SCORE_DIRTY_CROSS_CONTRACT",
     "SCORE_DIRTY_COVERAGE_VERIFY",
     "SCORE_DIRTY_EFFECTS",
     "SCORE_DIRTY_MANUAL",

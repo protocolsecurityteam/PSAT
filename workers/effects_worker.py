@@ -22,11 +22,9 @@ import logging
 import os
 import re
 import time
-from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.effect_cache import (
@@ -43,7 +41,7 @@ from db.effect_cache import (
     record_effect_verdict,
     upsert_cached_verdict,
 )
-from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
+from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
 from db.queue import advance_job, store_artifact
 from services.effects import claims_bridge
 from services.effects.balance_dependencies import (
@@ -552,7 +550,6 @@ class EffectsWorker(BaseWorker):
                 with log_timed_phase(logger, phase, durations_ms=durations_ms):
                     pass
             # These contracts' claims still need distilling, or the fold treats them as having no capabilities.
-            self._lock_claim_writers(session, job, function_ids=())
             self._distill_score_signals(session, job)
             self._record_metrics(counters)
             logger.info(
@@ -577,11 +574,6 @@ class EffectsWorker(BaseWorker):
         with log_timed_phase(logger, "verdict_write", durations_ms=durations_ms) as ph:
             self._write_verdicts(session, job, items, seams, counters)
             ph["verdicts_written"] = counters.verdicts_written
-            self._lock_claim_writers(
-                session,
-                job,
-                function_ids=[it.candidate.function_id for it in items if it.candidate.function_id is not None],
-            )
             ph["labeled"] = self._bridge_claims(session, items)
 
         # After the bridge so it reads the new ``behavioral_observed`` claims; outside the phase span (no verdict, no
@@ -1048,31 +1040,6 @@ class EffectsWorker(BaseWorker):
             )
             counters.verdicts_written += 1
             self._route_section9(it, verdict, tier, transcript_ptr, discrepancy, counters)
-
-    def _lock_claim_writers(self, session: Session, job: Job, *, function_ids: Iterable[int]) -> None:
-        """Hold the claims-writer lock of every contract the bridge and distillation touch until the job commits, so a
-        sibling's cross-contract claims land wholly before or after them; then drop cached rows read before the lock.
-        """
-        from services.policy.cross_contract_enrichment import lock_contract_claims
-
-        contract_ids = set(session.execute(select(Contract.id).where(Contract.job_id == job.id)).scalars())
-        fn_ids = list(function_ids)
-        if fn_ids:
-            contract_ids.update(
-                session.execute(select(EffectiveFunction.contract_id).where(EffectiveFunction.id.in_(fn_ids))).scalars()
-            )
-        resume_id = (job.request or {}).get("effects_resume_work_id")
-        if resume_id:
-            from db.models.balance_work import PendingEffectsWork
-
-            work = session.get(PendingEffectsWork, int(resume_id))
-            if work is not None and work.contract_id is not None:
-                contract_ids.add(work.contract_id)
-        if not contract_ids:
-            return
-        session.flush()
-        lock_contract_claims(session, contract_ids)
-        session.expire_all()
 
     def _bridge_claims(self, session: Session, items: list[_Item]) -> int:
         """Fold this job's proven verdicts (read back from the DB, including cache hits) into claims on the matching

@@ -184,7 +184,7 @@ class TestCrossContractEnrichmentWiring:
         assert len(calls) == 1
         assert calls[0]["target_effects"] is effects
         assert calls[0]["ep_data"] is not None
-        # The published payload is the readiness mark a later sibling's dependent pass looks for.
+        # A sibling's staleness check skips a job that hasn't published, so publishing must precede the own pass.
         assert "effective_permissions" in calls[0]["stored_before"]
         assert labeled_claims == [[policy_claim]]
 

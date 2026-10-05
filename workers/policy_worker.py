@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import logging
 import os
 from collections.abc import Callable, Mapping
@@ -38,11 +37,8 @@ from services.effects.config import effects_stage_enabled
 from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materialize_fp_principal_nodes
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.cross_contract_enrichment import (
-    SiblingFacts,
     apply_claims_to_payload,
-    enrich_dependent,
     fetch_sibling_facts,
-    lock_contract_claims,
     related_jobs_with_facts,
     selector_by_function_key,
     write_claims_to_rows,
@@ -50,6 +46,7 @@ from services.policy.cross_contract_enrichment import (
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
 from services.policy.principal_history import build_principal_history
+from services.policy.stale_policy import clear_policy_stale
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.graph_tables import replace_control_graph_rows
@@ -59,6 +56,7 @@ from services.static.claims import Claim
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
+from workers.retry_policy import classify
 
 logger = logging.getLogger("workers.policy_worker")
 
@@ -592,12 +590,6 @@ class PolicyWorker(BaseWorker):
                 context=f"policy_function_principals:{job.id}",
             )
 
-        if contract_row is not None:
-            # A sibling's dependent pass rewrites this artifact under the lock; publishing outside it could interleave
-            # with that read-modify-write and restore a previous run's payload. The store's commit releases it. Earlier
-            # writes (a membership dirty mark) commit first so the wait holds no row locks.
-            session.commit()
-            lock_contract_claims(session, [contract_row.id])
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
@@ -756,8 +748,7 @@ class PolicyWorker(BaseWorker):
         finally:
             _persist_spawn_summary(session, job, spawn_result)
 
-        # Mint policy-derived claims from sibling facts, and hand this job's facts to siblings that already ran. Before
-        # labeling, which reads the claims.
+        # Mint policy-derived claims from sibling facts before labeling, which reads the claims.
         self._enrich_cross_contract(
             session,
             job,
@@ -956,7 +947,7 @@ class PolicyWorker(BaseWorker):
     ) -> dict[str, list[Claim]]:
         """Mint policy-derived claims from sibling facts via ``services.static.cross_contract``'s derivations
         (value-flow propagation, transfer-policy configuration, beacon upgrade, proxy-verified upgrade provenance),
-        merged onto each function's claims; then merge this job's contribution into siblings that already ran theirs.
+        merged onto each function's claims.
 
         Derivations key on Slither full_name while rows store the ABI signature, so they're joined by the selector from
         ``function_records``.
@@ -976,16 +967,18 @@ class PolicyWorker(BaseWorker):
             target_effects = loaded if isinstance(loaded, dict) else None
 
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms) as ph:
-            contract_row = session.execute(
-                select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
-            ).scalar_one_or_none()
-            if contract_row is not None:
-                session.commit()
-                lock_contract_claims(session, [contract_row.id])
+            # Committed before the fact read: a sibling whose facts land after it marks this job stale again.
+            clear_policy_stale(session, job.id)
+            session.commit()
             facts = fetch_sibling_facts(
                 related_jobs_with_facts(session, job, chain_id=_chain_id_for_job(job)),
                 session_factory=SessionLocal,
             )
+            for exc in facts.unreadable.values():
+                # Not found out yet: retry rather than publish without the sibling. A proven-absent body joins the
+                # siblings that never stored facts.
+                if exc is not None and classify(exc) == "transient":
+                    raise exc
 
             deployment_address = request.get("proxy_address") or job.address or ""
             enriched = derive_cross_contract_claims(
@@ -1005,6 +998,9 @@ class PolicyWorker(BaseWorker):
                     job.id,
                     {fn_sig: [c["claim_id"] for c in claims] for fn_sig, claims in enriched.items()},
                 )
+                contract_row = session.execute(
+                    select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
+                ).scalar_one_or_none()
                 if contract_row is not None:
                     # An impl row can back several deployments; these claims belong to the deployment the writer tagged,
                     # derived the same way.
@@ -1018,92 +1014,10 @@ class PolicyWorker(BaseWorker):
                     )
                 if ep_data is not None:
                     apply_claims_to_payload(ep_data, enriched)
-                    # Merged into the stored payload, which also holds what siblings' dependent passes added since
-                    # this job published it; one whose artifacts failed to fetch above is missing from ``enriched``.
-                    stored = get_artifact(session, job.id, "effective_permissions")
-                    payload = stored if isinstance(stored, dict) else ep_data
-                    if payload is not ep_data:
-                        apply_claims_to_payload(payload, enriched)
-                    store_artifact(session, job.id, "effective_permissions", data=payload)
-            # Releases the claims-writer lock.
+                    store_artifact(session, job.id, "effective_permissions", data=ep_data)
             session.commit()
 
-        with log_timed_phase(logger, "cross_contract_dependents", durations_ms=durations_ms) as ph:
-            ph["dependent_passes"] = self._enrich_dependents(session, job, facts, target_effects, control_snapshot)
         return enriched
-
-    def _enrich_dependents(
-        self,
-        session: Session,
-        job: Job,
-        facts: SiblingFacts,
-        target_effects: dict | None,
-        control_snapshot: dict,
-    ) -> int:
-        """Merge what this job contributes to each sibling's derivation into that sibling; returns the passes run."""
-        from services.static.cross_contract import (
-            build_callee_claim_map,
-            derive_cross_contract_claims,
-            sibling_transfer_hook_links,
-        )
-
-        source_address = (job.address or "").lower()
-        if not source_address or target_effects is None:
-            return 0
-        # Read before any rollback below expires ``job``.
-        source_job_id = job.id
-        source_effects = {source_address: target_effects}
-        source_snapshots = {source_address: control_snapshot}
-        callee_claim_map = build_callee_claim_map(source_effects)
-        redistill = effects_stage_enabled()
-        passes = 0
-
-        def _contribution(sibling_address: str, sibling_effects: Any, sibling_snapshot: Any) -> dict[str, list[Claim]]:
-            if not isinstance(sibling_effects, dict):
-                return {}
-            controller_values = (
-                sibling_snapshot.get("controller_values", {}) if isinstance(sibling_snapshot, dict) else {}
-            )
-            return derive_cross_contract_claims(
-                sibling_effects,
-                controller_values,
-                callee_claim_map,
-                sibling_transfer_hooks=sibling_transfer_hook_links(sibling_address, source_effects, source_snapshots),
-            )
-
-        for address, sibling_effects in sorted(facts.effects.items()):
-            if address == source_address or not _contribution(address, sibling_effects, facts.snapshots.get(address)):
-                continue
-            sibling_job_id = facts.job_for_address[address]
-            passes += 1
-            for attempt in (1, 2):
-                try:
-                    enrich_dependent(
-                        session,
-                        dependent_job_id=sibling_job_id,
-                        contribution_for=functools.partial(_contribution, address),
-                        source_job_id=source_job_id,
-                        redistill=redistill,
-                    )
-                    break
-                except Exception as exc:
-                    session.rollback()
-                    if attempt == 1:
-                        continue
-                    # Nothing re-runs this pass; the sibling keeps its claims without this job's contribution.
-                    record_degraded(
-                        phase="cross_contract_dependents",
-                        exc=exc,
-                        context={"sibling_address": address, "sibling_job_id": str(sibling_job_id)},
-                    )
-                    logger.warning(
-                        "Job %s: cross-contract claims for sibling %s failed: %s",
-                        source_job_id,
-                        address,
-                        exc,
-                        extra={"exc_type": type(exc).__name__, "sibling_job_id": str(sibling_job_id)},
-                    )
-        return passes
 
     def _resolve_authority(
         self,
