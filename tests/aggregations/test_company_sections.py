@@ -141,7 +141,7 @@ def test_explicit_admin_refresh_is_authorized_and_uses_shared_builder(prepared, 
     monkeypatch.setattr(deps, "ADMIN_KEY", "test-admin")
     monkeypatch.setattr(api.app, "middleware_stack", None)
     client = TestClient(api.app)
-    monkeypatch.delitem(api.app.dependency_overrides, deps.require_admin_key, raising=False)
+    monkeypatch.delitem(api.app.dependency_overrides, deps.require_admin, raising=False)
     path = f"/api/company/{protocol.name}/refresh"
     assert client.post(path).status_code == 401
     assert pages.read_response(session, request(), protocol.name) is not None

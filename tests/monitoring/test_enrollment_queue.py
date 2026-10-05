@@ -829,9 +829,9 @@ def test_discovery_gate_promotion_marks_dirty(qsession, monkeypatch):
 
 def test_reenroll_route_marks_dirty(api_client, db_session, monkeypatch):
     import api as api_module
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
+    api_module.app.dependency_overrides[require_admin] = lambda: None
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", lambda *a, **kw: "0x100")
     proto = Protocol(name=NAME_PREFIX + "reenroll")
     try:
@@ -847,7 +847,7 @@ def test_reenroll_route_marks_dirty(api_client, db_session, monkeypatch):
         assert row is not None
         assert row.reason == "manual"
     finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
+        api_module.app.dependency_overrides.pop(require_admin, None)
         db_session.execute(delete(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id))
         db_session.execute(delete(Protocol).where(Protocol.id == proto.id))
         db_session.commit()
@@ -855,9 +855,9 @@ def test_reenroll_route_marks_dirty(api_client, db_session, monkeypatch):
 
 def test_add_audit_route_marks_dirty(api_client, db_session):
     import api as api_module
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
+    api_module.app.dependency_overrides[require_admin] = lambda: None
     name = NAME_PREFIX + "audit"
     proto = Protocol(name=name)
     try:
@@ -876,7 +876,7 @@ def test_add_audit_route_marks_dirty(api_client, db_session):
         assert row is not None
         assert row.reason == "audit_added"
     finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
+        api_module.app.dependency_overrides.pop(require_admin, None)
         from db.models import AuditReport
 
         db_session.execute(delete(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id == proto.id))

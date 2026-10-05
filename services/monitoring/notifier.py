@@ -6,7 +6,7 @@ import logging
 from urllib.parse import urlparse
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -28,31 +28,16 @@ from services.monitoring.salience import (
     SALIENCE_NOTABLE,
     SALIENCE_ROUTINE,
 )
-from utils.egress import UnsafeUrlError, connect_host
+from utils.egress import is_discord_webhook
 
 logger = logging.getLogger(__name__)
 
 DISCORD_TIMEOUT = 10
 
-# Webhook URLs are user-supplied; without this gate they are an SSRF sink.
-_DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"})
-
-
-def _is_discord_webhook(webhook_url: str) -> bool:
-    # Same host parser as the SSRF guard, so backslash/userinfo tricks can't make them disagree.
-    parsed = urlparse(webhook_url)
-    if parsed.scheme != "https":
-        return False
-    try:
-        host = connect_host(webhook_url)
-    except UnsafeUrlError:
-        return False
-    return host.lower() in _DISCORD_WEBHOOK_HOSTS
-
 
 def _send_discord(webhook_url: str, embed: dict) -> bool:
     """Post one embed; ``True`` iff the webhook accepted it, so rejected posts don't count as sent."""
-    if not _is_discord_webhook(webhook_url):
+    if not is_discord_webhook(webhook_url):
         logger.warning(
             "Skipping non-Discord webhook target",
             extra={"host": urlparse(webhook_url).hostname},
@@ -549,6 +534,15 @@ def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) 
     return _SALIENCE_ORDER[level] >= _SALIENCE_ORDER[minimum]
 
 
+def _deliverable_subscriptions(session: Session, protocol_ids: list[int]) -> list[ProtocolSubscription]:
+    """Subscriptions with a delivery target: an inline URL (admin rows) or a saved account webhook."""
+    stmt = select(ProtocolSubscription).where(
+        ProtocolSubscription.protocol_id.in_(protocol_ids),
+        or_(ProtocolSubscription.discord_webhook_url.isnot(None), ProtocolSubscription.webhook_id.isnot(None)),
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
 def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> None:
     """Send Discord notifications for governance/monitoring events to each protocol's subscriptions, honouring their
     filters.
@@ -569,16 +563,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
         return
 
     protocol_ids = list(events_by_protocol.keys())
-    subs = (
-        session.execute(
-            select(ProtocolSubscription).where(
-                ProtocolSubscription.protocol_id.in_(protocol_ids),
-                ProtocolSubscription.discord_webhook_url.isnot(None),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    subs = _deliverable_subscriptions(session, protocol_ids)
 
     if not subs:
         return
@@ -611,7 +596,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                     continue
 
                 try:
-                    if _send_discord(sub.discord_webhook_url, embed):  # pyright: ignore[reportArgumentType]
+                    if _send_discord(sub.delivery_url, embed):  # pyright: ignore[reportArgumentType]
                         sent += 1
                     else:
                         failed += 1
@@ -621,6 +606,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                         "Discord notification failed for a protocol subscription",
                         extra={
                             "subscription_id": str(sub.id),
+                            "user_id": str(sub.user_id) if sub.user_id else None,
                             "protocol_id": protocol_id,
                             "exc_type": type(exc).__name__,
                             "error": str(exc),
@@ -647,16 +633,7 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
     if not protocol_id:
         return
 
-    subs = (
-        session.execute(
-            select(ProtocolSubscription).where(
-                ProtocolSubscription.protocol_id == protocol_id,
-                ProtocolSubscription.discord_webhook_url.isnot(None),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    subs = _deliverable_subscriptions(session, [protocol_id])
     if not subs:
         return
 
@@ -723,7 +700,7 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
     failed = 0
     for sub in subs:
         try:
-            if _send_discord(sub.discord_webhook_url, embed):  # pyright: ignore[reportArgumentType]
+            if _send_discord(sub.delivery_url, embed):  # pyright: ignore[reportArgumentType]
                 sent += 1
             else:
                 failed += 1

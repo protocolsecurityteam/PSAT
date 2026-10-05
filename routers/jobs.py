@@ -44,7 +44,7 @@ router = APIRouter()
 W5_ADMIN_ACTOR = "admin_api_key"
 
 
-@router.get("/api/jobs", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.get("/api/jobs", dependencies=[Depends(deps.require_admin)], response_model=None)
 def list_jobs() -> list[JobDict]:
     with deps.SessionLocal() as session:
         stmt = select(Job).order_by(Job.created_at.desc())
@@ -52,7 +52,7 @@ def list_jobs() -> list[JobDict]:
         return [job.to_dict() for job in jobs]
 
 
-@router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.post("/api/analyze", dependencies=[Depends(deps.require_admin)], response_model=None)
 def analyze_address(request: AnalyzeRequest) -> JobDict:
     # Allowlist on the resolved chain, so chainless and company/dapp submissions are unaffected. An address
     # submission naming a chain must name a registered one: the string is stored verbatim.
@@ -94,7 +94,7 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
 
 @router.post(
     "/api/company/{company_name}/analyze-remaining",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
@@ -153,7 +153,7 @@ def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
 
 @router.delete(
     "/api/company/{company_name}/queued-jobs",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def cancel_queued_company_jobs(company_name: str) -> CancelQueuedJobsResponse:
@@ -179,7 +179,7 @@ def cancel_queued_company_jobs(company_name: str) -> CancelQueuedJobsResponse:
 
 @router.delete(
     "/api/company/{company_name}/addresses/{address}",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def delete_company_address(
@@ -217,7 +217,7 @@ def delete_company_address(
     return {"company": company_name, "address": address, "chain": chain_name, "deleted": True}
 
 
-@router.get("/api/jobs/{job_id}", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.get("/api/jobs/{job_id}", dependencies=[Depends(deps.require_admin)], response_model=None)
 def get_job(job_id: str) -> JobDict:
     with deps.SessionLocal() as session:
         job = session.get(Job, job_id)
@@ -237,7 +237,7 @@ class JobErrorsResponse(BaseModel):
 @router.get(
     "/api/jobs/{job_id}/errors",
     response_model=JobErrorsResponse,
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
 )
 def get_job_errors(job_id: str) -> JobErrorsResponse:
     """Empty list when the artifact is missing; 404 means no such job."""
@@ -287,7 +287,7 @@ def get_job_errors(job_id: str) -> JobErrorsResponse:
         )
 
 
-@router.post("/api/jobs/{job_id}/retry", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.post("/api/jobs/{job_id}/retry", dependencies=[Depends(deps.require_admin)], response_model=None)
 def retry_job(job_id: str) -> JobDict:
     """Operator retry of a ``failed_terminal`` job: reset to a fresh-looking queued row and append a degraded
     ``manual_retry`` StageError so the log doesn't show a silent recovery. 409 for any other state.
@@ -376,7 +376,7 @@ def retry_job(job_id: str) -> JobDict:
         return job.to_dict()
 
 
-@router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin)], response_model=None)
 def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
     """Per-stage timing artifacts keyed by stage, for the bench harness. Admin-gated operator telemetry."""
     with deps.SessionLocal() as session:

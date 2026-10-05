@@ -103,9 +103,7 @@ def list_monitored_contracts(
         return [monitored_contract_payload(c) for c in contracts]
 
 
-@router.post(
-    "/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin_key)], response_model=None
-)
+@router.post("/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin)], response_model=None)
 def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> MonitoredContractItem:
     # Allowlist: enrollment takes scanner leases and RPC on that chain.
     try:
@@ -170,9 +168,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
         return monitored_contract_payload(existing)
 
 
-@router.patch(
-    "/api/monitored-contracts/{contract_id}", dependencies=[Depends(deps.require_admin_key)], response_model=None
-)
+@router.patch("/api/monitored-contracts/{contract_id}", dependencies=[Depends(deps.require_admin)], response_model=None)
 def update_monitored_contract(contract_id: str, request: UpdateMonitoredContractRequest) -> MonitoredContractItem:
     try:
         parsed = uuid.UUID(contract_id)

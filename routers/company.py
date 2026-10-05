@@ -435,7 +435,7 @@ def company_summary(company_name: str, request: Request) -> Response | dict:
             raise HTTPException(404, "Company not found") from None
 
 
-@router.post("/api/company/{company_name}/refresh", dependencies=[Depends(deps.require_admin_key)], status_code=202)
+@router.post("/api/company/{company_name}/refresh", dependencies=[Depends(deps.require_admin)], status_code=202)
 def refresh_company(company_name: str) -> dict:
     with deps.SessionLocal() as session:
         identities = eligible_company_names(session)

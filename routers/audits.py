@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/audits/pipeline", dependencies=[Depends(deps.require_admin_key)])
+@router.get("/api/audits/pipeline", dependencies=[Depends(deps.require_admin)])
 def audits_pipeline() -> dict[str, Any]:
     """In-flight audit extraction for the monitor page, each list capped at ``_PIPELINE_BUCKET_LIMIT``.
 
@@ -196,7 +196,7 @@ def contract_audit_timeline(contract_id: int) -> dict[str, Any]:
 
 @router.post(
     "/api/company/{company_name}/refresh_coverage",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def refresh_company_coverage(
@@ -230,7 +230,7 @@ def refresh_company_coverage(
 
 @router.post(
     "/api/audits/{audit_id}/reextract_scope",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def reextract_audit_scope(audit_id: int) -> ReextractScopeResponse:
@@ -255,7 +255,7 @@ def reextract_audit_scope(audit_id: int) -> ReextractScopeResponse:
 
 @router.post(
     "/api/company/{company_name}/audits",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDict:
@@ -303,7 +303,7 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDic
 
 @router.delete(
     "/api/audits/{audit_id}",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
     response_model=None,
 )
 def delete_audit(audit_id: int) -> DeleteAuditResponse:

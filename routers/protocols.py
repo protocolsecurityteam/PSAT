@@ -12,6 +12,7 @@ from db.models import (
     Protocol,
     ProtocolSubscription,
     TvlSnapshot,
+    User,
 )
 from schemas.api_requests import ProtocolSubscribeRequest
 from schemas.api_responses import (
@@ -40,9 +41,7 @@ def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractItem]:
         return [monitored_contract_payload(c) for c in contracts]
 
 
-@router.post(
-    "/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin_key)], response_model=None
-)
+@router.post("/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin)], response_model=None)
 def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollResponse:
     """Run enrollment directly, bypassing in-flight job checks; for fixing wrong results or manual DB changes."""
     # Allowlist: re-enroll spawns monitoring work on that chain.
@@ -83,9 +82,7 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollRes
         }
 
 
-@router.post(
-    "/api/protocols/{protocol_id}/subscribe", dependencies=[Depends(deps.require_admin_key)], response_model=None
-)
+@router.post("/api/protocols/{protocol_id}/subscribe", dependencies=[Depends(deps.require_admin)], response_model=None)
 def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -> SubscriptionItem:
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)
@@ -111,32 +108,38 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
             "label": sub.label,
             "event_filter": sub.event_filter,
             "created_at": sub.created_at.isoformat() if sub.created_at else None,
+            "owner_email": None,
         }
 
 
 @router.get(
-    "/api/protocols/{protocol_id}/subscriptions", dependencies=[Depends(deps.require_admin_key)], response_model=None
+    "/api/protocols/{protocol_id}/subscriptions", dependencies=[Depends(deps.require_admin)], response_model=None
 )
 def list_protocol_subscriptions(protocol_id: int) -> list[SubscriptionItem]:
     from utils.secrets import sanitize_url
 
     with deps.SessionLocal() as session:
-        stmt = select(ProtocolSubscription).where(ProtocolSubscription.protocol_id == protocol_id)
-        subs = session.execute(stmt).scalars().all()
+        stmt = (
+            select(ProtocolSubscription, User.email)
+            .outerjoin(User, User.id == ProtocolSubscription.user_id)
+            .where(ProtocolSubscription.protocol_id == protocol_id)
+        )
+        rows = session.execute(stmt).all()
         return [
             {
                 "id": str(s.id),
                 "protocol_id": s.protocol_id,
-                "discord_webhook_url": (sanitize_url(s.discord_webhook_url) if s.discord_webhook_url else None),
+                "discord_webhook_url": (sanitize_url(s.delivery_url) if s.delivery_url else None),
                 "label": s.label,
                 "event_filter": s.event_filter,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
+                "owner_email": owner_email,
             }
-            for s in subs
+            for s, owner_email in rows
         ]
 
 
-@router.delete("/api/protocol-subscriptions/{sub_id}", dependencies=[Depends(deps.require_admin_key)])
+@router.delete("/api/protocol-subscriptions/{sub_id}", dependencies=[Depends(deps.require_admin)])
 def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
     try:
         parsed = uuid.UUID(sub_id)

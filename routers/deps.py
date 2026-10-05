@@ -7,10 +7,11 @@ import logging
 import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Header, HTTPException, Request, status
 
-from db.models import SessionLocal
+from db.models import SessionLocal, User
 from db.queue import (
     create_job,
     find_existing_job_for_address,
@@ -26,6 +27,7 @@ from db.storage import (
     deserialize_artifact,
     get_storage_client,
 )
+from services.auth.sessions import SESSION_COOKIE, is_admin, resolve_session
 from services.clients.rpc import default_rpc_url
 from utils.logging import trace_id_var
 
@@ -46,16 +48,7 @@ MAX_TVL_HISTORY_DAYS = 90
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
-def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
-    """Raises 401 unless an admin key is configured and the header matches."""
-    if not ADMIN_KEY:
-        reason = "admin_key_not_configured"
-    elif not x_psat_admin_key:
-        reason = "missing_key"
-    elif not hmac.compare_digest(x_psat_admin_key, ADMIN_KEY):
-        reason = "key_mismatch"
-    else:
-        return
+def _reject_admin(request: Request, reason: str) -> None:
     # Never log the supplied key.
     logger.warning(
         "admin key rejected on %s",
@@ -65,9 +58,74 @@ def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(de
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin key required")
 
 
-def admin_key_valid(x_psat_admin_key: str | None) -> bool:
-    """Non-raising variant for endpoints that broaden their response for admins."""
-    return bool(ADMIN_KEY) and bool(x_psat_admin_key) and hmac.compare_digest(x_psat_admin_key, ADMIN_KEY)
+def _key_reason(x_psat_admin_key: str | None) -> str | None:
+    if not ADMIN_KEY:
+        return "admin_key_not_configured"
+    if not x_psat_admin_key:
+        return "missing_key"
+    if not hmac.compare_digest(x_psat_admin_key, ADMIN_KEY):
+        return "key_mismatch"
+    return None
+
+
+def _allowed_origins() -> set[str]:
+    return {o.strip() for o in os.environ.get("PSAT_SITE_ORIGIN", "").split(",") if o.strip()}
+
+
+def check_same_origin(request: Request) -> None:
+    """CSRF gate for cookie-authenticated writes: the Origin must be the site itself or a configured site origin."""
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    origin = request.headers.get("origin")
+    if origin and (origin in _allowed_origins() or urlsplit(origin).netloc == request.headers.get("host")):
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-origin request refused")
+
+
+def current_user(request: Request) -> User | None:
+    """The signed-in user from the session cookie, or ``None``. Resolved once per request."""
+    if hasattr(request.state, "psat_user"):
+        return request.state.psat_user
+    user = None
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        with SessionLocal() as session:
+            user = resolve_session(session, token)
+    request.state.psat_user = user
+    return user
+
+
+def require_user(request: Request) -> User:
+    user = current_user(request)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in required")
+    check_same_origin(request)
+    return user
+
+
+def require_admin(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
+    """An admin is either the shared key (CI, scripts) or a signed-in account on the admin allowlist."""
+    reason = _key_reason(x_psat_admin_key)
+    if reason is None:
+        return
+    # A wrong key is a hard fail even with a valid cookie, so a stale key in a script surfaces instead of hiding.
+    user = current_user(request) if not x_psat_admin_key else None
+    if user is not None and is_admin(user):
+        check_same_origin(request)
+        # Mutation audit lines carry the same trace_id, which ties them to this account.
+        logger.info(
+            "admin access via account",
+            extra={"trace_id": trace_id_var.get(), "path": request.url.path, "user_id": str(user.id)},
+        )
+        return
+    _reject_admin(request, reason)
+
+
+def is_admin_request(request: Request, x_psat_admin_key: str | None) -> bool:
+    if _key_reason(x_psat_admin_key) is None:
+        return True
+    user = current_user(request)
+    return user is not None and is_admin(user)
 
 
 def log_admin_mutation(action: str, **fields: Any) -> None:
@@ -98,13 +156,16 @@ __all__ = [
     "StorageUnavailable",
     "_ADDRESS_RE",
     "_normalize_address_or_400",
-    "admin_key_valid",
+    "check_same_origin",
     "create_job",
+    "current_user",
     "deserialize_artifact",
     "find_existing_job_for_address",
     "get_all_artifacts",
     "get_artifact",
     "get_storage_client",
+    "is_admin_request",
     "log_admin_mutation",
-    "require_admin_key",
+    "require_admin",
+    "require_user",
 ]
