@@ -18,6 +18,14 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
 
     A raising matcher only forfeits its own claims. Each claim keeps its strongest tier; ordering is deterministic.
     """
+    if (
+        isinstance(effects, dict)
+        and not effects.get("effect_scopes_version")
+        and getattr(contract, "compilation_unit", None) is not None
+    ):
+        from ..contract_analysis_pipeline.effect_scopes import attach_effect_scopes
+
+        attach_effect_scopes(contract, predicate_trees, effects)
     discover()
     ctx = ClaimContext(contract, effects, predicate_trees)
     signatures = ctx.function_signatures()
@@ -28,9 +36,39 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
             if not entry.gate(ctx):
                 continue
             for signature in signatures:
+                if ctx.effect_record(signature).get("execution_outcome") == "always_reverts":
+                    continue
                 evidence = entry.trigger(ctx, signature)
                 if evidence is None:
                     continue
+                sites = ctx.effect_record(signature).get("effect_scopes") or []
+                source_sites = evidence.witness.get("source_sites")
+                if source_sites:
+                    selected = [
+                        s for s in sites if {"declaration": s["declaration"], "node": s["node"]} in source_sites
+                    ]
+                elif evidence.witness.get("sink_ids"):
+                    selected = [s for s in sites if set(s.get("sink_ids", [])) & set(evidence.witness["sink_ids"])]
+                else:
+                    selected = []
+                if source_sites and not selected and ctx.effect_record(signature).get("effect_scopes_complete"):
+                    continue
+                if selected:
+                    from ..contract_analysis_pipeline.predicate_types import make_or_node
+
+                    scope_tree = (
+                        make_or_node([s["predicate"] for s in selected])
+                        if all(s.get("predicate") for s in selected)
+                        else None
+                    )
+                    scoped_predicates = {**(predicate_trees or {}), "trees": {**ctx._trees, signature: scope_tree}}
+                    scoped_ctx = ClaimContext(contract, effects, scoped_predicates)
+                    refined = entry.trigger(scoped_ctx, signature)
+                    if refined is not None:
+                        evidence = refined
+                    evidence.witness["authority_scope_ids"] = [s["id"] for s in selected]
+                elif source_sites:
+                    evidence.witness["authority_scope_ids"] = []
                 functions[signature].append(emit_claim(entry.claim_id, evidence.tier, evidence.witness))
         except Exception:
             logger.warning(

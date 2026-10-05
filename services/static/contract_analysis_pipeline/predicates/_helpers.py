@@ -51,7 +51,7 @@ def _make_leaf(
     param_indices: list[int] = [
         idx for o in operands if o["source"] == "parameter" and (idx := o.get("parameter_index")) is not None
     ]
-    return {
+    leaf: LeafPredicate = {
         "kind": kind,
         "operator": operator,
         "authority_role": "business",  # filled in by caller
@@ -61,6 +61,19 @@ def _make_leaf(
         "expression": gate.expression_text or "",
         "basis": list(gate.basis),
     }
+
+    if gate.node is not None and gate.containing_function is not None:
+        from ..structural_evidence import evidence_for
+
+        owner = gate.containing_function
+        leaf["source_function"] = getattr(owner, "canonical_name", owner.full_name)
+        leaf["source_node_id"] = gate.node.node_id
+        if getattr(owner, "contract", None) is not None:
+            leaf["structural_predicate"] = {
+                "polarity": gate.polarity,
+                "value": evidence_for(owner.contract).summary(owner).expression(gate.condition_value),
+            }
+    return leaf
 
 
 def _unsupported_leaf(reason: str, expression: str, *, references_msg_sender: bool = False) -> LeafPredicate:

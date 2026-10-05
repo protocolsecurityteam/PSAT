@@ -116,7 +116,7 @@ def test_an_or_escape_means_the_leaf_is_not_mandatory():
         "op": "OR",
         "children": [
             _leaf(operands=[_param(0), STATE_VAR], parameter_indices=[0]),
-            _leaf(operator="truthy", operands=[CONSTANT]),
+            _leaf(operator="truthy", operands=[{"source": "constant", "constant_value": "True", "value_type": "bool"}]),
         ],
     }
     assert _facts.param_constraint(_ctx(tree), "f(address,uint256)", 0)["state"] == "unconstrained_proven"
@@ -424,6 +424,20 @@ def _safe_ctx() -> ClaimContext:
     return ClaimContext(None, {"contract_name": "SafeWallet", "functions": functions}, {"trees": trees})
 
 
+def test_safe_abi_alone_does_not_prove_a_signature_commitment():
+    ctx = _safe_ctx()
+    exec_tx = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
+    assert _facts.standard_destination_commitment(ctx, exec_tx) is None
+    for index in range(10):
+        verdict = _facts.param_constraint(ctx, exec_tx, index, mode="external_call")
+        assert verdict == {"state": "not_determined"}
+    for module_fn in (
+        "execTransactionFromModule(address,uint256,bytes,uint8)",
+        "execTransactionFromModuleReturnData(address,uint256,bytes,uint8)",
+    ):
+        assert _facts.standard_destination_commitment(ctx, module_fn) is None
+
+
 def test_a_module_exec_gate_pins_the_caller_not_the_destination():
     """The gate proves the destination free; an enabled module calls any target, so never ``pins: True``."""
     ctx = _safe_ctx()
@@ -465,3 +479,14 @@ def test_the_signed_entry_alone_would_be_opaque_without_the_standard():
     ctx = ClaimContext(None, {"contract_name": "NotASafe", "functions": functions}, {"trees": {exec_tx: tree}})
     assert _facts.standard_destination_commitment(ctx, exec_tx) is None
     assert _facts.param_constraint(ctx, exec_tx, 0, mode="external_call") == {"state": "not_determined"}
+
+
+def test_unknown_constant_is_not_evidence_of_a_public_escape():
+    tree = {
+        "op": "OR",
+        "children": [
+            _leaf(operands=[_param(0), STATE_VAR], parameter_indices=[0]),
+            _leaf(operator="truthy", operands=[CONSTANT]),
+        ],
+    }
+    assert _facts.param_constraint(_ctx(tree), "f(address,uint256)", 0)["state"] == "not_determined"

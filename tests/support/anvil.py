@@ -6,9 +6,50 @@ import time
 from pathlib import Path
 
 import pytest
+import requests
+from eth_abi.abi import decode, encode
+from eth_utils.crypto import keccak
 
 PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ACCOUNT0 = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+
+
+def calldata(signature, values=()):
+    types = signature.split("(", 1)[1][:-1].split(",") if not signature.endswith("()") else []
+    return "0x" + (keccak(text=signature)[:4] + encode(types, list(values))).hex()
+
+
+def rpc(url, method, params):
+    response = requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, timeout=15)
+    response.raise_for_status()
+    body = response.json()
+    if "error" in body:
+        raise RuntimeError(body["error"])
+    return body["result"]
+
+
+def send(url, sender, data, to=None, *, value=0):
+    tx = {"from": sender, "data": data, "gas": hex(8_000_000)}
+    if value:
+        tx["value"] = hex(value)
+    if to is not None:
+        tx["to"] = to
+    tx_hash = rpc(url, "eth_sendTransaction", [tx])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        receipt = rpc(url, "eth_getTransactionReceipt", [tx_hash])
+        if receipt is not None:
+            return receipt
+        time.sleep(0.02)
+    raise AssertionError("Anvil did not mine the transaction")
+
+
+def call(url, address, signature, values=(), returns=(), sender=None, block="latest"):
+    tx = {"to": address, "data": calldata(signature, values)}
+    if sender is not None:
+        tx["from"] = sender
+    result = rpc(url, "eth_call", [tx, block])
+    return decode(list(returns), bytes.fromhex(result[2:])) if returns else result
 
 
 def _free_port() -> int:

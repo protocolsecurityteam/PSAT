@@ -202,6 +202,14 @@ def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
 
 
 def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExpr:
+    if _is_recovered_signer_membership(leaf) or (leaf.get("authority_proof") or {}).get("state") == "not_determined":
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=ctx.contract_address,
+                target_call_selector=None,
+                extra={"basis": ["caller_tainted_authority_unresolved", "signer_authorization_unresolved"]},
+            )
+        )
     if leaf.get("kind") == "unsupported":
         return CapabilityExpr.unsupported(leaf.get("unsupported_reason") or "unsupported")
 
@@ -370,7 +378,14 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             return cap
         return _resolve_external_bool(leaf, ctx)
 
-    if kind == "signature_auth":
+    if kind in ("signature_auth", "authorization"):
+        descriptor = leaf.get("set_descriptor")
+        if descriptor is not None and descriptor.get("kind") == "state_authority":
+            from ..effect_scopes import resolve_state_authority
+
+            return resolve_state_authority(descriptor, ctx)
+        if descriptor is not None:
+            return ctx.adapter.enumerate(descriptor, ctx.contract_address)
         signer = _resolve_signer_from_leaf(leaf, ctx)
         return CapabilityExpr.signature_witness(signer)
 
@@ -403,6 +418,12 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
     return CapabilityExpr.unsupported(f"unknown_leaf_kind_{kind}")
 
 
+def _is_recovered_signer_membership(leaf: LeafPredicate) -> bool:
+    return leaf.get("kind") == "membership" and any(
+        key.get("source") == "signature_recovery" for key in (leaf.get("set_descriptor") or {}).get("key_sources") or []
+    )
+
+
 def _side_condition_capability(tree: PredicateTree) -> CapabilityExpr | None:
     conditions = _side_conditions_from_tree(tree)
     if conditions is None:
@@ -419,6 +440,11 @@ def _side_conditions_from_tree(tree: PredicateTree) -> list[Condition] | None:
     if op == "LEAF":
         leaf = tree.get("leaf")
         if not isinstance(leaf, dict):
+            return None
+        if (
+            _is_recovered_signer_membership(leaf)
+            or (leaf.get("authority_proof") or {}).get("state") == "not_determined"
+        ):
             return None
         role = leaf.get("authority_role")
         if role in ("reentrancy", "pause", "business", "time", "one_shot") and not leaf.get("references_msg_sender"):

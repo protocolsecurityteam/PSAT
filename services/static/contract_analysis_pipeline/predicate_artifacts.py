@@ -18,12 +18,14 @@ from eth_utils.crypto import keccak
 
 from utils.logging import record_stage_metric
 
+from .authorization import apply_authorization_pass
 from .internal_authority_slot import apply_internal_authority_slot_pass
 from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
 from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
+from .structural_evidence import structural_scope
 from .writer_gate import apply_writer_gate_pass
 
 logger = logging.getLogger(__name__)
@@ -201,7 +203,14 @@ def build_predicate_artifacts(contract: Any) -> dict[str, Any]:
     return artifact
 
 
-def build_predicate_artifacts_with_pause_info(
+def build_predicate_artifacts_with_pause_info(contract: Any) -> tuple[dict[str, Any], PauseInfo]:
+    with structural_scope(contract) as evidence:
+        artifact, pause_info = _build_predicate_artifacts_with_pause_info(contract)
+        artifact["structural_evidence"] = evidence.publish()
+        return artifact, pause_info
+
+
+def _build_predicate_artifacts_with_pause_info(
     contract: Any,
 ) -> tuple[dict[str, Any], PauseInfo]:
     """The predicate artifact plus ``PauseInfo`` for ``_detect_pausability``, with per-function timing logs above
@@ -298,6 +307,8 @@ def build_predicate_artifacts_with_pause_info(
 
         trees = {sig: all_trees[sig] for sig in trees}
         check_trees = {sig: all_trees[check_tree_keys[sig]] for sig in check_trees}
+
+    apply_authorization_pass(contract, trees)
 
     # Attempted vs built: unguarded functions produce no tree, so the gap is normal, not degradation.
     record_stage_metric("predicate_fns_attempted", fns_attempted)

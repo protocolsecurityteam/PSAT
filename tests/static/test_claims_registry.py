@@ -310,8 +310,11 @@ def test_single_contract_static_tier(claim, expected):
 
 _GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "label_corpus" / "golden.json"
 
-# Ids the reduced corpus doesn't exercise, mapped to the test that does. An id that starts producing must be removed.
-_SAFE_EXEMPTION = "no Gnosis Safe in the label corpus; covered by test_claims_upgrade_exec_matchers (safe_wallet.sol)."
+# Ids the reduced corpus doesn't exercise, with their validation basis. Remove ids when the corpus produces them.
+_SAFE_EXEMPTION = (
+    "no Safe in the label corpus; canonical variants and authentication-removed twins "
+    "were checked manually for PR #245."
+)
 _AUTH_MATCHERS_EXEMPTION = "no compiled corpus positive; covered by test_claims_auth_matchers (synthetic facts)."
 _UPGRADE_EXEC_EXEMPTION = (
     "no compiled corpus positive; covered by test_claims_upgrade_exec_matchers (small synthetic .sol fixtures)."

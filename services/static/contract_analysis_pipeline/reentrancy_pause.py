@@ -712,7 +712,7 @@ def _maybe_classify_guard_leaf(leaf: LeafPredicate, reentrancy_vars: set[str], p
             leaf["authority_role"] = "reentrancy"
             leaf["basis"] = list(leaf.get("basis", [])) + [f"reentrancy guard: {sv_name}"]
             return
-        if sv_name in pause_vars:
+        if sv_name in pause_vars and leaf.get("operator") in ("eq", "ne", "truthy", "falsy"):
             leaf["authority_role"] = "pause"
             leaf["basis"] = list(leaf.get("basis", [])) + [f"pause guard: {sv_name}"]
             return

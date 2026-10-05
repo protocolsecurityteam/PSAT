@@ -246,13 +246,11 @@ def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[st
     Safe ``execTransaction`` checks owners' signatures. Module-exec entries get nothing: their gate only allowlists the
     caller, so the tree walk answers.
     """
-    from ._gates import SAFE_EXEC_TRANSACTION, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
+    from ._gates import TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate
 
     selector = ctx.canonical_selector(function)
     if selector in TIMELOCK_EXECUTE_SELECTORS and is_oz_timelock_gate(ctx):
         return {"state": "constrained", "guard": "hash_commitment", "pins": True, "binding": "standard_gate"}
-    if selector == SAFE_EXEC_TRANSACTION and is_safe_gate(ctx):
-        return {"state": "constrained", "guard": "signature_witness", "pins": True, "binding": "standard_gate"}
     return None
 
 
@@ -330,6 +328,12 @@ def _is_external_callee_leaf(leaf: dict[str, Any]) -> bool:
     """A leaf whose truth includes another contract's answer (checked external bool, signature check, or statement
     call).
     """
+    descriptor = leaf.get("set_descriptor") or {}
+    if leaf.get("kind") in ("signature_auth", "authorization") and descriptor.get("kind") in (
+        "signature_threshold",
+        "authorization_threshold",
+    ):
+        return False
     if leaf.get("kind") in ("external_bool", "signature_auth"):
         return True
     if leaf.get("gate_kind") in _EXTERNAL_GATE_KINDS:
@@ -383,6 +387,12 @@ def _classify_constraining_leaf(leaf: dict[str, Any], via_derived: bool) -> str 
     if kind == "membership" and isinstance(descriptor, dict) and descriptor.get("kind") in _MEMBERSHIP_SET_KINDS:
         # Leaves record the allowed form: truthy membership is an allowlist, falsy a denylist (which doesn't pin).
         return "denylist" if operator in ("falsy", "ne") else "mapping_allowlist"
+    if kind == "authorization":
+        return (
+            "hash_commitment"
+            if (descriptor or {}).get("kind") == "authorization_threshold"
+            else "authorization_requirement"
+        )
     if kind == "signature_auth":
         return "signature_witness"
     if _is_external_callee_leaf(leaf):
@@ -404,22 +414,56 @@ def _classify_constraining_leaf(leaf: dict[str, Any], via_derived: bool) -> str 
 
 
 def _mandatory_leaves_with_paths(tree: Any) -> list[tuple[dict[str, Any], list[int]]]:
-    out: list[tuple[dict[str, Any], list[int]]] = []
+    import json
 
-    def walk(node: Any, mandatory: bool, path: list[int]) -> None:
+    def identity(leaf):
+        return json.dumps(
+            {
+                k: v
+                for k, v in leaf.items()
+                if k
+                not in {
+                    "source_function",
+                    "source_node_id",
+                    "structural_predicate",
+                    "expression",
+                    "basis",
+                    "confidence",
+                }
+            },
+            sort_keys=True,
+        )
+
+    def walk(node, path):
         if not isinstance(node, dict):
-            return
-        op = node.get("op")
-        if op == "LEAF":
+            return []
+        if node.get("op") == "LEAF":
             leaf = node.get("leaf")
-            if mandatory and isinstance(leaf, dict):
-                out.append((leaf, path))
-            return
-        for index, child in enumerate(node.get("children") or []):
-            walk(child, mandatory and op != "OR", path + [index])
+            return [(leaf, path)] if isinstance(leaf, dict) else []
+        if node.get("op") == "OR":
+            from ...contract_analysis_pipeline.structural_evidence import predicate_truth
 
-    walk(tree, True, [])
-    return out
+            if any(predicate_truth(child) is True for child in node.get("children") or []):
+                return []
+        branches = [walk(c, [*path, i]) for i, c in enumerate(node.get("children") or [])]
+        if node.get("op") != "OR":
+            return [fact for branch in branches for fact in branch]
+        if not branches:
+            return []
+        common = set.intersection(*({identity(leaf) for leaf, _ in branch} for branch in branches))
+        out = [(leaf, p) for leaf, p in branches[0] if identity(leaf) in common]
+        # An alternative constraint is not an absent constraint. Preserve its parameter dependencies as an
+        # unresolved obligation unless the same fact holds on every alternative.
+        for branch in branches:
+            for leaf, p in branch:
+                if identity(leaf) not in common and (
+                    _classify_constraining_leaf(leaf, via_derived=False) is not None
+                    or leaf.get("kind") == "unsupported"
+                ):
+                    out.append(({**leaf, "unsupported_reason": "alternative_guard_constraints"}, p))
+        return out
+
+    return walk(tree, [])
 
 
 def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_flow") -> dict[int, dict[str, Any]]:
@@ -479,6 +523,10 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
                 continue
             # View/pure callees are genuine preconditions and fall through to classification. Parameters named without
             # an operand, and dropped collection keys, block.
+        if leaf.get("unsupported_reason") == "alternative_guard_constraints":
+            blocked |= direct | derived | mentioned
+            blocked_all |= opaque
+            continue
         blocked |= mentioned
         if opaque or keyed_read:
             # Can reference any parameter silently: blocks the unconstrained proof for all.
