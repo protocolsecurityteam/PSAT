@@ -329,10 +329,11 @@ def test_sibling_scope_is_chain_and_relation_bound(pipeline, db_session):
     child_elsewhere = pipeline(f"other-{uuid.uuid4()}").job(VAULT, parent=target)
     unrelated = pipeline(f"other-{uuid.uuid4()}").job(TELLER)
     no_facts = p.job("0x" + "ee" * 20)
+    same_address = p.job(CALLER)
     stale = p.job(TOKEN_A)
     stale.created_at = same_company.created_at - timedelta(days=1)
     db_session.commit()
-    for job in (stale, same_company, other_chain, child_elsewhere, unrelated):
+    for job in (stale, same_company, other_chain, child_elsewhere, unrelated, same_address):
         p.land_facts(job, _token_effects(), _snapshot({}))
     store_artifact(db_session, no_facts.id, "effects", data=_token_effects())
 

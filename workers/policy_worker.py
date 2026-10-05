@@ -1050,6 +1050,8 @@ class PolicyWorker(BaseWorker):
         source_address = (job.address or "").lower()
         if not source_address or target_effects is None:
             return 0
+        # Read before any rollback below expires ``job``.
+        source_job_id = job.id
         source_effects = {source_address: target_effects}
         source_snapshots = {source_address: control_snapshot}
         callee_claim_map = build_callee_claim_map(source_effects)
@@ -1073,7 +1075,6 @@ class PolicyWorker(BaseWorker):
             if address == source_address or not _contribution(address, sibling_effects, facts.snapshots.get(address)):
                 continue
             sibling_job_id = facts.job_for_address[address]
-            source_job_id = job.id
             passes += 1
             for attempt in (1, 2):
                 try:
