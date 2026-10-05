@@ -188,4 +188,41 @@ test.describe("visual baselines", () => {
     await page.waitForTimeout(400);
     await expect(page).toHaveScreenshot("pipeline-dashboard.png", SCREENSHOT_OPTS);
   });
+
+  test("account page (signed in)", async ({ page }) => {
+    const json = (body) => (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    await page.route((url) => url.pathname === "/api/me", json({
+      id: "u1", email: "alice@example.com", display_name: "Alice", avatar_url: null, is_admin: false,
+    }));
+    await page.route((url) => url.pathname === "/api/me/webhooks", json([
+      { id: "w1", label: "ops-alerts", discord_webhook_url: "https://discord.com/api/webhooks/1234/<redacted>" },
+    ]));
+    await page.route((url) => url.pathname === "/api/me/subscriptions", json([
+      { id: "s1", protocol_id: 7, protocol_name: "etherfi", webhook_id: "w1", event_filter: { event_types: ["upgraded", "paused"] } },
+    ]));
+    await page.goto("/account", { waitUntil: "domcontentloaded" });
+    await page.getByRole("heading", { name: "Alice" }).waitFor({ state: "visible" });
+    await page.getByText("ops-alerts", { exact: true }).waitFor({ state: "visible" });
+    await expect(page).toHaveScreenshot("account-page.png", SCREENSHOT_OPTS);
+  });
+
+  test("sign-in dialog", async ({ page }) => {
+    await page.route((url) => url.pathname === "/api/auth/providers", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ providers: [{ name: "github", label: "GitHub" }, { name: "google", label: "Google" }], dev_login: false, password: true }),
+      }));
+    await page.goto("/account", { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("link", { name: "Continue with Google" }).waitFor({ state: "visible" });
+    await expect(page).toHaveScreenshot("sign-in-dialog.png", SCREENSHOT_OPTS);
+  });
+
+  test("set-password page", async ({ page }) => {
+    await page.goto("/set-password?token=e2e", { waitUntil: "domcontentloaded" });
+    await page.getByRole("heading", { name: "Choose a password" }).waitFor({ state: "visible" });
+    await expect(page).toHaveScreenshot("set-password-page.png", SCREENSHOT_OPTS);
+  });
 });

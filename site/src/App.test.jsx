@@ -14,7 +14,7 @@
 
 import React from "react";
 import { describe, it, expect, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App.jsx";
 import { setFetchHandler } from "./test/fetchMock.js";
@@ -89,6 +89,26 @@ describe("App router smoke tests", () => {
       expect(screen.getByText(/Active · queued \+ processing/i)).toBeInTheDocument();
     });
     expectNoCrash();
+  });
+
+  it("renders the account page at /account", async () => {
+    navigateTo("/account");
+    render(<App />);
+    expect(await screen.findByText("Sign in to manage alerts")).toBeInTheDocument();
+    expect(screen.queryByText(/Detect every/i)).toBeNull();
+    expectNoCrash();
+  });
+
+  it("opens the sign-in dialog when a request needs an account", async () => {
+    setFetchHandler("/api/auth/providers", () => ({ providers: [{ name: "github", label: "GitHub" }], dev_login: false }));
+    // Any route works; /account renders fastest.
+    navigateTo("/account");
+    render(<App />);
+    await screen.findByText("Sign in to manage alerts");
+    act(() => {
+      window.dispatchEvent(new Event("psat:auth-required"));
+    });
+    expect(await screen.findByRole("link", { name: "Continue with GitHub" })).toBeInTheDocument();
   });
 
   it("renders the company overview at /company/:name", async () => {

@@ -2,6 +2,9 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 
 import { api, getAdminKey, setAdminKey } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
+import AccountPage from "./account/AccountPage.jsx";
+import SetPasswordPage from "./account/SetPasswordPage.jsx";
+import SignInModal from "./account/SignInModal.jsx";
 import ProductHero from "./ProductHero.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
@@ -14,12 +17,6 @@ import RunsPage from "./pages/RunsPage.jsx";
 // Lazy so the home bundle stays slim; Vite dedupes it with CompanyOverview's
 // import.
 const ProtocolSurface = lazy(() => import("./surface/ProtocolSurface.jsx"));
-
-// TODO: replace with real sign-in (an identity-aware proxy like oauth2-proxy
-// injecting the admin key server-side, or per-user login + roles). The prompt +
-// localStorage key in api/client.js is a stopgap: a shared secret in every
-// admin's browser, no per-user audit, no revocation short of rotating the key.
-
 
 export default function App() {
   const [analyses, setAnalyses] = useState([]);
@@ -35,6 +32,13 @@ export default function App() {
   const analysesRef = useRef([]);
   const doneTimerRef = useRef(null);
   const isAdmin = useIsAdmin();
+  const [signInOpen, setSignInOpen] = useState(false);
+
+  useEffect(() => {
+    const open = () => setSignInOpen(true);
+    window.addEventListener("psat:auth-required", open);
+    return () => window.removeEventListener("psat:auth-required", open);
+  }, []);
 
   // ?admin=1 prompts once for a key; the only key-entry path now that operator
   // controls are hidden.
@@ -182,6 +186,8 @@ export default function App() {
 
   const isMonitor = viewMode === "monitor";
   const isCompany = viewMode === "company";
+  const isAccount = viewMode === "account";
+  const isSetPassword = viewMode === "set-password";
 
   return (
     <ErrorBoundary>
@@ -214,6 +220,8 @@ export default function App() {
         />
       )}
 
+      {signInOpen && <SignInModal onClose={() => setSignInOpen(false)} />}
+
       {isAdmin && isMonitor && formOpen && (
         <div className="submit-dropdown">
           <form className="submit-form" onSubmit={submit}>
@@ -241,7 +249,9 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {!isMonitor && !isCompany && (
+      {isAccount && <AccountPage onOpenCompany={openCompany} />}
+      {isSetPassword && <SetPasswordPage onDone={() => navigate("/account", "account")} />}
+      {!isMonitor && !isCompany && !isAccount && !isSetPassword && (
         <>
           <ProductHero />
           <RunsPage

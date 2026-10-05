@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
+import { useSession } from "../../../api/session.js";
 import { coalesceChain, entityKey } from "../../entityKey.js";
 import { principalLabel } from "../../format.js";
 import { EntityActivity } from "./EntityActivity.jsx";
@@ -56,6 +57,7 @@ export function ActivityPanel({
   chain = "ethereum",
 }) {
   const protocolId = companyData?.protocol_id;
+  const signedIn = useSession().status === "signed_in";
   const activeChain = coalesceChain(chain);
   const [contracts, setContracts] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
@@ -91,16 +93,24 @@ export function ActivityPanel({
   const refresh = useCallback(async () => {
     if (!protocolId) return;
     try {
+      // Admins see every delivery target on the protocol; a signed-in user
+      // sees their own; anyone else has none to see.
+      const subsRequest = isAdmin
+        ? api(`/api/protocols/${protocolId}/subscriptions`, { silent: true })
+        : signedIn
+          ? api("/api/me/subscriptions", { silent: true }).then((rows) =>
+            (Array.isArray(rows) ? rows : []).filter((r) => r.protocol_id === protocolId))
+          : Promise.resolve([]);
       const [monitoring, subs] = await Promise.all([
         api(`/api/protocols/${protocolId}/monitoring`),
-        api(`/api/protocols/${protocolId}/subscriptions`),
+        subsRequest,
       ]);
       setContracts(Array.isArray(monitoring) ? monitoring : []);
       setSubscriptions(Array.isArray(subs) ? subs : []);
     } catch {
       /* transient — keep last-good state */
     }
-  }, [protocolId]);
+  }, [protocolId, isAdmin, signedIn]);
 
   useEffect(() => {
     refresh();
@@ -130,24 +140,31 @@ export function ActivityPanel({
 
   // The watch set is fixed at enrollment; only the delivery target is
   // configurable.
-  const attachWebhook = useCallback(async (contract, url, label, groupKeys) => {
-    if (!protocolId || !url) return;
+  // `target` is a saved account webhook ({webhookId}) or, for operators on the
+  // shared admin key, a raw URL ({url, label}).
+  const attachWebhook = useCallback(async (contract, target, groupKeys) => {
+    if (!protocolId || !(target?.webhookId || target?.url)) return;
     const eventTypes = eventTypesFromGroupKeys(groupKeys);
+    // `groups` tells the notifier the filter uses the post-split vocabulary
+    // (notifier._FILTER_GROUPS_KEY). Always the whole group set today, but
+    // written now because pre- and post-key saves are otherwise
+    // indistinguishable forever.
+    const eventFilter = eventTypes.length ? { event_types: eventTypes, groups: groupKeys } : null;
     setSavingAddr(contract?.address?.toLowerCase() || null);
     try {
-      await api(`/api/protocols/${protocolId}/subscribe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          discord_webhook_url: url,
-          label,
-          // `groups` tells the notifier the filter uses the post-split
-          // vocabulary (notifier._FILTER_GROUPS_KEY). Always the whole group
-          // set today, but written now because pre- and post-key saves are
-          // otherwise indistinguishable forever.
-          event_filter: eventTypes.length ? { event_types: eventTypes, groups: groupKeys } : null,
-        }),
-      });
+      if (target.webhookId) {
+        await api("/api/me/subscriptions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ protocol_id: protocolId, webhook_id: target.webhookId, event_filter: eventFilter }),
+        });
+      } else {
+        await api(`/api/protocols/${protocolId}/subscribe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ discord_webhook_url: target.url, label: target.label, event_filter: eventFilter }),
+        });
+      }
     } catch {
     } finally {
       await refresh();

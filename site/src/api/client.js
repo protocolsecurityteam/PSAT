@@ -1,5 +1,6 @@
-// Shared HTTP helper: admin-key header, 401 prompt, JSON/text parsing by
-// Content-Type.
+// Shared HTTP helper: session cookie (fetch's same-origin default), optional
+// admin-key header for operators without an account, sign-in prompt on 401,
+// JSON/text parsing by Content-Type.
 
 const ADMIN_KEY_STORAGE = "psat_admin_key";
 
@@ -32,18 +33,11 @@ function buildHeadersWithKey(options, key) {
 }
 
 async function request(path, options = {}) {
-  // `silent: true` skips the 401 prompt, for background polls.
+  // `silent: true` skips the sign-in prompt, for background polls.
   const { silent, ...fetchOptions } = options;
-  let response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, getAdminKey()) });
+  const response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, getAdminKey()) });
   if (response.status === 401 && !silent) {
-    const entered = window.prompt(
-      "Admin key required for this action.\nPaste your PSAT admin key:",
-      getAdminKey(),
-    );
-    if (entered) {
-      setAdminKey(entered);
-      response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, entered) });
-    }
+    window.dispatchEvent(new Event("psat:auth-required"));
   }
   if (!response.ok) {
     // Callers must tell 404 (absent) from 503 (couldn't find out); a message

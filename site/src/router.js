@@ -19,6 +19,14 @@ export function parseLocationPath(pathname) {
     return { mode: "monitor", value: null };
   }
 
+  if (segments[0] === "account") {
+    return { mode: "account", value: null };
+  }
+
+  if (segments[0] === "set-password") {
+    return { mode: "set-password", value: null };
+  }
+
   if (segments[0] === "company" && segments[1]) {
     const validCompanyTabs = ["overview", "surface"];
     const companyTab = validCompanyTabs.includes(segments[2]) ? segments[2] : "overview";

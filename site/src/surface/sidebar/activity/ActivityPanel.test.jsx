@@ -959,3 +959,91 @@ describe("ActivityPanel — the attached webhook states its alert groups", () =>
     expect(body.event_filter.event_types).toContain("signer_added");
   });
 });
+
+describe("ActivityPanel — account alerts", () => {
+  const USER = { id: "u1", email: "alice@example.com", is_admin: false };
+
+  beforeEach(() => {
+    mockActivity({ contracts: [SAFE_CONTRACT], monitoredEvents: [] });
+  });
+
+  it("invites a signed-out visitor to sign in instead of offering a webhook form", async () => {
+    setFetchHandler("/api/me", () => new Response("{}", { status: 401, headers: { "Content-Type": "application/json" } }));
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    const signIn = await screen.findByText(/sign in to get alerts/i);
+    expect(screen.queryByText(/attach Discord/i)).toBeNull();
+    const onAuth = vi.fn();
+    window.addEventListener("psat:auth-required", onAuth);
+    fireEvent.click(signIn);
+    expect(onAuth).toHaveBeenCalled();
+    window.removeEventListener("psat:auth-required", onAuth);
+  });
+
+  it("subscribes a saved webhook with the contract's groups and shows only the user's own rows", async () => {
+    const posted = [];
+    const adminList = vi.fn(() => []);
+    setFetchHandler((url) => /\/api\/protocols\/\d+\/subscriptions$/.test(url.pathname), adminList);
+    setFetchHandler("/api/me", (url, init) => {
+      if (url.pathname === "/api/me") return USER;
+      if (url.pathname === "/api/me/webhooks") return [{ id: "w1", label: "ops", discord_webhook_url: "x" }];
+      if (url.pathname === "/api/me/subscriptions" && init?.method === "POST") {
+        posted.push(JSON.parse(init.body));
+        return {};
+      }
+      if (url.pathname === "/api/me/subscriptions") {
+        return [
+          { id: "s1", protocol_id: 7, webhook_label: "ops", event_filter: null },
+          { id: "s2", protocol_id: 99, webhook_label: "elsewhere", event_filter: null },
+        ];
+      }
+      return {};
+    });
+
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    const attachBtn = await screen.findByText(/attach another/i);
+    // Only this protocol's subscription is shown; the admin list is never read.
+    expect(screen.getByText("ops")).toBeInTheDocument();
+    expect(screen.queryByText("elsewhere")).toBeNull();
+    expect(adminList).not.toHaveBeenCalled();
+
+    await act(async () => {
+      attachBtn.click();
+    });
+    expect(await screen.findByLabelText("Deliver to")).toHaveValue("w1");
+    await act(async () => {
+      fireEvent.submit(document.querySelector(".ps-activity-webhook-form"));
+    });
+    await waitFor(() => expect(posted.length).toBe(1));
+    expect(posted[0].protocol_id).toBe(7);
+    expect(posted[0].webhook_id).toBe("w1");
+    expect(posted[0].event_filter.groups).toEqual(["signers", "safe_exec"]);
+  });
+
+  it("saves a new webhook first when the user picks one that isn't saved yet", async () => {
+    const calls = [];
+    setFetchHandler("/api/me", (url, init) => {
+      if (url.pathname === "/api/me") return USER;
+      if (init?.method === "POST") {
+        calls.push([url.pathname, JSON.parse(init.body)]);
+        return url.pathname === "/api/me/webhooks" ? { id: "w-new" } : {};
+      }
+      return [];
+    });
+    renderPanel({ selectedMachine: SAFE_MACHINE });
+    const attachBtn = await screen.findByText(/attach Discord/i);
+    await act(async () => {
+      attachBtn.click();
+    });
+    expect(await screen.findByLabelText("Deliver to")).toHaveValue("__new__");
+    fireEvent.change(screen.getByLabelText("Discord webhook URL"), {
+      target: { value: "https://discord.com/api/webhooks/9/abc" },
+    });
+    await act(async () => {
+      fireEvent.submit(document.querySelector(".ps-activity-webhook-form"));
+    });
+    await waitFor(() => expect(calls.length).toBe(2));
+    expect(calls[0]).toEqual(["/api/me/webhooks", { discord_webhook_url: "https://discord.com/api/webhooks/9/abc", label: null }]);
+    expect(calls[1][0]).toBe("/api/me/subscriptions");
+    expect(calls[1][1].webhook_id).toBe("w-new");
+  });
+});
