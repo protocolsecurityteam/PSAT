@@ -13,10 +13,8 @@ from sqlalchemy.orm import Session
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import (
     Contract,
-    EffectiveFunction,
     Job,
     JobStage,
-    JobStatus,
     PrincipalLabel,
     SessionLocal,
     derive_job_chain_id,
@@ -27,7 +25,6 @@ from db.queue import get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
 from services.clients.rpc import require_rpc_url
-from services.concurrency import parallel_map
 from services.discovery import membership_gate
 from services.discovery.perimeter import (
     PERIMETER_SPAWN_DEPTH_CAP,
@@ -39,6 +36,16 @@ from services.discovery.perimeter import (
 from services.effects.config import effects_stage_enabled
 from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materialize_fp_principal_nodes
 from services.policy import build_effective_permissions, build_principal_labels
+from services.policy.cross_contract_enrichment import (
+    SiblingFacts,
+    apply_claims_to_payload,
+    enrich_dependent,
+    fetch_sibling_facts,
+    lock_contract_claims,
+    related_jobs_with_facts,
+    selector_by_function_key,
+    write_claims_to_rows,
+)
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.policy.principal_enrichment import load_protocol_deployer_groups, load_protocol_safe_owner_sets
 from services.policy.principal_history import build_principal_history
@@ -47,7 +54,7 @@ from services.resolution.cross_chain_authority import make_cross_chain_recognize
 from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
-from services.static.claims import Claim, resolve_claim_precedence
+from services.static.claims import Claim
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
@@ -405,24 +412,6 @@ def _semantic_controller_context_address(
         if isinstance(bundle, dict):
             addresses.add(address)
     return sorted(addresses)[0] if addresses else None
-
-
-def _selector_by_function_key(function_records: list[dict] | None) -> dict[str, str]:
-    """``{function key -> selector}`` from the effective-permissions payload, keyed by both Slither ``full_name`` and
-    canonical ABI signature (they differ for contract/struct/enum params). The selector is taken from the payload
-    so it matches what the writer stored.
-    """
-    out: dict[str, str] = {}
-    for record in function_records or []:
-        if not isinstance(record, dict):
-            continue
-        selector = record.get("selector")
-        if not isinstance(selector, str) or not selector:
-            continue
-        for key in (record.get("function"), record.get("abi_signature")):
-            if isinstance(key, str) and key:
-                out.setdefault(key, selector.lower())
-    return out
 
 
 class PolicyWorker(BaseWorker):
@@ -819,18 +808,17 @@ class PolicyWorker(BaseWorker):
             job.name or "Contract",
         )
 
-        # Mint policy-derived claims from sibling facts.
-        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms):
-            enriched = self._enrich_cross_contract(
-                session,
-                job,
-                contract_analysis,
-                control_snapshot,
-                function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
-            )
-            if enriched and ep_data is not None:
-                self._apply_cross_contract_claims(ep_data, enriched)
-                store_artifact(session, job.id, "effective_permissions", data=ep_data)
+        # Mint policy-derived claims from sibling facts, and hand this job's facts to siblings that already ran.
+        self._enrich_cross_contract(
+            session,
+            job,
+            contract_analysis,
+            control_snapshot,
+            function_records=ep_data.get("functions") if isinstance(ep_data, dict) else None,
+            ep_data=ep_data,
+            target_effects=effects_artifact if isinstance(effects_artifact, dict) else None,
+            durations_ms=durations_ms,
+        )
 
         self.update_detail(
             session,
@@ -944,15 +932,6 @@ class PolicyWorker(BaseWorker):
             },
         )
 
-    def _apply_cross_contract_claims(self, payload: dict, enriched: dict[str, list[Claim]]) -> None:
-        for fn in payload.get("functions", []):
-            fn_sig = fn.get("function") or fn.get("abi_signature")
-            additions = enriched.get(fn_sig) if fn_sig else None
-            if not additions:
-                continue
-            existing = list(fn.get("claims") or [])
-            fn["claims"] = resolve_claim_precedence([*existing, *additions])
-
     def _enrich_cross_contract(
         self,
         session,
@@ -960,10 +939,14 @@ class PolicyWorker(BaseWorker):
         contract_analysis: dict,
         control_snapshot: dict,
         function_records: list[dict] | None = None,
+        *,
+        ep_data: dict | None = None,
+        target_effects: dict | None = None,
+        durations_ms: dict[str, int] | None = None,
     ) -> dict[str, list[Claim]]:
-        """Mint policy-derived claims from sibling facts via ``services.static.cross_contract``'s four derivations
-        (value-flow propagation, transfer-policy configuration, beacon upgrade, proxy-verified upgrade
-        provenance), merged onto each function's claims.
+        """Mint policy-derived claims from sibling facts via ``services.static.cross_contract``'s derivations
+        (value-flow propagation, transfer-policy configuration, beacon upgrade, proxy-verified upgrade provenance),
+        merged onto each function's claims; then merge this job's contribution into siblings that already ran theirs.
 
         Derivations key on Slither full_name while rows store the ABI signature, so they're joined by the selector from
         ``function_records``.
@@ -976,130 +959,122 @@ class PolicyWorker(BaseWorker):
             sibling_transfer_hook_links,
         )
 
-        # Sibling jobs (same company or parent).
         request = job.request if isinstance(job.request, dict) else {}
-        parent_job_id = request.get("parent_job_id")
-        company = job.company
-
-        completed_jobs = (
-            session.execute(select(Job).where(Job.status == JobStatus.completed, Job.address.isnot(None)))
-            .scalars()
-            .all()
-        )
-
-        # Extract scalars on the main thread so the parallel fetch can use fresh sessions.
-        sibling_targets: list[tuple[Any, str]] = []
-        for sj in completed_jobs:
-            if sj.id == job.id or not sj.address:
-                continue
-            sj_req = sj.request if isinstance(sj.request, dict) else {}
-            is_sibling = (
-                (company and sj.company == company)
-                or (parent_job_id and sj_req.get("parent_job_id") == parent_job_id)
-                or (parent_job_id and str(sj.id) == parent_job_id)
-            )
-            if is_sibling:
-                sibling_targets.append((sj.id, sj.address.lower()))
-
-        if not sibling_targets:
-            return {}
-
-        def _fetch_sibling_artifacts(
-            target: tuple[Any, str],
-        ) -> tuple[str, dict | None, dict | None]:
-            sj_id, addr = target
-            with SessionLocal() as s:
-                effects_payload = get_artifact(s, sj_id, "effects")
-                snapshot_payload = get_artifact(s, sj_id, "control_snapshot")
-            return (
-                addr,
-                effects_payload if isinstance(effects_payload, dict) else None,
-                snapshot_payload if isinstance(snapshot_payload, dict) else None,
-            )
-
-        sibling_effects: dict[str, dict] = {}
-        sibling_snapshots: dict[str, dict] = {}
-        for (_sj_id, addr), outcome in parallel_map(_fetch_sibling_artifacts, sibling_targets, max_workers=8):
-            if isinstance(outcome, BaseException):
-                record_degraded(
-                    phase="cross_contract_enrichment",
-                    exc=outcome,
-                    context={"sibling_address": addr, "sibling_job_id": str(_sj_id)},
-                )
-                logger.warning("sibling artifact fetch failed for %s: %s", addr, outcome)
-                continue
-            _addr, effects_payload, snapshot_payload = outcome
-            if effects_payload is not None:
-                sibling_effects[_addr] = effects_payload
-            if snapshot_payload is not None:
-                sibling_snapshots[_addr] = snapshot_payload
-
-        if not sibling_effects:
-            return {}
-
-        callee_claim_map = build_callee_claim_map(sibling_effects)
-        controller_values = control_snapshot.get("controller_values", {})
-        target_effects = get_artifact(session, job.id, "effects")
-        target_effects = target_effects if isinstance(target_effects, dict) else None
         target_address = (job.address or "").lower()
+        if target_effects is None:
+            loaded = get_artifact(session, job.id, "effects")
+            target_effects = loaded if isinstance(loaded, dict) else None
 
-        hook_links = sibling_transfer_hook_links(target_address, sibling_effects, sibling_snapshots)
-        deployment_address = request.get("proxy_address") or job.address or ""
-        proxy_provenance = proxy_provenance_from_classifications(
-            deployment_address, get_artifact(session, job.id, "classifications")
-        )
-
-        enriched = derive_cross_contract_claims(
-            target_effects,
-            controller_values,
-            callee_claim_map,
-            sibling_transfer_hooks=hook_links,
-            proxy_provenance=proxy_provenance,
-        )
-        if enriched:
-            logger.info(
-                "Job %s: cross-contract enrichment added policy claims: %s",
-                job.id,
-                {fn_sig: [c["claim_id"] for c in claims] for fn_sig, claims in enriched.items()},
-            )
+        with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms) as ph:
             contract_row = session.execute(
                 select(Contract).where(Contract.job_id == job.id).limit(1)
             ).scalar_one_or_none()
-            if contract_row:
-                selector_for = _selector_by_function_key(function_records)
-                # An impl row can back several deployments; these claims belong to the deployment the writer tagged,
-                # derived the same way.
-                row_deployment = normalize_deployment(request.get("proxy_address"))
-                for fn_sig, new_claims in enriched.items():
-                    stmt = select(EffectiveFunction).where(
-                        EffectiveFunction.contract_id == contract_row.id,
-                        deployment_scope(EffectiveFunction.deployment_address, row_deployment),
+            if contract_row is not None:
+                lock_contract_claims(session, [contract_row.id])
+            facts = fetch_sibling_facts(
+                related_jobs_with_facts(session, job, chain_id=_chain_id_for_job(job)),
+                session_factory=SessionLocal,
+            )
+
+            deployment_address = request.get("proxy_address") or job.address or ""
+            enriched = derive_cross_contract_claims(
+                target_effects,
+                control_snapshot.get("controller_values", {}),
+                build_callee_claim_map(facts.effects),
+                sibling_transfer_hooks=sibling_transfer_hook_links(target_address, facts.effects, facts.snapshots),
+                proxy_provenance=proxy_provenance_from_classifications(
+                    deployment_address, get_artifact(session, job.id, "classifications")
+                ),
+            )
+            ph["siblings"] = len(facts.effects)
+            ph["functions_enriched"] = len(enriched)
+            if enriched:
+                logger.info(
+                    "Job %s: cross-contract enrichment added policy claims: %s",
+                    job.id,
+                    {fn_sig: [c["claim_id"] for c in claims] for fn_sig, claims in enriched.items()},
+                )
+                if contract_row is not None:
+                    # An impl row can back several deployments; these claims belong to the deployment the writer tagged,
+                    # derived the same way.
+                    write_claims_to_rows(
+                        session,
+                        contract_id=contract_row.id,
+                        deployment_address=normalize_deployment(request.get("proxy_address")),
+                        selector_for=selector_by_function_key(function_records),
+                        enriched=enriched,
+                        job_id=job.id,
                     )
-                    selector = selector_for.get(fn_sig)
-                    if selector:
-                        stmt = stmt.where(EffectiveFunction.selector == selector)
-                    else:
-                        stmt = stmt.where(EffectiveFunction.abi_signature == fn_sig)
-                    # Exactly one row or nothing: the scope includes legacy untagged rows, and an ambiguous match would
-                    # raise and lose the whole run.
-                    matches = session.execute(stmt).scalars().all()
-                    if len(matches) == 1:
-                        ef = matches[0]
-                        ef.claims = resolve_claim_precedence([*(ef.claims or []), *new_claims])
-                    else:
-                        logger.warning(
-                            "Job %s: cross-contract claims for %s matched %d effective_function rows; skipped",
-                            job.id,
-                            fn_sig,
-                            len(matches),
-                            extra={
-                                "phase": "cross_contract_enrichment",
-                                "function": fn_sig,
-                                "matched_rows": len(matches),
-                            },
-                        )
-                session.commit()
+                if ep_data is not None:
+                    apply_claims_to_payload(ep_data, enriched)
+                    store_artifact(session, job.id, "effective_permissions", data=ep_data)
+            # Releases the claims-writer lock.
+            session.commit()
+
+        with log_timed_phase(logger, "cross_contract_dependents", durations_ms=durations_ms) as ph:
+            ph["dependent_passes"] = self._enrich_dependents(session, job, facts, target_effects, control_snapshot)
         return enriched
+
+    def _enrich_dependents(
+        self,
+        session: Session,
+        job: Job,
+        facts: SiblingFacts,
+        target_effects: dict | None,
+        control_snapshot: dict,
+    ) -> int:
+        """Merge what this job contributes to each sibling's derivation into that sibling; returns the passes run."""
+        from services.static.cross_contract import (
+            build_callee_claim_map,
+            derive_cross_contract_claims,
+            sibling_transfer_hook_links,
+        )
+
+        source_address = (job.address or "").lower()
+        if not source_address or target_effects is None:
+            return 0
+        source_effects = {source_address: target_effects}
+        source_snapshots = {source_address: control_snapshot}
+        callee_claim_map = build_callee_claim_map(source_effects)
+        redistill = effects_stage_enabled()
+        passes = 0
+        for address, sibling_effects in sorted(facts.effects.items()):
+            if address == source_address:
+                continue
+            sibling_snapshot = facts.snapshots.get(address) or {}
+            contribution = derive_cross_contract_claims(
+                sibling_effects,
+                sibling_snapshot.get("controller_values", {}),
+                callee_claim_map,
+                sibling_transfer_hooks=sibling_transfer_hook_links(address, source_effects, source_snapshots),
+            )
+            if not contribution:
+                continue
+            sibling_job_id = facts.job_for_address[address]
+            passes += 1
+            try:
+                enrich_dependent(
+                    session,
+                    dependent_job_id=sibling_job_id,
+                    enriched=contribution,
+                    source_job_id=job.id,
+                    redistill=redistill,
+                )
+            except Exception as exc:
+                session.rollback()
+                record_degraded(
+                    phase="cross_contract_dependents",
+                    exc=exc,
+                    context={"sibling_address": address, "sibling_job_id": str(sibling_job_id)},
+                )
+                logger.warning(
+                    "Job %s: cross-contract claims for sibling %s failed: %s",
+                    job.id,
+                    address,
+                    exc,
+                    extra={"exc_type": type(exc).__name__},
+                )
+        return passes
 
     def _resolve_authority(
         self,

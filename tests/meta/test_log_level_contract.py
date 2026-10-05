@@ -56,11 +56,11 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     },
     "workers/policy_worker.py": {
         # The reanalysis completed before the notifier; recording would mark it degraded.
-        929: "Notifier side-effect; reanalysis already completed before this fired.",
+        917: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # A resource side-effect, not a degraded verdict.
-        480: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        482: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
     "services/effects/anvil.py": {
         714: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
