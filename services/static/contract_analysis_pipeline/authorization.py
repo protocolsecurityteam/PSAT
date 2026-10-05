@@ -7,9 +7,9 @@ uncertainty. Storage/getter facts describe the registry the code actually consul
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
-from .predicate_types import PredicateTree, make_and_node
+from .predicate_types import PredicateTree, SetDescriptor, make_and_node
 from .slither_compat import (
     Assignment,
     Binary,
@@ -19,6 +19,7 @@ from .slither_compat import (
     Index,
     InternalCall,
     LibraryCall,
+    LowLevelCall,
     Return,
     SolidityCall,
     StateVariable,
@@ -741,7 +742,61 @@ def loop_witness(frame, contract, parameter_bindings):
     return None
 
 
-def quorum_witness(entry, contract):
+def _authorization_state_changed(frame, witness, contract):
+    """A pinned storage read cannot describe a value overwritten before its check in this execution."""
+    protected = {str(d["slot"]) for d in (witness.get("registry", {}), witness.get("threshold", {})) if "slot" in d}
+    evidence = evidence_for(contract)
+
+    def changed(function, before, ignored_call=None, ancestors=()):
+        if function in ancestors or len(ancestors) > 6:
+            return True
+        summary = evidence.summary(function)
+
+        def precedes(node):
+            return before is None or node is before or _reaches(node, before)
+
+        for write in summary.writes:
+            layout = slot(contract, write.cell.variable)
+            if layout and str(layout["slot"]) in protected and precedes(write.node):
+                return True
+        for node, ir in summary.operations:
+            if ir is ignored_call or not precedes(node):
+                continue
+            if isinstance(ir, (InternalCall, LibraryCall)):
+                if not getattr(ir.function, "nodes", None) or changed(
+                    ir.function, None, ancestors=(*ancestors, function)
+                ):
+                    return True
+            elif isinstance(ir, LowLevelCall) and str(ir.function_name) != "staticcall":
+                return True
+            elif isinstance(ir, HighLevelCall) and not (
+                getattr(ir.function, "view", False) or getattr(ir.function, "pure", False)
+            ):
+                return True
+            elif isinstance(ir, SolidityCall) and ir.function.name.startswith(
+                ("sstore(", "call(", "callcode(", "delegatecall(")
+            ):
+                return True
+        return False
+
+    header = next((n for n in frame.function.nodes if n.node_id == witness.get("source_loop")), None)
+    if header is None or changed(frame.function, header):
+        return True
+    child = frame
+    while child.parent is not None:
+        parent = child.parent
+        calls = [
+            (n, c)
+            for n, c in evidence.summary(parent.function).calls
+            if c.function is child.function and tuple(c.arguments) == child.arguments
+        ]
+        if not calls or any(changed(parent.function, n, c) for n, c in calls):
+            return True
+        child = parent
+    return False
+
+
+def quorum_witness(entry, contract) -> dict[str, Any] | None:
     """Follow mandatory helper calls with actual argument bindings; no contract/function-name allowlist."""
     initial = {p.name: {"kind": "parameter", "index": i} for i, p in enumerate(entry.parameters)}
     params = {p.name: {i} for i, p in enumerate(entry.parameters)}
@@ -759,6 +814,13 @@ def quorum_witness(entry, contract):
 
         witness = loop_witness(frame, contract, bindings) or count_witness(frame, contract, bindings)
         if witness is not None:
+            if witness["kind"] != "authorization_unresolved" and _authorization_state_changed(frame, witness, contract):
+                return {
+                    **witness,
+                    "kind": "authorization_unresolved",
+                    "bound_parameters": [],
+                    "missing": ["authorization_state_modified_before_check"],
+                }
             return witness
         for node, call in operations(frame.function):
             if not isinstance(call, (InternalCall, LibraryCall)) or not mandatory(node, frame.function):
@@ -877,7 +939,7 @@ def apply_authorization_pass(contract, trees):
                 "parameter_indices": witnessed["bound_parameters"],
                 "expression": "distinct authorized signer quorum",
                 "basis": ["source_verified_signature_loop"],
-                "set_descriptor": witnessed,
+                "set_descriptor": cast(SetDescriptor, witnessed),
             },
         }
         trees[fn.full_name] = make_and_node([quorum_leaf, remaining]) if remaining is not None else quorum_leaf

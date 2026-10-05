@@ -48,6 +48,7 @@ def _body_external_call_sink_ids(ctx: ClaimContext, function: str) -> list[str]:
     sentence="forwards a caller-supplied target and calldata (arbitrary execution)",
     legacy_projection="arbitrary_external_call",
     consumer_family="exec",
+    grant_class="control.code",
 )
 def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     selector = ctx.canonical_selector(function)

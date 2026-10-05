@@ -16,6 +16,7 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
             {
                 "function": "manage(address,bytes,uint256)",
                 "effect_labels": ["arbitrary_external_call"],
+                "claims": [_claim("exec.arbitrary")],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -34,6 +35,7 @@ def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):
             {
                 "function": "setAuthority(address)",
                 "effect_labels": ["authority_update"],
+                "claims": [_claim("authority.replace")],
                 "authority_public": False,
                 "authority_roles": [
                     {
@@ -221,19 +223,51 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
     assert "vault_manager" in principals[ctrl_manager]
 
 
-def test_build_principal_labels_legacy_hook_update_not_admin(monkeypatch):
-    """``hook_update`` is dropped from the admin set; no measured principal depends on it."""
-    hook_addr = "0x" + "b1" * 20
-    real_admin = "0x" + "b2" * 20
-    legacy_operator = "0x" + "b3" * 20
+def test_build_principal_labels_tags_transfer_policy_setters_as_config(monkeypatch):
+    """A config write is control-plane, but neither admin nor operator."""
+    setter = "0x" + "c1" * 20
+    effective_permissions = {
+        "contract_address": "0x1111111111111111111111111111111111111111",
+        "contract_name": "Token",
+        "functions": [
+            _role_fn(
+                "setTransferPolicy(address)", 4, setter, claims=[_claim("transfer_policy.configure", "policy_derived")]
+            )
+        ],
+    }
+    monkeypatch.setattr(
+        "services.policy.principal_enrichment.classify_resolved_address_with_status",
+        lambda rpc_url, address, **_kw: ("eoa", {"address": address}, True),
+    )
+
+    payload = build_principal_labels(effective_permissions, rpc_url="http://rpc.example")
+    labels = next(set(item["labels"]) for item in payload["principals"] if item["address"] == setter)
+
+    assert "token_config" in labels
+    assert not labels & {"token_admin", "token_operator", "token_manager"}
+
+
+def test_build_principal_labels_ignores_labels_without_claims(monkeypatch):
+    """Effect labels are display-only: a claim-less function earns no tag whatever it is labelled."""
+    labelled_owner = "0x" + "b1" * 20
+    claimed_owner = "0x" + "b2" * 20
+    labelled_withdrawer = "0x" + "b3" * 20
 
     effective_permissions = {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "Vault",
         "functions": [
-            _role_fn("setHook(address)", 1, hook_addr, effect_labels=["hook_update"]),
-            _role_fn("transferOwnership(address)", 2, real_admin, effect_labels=["ownership_transfer"]),
-            _role_fn("withdraw(uint256)", 3, legacy_operator, effect_labels=["asset_send"]),
+            _role_fn("transferOwnership(address)", 1, labelled_owner, claims=[], effect_labels=["ownership_transfer"]),
+            _role_fn(
+                "transferOwnership(address)",
+                2,
+                claimed_owner,
+                claims=[_claim("ownership.transfer")],
+                effect_labels=["ownership_transfer"],
+            ),
+            _role_fn(
+                "withdraw(uint256)", 3, labelled_withdrawer, effect_labels=["asset_send", "arbitrary_external_call"]
+            ),
         ],
     }
 
@@ -245,11 +279,9 @@ def test_build_principal_labels_legacy_hook_update_not_admin(monkeypatch):
     payload = build_principal_labels(effective_permissions, rpc_url="http://rpc.example")
     principals = {item["address"]: set(item["labels"]) for item in payload["principals"]}
 
-    assert "vault_admin" not in principals[hook_addr]
-    assert "vault_operator" not in principals[hook_addr]
-    assert "vault_manager" not in principals[hook_addr]
-    assert "vault_admin" in principals[real_admin]
-    assert "vault_operator" in principals[legacy_operator]
+    for addr in (labelled_owner, labelled_withdrawer):
+        assert not principals[addr] & {"vault_admin", "vault_operator", "vault_manager", "vault_config"}, addr
+    assert "vault_admin" in principals[claimed_owner]
 
 
 def test_build_principal_labels_includes_generic_controller_principals(monkeypatch):
@@ -616,6 +648,7 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
             {
                 "function": "manage(address,bytes,uint256)",
                 "effect_labels": ["arbitrary_external_call"],
+                "claims": [_claim("exec.arbitrary")],
                 "authority_public": False,
                 "authority_roles": [{"role": 1, "principals": role_principals(principal_addrs[:30])}],
                 "direct_owner": None,
@@ -623,6 +656,7 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
             {
                 "function": "setAuthority(address)",
                 "effect_labels": ["authority_update"],
+                "claims": [_claim("authority.replace")],
                 "authority_public": False,
                 "authority_roles": [{"role": 8, "principals": role_principals(principal_addrs[30:])}],
                 "direct_owner": None,

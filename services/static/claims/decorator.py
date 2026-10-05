@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 from .context import ClaimContext
 from .registry import Gate, RegistryEntry, Trigger, register
-from .types import ConsumerFamily
+from .types import ConsumerFamily, GrantClass
 
 
 def _always(_ctx: ClaimContext) -> bool:
@@ -21,6 +21,7 @@ def claim_matcher(
     sentence: str,
     legacy_projection: str | None,
     consumer_family: ConsumerFamily,
+    grant_class: GrantClass,
     gate: Gate | None = None,
 ) -> Callable[[Trigger], Trigger]:
     """Register the decorated function as ``claim_id``'s trigger and return it unchanged.
@@ -37,6 +38,7 @@ def claim_matcher(
                 trigger=trigger,
                 legacy_projection=legacy_projection,
                 consumer_family=consumer_family,
+                grant_class=grant_class,
             )
         )
         return trigger

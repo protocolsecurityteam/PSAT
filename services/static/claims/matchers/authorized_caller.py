@@ -23,6 +23,7 @@ def _has_rotatable_scalar(ctx: ClaimContext) -> bool:
     sentence="rotates a non-owner scalar address that authorizes callers of specific gated functions",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=_has_rotatable_scalar,
 )
 def authorized_caller_rotate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

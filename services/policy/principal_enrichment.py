@@ -22,6 +22,8 @@ from schemas.principal_labels import LabelConfidence, PrincipalLabels, Principal
 from services.concurrency import parallel_map
 from services.governance.principals import is_terminal_principal_type, resolve_terminal_principal
 from services.resolution.tracking import classify_resolved_address_with_status
+from services.static.claims import claim_ids_of_class
+from utils import claim_ids as C
 from utils.logging import record_stage_metric
 
 logger = logging.getLogger(__name__)
@@ -169,19 +171,14 @@ def _slug(value: str) -> str:
     return lowered.strip("_")
 
 
-# Keyed on claim_id, not consumer_family: ``pause.*`` / ``lz_oapp.*`` are control-plane but not admin, and
-# ``exec.arbitrary`` is a manager power ``contract_deployment`` isn't.
-_ADMIN_CLAIM_PREFIXES = ("ownership.", "roles.", "authority.", "upgrade.", "timelock.", "safe.")
-_ADMIN_CLAIM_IDS = frozenset({"authorized_caller.rotate", "proxy.admin_change", "callee_pointer.rotate"})
-_OPERATOR_CLAIM_PREFIXES = ("flow.", "supply.")
-_MANAGER_CLAIM_IDS = frozenset({"exec.arbitrary"})
-
-# Fallback for pre-claims rows. ``hook_update`` is absent: 1/69 correct, and no admin tag depends on it.
-_LEGACY_ADMIN_LABELS = frozenset(
-    {"authority_update", "ownership_transfer", "implementation_update", "role_management", "timelock_operation"}
-)
-_LEGACY_OPERATOR_LABELS = frozenset({"asset_pull", "asset_send", "mint", "burn"})
-_LEGACY_MANAGER_LABELS = frozenset({"arbitrary_external_call"})
+# Tags by grant class, refined by id where a class splits: ``lz_oapp.*`` gates are control but not admin, pause is
+# control-plane but not admin, and ``exec.arbitrary`` is a manager power ``contract_deployment`` isn't.
+_ADMIN_CLAIMS: frozenset[str] = (claim_ids_of_class("control.gate") - {C.LZ_OAPP_SET_PEER, C.LZ_OAPP_SET_DELEGATE}) | {
+    C.UPGRADE_IMPLEMENTATION
+}
+_OPERATOR_CLAIMS: frozenset[str] = claim_ids_of_class("control.funds") | {C.FLOW_IN}
+_MANAGER_CLAIMS: frozenset[str] = frozenset({C.EXEC_ARBITRARY})
+_CONFIG_CLAIMS: frozenset[str] = claim_ids_of_class("control.config")
 
 
 def _claim_ids(claims: Any) -> set[str]:
@@ -196,25 +193,18 @@ def _claim_ids(claims: Any) -> set[str]:
     return out
 
 
-def _enrichment_tags(claims: Any, effect_labels_set: set[str]) -> set[str]:
-    """Claims win when present; claim-less rows fall back to legacy labels."""
+def _enrichment_tags(claims: Any) -> set[str]:
+    """Tags a function's claims earn. A claim-less function earns none."""
     claim_ids = _claim_ids(claims)
     tags: set[str] = set()
-    if claim_ids:
-        for cid in claim_ids:
-            if cid in _ADMIN_CLAIM_IDS or cid.startswith(_ADMIN_CLAIM_PREFIXES):
-                tags.add("admin")
-            if cid.startswith(_OPERATOR_CLAIM_PREFIXES):
-                tags.add("operator")
-            if cid in _MANAGER_CLAIM_IDS:
-                tags.add("manager")
-        return tags
-    if effect_labels_set & _LEGACY_ADMIN_LABELS:
+    if claim_ids & _ADMIN_CLAIMS:
         tags.add("admin")
-    if effect_labels_set & _LEGACY_OPERATOR_LABELS:
+    if claim_ids & _OPERATOR_CLAIMS:
         tags.add("operator")
-    if effect_labels_set & _LEGACY_MANAGER_LABELS:
+    if claim_ids & _MANAGER_CLAIMS:
         tags.add("manager")
+    if claim_ids & _CONFIG_CLAIMS:
+        tags.add("config")
     return tags
 
 
@@ -268,8 +258,7 @@ def _collect_permissions(
         function_name = str(function.get("function", ""))
         effect_labels = [str(label) for label in function.get("effect_labels", [])]
         authority_public = bool(function.get("authority_public", False))
-        effect_labels_set = set(effect_labels)
-        function_tags = _enrichment_tags(function.get("claims"), effect_labels_set)
+        function_tags = _enrichment_tags(function.get("claims"))
         direct_owner = function.get("direct_owner")
         if direct_owner:
             address = direct_owner["address"].lower()
@@ -320,6 +309,8 @@ def _collect_permissions(
                     permission_labels[address].add(f"{contract_slug}_operator")
                 if "admin" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_admin")
+                if "config" in function_tags:
+                    permission_labels[address].add(f"{contract_slug}_config")
 
         for controller in function.get("controllers", []):
             controller_label = str(controller.get("label") or controller.get("source") or "controller")
@@ -347,6 +338,8 @@ def _collect_permissions(
                     permission_labels[address].add(f"{contract_slug}_manager")
                 if "admin" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_admin")
+                if "config" in function_tags:
+                    permission_labels[address].add(f"{contract_slug}_config")
 
     return by_address, {address: ",".join(sorted(labels)) for address, labels in permission_labels.items()}
 

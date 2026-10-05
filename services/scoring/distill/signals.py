@@ -15,6 +15,7 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from utils import claim_ids as C
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
     DESTINATION_FREE_CLAIMS,
@@ -243,13 +244,13 @@ def _build_signal(
     fields["witness_tier"] = _best_tier({_tier(entry) for entry in entries})
 
     destination = _UNDETERMINED_DESTINATION
-    if claim_id in ("delegatecall.execute", "exec.arbitrary"):
+    if claim_id in (C.DELEGATECALL_EXECUTE, C.EXEC_ARBITRARY):
         fork_param = _fork_caller_arbitrary_param(facts.verdicts.get(func.id, []))
         destination = _meet_destinations(
             [_exec_destination(claim_id, e.get("witness") or {}, fork_param) for e in entries]
         )
         gates["destination_basis"] = Tri.proven("basis", destination.basis).to_json()
-    elif claim_id == "flow.out":
+    elif claim_id == C.FLOW_OUT:
         destination = _meet_destinations([_flow_destination(e, all_claims, openness) for e in entries])
         gates["destination_basis"] = Tri.proven("basis", destination.basis).to_json()
     elif claim_id in DESTINATION_FREE_CLAIMS:
@@ -268,7 +269,7 @@ def _build_signal(
     fields["destination"] = destination.tri
     notes.update(destination.notes)
 
-    if claim_id == "flow.out" and not destination.tri.is_determined:
+    if claim_id == C.FLOW_OUT and not destination.tri.is_determined:
         for verdict in facts.verdicts.get(func.id, []):
             if verdict.verdict != "proven" or not verdict.concrete_destination:
                 continue
@@ -293,8 +294,8 @@ def _build_signal(
         deployment_address=deployment_address,
         self_gated=_function_is_self_gated(facts, func),
         # Asked only where the flow set is the claim's subject.
-        msg_value=_msg_value_return(all_claims) if claim_id == "flow.out" else _MSG_VALUE_NOT_ASKED,
-        self_service=_self_service_bound(all_claims) if claim_id == "flow.out" else _SELF_SERVICE_NOT_ASKED,
+        msg_value=_msg_value_return(all_claims) if claim_id == C.FLOW_OUT else _MSG_VALUE_NOT_ASKED,
+        self_service=_self_service_bound(all_claims) if claim_id == C.FLOW_OUT else _SELF_SERVICE_NOT_ASKED,
     )
     fields["severity"] = severity
     fields["severity_basis"] = severity_basis
@@ -356,9 +357,9 @@ def _build_signal(
     gates[PROVING_EXECUTION_KEY] = _proving_execution_gate(facts, func, entries).to_json()
     notes.update(reach.notes)
 
-    if claim_id == "flow.out":
+    if claim_id == C.FLOW_OUT:
         gates.update(_flow_gates(facts, entries, all_claims, notes))
-    if claim_id == "pause.set":
+    if claim_id == C.PAUSE_SET:
         gates.update(_pause_gates(facts, func, entries))
 
     # Read once so the citation and execution record name the same verdict. Extra verdicts are still cited and disclosed
@@ -427,7 +428,7 @@ def _reach_for_claim(
     gates: dict[str, Any],
     citations: list[dict[str, Any]],
 ) -> _Reach:
-    if claim_id == "flow.out":
+    if claim_id == C.FLOW_OUT:
         best: _Reach | None = None
         for entry in entries:
             observed = (entry.get("witness") or {}).get("observed") or {}
@@ -452,7 +453,7 @@ def _reach_for_claim(
                 citations.append({"field": bases[0], "value": keys})
         return reach
 
-    if claim_id == "pause.set":
+    if claim_id == C.PAUSE_SET:
         # value membership requires the fork proof that the latch takes effect.
         effective = any(
             _is_true(((e.get("witness") or {}).get("observed") or {}).get("pause_effective")) for e in entries
@@ -656,7 +657,7 @@ def _severity(
             )
         # W1 and W2 is the amount witness the open-caller withhold waits on, so it's evaluated first and gated
         # on a determined destination. A refused conjunction falls through to the withhold.
-        if claim_id == "flow.out" and self_service.proven and destination.tri.is_determined:
+        if claim_id == C.FLOW_OUT and self_service.proven and destination.tri.is_determined:
             return (
                 Tri.proven(SEVERITY_STATE_PROVEN, K.FLOW_SEVERITY_SELF_SERVICE_BOUNDED),
                 (SELF_SERVICE_BASIS,),
@@ -676,17 +677,17 @@ def _severity(
             return Tri[float].not_determined(), (), notes
         return Tri.proven(SEVERITY_STATE_PROVEN, destination.severity), (destination.basis,), notes
 
-    if claim_id == "pause.set":
+    if claim_id == C.PAUSE_SET:
         return _pause_severity(entries, notes)
 
     base = K.BASE_SEVERITY[claim_id]
     basis = ["capability_class_base"]
 
-    if claim_id == "ownership.transfer":
+    if claim_id == C.OWNERSHIP_TRANSFER:
         if any((e.get("witness") or {}).get("standard") == "default_admin_rules" for e in entries):
             base = min(base, K.OWNERSHIP_DEFAULT_ADMIN_RULES)
             basis.append("default_admin_rules_enforced_delay")
-    elif claim_id == "authority.replace":
+    elif claim_id == C.AUTHORITY_REPLACE:
         owner = facts.registry_owner
         if owner and facts.solmate_mutators:
             # Escalates only with positive proof: a resolved owner and the needed role mutators.
@@ -695,7 +696,7 @@ def _severity(
             notes.add("owner_may_grant_itself_any_role_on_this_registry")
         elif owner:
             notes.add("registry_escalation_mutators_unverified")
-    elif claim_id == "timelock.set_delay":
+    elif claim_id == C.TIMELOCK_SET_DELAY:
         # No credit either way: the principal enumeration is a lower bound and can't prove the caller set is closed.
         notes.add("delay_gate_self_gated_lower_bound" if self_gated else "delay_change_gate_not_self_gated")
 
@@ -708,7 +709,7 @@ def _pause_severity(entries: list[dict[str, Any]], notes: set[str]) -> tuple[Tri
     A proven freeze capability is the base; proven auto-expiry refines downward; sustainable freeze is added by the fold
     where key-set dependence is proven. Undetermined recovery questions leave the rung unchanged.
     """
-    severity = K.BASE_SEVERITY["pause.set"] + K.FREEZE_CAPABILITY_PROVEN
+    severity = K.BASE_SEVERITY[C.PAUSE_SET] + K.FREEZE_CAPABILITY_PROVEN
     basis = ["freeze_capability_proven"]
     for entry in entries:
         observed = (entry.get("witness") or {}).get("observed") or {}

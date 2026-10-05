@@ -8,6 +8,7 @@ from typing import Any
 
 from schemas.contract_analysis import ControllerProvenance
 from services.scoring import constants as K
+from utils import claim_ids as C
 from utils.scoring_status import (
     SELF_SERVICE_BASIS_BOUNDED,
     SELF_SERVICE_DISCLOSE_SIBLING,
@@ -99,7 +100,7 @@ def _flow_asset_class(claims: list[dict[str, Any]]) -> str | None:
     """native / ERC-20 partition of the out-flows. An absent ``from_is_self`` isn't treated as true."""
     native = erc20 = other = False
     for claim in claims:
-        if str(claim.get("claim_id")) != "flow.out":
+        if str(claim.get("claim_id")) != C.FLOW_OUT:
             continue
         for flow in (claim.get("witness") or {}).get("flows") or []:
             if not isinstance(flow, dict) or flow.get("from_is_self") is not True:

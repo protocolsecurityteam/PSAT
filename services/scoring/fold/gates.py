@@ -7,6 +7,7 @@ from typing import Any
 
 from services.scoring.fold.types import _Row
 from services.scoring.schema import NOT_DETERMINED, FunctionSignal, Tri
+from utils import claim_ids as C
 from utils import execution_record as EX
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
@@ -74,8 +75,8 @@ REQUIRED_GATES = ("exact_empty_credit", "latch_witness", "reach_magnitude_usd")
 
 
 REQUIRED_GATES_BY_CLAIM: dict[str, tuple[str, ...]] = {
-    "flow.out": ("token_identity", "asset_class", "asset_identity"),
-    "pause.set": ("freeze_recovery_principals",),
+    C.FLOW_OUT: ("token_identity", "asset_class", "asset_identity"),
+    C.PAUSE_SET: ("freeze_recovery_principals",),
 }
 
 

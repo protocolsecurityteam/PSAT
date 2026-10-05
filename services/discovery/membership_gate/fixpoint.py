@@ -333,18 +333,23 @@ def evaluate_principal_change(
     """Targeted evaluation for a ``FunctionPrincipal`` rewrite.
 
     *addresses* must be the union of principals before and after, since dropped principals are only reachable via the
-    pre-image. The contract's own address is named too.
+    pre-image. The contract's own address is named too. The principals are also changed deployers, so their Class-A
+    standing is settled in the same run: a rewrite can drop the perimeter fact a row rests on, turn the grant under a
+    remaining principal operational, or give a principal a control grant that registers it and admits its children.
     """
     contract = session.get(Contract, contract_id)
     own = (contract.address or "").lower() if contract is not None else ""
-    named = {a.lower() for a in addresses if isinstance(a, str) and _ADDRESS_RE.match(a)}
-    if own:
-        named.add(own)
+    principals = {a.lower() for a in addresses if isinstance(a, str) and _ADDRESS_RE.match(a)}
+    named = principals | ({own} if own else set())
     if not named:
         return None
     return evaluate_committed(
         session,
-        FactsDelta(new_edge_addresses=tuple(sorted(named)), recheck_contract_ids=(contract_id,)),
+        FactsDelta(
+            new_edge_addresses=tuple(sorted(named)),
+            changed_deployer_addresses=tuple(sorted(principals)),
+            recheck_contract_ids=(contract_id,),
+        ),
         context=context,
     )
 

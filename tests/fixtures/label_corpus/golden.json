@@ -6030,9 +6030,27 @@
         {
           "full_name": "pauseTimed()",
           "selector": "0x24a3f499",
-          "effect_labels": [],
-          "action_summary": "Writes or calls into: pausedUntil.",
-          "claims": [],
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "latch": "timestamp",
+                    "member": null,
+                    "var": "pausedUntil"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "set"
+              }
+            }
+          ],
           "value_flows": [],
           "external_calls": [],
           "delegatecall_sinks": [],
@@ -6147,9 +6165,27 @@
         {
           "full_name": "unpauseTimed()",
           "selector": "0xbb912b8b",
-          "effect_labels": [],
-          "action_summary": "Writes or calls into: pausedUntil.",
-          "claims": [],
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "latch": "timestamp",
+                    "member": null,
+                    "var": "pausedUntil"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "unset"
+              }
+            }
+          ],
           "value_flows": [],
           "external_calls": [],
           "delegatecall_sinks": [],
@@ -7176,6 +7212,259 @@
               "caller_authority"
             ],
             "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        }
+      ]
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000130",
+      "chain": "synthetic",
+      "contract": "NamespacedPauseUntil",
+      "solc_version": "0.8.27",
+      "functions": [
+        {
+          "full_name": "pause()",
+          "selector": "0x8456cb59",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "PAUSABLE_STORAGE_SLOT"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "set"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "PAUSABLE_STORAGE_SLOT"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "pauseUntil()",
+          "selector": "0x7e3db158",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.set",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "latch": "timestamp",
+                    "member": "pausedUntil",
+                    "var": "PAUSABLE_UNTIL_STORAGE_SLOT"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "set"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "PAUSABLE_UNTIL_STORAGE_SLOT"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 3,
+            "authority_roles": [
+              "business",
+              "caller_authority",
+              "time"
+            ],
+            "leaf_kinds": [
+              "comparison",
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "pausedUntil()",
+          "selector": "0xda748b10",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: PAUSABLE_UNTIL_STORAGE_SLOT.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "PAUSABLE_UNTIL_STORAGE_SLOT"
+          ],
+          "predicate_tree": {
+            "present": false
+          }
+        },
+        {
+          "full_name": "setPauseUntilDuration(uint256)",
+          "selector": "0x6acf63dd",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: PAUSABLE_UNTIL_STORAGE_SLOT.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "PAUSABLE_UNTIL_STORAGE_SLOT"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 3,
+            "authority_roles": [
+              "business",
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "comparison",
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "transfer(address,uint256)",
+          "selector": "0xa9059cbb",
+          "effect_labels": [],
+          "action_summary": "Writes or calls into: balanceOf.",
+          "claims": [],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "balanceOf"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "business",
+              "time"
+            ],
+            "leaf_kinds": [
+              "comparison",
+              "equality"
+            ],
+            "references_msg_sender": false
+          }
+        },
+        {
+          "full_name": "unpause()",
+          "selector": "0x3f4ba83a",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "member": null,
+                    "var": "PAUSABLE_STORAGE_SLOT"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "unset"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "PAUSABLE_STORAGE_SLOT"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "LEAF",
+            "leaf_count": 1,
+            "authority_roles": [
+              "caller_authority"
+            ],
+            "leaf_kinds": [
+              "equality"
+            ],
+            "references_msg_sender": true
+          }
+        },
+        {
+          "full_name": "unpauseUntil()",
+          "selector": "0x25ae2781",
+          "effect_labels": [
+            "pause_toggle"
+          ],
+          "action_summary": "Changes the contract pause state.",
+          "claims": [
+            {
+              "claim_id": "pause.unset",
+              "tier": "idiom_structural",
+              "witness": {
+                "flags": [
+                  {
+                    "latch": "timestamp",
+                    "member": "pausedUntil",
+                    "var": "PAUSABLE_UNTIL_STORAGE_SLOT"
+                  }
+                ],
+                "kind": "pause_flag",
+                "polarity": "unset"
+              }
+            }
+          ],
+          "value_flows": [],
+          "external_calls": [],
+          "delegatecall_sinks": [],
+          "effect_targets": [
+            "PAUSABLE_UNTIL_STORAGE_SLOT"
+          ],
+          "predicate_tree": {
+            "present": true,
+            "root_op": "AND",
+            "leaf_count": 2,
+            "authority_roles": [
+              "caller_authority",
+              "time"
+            ],
+            "leaf_kinds": [
+              "comparison",
               "equality"
             ],
             "references_msg_sender": true

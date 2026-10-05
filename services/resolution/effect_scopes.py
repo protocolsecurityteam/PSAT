@@ -22,7 +22,11 @@ def resolve_effect_scopes(sites, registry, ctx, base_cap=None, all_scopes=None):
     records = []
     body_caps = []
     for site in sites:
-        cap = evaluate_tree_with_registry(site.get("predicate"), registry, ctx)
+        cap = (
+            evaluate_tree_with_registry(site["predicate"], registry, ctx)
+            if "predicate" in site
+            else CapabilityExpr.unsupported("missing_effect_predicate")
+        )
         record = {k: site[k] for k in ("id", "kind", "target", "sink_ids", "origin")}
         record["capability"] = capability_to_dict(cap)
         records.append(record)

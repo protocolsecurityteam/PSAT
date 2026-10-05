@@ -42,6 +42,7 @@ def _wards_evidence(selector: str) -> ClaimEvidence:
     sentence="grants membership in a role-based access-control scheme (per a recognized standard)",
     legacy_projection="role_management",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=_roles_present,
 )
 def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -62,6 +63,7 @@ def roles_grant(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="revokes membership in a role-based access-control scheme (per a recognized standard)",
     legacy_projection="role_management",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=_roles_present,
 )
 def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -82,6 +84,7 @@ def roles_revoke(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="configures role or capability membership in a Solmate RolesAuthority scheme",
     legacy_projection="role_management",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=ac.solmate_roles_gate,
 )
 def roles_configure(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

@@ -250,17 +250,16 @@ def _prefetch_child_tables(
         return local, rows
 
     def _fp_function_detail(s: Session) -> tuple[dict[int, list[dict[str, Any]]], int]:
-        """Per-function ``{function, callers, labels, claims}`` for the co-controller rule and per-controller
-        capability detail. ``function_name`` because labels alone are too coarse. ``signature_witness`` excluded.
+        """Per-function ``{function, callers, claims}`` for the co-controller rule and per-controller capability
+        detail. ``signature_witness`` excluded.
         """
         by_ef: dict[int, dict[str, Any]] = {}
         rows = 0
-        for cid, ef_id, fname, labels, claims, addr in s.execute(
+        for cid, ef_id, fname, claims, addr in s.execute(
             select(
                 EffectiveFunction.contract_id,
                 EffectiveFunction.id,
                 EffectiveFunction.function_name,
-                EffectiveFunction.effect_labels,
                 EffectiveFunction.claims,
                 func.lower(FunctionPrincipal.address),
             )
@@ -281,7 +280,6 @@ def _prefetch_child_tables(
                 entry = {
                     "contract_id": cid,
                     "function": fname,
-                    "labels": set(labels or ()),
                     "claims": _claim_ids_list(claims),
                     "callers": set(),
                 }
@@ -293,7 +291,6 @@ def _prefetch_child_tables(
             local.setdefault(entry["contract_id"], []).append(
                 {
                     "function": entry["function"],
-                    "labels": entry["labels"],
                     "claims": entry["claims"],
                     "callers": entry["callers"],
                 }

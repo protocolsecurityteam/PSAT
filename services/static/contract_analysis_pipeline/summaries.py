@@ -18,6 +18,7 @@ from schemas.contract_analysis import (
     TrackingHint,
     UpgradeabilityAnalysis,
 )
+from utils import claim_ids as C
 
 from .constants import (
     STANDARD_EVENTS,
@@ -820,7 +821,7 @@ def _predicate_trees_plane_ran(predicate_trees: Mapping[str, Any] | None) -> boo
     return isinstance(predicate_trees.get("trees"), Mapping)
 
 
-_PAUSE_CLAIM_POLARITY = {"pause.set": "pause", "pause.unset": "unpause"}
+_PAUSE_CLAIM_POLARITY = {C.PAUSE_SET: "pause", C.PAUSE_UNSET: "unpause"}
 
 
 def _pause_claims(effects: Mapping[str, Any] | None) -> tuple[set[str], set[str], set[str]]:
@@ -970,9 +971,9 @@ def _classify_pause_toggle_polarity(function, pause_vars: set[str]) -> str:
     return ""
 
 
-_TIMELOCK_QUEUE_CLAIMS = frozenset({"timelock.schedule"})
-_TIMELOCK_EXECUTE_CLAIMS = frozenset({"timelock.execute"})
-_TIMELOCK_CLAIMS = frozenset({"timelock.schedule", "timelock.execute", "timelock.cancel", "timelock.set_delay"})
+_TIMELOCK_QUEUE_CLAIMS = frozenset({C.TIMELOCK_SCHEDULE})
+_TIMELOCK_EXECUTE_CLAIMS = frozenset({C.TIMELOCK_EXECUTE})
+_TIMELOCK_CLAIMS = frozenset({C.TIMELOCK_SCHEDULE, C.TIMELOCK_EXECUTE, C.TIMELOCK_CANCEL, C.TIMELOCK_SET_DELAY})
 
 # ``now`` is the pre-0.7 spelling.
 _TIME_SOURCE_NAMES = frozenset({"block.timestamp", "now", "block.number"})
@@ -1011,7 +1012,7 @@ def _arbitrary_execution_functions(effects: Mapping[str, Any] | None) -> set[str
         if not isinstance(signature, str) or not isinstance(info, Mapping):
             continue
         for claim in info.get("claims") or []:
-            if isinstance(claim, Mapping) and str(claim.get("claim_id")) == "exec.arbitrary":
+            if isinstance(claim, Mapping) and str(claim.get("claim_id")) == C.EXEC_ARBITRARY:
                 out.add(signature)
     return out
 
@@ -1256,10 +1257,10 @@ def _detect_timelock(
     arbitrary_executors = _arbitrary_execution_functions(effects)
     structural = bool(proven_registries and queue_functions and (execute_functions & arbitrary_executors))
 
-    queue_functions |= claims.get("timelock.schedule", set())
-    execute_functions |= claims.get("timelock.execute", set())
+    queue_functions |= claims.get(C.TIMELOCK_SCHEDULE, set())
+    execute_functions |= claims.get(C.TIMELOCK_EXECUTE, set())
 
-    standard = bool(claims.get("timelock.schedule") and claims.get("timelock.execute"))
+    standard = bool(claims.get(C.TIMELOCK_SCHEDULE) and claims.get(C.TIMELOCK_EXECUTE))
     has_timelock = structural or standard
 
     if not has_timelock:

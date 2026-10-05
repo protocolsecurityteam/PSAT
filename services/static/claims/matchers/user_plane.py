@@ -28,6 +28,7 @@ def _erc20_op(ctx: ClaimContext, function: str, selector: str) -> ClaimEvidence 
     sentence="approves a token allowance (user operation)",
     legacy_projection=None,
     consumer_family="user_plane",
+    grant_class="user",
 )
 def erc20_approve(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _erc20_op(ctx, function, "0x095ea7b3")
@@ -38,6 +39,7 @@ def erc20_approve(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="transfers tokens (user operation)",
     legacy_projection=None,
     consumer_family="user_plane",
+    grant_class="user",
 )
 def erc20_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _erc20_op(ctx, function, "0xa9059cbb")
@@ -48,6 +50,7 @@ def erc20_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="transfers tokens on behalf of another account (user operation)",
     legacy_projection=None,
     consumer_family="user_plane",
+    grant_class="user",
 )
 def erc20_transfer_from(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _erc20_op(ctx, function, "0x23b872dd")
@@ -62,6 +65,7 @@ def _weth_gate(ctx: ClaimContext) -> bool:
     sentence="wraps ETH into the token (user deposit)",
     legacy_projection=None,
     consumer_family="user_plane",
+    grant_class="user",
 )
 def weth_deposit(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if ctx.canonical_selector(function) != _DEPOSIT or not _weth_gate(ctx):
@@ -74,6 +78,7 @@ def weth_deposit(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="unwraps ETH from the token (user withdrawal)",
     legacy_projection=None,
     consumer_family="user_plane",
+    grant_class="user",
 )
 def weth_withdraw(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if ctx.canonical_selector(function) != _WITHDRAW or not _weth_gate(ctx):
@@ -90,6 +95,7 @@ DELEGATE_CHANGED_TOPIC0 = abi_topic0("DelegateChanged(address,address,address)")
     sentence="delegates voting power (user operation)",
     legacy_projection=None,
     consumer_family="user_plane",
+    grant_class="user",
 )
 def gov_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     """Comp/OZ-Votes delegation: standard_exact when ``DelegateChanged`` is emitted; the ``delegates`` +
@@ -118,6 +124,7 @@ def _lz_oapp_gate(ctx: ClaimContext) -> bool:
     sentence="sets the trusted remote peer (LayerZero OApp configuration)",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
 )
 def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if ctx.canonical_selector(function) != _SET_PEER or not _lz_oapp_gate(ctx):
@@ -130,6 +137,7 @@ def lz_oapp_set_peer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="sets the LayerZero endpoint delegate",
     legacy_projection=None,
     consumer_family="control_plane",
+    grant_class="control.gate",
 )
 def lz_oapp_set_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     if ctx.canonical_selector(function) != _SET_DELEGATE or not _lz_oapp_gate(ctx):

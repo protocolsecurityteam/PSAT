@@ -18,6 +18,7 @@ from . import _facts
     sentence="changes a code pointer that another entry point of this contract invokes at runtime",
     legacy_projection="hook_update",
     consumer_family="control_plane",
+    grant_class="control.gate",
 )
 def callee_pointer_rotate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     tree = ctx.predicate_tree(function)

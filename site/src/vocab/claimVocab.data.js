@@ -179,6 +179,14 @@ export const CLAIM_VOCAB = {
     priority: 3,
     legacy: null,
   },
+  "transfer_policy.configure": {
+    family: "control_plane",
+    lane: "top",
+    tone: "#7a8098",
+    sentence: "sets transfer policy",
+    priority: 3,
+    legacy: null,
+  },
 
   "pause.set": {
     family: "control_plane",

@@ -6,7 +6,17 @@ with membership, a balance, or a caller-supplied number. Unsupported counts reta
 
 from __future__ import annotations
 
-from .slither_compat import Assignment, Binary, Condition, InternalCall, LibraryCall, StateVariable
+from .slither_compat import (
+    Assignment,
+    Binary,
+    Condition,
+    HighLevelCall,
+    InternalCall,
+    LibraryCall,
+    LowLevelCall,
+    SolidityCall,
+    StateVariable,
+)
 from .structural_evidence import evidence_for, storage_cell
 from .structural_ir import (
     definition,
@@ -115,6 +125,17 @@ def count_witness(frame, contract, bindings):
                 if any(same(w.cell.variable, registry) for w in evidence_for(contract).summary(fn).writes):
                     continue
                 if any(isinstance(ir, (InternalCall, LibraryCall)) for n, ir in ops if n in region):
+                    continue
+                if any(
+                    isinstance(ir, LowLevelCall)
+                    and str(ir.function_name) != "staticcall"
+                    or isinstance(ir, HighLevelCall)
+                    and not (getattr(ir.function, "view", False) or getattr(ir.function, "pure", False))
+                    or isinstance(ir, SolidityCall)
+                    and ir.function.name.startswith(("call(", "callcode(", "delegatecall("))
+                    for n, ir in ops
+                    if n in region
+                ):
                     continue
                 enumerator = inventory(contract, registry)
                 if enumerator is None:

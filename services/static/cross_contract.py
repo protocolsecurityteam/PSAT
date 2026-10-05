@@ -12,15 +12,13 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
+from utils import claim_ids as C
 from utils.evm import EIP1967_IMPL_SLOT
 
 from .claims import (
     Claim,
-    RegistryEntry,
     discover,
     emit_claim,
-    is_registered,
-    register,
     registry,
     resolve_claim_precedence,
 )
@@ -28,34 +26,9 @@ from .claims.matchers._gates import UPGRADE_SELECTORS
 
 logger = logging.getLogger(__name__)
 
-TRANSFER_POLICY_CONFIGURE = "transfer_policy.configure"
-UPGRADE_IMPLEMENTATION = "upgrade.implementation"
-CALLEE_POINTER_ROTATE = "callee_pointer.rotate"
 
 # Proxy types whose implementation the classifier reads from a storage slot.
 _SLOT_CONFIRMED_PROXY_TYPES = frozenset({"eip1967", "eip1822", "beacon_proxy", "oz_legacy"})
-
-
-def _no_static_gate(_ctx: Any) -> bool:
-    # Policy-tier claims have no single-contract evidence; registered only so the policy stage can mint them.
-    return False
-
-
-def _no_static_trigger(_ctx: Any, _function: str) -> None:
-    return None
-
-
-if not is_registered(TRANSFER_POLICY_CONFIGURE):
-    register(
-        RegistryEntry(
-            claim_id=TRANSFER_POLICY_CONFIGURE,
-            sentence="changes another contract's transfer gating",
-            gate=_no_static_gate,
-            trigger=_no_static_trigger,
-            legacy_projection=None,
-            consumer_family="control_plane",
-        )
-    )
 
 
 def _compute_selector(signature: str) -> str | None:
@@ -94,7 +67,7 @@ def _propagatable(claim: Any) -> bool:
     claim_id = claim.get("claim_id")
     if not isinstance(claim_id, str):
         return False
-    return claim_id == UPGRADE_IMPLEMENTATION or _is_flow_family(claim_id)
+    return claim_id == C.UPGRADE_IMPLEMENTATION or _is_flow_family(claim_id)
 
 
 def build_callee_claim_map(
@@ -244,7 +217,7 @@ def _derive_transfer_policy_claims(
             continue
         claims = [
             emit_claim(
-                TRANSFER_POLICY_CONFIGURE,
+                C.TRANSFER_POLICY_CONFIGURE,
                 "policy_derived",
                 {
                     "kind": "transfer_policy",
@@ -281,7 +254,7 @@ def _derive_provenance_upgrade_claims(
             continue
         enriched[fn_sig] = [
             emit_claim(
-                UPGRADE_IMPLEMENTATION,
+                C.UPGRADE_IMPLEMENTATION,
                 "policy_derived",
                 {
                     "kind": "proxy_provenance",
@@ -304,7 +277,7 @@ def _callee_pointer_vars(effects_artifact: Any) -> set[str]:
         if not isinstance(record, dict):
             continue
         for claim in record.get("claims") or []:
-            if not isinstance(claim, dict) or claim.get("claim_id") != CALLEE_POINTER_ROTATE:
+            if not isinstance(claim, dict) or claim.get("claim_id") != C.CALLEE_POINTER_ROTATE:
                 continue
             witness = claim.get("witness")
             links = witness.get("links") if isinstance(witness, dict) else None

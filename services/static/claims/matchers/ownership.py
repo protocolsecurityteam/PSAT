@@ -39,6 +39,7 @@ def _evidence(standard: str, selector: str, corroboration: str) -> ClaimEvidence
     sentence="transfers contract ownership to a new principal (per a recognized ownership standard)",
     legacy_projection="ownership_transfer",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=_ownership_present,
 )
 def ownership_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -62,6 +63,7 @@ def ownership_transfer(ctx: ClaimContext, function: str) -> ClaimEvidence | None
     sentence="renounces contract ownership, leaving the contract unowned (per a recognized ownership standard)",
     legacy_projection="ownership_transfer",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=_ownership_present,
 )
 def ownership_renounce(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
@@ -82,6 +84,7 @@ def ownership_renounce(ctx: ClaimContext, function: str) -> ClaimEvidence | None
     sentence="accepts or requests a pending ownership transfer (per a recognized two-step ownership standard)",
     legacy_projection="ownership_transfer",
     consumer_family="control_plane",
+    grant_class="control.gate",
     gate=_ownership_present,
 )
 def ownership_accept(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

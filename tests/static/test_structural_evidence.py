@@ -255,3 +255,30 @@ def test_call_depth_limit_is_an_obligation_not_an_empty_public_result(tmp_path):
     assert aggregate is not None
     cap = capability_to_dict(aggregate)
     assert capability_surface_openness(cap, project_capability_surface(cap)) == "not_determined"
+
+
+def test_counting_with_a_callback_does_not_assume_an_unchanged_registry(tmp_path):
+    source = (
+        FIXTURE.with_name("counted_permissions.sol")
+        .read_text()
+        .replace("count++;", 'count++;\n                msg.sender.call("");')
+    )
+    project = write_foundry_project(tmp_path, "CountedPermissions", source)
+    _, trees, _ = collect_contract_analysis_with_artifacts(project)
+    assert trees is not None
+    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
+
+    cap = capability_to_dict(
+        evaluate_tree_with_registry(
+            trees["trees"]["execute(address,bytes)"], AdapterRegistry(), EvaluationContext(chain_id=1)
+        )
+    )
+    assert capability_surface_openness(cap, project_capability_surface(cap)) == "not_determined"
+
+
+def test_missing_effect_predicate_is_not_a_public_path():
+    sites = [{"id": "missing", "kind": "external_call", "target": "x", "sink_ids": [], "origin": "body"}]
+    cap, _ = resolve_effect_scopes(sites, AdapterRegistry(), EvaluationContext(chain_id=1))
+    assert cap is not None
+    data = capability_to_dict(cap)
+    assert capability_surface_openness(data, project_capability_surface(data)) == "not_determined"

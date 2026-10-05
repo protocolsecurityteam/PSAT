@@ -18,6 +18,7 @@ TIMED_LATCH = "0x00000000000000000000000000000000000000f0"
 RATE_LIMITED = "0x0000000000000000000000000000000000000110"
 POLICY_CALLER = "0x0000000000000000000000000000000000000100"
 SELF_SERVICE = "0x0000000000000000000000000000000000000120"
+PAUSE_UNTIL = "0x0000000000000000000000000000000000000130"
 
 
 def _functions(address: str) -> dict[str, dict]:
@@ -294,6 +295,25 @@ def test_the_timed_guard_leaf_carries_all_three_facts_across_operands_and_absorb
     # Absent means no additive sub-expression, not unknown.
     frozen_leaves = list(harness._tree_leaves(facts.trees["transferFreezable(address,uint256)"]))
     assert all("absorbed_operands" not in leaf for leaf in frozen_leaves)
+
+
+def test_the_golden_carries_timestamp_latch_pauses():
+    """Both timed latches: the plain one beside an indefinite bool, and etherfi's ERC-7201 member beside a bool slot.
+    The bool latches keep their unmarked flags."""
+    timed = _functions(TIMED_LATCH)
+    plain = {"var": "pausedUntil", "member": None, "latch": "timestamp"}
+    assert _claim(timed["pauseTimed()"], "pause.set")["witness"]["flags"] == [plain]
+    assert _claim(timed["unpauseTimed()"], "pause.unset")["witness"]["flags"] == [plain]
+    assert _claim(timed["freeze()"], "pause.set")["witness"]["flags"] == [{"var": "frozen", "member": None}]
+
+    namespaced = _functions(PAUSE_UNTIL)
+    member = {"var": "PAUSABLE_UNTIL_STORAGE_SLOT", "member": "pausedUntil", "latch": "timestamp"}
+    assert _claim(namespaced["pauseUntil()"], "pause.set")["witness"]["flags"] == [member]
+    assert _claim(namespaced["unpauseUntil()"], "pause.unset")["witness"]["flags"] == [member]
+    assert _claim(namespaced["pause()"], "pause.set")["witness"]["flags"] == [
+        {"var": "PAUSABLE_STORAGE_SLOT", "member": None}
+    ]
+    assert namespaced["setPauseUntilDuration(uint256)"]["claims"] == []
 
 
 def test_the_golden_carries_a_policy_derived_claim():

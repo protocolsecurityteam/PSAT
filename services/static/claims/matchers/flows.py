@@ -124,6 +124,7 @@ def _is_value_call(sink: dict[str, Any]) -> bool:
     sentence="sends value out of the contract",
     legacy_projection="asset_send",
     consumer_family="flow",
+    grant_class="control.funds",
 )
 def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _flow_evidence(ctx, function, "out")
@@ -134,6 +135,7 @@ def flow_out(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="pulls value into the contract",
     legacy_projection="asset_pull",
     consumer_family="flow",
+    grant_class="operational",
 )
 def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return _flow_evidence(ctx, function, "in")
@@ -144,6 +146,7 @@ def flow_in(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sentence="routes value through a contract it calls",
     legacy_projection=None,
     consumer_family="flow",
+    grant_class="operational",
 )
 def value_router(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     """A function that calls an in-unit contract whose body moves value (a Teller into a BoringVault); the

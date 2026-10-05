@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.scoring import constants as K
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
 from services.scoring import reach as R
@@ -17,6 +18,7 @@ from services.scoring.schema import (
     entity_key,
     not_determined_signal_defaults,
 )
+from services.static.claims import claim_ids_of_class
 from utils.scoring_status import VALUE_STATE_PROVEN_REACH
 
 SAFE = "0x" + "2" * 40
@@ -191,3 +193,8 @@ def test_merge_reach_min_hop_and_reached_beats_frontier():
     merged = R.merge_reach([first, second])
     assert merged[KEY_SAFE]["reached"][KEY_VAULT] == {"hop": 2, "basis": R.BASIS_WALKED_HOP}
     assert merged[KEY_SAFE]["frontier"] == []
+
+
+def test_reach_classes_are_drawn_from_the_grant_vocabulary():
+    assert K.CODE_CONTROL_CAPABILITIES == claim_ids_of_class("control.code")
+    assert K.GATE_CONTROL_CAPABILITIES < claim_ids_of_class("control.gate")

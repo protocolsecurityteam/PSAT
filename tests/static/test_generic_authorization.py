@@ -278,3 +278,36 @@ def test_boolean_contract_approval_ignores_paths_the_caller_rejects(tmp_path):
     descriptor = _descriptor(tmp_path, replacements)
     assert descriptor is not None
     assert descriptor["modes"] == ["ecdsa", "external"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "minimumApprovals = 1;",
+        "rewriteMinimum();",
+    ],
+)
+def test_storage_changed_before_validation_does_not_use_the_pinned_threshold(tmp_path, change):
+    replacements = [
+        (
+            "validateBundle(msg.sender, digest, signatures, minimumApprovals);",
+            change + "\nvalidateBundle(msg.sender, digest, signatures, minimumApprovals);",
+        ),
+        (
+            "    function split(",
+            "    function rewriteMinimum() internal { minimumApprovals = 1; }\n    function split(",
+        ),
+    ]
+    tree = _tree(tmp_path, replacements)
+
+    def find(node):
+        d = (node.get("leaf") or {}).get("set_descriptor") or {}
+        return (
+            d
+            if d.get("kind") == "authorization_unresolved"
+            else next((x for c in node.get("children", []) if (x := find(c))), None)
+        )
+
+    descriptor = find(tree)
+    assert descriptor is not None
+    assert descriptor["missing"] == ["authorization_state_modified_before_check"]

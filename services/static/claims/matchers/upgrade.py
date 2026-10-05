@@ -17,6 +17,7 @@ from ._gates import UPGRADE_SELECTORS, is_upgrade_gate, is_uups_gate
     sentence="changes which code executes behind this deployment",
     legacy_projection="implementation_update",
     consumer_family="control_plane",
+    grant_class="control.code",
     gate=is_upgrade_gate,
 )
 def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | None:

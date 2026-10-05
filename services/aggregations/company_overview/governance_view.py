@@ -164,7 +164,7 @@ def build_governance_view(
         ef_contract_ids = [primary_ef_cid] if primary_ef_cid else []
         ef_contract_ids += [sc.id for sc in secondary_impl_contracts]
 
-        # ``value_effects`` stays on legacy labels (drives role + fund-flow lane); capability chips are claims-first.
+        # ``value_effects`` stays on legacy labels (drives role + fund-flow lane); capability chips come from claims.
         value_effects: list[str] = []
         caps_set: set[str] = set()
         for cid in ef_contract_ids:
@@ -172,7 +172,7 @@ def build_governance_view(
                 for label in rec["labels"]:
                     if label in ("asset_pull", "asset_send", "mint", "burn") and label not in value_effects:
                         value_effects.append(label)
-                caps_set |= _function_capabilities(rec["labels"], rec["claims"])
+                caps_set |= _function_capabilities(rec["claims"])
 
         if is_proxy:
             caps_set.add("upgradeable")
@@ -485,8 +485,7 @@ def build_governance_view(
     for caddr, functions in fp_function_detail_by_entity.items():
         for fn in functions:
             fname = fn.get("function")
-            # Per function, so claims-vs-legacy stays per-function.
-            fn_caps = _function_capabilities(fn.get("labels") or (), fn.get("claims") or ())
+            fn_caps = _function_capabilities(fn.get("claims") or ())
             for a in fn.get("callers", ()):
                 la = (a or "").lower()
                 if not la:
