@@ -592,6 +592,12 @@ class PolicyWorker(BaseWorker):
                 context=f"policy_function_principals:{job.id}",
             )
 
+        if contract_row is not None:
+            # A sibling's dependent pass rewrites this artifact under the lock; publishing outside it could interleave
+            # with that read-modify-write and restore a previous run's payload. The store's commit releases it. Earlier
+            # writes (a membership dirty mark) commit first so the wait holds no row locks.
+            session.commit()
+            lock_contract_claims(session, [contract_row.id])
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
@@ -974,6 +980,7 @@ class PolicyWorker(BaseWorker):
                 select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
             ).scalar_one_or_none()
             if contract_row is not None:
+                session.commit()
                 lock_contract_claims(session, [contract_row.id])
             facts = fetch_sibling_facts(
                 related_jobs_with_facts(session, job, chain_id=_chain_id_for_job(job)),
@@ -1011,7 +1018,13 @@ class PolicyWorker(BaseWorker):
                     )
                 if ep_data is not None:
                     apply_claims_to_payload(ep_data, enriched)
-                    store_artifact(session, job.id, "effective_permissions", data=ep_data)
+                    # Merged into the stored payload, which also holds what siblings' dependent passes added since
+                    # this job published it; one whose artifacts failed to fetch above is missing from ``enriched``.
+                    stored = get_artifact(session, job.id, "effective_permissions")
+                    payload = stored if isinstance(stored, dict) else ep_data
+                    if payload is not ep_data:
+                        apply_claims_to_payload(payload, enriched)
+                    store_artifact(session, job.id, "effective_permissions", data=payload)
             # Releases the claims-writer lock.
             session.commit()
 
@@ -1060,6 +1073,7 @@ class PolicyWorker(BaseWorker):
             if address == source_address or not _contribution(address, sibling_effects, facts.snapshots.get(address)):
                 continue
             sibling_job_id = facts.job_for_address[address]
+            source_job_id = job.id
             passes += 1
             for attempt in (1, 2):
                 try:
@@ -1067,7 +1081,7 @@ class PolicyWorker(BaseWorker):
                         session,
                         dependent_job_id=sibling_job_id,
                         contribution_for=functools.partial(_contribution, address),
-                        source_job_id=job.id,
+                        source_job_id=source_job_id,
                         redistill=redistill,
                     )
                     break
@@ -1083,7 +1097,7 @@ class PolicyWorker(BaseWorker):
                     )
                     logger.warning(
                         "Job %s: cross-contract claims for sibling %s failed: %s",
-                        job.id,
+                        source_job_id,
                         address,
                         exc,
                         extra={"exc_type": type(exc).__name__, "sibling_job_id": str(sibling_job_id)},

@@ -30,7 +30,7 @@ from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope
-from db.models import Artifact, EffectiveFunction, Job
+from db.models import Artifact, Contract, EffectiveFunction, Job
 from db.queue import get_artifact
 from services.concurrency import parallel_map
 from services.static.claims import Claim, resolve_claim_precedence
@@ -156,8 +156,8 @@ def _parent_job_uuid(job: Job) -> uuid.UUID | None:
 
 
 def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> list[tuple[Any, str]]:
-    """``[(job_id, address)]`` of the job's siblings on its chain that have both fact artifacts, the newest job per
-    address.
+    """``[(job_id, address)]`` of the job's siblings on its chain that have both fact artifacts: per address, the job
+    owning its contract row, else the newest.
 
     Sibling is symmetric: same company, same parent, or parent and child. The child direction matters because a
     child's facts can feed its parent's derivation.
@@ -174,17 +174,20 @@ def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> lis
         return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
 
     address = func.lower(Job.address)
+    owns_contract = exists().where(Contract.job_id == Job.id)
     rows = session.execute(
         select(Job.id, address)
         .where(
             Job.id != job.id,
             Job.address.isnot(None),
+            address != (job.address or "").lower(),
             Job.chain_id == chain_id,
             or_(*related),
             *(_has(name) for name in FACT_ARTIFACTS),
         )
         .distinct(address)
-        .order_by(address, Job.created_at.desc(), Job.id.desc())
+        # The job holding the address's contract row is the one whose rows a dependent pass can reach.
+        .order_by(address, owns_contract.desc(), Job.created_at.desc(), Job.id.desc())
     ).all()
     return [(job_id, addr) for job_id, addr in rows if addr]
 
@@ -269,7 +272,6 @@ def enrich_dependent(
     see the sibling.
     """
     from db.deployment import normalize_deployment
-    from db.models import Contract
     from db.queue import store_artifact
 
     job = session.get(Job, dependent_job_id)

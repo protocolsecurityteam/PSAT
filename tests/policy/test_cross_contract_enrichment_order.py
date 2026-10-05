@@ -493,3 +493,44 @@ def test_effects_bridge_takes_the_claims_lock_and_rereads_rows(pipeline, db_sess
     finally:
         db_session.rollback()
         other.dispose()
+
+
+def test_sibling_scope_prefers_the_job_that_owns_the_contract_row(pipeline, db_session):
+    p = pipeline()
+    target = p.job(CALLER)
+    owner = p.job(TOKEN_A)
+    newer = p.job(TOKEN_A)
+    db_session.add(Contract(job_id=owner.id, address=TOKEN_A, contract_name="Token"))
+    db_session.commit()
+    for job in (owner, newer):
+        p.land_facts(job, _token_effects(), _snapshot({}))
+
+    assert related_jobs_with_facts(db_session, target, chain_id=1) == [(owner.id, TOKEN_A)]
+
+
+def test_own_pass_keeps_a_dependent_contribution_whose_sibling_it_could_not_fetch(pipeline, db_session, monkeypatch):
+    p = pipeline()
+    rows, artifact = _run_company_siblings(p, ["caller", "tokenA", "tokenB"])
+    caller = db_session.query(Job).filter(Job.company == p.company, Job.address == CALLER).one()
+    token_a = db_session.query(Job).filter(Job.company == p.company, Job.address == TOKEN_A).one()
+    assert rows[SWEEP][0]["witness"]["callee"] == TOKEN_A
+
+    def _drop_token_a(targets, *, session_factory):
+        return fetch_sibling_facts([t for t in targets if t[0] != token_a.id], session_factory=session_factory)
+
+    monkeypatch.setattr("workers.policy_worker.fetch_sibling_facts", _drop_token_a)
+    payload = get_artifact(db_session, caller.id, "effective_permissions")
+    assert isinstance(payload, dict)
+    fresh = {"functions": [{**fn, "claims": []} for fn in payload["functions"]]}
+    PolicyWorker()._enrich_cross_contract(
+        db_session,
+        caller,
+        {},
+        _snapshot({"tokenA": TOKEN_A, "tokenB": TOKEN_B}),
+        function_records=fresh["functions"],
+        ep_data=fresh,
+        target_effects=_caller_effects(),
+    )
+
+    assert p.artifact_claims(caller) == artifact
+    assert p.row_claims(caller) == rows
