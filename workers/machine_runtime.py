@@ -17,12 +17,25 @@ import threading
 import time
 import uuid
 
+import psycopg2
+from sqlalchemy.exc import OperationalError
+
 from db.models import SessionLocal
 from services.process_singleton import ProcessSingleton
-from services.worker_lifecycle import boot_phase, finish_boot, lifecycle_mode, register_boot
+from services.worker_lifecycle import (
+    boot_phase,
+    db_error_detail,
+    finish_boot,
+    lifecycle_mode,
+    register_boot,
+)
 from utils.logging import configure_logging
 
 logger = logging.getLogger(__name__)
+
+SUPERVISION_INTERVAL_S = 5.0
+# How long supervision queries may keep failing transiently before the group gives up. Ownership loss never waits.
+SUPERVISION_GRACE_S = 120.0
 
 
 def commands(group: str) -> list[list[str]]:
@@ -48,6 +61,39 @@ def kill_groups(children: list[subprocess.Popen]) -> None:
             pass
     for child in children:
         child.wait()
+
+
+class _Supervision:
+    """Tolerates transient failures of the periodic ownership check and heartbeat.
+
+    Killing the group on one slow query turned CPU throttling into a reboot loop. The singleton connection still holds
+    the lock while it is open, so only a closed connection, a lost lock or a superseded boot ends the group at once.
+    """
+
+    def __init__(self, group: str, singleton: ProcessSingleton, boot: uuid.UUID):
+        self.group, self.singleton, self.boot = group, singleton, boot
+        self.failing_since: float | None = None
+
+    def poll(self, phase: str) -> str:
+        try:
+            self.singleton.check()
+            if self.group == "workers":
+                with SessionLocal() as session:
+                    phase = boot_phase(session, self.boot)
+        except (OperationalError, psycopg2.OperationalError) as exc:
+            if self.singleton.connection.closed:
+                raise
+            now = time.monotonic()
+            self.failing_since = self.failing_since or now
+            if now - self.failing_since >= SUPERVISION_GRACE_S:
+                raise
+            logger.warning(
+                "process supervision query failed; retrying",
+                extra={"group": self.group, "failing_s": round(now - self.failing_since, 1), **db_error_detail(exc)},
+            )
+            return phase
+        self.failing_since = None
+        return phase
 
 
 def run(group: str, stop: threading.Event) -> int:
@@ -86,13 +132,11 @@ def run(group: str, stop: threading.Event) -> int:
         launched_at = [time.monotonic()] * len(children)
         check_at = 0.0
         phase = "running"
+        supervision = _Supervision(group, singleton, boot)
         while True:
             if time.monotonic() >= check_at:
-                singleton.check()
-                if group == "workers":
-                    with SessionLocal() as session:
-                        phase = boot_phase(session, boot)
-                check_at = time.monotonic() + 5
+                phase = supervision.poll(phase)
+                check_at = time.monotonic() + SUPERVISION_INTERVAL_S
             if not draining and (stop.is_set() or phase == "draining"):
                 draining = True
                 for child in children:
@@ -133,7 +177,10 @@ def run(group: str, stop: threading.Event) -> int:
             # Event.wait would spin once stop is set while a long job drains.
             time.sleep(1)
     except Exception as exc:
-        logger.error("process ownership or supervision failed", extra={"group": group, "exc_type": type(exc).__name__})
+        reason = {"reason": str(exc)} if isinstance(exc, RuntimeError) else {}
+        logger.error(
+            "process ownership or supervision failed", extra={"group": group, **db_error_detail(exc), **reason}
+        )
         return 1
     finally:
         # Forced loss cannot safely finish: terminate all descendants, retain
