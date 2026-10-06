@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 
+from db.storage import StorageKeyAbsent, StorageKeyMissing
 from services.scoring import distill as D
 from services.scoring import fold as FOLD
 from services.scoring import planes as P
@@ -366,33 +367,56 @@ class _FakeQuery:
 class _FakeSession:
     def __init__(self, outcome: Any) -> None:
         self._outcome = outcome
+        self.reads = 0
 
     def query(self, *_a: Any) -> _FakeQuery:
+        self.reads += 1
         return _FakeQuery(self._outcome)
 
 
 @pytest.mark.parametrize(
-    "outcome,reason",
+    "outcome,reason,from_storage",
     [
-        (None, EX.REASON_TRANSCRIPT_UNSTORED),
-        (RuntimeError("boom"), EX.REASON_FETCH_FAILED),
+        (None, EX.REASON_TRANSCRIPT_UNSTORED, False),
+        (RuntimeError("boom"), EX.REASON_FETCH_FAILED, False),
+        (StorageKeyAbsent("missing pointer"), EX.REASON_STORAGE_KEY_MISSING, True),
+        (StorageKeyMissing("missing object"), EX.REASON_TRANSCRIPT_UNSTORED, True),
+        (RuntimeError("storage offline"), EX.REASON_FETCH_FAILED, True),
     ],
-    ids=["no_artifact_row", "transport_failure"],
+    ids=["no_artifact_row", "database_failure", "no_storage_key", "no_storage_object", "storage_failure"],
 )
-def test_each_way_of_failing_to_reach_the_transcript_keeps_its_own_reason(outcome, reason):
-    """All three are faults with different implications for retrying."""
-    D.clear_transcript_cache()
-    reader = D._TranscriptReader(cast(Any, _FakeSession(outcome)))
+def test_each_way_of_failing_to_reach_the_transcript_keeps_its_own_reason(outcome, reason, from_storage, monkeypatch):
+    """A failure keeps its reason until storage recovers; successful caching ends with the contract load."""
+    session = _FakeSession(object() if from_storage else outcome)
+    if from_storage:
+
+        def unreadable(_row):
+            raise outcome
+
+        monkeypatch.setattr("db.queue._artifact_row_to_value", unreadable)
+    reader = D._TranscriptReader(cast(Any, session))
     record = reader.execution(transcript_ptr="job::art", effect_verdict_id=7)
     assert record.state == EX.EXECUTION_NOT_DETERMINED
     assert record.reason == reason
     assert record.reason in EX.FAULT_REASONS
     assert record.effect_verdict_id == 7
-    D.clear_transcript_cache()
+    assert session.reads == 1
+    session._outcome = object()
+    body = _transcript()
+    reads = []
+    monkeypatch.setattr("db.queue._artifact_row_to_value", lambda row: reads.append(row) or body)
+    recovered = reader.execution(transcript_ptr="job::art", effect_verdict_id=8)
+    assert recovered == EX.from_transcript(body, transcript_ptr="job::art", effect_verdict_id=8)
+    assert session.reads == 2 and len(reads) == 1
+    reader.execution(transcript_ptr="job::art", effect_verdict_id=9)
+    assert session.reads == 2 and len(reads) == 1
+    # New contract loads cannot inherit bodies (or failures) retained by previous readers.
+    fresh = D._TranscriptReader(cast(Any, session))
+    fresh.execution(transcript_ptr="job::art", effect_verdict_id=10)
+    assert session.reads == 3 and len(reads) == 2
 
 
 def test_an_unresolvable_pointer_never_reaches_object_storage():
-    D.clear_transcript_cache()
     reader = D._TranscriptReader(cast(Any, None))  # a session use would raise
     record = reader.execution(transcript_ptr="not-a-pointer", effect_verdict_id=7)
     assert record.reason == EX.REASON_PTR_UNRESOLVABLE

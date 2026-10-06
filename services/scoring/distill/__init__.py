@@ -41,7 +41,6 @@ from .facts import (
     _ORPHAN_SAMPLE,
     _SOLMATE_MUTATOR_SELECTORS,
     _TIMELOCK_ENTRYPOINTS,
-    _TRANSCRIPT_CACHE,
     _W2_ARM_RANK,
     ASSET_IDENTITY_ARTIFACT_ABSENT,
     ASSET_IDENTITY_ARTIFACT_MALFORMED,
@@ -70,7 +69,6 @@ from .facts import (
     _proven_number,
     _registry_owner,
     _TranscriptReader,
-    clear_transcript_cache,
     distill_contract_signals,
     distill_job_signals,
 )
@@ -170,7 +168,6 @@ __all__ = [
     "_TIER_RANK",
     "_TIER_TOKENS",
     "_TIMELOCK_ENTRYPOINTS",
-    "_TRANSCRIPT_CACHE",
     "_TranscriptReader",
     "_UNDETERMINED_DESTINATION",
     "_W2_ARM_RANK",
@@ -220,7 +217,6 @@ __all__ = [
     "_tier",
     "_token_identity",
     "_verdict_bearing_entries",
-    "clear_transcript_cache",
     "distill_contract_signals",
     "distill_job_signals",
 ]
