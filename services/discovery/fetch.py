@@ -230,40 +230,35 @@ def write_compiler_input(project_dir: Path, sources: dict[str, str], settings: d
     (project_dir / "analysis_standard_input.json").write_text(json.dumps(payload))
 
 
-_MIN_SOLC = "0.8.24"  # 0.8.21-0.8.23 have Natspec.cpp internal compiler errors on some OZ contracts
+_MIN_SOLC = "0.8.24"  # Preferred fallback when the source constraints permit it.
 
 
 def _detect_solc_version(sources: dict[str, str]) -> str:
-    min_tuple = tuple(int(x) for x in _MIN_SOLC.split("."))
-    versions = []
+    from semantic_version import NpmSpec, Version
+
+    preferred = Version(_MIN_SOLC)
+    candidates = {preferred}
+    constraints = []
     for content in sources.values():
-        for m in re.finditer(r"pragma\s+solidity\s+(<=|>=|[<>^~=]?)\s*(0\.\d+\.\d+)", content):
-            op, ver = m.group(1), m.group(2)
-            # ``<``/``<=`` is a ceiling, not a target (``<0.9.0`` would pin a nonexistent solc).
-            if op in ("<", "<="):
-                continue
-            versions.append(ver)
-    if not versions:
-        return _MIN_SOLC
-    detected = max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
-    detected_tuple = tuple(int(x) for x in detected.split("."))
-    if detected_tuple[:2] == min_tuple[:2] and detected_tuple < min_tuple:
-        return _MIN_SOLC
-    return detected
-
-
-def _relax_pragmas(sources: dict[str, str]) -> dict[str, str]:
-    """Rewrite exact pragmas to ``^X.Y.Z``: Foundry checks them against solc_version even with auto-detect off,
-    blocking newer patch compilers.
-    """
-    relaxed = {}
-    for path, content in sources.items():
-        relaxed[path] = re.sub(
-            r"(pragma\s+solidity\s+)=?\s*(0\.\d+\.\d+)",
-            r"\1^\2",
-            content,
-        )
-    return relaxed
+        # Pragma-shaped text inside comments or literals is not a compiler constraint.
+        code = re.sub(r"""//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""", " ", content)
+        for expression in re.findall(r"\bpragma\s+solidity\s+([^;]+);", code):
+            expression = re.sub(r"([<>=~^]+)\s+(?=\d)", r"\1", expression).strip()
+            try:
+                constraints.append(NpmSpec(expression))
+            except ValueError as exc:
+                raise ValueError("Cannot infer Solidity version; exact compiler metadata is required") from exc
+            for op, version in re.findall(r"([<>]=?|[=~^]?)\s*(\d+\.\d+\.\d+)", expression):
+                parsed = Version(version)
+                candidates.add(parsed)
+                if op == ">":
+                    candidates.add(parsed.next_patch())
+                elif op == "<" and parsed.patch:
+                    candidates.add(Version(major=parsed.major, minor=parsed.minor, patch=parsed.patch - 1))
+    eligible = [version for version in candidates if all(spec.match(version) for spec in constraints)]
+    if not eligible:
+        raise ValueError("No inferred compiler satisfies all Solidity pragmas; exact compiler metadata is required")
+    return str(preferred if preferred in eligible else max(eligible))
 
 
 def _project_src_dir(sources: dict[str, str]) -> str:

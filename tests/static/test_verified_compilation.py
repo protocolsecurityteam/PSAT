@@ -36,14 +36,28 @@ def result(settings=None, version="v0.8.27+commit.40a35a09"):
     }
 
 
-def test_exact_compiler_and_sources_are_not_rewritten(tmp_path):
-    data = result()
-    scaffold("0x" + "11" * 20, data, tmp_path)
-    assert "pragma solidity 0.8.27;" in (tmp_path / "src/C.sol").read_text()
-    assert 'solc_version = "0.8.27"' in (tmp_path / "foundry.toml").read_text()
+@pytest.mark.parametrize("worker", [False, True], ids=["discovery", "static"])
+@pytest.mark.parametrize("metadata", [False, True], ids=["inferred", "verified"])
+@pytest.mark.parametrize("constraint", ["0.8.21", "<0.9.0 =0.8.21 >=0.8.0 ^0.8.0 ^0.8.20"])
+def test_exact_compiler_and_sources_are_not_rewritten(tmp_path, worker, metadata, constraint):
+    data = result(version="v0.8.21+commit.d9974bed" if metadata else "")
+    source = f"pragma solidity {constraint}; contract C {{}}"
+    data["SourceCode"] = source
+    meta = {"compiler_version": data["CompilerVersion"], "language": "solidity", "contract_name": "C"}
+    if worker:
+        StaticWorker()._scaffold_project(
+            tmp_path, {"src/C.sol": source}, meta, {"verified_settings": parse_compiler_settings(data)}, []
+        )
+    else:
+        scaffold("0x" + "11" * 20, data, tmp_path)
+    assert (tmp_path / "src/C.sol").read_text() == source
+    assert 'solc_version = "0.8.21"' in (tmp_path / "foundry.toml").read_text()
     standard = json.loads((tmp_path / "analysis_standard_input.json").read_text())
     assert "evmVersion" not in standard["settings"]
     assert standard["settings"]["optimizer"]["runs"] == 0
+    compiled = compile_verified(tmp_path, meta)
+    assert next(iter(compiled.compilation_units.values())).compiler_version.version == "0.8.21"
+    assert any(c.name == "C" for c in Slither(compiled).contracts)
 
 
 def test_explorer_bare_file_map_compiles_as_sources(tmp_path):
