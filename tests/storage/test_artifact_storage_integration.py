@@ -20,10 +20,10 @@ pytestmark = [requires_postgres, requires_storage]
 def api_with(monkeypatch, db_session, storage_bucket):
     import api as api_module
     from routers import deps
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
     monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
+    api_module.app.dependency_overrides[require_admin] = lambda: None
     return api_module
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.monitoring.notifier import _is_discord_webhook
+from utils.egress import is_discord_webhook
 
 
 @pytest.mark.parametrize(
@@ -22,4 +22,4 @@ from services.monitoring.notifier import _is_discord_webhook
     ],
 )
 def test_is_discord_webhook(url, ok):
-    assert _is_discord_webhook(url) is ok
+    assert is_discord_webhook(url) is ok

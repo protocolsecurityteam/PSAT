@@ -21,9 +21,11 @@ from routers import (
     agent,
     analyses,
     audits,
+    auth,
     company,
     fleet,
     jobs,
+    me,
     meta,
     monitored,
     predicate_capabilities,
@@ -329,6 +331,8 @@ app.include_router(monitored.router)
 app.include_router(address_labels.router)
 app.include_router(agent.router)
 app.include_router(predicate_capabilities.router)
+app.include_router(auth.router)
+app.include_router(me.router)
 # SPA catch-all MUST be last.
 app.include_router(spa.router)
 

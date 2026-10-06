@@ -66,6 +66,21 @@ def connect_host(url: str) -> str:
     return host
 
 
+# Webhook URLs are user-supplied; without this allowlist they are an SSRF sink.
+_DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"})
+
+
+def is_discord_webhook(url: str) -> bool:
+    """https on a Discord host, judged by the host the client will dial so backslash/userinfo tricks can't disagree."""
+    if urlparse(url).scheme != "https":
+        return False
+    try:
+        host = connect_host(url)
+    except UnsafeUrlError:
+        return False
+    return host.lower() in _DISCORD_WEBHOOK_HOSTS
+
+
 def assert_public_http_url(url: str) -> str:
     host = connect_host(url)
     parsed = urlparse(url)

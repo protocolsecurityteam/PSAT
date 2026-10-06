@@ -1,6 +1,10 @@
 import { setAdminKey } from "./api/client.js";
+import { requestSignIn, signOut, useSession } from "./api/session.js";
+import { useHasAdminKey } from "./api/useIsAdmin.js";
 
 export default function HamburgerMenu({ onClose, viewMode, companyName, companyTab, isAdmin, onNavigate, onNavigateCompanyTab }) {
+  const { status, user } = useSession();
+  const hasAdminKey = useHasAdminKey();
   return (
     <>
       <div className="hamburger-backdrop" onClick={onClose} />
@@ -23,10 +27,21 @@ export default function HamburgerMenu({ onClose, viewMode, companyName, companyT
             <button className={`hamburger-link ${viewMode === "company" && companyTab === "surface" ? "active" : ""}`} onClick={() => { onNavigateCompanyTab("surface"); onClose(); }}>Surface</button>
           </nav>
         )}
-        {isAdmin && (
+        <nav className="hamburger-nav hamburger-account-section">
+          <div className="hamburger-section-label">{user ? user.email : "Account"}</div>
+          {status === "signed_in" ? (
+            <>
+              <button className={`hamburger-link ${viewMode === "account" ? "active" : ""}`} onClick={() => { onNavigate("/account", "account"); onClose(); }}>Alerts &amp; webhooks</button>
+              <button className="hamburger-link" onClick={() => { signOut(); onClose(); }}>Sign out</button>
+            </>
+          ) : (
+            <button className="hamburger-link" onClick={() => { requestSignIn(); onClose(); }}>Sign in</button>
+          )}
+        </nav>
+        {hasAdminKey && (
           <nav className="hamburger-nav hamburger-admin-section">
-            <div className="hamburger-section-label">Admin</div>
-            <button className="hamburger-link" onClick={() => { setAdminKey(""); onClose(); }}>Sign out (admin)</button>
+            <div className="hamburger-section-label">Admin key</div>
+            <button className="hamburger-link" onClick={() => { setAdminKey(""); onClose(); }}>Forget admin key</button>
           </nav>
         )}
       </aside>

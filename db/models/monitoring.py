@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -125,5 +126,26 @@ class ProtocolSubscription(Base):
         JSON().with_variant(JSONB(), "postgresql"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # NULL owner is an admin-created, unowned row. Account rows deliver through ``webhook`` rather than a copied URL,
+    # so editing or deleting the saved webhook follows through.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    webhook_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_webhooks.id", ondelete="CASCADE"), nullable=True
+    )
 
-    __table_args__ = (Index("ix_protocol_subscriptions_protocol_id", "protocol_id"),)
+    webhook = relationship("UserWebhook", lazy="joined")
+
+    __table_args__ = (
+        Index("ix_protocol_subscriptions_protocol_id", "protocol_id"),
+        Index("ix_protocol_subscriptions_user_id", "user_id"),
+        CheckConstraint(
+            "discord_webhook_url IS NULL OR webhook_id IS NULL",
+            name="ck_protocol_subscriptions_one_target",
+        ),
+    )
+
+    @property
+    def delivery_url(self) -> str | None:
+        return self.webhook.discord_webhook_url if self.webhook is not None else self.discord_webhook_url

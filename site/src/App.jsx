@@ -2,9 +2,14 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 
 import { api, getAdminKey, setAdminKey } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
+import AccountPage from "./account/AccountPage.jsx";
+import ResetPasswordPage from "./account/ResetPasswordPage.jsx";
+import SignInModal from "./account/SignInModal.jsx";
 import ProductHero from "./ProductHero.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
+import AccountNavButton from "./account/AccountNavButton.jsx";
+import { finishSocialSignIn } from "./api/neonAuth.js";
 import { isAddress, parseLocationPath } from "./router.js";
 import PipelineDashboard from "./pages/PipelineDashboard.jsx";
 import CompanyOverview from "./pages/CompanyOverview.jsx";
@@ -14,12 +19,6 @@ import RunsPage from "./pages/RunsPage.jsx";
 // Lazy so the home bundle stays slim; Vite dedupes it with CompanyOverview's
 // import.
 const ProtocolSurface = lazy(() => import("./surface/ProtocolSurface.jsx"));
-
-// TODO: replace with real sign-in (an identity-aware proxy like oauth2-proxy
-// injecting the admin key server-side, or per-user login + roles). The prompt +
-// localStorage key in api/client.js is a stopgap: a shared secret in every
-// admin's browser, no per-user audit, no revocation short of rotating the key.
-
 
 export default function App() {
   const [analyses, setAnalyses] = useState([]);
@@ -35,6 +34,23 @@ export default function App() {
   const analysesRef = useRef([]);
   const doneTimerRef = useRef(null);
   const isAdmin = useIsAdmin();
+  const [signInOpen, setSignInOpen] = useState(false);
+  const [signInError, setSignInError] = useState(null);
+
+  useEffect(() => {
+    const open = () => setSignInOpen(true);
+    window.addEventListener("psat:auth-required", open);
+    return () => window.removeEventListener("psat:auth-required", open);
+  }, []);
+
+  // Back from GitHub/Google: trade the verifier for our session, or reopen sign-in with why it failed.
+  useEffect(() => {
+    finishSocialSignIn().then((message) => {
+      if (!message) return;
+      setSignInError(message);
+      setSignInOpen(true);
+    });
+  }, []);
 
   // ?admin=1 prompts once for a key; the only key-entry path now that operator
   // controls are hidden.
@@ -182,6 +198,8 @@ export default function App() {
 
   const isMonitor = viewMode === "monitor";
   const isCompany = viewMode === "company";
+  const isAccount = viewMode === "account";
+  const isResetPassword = viewMode === "reset-password";
 
   return (
     <ErrorBoundary>
@@ -199,6 +217,7 @@ export default function App() {
               {formOpen ? "Close" : "+ New Analysis"}
             </button>
           )}
+          <AccountNavButton onOpenAccount={() => navigate("/account", "account")} />
         </div>
       </nav>
 
@@ -212,6 +231,10 @@ export default function App() {
           onNavigate={(path, mode) => { navigate(path, mode); refreshAnalyses(); }}
           onNavigateCompanyTab={navigateCompanyTab}
         />
+      )}
+
+      {signInOpen && (
+        <SignInModal initialError={signInError} onClose={() => { setSignInOpen(false); setSignInError(null); }} />
       )}
 
       {isAdmin && isMonitor && formOpen && (
@@ -241,7 +264,9 @@ export default function App() {
           </Suspense>
         </div>
       )}
-      {!isMonitor && !isCompany && (
+      {isAccount && <AccountPage onOpenCompany={openCompany} />}
+      {isResetPassword && <ResetPasswordPage />}
+      {!isMonitor && !isCompany && !isAccount && !isResetPassword && (
         <>
           <ProductHero />
           <RunsPage

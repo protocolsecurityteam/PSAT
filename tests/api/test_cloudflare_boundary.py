@@ -76,14 +76,14 @@ def edge_client(monkeypatch, jwks_wire):
     monkeypatch.setattr(EdgeConfig, "from_env", classmethod(lambda cls, env=None: CONFIG))
     monkeypatch.setattr(api.app, "middleware_stack", None)
     monkeypatch.setattr(deps, "ADMIN_KEY", "test-admin-key")
-    override = api.app.dependency_overrides.pop(deps.require_admin_key, None)
+    override = api.app.dependency_overrides.pop(deps.require_admin, None)
     api._global_limiter.reset()
     try:
         yield TestClient(api.app, raise_server_exceptions=False)
     finally:
         api._global_limiter.reset()
         if override is not None:
-            api.app.dependency_overrides[deps.require_admin_key] = override
+            api.app.dependency_overrides[deps.require_admin] = override
 
 
 def test_valid_jwt_and_jwks_cache(signing_keys, jwks_wire):
@@ -353,3 +353,26 @@ def test_invalid_access_still_consumes_global_budget(edge_client, monkeypatch, j
     direct = edge_client.get("/api/version")
     assert direct.status_code == 403
     assert direct.headers["x-content-type-options"] == "nosniff"
+
+
+def test_account_routes_skip_operator_access_but_cookies_never_unlock_operator_routes(edge_client, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from routers import deps
+    from tests.conftest import SessionFactory
+    from utils.edge import account_route
+
+    monkeypatch.setattr(deps, "SessionLocal", SessionFactory(MagicMock()))
+    for path in ("/api/me", "/api/me/webhooks", "/api/auth/config", "/api/auth/neon/get-session"):
+        assert account_route(path)
+        response = edge_client.get(path, headers=ORIGIN, follow_redirects=False)
+        assert response.status_code != 403, (path, response.text)
+        assert response.headers["cache-control"] == PRIVATE
+    assert edge_client.get("/api/me", headers=ORIGIN).status_code == 401
+    # Origin authentication still applies.
+    assert edge_client.get("/api/me").status_code == 403
+    for path in ("/api/mex", "/api/authx", "/api/jobs"):
+        assert not account_route(path)
+    session_cookie = {**ORIGIN, "Cookie": "psat_session=anything"}
+    assert edge_client.get("/api/jobs", headers=session_cookie).status_code == 403
+    assert edge_client.post("/api/analyze", headers=session_cookie, json={}).status_code == 403

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -12,9 +13,16 @@ from schemas.control_tracking import MonitoredContractType
 # So no ingest path accepts a 42-char string that isn't hex.
 _HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
-_DISCORD_WEBHOOK_HOSTS = {"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"}
-
 _DAPP_URLS_MAX = 50
+
+
+def _require_discord_webhook(value: str) -> str:
+    # The monitor POSTs findings here.
+    from utils.egress import is_discord_webhook
+
+    if not is_discord_webhook(value):
+        raise ValueError("discord_webhook_url must be an https URL on a Discord host")
+    return value
 
 
 def _require_http_url(value: str) -> str:
@@ -74,27 +82,8 @@ class AnalyzeRequest(BaseModel):
         return self
 
 
-class ProtocolSubscribeRequest(BaseModel):
-    discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for protocol event notifications.")
-    label: str | None = None
+class _EventFilteredRequest(BaseModel):
     event_filter: dict | None = Field(default=None, description='Optional filter: {"event_types": ["upgraded", ...]}')
-
-    @field_validator("discord_webhook_url")
-    @classmethod
-    def _validate_discord_webhook_url(cls, v: str) -> str:
-        # The monitor POSTs findings here, so https on a Discord host only. The host comes from ``connect_host`` so a
-        # backslash/userinfo trick that urllib3 dials elsewhere is rejected.
-        from utils.egress import UnsafeUrlError, connect_host
-
-        if urlparse(v).scheme.lower() != "https":
-            raise ValueError("discord_webhook_url must be an https URL on a Discord host")
-        try:
-            host = connect_host(v)
-        except UnsafeUrlError:
-            raise ValueError("discord_webhook_url must be an https URL on a Discord host") from None
-        if host.lower() not in _DISCORD_WEBHOOK_HOSTS:
-            raise ValueError("discord_webhook_url must be an https URL on a Discord host")
-        return v
 
     @field_validator("event_filter")
     @classmethod
@@ -165,6 +154,42 @@ def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
     return value
 
 
+class ProtocolSubscribeRequest(_EventFilteredRequest):
+    discord_webhook_url: str = Field(min_length=1, description="Discord webhook URL for protocol event notifications.")
+    label: str | None = None
+
+    @field_validator("discord_webhook_url")
+    @classmethod
+    def _validate_discord_webhook_url(cls, v: str) -> str:
+        return _require_discord_webhook(v)
+
+
+class AccountSubscribeRequest(_EventFilteredRequest):
+    protocol_id: int
+    webhook_id: uuid.UUID
+    label: str | None = Field(default=None, max_length=100)
+
+
+class SaveWebhookRequest(BaseModel):
+    discord_webhook_url: str = Field(min_length=1, max_length=500)
+    label: str | None = Field(default=None, max_length=100)
+
+    @field_validator("discord_webhook_url")
+    @classmethod
+    def _validate_discord_webhook_url(cls, v: str) -> str:
+        return _require_discord_webhook(v)
+
+
+class UpdateWebhookRequest(BaseModel):
+    discord_webhook_url: str | None = Field(default=None, min_length=1, max_length=500)
+    label: str | None = Field(default=None, max_length=100)
+
+    @field_validator("discord_webhook_url")
+    @classmethod
+    def _validate_discord_webhook_url(cls, v: str | None) -> str | None:
+        return None if v is None else _require_discord_webhook(v)
+
+
 class UpsertMonitoredContractRequest(BaseModel):
     address: str = Field(min_length=42, max_length=42)
     chain: str = "ethereum"
@@ -222,10 +247,13 @@ class AddressLabelUpsert(BaseModel):
 
 
 __all__ = [
+    "AccountSubscribeRequest",
     "AddAuditRequest",
     "AddressLabelUpsert",
     "AnalyzeRequest",
     "ProtocolSubscribeRequest",
+    "SaveWebhookRequest",
     "UpdateMonitoredContractRequest",
+    "UpdateWebhookRequest",
     "UpsertMonitoredContractRequest",
 ]

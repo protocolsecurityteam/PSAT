@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/api/fleet", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.get("/api/fleet", dependencies=[Depends(deps.require_admin)], response_model=None)
 def fleet_status() -> FleetStatusResponse:
     with deps.SessionLocal() as session:
         return build_fleet_status(session)

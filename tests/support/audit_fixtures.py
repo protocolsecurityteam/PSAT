@@ -9,14 +9,14 @@ def api_with_storage(monkeypatch, db_session, storage_bucket):
 
     import api as api_module
     from routers import deps
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
     monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
+    api_module.app.dependency_overrides[require_admin] = lambda: None
     try:
         yield TestClient(api_module.app)
     finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
+        api_module.app.dependency_overrides.pop(require_admin, None)
 
 
 @pytest.fixture()

@@ -130,6 +130,8 @@ jobs:
           STAGING_ARTIFACT_STORAGE_BUCKET: ${{ secrets.ARTIFACT_STORAGE_BUCKET }}
           STAGING_ARTIFACT_STORAGE_ACCESS_KEY: ${{ secrets.ARTIFACT_STORAGE_ACCESS_KEY }}
           STAGING_ARTIFACT_STORAGE_SECRET_KEY: ${{ secrets.ARTIFACT_STORAGE_SECRET_KEY }}
+          # The staging branch's Neon Auth URL (not a secret). Unset leaves preview sign-in off.
+          STAGING_NEON_AUTH_BASE_URL: ${{ vars.STAGING_NEON_AUTH_BASE_URL }}
         run: |
           required=(PSAT_STAGING_ADMIN_KEY STAGING_ETHERSCAN_API_KEY STAGING_ERPC_BASE_URL STAGING_ERPC_SECRET
             STAGING_ENVIO_API_TOKEN STAGING_TAVILY_API_KEY STAGING_EXA_API_KEY STAGING_OPEN_ROUTER_KEY
@@ -165,6 +167,11 @@ jobs:
             ARTIFACT_STORAGE_SECRET_KEY="$STAGING_ARTIFACT_STORAGE_SECRET_KEY" \
             ARTIFACT_STORAGE_PREFIX="${{ steps.plan.outputs.artifact_prefix }}" \
             PSAT_SUPPORTED_CHAIN_IDS="1,8453"
+          if [[ -n "${STAGING_NEON_AUTH_BASE_URL:-}" ]]; then
+            # A GitHub OAuth app has one callback URL, owned by production; staging offers Google's shared keys.
+            flyctl secrets set --stage -a "$APP_NAME" \
+              NEON_AUTH_BASE_URL="$STAGING_NEON_AUTH_BASE_URL" PSAT_AUTH_PROVIDERS="google"
+          fi
 
       - name: Stage app-scoped worker lifecycle token
         env:
