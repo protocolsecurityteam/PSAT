@@ -231,3 +231,45 @@ def test_fetch_creations_batches_five_per_call(db_session, monkeypatch):
     assert set(out) == {a.lower() for a in addresses}
     witness = db_session.get(ContractCreationWitness, (1, addresses[0].lower()))
     assert witness is not None and witness.creation_tx_hash == _TX and witness.creation_block == 7
+
+
+def test_concurrent_witness_writes_merge_instead_of_colliding(db_session):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from db.creation_witnesses import upsert_creation_witness
+    from tests.conftest import DATABASE_URL
+
+    address = ADDR(0x300)
+    other = Session(create_engine(DATABASE_URL))
+    try:
+        assert other.get(ContractCreationWitness, (1, address)) is None
+        upsert_creation_witness(db_session, chain_id=1, address=address, creation_tx_hash=_TX, creation_block=9)
+        db_session.commit()
+
+        probes._record_code_probe(other, chain_id=1, address=address, block_number=100, code_absent=False)
+        other.commit()
+    finally:
+        other.close()
+
+    db_session.expire_all()
+    witness = db_session.get(ContractCreationWitness, (1, address))
+    assert witness is not None
+    assert (witness.creation_tx_hash, witness.creation_block) == (_TX, 9)
+    assert (witness.code_probe_block, witness.code_absent_at_probe) == (100, False)
+
+
+def test_witness_upsert_refreshes_a_row_already_loaded(db_session):
+    from db.creation_witnesses import upsert_creation_witness
+
+    address = ADDR(0x301)
+    upsert_creation_witness(db_session, chain_id=1, address=address)
+    loaded = db_session.get(ContractCreationWitness, (1, address))
+    assert loaded is not None and loaded.creation_tx_hash is None
+
+    upsert_creation_witness(db_session, chain_id=1, address=address.upper().replace("0X", "0x"), creation_tx_hash=_TX)
+
+    refreshed = db_session.get(ContractCreationWitness, (1, address))
+    assert refreshed is loaded and refreshed.creation_tx_hash == _TX
+    with pytest.raises(ValueError):
+        upsert_creation_witness(db_session, chain_id=1, address=address, fetched_at=None)

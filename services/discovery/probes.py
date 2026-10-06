@@ -11,7 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Sequence
 
-from db.models import Contract, ContractCreationWitness, ContractProbeAttempt
+from db.creation_witnesses import upsert_creation_witness
+from db.models import Contract, ContractProbeAttempt
 from services.clients import etherscan
 from services.clients.rpc import (
     chain_id_for_chain_name,
@@ -159,16 +160,10 @@ def fetch_creations(
                 factory.lower() if isinstance(factory, str) and factory else None,
             )
     for addr, (tx, block, _creator, factory) in out.items():
-        row = session.get(ContractCreationWitness, (chain_id, addr))
-        if row is None:
-            row = ContractCreationWitness(chain_id=chain_id, address=addr)
-            session.add(row)
-        row.creation_tx_hash = tx
-        row.creation_block = block
+        fields: dict[str, Any] = {"creation_tx_hash": tx, "creation_block": block}
         if factory is not None:
-            row.creation_factory = factory
-    if out:
-        session.flush()
+            fields["creation_factory"] = factory
+        upsert_creation_witness(session, chain_id=chain_id, address=addr, **fields)
     return out
 
 
@@ -199,13 +194,9 @@ def _code_verdict(code: Any) -> bool | None:
 
 
 def _record_code_probe(session: Session, *, chain_id: int, address: str, block_number: int, code_absent: bool) -> None:
-    row = session.get(ContractCreationWitness, (chain_id, address))
-    if row is None:
-        row = ContractCreationWitness(chain_id=chain_id, address=address)
-        session.add(row)
-    row.code_probe_block = block_number
-    row.code_absent_at_probe = code_absent
-    session.flush()
+    upsert_creation_witness(
+        session, chain_id=chain_id, address=address, code_probe_block=block_number, code_absent_at_probe=code_absent
+    )
 
 
 def run_probe(session: Session, contract: Contract) -> ProbeResult:
