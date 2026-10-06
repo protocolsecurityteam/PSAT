@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
-from db.models import Protocol, ProtocolSubscription, User, UserWebhook
+from db.models import MonitoredContract, Protocol, ProtocolSubscription, User, UserWebhook
 from schemas.api_requests import AccountSubscribeRequest, SaveWebhookRequest, UpdateWebhookRequest
 from services.auth.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, check_password, set_password
 from services.auth.sessions import is_admin
@@ -159,8 +159,8 @@ def test_webhook(webhook_id: str, user: User = Depends(deps.require_user)) -> di
     from services.monitoring.notifier import _send_discord
 
     embed = {
-        "title": "PSAT test notification",
-        "description": "This webhook is connected to your PSAT account.",
+        "title": "snif test notification",
+        "description": "This webhook is connected to your snif account.",
         "color": 0x5865F2,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -169,6 +169,42 @@ def test_webhook(webhook_id: str, user: User = Depends(deps.require_user)) -> di
     except Exception:
         delivered = False
     return {"delivered": delivered}
+
+
+# Per (protocol, config key): how many active monitored contracts set a ``watch_*`` flag or a non-empty plan
+# (e.g. ``polling_plan``). Counted in SQL so plans, which can be large, never leave the database.
+_WATCH_COVERAGE = text(
+    """
+    SELECT m.protocol_id, kv.key, count(*)
+    FROM monitored_contracts m,
+      jsonb_each(CASE WHEN jsonb_typeof(m.monitoring_config) = 'object' THEN m.monitoring_config ELSE '{}' END) kv
+    WHERE m.is_active AND m.protocol_id IS NOT NULL
+      AND ((kv.key LIKE 'watch\\_%' AND kv.value = 'true'::jsonb)
+           OR (jsonb_typeof(kv.value) = 'array' AND jsonb_array_length(kv.value) > 0))
+    GROUP BY m.protocol_id, kv.key
+    """
+)
+
+
+@router.get("/api/me/protocols")
+def list_alertable_protocols(user: User = Depends(deps.require_user)) -> list[dict]:
+    """Protocols whose active monitored contracts watch something, so the UI only offers alerts monitoring can
+    actually produce. ``watching`` maps each config key to how many contracts enable it.
+    """
+    with deps.SessionLocal() as session:
+        watching: dict[int, dict[str, int]] = {}
+        for pid, key, n in session.execute(_WATCH_COVERAGE):
+            watching.setdefault(pid, {})[key] = n
+        if not watching:
+            return []
+        rows = session.execute(
+            select(Protocol.id, Protocol.name, func.count(MonitoredContract.id))
+            .join(MonitoredContract, MonitoredContract.protocol_id == Protocol.id)
+            .where(MonitoredContract.is_active.is_(True), Protocol.id.in_(watching))
+            .group_by(Protocol.id, Protocol.name)
+            .order_by(func.lower(Protocol.name))
+        ).all()
+    return [{"id": pid, "name": name, "monitored_contracts": n, "watching": watching[pid]} for pid, name, n in rows]
 
 
 @router.get("/api/me/subscriptions")

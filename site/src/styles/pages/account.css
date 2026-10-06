@@ -31,13 +31,241 @@
   border: 1px solid var(--panel-border);
 }
 
-.account-signout {
-  margin-left: auto;
+.account-avatar-initial {
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  font-weight: 800;
+  color: #06110f;
+  background: linear-gradient(180deg, #34e4cc, #14b8a6);
 }
 
-.account-section h2 {
+.account-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.account-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin-bottom: -1px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.account-tab:hover {
+  color: var(--ink);
+}
+
+.account-tab.active {
+  color: var(--ink);
+  border-bottom-color: var(--teal);
+}
+
+.account-count {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--teal-soft);
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.account-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 12px;
   font-size: 1.05rem;
+}
+
+.account-card > .muted {
+  margin: 0 0 14px;
+}
+
+.account-card .account-list:last-child {
+  margin-bottom: 0;
+}
+
+.account-empty {
+  margin: 0;
+}
+
+.account-add-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-color: rgba(45, 212, 191, 0.28);
+}
+
+.account-add-alert h2 {
+  margin: 0;
+}
+
+.account-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.account-field > span,
+.account-field > legend {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.account-field select,
+.account-field input {
+  width: 100%;
+}
+
+.account-groups {
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.account-groups legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  margin-bottom: 8px;
+}
+
+.account-groups legend .account-link-btn {
+  font-size: 12px;
+}
+
+.account-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.account-chips.small {
+  margin-top: 4px;
+}
+
+.account-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.account-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.account-chip.on {
+  border-color: rgba(45, 212, 191, 0.45);
+  background: var(--teal-soft);
+  color: var(--ink);
+}
+
+.account-chip:focus-within {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+.account-chip-count {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.account-groups-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+.account-chip.static {
+  padding: 2px 9px;
+  font-size: 11px;
+  cursor: default;
+}
+
+.account-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.account-form-footer .muted {
+  font-size: 13px;
+}
+
+.account-help {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-card > .account-help {
+  margin-top: 12px;
+}
+
+.account-help summary {
+  cursor: pointer;
+  color: var(--teal);
+}
+
+.account-help ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  line-height: 1.7;
+}
+
+.account-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 20px;
+  margin: 0;
+}
+
+.account-facts dt {
+  color: var(--muted);
+}
+
+.account-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .account-list {
@@ -162,8 +390,15 @@
 }
 
 @media (max-width: 640px) {
-  .account-inline-form {
+  .account-inline-form,
+  .account-field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .account-tab {
+    flex: 1;
+    justify-content: center;
+    padding: 10px 8px;
   }
 
   .account-row {
@@ -213,7 +448,7 @@
   border-top: 1px solid var(--panel-border);
 }
 
-.account-section .account-password-form {
+.account-card .account-password-form {
   max-width: 420px;
   margin-top: 12px;
 }

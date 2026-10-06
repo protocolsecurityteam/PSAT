@@ -201,9 +201,15 @@ test.describe("visual baselines", () => {
     await page.route((url) => url.pathname === "/api/me/subscriptions", json([
       { id: "s1", protocol_id: 7, protocol_name: "etherfi", webhook_id: "w1", event_filter: { event_types: ["upgraded", "paused"] } },
     ]));
+    await page.route((url) => url.pathname === "/api/me/protocols", json([
+      { id: 7, name: "etherfi", monitored_contracts: 12, watching: { watch_upgrades: 9, watch_ownership: 4, watch_pause: 2 } },
+      { id: 8, name: "lido", monitored_contracts: 4, watching: { watch_upgrades: 3, polling_plan: 4 } },
+    ]));
     await page.goto("/account", { waitUntil: "domcontentloaded" });
     await page.getByRole("heading", { name: "Alice" }).waitFor({ state: "visible" });
-    await page.getByText("ops-alerts", { exact: true }).waitFor({ state: "visible" });
+    await page.getByText("→ ops-alerts", { exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("combobox", { name: "Protocol" }).selectOption("7");
+    await page.getByRole("checkbox", { name: /Ownership/ }).waitFor({ state: "attached" });
     await expect(page).toHaveScreenshot("account-page.png", SCREENSHOT_OPTS);
   });
 
@@ -215,7 +221,7 @@ test.describe("visual baselines", () => {
         body: JSON.stringify({ providers: [{ name: "github", label: "GitHub" }, { name: "google", label: "Google" }], dev_login: false, password: true }),
       }));
     await page.goto("/account", { waitUntil: "domcontentloaded" });
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("navigation").getByRole("button", { name: "Sign in" }).click();
     await page.getByRole("link", { name: "Continue with Google" }).waitFor({ state: "visible" });
     await expect(page).toHaveScreenshot("sign-in-dialog.png", SCREENSHOT_OPTS);
   });

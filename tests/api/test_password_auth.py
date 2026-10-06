@@ -142,9 +142,9 @@ def test_register_and_forgot_do_not_reveal_whether_an_account_exists(client, out
             == (202, {"status": "check_email"})
         )
     # The existing (verified) account gets a reset link, never a second sign-up.
-    assert {subject for _to, subject, _body in outbox if _to == "alice@example.com"} == {"Set your PSAT password"}
+    assert {subject for _to, subject, _body in outbox if _to == "alice@example.com"} == {"Set your snif password"}
     # Register created a pending account for the unknown address, so it only ever gets sign-up links.
-    assert {s for to, s, _ in outbox if to == "ghost@example.com"} == {"Finish creating your PSAT account"}
+    assert {s for to, s, _ in outbox if to == "ghost@example.com"} == {"Finish creating your snif account"}
 
 
 def test_reset_signs_out_every_other_session(client, db_session, outbox):

@@ -137,6 +137,7 @@ describe("SetPasswordPage", () => {
 
 describe("AccountPage — password", () => {
   function signedIn(hasPassword) {
+    window.history.pushState({}, "", "/account?tab=settings");
     setFetchHandler("/api/me", (url) =>
       url.pathname === "/api/me"
         ? { id: "u1", email: "alice@example.com", display_name: "Alice", is_admin: false, has_password: hasPassword }
@@ -155,6 +156,7 @@ describe("AccountPage — password", () => {
     });
     expect(posted).toEqual([{ current_password: "old password!", new_password: "new password!!" }]);
     expect(await screen.findByText("Password saved.")).toBeInTheDocument();
+    window.history.pushState({}, "", "/");
   });
 
   it("lets a provider-only account add a password without a current one", async () => {
@@ -169,5 +171,6 @@ describe("AccountPage — password", () => {
       fireEvent.click(screen.getByRole("button", { name: "Add password" }));
     });
     expect(posted).toEqual([{ current_password: null, new_password: "new password!!" }]);
+    window.history.pushState({}, "", "/");
   });
 });

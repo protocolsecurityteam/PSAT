@@ -8,6 +8,7 @@ import SignInModal from "./account/SignInModal.jsx";
 import ProductHero from "./ProductHero.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
+import AccountNavButton from "./account/AccountNavButton.jsx";
 import { isAddress, parseLocationPath } from "./router.js";
 import PipelineDashboard from "./pages/PipelineDashboard.jsx";
 import CompanyOverview from "./pages/CompanyOverview.jsx";
@@ -205,6 +206,7 @@ export default function App() {
               {formOpen ? "Close" : "+ New Analysis"}
             </button>
           )}
+          <AccountNavButton onOpenAccount={() => navigate("/account", "account")} />
         </div>
       </nav>
 

@@ -63,3 +63,38 @@
 .top-nav.top-nav-dark .hamburger-icon::before,
 .top-nav.top-nav-dark .hamburger-icon::after { background: #94a3b8; }
 .top-nav.top-nav-dark .top-nav-submit-btn { color: #e2e8f0; }
+
+.top-nav-account-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 6px 14px;
+  max-width: 220px;
+}
+.top-nav-account-btn:has(.top-nav-avatar) { padding-left: 6px; }
+.top-nav-avatar {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.top-nav-avatar-initial {
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #06110f;
+  background: linear-gradient(180deg, #34e4cc, #14b8a6);
+}
+.top-nav-account-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.top-nav.top-nav-dark .top-nav-account-btn { color: #e2e8f0; }
+@media (max-width: 640px) {
+  .top-nav-account-name { display: none; }
+  .top-nav-account-btn:has(.top-nav-avatar) { padding: 4px; }
+}

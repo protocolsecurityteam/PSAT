@@ -54,9 +54,12 @@ describe("AccountPage", () => {
 
     render(<AccountPage />);
     expect(await screen.findByRole("heading", { name: "Alice" })).toBeInTheDocument();
+    expect(await screen.findByText("→ ops")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "etherfi" })).toBeInTheDocument();
+    expect(screen.getByText("All events")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Webhooks/ }));
     expect(await screen.findByText("ops")).toBeInTheDocument();
-    expect(screen.getByText("etherfi")).toBeInTheDocument();
-    expect(screen.getByText(/→ ops · all events/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Discord webhook URL"), {
       target: { value: "https://discord.com/api/webhooks/2/abc" },

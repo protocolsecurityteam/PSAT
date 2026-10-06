@@ -39,6 +39,7 @@
   ["GET", "/api/jobs/{job_id}/errors"],
   ["GET", "/api/jobs/{job_id}/stage_timings"],
   ["GET", "/api/me"],
+  ["GET", "/api/me/protocols"],
   ["GET", "/api/me/subscriptions"],
   ["GET", "/api/me/webhooks"],
   ["GET", "/api/monitored-contracts"],

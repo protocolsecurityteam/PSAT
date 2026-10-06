@@ -83,15 +83,15 @@ def _queue_password_link(session, request: Request, background: BackgroundTasks,
     session.commit()
     link = f"{public_base(request)}/set-password?token={token}"
     if purpose == "verify":
-        subject = "Finish creating your PSAT account"
+        subject = "Finish creating your snif account"
         body = (
-            f"Choose a password to finish creating your PSAT account:\n\n{link}\n\n"
+            f"Choose a password to finish creating your snif account:\n\n{link}\n\n"
             "The link works once and expires in 24 hours. If you didn't sign up, ignore this email."
         )
     else:
-        subject = "Set your PSAT password"
+        subject = "Set your snif password"
         body = (
-            f"Someone (hopefully you) asked to set a new password for your PSAT account:\n\n{link}\n\n"
+            f"Someone (hopefully you) asked to set a new password for your snif account:\n\n{link}\n\n"
             "The link works once and expires in 1 hour. If it wasn't you, ignore this email; your password is "
             "unchanged."
         )
