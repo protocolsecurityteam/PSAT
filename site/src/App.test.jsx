@@ -100,7 +100,7 @@ describe("App router smoke tests", () => {
   });
 
   it("opens the sign-in dialog when a request needs an account", async () => {
-    setFetchHandler("/api/auth/providers", () => ({ providers: [{ name: "github", label: "GitHub" }], dev_login: false }));
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github"], dev_login: false }));
     // Any route works; /account renders fastest.
     navigateTo("/account");
     render(<App />);
@@ -108,7 +108,7 @@ describe("App router smoke tests", () => {
     act(() => {
       window.dispatchEvent(new Event("psat:auth-required"));
     });
-    expect(await screen.findByRole("link", { name: "Continue with GitHub" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
   });
 
   it("renders the company overview at /company/:name", async () => {

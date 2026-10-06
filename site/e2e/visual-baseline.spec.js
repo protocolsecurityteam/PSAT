@@ -214,21 +214,21 @@ test.describe("visual baselines", () => {
   });
 
   test("sign-in dialog", async ({ page }) => {
-    await page.route((url) => url.pathname === "/api/auth/providers", (route) =>
+    await page.route((url) => url.pathname === "/api/auth/config", (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ providers: [{ name: "github", label: "GitHub" }, { name: "google", label: "Google" }], dev_login: false, password: true }),
+        body: JSON.stringify({ enabled: true, providers: ["github", "google"], dev_login: false }),
       }));
     await page.goto("/account", { waitUntil: "domcontentloaded" });
     await page.getByRole("navigation").getByRole("button", { name: "Sign in" }).click();
-    await page.getByRole("link", { name: "Continue with Google" }).waitFor({ state: "visible" });
+    await page.getByRole("button", { name: "Continue with Google" }).waitFor({ state: "visible" });
     await expect(page).toHaveScreenshot("sign-in-dialog.png", SCREENSHOT_OPTS);
   });
 
-  test("set-password page", async ({ page }) => {
-    await page.goto("/set-password?token=e2e", { waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: "Choose a password" }).waitFor({ state: "visible" });
-    await expect(page).toHaveScreenshot("set-password-page.png", SCREENSHOT_OPTS);
+  test("reset-password page", async ({ page }) => {
+    await page.goto("/reset-password?token=e2e", { waitUntil: "domcontentloaded" });
+    await page.getByRole("heading", { name: "Choose a new password" }).waitFor({ state: "visible" });
+    await expect(page).toHaveScreenshot("reset-password-page.png", SCREENSHOT_OPTS);
   });
 });

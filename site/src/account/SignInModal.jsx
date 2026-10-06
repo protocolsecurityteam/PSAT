@@ -1,26 +1,18 @@
 import { useEffect, useState } from "react";
 
 import { api, setAdminKey } from "../api/client.js";
+import { establishSession, neonAuth, sitePath } from "../api/neonAuth.js";
 import { refreshSession } from "../api/session.js";
 import { Modal, ModalTitle } from "../shared/Modal.jsx";
+import { MIN_PASSWORD_LENGTH } from "./PasswordFields.jsx";
 
-function returnPath() {
-  return window.location.pathname + window.location.search;
-}
+const PROVIDER_LABELS = { github: "GitHub", google: "Google" };
 
-function postJson(path, body) {
-  return api(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    silent: true,
-  });
-}
-
-// "signin" → email+password; "register" / "forgot" → email only, then "sent".
-// Sign-up never takes a password: the emailed link is where it's chosen.
+// "signin" → email+password; "register" → name, email, password, then "verify";
+// "forgot" → email, then "sent".
 function PasswordForms({ onSignedIn }) {
   const [mode, setMode] = useState("signin");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
@@ -30,17 +22,26 @@ function PasswordForms({ onSignedIn }) {
     event.preventDefault();
     setError(null);
     setBusy(true);
+    const address = email.trim();
     try {
       if (mode === "signin") {
-        await postJson("/api/auth/password/login", { email: email.trim(), password });
-        await refreshSession();
+        await neonAuth((c) => c.signIn.email({ email: address, password }));
+        await establishSession();
         onSignedIn();
-        return;
+      } else if (mode === "register") {
+        await neonAuth((c) => c.signUp.email({
+          email: address,
+          password,
+          name: name.trim() || address.split("@")[0],
+          callbackURL: sitePath("/account"),
+        }));
+        setMode("verify");
+      } else {
+        await neonAuth((c) => c.requestPasswordReset({ email: address, redirectTo: sitePath("/reset-password") }));
+        setMode("sent");
       }
-      await postJson(mode === "register" ? "/api/auth/register" : "/api/auth/password/forgot", { email: email.trim() });
-      setMode("sent");
     } catch (err) {
-      setError(err.status === 422 ? "Enter a valid email address." : err.message);
+      setError(err.message);
     } finally {
       setBusy(false);
     }
@@ -51,18 +52,26 @@ function PasswordForms({ onSignedIn }) {
     setError(null);
   }
 
-  if (mode === "sent") {
+  if (mode === "verify" || mode === "sent") {
     return (
       <div className="account-password-sent" role="status">
-        <p>Check <strong>{email.trim()}</strong> for a link to set your password. It may take a minute to arrive.</p>
+        <p>
+          {mode === "verify"
+            ? <>Check <strong>{email.trim()}</strong> to verify your address, then sign in.</>
+            : <>If <strong>{email.trim()}</strong> has an account, a reset link is on its way.</>}
+          {" "}It may take a minute to arrive.
+        </p>
         <button type="button" className="account-link-btn" onClick={() => switchTo("signin")}>Back to sign in</button>
       </div>
     );
   }
 
-  const label = { signin: "Sign in", register: "Email me a sign-up link", forgot: "Email me a reset link" }[mode];
+  const label = { signin: "Sign in", register: "Create account", forgot: "Email me a reset link" }[mode];
   return (
     <form className="account-password-form" onSubmit={submit}>
+      {mode === "register" && (
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (optional)" aria-label="Name" autoComplete="name" />
+      )}
       <input
         type="email"
         autoComplete="email"
@@ -72,13 +81,14 @@ function PasswordForms({ onSignedIn }) {
         aria-label="Email"
         required
       />
-      {mode === "signin" && (
+      {mode !== "forgot" && (
         <input
           type="password"
-          autoComplete="current-password"
+          autoComplete={mode === "register" ? "new-password" : "current-password"}
+          minLength={mode === "register" ? MIN_PASSWORD_LENGTH : undefined}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="Password"
+          placeholder={mode === "register" ? `Password (${MIN_PASSWORD_LENGTH}+ characters)` : "Password"}
           aria-label="Password"
           required
         />
@@ -92,33 +102,48 @@ function PasswordForms({ onSignedIn }) {
             <button type="button" className="account-link-btn" onClick={() => switchTo("forgot")}>Forgot password?</button>
           </>
         ) : (
-          <button type="button" className="account-link-btn" onClick={() => switchTo("signin")}>I have a password</button>
+          <button type="button" className="account-link-btn" onClick={() => switchTo("signin")}>I have an account</button>
         )}
       </div>
     </form>
   );
 }
 
-export default function SignInModal({ onClose }) {
+export default function SignInModal({ onClose, initialError = null }) {
   const [config, setConfig] = useState(null);
   const [devEmail, setDevEmail] = useState("");
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(initialError);
 
   useEffect(() => {
-    api("/api/auth/providers", { silent: true })
+    api("/api/auth/config", { silent: true })
       .then((data) => setConfig({
-        providers: data?.providers || [],
+        enabled: Boolean(data?.enabled),
+        providers: (data?.providers || []).filter((p) => PROVIDER_LABELS[p]),
         devLogin: Boolean(data?.dev_login),
-        password: Boolean(data?.password),
       }))
-      .catch(() => setConfig({ providers: [], devLogin: false, password: false }));
+      .catch(() => setConfig({ enabled: false, providers: [], devLogin: false }));
   }, []);
+
+  async function socialSignIn(provider) {
+    setError(null);
+    try {
+      // Redirects away; Neon brings the browser back here with a verifier (see finishSocialSignIn).
+      await neonAuth((c) => c.signIn.social({ provider, callbackURL: window.location.href }));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
   async function devSignIn(event) {
     event.preventDefault();
     setError(null);
     try {
-      await postJson("/api/auth/dev-login", { email: devEmail.trim() });
+      await api("/api/auth/dev-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: devEmail.trim() }),
+        silent: true,
+      });
       await refreshSession();
       onClose();
     } catch (err) {
@@ -134,25 +159,23 @@ export default function SignInModal({ onClose }) {
     }
   }
 
-  const next = encodeURIComponent(returnPath());
-  const nothingConfigured = config && !config.providers.length && !config.devLogin && !config.password;
   return (
     <Modal className="ps-audit-modal--read account-signin" onClose={onClose} portal header={<ModalTitle eyebrow="Account">Sign in</ModalTitle>}>
       <div className="account-signin-body">
         <p className="muted">Sign in to save Discord webhooks and get alerts when a protocol&apos;s control surface changes.</p>
         {config === null && <p className="muted">Loading…</p>}
-        {config?.providers.length > 0 && (
+        {config?.enabled && config.providers.length > 0 && (
           <div className="account-signin-providers">
             {config.providers.map((p) => (
-              <a key={p.name} className="btn account-provider-btn" href={`/api/auth/${p.name}/login?next=${next}`}>
-                Continue with {p.label}
-              </a>
+              <button key={p} type="button" className="btn account-provider-btn" onClick={() => socialSignIn(p)}>
+                Continue with {PROVIDER_LABELS[p]}
+              </button>
             ))}
           </div>
         )}
-        {config?.providers.length > 0 && config.password && <div className="account-divider"><span>or</span></div>}
-        {config?.password && <PasswordForms onSignedIn={onClose} />}
-        {nothingConfigured && <p className="muted">Sign-in isn&apos;t configured on this server.</p>}
+        {config?.enabled && config.providers.length > 0 && <div className="account-divider"><span>or</span></div>}
+        {config?.enabled && <PasswordForms onSignedIn={onClose} />}
+        {config && !config.enabled && !config.devLogin && <p className="muted">Sign-in isn&apos;t configured on this server.</p>}
         {config?.devLogin && (
           <form className="account-inline-form" onSubmit={devSignIn}>
             <input

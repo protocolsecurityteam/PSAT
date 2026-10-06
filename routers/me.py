@@ -8,27 +8,22 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select, text
 
 from db.models import MonitoredContract, Protocol, ProtocolSubscription, User, UserWebhook
 from schemas.api_requests import AccountSubscribeRequest, SaveWebhookRequest, UpdateWebhookRequest
-from services.auth.passwords import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, check_password, set_password
 from services.auth.sessions import is_admin
 from utils.ratelimit import SlidingWindowRateLimiter
 from utils.secrets import sanitize_url
 
 from . import deps
-from .auth import open_session
 
 router = APIRouter()
 
 MAX_WEBHOOKS_PER_USER = 10
 MAX_SUBSCRIPTIONS_PER_USER = 50
 _test_limiter = SlidingWindowRateLimiter(limit=5, window_s=60)
-_password_limiter = SlidingWindowRateLimiter(limit=10, window_s=900)
 
 
 def _parse_id(raw: str, what: str) -> uuid.UUID:
@@ -76,33 +71,7 @@ def get_me(user: User = Depends(deps.require_user)) -> dict:
         "display_name": user.display_name,
         "avatar_url": user.avatar_url,
         "is_admin": is_admin(user),
-        "has_password": user.password_hash is not None,
     }
-
-
-class ChangePasswordRequest(BaseModel):
-    # Omitted only by accounts that have no password yet (provider sign-in).
-    current_password: str | None = Field(default=None, max_length=MAX_PASSWORD_LENGTH)
-    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
-
-
-@router.post("/api/me/password")
-def change_password(
-    body: ChangePasswordRequest, request: Request, user: User = Depends(deps.require_user)
-) -> JSONResponse:
-    """Set or change the password; every other session is signed out."""
-    if _password_limiter.hit(str(user.id)) is not None:
-        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
-    with deps.SessionLocal() as session:
-        account = session.get(User, user.id)
-        if account is None:
-            raise HTTPException(status_code=401, detail="Sign in required")
-        if account.password_hash is not None and not check_password(session, account, body.current_password or ""):
-            raise HTTPException(status_code=403, detail="Current password is incorrect")
-        set_password(session, account, body.new_password)
-        response = JSONResponse({"status": "password_set"})
-        open_session(session, request, response, account)
-    return response
 
 
 @router.get("/api/me/webhooks")

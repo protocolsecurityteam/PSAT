@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-// Mirrors services/auth/passwords.MIN_PASSWORD_LENGTH; the server enforces it.
-export const MIN_PASSWORD_LENGTH = 10;
+// Better Auth's default minimum, which Neon Auth enforces server-side.
+export const MIN_PASSWORD_LENGTH = 8;
 
 // New-password + confirm pair. `onSubmit(password)` runs only once both match
 // and meet the minimum, so callers don't repeat the checks.

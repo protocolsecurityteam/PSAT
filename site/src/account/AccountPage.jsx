@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client.js";
-import { refreshSession, requestSignIn, signOut, useSession } from "../api/session.js";
+import { neonAuth, sitePath } from "../api/neonAuth.js";
+import { requestSignIn, signOut, useSession } from "../api/session.js";
 import { MONITOR_ALERT_GROUPS } from "../surface/meta.js";
 import { eventTypesFromGroupKeys } from "../surface/sidebar/activity/helpers.js";
-import { NewPasswordForm } from "./PasswordFields.jsx";
 
 const TABS = [
   { key: "alerts", label: "Alerts" },
@@ -367,47 +367,31 @@ function WebhooksTab({ webhooks, subscriptions, onChanged }) {
   );
 }
 
-function PasswordSection({ hasPassword }) {
-  const [current, setCurrent] = useState("");
-  const [saved, setSaved] = useState(false);
+function PasswordSection({ email }) {
+  const [state, setState] = useState(null);
 
-  async function save(password) {
-    setSaved(false);
-    await api("/api/me/password", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ current_password: hasPassword ? current : null, new_password: password }),
-      silent: true,
-    });
-    setCurrent("");
-    setSaved(true);
-    await refreshSession();
+  async function sendLink() {
+    setState("sending");
+    try {
+      await neonAuth((c) => c.requestPasswordReset({ email, redirectTo: sitePath("/reset-password") }));
+      setState("sent");
+    } catch (err) {
+      setState(err.message);
+    }
   }
 
   return (
     <section className="panel account-card">
       <h2>Password</h2>
       <p className="muted">
-        {hasPassword
-          ? "Changing it signs you out everywhere else."
-          : "Add a password to also sign in with your email address."}
+        We&apos;ll email {email} a link to set a new password. If you signed up with GitHub or Google, this adds a
+        password so you can also sign in with your email.
       </p>
-      <NewPasswordForm
-        submitLabel={hasPassword ? "Change password" : "Add password"}
-        onSubmit={save}
-        extraFields={hasPassword ? (
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-            placeholder="Current password"
-            aria-label="Current password"
-            required
-          />
-        ) : null}
-      />
-      {saved && <p className="muted" role="status">Password saved.</p>}
+      <button type="button" className="ghost" onClick={sendLink} disabled={state === "sending" || state === "sent"}>
+        {state === "sending" ? "Sending…" : "Email me a password link"}
+      </button>
+      {state === "sent" && <p className="muted" role="status">Check your inbox for the link.</p>}
+      {state && !["sending", "sent"].includes(state) && <p className="account-error" role="alert">{state}</p>}
     </section>
   );
 }
@@ -425,10 +409,10 @@ function SettingsTab({ user }) {
           <dd>{user.is_admin ? "Admin" : "Member"}</dd>
         </dl>
       </section>
-      <PasswordSection hasPassword={Boolean(user.has_password)} />
+      <PasswordSection email={user.email} />
       <section className="panel account-card">
         <h2>Sign out</h2>
-        <p className="muted">Signs out this browser. Changing your password signs out every other device.</p>
+        <p className="muted">Signs out this browser.</p>
         <button type="button" className="ghost account-signout" onClick={signOut}>Sign out</button>
       </section>
     </>

@@ -6,7 +6,7 @@ the former ``db.models`` surface.
 
 from __future__ import annotations
 
-from .accounts import EmailToken, OAuthIdentity, User, UserSession, UserWebhook
+from .accounts import User, UserSession, UserWebhook
 from .balance_collection import BalanceCollectionState
 from .balance_work import PendingEffectsWork
 from .balances import (
@@ -217,7 +217,6 @@ __all__ = [
     "EXECUTOR_KIND_TIMELOCK_ROUTED",
     "EffectBehaviorCache",
     "EffectVerdict",
-    "EmailToken",
     "EffectiveFunction",
     "EffectsPlanMarker",
     "EtherscanCache",
@@ -254,7 +253,6 @@ __all__ = [
     "ProtocolScore",
     "ProtocolScoreLatest",
     "ProtocolScoreQueue",
-    "OAuthIdentity",
     "ProtocolSubscription",
     "ProxySubscription",
     "ProxyUpgradeEvent",

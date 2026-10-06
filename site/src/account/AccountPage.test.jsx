@@ -80,23 +80,18 @@ describe("AccountPage", () => {
 });
 
 describe("SignInModal", () => {
-  it("links each enabled provider back to the current page", async () => {
-    window.history.pushState({}, "", "/company/etherfi/surface");
-    setFetchHandler("/api/auth/providers", () => ({
-      providers: [{ name: "github", label: "GitHub" }, { name: "google", label: "Google" }],
-      dev_login: false,
-    }));
+  it("offers the providers the server lists", async () => {
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github", "google", "myspace"], dev_login: false }));
     render(<SignInModal onClose={() => {}} />);
-    const github = await screen.findByRole("link", { name: "Continue with GitHub" });
-    expect(github).toHaveAttribute("href", "/api/auth/github/login?next=%2Fcompany%2Fetherfi%2Fsurface");
-    expect(screen.getByRole("link", { name: "Continue with Google" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /myspace/i })).toBeNull();
     expect(screen.queryByLabelText("Dev login email")).toBeNull();
-    window.history.pushState({}, "", "/");
   });
 
   it("offers dev login only when the server enables it", async () => {
     const posted = [];
-    setFetchHandler("/api/auth/providers", () => ({ providers: [], dev_login: true }));
+    setFetchHandler("/api/auth/config", () => ({ enabled: false, providers: [], dev_login: true }));
     setFetchHandler("/api/auth/dev-login", (url, init) => {
       posted.push(JSON.parse(init.body));
       return { status: "signed_in" };

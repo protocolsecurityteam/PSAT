@@ -5,7 +5,6 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -14,117 +13,70 @@ from tests.conftest import requires_postgres
 
 HOOK = "https://discord.com/api/webhooks/123456789012345678/SECRETtoken"
 SAME_ORIGIN = {"Origin": "http://testserver"}
+NEON = "https://ep-test.neonauth.example/neondb/auth"
 
 
 @pytest.fixture(autouse=True)
 def _auth_env(monkeypatch):
-    monkeypatch.setenv("PSAT_SESSION_SECRET", "s" * 48)
-    monkeypatch.setenv("PSAT_GITHUB_CLIENT_ID", "gh-id")
-    monkeypatch.setenv("PSAT_GITHUB_CLIENT_SECRET", "gh-secret")
+    monkeypatch.setenv("NEON_AUTH_BASE_URL", NEON)
     monkeypatch.setenv("PSAT_ADMIN_EMAILS", "boss@example.com")
-    for name in ("PSAT_PUBLIC_BASE_URL", "PSAT_SITE_ORIGIN", "PSAT_GOOGLE_CLIENT_ID", "FLY_APP_NAME"):
+    for name in ("PSAT_PUBLIC_BASE_URL", "PSAT_SITE_ORIGIN", "FLY_APP_NAME", "PSAT_AUTH_DEV_LOGIN"):
         monkeypatch.delenv(name, raising=False)
 
 
-# --- OAuth provider parsing (no DB) -------------------------------------------------------------------------------
+class FakeNeon:
+    """Stands in for Neon Auth: records each upstream request and answers from ``routes``."""
+
+    def __init__(self, monkeypatch):
+        self.requests: list[httpx.Request] = []
+        self.routes: dict[str, httpx.Response] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            return self.routes.get(f"{request.method} {request.url.path}", httpx.Response(404, json={}))
+
+        monkeypatch.setattr(
+            "services.auth.neon.httpx.Client", functools.partial(httpx.Client, transport=httpx.MockTransport(handler))
+        )
+
+    def session(self, user: dict | None, set_cookie: str | None = None):
+        headers = [("set-cookie", set_cookie)] if set_cookie else []
+        body = {"session": {"id": "s"}, "user": user} if user else None
+        self.routes["GET /neondb/auth/get-session"] = httpx.Response(200, json=body, headers=headers)
 
 
-def _mock_httpx(monkeypatch, routes: dict[str, httpx.Response]):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return routes[f"{request.method} {request.url.copy_with(query=None)}"]
+@pytest.fixture()
+def fake_neon(monkeypatch):
+    return FakeNeon(monkeypatch)
 
-    monkeypatch.setattr(
-        "services.auth.oauth.httpx.Client", functools.partial(httpx.Client, transport=httpx.MockTransport(handler))
+
+def neon_user(email="boss@example.com", verified: object = True, uid="neon-1", **extra):
+    return {"id": uid, "email": email, "emailVerified": verified, "name": "Boss", "image": None, **extra}
+
+
+# --- Cookie handling (no DB) -----------------------------------------------------------------------------------------
+
+
+def test_only_neon_cookies_are_forwarded_upstream():
+    from services.auth.neon import neon_cookies
+
+    header = "psat_session=ours; __Secure-neon-auth.session_token=t1; CF_Authorization=x; __Secure-neon-auth.x=2"
+    assert neon_cookies(header) == "__Secure-neon-auth.session_token=t1; __Secure-neon-auth.x=2"
+    assert neon_cookies(None) == ""
+
+
+def test_upstream_cookies_become_first_party_and_others_are_dropped():
+    from services.auth.neon import first_party_cookie
+
+    rewritten = first_party_cookie(
+        "__Secure-neon-auth.session_token=abc; Domain=neonauth.example; Path=/; HttpOnly; SameSite=None; "
+        "Secure; Partitioned; Max-Age=600"
     )
+    assert rewritten == "__Secure-neon-auth.session_token=abc; Path=/; HttpOnly; Max-Age=600; Secure; SameSite=Lax"
+    assert first_party_cookie("psat_session=evil; Path=/") is None
 
 
-def _github_routes(emails):
-    return {
-        "POST https://github.com/login/oauth/access_token": httpx.Response(200, json={"access_token": "tok"}),
-        "GET https://api.github.com/user": httpx.Response(200, json={"id": 42, "login": "octo", "avatar_url": "a"}),
-        "GET https://api.github.com/user/emails": httpx.Response(200, json=emails),
-    }
-
-
-def test_github_identity_requires_verified_primary_email(monkeypatch):
-    from services.auth import oauth
-
-    _mock_httpx(
-        monkeypatch,
-        _github_routes(
-            [
-                {"email": "alt@example.com", "primary": False, "verified": True},
-                {"email": "Octo@Example.com", "primary": True, "verified": True},
-            ]
-        ),
-    )
-    identity = oauth.exchange(oauth.PROVIDERS["github"], "code", "verifier", "http://testserver/cb")
-    assert (identity.subject, identity.email, identity.display_name) == ("42", "Octo@Example.com", "octo")
-
-    _mock_httpx(monkeypatch, _github_routes([{"email": "o@example.com", "primary": True, "verified": False}]))
-    with pytest.raises(oauth.OAuthError, match="verified"):
-        oauth.exchange(oauth.PROVIDERS["github"], "code", "verifier", "http://testserver/cb")
-
-
-@pytest.mark.parametrize("email_verified", [False, "true", None])
-def test_google_identity_rejects_unverified_email(monkeypatch, email_verified):
-    from services.auth import oauth
-
-    _mock_httpx(
-        monkeypatch,
-        {
-            "POST https://oauth2.googleapis.com/token": httpx.Response(200, json={"access_token": "tok"}),
-            "GET https://openidconnect.googleapis.com/v1/userinfo": httpx.Response(
-                200, json={"sub": "g1", "email": "g@example.com", "email_verified": email_verified}
-            ),
-        },
-    )
-    with pytest.raises(oauth.OAuthError):
-        oauth.exchange(oauth.PROVIDERS["google"], "code", "verifier", "http://testserver/cb")
-
-
-def test_rejected_token_exchange_is_an_oauth_error(monkeypatch):
-    from services.auth import oauth
-
-    _mock_httpx(
-        monkeypatch,
-        {"POST https://github.com/login/oauth/access_token": httpx.Response(200, json={"error": "bad_code"})},
-    )
-    with pytest.raises(oauth.OAuthError, match="rejected"):
-        oauth.exchange(oauth.PROVIDERS["github"], "code", "verifier", "http://testserver/cb")
-
-
-@pytest.mark.parametrize(
-    "cookie_tamper",
-    [
-        pytest.param(lambda c: c[:-2] + "xx", id="bad_signature"),
-        pytest.param(lambda c: "garbage", id="malformed"),
-        pytest.param(lambda c: None, id="missing"),
-    ],
-)
-def test_state_cookie_must_be_intact(cookie_tamper):
-    from services.auth import oauth
-
-    provider = oauth.PROVIDERS["github"]
-    url, cookie = oauth.begin(provider, "http://testserver/cb", "/company/x")
-    state = parse_qs(urlsplit(url).query)["state"][0]
-    assert oauth.check_state(provider, cookie, state)[1] == "/company/x"
-    with pytest.raises(oauth.OAuthError):
-        oauth.check_state(provider, cookie_tamper(cookie), state)
-    with pytest.raises(oauth.OAuthError, match="mismatch"):
-        oauth.check_state(provider, cookie, "other-state")
-    with pytest.raises(oauth.OAuthError):
-        oauth.check_state(oauth.PROVIDERS["google"], cookie, state)
-
-
-@pytest.mark.parametrize("raw", [None, "", "https://evil.com", "//evil.com", "/\\evil.com", "relative"])
-def test_next_path_is_never_an_open_redirect(raw):
-    from services.auth.oauth import safe_next
-
-    assert safe_next(raw) == "/"
-
-
-# --- Routes (DB-backed) -------------------------------------------------------------------------------------------
+# --- Proxy ------------------------------------------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -141,11 +93,122 @@ def client(db_session):
         yield TestClient(api.app)
 
 
-def _sign_in(db_session, client, email="user@example.com"):
-    from services.auth.sessions import SESSION_COOKIE, create_session, upsert_oauth_user
+def test_proxy_forwards_to_neon_with_only_its_cookies(client, fake_neon):
+    fake_neon.routes["POST /neondb/auth/sign-in/email"] = httpx.Response(
+        200,
+        json={"user": {"id": "neon-1"}},
+        headers=[
+            ("set-cookie", "__Secure-neon-auth.session_token=new; Domain=x; SameSite=None; Secure; HttpOnly"),
+            ("set-cookie", "psat_session=hijack; Path=/"),
+            ("set-auth-jwt", "jwt"),
+            ("x-internal", "nope"),
+        ],
+    )
+    client.cookies.set("psat_session", "ours")
+    client.cookies.set("__Secure-neon-auth.session_challenge", "c")
+    resp = client.post(
+        "/api/auth/neon/sign-in/email?x=1", json={"email": "a@example.com", "password": "pw"}, headers=SAME_ORIGIN
+    )
+    assert resp.status_code == 200
+    upstream = fake_neon.requests[-1]
+    assert str(upstream.url) == f"{NEON}/sign-in/email?x=1"
+    assert upstream.headers["cookie"] == "__Secure-neon-auth.session_challenge=c"
+    assert upstream.headers["origin"] == "http://testserver"
+    assert resp.headers.get_list("set-cookie") == [
+        "__Secure-neon-auth.session_token=new; HttpOnly; Secure; SameSite=Lax"
+    ]
+    assert resp.headers["set-auth-jwt"] == "jwt"
+    assert "x-internal" not in resp.headers
 
-    user = upsert_oauth_user(
-        db_session, provider="github", subject=email, email=email, display_name=None, avatar_url=None
+
+@pytest.mark.parametrize(
+    "path, headers, status",
+    [
+        ("sign-in/email", {}, 403),
+        ("sign-in/email", {"Origin": "https://evil.example"}, 403),
+        ("get-session%2F..%2F..%2Fadmin", SAME_ORIGIN, 404),
+    ],
+)
+def test_proxy_refuses_cross_origin_posts_and_odd_paths(client, fake_neon, path, headers, status):
+    assert client.post(f"/api/auth/neon/{path}", json={}, headers=headers).status_code == status
+    assert fake_neon.requests == []
+
+
+def test_auth_is_off_without_a_neon_url(client, fake_neon, monkeypatch):
+    monkeypatch.delenv("NEON_AUTH_BASE_URL")
+    assert client.get("/api/auth/config").json() == {"enabled": False, "providers": [], "dev_login": False}
+    assert client.get("/api/auth/neon/get-session").status_code == 404
+    assert client.post("/api/auth/session", headers=SAME_ORIGIN).status_code == 404
+
+
+# --- Establishing our session -----------------------------------------------------------------------------------------
+
+
+@requires_postgres
+def test_verified_neon_session_opens_ours_and_grants_admin(client, fake_neon):
+    fake_neon.session(neon_user(), set_cookie="__Secure-neon-auth.session_token=t; Path=/; Secure")
+    client.cookies.set("__Secure-neon-auth.session_challenge", "c")
+    resp = client.post("/api/auth/session", params={"neon_auth_session_verifier": "v&1"}, headers=SAME_ORIGIN)
+    assert resp.status_code == 200
+    assert fake_neon.requests[-1].url.params["neon_auth_session_verifier"] == "v&1"
+    cookies = resp.headers.get_list("set-cookie")
+    assert any(c.startswith("psat_session=") and "httponly" in c.lower() for c in cookies)
+    assert any(c.startswith("__Secure-neon-auth.session_token=t") for c in cookies)
+
+    me = client.get("/api/me").json()
+    assert (me["email"], me["display_name"], me["is_admin"]) == ("boss@example.com", "Boss", True)
+
+
+@requires_postgres
+@pytest.mark.parametrize(
+    "user, status",
+    [(None, 401), (neon_user(verified=False), 403), (neon_user(verified="true"), 403)],
+    ids=["no_neon_session", "unverified", "truthy_not_true"],
+)
+def test_no_session_without_a_verified_neon_user(client, fake_neon, user, status):
+    fake_neon.session(user)
+    resp = client.post("/api/auth/session", headers=SAME_ORIGIN)
+    assert resp.status_code == status
+    assert not any(c.startswith("psat_session=") for c in resp.headers.get_list("set-cookie"))
+    assert client.get("/api/me").status_code == 401
+
+
+@requires_postgres
+def test_session_exchange_is_same_origin_only(client, fake_neon):
+    fake_neon.session(neon_user())
+    assert client.post("/api/auth/session", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert fake_neon.requests == []
+
+
+@requires_postgres
+def test_neon_outage_is_a_502_not_a_sign_in(client, fake_neon):
+    fake_neon.routes["GET /neondb/auth/get-session"] = httpx.Response(503)
+    assert client.post("/api/auth/session", headers=SAME_ORIGIN).status_code == 502
+
+
+@requires_postgres
+def test_recreated_neon_user_relinks_only_with_a_verified_email(client, fake_neon, db_session):
+    from db.models import User
+
+    fake_neon.session(neon_user("alice@example.com", uid="neon-old"))
+    client.post("/api/auth/session", headers=SAME_ORIGIN)
+    original = db_session.query(User).filter_by(email="alice@example.com").one().id
+
+    fake_neon.session(neon_user("alice@example.com", uid="neon-new", verified=False))
+    assert client.post("/api/auth/session", headers=SAME_ORIGIN).status_code == 403
+
+    fake_neon.session(neon_user("alice@example.com", uid="neon-new"))
+    assert client.post("/api/auth/session", headers=SAME_ORIGIN).status_code == 200
+    db_session.expire_all()
+    user = db_session.query(User).filter_by(email="alice@example.com").one()
+    assert (user.id, user.neon_auth_id) == (original, "neon-new")
+
+
+def _sign_in(db_session, client, email="user@example.com"):
+    from services.auth.sessions import SESSION_COOKIE, create_session, upsert_neon_user
+
+    user = upsert_neon_user(
+        db_session, neon_auth_id=email, email=email, email_verified=True, display_name=None, avatar_url=None
     )
     token = create_session(db_session, user)
     db_session.commit()
@@ -163,73 +226,19 @@ def _protocol(db_session, name="__acct_proto__"):
 
 
 @requires_postgres
-def test_oauth_login_round_trip_signs_in_and_links_by_email(client, db_session, monkeypatch):
-    from db.models import OAuthIdentity
-    from services.auth import oauth
-
-    login = client.get("/api/auth/github/login", params={"next": "/company/aave"}, follow_redirects=False)
-    assert login.status_code == 302
-    location = urlsplit(login.headers["location"])
-    query = parse_qs(location.query)
-    assert location.netloc == "github.com"
-    assert query["redirect_uri"] == ["http://testserver/api/auth/github/callback"]
-    assert query["code_challenge_method"] == ["S256"]
-
-    seen = {}
-
-    def fake_exchange(provider, code, verifier, redirect_uri):
-        seen.update(code=code, redirect_uri=redirect_uri)
-        return oauth.VerifiedIdentity("gh-7", "Boss@Example.com", "Boss", None)
-
-    monkeypatch.setattr(oauth, "exchange", fake_exchange)
-    callback = client.get(
-        "/api/auth/github/callback", params={"code": "c0de", "state": query["state"][0]}, follow_redirects=False
-    )
-    assert callback.status_code == 303
-    assert callback.headers["location"] == "/company/aave"
-    assert seen == {"code": "c0de", "redirect_uri": "http://testserver/api/auth/github/callback"}
-    assert "httponly" in callback.headers["set-cookie"].lower()
-
-    me = client.get("/api/me").json()
-    assert me["email"] == "boss@example.com"
-    assert me["is_admin"] is True
-
-    # A second provider with the same verified email lands on the same account.
-    monkeypatch.setenv("PSAT_GOOGLE_CLIENT_ID", "g-id")
-    monkeypatch.setenv("PSAT_GOOGLE_CLIENT_SECRET", "g-secret")
-    monkeypatch.setattr(oauth, "exchange", lambda *a: oauth.VerifiedIdentity("g-9", "boss@example.com", None, None))
-    state = parse_qs(urlsplit(client.get("/api/auth/google/login", follow_redirects=False).headers["location"]).query)
-    client.get("/api/auth/google/callback", params={"code": "x", "state": state["state"][0]}, follow_redirects=False)
-    identities = db_session.query(OAuthIdentity).all()
-    assert {i.provider for i in identities} == {"github", "google"}
-    assert len({i.user_id for i in identities}) == 1
-
-
-@requires_postgres
-def test_callback_with_wrong_state_does_not_sign_in(client, monkeypatch):
-    from services.auth import oauth
-
-    client.get("/api/auth/github/login", follow_redirects=False)
-    monkeypatch.setattr(oauth, "exchange", lambda *a: pytest.fail("exchange must not run"))
-    resp = client.get("/api/auth/github/callback", params={"code": "c", "state": "forged"}, follow_redirects=False)
-    assert resp.status_code == 303
-    assert resp.headers["location"].startswith("/account?auth_error=")
-    assert client.get("/api/me").status_code == 401
-
-
-def test_disabled_provider_is_404(client, monkeypatch):
-    monkeypatch.delenv("PSAT_GITHUB_CLIENT_SECRET")
-    assert client.get("/api/auth/github/login", follow_redirects=False).status_code == 404
-    assert client.get("/api/auth/providers").json()["providers"] == []
-
-
-@requires_postgres
-def test_logout_revokes_the_session_server_side(client, db_session):
+def test_logout_revokes_our_session_and_signs_out_of_neon(client, db_session, fake_neon):
     from services.auth.sessions import SESSION_COOKIE
 
+    fake_neon.routes["POST /neondb/auth/sign-out"] = httpx.Response(
+        200, json={}, headers=[("set-cookie", "__Secure-neon-auth.session_token=; Max-Age=0")]
+    )
     _sign_in(db_session, client)
+    client.cookies.set("__Secure-neon-auth.session_token", "t")
     token = client.cookies.get(SESSION_COOKIE)
-    assert client.post("/api/auth/logout", headers=SAME_ORIGIN).status_code == 200
+    resp = client.post("/api/auth/logout", headers=SAME_ORIGIN)
+    assert resp.status_code == 200
+    assert fake_neon.requests[-1].url.path == "/neondb/auth/sign-out"
+    assert any(c.startswith("__Secure-neon-auth.session_token=;") for c in resp.headers.get_list("set-cookie"))
     client.cookies.set(SESSION_COOKIE, token)  # replaying the old cookie
     assert client.get("/api/me").status_code == 401
 

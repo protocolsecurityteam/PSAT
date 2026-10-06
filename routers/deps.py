@@ -72,12 +72,15 @@ def _allowed_origins() -> set[str]:
     return {o.strip() for o in os.environ.get("PSAT_SITE_ORIGIN", "").split(",") if o.strip()}
 
 
+def is_site_origin(request: Request, origin: str | None) -> bool:
+    return bool(origin) and (origin in _allowed_origins() or urlsplit(origin).netloc == request.headers.get("host"))
+
+
 def check_same_origin(request: Request) -> None:
     """CSRF gate for cookie-authenticated writes: the Origin must be the site itself or a configured site origin."""
     if request.method in {"GET", "HEAD", "OPTIONS"}:
         return
-    origin = request.headers.get("origin")
-    if origin and (origin in _allowed_origins() or urlsplit(origin).netloc == request.headers.get("host")):
+    if is_site_origin(request, request.headers.get("origin")):
         return
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-origin request refused")
 

@@ -12,8 +12,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from db.models import OAuthIdentity, User, UserSession
-from services.auth.passwords import forget_unverified_claims
+from db.models import User, UserSession
 
 SESSION_COOKIE = "psat_session"
 SESSION_TTL = timedelta(days=30)
@@ -64,40 +63,53 @@ def revoke_session(session: Session, token: str | None) -> None:
         session.commit()
 
 
-def upsert_oauth_user(
+def upsert_neon_user(
     session: Session,
     *,
-    provider: str,
-    subject: str,
+    neon_auth_id: str,
     email: str,
+    email_verified: bool,
     display_name: str | None,
     avatar_url: str | None,
     now: datetime | None = None,
 ) -> User:
-    """Find the user by identity, else by email (linking the identity), else create one.
+    """Find the user by Neon Auth id, else by email (a user Neon re-created), else create one.
 
-    The provider has verified ``email``. If it matches a password account whose email was never verified, that
-    account's unproven registrant loses it: the provider login is the first proof of ownership.
+    The email match only relinks when Neon has verified the address; an unverified claim to an existing account's
+    email is refused rather than handed that account.
     """
     now = now or datetime.now(timezone.utc)
     email = email.strip().lower()
-    identity = session.execute(
-        select(OAuthIdentity).where(OAuthIdentity.provider == provider, OAuthIdentity.provider_subject == subject)
-    ).scalar_one_or_none()
-    user = session.get(User, identity.user_id) if identity else None
+    user = session.execute(select(User).where(User.neon_auth_id == neon_auth_id)).scalar_one_or_none()
     if user is None:
-        user = session.execute(select(User).where(User.email == email)).scalar_one_or_none()
-        if user is not None and not user.email_verified:
-            forget_unverified_claims(session, user)
+        by_email = session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        if by_email is not None:
+            if not email_verified:
+                raise PermissionError("email belongs to another account")
+            user = by_email
+            user.neon_auth_id = neon_auth_id
+    if user is None:
+        user = User(neon_auth_id=neon_auth_id, email=email)
+        session.add(user)
+    user.email = email
+    user.email_verified = email_verified
+    user.display_name = display_name or user.display_name
+    user.avatar_url = avatar_url or user.avatar_url
+    user.is_admin = email_verified and email in admin_emails()
+    user.last_login_at = now
+    session.flush()
+    return user
+
+
+def upsert_dev_user(session: Session, email: str, *, now: datetime | None = None) -> User:
+    """Local dev-login only: a verified account with no Neon identity."""
+    email = email.strip().lower()
+    user = session.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if user is None:
         user = User(email=email)
         session.add(user)
-        session.flush()
-    if identity is None:
-        session.add(OAuthIdentity(user_id=user.id, provider=provider, provider_subject=subject))
-    user.display_name = display_name or user.display_name
-    user.avatar_url = avatar_url or user.avatar_url
     user.email_verified = True
-    user.is_admin = user.email in admin_emails()
-    user.last_login_at = now
+    user.is_admin = email in admin_emails()
+    user.last_login_at = now or datetime.now(timezone.utc)
+    session.flush()
     return user

@@ -1,4 +1,4 @@
-"""user accounts (OAuth and email/password), sessions, email tokens, saved webhooks, and owned subscriptions
+"""user accounts (Neon Auth identities), sessions, saved webhooks, and owned subscriptions
 
 Revision ID: b7e2c4a91f30
 Revises: aa9f6ba5b7df
@@ -25,27 +25,15 @@ def upgrade() -> None:
     op.create_table(
         "users",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
+        sa.Column("neon_auth_id", sa.String(), nullable=True, unique=True),
         sa.Column("email", sa.String(), nullable=False, unique=True),
         sa.Column("email_verified", sa.Boolean(), server_default="false", nullable=False),
-        sa.Column("password_hash", sa.String(), nullable=True),
         sa.Column("display_name", sa.String(), nullable=True),
         sa.Column("avatar_url", sa.String(), nullable=True),
         sa.Column("is_admin", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_table(
-        "oauth_identities",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-        ),
-        sa.Column("provider", sa.String(length=16), nullable=False),
-        sa.Column("provider_subject", sa.String(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.UniqueConstraint("provider", "provider_subject", name="uq_oauth_identities_provider_subject"),
-    )
-    op.create_index("ix_oauth_identities_user_id", "oauth_identities", ["user_id"])
     op.create_table(
         "user_sessions",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -69,19 +57,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
     op.create_index("ix_user_webhooks_user_id", "user_webhooks", ["user_id"])
-    op.create_table(
-        "email_tokens",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-        ),
-        sa.Column("purpose", sa.String(length=16), nullable=False),
-        sa.Column("token_hash", sa.String(length=64), nullable=False, unique=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("purpose IN ('verify', 'reset')", name="ck_email_tokens_purpose"),
-    )
-    op.create_index("ix_email_tokens_user_id", "email_tokens", ["user_id"])
 
     op.add_column(
         "protocol_subscriptions",
@@ -111,8 +86,6 @@ def downgrade() -> None:
     op.drop_index("ix_protocol_subscriptions_user_id", table_name="protocol_subscriptions")
     op.drop_column("protocol_subscriptions", "webhook_id")
     op.drop_column("protocol_subscriptions", "user_id")
-    op.drop_table("email_tokens")
     op.drop_table("user_webhooks")
     op.drop_table("user_sessions")
-    op.drop_table("oauth_identities")
     op.drop_table("users")

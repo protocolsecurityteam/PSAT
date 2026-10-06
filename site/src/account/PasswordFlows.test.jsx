@@ -1,35 +1,47 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 
-import AccountPage from "./AccountPage.jsx";
-import SetPasswordPage from "./SetPasswordPage.jsx";
+import ResetPasswordPage from "./ResetPasswordPage.jsx";
 import SignInModal from "./SignInModal.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
+import { resetNeonAuthForTests } from "../api/neonAuth.js";
+
+const neon = vi.hoisted(() => ({
+  signIn: { email: vi.fn(), social: vi.fn() },
+  signUp: { email: vi.fn() },
+  requestPasswordReset: vi.fn(),
+  resetPassword: vi.fn(),
+}));
+
+vi.mock("@neondatabase/auth", () => ({ createAuthClient: vi.fn(() => neon) }));
 
 function recordPosts(path, respond = () => ({})) {
   const posted = [];
   setFetchHandler(
     (url, init) => url.pathname === path && init?.method === "POST",
-    (url, init) => {
-      posted.push(JSON.parse(init.body));
-      return respond(posted.at(-1));
+    (url) => {
+      posted.push(url.search);
+      return respond();
     },
   );
   return posted;
 }
 
-function passwordProviders() {
-  setFetchHandler("/api/auth/providers", () => ({
-    providers: [{ name: "github", label: "GitHub" }],
-    dev_login: false,
-    password: true,
-  }));
+function neonEnabled() {
+  setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github"], dev_login: false }));
 }
 
-describe("SignInModal — email and password", () => {
-  it("signs in with email and password", async () => {
-    passwordProviders();
-    const posted = recordPosts("/api/auth/password/login");
+beforeEach(() => {
+  resetNeonAuthForTests();
+  for (const fn of [neon.signIn.email, neon.signIn.social, neon.signUp.email, neon.requestPasswordReset, neon.resetPassword]) {
+    fn.mockReset().mockResolvedValue({ data: {}, error: null });
+  }
+});
+
+describe("SignInModal — Neon Auth", () => {
+  it("signs in with email and password, then opens our session", async () => {
+    neonEnabled();
+    const sessions = recordPosts("/api/auth/session", () => ({ status: "signed_in" }));
     const onClose = vi.fn();
     render(<SignInModal onClose={onClose} />);
     fireEvent.change(await screen.findByLabelText("Email"), { target: { value: "alice@example.com" } });
@@ -37,67 +49,74 @@ describe("SignInModal — email and password", () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     });
-    expect(posted).toEqual([{ email: "alice@example.com", password: "hunter2hunter2" }]);
+    expect(neon.signIn.email).toHaveBeenCalledWith({ email: "alice@example.com", password: "hunter2hunter2" });
+    expect(sessions).toEqual([""]);
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("shows the server's error on a bad password", async () => {
-    passwordProviders();
-    setFetchHandler("/api/auth/password/login", () =>
-      new Response(JSON.stringify({ detail: "Incorrect email or password" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      }));
+  it("shows Neon's error and opens no session", async () => {
+    neonEnabled();
+    neon.signIn.email.mockResolvedValue({ data: null, error: { message: "Invalid email or password" } });
+    const sessions = recordPosts("/api/auth/session");
     render(<SignInModal onClose={() => {}} />);
     fireEvent.change(await screen.findByLabelText("Email"), { target: { value: "a@example.com" } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "wrong" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect email or password");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid email or password");
+    expect(sessions).toEqual([]);
   });
 
-  it("creates an account with only an email, then says to check the inbox", async () => {
-    passwordProviders();
-    const posted = recordPosts("/api/auth/register", () => ({ status: "check_email" }));
+  it("creates an account, then asks to verify the email", async () => {
+    neonEnabled();
     render(<SignInModal onClose={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Create an account" }));
-    // Sign-up never asks for a password; the emailed link does.
-    expect(screen.queryByLabelText("Password")).toBeNull();
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "new@example.com" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "long enough" } });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Email me a sign-up link" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create account" }));
     });
-    expect(posted).toEqual([{ email: "new@example.com" }]);
-    expect(await screen.findByRole("status")).toHaveTextContent("Check new@example.com");
+    expect(neon.signUp.email).toHaveBeenCalledWith(expect.objectContaining({ email: "new@example.com", name: "new" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Check new@example.com to verify");
   });
 
-  it("requests a reset link", async () => {
-    passwordProviders();
-    const posted = recordPosts("/api/auth/password/forgot", () => ({ status: "check_email" }));
+  it("requests a reset link back to our reset page", async () => {
+    neonEnabled();
     render(<SignInModal onClose={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
     fireEvent.change(screen.getByLabelText("Email"), { target: { value: "alice@example.com" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Email me a reset link" }));
     });
-    expect(posted).toEqual([{ email: "alice@example.com" }]);
+    expect(neon.requestPasswordReset).toHaveBeenCalledWith({
+      email: "alice@example.com",
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
   });
 
-  it("hides the password form when the server can't send email", async () => {
-    setFetchHandler("/api/auth/providers", () => ({ providers: [{ name: "github", label: "GitHub" }], password: false }));
+  it("starts GitHub sign-in through Neon, returning to this page", async () => {
+    neonEnabled();
     render(<SignInModal onClose={() => {}} />);
-    await screen.findByRole("link", { name: "Continue with GitHub" });
+    const github = await screen.findByRole("button", { name: "Continue with GitHub" });
+    await act(async () => {
+      fireEvent.click(github);
+    });
+    expect(neon.signIn.social).toHaveBeenCalledWith({ provider: "github", callbackURL: window.location.href });
+  });
+
+  it("says so when sign-in isn't configured", async () => {
+    setFetchHandler("/api/auth/config", () => ({ enabled: false, providers: [], dev_login: false }));
+    render(<SignInModal onClose={() => {}} />);
+    expect(await screen.findByText("Sign-in isn't configured on this server.")).toBeInTheDocument();
     expect(screen.queryByLabelText("Email")).toBeNull();
   });
 });
 
-describe("SetPasswordPage", () => {
-  it("posts the link's token, then strips it from the address bar", async () => {
-    window.history.pushState({}, "", "/set-password?token=tok-123");
-    const posted = recordPosts("/api/auth/password/set", () => ({ status: "signed_in" }));
-    const onDone = vi.fn();
-    render(<SetPasswordPage onDone={onDone} />);
+describe("ResetPasswordPage", () => {
+  it("sets the new password with the link's token, then strips it from the address bar", async () => {
+    window.history.pushState({}, "", "/reset-password?token=tok-123");
+    render(<ResetPasswordPage />);
     expect(window.location.search).toBe("");
 
     fireEvent.change(screen.getByLabelText("New password"), { target: { value: "long enough pw" } });
@@ -106,71 +125,21 @@ describe("SetPasswordPage", () => {
       fireEvent.click(screen.getByRole("button", { name: "Set password" }));
     });
     expect(screen.getByRole("alert")).toHaveTextContent("don't match");
-    expect(posted).toEqual([]);
+    expect(neon.resetPassword).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "long enough pw" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Set password" }));
     });
-    expect(posted).toEqual([{ token: "tok-123", password: "long enough pw" }]);
-    await waitFor(() => expect(onDone).toHaveBeenCalled());
+    expect(neon.resetPassword).toHaveBeenCalledWith({ newPassword: "long enough pw", token: "tok-123" });
+    expect(await screen.findByRole("status")).toHaveTextContent("Password updated");
     window.history.pushState({}, "", "/");
   });
 
-  it("explains an expired link", async () => {
-    window.history.pushState({}, "", "/set-password?token=old");
-    setFetchHandler("/api/auth/password/set", () =>
-      new Response(JSON.stringify({ detail: "This link is invalid or has expired; request a new one" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      }));
-    render(<SetPasswordPage />);
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "long enough pw" } });
-    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "long enough pw" } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Set password" }));
-    });
-    expect(await screen.findByRole("alert")).toHaveTextContent("expired");
-    window.history.pushState({}, "", "/");
-  });
-});
-
-describe("AccountPage — password", () => {
-  function signedIn(hasPassword) {
-    window.history.pushState({}, "", "/account?tab=settings");
-    setFetchHandler("/api/me", (url) =>
-      url.pathname === "/api/me"
-        ? { id: "u1", email: "alice@example.com", display_name: "Alice", is_admin: false, has_password: hasPassword }
-        : []);
-  }
-
-  it("asks for the current password before changing it", async () => {
-    signedIn(true);
-    const posted = recordPosts("/api/me/password", () => ({ status: "password_set" }));
-    render(<AccountPage />);
-    fireEvent.change(await screen.findByLabelText("Current password"), { target: { value: "old password!" } });
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "new password!!" } });
-    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "new password!!" } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Change password" }));
-    });
-    expect(posted).toEqual([{ current_password: "old password!", new_password: "new password!!" }]);
-    expect(await screen.findByText("Password saved.")).toBeInTheDocument();
-    window.history.pushState({}, "", "/");
-  });
-
-  it("lets a provider-only account add a password without a current one", async () => {
-    signedIn(false);
-    const posted = recordPosts("/api/me/password", () => ({ status: "password_set" }));
-    render(<AccountPage />);
-    await screen.findByRole("button", { name: "Add password" });
-    expect(screen.queryByLabelText("Current password")).toBeNull();
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "new password!!" } });
-    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "new password!!" } });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Add password" }));
-    });
-    expect(posted).toEqual([{ current_password: null, new_password: "new password!!" }]);
+  it("explains an expired link", () => {
+    window.history.pushState({}, "", "/reset-password?error=INVALID_TOKEN");
+    render(<ResetPasswordPage />);
+    expect(screen.getByRole("alert")).toHaveTextContent("expired");
     window.history.pushState({}, "", "/");
   });
 });

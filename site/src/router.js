@@ -23,8 +23,8 @@ export function parseLocationPath(pathname) {
     return { mode: "account", value: null };
   }
 
-  if (segments[0] === "set-password") {
-    return { mode: "set-password", value: null };
+  if (segments[0] === "reset-password") {
+    return { mode: "reset-password", value: null };
   }
 
   if (segments[0] === "company" && segments[1]) {

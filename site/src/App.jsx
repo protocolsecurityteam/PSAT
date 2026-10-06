@@ -3,12 +3,13 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { api, getAdminKey, setAdminKey } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
 import AccountPage from "./account/AccountPage.jsx";
-import SetPasswordPage from "./account/SetPasswordPage.jsx";
+import ResetPasswordPage from "./account/ResetPasswordPage.jsx";
 import SignInModal from "./account/SignInModal.jsx";
 import ProductHero from "./ProductHero.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
 import HamburgerMenu from "./HamburgerMenu.jsx";
 import AccountNavButton from "./account/AccountNavButton.jsx";
+import { finishSocialSignIn } from "./api/neonAuth.js";
 import { isAddress, parseLocationPath } from "./router.js";
 import PipelineDashboard from "./pages/PipelineDashboard.jsx";
 import CompanyOverview from "./pages/CompanyOverview.jsx";
@@ -34,11 +35,21 @@ export default function App() {
   const doneTimerRef = useRef(null);
   const isAdmin = useIsAdmin();
   const [signInOpen, setSignInOpen] = useState(false);
+  const [signInError, setSignInError] = useState(null);
 
   useEffect(() => {
     const open = () => setSignInOpen(true);
     window.addEventListener("psat:auth-required", open);
     return () => window.removeEventListener("psat:auth-required", open);
+  }, []);
+
+  // Back from GitHub/Google: trade the verifier for our session, or reopen sign-in with why it failed.
+  useEffect(() => {
+    finishSocialSignIn().then((message) => {
+      if (!message) return;
+      setSignInError(message);
+      setSignInOpen(true);
+    });
   }, []);
 
   // ?admin=1 prompts once for a key; the only key-entry path now that operator
@@ -188,7 +199,7 @@ export default function App() {
   const isMonitor = viewMode === "monitor";
   const isCompany = viewMode === "company";
   const isAccount = viewMode === "account";
-  const isSetPassword = viewMode === "set-password";
+  const isResetPassword = viewMode === "reset-password";
 
   return (
     <ErrorBoundary>
@@ -222,7 +233,9 @@ export default function App() {
         />
       )}
 
-      {signInOpen && <SignInModal onClose={() => setSignInOpen(false)} />}
+      {signInOpen && (
+        <SignInModal initialError={signInError} onClose={() => { setSignInOpen(false); setSignInError(null); }} />
+      )}
 
       {isAdmin && isMonitor && formOpen && (
         <div className="submit-dropdown">
@@ -252,8 +265,8 @@ export default function App() {
         </div>
       )}
       {isAccount && <AccountPage onOpenCompany={openCompany} />}
-      {isSetPassword && <SetPasswordPage onDone={() => navigate("/account", "account")} />}
-      {!isMonitor && !isCompany && !isAccount && !isSetPassword && (
+      {isResetPassword && <ResetPasswordPage />}
+      {!isMonitor && !isCompany && !isAccount && !isResetPassword && (
         <>
           <ProductHero />
           <RunsPage
