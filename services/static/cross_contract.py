@@ -7,6 +7,7 @@ call boundary otherwise.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -53,6 +54,11 @@ def _var_to_address(controller_values: Any) -> dict[str, str]:
         if len(parts) == 2:
             out[parts[1].lower()] = val.lower()
     return out
+
+
+def controller_addresses(controller_values: Any) -> set[str]:
+    """Every address a control snapshot's state variables hold: what its derivations can join on."""
+    return set(_var_to_address(controller_values).values())
 
 
 def _is_flow_family(claim_id: str) -> bool:
@@ -176,6 +182,33 @@ def _derive_value_flow_claims(
         if new_claims:
             enriched[fn_sig] = new_claims
     return enriched
+
+
+def unresolved_callees(
+    target_effects: Any,
+    controller_values: Any,
+    callees_with_facts: set[str],
+    *,
+    target_address: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Body calls whose callee resolves to an address with no facts to derive from: ``{function_signature: [{sink_id,
+    selector, callee}]}``. Value-flow claims for these calls are not determined, which is not "none".
+    """
+    var_to_address = _var_to_address(controller_values)
+    target = (target_address or "").lower()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for fn_sig, sinks in _body_external_calls(target_effects).items():
+        gaps = []
+        for sink in sinks:
+            callee = var_to_address.get(str(sink.get("target", "")).lower().split(".", 1)[0])
+            # The zero address is a burn sentinel, not a contract that could have facts.
+            if not callee or callee == target or callee in callees_with_facts or not callee[2:].strip("0"):
+                continue
+            selector = str(sink.get("selector", "")).lower()
+            gaps.append({"sink_id": sink.get("id"), "selector": selector, "callee": callee})
+        if gaps:
+            out[fn_sig] = gaps
+    return out
 
 
 def _is_bool_mapping(declared_type: Any) -> bool:
@@ -358,4 +391,13 @@ def derive_cross_contract_claims(
     ):
         for fn_sig, claims in derivation.items():
             merged.setdefault(fn_sig, []).extend(claims)
-    return {fn_sig: resolve_claim_precedence(claims) for fn_sig, claims in merged.items() if claims}
+    # Sorted so equal-tier ties don't depend on sink or sibling order.
+    return {
+        fn_sig: resolve_claim_precedence(sorted(claims, key=claim_sort_key))
+        for fn_sig, claims in merged.items()
+        if claims
+    }
+
+
+def claim_sort_key(claim: Claim) -> str:
+    return json.dumps(claim, sort_keys=True, default=str)

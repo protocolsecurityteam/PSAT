@@ -248,16 +248,23 @@ def _carries_static_detail(claim: Claim) -> bool:
     return any(key not in _OBSERVED_WITNESS_KEYS for key in witness)
 
 
+def _policy_derived(claim: Claim) -> bool:
+    witness = claim.get("witness")
+    stamp = witness.get(STATIC_TIER_WITNESS_KEY) if isinstance(witness, dict) else None
+    return claim.get("tier") == "policy_derived" or stamp == "policy_derived"
+
+
 def _donor_for(claim_id: str, prior: list[Claim]) -> Claim | None:
     """The prior claim to inherit structural detail from: the strongest that has any.
 
     Choosing by tier alone picks an already-stripped observed claim as its own donor, so re-running policy couldn't
-    repair damaged rows.
+    repair damaged rows. ``policy_derived`` detail is never inherited: it is inferred from a sibling's facts, which can
+    land before or after the observation.
     """
     fallback: Claim | None = None
     donor: Claim | None = None
     for claim in prior:
-        if claim.get("claim_id") != claim_id:
+        if claim.get("claim_id") != claim_id or _policy_derived(claim):
             continue
         rank = _tier_rank(claim.get("tier", ""))
         if fallback is None or rank > _tier_rank(fallback.get("tier", "")):
@@ -315,11 +322,13 @@ def merge_observed_claims(existing: Iterable[Claim], verdicts: Iterable[Any]) ->
 
 def reproject_effect_labels(existing_labels: Iterable[str], claims: Iterable[Claim]) -> list[str]:
     """Rebuild legacy ``effect_labels`` as existing labels plus every claim's ``legacy_projection`` (additive, like
-    ``project_effect_labels``).
+    ``project_effect_labels``). ``policy_derived`` claims don't project, as in the policy writer.
     """
     projections = legacy_projections()
     labels = {str(label) for label in existing_labels}
     for claim in claims:
+        if claim.get("tier") == "policy_derived":
+            continue
         projected = projections.get(claim.get("claim_id", ""))
         if projected:
             labels.add(projected)

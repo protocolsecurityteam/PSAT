@@ -392,6 +392,8 @@ def _build_company_function_entry(
         "effect_labels": list(ef.effect_labels or []),
         "effect_targets": list(ef.effect_targets or []),
         "claims": list(getattr(ef, "claims", None) or []),
+        # ``None``: not evaluated; ``[]``: every resolved callee had facts.
+        "cross_contract_gaps": getattr(ef, "cross_contract_gaps", None),
         # See services/aggregations/action_summary.
         "action_summary": _action_summary_text,
         "action_summary_kind": _action_summary_kind,

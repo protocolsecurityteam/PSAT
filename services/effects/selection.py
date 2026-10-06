@@ -842,7 +842,7 @@ def _membership_exact(capability_expr: Any) -> bool:
     )
 
 
-def _enrolled_families(claims: Any) -> frozenset[str] | None:
+def _enrolled_families(claims: Any, *, public: bool = False) -> frozenset[str] | None:
     """Which effect families to probe, from the claims.
 
     * ``None``: blank (``[]``, SQL NULL and JSON null alike); synthesize everything.
@@ -850,11 +850,15 @@ def _enrolled_families(claims: Any) -> frozenset[str] | None:
     * empty: only other claims, already explained; dropped. Unrecognised shapes enroll nothing.
 
     :data:`_ENROLLMENT_TRANSPARENT_CLAIM_IDS` are removed first so they never turn a blank row into a dropped one.
+    ``policy_derived`` claims can add families but never drop or narrow a row: they come from a sibling's facts, which
+    can land after this stage ran, and the re-run must probe a superset of what the earlier run did. A public row is a
+    candidate only through its claims (:func:`_carries_public_admission_claim`), so one admitted by ``policy_derived``
+    claims alone is probed for their families, not synthesized in full.
     """
     if not isinstance(claims, list) or not claims:
         return None
     claims = [c for c in claims if not (isinstance(c, dict) and c.get("claim_id") in _ENROLLMENT_TRANSPARENT_CLAIM_IDS)]
-    if not claims:
+    if not public and all(isinstance(c, dict) and c.get("tier") == "policy_derived" for c in claims):
         return None
     families: set[str] = set()
     for claim in claims:
@@ -956,7 +960,7 @@ def select_candidates(
 
     candidates: list[Candidate] = []
     for fid, contract_id, address, selector, name, public, deployment, claims, capability_expr in rows:
-        families = _enrolled_families(claims)
+        families = _enrolled_families(claims, public=bool(public))
         if families is not None and not families:
             if funnel is not None:
                 funnel["skipped_already_explained"] += 1

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Job, MonitoredContract
 from services.commit_fence import fenced_commits
+from services.policy.stale_policy import STALE_POLICY_KIND, refresh_stale_policy
 from services.resolution.deferred_reconciler import (
     enqueue_reorg_refreshes,
     reconcile_deferred_resolutions,
@@ -145,13 +146,13 @@ def drain_reconciliation(
     session: Session, *, limit: int = 20, job_limit: int = 200, stop_event: Event | None = None
 ) -> tuple[int, int]:
     repaired = repair_due(session, ("reconcile",), limit=limit)
-    deferred = drift = 0
+    deferred = drift = stale = 0
     pending = 0
     visited: set[tuple[str, str]] = set()
     for _ in range(limit):
         if stop_event is not None and stop_event.is_set():
             break
-        claim = claim_one(session, ("reconcile", "reorg", "refresh_job"), exclude=visited)
+        claim = claim_one(session, ("reconcile", "reorg", "refresh_job", STALE_POLICY_KIND), exclude=visited)
         if claim is None:
             break
         visited.add((claim.kind, claim.key))
@@ -168,6 +169,11 @@ def drain_reconciliation(
                 count = refresh_invalidated_job(session, uuid.UUID(claim.key))
                 finish(session, claim, success=True, remove=True)
                 drift += count
+            elif claim.kind == STALE_POLICY_KIND:
+                lock_claim(session, claim)
+                count = refresh_stale_policy(session, uuid.UUID(claim.key))
+                finish(session, claim, success=True, remove=True)
+                stale += count
             else:
                 chain_id = int(claim.key)
                 if chain_id not in supported_chain_ids():
@@ -202,6 +208,7 @@ def drain_reconciliation(
             "repair_enqueued": repaired,
             "reenqueued": deferred,
             "drift_reenqueued": drift,
+            "stale_policy_reenqueued": stale,
         },
     )
     return deferred, drift

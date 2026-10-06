@@ -134,83 +134,59 @@ class TestProcessSemanticInputs:
         assert semantic_errors[0]["context"]["missing_artifacts"] == ["effects", "predicate_trees"]
 
 
-class TestCrossContractEnrichmentArtifactSync:
-    def test_enrichment_rewrites_effective_permissions_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+class TestCrossContractEnrichmentWiring:
+    def test_enrichment_gets_this_job_s_facts_and_runs_before_labeling(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
         session = MagicMock()
+        session.execute.return_value.scalar_one_or_none.return_value = None
         job = _job()
-
-        contract_analysis = _minimal_contract_analysis()
-        control_snapshot = _minimal_snapshot({"state_variable:token": {"value": AUTH_ADDRESS}})
-        resolved_graph = _graph_with_nodes([])
-        tracking_plan = {"schema_version": "0.1", "contract_address": TARGET_ADDRESS, "contract_name": "TestContract"}
-
-        def fake_get_artifact(_session: Any, _job_id: Any, name: str) -> Any:
-            return {
-                "contract_analysis": contract_analysis,
-                "control_snapshot": control_snapshot,
-                "resolved_control_graph": resolved_graph,
-                "control_tracking_plan": tracking_plan,
-            }.get(name)
-
-        store_calls: list[tuple[str, Any]] = []
-
-        def fake_store_artifact(
-            _session: Any,
-            _job_id: Any,
-            name: str,
-            data: Any = None,
-            text_data: Any = None,
-        ) -> None:
-            import json as _json
-
-            store_calls.append((name, _json.loads(_json.dumps(data)) if data is not None else text_data))
-
-        contract_row = MagicMock()
-        contract_row.id = 1
-        session.execute.return_value.scalar_one_or_none.return_value = contract_row
-
-        monkeypatch.setattr("workers.policy_worker.get_artifact", fake_get_artifact)
-        monkeypatch.setattr("workers.policy_worker.store_artifact", fake_store_artifact)
+        effects = {"functions": {"mintRewards()": {"selector": "0x12345678", "claims": []}}}
+        artifacts = {
+            "contract_analysis": _minimal_contract_analysis(),
+            "control_snapshot": _minimal_snapshot({}),
+            "resolved_control_graph": _graph_with_nodes([]),
+            "control_tracking_plan": {"schema_version": "0.1", "contract_address": TARGET_ADDRESS},
+            "predicate_trees": {"trees": {}},
+            "effects": effects,
+        }
+        stored: list[str] = []
+        monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
+        monkeypatch.setattr(
+            "workers.policy_worker.store_artifact", lambda _s, _j, name, data=None, text_data=None: stored.append(name)
+        )
         monkeypatch.setattr("workers.policy_worker._load_nested_artifacts", lambda *_a, **_kw: {})
         monkeypatch.setattr(
             "workers.policy_worker.build_effective_permissions",
-            lambda *a, **kw: {
-                "schema_version": "1",
-                "functions": [
-                    {
-                        "function": "mintRewards()",
-                        "effect_labels": ["role_management"],
-                        "claims": [],
-                        "controllers": [],
-                        "authority_roles": [],
-                        "direct_owner": None,
-                    }
-                ],
-            },
+            lambda *a, **kw: {"functions": [{"function": "mintRewards()", "claims": []}]},
         )
         monkeypatch.setattr(
-            "workers.policy_worker.resolve_control_graph",
-            lambda **kw: ({"nodes": [], "edges": []}, {}),
+            "workers.policy_worker.resolve_control_graph", lambda **kw: ({"nodes": [], "edges": []}, {})
         )
-        monkeypatch.setattr(
-            "workers.policy_worker.build_principal_labels",
-            lambda *a, **kw: {"principals": []},
-        )
-        policy_claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"callee": AUTH_ADDRESS}}
-        monkeypatch.setattr(
-            PolicyWorker,
-            "_enrich_cross_contract",
-            lambda self, session, job, contract_analysis, control_snapshot, **kw: {"mintRewards()": [policy_claim]},
-        )
+        calls: list[dict[str, Any]] = []
+        policy_claim = {"claim_id": "transfer_policy.configure", "tier": "policy_derived", "witness": {}}
+
+        def fake_enrich(self, session, job, contract_analysis, control_snapshot, **kw):
+            calls.append({"stored_before": list(stored), **kw})
+            kw["ep_data"]["functions"][0]["claims"] = [policy_claim]
+            return {"mintRewards()": [policy_claim]}
+
+        labeled_claims: list[Any] = []
+
+        def fake_labels(ep_data, **kw):
+            labeled_claims.append(ep_data["functions"][0]["claims"])
+            return {"principals": []}
+
+        monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", fake_enrich)
+        monkeypatch.setattr("workers.policy_worker.build_principal_labels", fake_labels)
 
         worker.process(session, cast(Any, job))
 
-        effective_payloads = [data for name, data in store_calls if name == "effective_permissions"]
-        assert len(effective_payloads) == 2
-        fn = effective_payloads[-1]["functions"][0]
-        assert [c["claim_id"] for c in fn["claims"]] == ["flow.out"]
-        assert fn["effect_labels"] == ["role_management"]
+        assert len(calls) == 1
+        assert calls[0]["target_effects"] is effects
+        assert calls[0]["ep_data"] is not None
+        # A sibling's staleness check skips a job that hasn't published, so publishing must precede the own pass.
+        assert "effective_permissions" in calls[0]["stored_before"]
+        assert labeled_claims == [[policy_claim]]
 
 
 # PSAT_RPC_FANOUT=1 vs =8 must store identical artifacts, and the classify cache must collapse repeats.

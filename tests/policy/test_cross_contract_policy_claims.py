@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from db.models import Contract, EffectiveFunction, Job, JobStage, JobStatus
 from db.queue import store_artifact
+from services.policy.cross_contract_enrichment import apply_claims_to_payload
 from services.static.claims import Claim
 from tests.conftest import requires_postgres
 from workers.policy_worker import PolicyWorker
@@ -200,7 +201,7 @@ def test_apply_cross_contract_claims_merges_and_dedups():
     enriched: dict[str, list[Claim]] = {
         "sweep(address)": [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"policy": True}}],
     }
-    PolicyWorker()._apply_cross_contract_claims(payload, enriched)
+    apply_claims_to_payload(payload, enriched)
 
     sweep = payload["functions"][0]
     assert len(sweep["claims"]) == 1
@@ -459,7 +460,7 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
     db_session.commit()
 
     control_snapshot = {"controller_values": {"state_variable:token": {"value": TOKEN}}}
-    with caplog.at_level("WARNING", logger="workers.policy_worker"):
+    with caplog.at_level("WARNING", logger="services.policy.cross_contract_enrichment"):
         enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
 
     assert "sweep(address)" in enriched

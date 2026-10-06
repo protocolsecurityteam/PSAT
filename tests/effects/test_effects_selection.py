@@ -815,3 +815,44 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     warnings.clear()
     etherscan.get_token_balances_page("0x" + "ac" * 20, chain_id=1)
     assert not [w for w in warnings if "FULL page" in w]
+
+
+def _claim(claim_id: str, tier: str = "standard_exact") -> dict[str, Any]:
+    return {"claim_id": claim_id, "tier": tier, "witness": {}}
+
+
+@pytest.mark.parametrize(
+    ("own", "derived", "expected"),
+    [
+        # A sibling-derived claim never drops a blank row or narrows it.
+        ([], [_claim("transfer_policy.configure", "policy_derived")], None),
+        ([], [_claim("flow.in", "policy_derived")], None),
+        # It can re-enroll a row its own claims would drop.
+        ([_claim("value_router")], [_claim("flow.out", "policy_derived")], frozenset({EFFECT_CLASS_VALUE_OUT})),
+        ([_claim("value_router")], [_claim("transfer_policy.configure", "policy_derived")], frozenset()),
+        (
+            [_claim("supply.mint")],
+            [_claim("flow.out", "policy_derived")],
+            frozenset({EFFECT_CLASS_VALUE_OUT, EFFECT_CLASS_SUPPLY}),
+        ),
+    ],
+)
+def test_policy_derived_claims_only_widen_enrollment(own, derived, expected):
+    from services.effects.selection import _enrolled_families
+
+    def _wider(a: frozenset[str] | None, b: frozenset[str] | None) -> bool:
+        return b is None or (a is not None and a <= b)
+
+    assert _enrolled_families([*own, *derived]) == expected
+    assert _wider(_enrolled_families(own), _enrolled_families([*own, *derived]))
+
+
+def test_a_public_row_admitted_only_by_derived_claims_is_probed_for_their_families():
+    """Public rows are candidates only through an admitting claim, so full synthesis would widen wrapper noise."""
+    from services.effects.selection import _enrolled_families
+
+    derived = [_claim("flow.out", "policy_derived"), _claim("flow.in", "policy_derived")]
+
+    assert _enrolled_families(derived, public=True) == frozenset({EFFECT_CLASS_VALUE_OUT})
+    assert _enrolled_families(derived) is None
+    assert _enrolled_families([_claim("value_router"), *derived], public=True) == frozenset({EFFECT_CLASS_VALUE_OUT})

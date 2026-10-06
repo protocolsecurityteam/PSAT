@@ -619,6 +619,15 @@ class EffectiveFunction(Base):
             "with state_writes=[]. SQL NULL = not determined; [] = proven none."
         ),
     )
+    cross_contract_gaps: Mapped[Any | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+        comment=(
+            "Body calls whose callee resolves to an address with no readable facts, so their cross-contract claims "
+            "are not determined: [{sink_id, selector, callee, reason, callee_job_id}]. SQL NULL = not evaluated; "
+            "[] = every resolved callee had facts."
+        ),
+    )
     writer_selectors: Mapped[list[str] | None] = mapped_column(
         ARRAY(String(10)),
         nullable=True,

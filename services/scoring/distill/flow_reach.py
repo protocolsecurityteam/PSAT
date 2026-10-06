@@ -10,6 +10,7 @@ from services.scoring.schema import (
     Tri,
     entity_key,
 )
+from services.static.claims import STATIC_TIER_WITNESS_KEY
 from utils import execution_record as EX
 from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.scoring_status import (
@@ -180,7 +181,8 @@ def _repointed_entities(
     A repoint adds a foreign entity to reach, so it gets the backlink licence's checks:
 
     * the tier must be in the ``REPOINT_ADMISSIBLE_TIERS`` allowlist (``policy_derived`` and ``not_determined`` are
-    inferences, not value evidence);
+    inferences, not value evidence). Named entities on an observed claim were carried from the static claim it
+    superseded, so they take that claim's tier, recorded as ``static_tier``;
     * the address must be a contract of this protocol on this chain;
     * the burn address is never an entity.
 
@@ -193,7 +195,8 @@ def _repointed_entities(
     keys: list[str] = []
     bases: list[str] = []
     refused: list[dict[str, Any]] = []
-    tier = _tier(entry)
+    carried_tier = witness.get(STATIC_TIER_WITNESS_KEY)
+    tier = _tier({"tier": carried_tier}) if carried_tier is not None else _tier(entry)
     for field_name, basis in (("callee", "witness.callee"), ("configures", "witness.configures")):
         named = witness.get(field_name)
         if not named:
