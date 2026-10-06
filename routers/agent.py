@@ -33,7 +33,7 @@ class AgentChatRequest(BaseModel):
     history: list[AgentChatMessage] = Field(default_factory=list)
 
 
-@router.post("/api/agent/chat", dependencies=[Depends(deps.require_admin_key)])
+@router.post("/api/agent/chat", dependencies=[Depends(deps.require_admin)])
 def agent_chat(req: AgentChatRequest):
     ctx = AgentContext(
         company=req.company,
@@ -63,7 +63,7 @@ def agent_chat(req: AgentChatRequest):
     )
 
 
-@router.get("/api/agent/address-touches", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.get("/api/agent/address-touches", dependencies=[Depends(deps.require_admin)], response_model=None)
 def agent_address_touches(
     company: str,
     address: str,

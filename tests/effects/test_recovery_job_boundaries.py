@@ -72,11 +72,11 @@ def recovery_pair(db_session):
 @pytest.mark.parametrize("reader", ["capabilities", "membership", "signature", "artifact", "company", "listing"])
 def test_public_analysis_readers_keep_full_analysis(api_client, db_session, recovery_pair, reader):
     from api import app
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
     protocol, contract, original, retry = recovery_pair
     address = contract.address
-    app.dependency_overrides[require_admin_key] = lambda: None
+    app.dependency_overrides[require_admin] = lambda: None
     try:
         if reader in ("membership", "signature"):
             who = "member" if reader == "membership" else "recovered_signer"
@@ -107,7 +107,7 @@ def test_public_analysis_readers_keep_full_analysis(api_client, db_session, reco
         elif reader == "listing":
             assert len([entry for entry in body if entry["address"] == address]) == 1
     finally:
-        app.dependency_overrides.pop(require_admin_key, None)
+        app.dependency_overrides.pop(require_admin, None)
 
 
 def test_retry_does_not_suppress_real_state_change_reanalysis(db_session, recovery_pair):

@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = ">=3.10"
+resolution-markers = [
+    "python_full_version >= '3.14'",
+    "python_full_version < '3.14'",
+]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -1992,6 +1996,7 @@ dependencies = [
     { name = "eth-account" },
     { name = "eth-utils" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "hypersync" },
     { name = "playwright" },
     { name = "psycopg2-binary" },
@@ -2014,7 +2019,6 @@ dependencies = [
 dev = [
     { name = "coverage" },
     { name = "diff-cover" },
-    { name = "httpx" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -2031,6 +2035,7 @@ requires-dist = [
     { name = "eth-account", specifier = ">=0.11.0" },
     { name = "eth-utils", specifier = ">=5.3.0" },
     { name = "fastapi", specifier = ">=0.135.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypersync", specifier = ">=0.8.5" },
     { name = "playwright", specifier = ">=1.58.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
@@ -2053,7 +2058,6 @@ requires-dist = [
 dev = [
     { name = "coverage", specifier = ">=7.6.0" },
     { name = "diff-cover", specifier = ">=10.2.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pyright", specifier = ">=1.1.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },

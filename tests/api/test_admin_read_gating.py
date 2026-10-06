@@ -14,9 +14,9 @@ ADMIN_KEY = "real-admin-key"
 
 def _client_without_bypass(monkeypatch) -> TestClient:
     import api
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
-    api.app.dependency_overrides.pop(require_admin_key, None)
+    api.app.dependency_overrides.pop(require_admin, None)
     monkeypatch.setattr("routers.deps.ADMIN_KEY", ADMIN_KEY)
     return TestClient(api.app)
 
@@ -152,13 +152,13 @@ def test_subscriptions_redacts_webhook_token() -> None:
     sub = SimpleNamespace(
         id=uuid.uuid4(),
         protocol_id=1,
-        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/SUPERSECRETtoken_abcdef",
+        delivery_url="https://discord.com/api/webhooks/123456789012345678/SUPERSECRETtoken_abcdef",
         label="ops",
         event_filter=None,
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     exec_result = MagicMock()
-    exec_result.scalars.return_value.all.return_value = [sub]
+    exec_result.all.return_value = [(sub, None)]
     session = MagicMock()
     session.execute.return_value = exec_result
     cm = MagicMock()

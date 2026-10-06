@@ -161,7 +161,7 @@ def _compute_data_freshness(session, address: str, chain_id: int) -> dict[str, A
 
 @router.post(
     "/api/contract/{address}/probe/membership",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
 )
 def probe_contract_membership(
     address: str,
@@ -245,7 +245,7 @@ def probe_contract_membership(
 
 @router.post(
     "/api/contract/{address}/probe/signature",
-    dependencies=[Depends(deps.require_admin_key)],
+    dependencies=[Depends(deps.require_admin)],
 )
 def probe_contract_signature(
     address: str,

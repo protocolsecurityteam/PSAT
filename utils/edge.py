@@ -63,6 +63,14 @@ def matches(template: str, path: str) -> bool:
     return re.fullmatch(pattern, path) is not None
 
 
+def account_route(path: str) -> bool:
+    """Sign-in (OAuth and email/password) and the signed-in user's own resources: open to any visitor (the app
+    authenticates them by session cookie), so not gated on operator Access. Never cacheable: they carry a cookie or set
+    one.
+    """
+    return path == "/api/me" or path.startswith(("/api/me/", "/api/auth/"))
+
+
 def public_read(method: str, path: str) -> bool:
     if method not in {"GET", "HEAD"}:
         return False
@@ -212,7 +220,9 @@ class CloudflareBoundary:
             or path.startswith("/monitor/")
         )
         operator = operator or target in {"/docs", "/redoc", "/openapi.json"}
-        operator = operator or (target.startswith("/api/") and not public_read(request.method, target))
+        operator = operator or (
+            target.startswith("/api/") and not public_read(request.method, target) and not account_route(target)
+        )
         operator = operator or "x-psat-admin-key" in request.headers or "authorization" in request.headers
         scope.setdefault("state", {})["edge_visitor_ip"] = None
         scope["state"]["edge_operator"] = operator

@@ -58,6 +58,7 @@ from db.models import (  # noqa: E402
     RoleHolderPlaneRefresh,
     TvlSnapshot,
     UpgradeTransaction,
+    User,
     WatchedProxy,
 )
 
@@ -323,15 +324,15 @@ def _scrub_storage_env(monkeypatch):
 def _bypass_admin_key():
     try:
         import api as _api
-        from routers.deps import require_admin_key
+        from routers.deps import require_admin
     except Exception:
         yield
         return
-    _api.app.dependency_overrides[require_admin_key] = lambda: None
+    _api.app.dependency_overrides[require_admin] = lambda: None
     try:
         yield
     finally:
-        _api.app.dependency_overrides.pop(require_admin_key, None)
+        _api.app.dependency_overrides.pop(require_admin, None)
 
 
 @pytest.fixture(autouse=True)
@@ -567,6 +568,8 @@ def db_session():
             MonitoredEvent,
             MonitoredContract,
             ProtocolSubscription,
+            # Cascades to identities, sessions, email tokens and saved webhooks.
+            User,
             TvlSnapshot,
             ProxyUpgradeEvent,
             ProxySubscription,

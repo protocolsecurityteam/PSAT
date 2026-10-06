@@ -103,7 +103,7 @@ def test_require_admin_key_warns_on_reject_without_leaking_key(caplog, monkeypat
     monkeypatch.setattr(deps, "ADMIN_KEY", "the-real-secret")
     with caplog.at_level(logging.WARNING, logger="routers.deps"):
         with pytest.raises(HTTPException) as ei:
-            deps.require_admin_key(_make_request("/api/analyze"), "wrong-key")
+            deps.require_admin(_make_request("/api/analyze"), "wrong-key")
     assert ei.value.status_code == 401
     rec = _rec(caplog, "admin key rejected")
     assert rec.levelno == logging.WARNING

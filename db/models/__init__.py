@@ -6,6 +6,7 @@ the former ``db.models`` surface.
 
 from __future__ import annotations
 
+from .accounts import User, UserSession, UserWebhook
 from .balance_collection import BalanceCollectionState
 from .balance_work import PendingEffectsWork
 from .balances import (
@@ -277,6 +278,9 @@ __all__ = [
     "UPGRADE_SOURCE_POLL",
     "UpgradeEvent",
     "UpgradeTransaction",
+    "User",
+    "UserSession",
+    "UserWebhook",
     "WINDOW_STATS_CONTINUOUS",
     "WINDOW_STATS_NOT_DETERMINED",
     "WINDOW_STATS_UNMEASURED_LEGACY",

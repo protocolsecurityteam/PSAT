@@ -235,10 +235,10 @@ def test_cors_allows_configured_origin(monkeypatch, db_session) -> None:
     try:
         # SessionLocal lives on routers.deps; point it at the test DB so /api/health works.
         from routers import deps
-        from routers.deps import require_admin_key
+        from routers.deps import require_admin
 
         monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-        api.app.dependency_overrides[require_admin_key] = lambda: None
+        api.app.dependency_overrides[require_admin] = lambda: None
         client = TestClient(api.app)
 
         response = client.get("/api/health", headers={"Origin": "https://psat.example.com"})
