@@ -207,18 +207,16 @@ class TestExtractFromPageText:
 
     def test_safe_link_in_a_table_cell(self):
         safe, unknown = "0x" + "33" * 20, "0x" + "55" * 20
-        html = f"""
-        <h2>Ethereum</h2>
-        <table>
-            <tr><th>Contract</th><th>Address</th></tr>
-            <tr><td>Treasury</td><td>https://app.safe.global/home?safe=eth:{safe}</td></tr>
-            <tr><td>Other</td><td>https://app.safe.global/home?safe=gno:{unknown}</td></tr>
-        </table>
-        """
+        html = (
+            "<h2>Ethereum</h2><p>Contract</p><p>Address</p>"
+            f"<p>Treasury</p><p>https://app.safe.global/home?safe=eth:{safe}</p>"
+            f"<p>Other</p><p>https://app.safe.global/home?safe=gno:{unknown}</p>"
+        )
 
         entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
 
         by_addr = {e["address"]: e for e in entries}
+        assert all(e["kind"] == "official_inventory_table" for e in entries)
         assert by_addr[safe]["chain"] == "ethereum" and by_addr[safe]["explorer_url"]
         assert by_addr[unknown]["chain"] == "unknown" and by_addr[unknown]["explorer_url"] is None
 
