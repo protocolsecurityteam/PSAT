@@ -196,6 +196,30 @@ class TestExtractFromPageText:
             (safe, "unknown", None, "official_inventory_text")
         ]
 
+    @pytest.mark.parametrize("requested", [None, "ethereum"])
+    def test_unknown_prefix_never_borrows_a_requested_chain(self, requested):
+        safe = "0x" + "33" * 20
+        html = f"<h2>Ethereum</h2><p>Treasury https://app.safe.global/home?safe=gno:{safe}</p>"
+        table = (
+            "<h2>Ethereum</h2><p>Contract</p><p>Address</p>"
+            f"<p>Treasury</p><p>https://app.safe.global/home?safe=gno:{safe}</p>"
+        )
+
+        for page in (html, table):
+            entries = extract_inventory_entries_from_page_text("https://docs.example.com", page, requested)
+            expected = [] if requested else [("unknown", False)]
+            assert [(e["chain"], e["chain_from_hint"]) for e in entries] == expected
+
+    def test_safe_link_naming_no_safe_is_not_a_locator(self):
+        addr = "0x" + "44" * 20
+        html = f"<h2>Ethereum</h2><p>Vault {addr} https://app.safe.global/welcome</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["address"], e["explorer_url"], e["kind"]) for e in entries] == [
+            (addr, None, "official_inventory_text")
+        ]
+
     def test_safe_link_names_only_its_own_safe(self):
         safe, app = "0x" + "33" * 20, "0x" + "44" * 20
         link = f"https://app.safe.global/apps/open?safe=arb1:{safe}&appUrl=https%3A%2F%2Fx.io%2F%3Fa%3D{app}"

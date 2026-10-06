@@ -250,9 +250,7 @@ def _build_entries_from_table_row(
     entries: list[dict[str, Any]] = []
     for address in addresses:
         explorer_url = next((link for link in explorer_links if address in _link_addresses(link)), None)
-        address_chains = (
-            _resolve_candidate_chains(None, "unknown", requested_chain) if address in unresolved else resolved_chains
-        )
+        address_chains = _unresolved_chains(requested_chain) if address in unresolved else resolved_chains
         for resolved, chain_from_hint in address_chains:
             entries.append(
                 {
@@ -301,6 +299,13 @@ def _extract_name_from_line(line: str) -> str | None:
     return max(set(candidates), key=_label_score)
 
 
+def _unresolved_chains(requested_chain: str | None) -> list[tuple[str, bool]]:
+    """An address whose stated chain we can't map is never on a requested chain (every supported chain has a mapped
+    prefix), and otherwise stays unknown rather than hinted.
+    """
+    return [] if requested_chain else [("unknown", False)]
+
+
 def _extract_addresses_and_links(line: str) -> tuple[list[str], list[str], set[str]]:
     """Addresses, the locator links that corroborate them, and the addresses whose only chain qualifier is a Safe link
     prefix we can't map. Such a link is not evidence and its address takes no surrounding chain.
@@ -318,6 +323,8 @@ def _extract_addresses_and_links(line: str) -> tuple[list[str], list[str], set[s
         addresses.update(linked)
         if _is_unresolved_safe_link(clean_url):
             unresolved.update(linked)
+            continue
+        if not linked:
             continue
         if clean_url not in seen_links:
             seen_links.add(clean_url)
@@ -461,8 +468,12 @@ def extract_inventory_entries_from_page_text(
 
         for address in addresses:
             explorer_url = next((link for link in explorer_links if address in _link_addresses(link)), None)
-            address_chain = "unknown" if address in unresolved else line_chain
-            for resolved, chain_from_hint in _resolve_candidate_chains(None, address_chain, requested_chain):
+            address_chains = (
+                _unresolved_chains(requested_chain)
+                if address in unresolved
+                else _resolve_candidate_chains(None, line_chain, requested_chain)
+            )
+            for resolved, chain_from_hint in address_chains:
                 signature = (resolved, address, name, kind, url)
                 if signature in seen:
                     continue
