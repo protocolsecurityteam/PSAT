@@ -363,7 +363,7 @@ def test_account_routes_skip_operator_access_but_cookies_never_unlock_operator_r
     from utils.edge import account_route
 
     monkeypatch.setattr(deps, "SessionLocal", SessionFactory(MagicMock()))
-    for path in ("/api/me", "/api/me/webhooks", "/api/auth/providers", "/api/auth/github/login"):
+    for path in ("/api/me", "/api/me/webhooks", "/api/auth/config", "/api/auth/neon/get-session"):
         assert account_route(path)
         response = edge_client.get(path, headers=ORIGIN, follow_redirects=False)
         assert response.status_code != 403, (path, response.text)

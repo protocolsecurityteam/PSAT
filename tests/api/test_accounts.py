@@ -119,6 +119,9 @@ def test_proxy_forwards_to_neon_with_only_its_cookies(client, fake_neon):
     ]
     assert resp.headers["set-auth-jwt"] == "jwt"
     assert "x-internal" not in resp.headers
+    # Served from our origin, so the site's no-inline-script CSP must cover whatever Neon returns.
+    assert "script-src 'self'" in resp.headers["content-security-policy"]
+    assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 """user accounts (Neon Auth identities), sessions, saved webhooks, and owned subscriptions
 
 Revision ID: b7e2c4a91f30
-Revises: aa9f6ba5b7df
+Revises: c7e3a9d15b28
 
 Existing subscriptions keep their inline URL and no owner; account-created rows point at a saved webhook instead.
 """
@@ -16,7 +16,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "b7e2c4a91f30"
-down_revision: Union[str, Sequence[str], None] = "aa9f6ba5b7df"
+down_revision: Union[str, Sequence[str], None] = "c7e3a9d15b28"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
