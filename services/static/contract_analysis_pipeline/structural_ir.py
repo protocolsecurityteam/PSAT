@@ -6,6 +6,7 @@ These operate on declarations and IR values, never contract or helper names.
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -94,7 +95,22 @@ def conjuncts(value, fn):
     return [ir] if ir is not None else []
 
 
+# ``id(fn) -> (fn, guards)`` while a structural scope is active. The authorization pass asks for the same function's
+# guards once per mandatory call, and each ``RevertDetector`` run stringifies every condition expression.
+guards_cache: ContextVar[dict | None] = ContextVar("structural_guards_cache", default=None)
+
+
 def guards(fn):
+    cache = guards_cache.get()
+    if cache is None:
+        return _guards(fn)
+    hit = cache.get(id(fn))
+    if hit is None:
+        hit = cache[id(fn)] = (fn, tuple(_guards(fn)))
+    return list(hit[1])
+
+
+def _guards(fn):
     out = []
     for gate in RevertDetector(fn).run():
         condition = None
