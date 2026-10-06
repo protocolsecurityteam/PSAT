@@ -10,6 +10,7 @@ import contextvars
 from copy import deepcopy
 from dataclasses import replace
 
+from .effect_scope_codec import EFFECT_SCOPES_VERSION
 from .effects.sinks import _classify_node_irs, _is_modifier_call, _node_kind_state_writes
 from .predicate_types import PredicateTree, make_and_node, make_or_node
 from .predicates._helpers import _unsupported_leaf
@@ -355,7 +356,7 @@ def _attach_effect_scopes(contract, predicates, effects):
                 site["predicate"] = tree
             functions[signature]["effect_scopes"] = sites
         predicates["effect_scopes"] = {sig: sites for sig, sites in sites_by_function.items() if sites}
-        effects["effect_scopes_version"] = 1
+        effects["effect_scopes_version"] = EFFECT_SCOPES_VERSION
 
 
 def _conditional_prefix(unit, site, chain, entry, provenance, gates):

@@ -13,9 +13,10 @@ from services.policy.effective_permissions import build_effective_permissions
 from services.policy.effective_permissions_writer import write_effective_function_rows
 from services.resolution.adapters import AdapterRegistry, EvaluationContext
 from services.resolution.capability_resolver import capability_to_dict
-from services.resolution.effect_scopes import resolve_effect_scopes
+from services.resolution.effect_scopes import resolve_effect_scopes, site_predicates
 from services.scoring.cli import distill_protocol_in_memory
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
 from tests.conftest import requires_postgres
 from tests.support.anvil import PRIVATE_KEY, _start_anvil, _terminate, call, calldata, rpc, send
 from tests.support.foundry_project import write_foundry_project
@@ -62,8 +63,9 @@ def test_execution_and_scoring_preserve_effect_specific_authority(tmp_path, db_s
         ctx = EvaluationContext(
             chain_id=1, contract_address=address, rpc_url=url, block=block, state_var_values={"owner": owner}
         )
+        expanded = expand_effect_scopes(trees)
         aggregate, scopes = resolve_effect_scopes(
-            trees["effect_scopes"][signature], AdapterRegistry(), ctx, all_scopes=trees["effect_scopes"]
+            expanded[signature], AdapterRegistry(), ctx, effect_predicates=site_predicates(expanded)
         )
         assert aggregate is not None
         caps = {signature: {**capability_to_dict(aggregate), "effect_capabilities": scopes}}
