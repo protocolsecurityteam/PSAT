@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from .revert_detect import RevertDetector
+from .revert_detect import RevertDetector, expression_text_cache
 from .slither_compat import (
     Assignment,
     Binary,
@@ -27,7 +27,7 @@ from .slither_compat import (
     TypeConversion,
     Unary,
 )
-from .structural_ir import definition, integer, operations, relation, same
+from .structural_ir import definition, guards_cache, integer, operations, relation, same
 
 
 def declaration(value):
@@ -91,6 +91,13 @@ class WriteEvidence:
     def transition(self, operator="NOT_EQUAL", rhs=0):
         after = 0 if isinstance(self.operation, Delete) else integer(self.value, self.function)
         return acceptance_transition(operator, rhs, after)
+
+
+def _type_text(type_):
+    # Tuple-returning calls carry a list of types; ``str(list)`` would publish object reprs with memory addresses.
+    if isinstance(type_, (list, tuple)):
+        return str(type_[0]) if len(type_) == 1 else "(" + ",".join(str(t) for t in type_) + ")"
+    return str(type_)
 
 
 class FunctionSummary:
@@ -167,7 +174,7 @@ class FunctionSummary:
         return {
             "kind": "unknown",
             "reason": "ambiguous_or_unsupported_definition",
-            "type": str(getattr(value, "type", "")),
+            "type": _type_text(getattr(value, "type", "")),
         }
 
     def publish(self):
@@ -245,9 +252,13 @@ def evidence_for(contract):
 def structural_scope(contract):
     evidence = StructuralEvidence(contract)
     token = _active_evidence.set(evidence)
+    guards_token = guards_cache.set({})
+    text_token = expression_text_cache.set({})
     try:
         yield evidence
     finally:
+        expression_text_cache.reset(text_token)
+        guards_cache.reset(guards_token)
         _active_evidence.reset(token)
 
 
