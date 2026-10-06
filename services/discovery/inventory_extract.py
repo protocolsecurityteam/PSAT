@@ -13,11 +13,12 @@ from .inventory_domain import (
     TAG_RE,
     URL_RE,
     _debug_log,
-    _extract_addresses,
     _fetch_page,
     _get_domain,
     _infer_chain,
     _is_explorer_domain,
+    _is_unresolved_safe_link,
+    _link_addresses,
     _resolve_chain,
 )
 from .static_dependencies import normalize_address as _normalize_address
@@ -235,7 +236,7 @@ def _build_entries_from_table_row(
         cell_by_role.setdefault(role, []).append(cell)
 
     address_blob = " ".join(cell_by_role.get("address", []))
-    addresses, explorer_links = _extract_addresses_and_links(address_blob)
+    addresses, explorer_links, unresolved = _extract_addresses_and_links(address_blob)
     if not addresses:
         return []
 
@@ -248,8 +249,11 @@ def _build_entries_from_table_row(
 
     entries: list[dict[str, Any]] = []
     for address in addresses:
-        explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-        for resolved, chain_from_hint in resolved_chains:
+        explorer_url = next((link for link in explorer_links if address in _link_addresses(link)), None)
+        address_chains = (
+            _resolve_candidate_chains(None, "unknown", requested_chain) if address in unresolved else resolved_chains
+        )
+        for resolved, chain_from_hint in address_chains:
             entries.append(
                 {
                     "name": name,
@@ -297,21 +301,30 @@ def _extract_name_from_line(line: str) -> str | None:
     return max(set(candidates), key=_label_score)
 
 
-def _extract_addresses_and_links(line: str) -> tuple[list[str], list[str]]:
+def _extract_addresses_and_links(line: str) -> tuple[list[str], list[str], set[str]]:
+    """Addresses, the locator links that corroborate them, and the addresses whose only chain qualifier is a Safe link
+    prefix we can't map. Such a link is not evidence and its address takes no surrounding chain.
+    """
     explorer_links: list[str] = []
     seen_links: set[str] = set()
     addresses: set[str] = set(_normalize_address(match) for match in ADDRESS_RE.findall(line))
+    unresolved: set[str] = set()
 
     for raw_url in URL_RE.findall(line):
         clean_url = raw_url.rstrip(".,;:!?)")
         if not _is_explorer_domain(_get_domain(clean_url)):
             continue
+        linked = _link_addresses(clean_url)
+        addresses.update(linked)
+        if _is_unresolved_safe_link(clean_url):
+            unresolved.update(linked)
+            continue
         if clean_url not in seen_links:
             seen_links.add(clean_url)
             explorer_links.append(clean_url)
-        addresses.update(_extract_addresses(clean_url))
 
-    return sorted(addresses), explorer_links
+    corroborated = {address for link in explorer_links for address in _link_addresses(link)}
+    return sorted(addresses), explorer_links, unresolved - corroborated
 
 
 def _entry_kind(line: str, explorer_links: list[str]) -> str:
@@ -414,7 +427,7 @@ def extract_inventory_entries_from_page_text(
                         continue
             schema_roles = None
 
-        addresses, explorer_links = _extract_addresses_and_links(line)
+        addresses, explorer_links, unresolved = _extract_addresses_and_links(line)
         if not addresses:
             context_chains = _parse_chain_values(line)
             if context_chains and any(token in line.lower() for token in ("deploy", "mainnet", "chain")):
@@ -447,8 +460,9 @@ def extract_inventory_entries_from_page_text(
         pending_label = None
 
         for address in addresses:
-            explorer_url = next((link for link in explorer_links if address in _extract_addresses(link)), None)
-            for resolved, chain_from_hint in _resolve_candidate_chains(None, line_chain, requested_chain):
+            explorer_url = next((link for link in explorer_links if address in _link_addresses(link)), None)
+            address_chain = "unknown" if address in unresolved else line_chain
+            for resolved, chain_from_hint in _resolve_candidate_chains(None, address_chain, requested_chain):
                 signature = (resolved, address, name, kind, url)
                 if signature in seen:
                     continue

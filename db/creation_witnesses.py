@@ -14,14 +14,18 @@ _WRITABLE = frozenset(
 )
 
 
-def upsert_creation_witness(session: Session, *, chain_id: int, address: str, **fields: Any) -> None:
-    """Insert the ``(chain_id, address)`` row or overwrite only the given columns on it."""
+def upsert_creation_witness(
+    session: Session, *, chain_id: int, address: str, keep_existing: bool = False, **fields: Any
+) -> None:
+    """Insert the ``(chain_id, address)`` row or overwrite only the given columns on it. With *keep_existing*, a row
+    another writer created first is left untouched.
+    """
     unknown = set(fields) - _WRITABLE
     if unknown:
         raise ValueError(f"not creation-witness columns: {sorted(unknown)}")
     address = address.lower()
     stmt = pg_insert(ContractCreationWitness).values(chain_id=chain_id, address=address, **fields)
-    if fields:
+    if fields and not keep_existing:
         stmt = stmt.on_conflict_do_update(
             index_elements=["chain_id", "address"],
             set_={name: stmt.excluded[name] for name in fields},

@@ -186,6 +186,42 @@ class TestExtractFromPageText:
         arb_entry = by_addr["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
         assert arb_entry["chain"] == "arbitrum"
 
+    def test_safe_link_with_unknown_prefix_takes_no_heading_chain_and_is_not_evidence(self):
+        safe = "0x" + "33" * 20
+        html = f"<h2>Ethereum</h2><p>Treasury https://app.safe.global/home?safe=gno:{safe}</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["address"], e["chain"], e["explorer_url"], e["kind"]) for e in entries] == [
+            (safe, "unknown", None, "official_inventory_text")
+        ]
+
+    def test_safe_link_names_only_its_own_safe(self):
+        safe, app = "0x" + "33" * 20, "0x" + "44" * 20
+        link = f"https://app.safe.global/apps/open?safe=arb1:{safe}&appUrl=https%3A%2F%2Fx.io%2F%3Fa%3D{app}"
+        html = f"<h2>Ethereum</h2><p>Ops multisig {link}</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["address"], e["chain"], e["explorer_url"]) for e in entries] == [(safe, "arbitrum", link)]
+
+    def test_safe_link_in_a_table_cell(self):
+        safe, unknown = "0x" + "33" * 20, "0x" + "55" * 20
+        html = f"""
+        <h2>Ethereum</h2>
+        <table>
+            <tr><th>Contract</th><th>Address</th></tr>
+            <tr><td>Treasury</td><td>https://app.safe.global/home?safe=eth:{safe}</td></tr>
+            <tr><td>Other</td><td>https://app.safe.global/home?safe=gno:{unknown}</td></tr>
+        </table>
+        """
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        by_addr = {e["address"]: e for e in entries}
+        assert by_addr[safe]["chain"] == "ethereum" and by_addr[safe]["explorer_url"]
+        assert by_addr[unknown]["chain"] == "unknown" and by_addr[unknown]["explorer_url"] is None
+
     def test_requested_chain_filters_entries(self):
         html = """
         <h2>Ethereum</h2>
@@ -471,15 +507,56 @@ class TestInventoryEntries:
         assert entries[0]["source"] == ["ai_inventory", "exa"]
         assert entries[0]["source_ids"] == ["s1", "s2"]
 
+    def test_an_address_listed_on_several_chains_yields_an_entry_per_chain(self):
+        addr = "0x" + "ab" * 20
+        entries, _ = inventory_entries([{**_inventory_row("Vault", addr), "chains": ["ethereum", "base"]}])
+
+        assert [(e["chain"], e["chains"]) for e in entries] == [
+            ("ethereum", ["ethereum", "base"]),
+            ("base", ["ethereum", "base"]),
+        ]
+
+    def test_an_entry_already_split_by_chain_stays_on_it(self):
+        addr = "0x" + "ab" * 20
+        split = {**_inventory_row("Vault", addr), "chains": ["ethereum", "base"], "chain": "base"}
+        entries, _ = inventory_entries([split])
+
+        assert [e["chain"] for e in entries] == ["base"]
+
+    def test_chainless_entry_has_no_chain(self):
+        entries, _ = inventory_entries([{"name": "X", "address": "0x" + "ab" * 20, "chains": []}])
+
+        assert entries[0]["chain"] is None
+
+    def test_legacy_deployment_keeps_only_sources_that_name_it(self):
+        own, other = "0x" + "aa" * 20, "0x" + "bb" * 20
+        legacy = {
+            "name": "Vault",
+            "chains": ["ethereum"],
+            "source_ids": ["s1", "s2", "s3", "s4"],
+            "deployments": [{"address": own, "chains": ["ethereum"]}],
+        }
+        sources = {
+            "s1": "https://docs.example.com/contracts",
+            "s2": f"https://etherscan.io/address/{other}",
+            "s3": f"https://etherscan.io/address/{own}",
+            "s4": f"https://app.safe.global/home?safe=eth:{other}",
+        }
+
+        entries, _ = inventory_entries([legacy], sources)
+
+        assert entries[0]["source_ids"] == ["s1", "s3"]
+
     def test_entries_without_an_address_are_counted(self):
         rows = [
             _inventory_row("NoAddress", ""),
             {"name": "Group", "chains": ["ethereum"], "deployments": [{"chains": ["ethereum"]}, "junk"]},
+            {"name": "EmptyGroup", "chains": ["ethereum"], "deployments": []},
         ]
         entries, missing = inventory_entries(rows)
 
         assert entries == []
-        assert missing == 3
+        assert missing == 4
 
     def test_pipeline_keeps_same_name_deployments(self, monkeypatch):
         page = (

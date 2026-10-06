@@ -777,21 +777,20 @@ class DiscoveryWorker(BaseWorker):
             logger.warning("Job %s: audit report persistence failed: %s", job.id, exc)
 
         inventory_contracts = inventory.get("contracts", [])
-        discovered, missing_address = inventory_entries(inventory_contracts)
+        raw_sources = inventory.get("sources")
+        sources_by_id: dict = raw_sources if isinstance(raw_sources, dict) else {}
+        discovered, missing_address = inventory_entries(inventory_contracts, sources_by_id)
         record_stage_metric("contracts_discovered", len(discovered))
         dropped = dict(inventory.get("dropped") or {})
         if missing_address:
-            dropped["no_address"] = missing_address
-        raw_sources = inventory.get("sources")
-        sources_by_id: dict = raw_sources if isinstance(raw_sources, dict) else {}
+            dropped["no_address"] = dropped.get("no_address", 0) + missing_address
 
         # Write every discovered address; ranking waits for selection so all sources compete for ``analyze_limit``. The
         # upsert unions ``discovery_sources``, and inventory entries keep their own source lists for richer
         # corroboration.
         bulk_entries: list[dict] = []
         for entry in discovered:
-            entry_chains = entry.get("chains")
-            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
+            entry_chain = entry.get("chain")
             entry_sources = entry.get("source") or ["inventory"]
             if not isinstance(entry_sources, list):
                 entry_sources = [str(entry_sources)]

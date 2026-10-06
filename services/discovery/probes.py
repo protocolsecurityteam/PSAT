@@ -11,6 +11,9 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Sequence
 
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from db.creation_witnesses import upsert_creation_witness
 from db.models import Contract, ContractProbeAttempt
 from services.clients import etherscan
@@ -89,12 +92,22 @@ def _persist_attempt(
     ``resolved_addresses`` still feed targeting).
     """
     key_chain = UNRESOLVABLE_CHAIN_ID if chain_id is None else chain_id
-    row = session.get(ContractProbeAttempt, (contract_id, key_chain))
-    if row is None:
-        row = ContractProbeAttempt(contract_id=contract_id, chain_id=key_chain, results=results)
-        row.block_number = block_number
-        session.add(row)
-    elif results.get("status") == STATUS_PROBED:
+    # Concurrent jobs probe the same contract: claim the row atomically, then merge under a row lock.
+    inserted = session.execute(
+        pg_insert(ContractProbeAttempt)
+        .values(contract_id=contract_id, chain_id=key_chain, results=results, block_number=block_number)
+        .on_conflict_do_nothing(index_elements=["contract_id", "chain_id"])
+        .returning(ContractProbeAttempt.contract_id)
+    ).first()
+    row = session.execute(
+        select(ContractProbeAttempt)
+        .where(ContractProbeAttempt.contract_id == contract_id, ContractProbeAttempt.chain_id == key_chain)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+    if inserted is not None:
+        return
+    if results.get("status") == STATUS_PROBED:
         row.results = results
         row.block_number = block_number
     else:

@@ -1177,10 +1177,12 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
                     else:
                         probe_block = None
 
+        # Called only for addresses with no row; a concurrent membership probe's latest-block reading must win.
         upsert_creation_witness(
             session,
             chain_id=chain_id,
             address=address,
+            keep_existing=True,
             creation_tx_hash=creation_tx,
             creation_block=creation_block,
             code_probe_block=probe_block,

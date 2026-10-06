@@ -19,6 +19,8 @@ from services.discovery.inventory_domain import (
     _get_domain,
     _infer_chain,
     _is_explorer_domain,
+    _is_unresolved_safe_link,
+    _link_addresses,
     _llm_select_domain,
     _llm_select_pages,
     _maybe_domain,
@@ -115,9 +117,16 @@ class TestInferChain:
         assert _infer_chain(url, "") == expected
         assert _is_explorer_domain(_get_domain(url))
 
-    def test_percent_encoded_safe_address_is_extracted(self):
+    def test_percent_encoded_safe_link_resolves(self):
         url = "https://app.safe.global/home?safe=base%3A0x" + "AB" * 20
-        assert _extract_addresses(url) == {"0x" + "ab" * 20}
+        assert _link_addresses(url) == {"0x" + "ab" * 20}
+        assert _infer_chain(url, "") == "base"
+
+    def test_unknown_prefix_is_unresolved_not_absent(self):
+        assert _is_unresolved_safe_link("https://app.safe.global/home?safe=gno:0x" + "ab" * 20)
+        assert not _is_unresolved_safe_link("https://app.safe.global/home?safe=eth:0x" + "ab" * 20)
+        assert not _is_unresolved_safe_link("https://app.safe.global/welcome")
+        assert _link_addresses("https://app.safe.global/welcome") == set()
 
 
 class TestResolveChain:

@@ -21,6 +21,9 @@ from .inventory_domain import (
     _debug_log,
     _discover_contract_inventory_pages,
     _domain_candidates_from_results,
+    _get_domain,
+    _is_explorer_domain,
+    _link_addresses,
     _llm_select_domain,
     _maybe_domain,
     _tavily_search,
@@ -187,21 +190,50 @@ def _build_contracts(
     return sorted(listed + inferred[:room], key=_rank), sources_map, dict(dropped)
 
 
-def inventory_entries(contracts: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    """One entry per ``(address, primary chain)``, and how many listed deployments had no address.
+def _own_source_ids(base_ids: list[str], address: str, sources: dict[str, str]) -> list[str]:
+    """The legacy group's source ids that can speak for *address*: pages, and locator links naming it."""
+    own: list[str] = []
+    for sid in base_ids:
+        url = sources.get(sid)
+        if not isinstance(url, str):
+            continue
+        if _is_explorer_domain(_get_domain(url)) and address not in _link_addresses(url):
+            continue
+        own.append(sid)
+    return own
 
-    Expands the legacy shape that folded same-named contracts into one entry carrying ``deployments[]`` and no
-    top-level ``address``. A duplicate keeps the first entry and unions its ``source`` and ``source_ids``.
+
+def inventory_entries(
+    contracts: list[dict[str, Any]], sources: dict[str, str] | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    """One entry per ``(address, chain)``, each carrying that ``chain``, and how many listed deployments had no
+    address.
+
+    An address listed on several chains yields an entry per chain (``chains`` keeps the full list); an entry that
+    already carries ``chain`` is one of these. Expands the legacy shape that folded same-named contracts into one
+    entry carrying ``deployments[]`` and no top-level ``address``; with *sources*, an expanded deployment keeps only
+    the group's sources that can speak for it. A duplicate keeps the first entry and unions ``source`` and
+    ``source_ids``.
     """
     out: list[dict[str, Any]] = []
-    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
     missing_address = 0
     for contract in contracts:
         deployments = contract.get("deployments")
         if isinstance(deployments, list) and not contract.get("address"):
             base = {k: v for k, v in contract.items() if k != "deployments"}
-            expanded = [{**base, **dep} for dep in deployments if isinstance(dep, dict)]
-            missing_address += sum(1 for dep in deployments if not isinstance(dep, dict))
+            expanded = []
+            for dep in deployments:
+                if not isinstance(dep, dict):
+                    missing_address += 1
+                    continue
+                entry = {**base, **dep}
+                if sources is not None and "source_ids" not in dep:
+                    address = str(dep.get("address") or "").lower()
+                    entry["source_ids"] = _own_source_ids(list(base.get("source_ids") or []), address, sources)
+                expanded.append(entry)
+            if not deployments:
+                missing_address += 1
         else:
             expanded = [contract]
         for entry in expanded:
@@ -209,19 +241,23 @@ def inventory_entries(contracts: list[dict[str, Any]]) -> tuple[list[dict[str, A
             if not address:
                 missing_address += 1
                 continue
-            chains = canonical_chain_list(entry.get("chains")) or []
-            key = (address, chains[0] if chains else "unknown")
-            kept = by_key.get(key)
-            if kept is None:
-                kept = {**entry, "address": address}
-                by_key[key] = kept
-                out.append(kept)
-                continue
-            for field in ("source", "source_ids"):
-                merged = list(kept.get(field) or [])
-                merged.extend(v for v in entry.get(field) or [] if v not in merged)
-                if merged:
-                    kept[field] = merged
+            if "chain" in entry:
+                per_chain: list[str | None] = [canonical_chain(entry.get("chain"))]
+            else:
+                per_chain = list(canonical_chain_list(entry.get("chains")) or []) or [None]
+            for chain in per_chain:
+                key = (address, chain)
+                kept = by_key.get(key)
+                if kept is None:
+                    kept = {**entry, "address": address, "chain": chain}
+                    by_key[key] = kept
+                    out.append(kept)
+                    continue
+                for field in ("source", "source_ids"):
+                    merged = list(kept.get(field) or [])
+                    merged.extend(v for v in entry.get(field) or [] if v not in merged)
+                    if merged:
+                        kept[field] = merged
     return out, missing_address
 
 
@@ -465,10 +501,18 @@ def merge_inventory(prev: dict, new: dict) -> dict:
         )
         return {**entry, "source_ids": source_ids}
 
-    prev_contracts = {c["address"]: c for c in inventory_entries(prev.get("contracts", []))[0]}
-    new_contracts = {c["address"]: c for c in inventory_entries(new.get("contracts", []))[0]}
+    prev_entries, prev_missing = inventory_entries(
+        prev.get("contracts", []), prev_sources if isinstance(prev_sources, dict) else None
+    )
+    new_entries, new_missing = inventory_entries(
+        new.get("contracts", []), new_sources if isinstance(new_sources, dict) else None
+    )
+    prev_contracts = {(c["address"], c["chain"]): c for c in prev_entries}
+    new_contracts = {(c["address"], c["chain"]): c for c in new_entries}
+    dropped: Counter[str] = Counter(new.get("dropped") or {})
+    dropped["no_address"] += prev_missing + new_missing
 
-    merged: dict[str, dict] = {}
+    merged: dict[tuple[str, str | None], dict] = {}
 
     for addr, entry in new_contracts.items():
         if addr not in prev_contracts:
@@ -486,6 +530,7 @@ def merge_inventory(prev: dict, new: dict) -> dict:
             prev_conf = entry.get("confidence", 0) or 0
             decayed_conf = prev_conf * CONFIDENCE_DECAY
             if decayed_conf < CONFIDENCE_FLOOR:
+                dropped["stale_below_confidence_floor"] += 1
                 continue
             decayed_entry["confidence"] = decayed_conf
             merged[addr] = decayed_entry
@@ -497,7 +542,7 @@ def merge_inventory(prev: dict, new: dict) -> dict:
         "company": new.get("company", prev.get("company")),
         "chain": new.get("chain", prev.get("chain")),
         "official_domain": new.get("official_domain") or prev.get("official_domain"),
-        "dropped": new.get("dropped"),
+        "dropped": {reason: n for reason, n in dropped.items() if n},
         "errors": new.get("errors"),
         "notes": new.get("notes"),
     }

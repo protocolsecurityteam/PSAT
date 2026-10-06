@@ -181,14 +181,13 @@ def test_merge_expands_legacy_grouped_entries_and_rekeys_sources():
     merged = merge_inventory(prev, new)
     by_addr = {c["address"]: c for c in merged["contracts"]}
 
+    assert len(merged["contracts"]) == 3
     assert set(by_addr) == {ADDR_A.lower(), ADDR_B.lower(), ADDR_C.lower()}
     assert all("deployments" not in c for c in merged["contracts"])
     sources = merged["sources"]
     assert [sources[s] for s in by_addr[ADDR_C.lower()]["source_ids"]] == ["https://new.example.com/contracts"]
-    assert [sources[s] for s in by_addr[ADDR_A.lower()]["source_ids"]] == [
-        "https://old.example.com/contracts",
-        "https://etherscan.io/address/" + ADDR_B,
-    ]
+    # The legacy group's explorer link names B, so A keeps only the shared page.
+    assert [sources[s] for s in by_addr[ADDR_A.lower()]["source_ids"]] == ["https://old.example.com/contracts"]
     assert [sources[s] for s in by_addr[ADDR_B.lower()]["source_ids"]] == ["https://etherscan.io/address/" + ADDR_B]
     assert merged["dropped"] == {"deployer_expansion_over_limit": 2}
 
@@ -221,7 +220,7 @@ def test_company_discovery_persists_every_listed_deployment(db_session, monkeypa
             {
                 "name": "Solo",
                 "address": ADDR_C,
-                "chains": ["ethereum"],
+                "chains": ["ethereum", "base"],
                 "confidence": 0.8,
                 "source": ["ai_inventory"],
                 "source_ids": ["s1"],
@@ -257,6 +256,7 @@ def test_company_discovery_persists_every_listed_deployment(db_session, monkeypa
         (same_chain[1], "ethereum"),
         (other_chain, "base"),
         (ADDR_C.lower(), "ethereum"),
+        (ADDR_C.lower(), "base"),
     }
     assert rows[(same_chain[0], "ethereum")].contract_name == "HashConsensus"
     assert rows[(same_chain[0], "ethereum")].discovery_url == "https://docs.example.com/contracts"
@@ -265,5 +265,30 @@ def test_company_discovery_persists_every_listed_deployment(db_session, monkeypa
     summary = get_artifact(db_session, job.id, "discovery_summary")
     assert isinstance(summary, dict)
     assert summary["inventory_entries"] == 2
-    assert summary["discovered_count"] == 4
+    assert summary["discovered_count"] == 5
     assert summary["dropped"] == {"deployer_expansion_over_limit": 4, "no_address": 1}
+
+
+def test_merge_keeps_one_address_on_two_chains():
+    from services.discovery.inventory import CONFIDENCE_FLOOR, merge_inventory
+
+    prev = {
+        "contracts": [
+            {"address": ADDR_A, "chains": ["ethereum"], "confidence": 0.9, "source": ["ai_inventory"]},
+            {"address": ADDR_B, "chains": ["ethereum"], "confidence": CONFIDENCE_FLOOR, "source": ["ai_inventory"]},
+            {"name": "Empty", "chains": ["ethereum"], "deployments": []},
+        ],
+    }
+    new = {
+        "contracts": [
+            {"address": ADDR_A, "chains": ["arbitrum"], "confidence": 1.0, "source": ["exa_deep_research"]},
+        ],
+    }
+
+    merged = merge_inventory(prev, new)
+
+    assert sorted((c["address"], c["chain"]) for c in merged["contracts"]) == [
+        (ADDR_A.lower(), "arbitrum"),
+        (ADDR_A.lower(), "ethereum"),
+    ]
+    assert merged["dropped"] == {"no_address": 1, "stale_below_confidence_floor": 1}
