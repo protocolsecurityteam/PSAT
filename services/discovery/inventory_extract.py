@@ -449,8 +449,11 @@ def extract_inventory_entries_from_page_text(
             continue
 
         line_chain = current_chain
-        if explorer_links:
-            linked_chain = _infer_chain(explorer_links[0], "")
+        # An explorer link that names no address isn't evidence, but its host still says which chain the line is on.
+        host_links = [u.rstrip(".,;:!?)") for u in URL_RE.findall(line) if _is_explorer_domain(_get_domain(u))]
+        chain_links = explorer_links or [u for u in host_links if not _is_unresolved_safe_link(u)]
+        if chain_links:
+            linked_chain = _infer_chain(chain_links[0], "")
             if linked_chain != "unknown":
                 line_chain = linked_chain
         if line_chain == "unknown":

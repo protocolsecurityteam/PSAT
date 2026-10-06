@@ -220,6 +220,16 @@ class TestExtractFromPageText:
             (addr, None, "official_inventory_text")
         ]
 
+    def test_explorer_host_without_an_address_still_sets_the_chain(self):
+        addr = "0x" + "44" * 20
+        html = f"<h2>Ethereum</h2><p>Vault {addr} (view on https://basescan.org)</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["chain"], e["explorer_url"], e["kind"]) for e in entries] == [
+            ("base", None, "official_inventory_text")
+        ]
+
     def test_safe_link_names_only_its_own_safe(self):
         safe, app = "0x" + "33" * 20, "0x" + "44" * 20
         link = f"https://app.safe.global/apps/open?safe=arb1:{safe}&appUrl=https%3A%2F%2Fx.io%2F%3Fa%3D{app}"
