@@ -30,6 +30,7 @@ from ..permissionless_shapes import (
     is_caller_keyed_time_allowlist,
     is_caller_keyed_time_denylist,
     is_permissionless_caller_shape,
+    is_public_registration,
     leaf_is_caller_tainted,
 )
 from .adapters import SetAdapter, _NullAdapter
@@ -66,7 +67,6 @@ from .telemetry import (
     _adapter_deferred_pending_index,
     _bump_resolve_counter,
     _record_guard_fire,
-    _state_var_lookup_key,
     _tag_caller_subject,
 )
 
@@ -217,6 +217,8 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
     # < 10 revert``), which is an authority gate enumerable when the adapter has data.
     role = leaf.get("authority_role")
     if role in ("reentrancy", "pause", "business", "time", "one_shot"):
+        if is_public_registration(leaf):
+            return CapabilityExpr.conditional_universal(_condition_from_leaf(leaf))
         if _is_opaque_bool_return_predicate(leaf):
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
@@ -293,11 +295,35 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         descriptor = leaf.get("set_descriptor")
         if descriptor is None:
             return CapabilityExpr.unsupported("membership_without_descriptor")
+        complement = operator == "falsy"
+        predicate = descriptor.get("value_predicate")
+        if predicate:
+            from services.resolution.mapping_enumerator import _value_predicate_passes
+
+            # Value predicates already express the ALLOWED relation. `!= 0`
+            # admits registered keys; negating it again would publish everyone
+            # except those keys. Default-allow predicates enumerate the rejected
+            # exceptions instead, then take their complement exactly once.
+            complement = _value_predicate_passes("0x" + "00" * 32, dict(predicate))
+            if complement:
+                inverse = {
+                    "eq": "ne",
+                    "ne": "eq",
+                    "lt": "gte",
+                    "lte": "gt",
+                    "gt": "lte",
+                    "gte": "lt",
+                    "in": "not_in",
+                    "not_in": "in",
+                }.get(predicate.get("op"))
+                if inverse is None:
+                    return CapabilityExpr.unsupported("membership_default_not_determined")
+                descriptor = cast(SetDescriptor, {**descriptor, "value_predicate": {**predicate, "op": inverse}})
         cap = _resolve_view_key_membership(descriptor, ctx)
         if cap is None:
             cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
         cap = _tag_caller_subject(cap, ctx)
-        if operator == "falsy":
+        if complement:
             # Normalize an un-enumerable falsy membership decline so negate reaches its cofinite arm instead of
             # ``negate_of_no_adapter``.
             cap = _normalize_membership_decline_for_negation(cap, leaf, descriptor, ctx)
@@ -343,6 +369,26 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         descriptor = leaf.get("set_descriptor")
         if descriptor is not None:
             if descriptor.get("kind") == "external_set":
+                from .descriptors import _target_address_from_descriptor
+
+                authority = descriptor.get("authority_contract") or {}
+                address_source = authority.get("address_source") or {}
+                if address_source.get("source") == "view_call" and address_source.get("storage_slot"):
+                    target = _target_address_from_descriptor(descriptor, ctx)
+                    if target is None:
+                        return _stamp_caller_gate_check(
+                            CapabilityExpr.external_check_only(
+                                ExternalCheck(
+                                    target_address=None,
+                                    target_call_selector=descriptor.get("callee_selector"),
+                                    extra={"basis": ["authority_slot_unresolved"]},
+                                )
+                            ),
+                            leaf,
+                        )
+                    descriptor = cast(
+                        SetDescriptor, {**descriptor, "authority_contract": {**authority, "address": target}}
+                    )
                 # Prefer a standard-aware adapter (e.g. Solmate RolesAuthority from role events) before inlining: the
                 # generic materializer renders public capabilities as lists and admitted phantom callers for every Veda
                 # Teller. A decline falls through to inlining, then a bare external check.
@@ -511,15 +557,9 @@ def _maybe_inline_cross_contract_call(
     if session is None:
         return None
 
-    authority_contract = descriptor.get("authority_contract") or {}
-    address_source = authority_contract.get("address_source") or {}
-    if address_source.get("source") != "state_variable":
-        return None
-    sv_name = _state_var_lookup_key(cast(dict[str, Any], address_source))
-    if not isinstance(sv_name, str) or not sv_name:
-        return None
-    state_vars = getattr(outer_ctx, "state_var_values", None) or {}
-    registry_addr = state_vars.get(sv_name)
+    from .descriptors import _target_address_from_descriptor
+
+    registry_addr = _target_address_from_descriptor(descriptor, ctx)
     if not isinstance(registry_addr, str) or not registry_addr.startswith("0x") or len(registry_addr) != 42:
         return None
     registry_addr = registry_addr.lower()
@@ -543,11 +583,18 @@ def _maybe_inline_cross_contract_call(
     # A proxy registry's predicate_trees live on its implementation job.
     from db.queue import get_artifact
     from services.resolution.capability_resolver import find_analysis_job_for_address
+    from utils.chains import UnknownChainError, chain_by_id
+
+    try:
+        chain = chain_by_id(chain_id).name
+    except UnknownChainError:
+        return None
 
     lookup = find_analysis_job_for_address(
         session,
         registry_addr,
         required_artifact="predicate_trees",
+        chain=chain,
         completed_only=False,
     )
     if lookup is None:

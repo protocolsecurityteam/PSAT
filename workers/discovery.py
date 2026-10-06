@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Callable, Collection, Sequence, cast
 
 from sqlalchemy import func, null, select
@@ -41,6 +42,7 @@ from db.queue import (
 )
 from services.clients import etherscan
 from services.clients.rpc import chain_id_for_chain_name
+from services.clients.rpc_limits import RpcBackpressure, RpcBudgetExceeded, current_scope
 from services.discovery import membership_gate as gate
 from services.discovery.audit_reports import merge_audit_reports, search_audit_reports
 from services.discovery.deployer import _batch_get_creators
@@ -49,7 +51,15 @@ from services.discovery.deployer_enumeration import (
     enumerate_with_coverage,
     session_deployer_enumerator,
 )
-from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
+from services.discovery.fetch import (
+    fetch,
+    is_vyper_result,
+    parse_compiler_settings,
+    parse_remappings,
+    parse_sources,
+    parse_verification_bundle,
+    source_content_hash,
+)
 from services.discovery.inventory import merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import (
     needs_probe,
@@ -322,6 +332,9 @@ def _consume_reprobes(
     Still-blocked candidates settle later. Never raises.
     """
     ids = [cid for cid in dict.fromkeys(contract_ids) if cid not in set(exclude)][:_REPROBE_PASS_CAP]
+    scope = current_scope()
+    if scope is not None:
+        ids = ids[: max(0, scope.stage_limit - scope.attempts) // 7]
     if not ids:
         return
     probed: list[int] = []
@@ -340,6 +353,9 @@ def _consume_reprobes(
             gate.seed_llama_witness(session, contract=contract)
             resolved.update(result.resolved_addresses)
         session.commit()
+    except (RpcBackpressure, RpcBudgetExceeded):
+        session.rollback()
+        raise
     except Exception as exc:
         session.rollback()
         record_degraded(
@@ -362,17 +378,34 @@ def _consume_reprobes(
     )
 
 
+@dataclass(frozen=True)
+class ProbePassResult(gate.PromotionResult):
+    probed_contract_ids: tuple[int, ...] = ()
+    deferred_contract_ids: tuple[int, ...] = ()
+
+
 def run_probe_pass(
     session: Session,
     protocol_id: int,
     *,
     heartbeat: Callable[[], None] | None = None,
-) -> gate.PromotionResult:
+    skip_contract_ids: Collection[int] = (),
+) -> ProbePassResult:
     """settle this protocol's fresh candidates, bounded to ``PSAT_PROBE_PASS_MAX`` probes (lowest ids
     first); commits before evaluating. Idempotent: ``needs_probe`` picks up the deferred tail next pass.
     *heartbeat* is called after each probe to keep the lease.
     """
     probe_budget = int(os.getenv("PSAT_PROBE_PASS_MAX", "200"))
+    if probe_budget < 1:
+        raise ValueError("PSAT_PROBE_PASS_MAX must be positive")
+    scope = current_scope()
+    if scope is not None:
+        # Each probe makes at most seven reads. Leave room for fixpoint reprobes.
+        if scope.stage_limit < 7:
+            raise RpcBudgetExceeded("RPC stage allowance cannot fit a membership probe")
+        reserve = min(200, scope.stage_limit // 4)
+        probe_budget = min(probe_budget, max(0, scope.stage_limit - scope.attempts - reserve) // 7)
+    skipped = set(skip_contract_ids)
     candidates = list(
         session.execute(
             select(Contract)
@@ -385,16 +418,23 @@ def run_probe_pass(
     )
     probed: list[Contract] = []
     seeded: list[Contract] = []
+    promoted: list[int] = []
     resolved: set[str] = set()
-    deferred = 0
+    deferred: list[int] = []
     for contract in candidates:
+        if contract.id in skipped:
+            continue
+        did_probe = False
         # Also re-target demoted members whose completed probe predates a revocation.
         if needs_probe(session, contract) or probe_predates_revocation(session, contract):
             if len(probed) >= probe_budget:
-                deferred += 1
+                deferred.append(contract.id)
                 continue
             result = gate.probe(session, contract)
+            if scope is not None and scope.failure is not None:
+                raise scope.failure
             probed.append(contract)
+            did_probe = True
             record_code_witness(session, contract=contract, protocol_id=protocol_id, probe_result=result)
             resolved.update(result.resolved_addresses)
             if heartbeat is not None:
@@ -402,20 +442,21 @@ def run_probe_pass(
         # W6 rides on the persisted code fact, so already-probed candidates get seeded too.
         if gate.seed_llama_witness(session, contract=contract):
             seeded.append(contract)
+        if did_probe:
+            if gate.promote(session, contract=contract, protocol_id=protocol_id):
+                promoted.append(contract.id)
+            # Commit the admission verdict with its evidence so a retry cannot strand W1-only progress.
+            session.commit()
     if deferred:
         record_degraded(
             phase="membership_probe_pass_budget",
-            exc=RuntimeError(f"{deferred} unprobed candidates deferred past the probe-pass budget"),
-            context={"protocol_id": protocol_id, "budget": probe_budget, "deferred": deferred},
+            exc=RuntimeError(f"{len(deferred)} unprobed candidates deferred past the probe-pass budget"),
+            context={"protocol_id": protocol_id, "budget": probe_budget, "deferred": len(deferred)},
         )
         logger.warning(
             "probe pass budget exhausted — tail deferred to the next pass",
-            extra={"protocol_id": protocol_id, "budget": probe_budget, "deferred": deferred},
+            extra={"protocol_id": protocol_id, "budget": probe_budget, "deferred": len(deferred)},
         )
-    promoted: list[int] = []
-    for contract in probed:
-        if gate.promote(session, contract=contract, protocol_id=protocol_id):
-            promoted.append(contract.id)
     session.commit()
     # The fixpoint binds W1 from the persisted probe for seeded-but-unwitnessed rows.
     delta = gate.FactsDelta(
@@ -435,11 +476,13 @@ def run_probe_pass(
         context=f"probe_pass:{protocol_id}",
         exclude={contract.id for contract in probed},
     )
-    return gate.PromotionResult(
+    return ProbePassResult(
         targeted_contract_ids=cascade.targeted_contract_ids,
         promoted_contract_ids=tuple(promoted) + cascade.promoted_contract_ids,
         demoted_contract_ids=cascade.demoted_contract_ids,
         reprobe_contract_ids=cascade.reprobe_contract_ids,
+        probed_contract_ids=tuple(contract.id for contract in probed),
+        deferred_contract_ids=tuple(deferred),
     )
 
 
@@ -776,32 +819,18 @@ class DiscoveryWorker(BaseWorker):
             )
             logger.warning("Job %s: audit report persistence failed: %s", job.id, exc)
 
-        discovered = [e for e in inventory.get("contracts", []) if e.get("address")]
+        from services.discovery.inventory_rows import inventory_rows
+
+        inventory_default_chain = canonical_chain(chain) or "ethereum"
+        bulk_entries = inventory_rows(inventory, default_chain=inventory_default_chain)
+        discovered = {(entry["chain"], entry["address"].lower()) for entry in bulk_entries}
         record_stage_metric("contracts_discovered", len(discovered))
 
         # Write every discovered address; ranking waits for selection so all sources compete for ``analyze_limit``. The
         # upsert unions ``discovery_sources``, and inventory entries keep their own source lists for richer
         # corroboration.
-        bulk_entries: list[dict] = []
-        for entry in discovered:
-            entry_chains = entry.get("chains")
-            entry_chain = entry_chains[0] if isinstance(entry_chains, list) and entry_chains else entry.get("chain")
-            entry_sources = entry.get("source") or ["inventory"]
-            if not isinstance(entry_sources, list):
-                entry_sources = [str(entry_sources)]
-            bulk_entries.append(
-                {
-                    "address": str(entry["address"]),
-                    "chain": entry_chain,
-                    "new_sources": entry_sources,
-                    "contract_name": entry.get("name"),
-                    "confidence": entry.get("confidence"),
-                    "chains": entry.get("chains"),
-                }
-            )
         # One SELECT plus a bulk add instead of hundreds of round-trips. Chainless entries inherit this discovery's
         # chain rather than writing NULL and duplicating.
-        inventory_default_chain = canonical_chain(chain) or "ethereum"
         bulk_upsert_discovered_contracts(
             session,
             protocol_id=protocol_row.id,
@@ -834,6 +863,7 @@ class DiscoveryWorker(BaseWorker):
                 "company": company,
                 "official_domain": inventory.get("official_domain"),
                 "discovered_count": len(discovered),
+                "inventory_retention": inventory.get("retention"),
             },
         )
 
@@ -1015,10 +1045,11 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(session, job, "Storing source files")
         with log_timed_phase(logger, "source_storage", files=len(sources)):
             store_source_files(session, job.id, sources)
+            store_artifact(session, job.id, "compiler_settings", data=parse_compiler_settings(result))
         self.update_detail(session, job, "Evaluating membership")
 
         raw_evm = result.get("EVMVersion", "") or ""
-        evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
+        evm_version = raw_evm if raw_evm.lower() not in ("", "default") else None
 
         deployer = None
         creators_or_exc = fan_out.get("creators")
@@ -1052,7 +1083,7 @@ class DiscoveryWorker(BaseWorker):
             existing.evm_version = evm_version
             existing.optimization = result.get("OptimizationUsed", "1") == "1"
             existing.optimization_runs = int(result.get("Runs", "200") or 200)
-            existing.source_format = "standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat"
+            existing.source_format = "standard_json" if parse_verification_bundle(result) is not None else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
             # ``None`` means no answer, not no deployer; keep prior evidence.
@@ -1074,7 +1105,7 @@ class DiscoveryWorker(BaseWorker):
                 evm_version=evm_version,
                 optimization=result.get("OptimizationUsed", "1") == "1",
                 optimization_runs=int(result.get("Runs", "200") or 200),
-                source_format="standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat",
+                source_format="standard_json" if parse_verification_bundle(result) is not None else "flat",
                 source_file_count=len(sources),
                 license=result.get("LicenseType", ""),
                 deployer=deployer,

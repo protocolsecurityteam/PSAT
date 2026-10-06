@@ -248,17 +248,14 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool:
         body = value_hex[2:]
         return any(c not in "0" for c in body)
 
-    if value_type == "address":
-        actual = "0x" + value_hex[-40:]
-        for r in rhs_raw:
-            r_norm = (r or "").lower()
-            if not r_norm.startswith("0x"):
-                continue
-            if op == "eq" and r_norm[-40:] == actual[2:]:
-                return True
-            if op == "ne" and r_norm[-40:] != actual[2:]:
-                return True
-        return False
+    if value_type.startswith("address"):
+        actual = int(value_hex[-40:], 16)
+        values = [_to_int(r) for r in rhs_raw]
+        if not values or any(value is None or not 0 <= value < 2**160 for value in values):
+            return False
+        if op in ("in", "not_in"):
+            return (actual in values) if op == "in" else (actual not in values)
+        return actual == values[0] if op == "eq" else actual != values[0] if op == "ne" else False
 
     try:
         actual_int = int(value_hex, 16)
@@ -269,10 +266,10 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool:
             actual_int = actual_int & int(mask_hex, 16)
         except ValueError:
             pass
-    if op == "in":
+    if op in ("in", "not_in"):
         rhs_set = {_to_int(r) for r in rhs_raw}
         rhs_set.discard(None)
-        return actual_int in rhs_set
+        return (actual_int in rhs_set) if op == "in" else (actual_int not in rhs_set)
     if not rhs_raw:
         return False
     rhs_int = _to_int(rhs_raw[0])

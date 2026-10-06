@@ -128,6 +128,84 @@ def test_search_truncates_content_to_1000(monkeypatch):
     assert len(out[0]["content"]) == 1000
 
 
+def test_deep_research_happy_path(monkeypatch):
+    # time.sleep is imported inside the function.
+    import time as _time
+
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
+
+    create_resp = _FakeResp(payload={"id": "task-123"})
+    poll_resp = _FakeResp(
+        payload={
+            "status": "completed",
+            "output": {"structured": {"auditReports": [{"auditor": "Trail of Bits", "url": "https://example.com/a"}]}},
+        }
+    )
+    post = MagicMock(return_value=create_resp)
+    monkeypatch.setattr(exa.requests, "post", post)
+    monkeypatch.setattr(exa.requests, "get", lambda *a, **kw: poll_resp)
+
+    out = exa.deep_research("find audits", timeout_seconds=60)
+    assert post.call_args.args[0] == "https://api.exa.ai/agent/runs"
+    assert post.call_args.kwargs["json"]["query"] == "find audits"
+    assert post.call_args.kwargs["json"]["effort"] == "medium"
+    assert post.call_args.kwargs["json"]["outputSchema"] == exa._AUDIT_RESEARCH_SCHEMA
+    assert out["task_id"] == "task-123"
+    assert out["status"] == "completed"
+    assert out["data"]["auditReports"][0]["url"] == "https://example.com/a"
+
+
+@pytest.mark.parametrize(
+    ("create_resp", "poll_resp", "status_code", "fragment"),
+    [
+        pytest.param(_FakeResp(status_code=500, text="server boom"), None, 500, "create", id="create_http_error"),
+        pytest.param(
+            _FakeResp(payload={"id": "t1"}),
+            _FakeResp(status_code=503, text="unavail"),
+            503,
+            "poll",
+            id="poll_http_error",
+        ),
+    ],
+)
+def test_deep_research_http_errors_carry_status(monkeypatch, create_resp, poll_resp, status_code, fragment):
+    import time as _time
+
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
+    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: create_resp)
+    monkeypatch.setattr(exa.requests, "get", lambda *a, **kw: poll_resp)
+    with pytest.raises(exa.ExaError) as ei:
+        exa.deep_research("inst", timeout_seconds=60)
+    assert ei.value.error["status_code"] == status_code
+    assert fragment in ei.value.error["error"]
+
+
+@pytest.mark.parametrize(
+    ("create_resp", "poll_resp", "fragment"),
+    [
+        pytest.param(_FakeResp(payload={"foo": "bar"}), None, "no task id", id="no_task_id"),
+        pytest.param(
+            _FakeResp(payload={"id": "t1"}),
+            _FakeResp(payload={"status": "failed", "error": "model down"}),
+            "failed",
+            id="failed_status",
+        ),
+    ],
+)
+def test_deep_research_task_errors(monkeypatch, create_resp, poll_resp, fragment):
+    import time as _time
+
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
+    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: create_resp)
+    monkeypatch.setattr(exa.requests, "get", lambda *a, **kw: poll_resp)
+    with pytest.raises(exa.ExaError) as ei:
+        exa.deep_research("inst", timeout_seconds=60)
+    assert fragment in ei.value.error["error"]
+
+
 def test_deep_research_timeout(monkeypatch):
     import time as _time
 
@@ -253,7 +331,9 @@ class TestDeepResearchCacheBehavior:
         storage_client.get.side_effect = StorageKeyMissing("k")
         post_mock = MagicMock(return_value=_FakeResp(payload={"id": "task-77"}))
         get_mock = MagicMock(
-            return_value=_FakeResp(payload={"status": "completed", "data": {"auditReports": [{"a": 1}]}})
+            return_value=_FakeResp(
+                payload={"status": "completed", "output": {"structured": {"auditReports": [{"a": 1}]}}}
+            )
         )
 
         with patch("db.storage.get_storage_client", return_value=storage_client):
@@ -282,7 +362,7 @@ class TestDeepResearchCacheBehavior:
         storage_client = MagicMock()
         storage_client.get.side_effect = StorageKeyMissing("k")
         post_mock = MagicMock(return_value=_FakeResp(payload={"id": "task-empty"}))
-        get_mock = MagicMock(return_value=_FakeResp(payload={"status": "completed", "data": {}}))
+        get_mock = MagicMock(return_value=_FakeResp(payload={"status": "completed", "output": {"structured": {}}}))
 
         with patch("db.storage.get_storage_client", return_value=storage_client):
             monkeypatch.setattr(exa.requests, "post", post_mock)

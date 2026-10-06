@@ -76,7 +76,7 @@ class TestBuildContracts:
         contracts, _ = _build_contracts(entries, limit=10)
         assert set(contracts[0]["chains"]) == {"ethereum", "base"}
 
-    def test_limit_and_sort_order(self):
+    def test_limit_does_not_truncate_official_inventory(self):
         entries = [
             _entry(address=f"0x{i:040x}", name=None, kind="official_inventory_text", explorer_url=None)
             for i in range(5)
@@ -85,7 +85,7 @@ class TestBuildContracts:
         ]
         contracts, _ = _build_contracts(entries, limit=3)
 
-        assert len(contracts) == 3
+        assert len(contracts) == 6
         assert contracts[0]["address"] == "0x" + "f" * 40
         assert contracts[0]["confidence"] > contracts[-1]["confidence"]
 

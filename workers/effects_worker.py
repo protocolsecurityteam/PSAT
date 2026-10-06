@@ -367,6 +367,7 @@ class EffectsWorker(BaseWorker):
         # One anvil per job, created on the first Tier-2 plan and closed in ``process()``.
         self._anvil: Any = None
         self._anvil_error: Exception | None = None
+        self._fork_gateway: Any = None
         # The preflight height the fork spawns at, set in ``_probe_context`` (the factory is built before the head is
         # pinned) and cleared with the fork.
         self._fork_block_pin: int | None = None
@@ -426,6 +427,7 @@ class EffectsWorker(BaseWorker):
         """
         if not _fork_enabled():
             return None
+        from services.clients.fork_gateway import ForkGateway
         from services.clients.rpc import rpc_headers
         from services.effects.anvil import SubprocessAnvil
         from services.effects.exceptions import AnvilSpawnError
@@ -440,11 +442,11 @@ class EffectsWorker(BaseWorker):
                 return self._anvil
             try:
                 # ``rpc_headers`` is the source of eRPC auth; local/explicit fork URLs get no secret.
+                self._fork_gateway = ForkGateway(rpc_url, rpc_headers(rpc_url))
                 self._anvil = SubprocessAnvil(
                     port=port,
                     hardfork_name=hardfork,
-                    fork_url=rpc_url,
-                    fork_headers=rpc_headers(rpc_url),
+                    fork_url=self._fork_gateway.url,
                     # Same height as Tier 1; unpinned forks observe an unrecorded, unreplayable state.
                     fork_block_number=self._fork_block_pin,
                 )
@@ -472,12 +474,19 @@ class EffectsWorker(BaseWorker):
         self._anvil_error = None
         self._fork_block_pin = None
         self._rss_sample_failed = False
+        gateway = getattr(self, "_fork_gateway", None)
+        self._fork_gateway = None
         if anvil is None:
+            if gateway is not None:
+                gateway.close()
             return
         try:
             anvil.close()
         except Exception:
             logger.warning("effects fork close failed", exc_info=True)
+        finally:
+            if gateway is not None:
+                gateway.close()
 
     def _make_transcript_store(self, session: Session, job: Job):
         """Persist each transcript as a job artifact, returning a pointer resolvable via ``get_artifact(job_id,

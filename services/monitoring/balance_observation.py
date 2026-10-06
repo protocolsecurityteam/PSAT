@@ -19,6 +19,7 @@ from utils.balance_status import (
     BALANCE_SOURCE_UNPINNED_NATIVE_READ,
     NATIVE_STATUS_PROVEN_ZERO,
 )
+from utils.quote_validation import quote_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,10 @@ def record_observation(
     elif native.wei is not None and native.price_usd is not None:
         value = (native.wei / 1e18) * native.price_usd
         native_usd = value if math.isfinite(value) and 0 <= value < 1e20 else None
+    native_price = native.price_usd
+    if quote_refusal(native_price, native_usd):
+        native_price = None
+        native_usd = 0 if native.wei == 0 and native_status == NATIVE_STATUS_PROVEN_ZERO else None
     written: list[ContractBalance] = []
     if (
         native.attempted
@@ -171,13 +176,13 @@ def record_observation(
                 decimals=18,
                 decimals_known=True,
                 raw_balance=str(native.wei),
-                price_usd=native.price_usd,
+                price_usd=native_price,
                 usd_value=native_usd,
                 observed_address=subject.address,
                 block_number=native.block_number,
                 observed_at=native.observed_at or when,
                 fetched_at=when,
-                price_observed_at=native.price_observed_at if native.price_usd is not None else None,
+                price_observed_at=native.price_observed_at if native_price is not None else None,
                 fetch_id=fetch.id,
                 source=(
                     BALANCE_SOURCE_PINNED_NATIVE_READ
@@ -191,6 +196,7 @@ def record_observation(
             if int(row["balance"]) <= 0:
                 continue
             known = row.get("decimals_reported") is True
+            priced = known and quote_refusal(row.get("price_usd"), row.get("usd_value")) is None
             written.append(
                 ContractBalance(
                     **subject.columns(),
@@ -200,14 +206,14 @@ def record_observation(
                     decimals=row.get("decimals", 18),
                     decimals_known=known,
                     raw_balance=str(row["balance"]),
-                    price_usd=row.get("price_usd") if known else None,
-                    usd_value=row.get("usd_value") if known else None,
+                    price_usd=row.get("price_usd") if priced else None,
+                    usd_value=row.get("usd_value") if priced else None,
                     observed_address=subject.address,
                     fetch_id=fetch.id,
                     source=ASSET_SET_SOURCE_ETHERSCAN_PAGES,
                     observed_at=when,
                     fetched_at=when,
-                    price_observed_at=when if known and row.get("price_usd") is not None else None,
+                    price_observed_at=when if priced and row.get("price_usd") is not None else None,
                 )
             )
     session.add_all(written)

@@ -35,6 +35,7 @@ logger = logging.getLogger("db.queue")
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
         "contract_analysis",
+        "compiler_settings",
         "control_tracking_plan",
         "predicate_trees",
         "effects",
@@ -289,7 +290,7 @@ def find_existing_job_for_address(session: Session, address: str, chain: str | N
     """A non-failed job for *address* (case-insensitive), filtered by *chain* when given."""
     stmt = select(Job).where(
         func.lower(Job.address) == address.lower(),
-        Job.status != JobStatus.failed,
+        Job.status.notin_([JobStatus.failed, JobStatus.failed_terminal]),
         Job.request["effects_resume_work_id"].astext.is_(None),
     )
     if chain is not None:
@@ -414,7 +415,9 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 # Code-plane artifacts safe to reuse across chains. Excludes ``static_dependencies``, ``enrichment_cache`` and the seed
 # artifacts (chain-specific or merged). ``contract_analysis``/``control_tracking_plan`` have their address re-stamped on
 # copy.
-_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
+_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset(
+    {"contract_analysis", "compiler_settings", "control_tracking_plan", "predicate_trees", "effects"}
+)
 
 
 def copy_static_cache_cross_chain(

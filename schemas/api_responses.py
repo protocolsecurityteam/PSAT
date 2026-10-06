@@ -199,6 +199,7 @@ class CompanyAuditCoverageResponse(TypedDict):
     contract_count: int
     audit_count: int
     scoped_audit_count: int
+    audit_reports: NotRequired[list[AuditReportDict]]
     coverage: list[AuditCoverageEntry]
 
 

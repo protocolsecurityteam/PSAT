@@ -7,11 +7,11 @@ Impl source: DB ``SourceFile`` rows, else Etherscan. Audit source: GitHub raw. O
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import logging
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -295,8 +295,6 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
     one RST burst can't poison a URL for the process lifetime.
     """
     headers = {"User-Agent": "PSAT-source-equivalence/0.1"}
-    if token:
-        headers["Authorization"] = f"token {token}"
 
     backoff = _RETRY_INITIAL_BACKOFF
     last_transport_exc: requests.RequestException | None = None
@@ -306,6 +304,10 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
         last_attempt = attempt == _RETRY_ATTEMPTS - 1
         try:
             r = requests.get(url, headers=headers, timeout=15)
+            # Public audit sources must not inherit an unrelated credential's
+            # restrictions. Credentials are a fallback for private resources.
+            if r.status_code in (401, 403, 404) and token:
+                r = requests.get(url, headers={**headers, "Authorization": f"token {token}"}, timeout=15)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             last_transport_exc = exc
             if last_attempt:
@@ -343,6 +345,8 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
 
         if r.status_code == 404:
             return GithubFetch(content=None, status="http_404", detail=f"{url}: 404")
+        if r.status_code in (401, 403):
+            return GithubFetch(content=None, status="auth_error", detail=f"GitHub access denied: HTTP {r.status_code}")
         if 500 <= r.status_code < 600:
             return GithubFetch(content=None, status="http_5xx", detail=f"{url}: {r.status_code}")
         if r.status_code != 200:
@@ -396,16 +400,36 @@ def _coerce_github_hash_result(result: Any) -> GithubHashResult:
     raise TypeError(f"unsupported github hash result type: {type(result).__name__}")
 
 
-@functools.lru_cache(maxsize=4096)
-def _fetch_github_raw_hash(url: str, token: str | None) -> GithubHashResult:
-    """Process-global memoized hash, keyed by ``(url, token)``, capped at 4096.
+class _GithubHashCache:
+    """Bounded hash cache; access errors and transient failures never become sticky."""
 
-    Stores only the sha256 and status so the cap is a real memory bound; terminal failures are cached too.
-    """
-    fetch = _fetch_github_raw(url, token)
-    if fetch.content is None:
-        return GithubHashResult(sha256=None, status=fetch.status, detail=fetch.detail)
-    return GithubHashResult(sha256=_hash_source_text(fetch.content), status="ok", detail="")
+    def __init__(self):
+        self.values: dict[tuple[str, str], GithubHashResult] = {}
+        self.lock = threading.Lock()
+
+    def cache_clear(self):
+        with self.lock:
+            self.values.clear()
+
+    def __call__(self, url: str, token: str | None) -> GithubHashResult:
+        key = (url, hashlib.sha256((token or "").encode()).hexdigest())
+        with self.lock:
+            cached = self.values.get(key)
+        if cached is not None:
+            return cached
+        fetch = _fetch_github_raw(url, token)
+        result = GithubHashResult(
+            _hash_source_text(fetch.content) if fetch.content is not None else None, fetch.status, fetch.detail
+        )
+        if result.status in ("ok", "http_404"):
+            with self.lock:
+                if len(self.values) >= 4096:
+                    self.values.pop(next(iter(self.values)))
+                self.values[key] = result
+        return result
+
+
+_fetch_github_raw_hash = _GithubHashCache()
 
 
 def fetch_github_source_hash(repo: str, commit: str, path: str, *, token: str | None = None) -> GithubHashResult:
@@ -421,12 +445,23 @@ def fetch_github_source_hash(repo: str, commit: str, path: str, *, token: str | 
 
 
 def _commit_exists_in_repo(repo: str, commit: str, *, token: str | None = None) -> GithubHashResult:
-    """Whether a commit resolves in ``repo``, probing ``README.md`` at the ref, to tell a bad SHA from a path miss.
-
-    A repo without a README degrades the diagnosis.
-    """
-    url = f"https://raw.githubusercontent.com/{repo}/{commit}/README.md"
-    return _fetch_github_raw_hash(url, token)
+    """Check the commit object itself; a repository is not required to have README.md."""
+    url = f"https://api.github.com/repos/{repo}/commits/{commit}"
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "PSAT-source-equivalence/0.1"}
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code in (401, 403, 404) and token:
+            response = requests.get(url, headers={**headers, "Authorization": f"token {token}"}, timeout=15)
+        if response.status_code in (404, 422):
+            return GithubHashResult(None, "http_404", "commit unavailable in repository")
+        if response.status_code != 200:
+            return GithubHashResult(None, "transport_error", f"GitHub commit lookup HTTP {response.status_code}")
+        sha = response.json().get("sha")
+        if isinstance(sha, str) and sha.lower().startswith(commit.lower()):
+            return GithubHashResult(None, "ok", "")
+        return GithubHashResult(None, "transport_error", "GitHub commit lookup returned an invalid object")
+    except (requests.RequestException, ValueError) as exc:
+        return GithubHashResult(None, "transport_error", type(exc).__name__)
 
 
 def _candidate_paths_for_name(name: str, etherscan_paths: list[str]) -> list[str]:
@@ -605,18 +640,21 @@ def _verify_single_repo(
                     details.append(f"{commit[:8]} {path}: github={gh.sha256[:8]} etherscan={etherscan_hash[:8]}")
             elif gh.status == "http_404":
                 commit_had_404 = True
-            elif gh.status in ("http_5xx", "transport_error"):
+            elif gh.status in ("http_5xx", "transport_error", "http_other", "auth_error"):
                 commit_had_transient = True
                 any_transient = True
                 details.append(f"{commit[:8]} {path}: {gh.detail}")
 
         if commit_hit_anything:
             any_commit_resolved = True
-        elif commit_had_404 and not commit_had_transient:
+        elif (commit_had_404 or not fetch_pairs) and not commit_had_transient:
             # Probe the repo root to tell a missing commit from a missing path.
             probe = _commit_exists_in_repo(source_repo, commit, token=github_token)
             if probe.status == "ok":
                 any_commit_resolved = True
+            elif probe.status != "http_404":
+                any_transient = True
+                details.append(probe.detail)
 
     if matches:
         return EquivalenceOutcome(

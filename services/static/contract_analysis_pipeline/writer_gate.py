@@ -87,6 +87,19 @@ def _maybe_promote_leaf(
     all_trees: dict[str, PredicateTree],
     contract: Any,
 ) -> None:
+    descriptor = leaf.get("set_descriptor") or {}
+    if (
+        leaf.get("kind") == "membership"
+        and (descriptor.get("value_predicate") or {}).get("value_type", "").startswith("address")
+        and any(k.get("source") in ("msg_sender", "tx_origin") for k in descriptor.get("key_sources", []))
+    ):
+        storage_var = descriptor.get("storage_var")
+        if storage_var and _public_address_registration(
+            storage_var, writers_by_var.get(storage_var, []), all_trees, descriptor.get("storage_var_declaration")
+        ):
+            leaf["authority_role"] = "business"
+            leaf["basis"] = list(leaf.get("basis", [])) + ["unconditional public address registration"]
+        return
     if leaf.get("authority_role") != "business":
         return  # already classified
     descriptor = leaf.get("set_descriptor")
@@ -141,6 +154,53 @@ def _maybe_promote_leaf(
                 f"threshold-promote: {storage_var} is authority-derived counter",
             ]
         return
+
+
+def _public_address_registration(
+    storage_var: str, writers: list[Any], trees: dict[str, PredicateTree], declaration: str | None
+) -> bool:
+    """Prove a straight-line public setter can install a nonzero registry entry.
+
+    Initializers, conditional writes and opaque helpers remain gated/unknown.
+    Removing an entry publicly is not the ability to become a member.
+    """
+    from .provenance import ProvenanceEngine
+    from .slither_compat import Return, TypeConversion
+
+    if declaration is None:
+        return False  # A same-named inherited variable cannot prove this registry is writable.
+    for fn in writers:
+        if fn.is_constructor or fn.visibility not in ("public", "external") or trees.get(fn.full_name) is not None:
+            continue
+        # The source-level straight-line check excludes control-flow merges;
+        # synthetic SSA state phis are not extra writes or branches.
+        irs = [ir for node in fn.nodes for ir in node.irs]
+        if any(not isinstance(ir, (Index, Assignment, TypeConversion, Return)) for ir in irs):
+            continue
+        if any(
+            str(node.type) not in {"NodeType.ENTRYPOINT", "NodeType.EXPRESSION", "NodeType.RETURN"} for node in fn.nodes
+        ):
+            continue
+        engine = ProvenanceEngine(fn)
+        engine.run()
+        refs = {
+            ir.lvalue.name: ir
+            for ir in irs
+            if isinstance(ir, Index)
+            and ir.lvalue is not None
+            and getattr(ir.variable_left, "name", None) == storage_var
+            and getattr(ir.variable_left, "canonical_name", None) == declaration
+        }
+        for ir in irs:
+            if not isinstance(ir, Assignment) or ir.lvalue is None or ir.lvalue.name not in refs:
+                continue
+            key = engine._sources_for_value(refs[ir.lvalue.name].variable_right)
+            values = engine._sources_for_value(ir.rvalue)
+            if not key or not all(s.kind in {"msg_sender", "parameter"} for s in key):
+                continue
+            if values and all(s.kind in {"self_address", "msg_sender", "parameter"} for s in values):
+                return True
+    return False
 
 
 def _index_ref_name(ir: Any) -> str:

@@ -52,7 +52,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         195: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
-        1142: "Boot-time sweep failure; runs before any job context exists.",
+        1173: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # The reanalysis completed before the notifier; recording would mark it degraded.
@@ -60,7 +60,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     },
     "workers/effects_worker.py": {
         # A resource side-effect, not a degraded verdict.
-        480: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        486: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
     "services/effects/anvil.py": {
         714: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",

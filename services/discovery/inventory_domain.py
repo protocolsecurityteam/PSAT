@@ -11,7 +11,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests as _requests
 
@@ -41,6 +41,8 @@ EXPLORER_CHAINS = {
     "basescan.org": "base",
     "base.blockscout.com": "base",
 }
+
+_SAFE_CHAIN_PREFIXES = {"eth": "ethereum", "arb1": "arbitrum", "oeth": "optimism", "bnb": "bsc", "matic": "polygon"}
 
 LOW_TRUST_DOMAINS = {
     "coingecko.com",
@@ -116,7 +118,7 @@ def _domain_matches(domain: str, known: str) -> bool:
 
 
 def _is_explorer_domain(domain: str) -> bool:
-    return any(_domain_matches(domain, k) for k in EXPLORER_CHAINS)
+    return domain == "app.safe.global" or any(_domain_matches(domain, k) for k in EXPLORER_CHAINS)
 
 
 def _is_low_trust_domain(domain: str) -> bool:
@@ -138,6 +140,14 @@ def _extract_addresses(*values: str) -> set[str]:
 
 def _infer_chain(url: str, text: str) -> str:
     domain = _get_domain(url)
+    if domain == "app.safe.global":
+        safe = parse_qs(urlparse(url).query).get("safe", [""])[0]
+        if ":" in safe:
+            prefix = safe.split(":", 1)[0].lower()
+            try:
+                return chain_by_name(_SAFE_CHAIN_PREFIXES.get(prefix, prefix)).name
+            except ValueError:
+                return "unknown"
     # Longest first so subdomains beat their parent (optimistic.etherscan.io vs etherscan.io).
     for known, chain in sorted(EXPLORER_CHAINS.items(), key=lambda kv: -len(kv[0])):
         if _domain_matches(domain, known):

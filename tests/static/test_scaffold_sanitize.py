@@ -52,10 +52,9 @@ def test_scaffold_evm_injection_not_in_toml(tmp_path):
     injected = 'shanghai"\nffi = true\nx = "'
     result = _standard_json_result({"src/C.sol": {"content": "pragma solidity 0.8.24;"}}, evm_version=injected)
     project = tmp_path / "proj"
-    fetch.scaffold("0xabc", result, project)
-    toml = (project / "foundry.toml").read_text()
-    assert 'evm_version = "shanghai"' in toml
-    assert "ffi = true" not in toml
+    with pytest.raises(ValueError, match="Unsupported verified EVM target"):
+        fetch.scaffold("0xabc", result, project)
+    assert not (project / "foundry.toml").exists()
 
 
 def test_parse_remappings_drops_escaping_target():

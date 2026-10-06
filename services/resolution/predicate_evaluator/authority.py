@@ -6,6 +6,7 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
+from utils.address_evidence import special_address_reason
 from utils.evm import OWNER_SELECTOR
 
 from ..capabilities import (
@@ -86,6 +87,8 @@ def _live_authority_result(read_addr: str, selector: str, contract: str, block: 
             empty_reason="owner_read_burn_address",
             trace=[{**step, "read_address": read_addr.lower()}],
         )
+    if reason := special_address_reason(read_addr):
+        return CapabilityExpr.unsupported(reason)
     return CapabilityExpr.finite_set(
         [read_addr],
         quality="exact",
@@ -208,6 +211,8 @@ def _live_resolve_authority_slot(
             empty_reason="owner_read_burn_address",
             trace=[{**step, "read_address": addr}],
         )
+    if reason := special_address_reason(addr):
+        return CapabilityExpr.unsupported(reason)
     return CapabilityExpr.finite_set(
         [addr],
         quality="exact",

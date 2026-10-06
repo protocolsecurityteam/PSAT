@@ -596,3 +596,173 @@ def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
     monkeypatch.setattr(probes, "rpc_batch_request", fake_rpc_batch_request)
     monkeypatch.setattr(probes.etherscan, "get", fake_etherscan_get)
     return seen
+
+
+@requires_postgres
+def test_selection_settles_pending_nominations_before_ranking(db_session, worker, seed_protocol, monkeypatch):
+    """Crawl nominations land after discovery's probe pass; unsettled, a cold cascade once ranked zero of 585
+    nominations.
+    """
+    from db.models import (
+        WITNESS_RULE_W1_CODE,
+        WITNESS_RULE_W2_STRUCTURAL,
+        Contract,
+        ContractMembershipWitness,
+        Job,
+        JobStage,
+        JobStatus,
+    )
+    from services.discovery import membership_gate as gate
+
+    monkeypatch.setenv("ERPC_BASE_URL", "http://erpc.test")
+    protocol_id, company, addr = seed_protocol
+    anchor_addr = addr()
+    candidate_addr = addr()
+
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    anchor_job = Job(
+        company=company,
+        address=anchor_addr,
+        stage=JobStage.done,
+        status=JobStatus.completed,
+        request={},
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+    )
+    db_session.add(anchor_job)
+    db_session.commit()
+    anchor = Contract(
+        protocol_id=protocol_id,
+        address=anchor_addr,
+        chain="ethereum",
+        discovery_sources=["ai_inventory"],
+        confidence=0.9,
+        job_id=anchor_job.id,
+    )
+    candidate = Contract(
+        nominated_protocol_id=protocol_id,
+        address=candidate_addr,
+        chain="ethereum",
+        discovery_sources=["ai_inventory"],
+        confidence=0.9,
+    )
+    db_session.add_all([anchor, candidate])
+    db_session.commit()
+
+    # The probe pass supplies the missing W1.
+    anchor.implementation = candidate.address
+    db_session.flush()
+    gate.write_witness(
+        db_session,
+        contract_id=candidate.id,
+        protocol_id=protocol_id,
+        rule=WITNESS_RULE_W2_STRUCTURAL,
+        evidence=gate.w2_evidence(
+            edge_kind="implementation",
+            member_contract_id=anchor.id,
+            member_address=anchor.address,
+            resolved_pointer=candidate.address,
+        ),
+        via_address=anchor.address,
+    )
+    db_session.commit()
+
+    seen = _stub_probe_wire(monkeypatch)
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=2)
+
+    with pytest.raises(JobHandledDirectly):
+        worker.process(db_session, job)
+
+    assert seen["probed"] == [candidate.address]
+    db_session.refresh(candidate)
+    assert candidate.protocol_id == protocol_id
+    w1 = (
+        db_session.query(ContractMembershipWitness).filter_by(contract_id=candidate.id, rule=WITNESS_RULE_W1_CODE).one()
+    )
+    assert w1.revoked_at is None
+
+    from db.models import Job as JobModel
+
+    children = (
+        db_session.execute(select(JobModel).where(JobModel.request["parent_job_id"].as_string() == str(job.id)))
+        .scalars()
+        .all()
+    )
+    assert {child.address for child in children} == {candidate.address}
+    db_session.refresh(job)
+    assert "queued 1" in (job.detail or "")
+
+
+@pytest.mark.parametrize(
+    "previous_status,force,current,expected",
+    [
+        ("failed_terminal", False, False, 1),
+        ("failed", False, False, 1),
+        ("completed", True, True, 1),
+        ("completed", False, True, 0),
+        ("completed", False, False, 1),
+        ("processing", True, False, 0),
+    ],
+)
+def test_company_rerun_revisits_failed_analysis_and_propagates_force(
+    db_session, worker, seed_protocol, previous_status, force, current, expected
+):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import Job, JobStage, JobStatus
+
+    protocol_id, company, addr = seed_protocol
+    target = addr()
+    old = Job(
+        address=target,
+        stage=JobStage.done,
+        status=JobStatus(previous_status),
+        request={"address": target, "chain": "ethereum"},
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION if current else ANALYSIS_SCHEMA_VERSION - 1,
+    )
+    db_session.add(old)
+    db_session.commit()
+    _add_contract(
+        db_session,
+        protocol_id=protocol_id,
+        address=target,
+        discovery_sources="ai_inventory",
+        confidence=0.9,
+        job_id=old.id,
+    )
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
+    job.request = {**(job.request or {}), "force": force}
+    db_session.commit()
+    with pytest.raises(JobHandledDirectly):
+        worker.process(db_session, job)
+    children = db_session.query(Job).filter(Job.request["parent_job_id"].as_string() == str(job.id)).all()
+    assert len(children) == expected
+    if children:
+        assert children[0].request.get("force", False) == force
+        assert children[0].request["root_job_id"] == str(job.id)
+
+
+@pytest.mark.parametrize("stuck", [False, True])
+def test_selection_claim_respects_provider_cooldown_even_past_stuck_timeout(db_session, seed_protocol, stuck):
+    from db.models import Job
+    from services.worker_workload import custom_claim_statement
+
+    protocol_id, company, _ = seed_protocol
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company)
+    job.next_attempt_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    db_session.commit()
+    db_session.execute(
+        sa_update(Job).where(Job.id == job.id).values(updated_at=datetime.now(timezone.utc) - timedelta(hours=2))
+    )
+    db_session.commit()
+    stmt = custom_claim_statement("selection", stuck=stuck)
+    ids = db_session.execute(stmt, {"timeout": 60}).scalars().all()
+    assert job.id not in ids
+    db_session.rollback()
+    job.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+    db_session.execute(
+        sa_update(Job).where(Job.id == job.id).values(updated_at=datetime.now(timezone.utc) - timedelta(hours=2))
+    )
+    db_session.commit()
+    ids = db_session.execute(stmt, {"timeout": 60}).scalars().all()
+    assert job.id in ids

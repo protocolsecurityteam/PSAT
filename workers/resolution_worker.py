@@ -20,6 +20,7 @@ from db.models import (
     ControllerValue,
     Job,
     JobStage,
+    JobStatus,
     SessionLocal,
     derive_job_chain_id,
 )
@@ -642,14 +643,37 @@ class ResolutionWorker(BaseWorker):
             state_var_addresses.setdefault(name, value.lower())
 
         referenced: set[str] = set()
+        authority_slots: set[str] = set()
         for tree_map in tree_maps:
             for tree in tree_map.values():
                 _collect_authority_contract_state_vars(tree, referenced)
-        if not referenced:
+                _collect_authority_contract_slots(tree, authority_slots)
+        if not referenced and not authority_slots:
             return
 
         # Missing values are skipped (not captured yet, private var, RPC failure).
-        target_addresses = sorted({state_var_addresses[name] for name in referenced if name in state_var_addresses})
+        targets = {state_var_addresses[name] for name in referenced if name in state_var_addresses}
+        if authority_slots and chain_enabled(_chain_name_for_job(job)):
+            from services.clients.rpc import parse_address_result, rpc_request
+
+            request = job.request if isinstance(job.request, dict) else {}
+            runtime_address = request.get("proxy_address") or job.address
+            block = snapshot.get("block_number")
+            if isinstance(block, int) and runtime_address:
+                for slot in sorted(authority_slots):
+                    try:
+                        word = rpc_request(
+                            rpc_url,
+                            "eth_getStorageAt",
+                            [runtime_address, slot, hex(block)],
+                            chain_id=_chain_id_for_job(job),
+                        )
+                        target = parse_address_result(word)
+                        if target:
+                            targets.add(target.lower())
+                    except Exception as exc:
+                        record_degraded(phase="authority_slot_dependency", exc=exc, context={"slot": slot})
+        target_addresses = sorted(targets - {"0x" + "0" * 40})
         if not target_addresses:
             return
 
@@ -673,6 +697,7 @@ class ResolutionWorker(BaseWorker):
         n_satisfied = 0
         n_pending = 0
         n_cycle = 0
+        n_degraded = 0
         for target_addr in target_addresses:
             # Self-references aren't dependencies.
             if target_addr == (job.address or "").lower():
@@ -722,13 +747,25 @@ class ResolutionWorker(BaseWorker):
             # An edge closing a cycle would deadlock the claim gate; insert it as ``cycle_degraded`` so it doesn't block
             # and the leaf resolves to external_check_only.
             cycle_path = None
-            if not already_satisfied:
+            terminal_without_policy = not already_satisfied and provider_job.status in (
+                JobStatus.failed_terminal,
+                JobStatus.completed,
+            )
+            if not already_satisfied and not terminal_without_policy:
                 cycle_path = _detect_dep_cycle(
                     session,
                     proposed_depender_id=job.id,
                     proposed_provider_id=provider_job.id,
                 )
-            edge_status = "satisfied" if already_satisfied else ("cycle_degraded" if cycle_path else "pending")
+            edge_status = (
+                "satisfied"
+                if already_satisfied
+                else "degraded"
+                if terminal_without_policy
+                else "cycle_degraded"
+                if cycle_path
+                else "pending"
+            )
             values = {
                 "depender_job_id": job.id,
                 "provider_chain": chain,
@@ -737,19 +774,22 @@ class ResolutionWorker(BaseWorker):
                 "status": edge_status,
                 "cycle_path": cycle_path,
             }
-            if already_satisfied:
+            if edge_status != "pending":
                 values["satisfied_at"] = datetime.now(timezone.utc)
-            stmt = (
-                _pg_insert(JobDependency)
-                .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        "depender_job_id",
-                        "provider_chain",
-                        "provider_address",
-                        "required_stage",
-                    ],
-                )
+            stmt = _pg_insert(JobDependency).values(**values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[
+                    "depender_job_id",
+                    "provider_chain",
+                    "provider_address",
+                    "required_stage",
+                ],
+                set_={
+                    "status": stmt.excluded.status,
+                    "satisfied_at": stmt.excluded.satisfied_at,
+                    "cycle_path": stmt.excluded.cycle_path,
+                },
+                where=(JobDependency.status == "pending") & (stmt.excluded.status != "pending"),
             )
             result = session.execute(stmt)
             # ``rowcount`` isn't on the generic Result type pyright sees.
@@ -757,6 +797,17 @@ class ResolutionWorker(BaseWorker):
                 edges_inserted += 1
                 if edge_status == "satisfied":
                     n_satisfied += 1
+                elif edge_status == "degraded":
+                    n_degraded += 1
+                    record_degraded(
+                        phase="dependency_provider_terminal",
+                        exc=RuntimeError("Authority provider ended without effective permissions"),
+                        context={
+                            "provider_address": dependency_provider_addr,
+                            "provider_job_id": str(provider_job.id),
+                            "provider_status": provider_job.status.value,
+                        },
+                    )
                 elif edge_status == "cycle_degraded":
                     n_cycle += 1
                     # A cycle is a degraded outcome; surface it.
@@ -790,6 +841,20 @@ class ResolutionWorker(BaseWorker):
             record_stage_metric("dep_edges_inserted", edges_inserted)
             record_stage_metric("dep_edges_pending", n_pending)
             record_stage_metric("dep_edges_cycle_degraded", n_cycle)
+            record_stage_metric("dep_edges_degraded", n_degraded)
+
+
+def _collect_authority_contract_slots(node: dict, out: set[str]) -> None:
+    if not isinstance(node, dict):
+        return
+    if node.get("op") == "LEAF":
+        descriptor = (node.get("leaf") or {}).get("set_descriptor") or {}
+        source = (descriptor.get("authority_contract") or {}).get("address_source") or {}
+        slot = source.get("storage_slot")
+        if source.get("source") == "view_call" and isinstance(slot, str) and re.fullmatch(r"0x[0-9a-fA-F]{64}", slot):
+            out.add(slot.lower())
+    for child in node.get("children") or []:
+        _collect_authority_contract_slots(child, out)
 
 
 def _collect_authority_contract_state_vars(node: dict, out: set[str]) -> None:

@@ -285,6 +285,68 @@ def _authority_check_predicate_trees() -> dict:
     }
 
 
+@pytest.mark.parametrize("proxy", [False, True])
+def test_terminal_provider_does_not_leave_late_dependency_pending(db_session_for_resolution, proxy):
+    from db.models import JobDependency, JobStage, JobStatus
+    from db.queue import claim_job, create_job, store_artifact
+
+    session = db_session_for_resolution
+    target, implementation, depender = ["0x" + byte * 20 for byte in ("91", "92", "93")]
+    provider = create_job(session, {"address": target, "chain": "ethereum"})
+    provider.status = JobStatus.completed if proxy else JobStatus.failed_terminal
+    provider.stage = JobStage.done if proxy else JobStage.discovery
+    if proxy:
+        session.add(
+            Contract(address=target, chain="ethereum", job_id=provider.id, is_proxy=True, implementation=implementation)
+        )
+        child = create_job(session, {"address": implementation, "chain": "ethereum", "parent_job_id": str(provider.id)})
+        child.status = JobStatus.failed_terminal
+    session.commit()
+    job = create_job(session, {"address": depender, "chain": "ethereum"}, initial_stage=JobStage.policy)
+    store_artifact(session, job.id, "predicate_trees", data=_authority_check_predicate_trees())
+    snapshot = {"controller_values": {"external_contract:authority": {"value": target}}}
+    ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
+        session, job, cast(Any, snapshot), "http://rpc.example"
+    )
+    edge = session.execute(select(JobDependency).where(JobDependency.depender_job_id == job.id)).scalar_one()
+    assert edge.provider_address == (implementation if proxy else target)
+    assert edge.status == "degraded"
+    claimed = claim_job(session, JobStage.policy, "test-worker")
+    assert claimed is not None and claimed.id == job.id
+
+
+def test_slot_backed_authority_enqueues_provider_at_runtime_address(db_session_for_resolution, monkeypatch):
+    from db.models import JobDependency, JobStage
+    from db.queue import create_job, store_artifact
+
+    session = db_session_for_resolution
+    runtime, implementation, target = ["0x" + byte * 20 for byte in ("81", "82", "83")]
+    job = create_job(
+        session,
+        {"address": implementation, "proxy_address": runtime, "chain": "ethereum"},
+        initial_stage=JobStage.resolution,
+    )
+    trees = _authority_check_predicate_trees()
+    source = trees["check_trees"]["canCall(address,address,bytes4)"]["leaf"]["set_descriptor"]["authority_contract"]
+    slot = "0x" + f"{123:064x}"
+    source["address_source"] = {"source": "view_call", "storage_slot": slot}
+    store_artifact(session, job.id, "predicate_trees", data=trees)
+    calls = []
+
+    def rpc(url, method, params, **kwargs):
+        calls.append((method, params))
+        return "0x" + "00" * 12 + target[2:]
+
+    monkeypatch.setattr("services.clients.rpc.rpc_request", rpc)
+    ResolutionWorker()._emit_dependency_edges_from_predicate_trees(
+        session, job, cast(Any, {"block_number": 100, "controller_values": {}}), "http://rpc.example"
+    )
+    edge = session.execute(select(JobDependency).where(JobDependency.depender_job_id == job.id)).scalar_one()
+    assert edge.provider_address == target
+    assert edge.status == "pending"
+    assert calls == [("eth_getStorageAt", [runtime, slot, "0x64"])]
+
+
 def test_dependency_emission_records_pending_status_metrics(db_session_for_resolution):
     from sqlalchemy import select
 

@@ -1323,8 +1323,8 @@ def test_anvil_factory_is_single_flight_and_closed(monkeypatch):
     first = factory()
     assert factory() is first  # memoized: one fork per run per chain
     assert len(spawns) == 1
-    assert spawns[0]["fork_url"] == "http://rpc.example/1"
-    assert spawns[0]["fork_headers"] == {"X-Test": "1"}
+    assert spawns[0]["fork_url"].startswith("http://127.0.0.1:")
+    assert "fork_headers" not in spawns[0]  # The gateway holds upstream credentials.
     worker._close_anvil()
     assert first.closed is True
     assert worker._anvil is None

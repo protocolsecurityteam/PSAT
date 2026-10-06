@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -26,6 +27,7 @@ _ALLOWED_EVM_VERSIONS = (
     "shanghai",
     "cancun",
     "prague",
+    "osaka",
 )
 _EVM_VERSION_BY_KEY = {v.lower(): v for v in _ALLOWED_EVM_VERSIONS}
 _DEFAULT_EVM_VERSION = "shanghai"
@@ -91,18 +93,21 @@ def source_content_hash(result: dict) -> str:
 
     Covers the source file set (``parse_sources``) and the compiler settings that change the IR: language, EVM version,
     optimizer on/off and runs, and remappings. Excludes address, constructor args, immutable values and chain id. The
-    solc version comes from the hashed pragmas.
+    verified compiler version and standard-JSON settings are part of the key.
 
     Returns a ``0x``-prefixed sha256 (66 chars).
     """
     sources = parse_sources(result)
     payload = {
         "sources": sorted(sources.items()),
+        "contract_name": str(result.get("ContractName", "Contract")),
         "remappings": sorted(parse_remappings(result)),
         "language": "vyper" if is_vyper_result(result) else "solidity",
         "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
         "optimizer": str(result.get("OptimizationUsed", "") or ""),
         "runs": str(result.get("Runs", "") or ""),
+        "compiler_version": str(result.get("CompilerVersion", "")),
+        "compiler_settings": parse_compiler_settings(result),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "0x" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -126,9 +131,20 @@ def _parse_source_code(raw: str) -> dict | None:
 
 def parse_verification_bundle(result: dict) -> dict | None:
     parsed = _parse_source_code(result.get("SourceCode", ""))
-    if not parsed or "sources" not in parsed:
+    if not parsed:
         return None
-    return parsed
+    if "sources" in parsed:
+        return parsed
+    # Explorers also return a bare filename -> source map without the standard
+    # JSON envelope. Preserve the files rather than compiling the JSON as Solidity.
+    if all(
+        isinstance(name, str)
+        and name.endswith((".sol", ".vy"))
+        and isinstance(value.get("content") if isinstance(value, dict) else value, str)
+        for name, value in parsed.items()
+    ):
+        return {"sources": parsed}
+    return None
 
 
 def is_vyper_result(result: dict) -> bool:
@@ -165,6 +181,53 @@ def parse_remappings(result: dict) -> list[str]:
         for entry in remappings
         if isinstance(entry, str) and entry.strip() and _remapping_target_is_safe(entry.strip())
     ]
+
+
+def parse_compiler_settings(result: dict) -> dict:
+    """Carry verified settings without replacing compiler defaults with host-tool defaults."""
+    bundle = parse_verification_bundle(result)
+    settings = copy.deepcopy(bundle.get("settings", {})) if bundle else {}
+    settings.pop("outputSelection", None)  # Analysis requests its own AST/bytecode outputs.
+    if not is_vyper_result(result):
+        settings["remappings"] = parse_remappings(result)
+    if not is_vyper_result(result) and "optimizer" not in settings:
+        settings["optimizer"] = {
+            "enabled": str(result.get("OptimizationUsed", "0")) == "1",
+            "runs": int(result.get("Runs", "200") or 200),
+        }
+    evm = str(settings.get("evmVersion", result.get("EVMVersion", "")) or "").strip()
+    if evm.lower() in ("", "default"):
+        settings.pop("evmVersion", None)
+    elif evm.lower() in _EVM_VERSION_BY_KEY:
+        settings["evmVersion"] = _EVM_VERSION_BY_KEY[evm.lower()]
+    else:
+        raise ValueError(f"Unsupported verified EVM target: {evm!r}")
+    return settings
+
+
+def verified_solc_version(raw: object, sources: dict[str, str]) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return _detect_solc_version(sources)
+    match = re.fullmatch(r"v?(0\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", value)
+    if match is None:
+        raise ValueError(f"Unsupported verified Solidity compiler version: {value!r}")
+    return match.group(1)
+
+
+def write_compiler_input(project_dir: Path, sources: dict[str, str], settings: dict, *, language: str) -> None:
+    """Persist confined, inline sources so analysis never re-fetches compiler imports."""
+    for filename in sources:
+        _confine(project_dir, filename)
+    normalized = copy.deepcopy(settings)
+    if language.lower() != "vyper":
+        normalized["remappings"] = [r for r in normalized.get("remappings", []) if _remapping_target_is_safe(r)]
+    payload = {
+        "language": "Vyper" if language.lower() == "vyper" else "Solidity",
+        "sources": {name: {"content": content} for name, content in sources.items()},
+        "settings": normalized,
+    }
+    (project_dir / "analysis_standard_input.json").write_text(json.dumps(payload))
 
 
 _MIN_SOLC = "0.8.24"  # 0.8.21-0.8.23 have Natspec.cpp internal compiler errors on some OZ contracts
@@ -215,9 +278,13 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     remappings = parse_remappings(result)
     bundle = parse_verification_bundle(result)
     language = "vyper" if is_vyper_result(result) else "solidity"
-    solc_version = _detect_solc_version(sources)
+    solc_version = (
+        verified_solc_version(result.get("CompilerVersion"), sources) if language == "solidity" else _MIN_SOLC
+    )
     src_dir = _project_src_dir(sources)
-    evm_version = sanitize_evm_version(result.get("EVMVersion", ""))
+    compiler_settings = parse_compiler_settings(result)
+    evm_version = compiler_settings.get("evmVersion")
+    evm_line = f'evm_version = "{evm_version}"' if evm_version else ""
 
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -229,7 +296,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
             out = "out"
             libs = ["lib"]
             solc_version = "{solc_version}"
-            evm_version = "{evm_version}"
+            {evm_line}
             optimizer = {str(result.get("OptimizationUsed", "1") == "1").lower()}
             optimizer_runs = {int(result.get("Runs", "200") or 200)}
             auto_detect_solc = false
@@ -243,12 +310,13 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     if bundle:
         (project_dir / "etherscan_standard_input.json").write_text(json.dumps(bundle, indent=2) + "\n")
 
-    # Relax exact pragmas so one solc_version satisfies all files.
-    sources = _relax_pragmas(sources)
+    # Verified source and compiler version are an inseparable pair; do not rewrite pragmas.
     for filename, content in sources.items():
         filepath = _confine(project_dir, filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)
+
+    write_compiler_input(project_dir, sources, compiler_settings, language=language)
 
     meta = {
         "address": address,

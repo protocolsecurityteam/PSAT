@@ -721,6 +721,12 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 usd_value = (raw_balance / (10**decimals)) * price_usd
                 if not math.isfinite(usd_value) or usd_value >= 1e20:
                     usd_value = None
+            from utils.quote_validation import quote_refusal
+
+            refusal = quote_refusal(price_usd, usd_value)
+            if refusal:
+                price_usd = 0.0
+                usd_value = None
             results.append(
                 {
                     "token_address": (entry.get("TokenAddress") or "").lower(),
@@ -731,6 +737,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                     "balance": raw_balance,
                     "price_usd": price_usd if decimals is not None and price_usd > 0 else None,
                     "usd_value": usd_value,
+                    "price_refusal": refusal,
                 }
             )
     # Ask of raw entries: dropping zero-balance entries makes a full page look short.
@@ -760,6 +767,9 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
         # An empty list per one third-party index, not proof nothing is held.
         status = ASSET_SET_STATUS_RETURNED_EMPTY
         basis = f"etherscan addresstokenbalance, {pages_read} page(s), empty list"
+    refused_quotes = sum(bool(row.get("price_refusal")) for row in results)
+    if refused_quotes:
+        basis += f"; {refused_quotes} quotes failed price validation and remain unpriced"
     return TokenBalancePage(
         rows=sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True),
         page_length=returned,

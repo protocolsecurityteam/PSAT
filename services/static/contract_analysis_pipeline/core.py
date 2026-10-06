@@ -87,7 +87,7 @@ def _guard_vyper_version(project_dir: Path, meta: dict) -> None:
     if version and version.startswith("0.4."):
         raise RuntimeError(
             f"Vyper {version} is not supported (upstream crytic-compile sourceMap bug). "
-            "Pin the contract to Vyper 0.3.x."
+            "Analysis requires parser support for this verified compiler version."
         )
 
 
@@ -141,7 +141,12 @@ def collect_contract_analysis_with_artifacts(
     _guard_vyper_version(project_dir, meta)
 
     with _phase("slither_parse", durations_ms):
-        slither = Slither(_slither_target(project_dir, meta))
+        if (project_dir / "analysis_standard_input.json").is_file():
+            from services.static.compilation import compile_verified
+
+            slither = Slither(compile_verified(project_dir, meta))
+        else:
+            slither = Slither(_slither_target(project_dir, meta))
 
     subject_contract = _select_subject_contract(slither, meta.get("contract_name"))
     if subject_contract is None:
@@ -266,6 +271,9 @@ def collect_contract_analysis_with_artifacts(
             "name": subject_contract.name,
             "compiler_version": meta.get("compiler_version", ""),
             "source_verified": _source_verified(meta),
+            "kind": "interface"
+            if getattr(subject_contract, "is_interface", False)
+            else ("library" if getattr(subject_contract, "is_library", False) else "contract"),
         },
         "analysis_status": {
             "static_analysis_completed": True,

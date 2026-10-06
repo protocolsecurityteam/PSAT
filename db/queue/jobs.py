@@ -66,11 +66,27 @@ def create_job(
     initial_stage: JobStage = JobStage.discovery,
 ) -> Job:
     """Insert a queued job at the given stage. ``trace_id`` comes from the ambient contextvar, else a fresh one."""
+    from services.clients.rpc_limits import current_scope
     from utils.logging import trace_id_var
 
     trace_id = trace_id_var.get() or uuid.uuid4().hex[:16]
+    scope = current_scope()
+    job_id = uuid.uuid4()
+    request_dict = dict(request_dict)
+    if not request_dict.get("root_job_id"):
+        inherited = scope.run_id if scope is not None else None
+        if inherited is None and request_dict.get("parent_job_id"):
+            try:
+                parent_id = uuid.UUID(str(request_dict["parent_job_id"]))
+            except ValueError:
+                parent_id = None
+            parent = session.get(Job, parent_id) if parent_id is not None else None
+            if parent is not None:
+                inherited = (parent.request or {}).get("root_job_id") or str(parent.id)
+        request_dict["root_job_id"] = inherited or str(job_id)
     address = request_dict.get("address")
     job = Job(
+        id=job_id,
         address=address,
         # Enqueue-path dual-write, sharing the model default's derivation.
         chain_id=derive_job_chain_id(request_dict.get("chain"), address),
@@ -213,6 +229,11 @@ def advance_job(
     lease_id: uuid.UUID | None = None,
 ) -> None:
     """Advance to the next stage, reset to queued. A given *lease_id* must still hold the lease (``LeaseLost``)."""
+    from services.clients.rpc_limits import current_scope
+
+    scope = current_scope()
+    if scope is not None and scope.failure is not None:
+        raise scope.failure
     job = _locked_job(session, job_id, lease_id)
     if job is None:
         return
@@ -234,6 +255,11 @@ def complete_job(
     lease_id: uuid.UUID | None = None,
 ) -> None:
     """Mark completed with stage=done. See :func:`advance_job` for *lease_id*."""
+    from services.clients.rpc_limits import current_scope
+
+    scope = current_scope()
+    if scope is not None and scope.failure is not None:
+        raise scope.failure
     job = _locked_job(session, job_id, lease_id)
     if job is None:
         return

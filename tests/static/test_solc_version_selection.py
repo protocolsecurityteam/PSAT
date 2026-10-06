@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from services.discovery.fetch import _detect_solc_version as detect_fetch_solc
-from workers.static_worker import _detect_solc_version as detect_static_solc
+from workers.static_support.source_prep import _detect_solc_version as detect_static_solc
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,15 @@ from sqlalchemy.orm import Session
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+
+@pytest.fixture(autouse=True)
+def _offline_rpc_admission(request, monkeypatch):
+    # Offline tests stub the wire; integration tests opt back into the isolated
+    # DB gate. Live-marked tests retain the real limiter and never disable it.
+    if request.node.get_closest_marker("live") is None:
+        monkeypatch.setenv("PSAT_RPC_LIMITER_MODE", "off")
+
+
 # Offline runs route every RPC to a stub eRPC URL, since prod has no public fallback and CI has no .env. The URL is
 # never dialed; a real ERPC_BASE_URL still wins.
 if not os.environ.get("ERPC_BASE_URL"):

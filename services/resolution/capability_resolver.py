@@ -26,7 +26,7 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
-from utils.chains import UnknownChainError, chain_by_id, require_chain
+from utils.chains import UnknownChainError, UnsupportedChainError, chain_by_id, require_chain
 from utils.logging import record_degraded, record_stage_metric
 
 from . import indexer_settings
@@ -201,8 +201,10 @@ def find_dependency_provider_job_for_address(
 
     For a proxy that's the implementation job, since the proxy job may be done without policy artifacts.
     """
-    for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=False):
-        impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=False)
+    for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=False, include_failed=True):
+        impl_job = _implementation_child_job(
+            session, runtime_job, chain=chain, completed_only=False, include_failed=True
+        )
         if impl_job is not None:
             return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
@@ -712,14 +714,16 @@ def _jobs_for_address(
     *,
     chain: str | None = None,
     completed_only: bool = True,
+    include_failed: bool = False,
 ) -> list[Job]:
     stmt = (
         select(Job)
         .where(func.lower(Job.address) == address.lower())
         .where(Job.request["effects_resume_work_id"].astext.is_(None))
-        .where(~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
     )
+    if not include_failed:
+        stmt = stmt.where(~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)))
     if completed_only:
         stmt = stmt.where(Job.status == JobStatus.completed)
     candidates = list(session.execute(stmt).scalars().all())
@@ -734,13 +738,16 @@ def _implementation_child_job(
     *,
     chain: str | None,
     completed_only: bool,
+    include_failed: bool = False,
 ) -> Job | None:
     contract = _contract_for_job(session, runtime_job, chain=chain)
     impl_addr = (contract.implementation if contract is not None else None) or None
     if not isinstance(impl_addr, str) or not impl_addr.startswith("0x") or len(impl_addr) != 42:
         return None
 
-    candidates = _jobs_for_address(session, impl_addr, chain=chain, completed_only=completed_only)
+    candidates = _jobs_for_address(
+        session, impl_addr, chain=chain, completed_only=completed_only, include_failed=include_failed
+    )
     runtime_addr = (runtime_job.address or "").lower()
     parent_id = str(runtime_job.id)
 
@@ -777,7 +784,12 @@ def _contract_for_job(session: Session, job: Job, *, chain: str | None) -> Contr
 def _job_chain(job: Job) -> str | None:
     request = job.request if isinstance(job.request, dict) else {}
     chain = request.get("chain")
-    return chain if isinstance(chain, str) and chain else None
+    try:
+        return require_chain(
+            job.chain_id, chain=chain if isinstance(chain, str) else None, context="analysis dependency lookup"
+        ).name
+    except UnsupportedChainError:
+        return None
 
 
 def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
