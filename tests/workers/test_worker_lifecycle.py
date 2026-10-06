@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Job, JobDependency, JobStage, JobStatus, Protocol
 from db.queue import LeaseLost, advance_job, claim_job, complete_job, requeue_job
-from services.worker_lifecycle import claim_allowed, register_boot
+from services.worker_lifecycle import BootSuperseded, boot_phase, claim_allowed, db_error_detail, register_boot
 from services.worker_workload import snapshot
 from tests.conftest import requires_postgres
 from workers.lifecycle_controller import tick
@@ -486,3 +486,49 @@ def test_deployment_readiness_reads_real_indexer_lock_and_controller_heartbeat(l
     finally:
         owner.close()
     assert readiness(lifecycle)["indexer_owner"] is None
+
+
+def test_heartbeat_does_not_queue_behind_a_claim(lifecycle):
+    boot = uuid.UUID(lifecycle.execute(text("SELECT boot_id::text FROM worker_lifecycle WHERE id=1")).scalar_one())
+    before = lifecycle.execute(text("SELECT heartbeat_at FROM worker_lifecycle WHERE id=1")).scalar_one()
+    lifecycle.commit()
+    claimer = Session(lifecycle.bind)
+    try:
+        assert claim_allowed(claimer)
+        with Session(lifecycle.bind) as supervisor:
+            assert boot_phase(supervisor, boot) == "running"
+            held = supervisor.execute(text("SELECT heartbeat_at FROM worker_lifecycle WHERE id=1")).scalar_one()
+        assert held == before
+    finally:
+        claimer.rollback()
+        claimer.close()
+    with Session(lifecycle.bind) as supervisor:
+        assert boot_phase(supervisor, boot) == "running"
+        assert supervisor.execute(text("SELECT heartbeat_at FROM worker_lifecycle WHERE id=1")).scalar_one() > before
+
+
+def test_a_superseded_boot_is_reported_not_read_as_running(lifecycle):
+    with Session(lifecycle.bind) as supervisor, pytest.raises(BootSuperseded):
+        boot_phase(supervisor, uuid.uuid4())
+
+
+def test_failed_lifecycle_queries_log_the_database_reason_but_no_sql(db_session):
+    import requests
+    from sqlalchemy.exc import DataError, OperationalError
+
+    db_session.execute(text("SET LOCAL statement_timeout = '1ms'"))
+    with pytest.raises(OperationalError) as cancelled:
+        db_session.execute(text("SELECT pg_sleep(0.05), CAST(:secret AS text)"), {"secret": "boot-token"})
+    db_session.rollback()
+    detail = db_error_detail(cancelled.value)
+    assert detail == {
+        "exc_type": "OperationalError",
+        "pgcode": "57014",
+        "db_error": "canceling statement due to statement timeout",
+    }
+    assert "boot-token" not in str(detail)
+    with pytest.raises(DataError) as echoed:
+        db_session.execute(text("SELECT CAST(:value AS uuid)"), {"value": "boot-token"})
+    db_session.rollback()
+    assert db_error_detail(echoed.value) == {"exc_type": "DataError", "pgcode": "22P02"}
+    assert db_error_detail(requests.HTTPError("403 for https://api.machines.dev/x")) == {"exc_type": "HTTPError"}

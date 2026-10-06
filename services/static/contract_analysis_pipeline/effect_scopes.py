@@ -10,6 +10,7 @@ import contextvars
 from copy import deepcopy
 from dataclasses import replace
 
+from .effect_scope_codec import EFFECT_SCOPES_VERSION
 from .effects.sinks import _classify_node_irs, _is_modifier_call, _node_kind_state_writes
 from .predicate_types import PredicateTree, make_and_node, make_or_node
 from .predicates._helpers import _unsupported_leaf
@@ -51,8 +52,8 @@ def _reachable(start, end):
     return id(end) in hit[1]
 
 
-# ``key -> lowered, stamped tree`` for one attach pass: a guard is re-lowered at every site it governs. Hits are
-# copied because later passes mutate leaves in place.
+# ``key -> lowered, stamped tree`` for one attach pass, so every site a guard governs references one tree. Later passes
+# rewrite leaves in place, which is sound because each rewrite depends only on the leaf, never on the site.
 _lowered_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "psat_effect_scope_lowered_cache", default=None
 )
@@ -61,14 +62,15 @@ _lowered_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
 def _lower(gate, provenance, entry, key):
     cache = _lowered_cache.get()
     if cache is not None and key in cache:
-        hit = cache[key][1]
-        return deepcopy(hit) if hit is not None else None
+        return cache[key][1]
     tree = _build_subtree_from_gate(gate, provenance, entry)
     if tree is not None:
         _stamp_gate_scope(tree, gate, entry)
+        # Detached from anything the entry-point analysis holds; those trees are published separately.
+        tree = deepcopy(tree)
     if cache is not None:
         # Held so the ids in the key (one engine per entry) can't be reused mid-pass.
-        cache[key] = ((gate, provenance, entry), deepcopy(tree) if tree is not None else None)
+        cache[key] = ((gate, provenance, entry), tree)
     return tree
 
 
@@ -251,10 +253,10 @@ def _attach_effect_scopes(contract, predicates, effects):
                         site_id = "/".join(
                             [entry.full_name, *paths, unit.canonical_name, str(node.node_id), kind, target]
                         )
-                        tree = make_and_node(deepcopy(required)) if required else None
+                        tree = make_and_node(list(required)) if required else None
                         if summaries:
                             tree = _consume_summary_guards(tree, summaries) if tree else None
-                            tree = make_and_node([*deepcopy(summaries), *([tree] if tree else [])])
+                            tree = make_and_node([*summaries, *([tree] if tree else [])])
                         matching = [
                             s["id"]
                             for s in record_sinks
@@ -354,7 +356,7 @@ def _attach_effect_scopes(contract, predicates, effects):
                 site["predicate"] = tree
             functions[signature]["effect_scopes"] = sites
         predicates["effect_scopes"] = {sig: sites for sig, sites in sites_by_function.items() if sites}
-        effects["effect_scopes_version"] = 1
+        effects["effect_scopes_version"] = EFFECT_SCOPES_VERSION
 
 
 def _conditional_prefix(unit, site, chain, entry, provenance, gates):

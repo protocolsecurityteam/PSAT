@@ -276,86 +276,82 @@ def _requires_authority(tree):
     return bool(checks) and (all(checks) if tree.get("op") == "OR" else any(checks))
 
 
-def _attach_storage_dependencies_once(contract, scoped_trees, sites_by_function, writer_trees):
-    """Relate non-caller-keyed state requirements to the actual sites that can enable them.
+_RELATION_NAMES = {
+    "eq": "EQUAL",
+    "ne": "NOT_EQUAL",
+    "gt": "GREATER",
+    "gte": "GREATER_EQUAL",
+    "lt": "LESS",
+    "lte": "LESS_EQUAL",
+}
 
-    Caller-keyed balances/allowances remain resource constraints. State transitions and writer gates are independent
-    facts; a writer guarded only on the same unresolved dependency cannot bootstrap a proof.
+
+def _storage_requirement(leaf, variables, evidence, writer_sites, grants_memo):
+    """``(variable name, key sources, located writer sites per enabling write)`` for a non-caller-keyed state
+    requirement with a constant acceptance relation, else None.
     """
+    descriptor = leaf.get("set_descriptor") or {}
+    keys = descriptor.get("key_sources") or []
+    value_predicate = descriptor.get("value_predicate") or {}
+    variable = variables.get(descriptor.get("storage_var"))
+    if (
+        leaf.get("kind") != "membership"
+        or variable is None
+        or not keys
+        or any(k.get("source") in ("msg_sender", "tx_origin", "signature_recovery") for k in keys)
+    ):
+        return None
+    op = _RELATION_NAMES.get(value_predicate.get("op") or "")
+    rhs_values = value_predicate.get("rhs_values") or []
+    try:
+        rhs = int(rhs_values[0], 0) if len(rhs_values) == 1 else None
+    except (TypeError, ValueError):
+        rhs = None
+    if op is None or rhs is None:
+        return None
+    memo_key = (variable.name, op, rhs)
+    if memo_key not in grants_memo:
+        grants_memo[memo_key] = [
+            writer_sites.get((declaration(write.function), write.node.node_id, variable.name), [])
+            for write in evidence.writes_to(variable)
+            if write.transition(op, rhs) != "revokes"
+        ]
+    return variable.name, keys, grants_memo[memo_key]
 
-    evidence = evidence_for(contract)
-    sites = [s for values in sites_by_function.values() for s in values]
-    writer_sites = {}
-    for site in sites:
-        if site["kind"] == "state_write":
-            writer_sites.setdefault((site["declaration"], site["node"], site["target"]), []).append(site)
-    original = writer_trees
-    variables = {v.name: v for v in contract.state_variables}
-    relation_names = {
-        "eq": "EQUAL",
-        "ne": "NOT_EQUAL",
-        "gt": "GREATER",
-        "gte": "GREATER_EQUAL",
-        "lt": "LESS",
-        "lte": "LESS_EQUAL",
-    }
 
-    def visit(tree):
-        if not isinstance(tree, dict):
-            return
-        leaf = tree.get("leaf") or {}
-        descriptor = leaf.get("set_descriptor") or {}
-        keys = descriptor.get("key_sources") or []
-        value_predicate = descriptor.get("value_predicate") or {}
-        variable = variables.get(descriptor.get("storage_var"))
-        if (
-            leaf.get("kind") == "membership"
-            and variable is not None
-            and keys
-            and not any(k.get("source") in ("msg_sender", "tx_origin", "signature_recovery") for k in keys)
-        ):
-            op = relation_names.get(value_predicate.get("op") or "")
-            rhs_values = value_predicate.get("rhs_values") or []
-            try:
-                rhs = int(rhs_values[0], 0) if len(rhs_values) == 1 else None
-            except (TypeError, ValueError):
-                rhs = None
-            if op is not None and rhs is not None:
-                grants = [w for w in evidence.writes_to(variable) if w.transition(op, rhs) != "revokes"]
-                guards = []
-                guard_ids = []
-                unresolved_dependency = False
-                complete = bool(grants)
-                for write in grants:
-                    located = writer_sites.get((declaration(write.function), write.node.node_id, variable.name), [])
-                    if not located:
-                        complete = False
-                    for site in located:
-                        predicate = original.get(site["id"])
-                        if not _requires_authority(predicate):
-                            complete = False
-                            unresolved_dependency |= _has_state_dependency(predicate)
-                        else:
-                            guards.append(predicate)
-                            guard_ids.append(site["id"])
-                if not complete and unresolved_dependency:
-                    leaf["authority_role"] = "caller_authority"
-                    leaf["authority_proof"] = {"state": "not_determined", "requirements": ["state_writer_authority"]}
-                if complete and guards:
-                    leaf["kind"] = "authorization"
-                    leaf["authority_role"] = "caller_authority"
-                    leaf["authority_proof"] = {"state": "proven", "basis": "authority_enabling_writes"}
-                    leaf["set_descriptor"] = {
-                        "kind": "state_authority",
-                        "writer_scope_ids": sorted(set(guard_ids)),
-                        "storage_var": variable.name,
-                        "key_sources": keys,
-                    }
-        for child in tree.get("children") or []:
-            visit(child)
-
-    for tree in scoped_trees.values():
-        visit(tree)
+def _requirement_leaf(raw, requirement, writer_flags):
+    """The leaf ``raw`` becomes when its enabling writers have ``writer_flags[site id]`` =
+    ``(requires authority, has state dependency)``.
+    """
+    variable_name, keys, located_per_write = requirement
+    guard_ids = []
+    unresolved_dependency = False
+    complete = bool(located_per_write)
+    for located in located_per_write:
+        if not located:
+            complete = False
+        for site in located:
+            requires, depends = writer_flags[site["id"]]
+            if not requires:
+                complete = False
+                unresolved_dependency |= depends
+            else:
+                guard_ids.append(site["id"])
+    leaf = dict(raw)
+    if not complete and unresolved_dependency:
+        leaf["authority_role"] = "caller_authority"
+        leaf["authority_proof"] = {"state": "not_determined", "requirements": ["state_writer_authority"]}
+    if complete and guard_ids:
+        leaf["kind"] = "authorization"
+        leaf["authority_role"] = "caller_authority"
+        leaf["authority_proof"] = {"state": "proven", "basis": "authority_enabling_writes"}
+        leaf["set_descriptor"] = {
+            "kind": "state_authority",
+            "writer_scope_ids": sorted(set(guard_ids)),
+            "storage_var": variable_name,
+            "key_sources": keys,
+        }
+    return leaf
 
 
 def predicate_truth(tree):
@@ -423,17 +419,71 @@ def _unbind_writer_parameters(value):
 
 
 def attach_storage_dependencies(contract, scoped_trees, sites_by_function):
-    from copy import deepcopy
+    """Relate non-caller-keyed state requirements to the actual sites that can enable them, in place.
 
-    raw = deepcopy(scoped_trees)
-    previous = scoped_trees
-    updated = previous
-    # Monotone authority facts propagate from actual caller guards. Cycles without an anchor stay unresolved.
+    Caller-keyed balances/allowances remain resource constraints. State transitions and writer gates are independent
+    facts; a writer guarded only on the same unresolved dependency cannot bootstrap a proof.
+
+    Monotone authority facts propagate from actual caller guards, up to 8 rounds; cycles without an anchor stay
+    unresolved. Each round rewrites every requirement from its original leaf against the previous round's writer
+    predicates, so a requirement leaf shared by several trees is rewritten once.
+    """
+    evidence = evidence_for(contract)
+    writer_sites = {}
+    for site in (s for values in sites_by_function.values() for s in values):
+        if site["kind"] == "state_write":
+            writer_sites.setdefault((site["declaration"], site["node"], site["target"]), []).append(site)
+    variables = {v.name: v for v in contract.state_variables}
+    grants_memo = {}
+    requirements = {}
+    below = {}
+
+    def collect(tree):
+        if not isinstance(tree, dict):
+            return frozenset()
+        hit = below.get(id(tree))
+        if hit is not None:
+            return hit[1]
+        found = set()
+        leaf = tree.get("leaf")
+        if isinstance(leaf, dict):
+            if id(leaf) not in requirements:
+                requirement = _storage_requirement(leaf, variables, evidence, writer_sites, grants_memo)
+                if requirement is not None:
+                    requirements[id(leaf)] = (leaf, dict(leaf), requirement)
+            if id(leaf) in requirements:
+                found.add(id(leaf))
+        for child in tree.get("children") or []:
+            found |= collect(child)
+        below[id(tree)] = (tree, frozenset(found))
+        return below[id(tree)][1]
+
+    holders = {key: collect(tree) for key, tree in scoped_trees.items()}
+    if not requirements:
+        return
+    writer_ids = {site["id"] for _, _, (_, _, located) in requirements.values() for sites in located for site in sites}
+
+    def flags(site_id):
+        tree = scoped_trees.get(site_id)
+        return _requires_authority(tree), _has_state_dependency(tree)
+
+    writer_flags = {site_id: flags(site_id) for site_id in writer_ids}
+    dependents = {}
+    for site_id in writer_ids:
+        for leaf_id in holders.get(site_id, ()):
+            dependents.setdefault(leaf_id, set()).add(site_id)
     for _ in range(8):
-        updated = deepcopy(raw)
-        _attach_storage_dependencies_once(contract, updated, sites_by_function, previous)
-        if updated == previous:
+        changed = []
+        for leaf_id, (leaf, raw, requirement) in requirements.items():
+            rewritten = _requirement_leaf(raw, requirement, writer_flags)
+            if rewritten != leaf:
+                changed.append((leaf_id, leaf, rewritten))
+        if not changed:
             break
-        previous = updated
-    scoped_trees.clear()
-    scoped_trees.update(updated)
+        stale = set()
+        for leaf_id, leaf, rewritten in changed:
+            leaf.clear()
+            leaf.update(rewritten)
+            stale |= dependents.get(leaf_id, set())
+        for site_id in stale:
+            writer_flags[site_id] = flags(site_id)

@@ -26,6 +26,7 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
+from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
 from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import record_degraded, record_stage_metric
 
@@ -37,6 +38,7 @@ from .adapters.event_indexed import EventIndexedAdapter
 from .adapters.solmate_roles import SolmateRolesAuthorityAdapter
 from .capabilities import CapabilityExpr, Condition
 from .differential_probe import ProbeResult, differential_probe_enabled, run_differential_probe
+from .effect_scopes import resolve_effect_scopes, site_predicates
 from .one_shot_probe import (
     LatchReadResult,
     annotate_capability_one_shot,
@@ -332,6 +334,8 @@ def resolve_contract_capabilities(
     resolve_counters: dict[str, Any] = {}
     # Per-pass memo of live nullary getter reads, shared across functions; discarded with this frame, never persisted.
     live_read_memo: dict[Any, Any] = {}
+    # Per-pass Solmate RolesAuthority folds, one per authority; discarded with this frame.
+    solmate_role_states: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
     # Pin one finalized height for the whole pass (#119), stepped back ``resolver_pin_margin`` so healthy cursors stay
     # ``exact`` and stalled ones demote. ``None`` leaves it unpinned, which demotes (safe). The differential probe keeps
@@ -347,8 +351,10 @@ def resolve_contract_capabilities(
     # Resolved lazily on the first one-shot row so passes without initializers make no extra calls.
     one_shot_block_cell: list[Any] = [probe_block if probe_block is not None else _UNRESOLVED_BLOCK]
     one_shot_pass_cache: dict[tuple[Any, ...], LatchReadResult] = {}
+    effect_scopes = expand_effect_scopes(artifact)
+    effect_predicates = site_predicates(effect_scopes)
     function_trees = dict(artifact["trees"] or {})
-    for signature in artifact.get("effect_scopes") or {}:
+    for signature in effect_scopes:
         function_trees.setdefault(signature, None)
     for fn_signature, tree in function_trees.items():
         ctx = EvaluationContext(
@@ -367,7 +373,11 @@ def resolve_contract_capabilities(
                     fn_signature if isinstance(fn_signature, str) else None, canonical_signatures
                 ),
             ),
-            meta={"resolve_counters": resolve_counters, "live_read_memo": live_read_memo},
+            meta={
+                "resolve_counters": resolve_counters,
+                "live_read_memo": live_read_memo,
+                "solmate_role_states": solmate_role_states,
+            },
         )
         fn_started = time.monotonic()
         cap = evaluate_tree_with_registry(tree, registry, ctx)
@@ -381,13 +391,11 @@ def resolve_contract_capabilities(
                 rpc_url=rpc_url,
                 block=probe_block,
             )
-        scoped = (artifact.get("effect_scopes") or {}).get(fn_signature)
+        scoped = effect_scopes.get(fn_signature)
         scope_records = []
         if scoped:
-            from .effect_scopes import resolve_effect_scopes
-
             aggregate, scope_records = resolve_effect_scopes(
-                scoped, registry, ctx, base_cap=cap, all_scopes=artifact.get("effect_scopes")
+                scoped, registry, ctx, base_cap=cap, effect_predicates=effect_predicates
             )
             if aggregate is not None:
                 cap = aggregate

@@ -5,13 +5,19 @@ import pytest
 from services.policy.capability_surface import capability_surface_openness, project_capability_surface
 from services.resolution.adapters import AdapterRegistry, EvaluationContext
 from services.resolution.capability_resolver import capability_to_dict
-from services.resolution.effect_scopes import resolve_effect_scopes
+from services.resolution.effect_scopes import resolve_effect_scopes, site_predicates
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
+from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
 from tests.support.foundry_project import write_foundry_project
 
 pytestmark = pytest.mark.compile
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures/contracts/authorization/structural_controls.sol"
 OWNER = "0x" + "11" * 20
+
+
+def _resolve(trees, signature, ctx):
+    scopes = expand_effect_scopes(trees)
+    return resolve_effect_scopes(scopes[signature], AdapterRegistry(), ctx, effect_predicates=site_predicates(scopes))
 
 
 @pytest.fixture(scope="module")
@@ -33,9 +39,8 @@ def test_storage_summaries_distinguish_aliases_grants_and_revocation(artifact):
 
 def test_public_withdrawal_and_privileged_call_keep_separate_authority(artifact):
     _, trees, _ = artifact
-    sites = trees["effect_scopes"]["mixed(bool,address,bytes,uint256)"]
     ctx = EvaluationContext(chain_id=1, state_var_values={"owner": OWNER})
-    aggregate, scopes = resolve_effect_scopes(sites, AdapterRegistry(), ctx, all_scopes=trees["effect_scopes"])
+    aggregate, scopes = _resolve(trees, "mixed(bool,address,bytes,uint256)", ctx)
     assert aggregate is not None
     assert aggregate is not None
     result = capability_to_dict(aggregate)
@@ -62,9 +67,7 @@ def test_zero_write_is_not_unconditionally_a_revocation():
 def test_scheduled_action_keeps_scheduler_authority_after_consumption(artifact):
     _, trees, _ = artifact
     ctx = EvaluationContext(chain_id=1, state_var_values={"owner": OWNER})
-    aggregate, scopes = resolve_effect_scopes(
-        trees["effect_scopes"]["run(address,bytes)"], AdapterRegistry(), ctx, all_scopes=trees["effect_scopes"]
-    )
+    aggregate, scopes = _resolve(trees, "run(address,bytes)", ctx)
     assert aggregate is not None
     result = capability_to_dict(aggregate)
     surface = project_capability_surface(result)
@@ -78,9 +81,7 @@ def test_claim_uses_its_effect_scope_instead_of_the_public_sibling(artifact):
     _, trees, effects = artifact
     signature = "mixed(bool,address,bytes,uint256)"
     ctx = EvaluationContext(chain_id=1, state_var_values={"owner": OWNER})
-    aggregate, scopes = resolve_effect_scopes(
-        trees["effect_scopes"][signature], AdapterRegistry(), ctx, all_scopes=trees["effect_scopes"]
-    )
+    aggregate, scopes = _resolve(trees, signature, ctx)
     assert aggregate is not None
     capability = {**capability_to_dict(aggregate), "effect_capabilities": scopes}
     claims = scope_claim_authority(effects["functions"][signature]["claims"], capability)
@@ -139,12 +140,7 @@ contract Circular {
     project = write_foundry_project(tmp_path, "Circular", source)
     _, trees, _ = collect_contract_analysis_with_artifacts(project)
     assert trees is not None
-    aggregate, _ = resolve_effect_scopes(
-        trees["effect_scopes"]["execute(address,bytes)"],
-        AdapterRegistry(),
-        EvaluationContext(chain_id=1),
-        all_scopes=trees["effect_scopes"],
-    )
+    aggregate, _ = _resolve(trees, "execute(address,bytes)", EvaluationContext(chain_id=1))
     assert aggregate is not None
     cap = capability_to_dict(aggregate)
     assert capability_surface_openness(cap, project_capability_surface(cap)) == "not_determined"
@@ -188,9 +184,7 @@ def test_guards_before_a_join_preserve_correlated_alternatives(tmp_path, body):
     _, trees, _ = collect_contract_analysis_with_artifacts(project)
     assert trees is not None
     ctx = EvaluationContext(chain_id=1, state_var_values={"first": "0x" + "11" * 20, "second": "0x" + "22" * 20})
-    aggregate, _ = resolve_effect_scopes(
-        trees["effect_scopes"]["execute(bool,address,bytes)"], AdapterRegistry(), ctx, all_scopes=trees["effect_scopes"]
-    )
+    aggregate, _ = _resolve(trees, "execute(bool,address,bytes)", ctx)
     assert aggregate is not None
     cap = capability_to_dict(aggregate)
     surface = project_capability_surface(cap)
@@ -200,12 +194,7 @@ def test_guards_before_a_join_preserve_correlated_alternatives(tmp_path, body):
 
 def test_role_membership_is_not_public_when_member_inventory_is_unknown(artifact):
     _, trees, _ = artifact
-    aggregate, _ = resolve_effect_scopes(
-        trees["effect_scopes"]["mint(uint256)"],
-        AdapterRegistry(),
-        EvaluationContext(chain_id=1),
-        all_scopes=trees["effect_scopes"],
-    )
+    aggregate, _ = _resolve(trees, "mint(uint256)", EvaluationContext(chain_id=1))
     assert aggregate is not None
     cap = capability_to_dict(aggregate)
     assert capability_surface_openness(cap, project_capability_surface(cap)) == "not_determined"
@@ -223,9 +212,7 @@ def test_proven_public_bypass_survives_conditional_private_guard(tmp_path):
     _, trees, _ = collect_contract_analysis_with_artifacts(project)
     assert trees is not None
     ctx = EvaluationContext(chain_id=1, state_var_values={"owner": OWNER})
-    aggregate, _ = resolve_effect_scopes(
-        trees["effect_scopes"]["execute(bool,address,bytes)"], AdapterRegistry(), ctx, all_scopes=trees["effect_scopes"]
-    )
+    aggregate, _ = _resolve(trees, "execute(bool,address,bytes)", ctx)
     assert aggregate is not None
     cap = capability_to_dict(aggregate)
     assert capability_surface_openness(cap, project_capability_surface(cap)) == "open"
@@ -249,9 +236,7 @@ def test_call_depth_limit_is_an_obligation_not_an_empty_public_result(tmp_path):
     assert trees is not None
     sites = trees["effect_scopes"]["execute(address,bytes)"]
     assert any(s["kind"] == "unresolved_effect" for s in sites)
-    aggregate, _ = resolve_effect_scopes(
-        sites, AdapterRegistry(), EvaluationContext(chain_id=1), all_scopes=trees["effect_scopes"]
-    )
+    aggregate, _ = _resolve(trees, "execute(address,bytes)", EvaluationContext(chain_id=1))
     assert aggregate is not None
     cap = capability_to_dict(aggregate)
     assert capability_surface_openness(cap, project_capability_surface(cap)) == "not_determined"
