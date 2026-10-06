@@ -11,7 +11,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests as _requests
 
@@ -41,6 +41,26 @@ EXPLORER_CHAINS = {
     "basescan.org": "base",
     "base.blockscout.com": "base",
 }
+
+# Safe{Wallet} links qualify an address with its EIP-3770 chain short name (``app.safe.global/home?safe=eth:0x…``,
+# legacy ``gnosis-safe.io/app/eth:0x…``), so their chain comes from that prefix, not the host.
+SAFE_APP_DOMAINS = ("app.safe.global", "gnosis-safe.io")
+SAFE_CHAIN_PREFIXES = {
+    "eth": "ethereum",
+    "arb1": "arbitrum",
+    "oeth": "optimism",
+    "matic": "polygon",
+    "pol": "polygon",
+    "base": "base",
+    "avax": "avalanche",
+    "bnb": "bsc",
+    "linea": "linea",
+    "scr": "scroll",
+    "zksync": "zksync",
+    "blast": "blast",
+    "mode": "mode",
+}
+_SAFE_QUALIFIED_RE = re.compile(r"(?<![a-z0-9])([a-z][a-z0-9-]*):0x[a-f0-9]{40}\b", re.IGNORECASE)
 
 LOW_TRUST_DOMAINS = {
     "coingecko.com",
@@ -116,7 +136,15 @@ def _domain_matches(domain: str, known: str) -> bool:
 
 
 def _is_explorer_domain(domain: str) -> bool:
-    return any(_domain_matches(domain, k) for k in EXPLORER_CHAINS)
+    return any(_domain_matches(domain, k) for k in (*EXPLORER_CHAINS, *SAFE_APP_DOMAINS))
+
+
+def _safe_link_chain(url: str) -> str | None:
+    """The chain a Safe{Wallet} link qualifies its address with; ``None`` for any other link or an unknown prefix."""
+    if not any(_domain_matches(_get_domain(url), known) for known in SAFE_APP_DOMAINS):
+        return None
+    match = _SAFE_QUALIFIED_RE.search(unquote(url))
+    return SAFE_CHAIN_PREFIXES.get(match.group(1).lower()) if match else None
 
 
 def _is_low_trust_domain(domain: str) -> bool:
@@ -131,12 +159,15 @@ def _extract_addresses(*values: str) -> set[str]:
     out: set[str] = set()
     for value in values:
         if value:
-            for match in ADDRESS_RE.findall(value):
+            # Links may percent-encode the separator before an address (``safe=eth%3A0x…``).
+            for match in ADDRESS_RE.findall(unquote(value)):
                 out.add(_normalize_address(match))
     return out
 
 
 def _infer_chain(url: str, text: str) -> str:
+    if safe_chain := _safe_link_chain(url):
+        return safe_chain
     domain = _get_domain(url)
     # Longest first so subdomains beat their parent (optimistic.etherscan.io vs etherscan.io).
     for known, chain in sorted(EXPLORER_CHAINS.items(), key=lambda kv: -len(kv[0])):

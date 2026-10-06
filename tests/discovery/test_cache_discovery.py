@@ -33,7 +33,7 @@ def test_merge_inventory_new_and_previous():
         ],
         "official_domain": "old.example.com",
         "pages_considered": [{"url": "https://old.example.com/page1"}],
-        "sources": {"etherscan": True},
+        "sources": {"s1": "https://old.example.com/page1"},
     }
     new = {
         "contracts": [
@@ -42,7 +42,7 @@ def test_merge_inventory_new_and_previous():
         ],
         "official_domain": "new.example.com",
         "pages_considered": [{"url": "https://new.example.com/page2"}],
-        "sources": {"tavily": True},
+        "sources": {"s1": "https://new.example.com/page2"},
     }
 
     merged = _merge_inventory(prev, new)
@@ -68,7 +68,8 @@ def test_merge_inventory_new_and_previous():
     urls = {p["url"] for p in merged["pages_considered"]}
     assert urls == {"https://old.example.com/page1", "https://new.example.com/page2"}
 
-    assert merged["sources"] == {"etherscan": True, "tavily": True}
+    assert sorted(merged["sources"].values()) == ["https://new.example.com/page2", "https://old.example.com/page1"]
+    assert merged["sources"]["s1"] == "https://new.example.com/page2"
 
 
 def _make_company_job(session, company="TestProtocol", **extra):
@@ -148,3 +149,121 @@ def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
 
 
 # Child-job dedup and confidence filtering live in tests/discovery/test_selection_worker.py.
+
+
+def test_merge_expands_legacy_grouped_entries_and_rekeys_sources():
+    from services.discovery.inventory import merge_inventory
+
+    prev = {
+        "contracts": [
+            {
+                "name": "Vault",
+                "chains": ["ethereum"],
+                "confidence": 0.9,
+                "source": ["ai_inventory"],
+                "source_ids": ["s1", "s2"],
+                "deployments": [
+                    {"address": ADDR_A, "chains": ["ethereum"]},
+                    {"address": ADDR_B, "chains": ["ethereum"], "source_ids": ["s2"]},
+                ],
+            },
+        ],
+        "sources": {"s1": "https://old.example.com/contracts", "s2": "https://etherscan.io/address/" + ADDR_B},
+    }
+    new = {
+        "contracts": [
+            {"address": ADDR_C, "name": "C", "confidence": 0.85, "source_ids": ["s1"]},
+        ],
+        "sources": {"s1": "https://new.example.com/contracts"},
+        "dropped": {"deployer_expansion_over_limit": 2},
+    }
+
+    merged = merge_inventory(prev, new)
+    by_addr = {c["address"]: c for c in merged["contracts"]}
+
+    assert set(by_addr) == {ADDR_A.lower(), ADDR_B.lower(), ADDR_C.lower()}
+    assert all("deployments" not in c for c in merged["contracts"])
+    sources = merged["sources"]
+    assert [sources[s] for s in by_addr[ADDR_C.lower()]["source_ids"]] == ["https://new.example.com/contracts"]
+    assert [sources[s] for s in by_addr[ADDR_A.lower()]["source_ids"]] == [
+        "https://old.example.com/contracts",
+        "https://etherscan.io/address/" + ADDR_B,
+    ]
+    assert [sources[s] for s in by_addr[ADDR_B.lower()]["source_ids"]] == ["https://etherscan.io/address/" + ADDR_B]
+    assert merged["dropped"] == {"deployer_expansion_over_limit": 2}
+
+
+def test_company_discovery_persists_every_listed_deployment(db_session, monkeypatch):
+    from sqlalchemy import select
+
+    from db.models import Contract
+    from db.queue import get_artifact
+    from workers.base import JobHandledDirectly
+    from workers.discovery import DiscoveryWorker
+
+    same_chain = [f"0x{0xA00 + i:040x}" for i in range(2)]
+    other_chain = f"0x{0xB00:040x}"
+    inventory = _mock_inventory(
+        [
+            {
+                "name": "HashConsensus",
+                "chains": ["ethereum", "base"],
+                "confidence": 1.0,
+                "source": ["ai_inventory"],
+                "source_ids": ["s1"],
+                "deployments": [
+                    {"address": same_chain[0], "chains": ["ethereum"]},
+                    {"address": same_chain[1], "chains": ["ethereum"], "source_ids": ["s2"]},
+                    {"address": other_chain, "chains": ["base"]},
+                    {"chains": ["ethereum"]},
+                ],
+            },
+            {
+                "name": "Solo",
+                "address": ADDR_C,
+                "chains": ["ethereum"],
+                "confidence": 0.8,
+                "source": ["ai_inventory"],
+                "source_ids": ["s1"],
+            },
+        ],
+        sources={"s1": "https://docs.example.com/contracts", "s2": "https://app.safe.global/home?safe=eth:" + ADDR_C},
+        dropped={"deployer_expansion_over_limit": 4},
+    )
+    monkeypatch.setattr(
+        "services.discovery.run_discovery.run_discovery",
+        lambda *a, **kw: {
+            "audits": {"reports": [], "errors": [], "notes": []},
+            "addresses": inventory,
+            "meta": {"protocol": "GroupedProtocol", "estimated_cost_usd": 0.0},
+        },
+    )
+    job = _make_company_job(db_session, company="GroupedProtocol")
+    worker = DiscoveryWorker()
+    worker.update_detail = MagicMock()
+    monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *a, **kw: None)
+
+    with pytest.raises(JobHandledDirectly):
+        worker._process_company(db_session, job)
+
+    rows = {
+        (r.address, r.chain): r
+        for r in db_session.execute(
+            select(Contract).where(Contract.address.in_([*same_chain, other_chain, ADDR_C.lower()]))
+        ).scalars()
+    }
+    assert set(rows) == {
+        (same_chain[0], "ethereum"),
+        (same_chain[1], "ethereum"),
+        (other_chain, "base"),
+        (ADDR_C.lower(), "ethereum"),
+    }
+    assert rows[(same_chain[0], "ethereum")].contract_name == "HashConsensus"
+    assert rows[(same_chain[0], "ethereum")].discovery_url == "https://docs.example.com/contracts"
+    assert rows[(same_chain[1], "ethereum")].discovery_url == "https://app.safe.global/home?safe=eth:" + ADDR_C
+
+    summary = get_artifact(db_session, job.id, "discovery_summary")
+    assert isinstance(summary, dict)
+    assert summary["inventory_entries"] == 2
+    assert summary["discovered_count"] == 4
+    assert summary["dropped"] == {"deployer_expansion_over_limit": 4, "no_address": 1}

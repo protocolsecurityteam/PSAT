@@ -50,7 +50,7 @@ from services.discovery.deployer_enumeration import (
     session_deployer_enumerator,
 )
 from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
-from services.discovery.inventory import merge_inventory, search_protocol_inventory
+from services.discovery.inventory import inventory_entries, merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import (
     needs_probe,
     probe_predates_revocation,
@@ -776,8 +776,14 @@ class DiscoveryWorker(BaseWorker):
             )
             logger.warning("Job %s: audit report persistence failed: %s", job.id, exc)
 
-        discovered = [e for e in inventory.get("contracts", []) if e.get("address")]
+        inventory_contracts = inventory.get("contracts", [])
+        discovered, missing_address = inventory_entries(inventory_contracts)
         record_stage_metric("contracts_discovered", len(discovered))
+        dropped = dict(inventory.get("dropped") or {})
+        if missing_address:
+            dropped["no_address"] = missing_address
+        raw_sources = inventory.get("sources")
+        sources_by_id: dict = raw_sources if isinstance(raw_sources, dict) else {}
 
         # Write every discovered address; ranking waits for selection so all sources compete for ``analyze_limit``. The
         # upsert unions ``discovery_sources``, and inventory entries keep their own source lists for richer
@@ -789,6 +795,7 @@ class DiscoveryWorker(BaseWorker):
             entry_sources = entry.get("source") or ["inventory"]
             if not isinstance(entry_sources, list):
                 entry_sources = [str(entry_sources)]
+            source_urls = [sources_by_id[sid] for sid in entry.get("source_ids") or [] if sources_by_id.get(sid)]
             bulk_entries.append(
                 {
                     "address": str(entry["address"]),
@@ -797,6 +804,7 @@ class DiscoveryWorker(BaseWorker):
                     "contract_name": entry.get("name"),
                     "confidence": entry.get("confidence"),
                     "chains": entry.get("chains"),
+                    "discovery_url": source_urls[0] if source_urls else None,
                 }
             )
         # One SELECT plus a bulk add instead of hundreds of round-trips. Chainless entries inherit this discovery's
@@ -833,7 +841,9 @@ class DiscoveryWorker(BaseWorker):
                 "mode": "company",
                 "company": company,
                 "official_domain": inventory.get("official_domain"),
+                "inventory_entries": len(inventory_contracts),
                 "discovered_count": len(discovered),
+                "dropped": dropped,
             },
         )
 
