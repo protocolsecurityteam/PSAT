@@ -332,6 +332,8 @@ def resolve_contract_capabilities(
     resolve_counters: dict[str, Any] = {}
     # Per-pass memo of live nullary getter reads, shared across functions; discarded with this frame, never persisted.
     live_read_memo: dict[Any, Any] = {}
+    # Per-pass Solmate RolesAuthority folds, one per authority; discarded with this frame.
+    solmate_role_states: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
     # Pin one finalized height for the whole pass (#119), stepped back ``resolver_pin_margin`` so healthy cursors stay
     # ``exact`` and stalled ones demote. ``None`` leaves it unpinned, which demotes (safe). The differential probe keeps
@@ -367,7 +369,11 @@ def resolve_contract_capabilities(
                     fn_signature if isinstance(fn_signature, str) else None, canonical_signatures
                 ),
             ),
-            meta={"resolve_counters": resolve_counters, "live_read_memo": live_read_memo},
+            meta={
+                "resolve_counters": resolve_counters,
+                "live_read_memo": live_read_memo,
+                "solmate_role_states": solmate_role_states,
+            },
         )
         fn_started = time.monotonic()
         cap = evaluate_tree_with_registry(tree, registry, ctx)

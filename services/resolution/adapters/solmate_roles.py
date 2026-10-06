@@ -13,6 +13,9 @@ beyond ``EventIndexedAdapter``, hence a named adapter over the same ``IndexedEve
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, TypeGuard
 
 from eth_utils.crypto import keccak
@@ -105,64 +108,13 @@ class SolmateRolesAuthorityAdapter:
         if authority is None or target is None or selector is None or iter_rows is None:
             return _check_only(authority, descriptor, basis)
 
-        last_block = _min_indexed_block(repo, ctx.chain_id, authority)
-        if last_block is None:
-            # Not indexed to head: a partial set would freeze and an empty one would falsely say "nobody". Always defer;
-            # ``no_index_cursor`` is marked for the reconciler.
-            return _check_only(authority, descriptor, ["no_index_cursor"])
-        covered_through = last_block
-        scan_window: dict[str, Any] | None = None
-        try:
-            if _cursor_covers_block(last_block, ctx.block):
-                rows = list(
-                    iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=ctx.block)
-                )
-            else:
-                # A grant or revoke in (cursor, block] would be missing from an index-only fold.
-                scanner = tail_scanner_for(ctx)
-                scan = (
-                    scanner(authority, _ROLE_TOPICS, last_block, ctx.block)
-                    if scanner is not None and isinstance(ctx.block, int)
-                    else None
-                )
-                if scan is None or not scan.complete:
-                    return _check_only(authority, descriptor, ["cursor_behind_block"])
-                durable = iter_rows(
-                    chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=last_block
-                )
-                rows = [*durable, *scan.logs]
-                covered_through = scan.to_block
-                scan_window = scan.trace_fields()
-        except UndecodableEventRow:
-            return _check_only(authority, descriptor, [UNDECODABLE_EVENT_DATA])
-        except Exception:
-            return _check_only(authority, descriptor, ["event_log_backend_error"])
+        state = _role_state(repo, authority, ctx)
+        if isinstance(state, str):
+            return _check_only(authority, descriptor, [state])
 
-        roles_for_target_sig: set[int] = set()
-        public = False
-        users_by_role: dict[int, set[str]] = {}
-        # Rows must be in log order so toggles fold to the final state.
-        for row in rows:
-            topics = list(getattr(row, "topics", None) or [])
-            data_words = list(getattr(row, "data_words", None) or [])
-            if not topics:
-                continue
-            topic0 = str(topics[0]).lower()
-            enabled = _word_bool(data_words[0]) if data_words else False
-            if topic0 == ROLE_CAPABILITY_UPDATED and len(topics) >= 4:
-                if _word_addr(topics[2]) == target and _word_selector(topics[3]) == selector:
-                    role = _word_int(topics[1])
-                    roles_for_target_sig.add(role) if enabled else roles_for_target_sig.discard(role)
-            elif topic0 == PUBLIC_CAPABILITY_UPDATED and len(topics) >= 3:
-                if _word_addr(topics[1]) == target and _word_selector(topics[2]) == selector:
-                    public = enabled
-            elif topic0 == USER_ROLE_UPDATED and len(topics) >= 3:
-                user = _word_addr(topics[1])
-                if user is not None:
-                    bucket = users_by_role.setdefault(_word_int(topics[2]), set())
-                    bucket.add(user) if enabled else bucket.discard(user)
-
-        if public:
+        key = (target, selector)
+        roles_for_target_sig = state.roles_by_capability.get(key, frozenset())
+        if state.public.get(key, False):
             logger.debug(
                 "solmate_roles decision",
                 extra={
@@ -178,7 +130,7 @@ class SolmateRolesAuthorityAdapter:
 
         members: set[str] = set()
         for role in roles_for_target_sig:
-            members |= users_by_role.get(role, set())
+            members |= state.users_by_role.get(role, frozenset())
 
         trace = [
             {
@@ -187,10 +139,10 @@ class SolmateRolesAuthorityAdapter:
                 "target": target,
                 "selector": selector,
                 "roles": sorted(roles_for_target_sig),
-                **(scan_window or {}),
+                **(state.scan_window or {}),
             }
         ]
-        if not rows:
+        if not state.had_rows:
             # Indexed but no role events: can't confirm this is a RolesAuthority, so fail closed to a probe.
             return _check_only(authority, descriptor, ["authority_unconfirmed_no_role_events"])
         logger.debug(
@@ -208,9 +160,104 @@ class SolmateRolesAuthorityAdapter:
             sorted(members),
             quality="exact",
             confidence="enumerable",
-            last_indexed_block=covered_through,
+            last_indexed_block=state.covered_through,
             trace=trace,
         )
+
+
+@dataclass(frozen=True)
+class _RoleState:
+    """An authority's role events folded over every ``(target, selector)``, in log order."""
+
+    roles_by_capability: Mapping[tuple[str | None, str | None], frozenset[int]]
+    public: Mapping[tuple[str | None, str | None], bool]
+    users_by_role: Mapping[int, frozenset[str]]
+    covered_through: int
+    scan_window: Mapping[str, Any] | None
+    had_rows: bool
+
+
+def _role_state(repo: Any, authority: str, ctx: EvaluationContext) -> _RoleState | str:
+    """The folded role state for ``authority`` at ``ctx.block``, or the basis it can't be read. Loaded once per pass
+    through ``ctx.meta['solmate_role_states']``; callers build a fresh capability from it on every answer.
+    """
+    cache = ctx.meta.get("solmate_role_states") if isinstance(ctx.meta, dict) else None
+    key = (ctx.chain_id, authority, ctx.block)
+    if isinstance(cache, dict) and key in cache:
+        return cache[key]
+    outcome, settled = _load_role_state(repo, authority, ctx)
+    if settled and isinstance(cache, dict):
+        cache[key] = outcome
+    return outcome
+
+
+def _load_role_state(repo: Any, authority: str, ctx: EvaluationContext) -> tuple[_RoleState | str, bool]:
+    """``(state or basis, settled)``. A backend error, a failed cursor read or an incomplete tail is unsettled, so the
+    next leaf retries it.
+    """
+    last_block, cursor_read = _read_indexed_block(repo, ctx.chain_id, authority)
+    if last_block is None:
+        # Not indexed to head: a partial set would freeze and an empty one would falsely say "nobody". Always defer;
+        # ``no_index_cursor`` is marked for the reconciler.
+        return "no_index_cursor", cursor_read
+    covered_through = last_block
+    scan_window: dict[str, Any] | None = None
+    iter_rows = repo.iter_event_rows
+    try:
+        if _cursor_covers_block(last_block, ctx.block):
+            rows = list(
+                iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=ctx.block)
+            )
+        else:
+            # A grant or revoke in (cursor, block] would be missing from an index-only fold.
+            scanner = tail_scanner_for(ctx)
+            scan = (
+                scanner(authority, _ROLE_TOPICS, last_block, ctx.block)
+                if scanner is not None and isinstance(ctx.block, int)
+                else None
+            )
+            if scan is None or not scan.complete:
+                return "cursor_behind_block", False
+            durable = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=last_block)
+            rows = [*durable, *scan.logs]
+            covered_through = scan.to_block
+            scan_window = scan.trace_fields()
+    except UndecodableEventRow:
+        return UNDECODABLE_EVENT_DATA, True
+    except Exception:
+        return "event_log_backend_error", False
+
+    roles_by_capability: dict[tuple[str | None, str | None], set[int]] = {}
+    public: dict[tuple[str | None, str | None], bool] = {}
+    users_by_role: dict[int, set[str]] = {}
+    # Rows must be in log order so toggles fold to the final state.
+    for row in rows:
+        topics = list(getattr(row, "topics", None) or [])
+        data_words = list(getattr(row, "data_words", None) or [])
+        if not topics:
+            continue
+        topic0 = str(topics[0]).lower()
+        enabled = _word_bool(data_words[0]) if data_words else False
+        if topic0 == ROLE_CAPABILITY_UPDATED and len(topics) >= 4:
+            roles = roles_by_capability.setdefault((_word_addr(topics[2]), _word_selector(topics[3])), set())
+            role = _word_int(topics[1])
+            roles.add(role) if enabled else roles.discard(role)
+        elif topic0 == PUBLIC_CAPABILITY_UPDATED and len(topics) >= 3:
+            public[(_word_addr(topics[1]), _word_selector(topics[2]))] = enabled
+        elif topic0 == USER_ROLE_UPDATED and len(topics) >= 3:
+            user = _word_addr(topics[1])
+            if user is not None:
+                bucket = users_by_role.setdefault(_word_int(topics[2]), set())
+                bucket.add(user) if enabled else bucket.discard(user)
+    state = _RoleState(
+        roles_by_capability=MappingProxyType({k: frozenset(v) for k, v in roles_by_capability.items()}),
+        public=MappingProxyType(public),
+        users_by_role=MappingProxyType({k: frozenset(v) for k, v in users_by_role.items()}),
+        covered_through=covered_through,
+        scan_window=MappingProxyType(scan_window) if scan_window is not None else None,
+        had_rows=bool(rows),
+    )
+    return state, True
 
 
 def _check_only(authority: str | None, descriptor: dict, basis: list[str]) -> CapabilityExpr:
@@ -277,15 +324,16 @@ def _resolve_target_selector(descriptor: dict, ctx: EvaluationContext) -> str | 
     return None
 
 
-def _min_indexed_block(repo: Any, chain_id: int, event_address: str) -> int | None:
+def _read_indexed_block(repo: Any, chain_id: int, event_address: str) -> tuple[int | None, bool]:
+    """``(cursor, read)``; ``read`` is False when the lookup itself failed, which is retried rather than settled."""
     getter = getattr(repo, "min_indexed_block", None)
     if not callable(getter):
-        return None
+        return None, True
     try:
         value = getter(chain_id=chain_id, event_address=event_address, topic0s=_ROLE_TOPICS)
     except Exception:
-        return None
-    return value if isinstance(value, int) else None
+        return None, False
+    return (value if isinstance(value, int) else None), True
 
 
 def _is_address(value: Any) -> TypeGuard[str]:

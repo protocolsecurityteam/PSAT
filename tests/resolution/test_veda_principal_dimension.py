@@ -272,6 +272,30 @@ def test_pin2b_nonempty_inner_exit_neither_drops_nor_leaks(session, fixture):
     )
 
 
+@requires_postgres
+def test_one_role_fold_per_authority_serves_the_whole_pass(session, fixture, monkeypatch):
+    from services.resolution.adapters import solmate_roles
+
+    loads: list[tuple] = []
+    answers: list[str] = []
+    load, enumerate_ = solmate_roles._load_role_state, solmate_roles.SolmateRolesAuthorityAdapter.enumerate
+
+    def counted_load(repo, authority, ctx):
+        loads.append((ctx.chain_id, authority, ctx.block))
+        return load(repo, authority, ctx)
+
+    def counted_enumerate(self, descriptor, ctx):
+        answers.append(ctx.contract_address)
+        return enumerate_(self, descriptor, ctx)
+
+    monkeypatch.setattr(solmate_roles, "_load_role_state", counted_load)
+    monkeypatch.setattr(solmate_roles.SolmateRolesAuthorityAdapter, "enumerate", counted_enumerate)
+    _resolve(session, fixture, seed_vault=True, extra_events=_inner_exit_grant_events(fixture["vault_address"]))
+
+    assert loads == [(1, fixture["authority_address"].lower(), _ROLE_FRONTIER)]
+    assert len(answers) > 1
+
+
 # The fix must not resurrect true negatives.
 
 
