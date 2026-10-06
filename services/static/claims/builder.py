@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from utils.logging import record_degraded
+
 from .context import ClaimContext
 from .matchers import discover
 from .registry import emit_claim, legacy_projections, registry, resolve_claim_precedence
@@ -32,6 +34,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     functions: dict[str, list[Claim]] = {signature: [] for signature in signatures}
 
     for entry in registry().values():
+        pending: dict[str, Claim] = {}
         try:
             if not entry.gate(ctx):
                 continue
@@ -69,21 +72,24 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
                     evidence.witness["authority_scope_ids"] = [s["id"] for s in selected]
                 elif source_sites:
                     evidence.witness["authority_scope_ids"] = []
-                functions[signature].append(emit_claim(entry.claim_id, evidence.tier, evidence.witness))
-        except Exception:
+                pending[signature] = emit_claim(entry.claim_id, evidence.tier, evidence.witness)
+        except Exception as exc:
+            record_degraded(phase="claim_matcher", exc=exc, context={"claim_id": entry.claim_id})
             logger.warning(
                 "claim matcher %s failed",
                 entry.claim_id,
                 extra={"claim_id": entry.claim_id},
                 exc_info=True,
             )
+        else:
+            for signature, claim in pending.items():
+                functions[signature].append(claim)
 
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
 
-    # The canonical ABI selector (the real ``msg.sig``). The effects record's ``selector`` hashes the declared
-    # signature, which is wrong for interface/enum/struct params. Unlowerable signatures are omitted (not determined);
-    # fallback/receive have no selector.
+    # Retain the canonical stamp for consumers of older effects artifacts as well.
+    # Unlowerable signatures are omitted; fallback/receive have no selector.
     abi_selectors = {
         signature: selector
         for signature in signatures

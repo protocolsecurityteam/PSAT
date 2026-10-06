@@ -1475,6 +1475,9 @@ class StaticWorker(BaseWorker):
             analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
                 project_dir
             )
+            from schemas.static_artifacts import validate_static_artifacts
+
+            validate_static_artifacts(semantic_predicate_trees, semantic_effects)
         except Exception as exc:
             record_degraded(
                 phase="contract_analysis",

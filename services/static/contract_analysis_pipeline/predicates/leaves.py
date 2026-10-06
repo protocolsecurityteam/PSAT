@@ -568,15 +568,7 @@ def _build_unary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function: 
     op_type = getattr(ir, "type", None)
     if op_type == getattr(UnaryType, "BANG", "!"):
         inner = ir.rvalue
-        flipped_polarity = "allowed_when_true" if gate.polarity == "allowed_when_false" else "allowed_when_false"
-        new_gate = RevertGate(
-            kind=gate.kind,
-            condition_value=inner,
-            polarity=flipped_polarity,
-            node=gate.node,
-            expression_text=gate.expression_text,
-            basis=gate.basis,
-        )
+        new_gate = gate.negated(inner)
         return _build_leaf_from_gate(new_gate, prov, function) or _unsupported_leaf(
             reason="negated_unknown", expression=str(ir)
         )

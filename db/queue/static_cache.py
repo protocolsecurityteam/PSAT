@@ -21,6 +21,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.storage import artifact_key, get_storage_client, source_file_key
+from schemas.static_artifacts import validate_static_artifacts
 from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
@@ -140,7 +141,7 @@ def find_completed_static_cache(
 
     Looks up the contract by (address, chain), since ``copy_static_cache`` may have reassigned it. If that misses and
     *source_content_hash* is given, falls back to any completed job with the same verified source under the current
-    analyzer; the primary path is unchanged.
+    analyzer. Non-proxy donors on either path must have complete semantic artifacts from the current analyzer.
     """
     stmt = (
         select(Job)
@@ -188,6 +189,9 @@ def find_completed_static_cache(
         if not has_required:
             continue
 
+        if not contract_row.is_proxy and not _has_reusable_semantics(session, candidate):
+            continue
+
         summary = session.execute(
             select(ContractSummary).where(ContractSummary.contract_id == contract_row.id).limit(1)
         ).scalar_one_or_none()
@@ -201,6 +205,25 @@ def find_completed_static_cache(
         return _find_static_cache_by_source_hash(session, source_content_hash)
 
     return None
+
+
+def _has_reusable_semantics(session: Session, job: Job) -> bool:
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    if proven_analysis_schema_version(session, job) != ANALYSIS_SCHEMA_VERSION:
+        return False
+    try:
+        trees = get_artifact(session, job.id, "predicate_trees")
+        effects = get_artifact(session, job.id, "effects")
+    except Exception as exc:
+        record_degraded(phase="static_cache_read", exc=exc, context={"job_id": str(job.id)})
+        logger.warning("Static cache semantic artifacts unreadable", extra={"job_id": str(job.id)}, exc_info=True)
+        return False
+    try:
+        validate_static_artifacts(trees, effects)
+    except ValueError:
+        return False
+    return True
 
 
 def _find_static_cache_by_source_hash(session: Session, source_content_hash: str) -> Job | None:
@@ -249,6 +272,8 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_analysis").limit(1)
         ).scalar_one_or_none()
         if not has_analysis:
+            continue
+        if not _has_reusable_semantics(session, candidate):
             continue
         return candidate
     return None

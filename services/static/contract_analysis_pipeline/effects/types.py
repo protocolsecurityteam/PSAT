@@ -152,8 +152,8 @@ class ValueFlow(TypedDict):
 class EffectInfo(TypedDict):
     effect_scopes: NotRequired[list[dict[str, Any]]]
     function: str
-    selector: str
-    abi_signature: str
+    selector: str | None
+    abi_signature: str | None
     sinks: list[SinkRecord]
     state_writes: list[StateWriteFact]
     value_flows: list[ValueFlow]

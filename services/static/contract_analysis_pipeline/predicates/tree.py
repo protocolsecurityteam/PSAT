@@ -363,17 +363,7 @@ def _build_subtree_from_value(
         op_type = getattr(defining_ir, "type", None)
         if op_type == getattr(UnaryType, "BANG", "!"):
             inner_value = defining_ir.rvalue
-            flipped_polarity = "allowed_when_true" if gate.polarity == "allowed_when_false" else "allowed_when_false"
-            inner_gate = RevertGate(
-                kind=gate.kind,
-                condition_value=inner_value,
-                polarity=flipped_polarity,
-                node=gate.node,
-                containing_function=gate.containing_function,
-                call_chain=list(gate.call_chain),
-                expression_text=gate.expression_text,
-                basis=list(gate.basis),
-            )
+            inner_gate = gate.negated(inner_value)
             return _build_subtree_from_value(inner_value, prov, inner_gate, function)
 
     if isinstance(defining_ir, Binary):

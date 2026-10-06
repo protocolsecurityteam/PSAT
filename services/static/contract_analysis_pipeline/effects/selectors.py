@@ -40,7 +40,9 @@ def _own_selector(fn: Any) -> str | None:
     """
     if _is_fallback_or_receive(fn):
         return None
-    return _selector_for(_function_full_name(fn))
+    from ..predicate_artifacts import _canonical_signature
+
+    return _selector_for(_canonical_signature(fn))
 
 
 def _callee_signature(ir: Any) -> str | None:

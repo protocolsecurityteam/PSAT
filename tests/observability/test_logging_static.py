@@ -1,10 +1,10 @@
-"""Semantic-emit swallows are WARNING + ``record_degraded``, and ``predicate_fns_attempted`` vs
-``predicate_trees_built`` makes an empty semantic artifact chartable.
-"""
+"""Required semantic extraction failures remain observable and stop analysis."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+import pytest
 
 import services.static.contract_analysis_pipeline.core as core
 from services.static.contract_analysis_pipeline.core import (
@@ -41,13 +41,18 @@ def _stub_analysis_phases(monkeypatch):
     return subject
 
 
-def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch, tmp_path, caplog):
+@pytest.mark.parametrize(
+    "builder, phase",
+    [("build_predicate_artifacts_with_pause_info", "predicate_trees_emit"), ("build_effects", "effects_emit")],
+)
+def test_core_semantic_emit_failure_records_degraded_and_raises(monkeypatch, tmp_path, caplog, builder, phase):
     _stub_analysis_phases(monkeypatch)
 
     def _boom(_contract):
         raise RuntimeError("predicate IR-gen exploded")
 
-    monkeypatch.setattr(core, "build_predicate_artifacts_with_pause_info", _boom)
+    monkeypatch.setattr(core, "build_predicate_artifacts_with_pause_info", lambda _: ({"trees": {}}, {}))
+    monkeypatch.setattr(core, builder, _boom)
     monkeypatch.setattr(core, "detect_secondary_impl_pointers", lambda *_a, **_k: [])
 
     accumulator: list = []
@@ -57,26 +62,24 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
     try:
         with bind_trace_context(trace_id="t", job_id="j", stage="static", worker_id="StaticWorker-1"):
             with caplog.at_level("WARNING"):
-                analysis, trees, _effects = collect_contract_analysis_with_artifacts(tmp_path)
+                with pytest.raises(RuntimeError, match="predicate IR-gen exploded"):
+                    collect_contract_analysis_with_artifacts(tmp_path)
     finally:
         stage_metrics_var.reset(met_token)
         degraded_errors_var.reset(deg_token)
 
     phases = [e.phase for e in accumulator]
-    assert "predicate_trees_emit" in phases
-    emit = next(e for e in accumulator if e.phase == "predicate_trees_emit")
+    assert phase in phases
+    emit = next(e for e in accumulator if e.phase == phase)
     assert emit.severity == "degraded"
     assert emit.stage == "static"
     assert emit.exc_type == "builtins.RuntimeError"
 
-    rec = next(r for r in caplog.records if r.getMessage().startswith("semantic predicate_trees emit failed"))
+    rec = next(r for r in caplog.records if getattr(r, "phase", None) == phase)
     assert rec.levelname == "WARNING"
     assert getattr(rec, "exc_type", None) == "RuntimeError"
 
-    assert trees is not None and trees["error"]
-    assert analysis["analysis_status"]["static_analysis_completed"] is True
-    assert metrics["secondary_impl_pointers"] == 0
-    assert any(k.startswith("phase_ms_") for k in metrics)
+    assert "secondary_impl_pointers" not in metrics
 
 
 def test_unknown_parent_chain_reports_once_per_job(caplog):

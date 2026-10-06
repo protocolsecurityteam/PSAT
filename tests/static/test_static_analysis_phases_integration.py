@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from workers.static_worker import StaticWorker
 
 
@@ -62,14 +64,27 @@ class TestAnalysisPhaseSuccess:
 
 
 class TestAnalysisPhaseFailure:
-    def test_stores_analysis_error_on_exception(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        "artifact_name, invalid",
+        [(None, None)]
+        + [
+            (name, invalid)
+            for name in ("predicate_trees", "effects")
+            for invalid in (None, {}, {"error": "extraction failed"}, {"trees": [], "functions": []})
+        ],
+    )
+    def test_stores_analysis_error_on_failure(self, monkeypatch, tmp_path, artifact_name, invalid):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         session = MagicMock()
         job = _job()
 
         def _raise(project_dir):
-            raise RuntimeError("LLM analysis timed out")
+            if artifact_name is None:
+                raise RuntimeError("extraction failed")
+            trees = invalid if artifact_name == "predicate_trees" else {"trees": {}}
+            effects = invalid if artifact_name == "effects" else {"functions": {}}
+            return {"summary": {}}, trees, effects
 
         monkeypatch.setattr("workers.static_worker.collect_contract_analysis_with_artifacts", _raise)
         calls = _capture_store_artifact(monkeypatch)
@@ -79,4 +94,8 @@ class TestAnalysisPhaseFailure:
         assert result is None
         assert len(calls) == 1
         assert calls[0]["name"] == "analysis_error"
-        assert "LLM analysis timed out" in calls[0]["data"]["error"]
+        expected_error = (
+            "extraction failed" if artifact_name is None else f"Incomplete static artifact: {artifact_name}"
+        )
+        assert expected_error in calls[0]["data"]["error"]
+        assert not list(tmp_path.glob("*.json"))

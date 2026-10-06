@@ -49,7 +49,7 @@ def _tracking_plan(address: str) -> dict:
 
 
 _PREDICATE_TREES = {"schema_version": "semantic", "trees": {"pause()": {"node_type": "caller"}}}
-_EFFECTS = {"schema_version": "semantic", "effects": {"transfer()": [{"kind": "value_flow"}]}}
+_EFFECTS = {"schema_version": "semantic", "functions": {"transfer()": {"sinks": [{"kind": "value_flow"}]}}}
 
 
 def _make_donor(
@@ -190,6 +190,10 @@ def test_fallback_fires_only_on_primary_miss(db_session):
         pytest.param({"source_content_hash": None, "schema_version": None}, [HASH, None], id="legacy_null_hash"),
         # A proxy donor (contract_flags only) is not a code-plane reuse source.
         pytest.param({"with_analysis": False}, [HASH], id="proxy_donor"),
+        pytest.param({"extra_artifacts": {"predicate_trees": {"error": "failed"}}}, [HASH], id="failed_predicates"),
+        pytest.param({"extra_artifacts": {"effects": {"error": "failed"}}}, [HASH], id="failed_effects"),
+        pytest.param({"extra_artifacts": {"predicate_trees": {"trees": []}}}, [HASH], id="malformed_predicates"),
+        pytest.param({"extra_artifacts": {"effects": {"functions": []}}}, [HASH], id="malformed_effects"),
     ],
 )
 def test_ineligible_cross_chain_donor_is_not_reused(db_session, donor_kwargs, lookup_hashes):

@@ -153,10 +153,8 @@ CLASSIC_PAUSABLE = """
         pytest.param("classic", CLASSIC_PAUSABLE, id="classic"),
     ],
 )
-def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, monkeypatch, label, source):
-    """``core.py`` catches the trees stage and substitutes an empty ``PauseInfo`` while claims still run; ``false``
-    was published on every pausable contract. The healthy arm runs first so the fixture can't go vacuous.
-    """
+def test_pausability_is_not_published_when_the_trees_stage_raised(tmp_path, monkeypatch, label, source):
+    """A failed extraction cannot publish a successful analysis, even with partial classification evidence."""
     from services.static.contract_analysis_pipeline import core
     from tests.support.foundry_project import write_foundry_project
 
@@ -171,12 +169,5 @@ def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, mon
 
     monkeypatch.setattr(core, "build_predicate_artifacts_with_pause_info", _boom)
     degraded_project = write_foundry_project(tmp_path / "degraded", "C", body)
-    degraded, trees_artifact, effects_artifact = core.collect_contract_analysis_with_artifacts(degraded_project)
-
-    assert isinstance(trees_artifact, dict) and isinstance(effects_artifact, dict)
-    assert "error" in trees_artifact, "guard: the trees stage must actually have degraded"
-    assert any("claims" in record for record in (effects_artifact.get("functions") or {}).values()), (
-        "guard: the claims key is written anyway — that is why it cannot be the only discriminator"
-    )
-
-    assert degraded["pausability"]["is_pausable"] is None, degraded["pausability"]
+    with pytest.raises(RuntimeError, match="forced predicate_trees_emit failure"):
+        core.collect_contract_analysis_with_artifacts(degraded_project)

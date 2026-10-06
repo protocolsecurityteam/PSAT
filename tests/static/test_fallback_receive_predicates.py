@@ -76,10 +76,12 @@ def test_selectorless_signatures_are_not_canonical(signature):
     assert is_canonical_abi_signature(signature) is False
 
 
-def test_fallback_state_write_publishes_no_writer_selector(contract):
+@pytest.mark.parametrize("signature", ["fallback()", "receive()"])
+def test_fallback_state_write_publishes_no_writer_selector(contract, signature):
     functions = build_effects(contract)["functions"]
-    assert functions["fallback()"]["writer_selectors"] == []
-    assert functions["fallback()"]["state_writes"], "the write itself is still recorded"
+    assert functions[signature]["writer_selectors"] == []
+    assert functions[signature]["selector"] == ""
+    assert functions[signature]["state_writes"], "the write itself is still recorded"
 
 
 def test_no_named_function_can_receive_the_selectorless_sentinel():

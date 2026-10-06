@@ -171,13 +171,7 @@ def collect_contract_analysis_with_artifacts(
             extra={"exc_type": type(exc).__name__, "phase": "predicate_trees_emit"},
         )
         record_degraded(phase="predicate_trees_emit", exc=exc, context={"project_dir": str(project_dir)})
-        predicate_trees_artifact = {"schema_version": "semantic", "error": str(exc)}
-        pause_info = {
-            "pause_state_vars": [],
-            "pause_toggle_functions": [],
-            "reentrancy_state_vars": [],
-            "reentrancy_guarded_functions": [],
-        }
+        raise
 
     effects_artifact: EffectsArtifact | dict[str, Any]
     try:
@@ -190,7 +184,7 @@ def collect_contract_analysis_with_artifacts(
             extra={"exc_type": type(exc).__name__, "phase": "effects_emit"},
         )
         record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
-        effects_artifact = {"schema_version": "semantic", "error": str(exc)}
+        raise
 
     # Mint claims from the facts and project them onto legacy ``effect_labels``; must run before semantic_control, which
     # reads them.

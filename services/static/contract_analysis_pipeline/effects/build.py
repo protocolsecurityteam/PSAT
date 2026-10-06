@@ -8,7 +8,7 @@ from ..record_ordering import attach_record_ordering
 from ..summaries import _action_summary, _effect_labels
 from ..token_slots import derive_token_slots
 from .origins import _ENGINE_BUNDLE_SCOPE
-from .selectors import _function_full_name, _own_selector
+from .selectors import _function_full_name, _is_fallback_or_receive, _own_selector
 from .sinks import _build_sink_records, _is_externally_observable, _is_state_changing_entry_point
 from .state_writes import _state_write_facts
 from .types import (
@@ -95,6 +95,8 @@ def _reconcile_value_flow_labels(
 
 
 def _effect_info_for_function(function: Any) -> EffectInfo:
+    from ..predicate_artifacts import _canonical_signature
+
     sinks = _build_sink_records(function)
     state_writes = _state_write_facts(function, sinks)
     zero_value_sinks: set[str] = set()
@@ -130,12 +132,12 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     summary = _action_summary(labels, list(effect_targets))
 
     signature = _function_full_name(function)
-    # "" is the no-selector sentinel (fallback/receive), matching ``db/effect_cache.py``.
-    selector = _own_selector(function) or ""
+    # Distinguish a proven selectorless entry from one whose ABI type cannot be lowered.
+    selector = "" if _is_fallback_or_receive(function) else _own_selector(function)
     return {
         "function": signature,
         "selector": selector,
-        "abi_signature": signature,
+        "abi_signature": _canonical_signature(function),
         "sinks": sinks,
         "state_writes": state_writes,
         "value_flows": value_flows,

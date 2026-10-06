@@ -202,10 +202,17 @@ def test_attach_claims_tolerates_degraded_effects():
     attach_claims_to_effects(None, {"functions": {}})
 
 
-def test_build_claims_isolates_a_failing_matcher():
+@pytest.mark.parametrize("failure_at", [0, 1, 2])
+def test_build_claims_isolates_a_failing_matcher(failure_at, monkeypatch):
+    from utils.logging import degraded_errors_var
 
-    def _boom(_ctx: ClaimContext, _fn: str) -> ClaimEvidence | None:
-        raise RuntimeError("matcher blew up")
+    visited = []
+
+    def _boom(_ctx: ClaimContext, fn: str) -> ClaimEvidence | None:
+        visited.append(fn)
+        if len(visited) - 1 == failure_at:
+            raise RuntimeError("matcher blew up")
+        return ClaimEvidence(tier="idiom_structural", witness={"function": fn})
 
     entry = RegistryEntry(
         claim_id="test.raising_matcher",
@@ -216,13 +223,22 @@ def test_build_claims_isolates_a_failing_matcher():
         consumer_family="control_plane",
         grant_class="control.gate",
     )
+    effects = _facts()
+    effects["functions"]["last()"] = {"sinks": [], "effect_labels": []}
+    errors: list = []
+    token = degraded_errors_var.set(errors)
     register(entry)
+    monkeypatch.setattr("services.static.claims.builder.registry", lambda: {entry.claim_id: entry, **registry()})
     try:
-        artifact = build_claims(None, _facts(), {})
+        artifact = build_claims(None, effects, {})
     finally:
         _REGISTRY.pop("test.raising_matcher", None)
+        degraded_errors_var.reset(token)
     assert artifact["functions"]["deploy()"][0]["claim_id"] == "contract_deployment"
-    assert all(c["claim_id"] != "test.raising_matcher" for c in artifact["functions"]["deploy()"])
+    assert len(visited) == failure_at + 1
+    assert all(c["claim_id"] != entry.claim_id for claims in artifact["functions"].values() for c in claims)
+    assert len(errors) == 1
+    assert errors[0].context["claim_id"] == entry.claim_id
 
 
 def test_consumer_referenced_ids_are_subset_of_registry():
