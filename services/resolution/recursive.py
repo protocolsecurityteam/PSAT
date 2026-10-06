@@ -319,9 +319,14 @@ def _materialize_with_cross_process_cache(
     # a witness built on nothing.
     analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
     plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
-    # ``None`` on rows before c1d2e3f4a5b6; the mapping-writer extraction short-circuits.
+    # ``None`` on rows before c1d2e3f4a5b6; the mapping-writer extraction short-circuits. That extraction is the only
+    # reader and never mutates, so the two maps it reads are projected out without copying the ORM-cached blob.
     predicate_trees_cached = cm.hydrate_predicate_trees(row)
-    predicate_trees = copy.deepcopy(predicate_trees_cached) if predicate_trees_cached else None
+    predicate_trees = (
+        {k: predicate_trees_cached[k] for k in ("trees", "check_trees") if k in predicate_trees_cached}
+        if predicate_trees_cached
+        else None
+    )
     contract_name = row.contract_name or "Contract"
     return contract_name, analysis, plan, predicate_trees
 
