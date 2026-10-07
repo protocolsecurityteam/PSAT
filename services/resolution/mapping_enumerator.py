@@ -662,6 +662,18 @@ def _db_cache_enabled() -> bool:
     return os.getenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "1").lower() in ("1", "true", "yes")
 
 
+# Value-scan statuses where a write was skipped or never readable: any key's latest value may be wrong, so the entries
+# bound nothing (unlike a truncated scan, whose entries are proven up to where it stopped).
+UNREADABLE_VALUE_SCAN_STATUSES = frozenset(
+    {
+        "incomplete_undecodable_event",
+        "incomplete_unfoldable_writer_event",
+        "incomplete_ambiguous_writer_event",
+        "incomplete_no_writer_specs",
+    }
+)
+
+
 def value_writer_spec_foldable(spec: Any) -> bool:
     """Whether a value fold can replay this writer: its event carries the value, or it writes zero (``remove``)."""
     return spec.get("value_position") is not None or spec.get("direction") == "remove"

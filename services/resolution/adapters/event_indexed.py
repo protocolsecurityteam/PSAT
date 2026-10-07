@@ -439,7 +439,11 @@ class EventIndexedAdapter:
                 }
             )
 
-        from ..mapping_enumerator import enumerate_mapping_values_sync, filter_value_entries
+        from ..mapping_enumerator import (
+            UNREADABLE_VALUE_SCAN_STATUSES,
+            enumerate_mapping_values_sync,
+            filter_value_entries,
+        )
 
         meta = ctx.meta or {}
         kwargs: dict[str, Any] = {"value_predicate": value_predicate}
@@ -475,9 +479,10 @@ class EventIndexedAdapter:
         except Exception:
             return CapabilityExpr.unsupported("mapping_value_scan_failed")
 
-        if scan["status"] in _VALUE_SCAN_UNREADABLE:
+        if scan["status"] in UNREADABLE_VALUE_SCAN_STATUSES:
             # A skipped write could have changed any key's value, so the listed keys bound nothing.
-            return CapabilityExpr.unsupported(_VALUE_SCAN_UNREADABLE[scan["status"]])
+            reason = _VALUE_SCAN_UNREADABLE.get(scan["status"], "value_writer_event_unfoldable")
+            return CapabilityExpr.unsupported(reason)
         keys = filter_value_entries(scan["entries"], value_predicate)
         if keys is None:
             return CapabilityExpr.unsupported("value_predicate_not_evaluable")
