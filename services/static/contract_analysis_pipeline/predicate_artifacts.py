@@ -131,6 +131,34 @@ def _canonical_signature(fn: Any) -> str | None:
     return signature
 
 
+def dispatch_signature(callee: Any, declared_signature: str | None = None) -> str | None:
+    """The canonical ABI signature a call to ``callee`` dispatches on, or ``None`` when it can't be determined.
+
+    Lowered from the live Slither types; a public state variable's getter uses Slither's own lowered signature.
+    ``declared_signature`` (Slither's spelling) stands in only when it is already canonical, since an unlowered name
+    hashes to a selector the chain never dispatches.
+    """
+    from slither.core.variables.state_variable import StateVariable
+
+    signature: str | None = None
+    if isinstance(callee, StateVariable):
+        try:
+            signature = callee.solidity_signature
+        except (AttributeError, KeyError, TypeError, ValueError):
+            signature = None
+    elif callee is not None:
+        signature = _canonical_signature(callee)
+    if signature is None:
+        signature = declared_signature
+    return signature if isinstance(signature, str) and is_canonical_abi_signature(signature) else None
+
+
+def dispatch_selector(callee: Any, declared_signature: str | None = None) -> str | None:
+    """``keccak256[:4]`` of :func:`dispatch_signature`, or ``None``."""
+    signature = dispatch_signature(callee, declared_signature)
+    return None if signature is None else "0x" + keccak(text=signature).hex()[:8]
+
+
 _ELEMENTARY_PREFIXES = (
     "uint",
     "int",

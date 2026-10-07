@@ -33,14 +33,22 @@ def _selector_for(signature: str | None) -> str | None:
     return "0x" + keccak(text=signature).hex()[:8]
 
 
-def _own_selector(fn: Any) -> str | None:
-    """The selector that reaches ``fn``, or ``None`` for fallback/receive (their name hashes are not dispatches).
+def _own_abi_signature(fn: Any) -> str | None:
+    """``fn``'s canonical ABI signature (``addAsset(address)``, not Slither's ``addAsset(IToken)``), or ``None`` when
+    its parameter types can't be lowered.
+    """
+    from ..predicate_artifacts import dispatch_signature
 
-    Matches ``db/effect_cache.py``'s empty-string sentinel.
+    return dispatch_signature(fn, _function_full_name(fn))
+
+
+def _own_selector(fn: Any) -> str | None:
+    """The selector that reaches ``fn``, or ``None``: for fallback/receive (their name hashes are not dispatches) and
+    when :func:`_own_abi_signature` can't lower it. Callers tell the two apart with :func:`_is_fallback_or_receive`.
     """
     if _is_fallback_or_receive(fn):
         return None
-    return _selector_for(_function_full_name(fn))
+    return _selector_for(_own_abi_signature(fn))
 
 
 def _callee_signature(ir: Any) -> str | None:
@@ -135,7 +143,7 @@ def _selector_of_member_access(ir: Any) -> str | None:
     candidates = [fn for fn in (getattr(target, "functions", None) or []) if (getattr(fn, "name", "") or "") == member]
     if len(candidates) != 1:
         return None
-    return _selector_for(_function_full_name(candidates[0]))
+    return _own_selector(candidates[0])
 
 
 def _ir_operands(ir: Any) -> list[Any]:
