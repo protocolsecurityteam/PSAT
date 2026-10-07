@@ -288,3 +288,23 @@ def test_all_read_paths_keep_headers_and_pass_shared_admission(monkeypatch, meth
         function("https://rpc.example", [("eth_call", [{}, "latest"])], headers=headers)
     assert admissions == [1]
     assert sent[0]["headers"]["X-Test-Trace"] == "read-path"
+
+
+@requires_postgres
+def test_waiting_batch_books_ahead_so_single_calls_cannot_starve_it(shared_gate, monkeypatch):
+    monkeypatch.setenv("PSAT_RPC_BURST", "10")
+    monkeypatch.setenv("PSAT_RPC_RPS", "1")
+    assert limits._reserve(shared_gate, 10) == 0
+    batch_wait = limits._reserve(shared_gate, 10, max_wait=30)
+    assert 9 < batch_wait <= 10
+    # A later single call queues behind the booked batch instead of taking the next refill.
+    assert limits._reserve(shared_gate, 1) > batch_wait
+
+
+@requires_postgres
+def test_wait_beyond_deadline_books_nothing(shared_gate, monkeypatch):
+    monkeypatch.setenv("PSAT_RPC_BURST", "10")
+    monkeypatch.setenv("PSAT_RPC_RPS", "1")
+    assert limits._reserve(shared_gate, 10) == 0
+    assert limits._reserve(shared_gate, 10, max_wait=5) > 5
+    assert limits._reserve(shared_gate, 1, max_wait=5) <= 1

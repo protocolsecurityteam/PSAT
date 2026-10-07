@@ -108,8 +108,13 @@ def _row(session, key: str):
     return session.execute(select(OpsKv).where(OpsKv.key == key).with_for_update()).scalar_one()
 
 
-def _reserve(url: str, count: int) -> float:
-    """Return a delay without holding a connection/lock during the wait."""
+def _reserve(url: str, count: int, max_wait: float = 0) -> float:
+    """Book ``count`` tokens when they are available within ``max_wait``; return the delay to sleep first.
+
+    Booking ahead lets the bucket go negative, so later callers queue behind it instead of
+    taking each refilled token before a waiting batch can accumulate enough. A delay above
+    ``max_wait`` books nothing.
+    """
     rate = float(os.getenv("PSAT_RPC_RPS", "5"))
     burst = int(os.getenv("PSAT_RPC_BURST", "10"))
     hourly_limit = int(os.getenv("PSAT_RPC_HOURLY_LIMIT", "20000"))
@@ -130,9 +135,10 @@ def _reserve(url: str, count: int) -> float:
             if used + count > hourly_limit:
                 raise RpcBackpressure("RPC gateway hourly allowance exhausted", max(1, window + 3600 - now))
             tokens = min(burst, float(state.get("tokens", burst)) + max(0, now - float(state.get("at", now))) * rate)
-            if tokens < count:
+            delay = max(0.0, (count - tokens) / rate)
+            if delay > max_wait:
                 session.commit()
-                return (count - tokens) / rate
+                return delay
             scope = current_scope()
             if scope is not None:
                 run_key = "rpc:run:" + hashlib.sha256(scope.run_id.encode()).hexdigest()[:40]
@@ -144,7 +150,7 @@ def _reserve(url: str, count: int) -> float:
             state.update(tokens=tokens - count, at=now, used=used + count, window=window if used else now)
             row.value = state
             session.commit()
-        return 0
+        return delay
     except (RpcBackpressure, RpcBudgetExceeded):
         raise
     except Exception as exc:
@@ -163,15 +169,13 @@ def admit(url: str, count: int) -> None:
         charge_attempt("rpc")
     if os.getenv("PSAT_RPC_LIMITER_MODE", "postgres") == "off":
         return  # Explicit CLI/test escape hatch; production defaults to shared enforcement.
-    deadline = time.monotonic() + float(os.getenv("PSAT_RPC_ADMISSION_TIMEOUT_S", "30"))
+    max_wait = float(os.getenv("PSAT_RPC_ADMISSION_TIMEOUT_S", "30"))
     try:
-        while True:
-            delay = _reserve(url, count)
-            if delay == 0:
-                return
-            if time.monotonic() + delay > deadline:
-                raise RpcBackpressure("RPC admission wait exceeded its deadline")
-            time.sleep(min(delay, 1))
+        delay = _reserve(url, count, max_wait)
+        if delay > max_wait:
+            raise RpcBackpressure("RPC admission wait exceeded its deadline", delay)
+        if delay:
+            time.sleep(delay)
     except (RpcBackpressure, RpcBudgetExceeded) as exc:
         if scope is not None:
             scope.failure = exc
@@ -212,7 +216,8 @@ def overload(url: str, retry_after: Any = None) -> float:
                 blocked_until=max(float(state.get("blocked_until", 0)), now + delay),
                 limited_at=now,
                 strikes=strikes,
-                tokens=0,
+                # Keep booked-ahead debt; resetting to 0 would forgive it.
+                tokens=min(0.0, float(state.get("tokens", 0))),
                 at=now,
             )
             row.value = state
