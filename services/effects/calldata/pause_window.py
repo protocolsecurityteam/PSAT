@@ -45,8 +45,8 @@ logger = logging.getLogger("services.effects.calldata")
 
 
 def _claim_latch_pairs(session: Session, function_id: int) -> set[tuple[str, str | None]]:
-    """Latch ``(var, member)`` pairs from a persisted ``pause.set`` witness; usually empty (blank-claim selection),
-    so corroborating only.
+    """Latch ``(var, member)`` pairs from a persisted ``pause.set`` witness, preferred over :func:`_latch_pairs`;
+    empty for a blank row.
     """
     from services.effects.prefetch import get_prefetch
 

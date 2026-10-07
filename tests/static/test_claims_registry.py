@@ -168,7 +168,7 @@ def test_claim_context_tolerates_degraded_effects():
     assert ctx.function_signatures() == []
     assert ctx.sinks("anything()") == []
     assert ctx.effect_labels("anything()") == []
-    assert ctx.selector("anything()") == ""
+    assert ctx.selector("anything()") is None
     assert ctx.canonical_signature("anything()") is None
 
 

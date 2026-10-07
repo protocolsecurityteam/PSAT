@@ -48,6 +48,7 @@ from .binding import (
     _bind_value,
     _bound_parameter_operand,
     _callee_argument_operands,
+    _callee_tree_entry,
     _is_caller_source,
     _is_target_call_operand,
     _normalize_operand_for_call_arg,
@@ -56,7 +57,6 @@ from .binding import (
     _promote_bound_caller_leaf,
     _resolve_static_external_call_operand,
     _selector_for_signature,
-    _tree_for_signature_or_selector,
 )
 from .core import (
     EvaluationContext,
@@ -205,7 +205,7 @@ __all__ = [
     "_state_var_lookup_key",
     "_tag_caller_subject",
     "_target_address_from_descriptor",
-    "_tree_for_signature_or_selector",
+    "_callee_tree_entry",
     "_view_call_caller_selects_key",
     "evaluate_tree",
     "evaluate_tree_with_registry",

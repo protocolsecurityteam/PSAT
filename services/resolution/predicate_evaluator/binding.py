@@ -247,25 +247,68 @@ def _is_caller_source(item: dict[str, Any]) -> bool:
     return item.get("source") in _CALLER_SOURCES
 
 
-def _tree_for_signature_or_selector(
+def _callee_tree_entry(
     trees: dict[str, Any],
     *,
     callee_signature: str | None,
     callee_selector: str | None,
-) -> PredicateTree | None:
+    canonical_signatures: Any = None,
+) -> tuple[str, PredicateTree] | None:
+    """``(key, tree)`` for the callee, by Slither spelling, else by selector.
+
+    A tree is keyed by Slither's spelling, so its selector is the hash of the artifact's ``canonical_signatures`` entry
+    (or the key itself when already canonical). The key's own hash is kept for callers whose stored selector predates
+    canonical lowering.
+    """
     if callee_signature and callee_signature in trees:
         tree = trees[callee_signature]
-        return cast(PredicateTree, tree) if isinstance(tree, dict) else None
+        return (callee_signature, cast(PredicateTree, tree)) if isinstance(tree, dict) else None
     if callee_selector:
         for signature, tree in trees.items():
-            if not isinstance(signature, str):
+            if not isinstance(signature, str) or not isinstance(tree, dict):
                 continue
-            if _selector_for_signature(signature) == callee_selector and isinstance(tree, dict):
-                return cast(PredicateTree, tree)
+            selectors = {
+                _selector_for_signature(signature),
+                _key_dispatch_selector(signature, canonical_signatures),
+            }
+            if callee_selector in selectors:
+                return signature, cast(PredicateTree, tree)
     return None
+
+
+def _key_dispatch_selector(key: str, canonical_signatures: Any) -> str | None:
+    """The selector that reaches the function a tree is keyed under (its Slither spelling), or ``None``."""
+    canonical = canonical_signatures if isinstance(canonical_signatures, dict) else {}
+    return _selector_for_canonical_signature(canonical.get(key) or key)
+
+
+def _stored_dispatch_selector(selector: Any, signature: Any) -> str | None:
+    """A stored ``callee_selector``, or ``None`` when it is the hash of an unlowered spelling: trees written before
+    canonical lowering stored ``keccak("exit(address,ERC20,...)")``, a selector the callee never answers.
+    """
+    if not isinstance(selector, str) or not selector:
+        return None
+    if (
+        isinstance(signature, str)
+        and _selector_for_canonical_signature(signature) is None
+        and selector.lower() == _selector_for_signature(signature)
+    ):
+        return None
+    return selector
 
 
 def _selector_for_signature(signature: str) -> str | None:
     if "(" not in signature or not signature.endswith(")"):
         return None
     return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _selector_for_canonical_signature(signature: Any) -> str | None:
+    """A selector hashed from signature text only when the text is canonical; an unlowered spelling (``exit(address,
+    ERC20,...)``) hashes to a selector the chain never dispatches.
+    """
+    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+
+    if not isinstance(signature, str) or not is_canonical_abi_signature(signature):
+        return None
+    return _selector_for_signature(signature)
