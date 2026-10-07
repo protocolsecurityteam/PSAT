@@ -146,9 +146,18 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
 
     static_worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, static_worker)
+    # A cache hit from a proven-current era publishes its materialization, keyed by the deployed bytecode's keccak.
+    code_reads: list[str] = []
+
+    def fake_code(_rpc_url, address, **_kwargs):
+        code_reads.append(address.lower())
+        return "0x6000", "0x" + "ab" * 32
+
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", fake_code)
 
     static_worker.process(db_session, new_job)
 
+    assert code_reads == [ADDR_A.lower()]
     assert "slither" not in phases_run
     assert "analysis" not in phases_run
     assert "tracking_plan" not in phases_run
