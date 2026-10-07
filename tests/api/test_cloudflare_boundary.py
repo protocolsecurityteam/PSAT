@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -378,7 +379,7 @@ def test_account_routes_skip_operator_access_but_cookies_never_unlock_operator_r
     assert edge_client.post("/api/analyze", headers=session_cookie, json={}).status_code == 403
 
 
-def test_admin_account_must_be_the_operator_access_authenticated(edge_client, signing_keys, monkeypatch):
+def test_admin_account_must_be_the_operator_access_authenticated(edge_client, signing_keys, monkeypatch, caplog):
     import uuid
     from unittest.mock import MagicMock
 
@@ -396,6 +397,23 @@ def test_admin_account_must_be_the_operator_access_authenticated(edge_client, si
 
     signed_in["user"] = User(id=uuid.uuid4(), email="operator@example.com", email_verified=True, is_admin=True)
     assert edge_client.get("/api/jobs", headers=headers).status_code == 200
-    # Another admin account riding on this operator's Access session is refused.
+    # Another admin account riding on this operator's Access session is refused, and the log says why.
     signed_in["user"] = User(id=uuid.uuid4(), email="boss@example.com", email_verified=True, is_admin=True)
-    assert edge_client.get("/api/jobs", headers=headers).status_code == 401
+    with caplog.at_level(logging.WARNING, logger="routers.deps"):
+        assert edge_client.get("/api/jobs", headers=headers).status_code == 401
+    rejected = [
+        getattr(r, "reason", None) for r in caplog.records if r.getMessage().startswith("admin access rejected")
+    ]
+    assert rejected == ["access_identity_mismatch"]
+
+
+def test_production_does_not_start_with_the_admin_key(monkeypatch):
+    import api
+
+    monkeypatch.setattr(EdgeConfig, "from_env", classmethod(lambda cls, env=None: CONFIG))
+    monkeypatch.setattr(api.app, "middleware_stack", None)
+    monkeypatch.setenv("FLY_APP_NAME", "psat")
+    monkeypatch.setenv("PSAT_ADMIN_KEY", "k")
+    with pytest.raises(ValueError, match="PSAT_ADMIN_KEY"):
+        with TestClient(api.app):
+            pass

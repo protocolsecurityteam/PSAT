@@ -6,7 +6,7 @@ import hmac
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 from fastapi import Header, HTTPException, Request, status
@@ -47,10 +47,10 @@ MAX_TVL_HISTORY_DAYS = 90
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
-def _reject_admin(request: Request, reason: str) -> None:
+def _reject_admin(request: Request, reason: str) -> NoReturn:
     # Never log the supplied key.
     logger.warning(
-        "admin key rejected on %s",
+        "admin access rejected on %s",
         request.url.path,
         extra={"trace_id": trace_id_var.get(), "path": request.url.path, "reason": reason},
     )
@@ -105,42 +105,49 @@ def require_user(request: Request) -> User:
     return user
 
 
-def _account_admin(request: Request, user: User) -> bool:
+def _account_rejection(request: Request, user: User) -> str | None:
+    """Why ``user`` isn't an admin for this request, or ``None`` when they are."""
     if not is_admin(user):
-        return False
+        return "not_admin"
     if getattr(request.state, "edge_mode", None) != "cloudflare" and not is_production():
-        return True
+        return None
     # Behind operator Access the account must be the operator Access authenticated, not merely any admin account.
     identity = getattr(request.state, "access_identity", None)
     email = identity.get("email") if isinstance(identity, dict) else None
-    return isinstance(email, str) and email.lower() == user.email.lower()
+    if isinstance(email, str) and email.lower() == user.email.lower():
+        return None
+    return "access_identity_mismatch"
 
 
 def require_admin(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
-    """An admin is a signed-in account on the admin allowlist, or the shared key where one is configured (previews,
-    local).
+    """An admin is a signed-in account on the admin allowlist, or the shared key where one is configured
+    (previews, local).
     """
     reason = _key_reason(x_psat_admin_key)
     if reason is None:
         return
     # A wrong key is a hard fail even with a valid cookie, so a stale key in a script surfaces instead of hiding.
-    user = current_user(request) if not x_psat_admin_key else None
-    if user is not None and _account_admin(request, user):
-        check_same_origin(request)
-        # Mutation audit lines carry the same trace_id, which ties them to this account.
-        logger.info(
-            "admin access via account",
-            extra={"trace_id": trace_id_var.get(), "path": request.url.path, "user_id": str(user.id)},
-        )
-        return
-    _reject_admin(request, reason)
+    if x_psat_admin_key:
+        _reject_admin(request, reason)
+    user = current_user(request)
+    if user is None:
+        _reject_admin(request, "no_session")
+    rejection = _account_rejection(request, user)
+    if rejection is not None:
+        _reject_admin(request, rejection)
+    check_same_origin(request)
+    # Mutation audit lines carry the same trace_id, which ties them to this account.
+    logger.info(
+        "admin access via account",
+        extra={"trace_id": trace_id_var.get(), "path": request.url.path, "user_id": str(user.id)},
+    )
 
 
 def is_admin_request(request: Request, x_psat_admin_key: str | None) -> bool:
     if _key_reason(x_psat_admin_key) is None:
         return True
     user = current_user(request)
-    return user is not None and _account_admin(request, user)
+    return user is not None and _account_rejection(request, user) is None
 
 
 def log_admin_mutation(action: str, **fields: Any) -> None:

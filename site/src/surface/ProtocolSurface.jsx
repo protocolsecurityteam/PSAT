@@ -96,11 +96,16 @@ function ProtocolSurface({
   // Agent is admin-only and the most useful first stop for admins; everyone
   // else opens in Detail.
   const [sidebarMode, setSidebarMode] = useState(() => (isAdmin ? "agent" : "detail"));
-  // Don't leave admin-only content on screen after the key clears.
+  // Admin status resolves after mount (session, auth config): open Agent when
+  // it arrives, and don't leave admin-only content on screen once it's gone.
+  const wasAdmin = useRef(isAdmin);
   useEffect(() => {
-    if (!isAdmin && sidebarMode === "agent") {
+    if (isAdmin && !wasAdmin.current && sidebarMode === "detail") {
+      setSidebarMode("agent");
+    } else if (!isAdmin && sidebarMode === "agent") {
       setSidebarMode("detail");
     }
+    wasAdmin.current = isAdmin;
   }, [isAdmin, sidebarMode]);
   // Upgrade history per proxy job, fetched lazily: /api/company reports
   // upgrade_count=null until the chain monitor ingests events.

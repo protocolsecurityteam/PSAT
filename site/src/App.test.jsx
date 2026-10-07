@@ -13,7 +13,7 @@
 // changes during legitimate refactors.
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App.jsx";
@@ -109,6 +109,32 @@ describe("App router smoke tests", () => {
       window.dispatchEvent(new Event("psat:auth-required"));
     });
     expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
+  });
+
+  it("?admin=1 asks for the shared key only where the deployment accepts one", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue(null);
+    navigateTo("/?admin=1");
+    render(<App />);
+    await waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+  });
+
+  it("?admin=1 on production opens sign-in instead of asking for a key", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("pasted-key");
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github"], dev_login: false, admin_key: false }));
+    // Any route works; /account renders fastest.
+    navigateTo("/account?admin=1");
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("a stale stored key on production neither unlocks /monitor nor survives", async () => {
+    window.localStorage.setItem("psat_admin_key", "stale-key");
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: [], dev_login: false, admin_key: false }));
+    navigateTo("/monitor");
+    render(<App />);
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    await waitFor(() => expect(window.localStorage.getItem("psat_admin_key")).toBeNull());
   });
 
   it("renders the company overview at /company/:name", async () => {

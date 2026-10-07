@@ -17,13 +17,11 @@ function subscribe(callback) {
 const getSnapshot = () => Boolean(getAdminKey());
 const getServerSnapshot = () => false;
 
-// A stored key counts until the server says keys aren't accepted (production),
-// so operator UI doesn't flicker while the config loads. Requests never send
-// it before then (client.js).
+// A stored key counts only once the server confirms it accepts keys.
 export function useHasAdminKey() {
   const stored = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const config = useAuthConfig(stored);
-  return stored && config?.adminKey !== false;
+  return stored && config?.adminKey === true;
 }
 
 // An admin account, or an operator holding the shared key (?admin=1).
@@ -31,4 +29,13 @@ export function useIsAdmin() {
   const hasKey = useHasAdminKey();
   const { user } = useSession();
   return hasKey || Boolean(user?.is_admin);
+}
+
+// Whether useIsAdmin's answer is settled: the session read, and with a stored
+// key the auth config, have both come back.
+export function useAdminResolved() {
+  const stored = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const config = useAuthConfig(stored);
+  const { status } = useSession();
+  return status !== "unknown" && (!stored || config !== null);
 }
