@@ -61,8 +61,8 @@ class SinkRecord(TypedDict):
     # Library call sinks only: the library function's Slither spelling. Text, never hashed: the receiver doesn't
     # answer the library's selector, so ``selector`` is ``None``.
     library_signature: NotRequired[str]
-    # Library call sinks only, and only when proven: the library function and all it reaches make no external call, so
-    # its receiver is never called. Absent is not determined.
+    # Library call sinks only, and only when proven: the library function and all it reaches never run code at another
+    # address, so its receiver is never called. Absent is not determined.
     library_makes_no_call: NotRequired[bool]
 
 

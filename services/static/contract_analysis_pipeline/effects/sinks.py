@@ -247,8 +247,8 @@ _ASSEMBLY_CALLS = ("call(", "callcode(", "delegatecall(", "staticcall(", "create
 
 
 def _makes_no_call(fn: Any, visited: set[int] | None = None) -> bool:
-    """True only when ``fn`` and every function it reaches provably make no external call. A missing body or an
-    assembly block it can't see into is not that proof.
+    """True only when ``fn`` and every function it reaches provably never run code at another address (precompiles and
+    ``selfdestruct`` run none). A missing body or an assembly block it can't see into is not that proof.
     """
     from slither.slithir.operations import Call
 
