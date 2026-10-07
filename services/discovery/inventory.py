@@ -143,6 +143,7 @@ def _build_contracts(
     room for one inferred from a deployer wallet.
     """
     grouped = _collapse_unknown_chain_entries(entries)
+    official_addresses: set[str] = set()
     sources_map: dict[str, str] = {}  # url → id
     contracts: list[dict[str, Any]] = []
     dropped: Counter[str] = Counter()
@@ -155,6 +156,8 @@ def _build_contracts(
             dropped["no_source_url"] += 1
             continue
         source_types = _determine_sources(evidence)
+        if any(str(item.get("kind", "")).startswith("official_inventory_") for item in evidence):
+            official_addresses.add(address)
         # Unnamed deployer-only contracts can't be catalogued or analysed.
         if not name and source_types == ["deployer_expansion"]:
             dropped["unnamed_deployer_only"] += 1
@@ -522,6 +525,9 @@ def merge_inventory(prev: dict, new: dict) -> dict:
             new_conf = entry.get("confidence", 0) or 0
             merged_entry = dict(entry)
             merged_entry["confidence"] = max(prev_conf, new_conf)
+            merged_entry["source_ids"] = list(
+                dict.fromkeys(entry.get("source_ids", []) + prev_contracts[addr].get("source_ids", []))
+            )
             merged[addr] = merged_entry
 
     for addr, entry in prev_contracts.items():

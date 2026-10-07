@@ -9,7 +9,7 @@
 
 .ps-audits-panel-hint {
   font-size: 11px;
-  color: #64748b;
+  color: #94a3b8;
   line-height: 1.4;
 }
 
@@ -188,7 +188,7 @@
 
 .ps-audits-arow-date {
   font-size: 10px;
-  color: #64748b;
+  color: #94a3b8;
   font-family: "JetBrains Mono", "SFMono-Regular", monospace;
   white-space: nowrap;
 }
@@ -199,6 +199,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ps-audits-report-status {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #94a3b8;
 }
 
 .ps-audits-arow-meta {

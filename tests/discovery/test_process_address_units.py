@@ -156,12 +156,12 @@ assert "sources" in _STANDARD_JSON_SOURCE[:10]
             {"language": "solidity"},
             id="solidity-when-compiler-not-vyper",
         ),
-        pytest.param({"EVMVersion": ""}, (), {"evm_version": "shanghai"}, id="evm-version-empty-defaults-to-shanghai"),
+        pytest.param({"EVMVersion": ""}, (), {"evm_version": None}, id="evm-version-empty-preserves-compiler-default"),
         pytest.param(
-            {"EVMVersion": "Default"}, (), {"evm_version": "shanghai"}, id="evm-version-default-defaults-to-shanghai"
+            {"EVMVersion": "Default"}, (), {"evm_version": None}, id="evm-version-default-preserves-compiler-default"
         ),
         pytest.param({"EVMVersion": "cancun"}, (), {"evm_version": "cancun"}, id="evm-version-explicit-preserved"),
-        pytest.param({}, ("EVMVersion",), {"evm_version": "shanghai"}, id="evm-version-key-missing"),
+        pytest.param({}, ("EVMVersion",), {"evm_version": None}, id="evm-version-key-missing"),
         pytest.param(
             {"SourceCode": _STANDARD_JSON_SOURCE, "ContractName": "Token"},
             (),

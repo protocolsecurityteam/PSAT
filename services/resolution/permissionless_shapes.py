@@ -31,6 +31,18 @@ def earned_public_enabled() -> bool:
     return os.getenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1").lower() in ("1", "true", "yes")
 
 
+def is_public_registration(leaf: LeafPredicate) -> bool:
+    """The writer pass proved an unconditional, externally callable registration path."""
+    return (
+        leaf.get("kind") == "membership"
+        and leaf.get("authority_role") == "business"
+        and "unconditional public address registration" in (leaf.get("basis") or [])
+        and ((leaf.get("set_descriptor") or {}).get("value_predicate") or {})
+        .get("value_type", "")
+        .startswith("address")
+    )
+
+
 def leaf_is_caller_tainted(leaf: LeafPredicate) -> bool:
     """Whether the leaf depends on the caller's identity (caller-sourced operand or membership key).
 
@@ -83,6 +95,8 @@ def is_permissionless_caller_shape(leaf: LeafPredicate) -> bool:
     A leaf whose taint is visible only through ``derived_from`` is never permissionless: its comparison was never
     lowered, so claiming a shape would be absence-as-proof (A1 Part B).
     """
+    if is_public_registration(leaf):
+        return True
     if leaf_caller_taint_is_collapsed(leaf):
         return False
     operator = leaf.get("operator")

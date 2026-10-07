@@ -106,3 +106,41 @@ def test_self_referential_arithmetic_converges_before_cap(_newton):
     tainted_vars = [name for name, srcs in engine.provenance.sources.items() if has_msg_sender(srcs)]
     assert "x" in tainted_vars
     assert len(tainted_vars) > 1
+
+
+def test_recursive_struct_walk_saturates_instead_of_expanding_paths(tmp_path):
+    from services.static.contract_analysis_pipeline import provenance as p
+    from tests.support.slither_compile import _compile
+
+    slither = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract LinkedRecords {
+            struct Record { mapping(uint => Record) children; address recipient; }
+            Record root;
+            function recipient(uint[] calldata path) external view returns (address) {
+                Record storage current = root;
+                for (uint i; i < path.length; ++i) current = current.children[path[i]];
+                return current.recipient;
+            }
+        }
+    """,
+    )
+    function = next(f for c in slither.contracts for f in c.functions if f.name == "recipient")
+    engine = p.ProvenanceEngine(function)
+    engine.run()
+    assert engine.iterations_run < engine.worklist_cap
+    assert engine.provenance.saturated
+    assert engine._collect_return_sources(function, engine.provenance) == p.TOP
+
+
+def test_origin_budget_cannot_be_reset_by_a_later_precise_assignment():
+    from services.static.contract_analysis_pipeline import provenance as p
+
+    origins = frozenset(p.Source(kind="parameter", parameter_index=i) for i in range(p.DEFAULT_ORIGIN_CAP))
+    pmap = p.ProvenanceMap(sources={})
+    pmap.set("destination", frozenset({p.Source(kind="computed", derived_from=origins)}))
+    assert pmap.get("destination") == p.TOP
+    pmap.set("destination", frozenset({p.Source(kind="msg_sender")}))
+    assert pmap.get("destination") == p.TOP

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.cache_helpers import (
     ADDR_A,
     _create_completed_job_with_static_data,
@@ -10,28 +12,29 @@ from tests.cache_helpers import (
 pytestmark = requires_postgres
 
 
-def test_find_completed_static_cache_picks_most_recent(db_session):
+@pytest.mark.parametrize("artifact_name", ["predicate_trees", "effects"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        {},
+        {"error": "extraction failed"},
+        {"trees": [], "functions": []},
+        "outdated",
+        "unwitnessed",
+        "incomplete_claims",
+    ],
+)
+def test_find_completed_static_cache_picks_most_recent(db_session, artifact_name, invalid):
     from datetime import datetime, timedelta, timezone
 
-    from sqlalchemy import update
+    from sqlalchemy import delete, update
 
-    from db.models import Contract, ContractSummary, Job, JobStage, JobStatus
-    from db.queue import create_job, find_completed_static_cache, store_artifact, store_source_files
+    from db.models import Artifact, Job
+    from db.queue import find_completed_static_cache, store_artifact
 
-    _create_completed_job_with_static_data(db_session, address=ADDR_A)
-
-    new_job = create_job(db_session, {"address": ADDR_A, "name": "TestContract2"})
-    new_job.status = JobStatus.completed
-    new_job.stage = JobStage.done
-    db_session.commit()
-
-    contract = Contract(job_id=new_job.id, address=ADDR_A, chain="ethereum", contract_name="TestContract2")
-    db_session.add(contract)
-    db_session.flush()
-    db_session.add(ContractSummary(contract_id=contract.id))
-    db_session.commit()
-    store_source_files(db_session, new_job.id, {"src/T.sol": "contract T {}"})
-    store_artifact(db_session, new_job.id, "contract_analysis", data={"summary": {}})
+    old_job = _create_completed_job_with_static_data(db_session, address=ADDR_A)
+    new_job = _create_completed_job_with_static_data(db_session, address=ADDR_A)
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))
@@ -40,6 +43,25 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     found = find_completed_static_cache(db_session, ADDR_A)
     assert found is not None
     assert found.id == new_job.id
+
+    for bad, expected in [(new_job, old_job), (old_job, None)]:
+        if invalid == "incomplete_claims":
+            store_artifact(
+                db_session,
+                bad.id,
+                "contract_analysis",
+                data={"analysis_status": {"static_analysis_completed": True, "errors": ["claim matcher failed"]}},
+            )
+        elif isinstance(invalid, str):
+            bad.analysis_schema_version = 0 if invalid == "outdated" else None
+            db_session.commit()
+        elif invalid is None:
+            db_session.execute(delete(Artifact).where(Artifact.job_id == bad.id, Artifact.name == artifact_name))
+            db_session.commit()
+        else:
+            store_artifact(db_session, bad.id, artifact_name, data=invalid)
+        found = find_completed_static_cache(db_session, ADDR_A)
+        assert (found.id if found else None) == (expected.id if expected else None)
 
 
 def test_copy_returns_early_if_target_already_populated(db_session):

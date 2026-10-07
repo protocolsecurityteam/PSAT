@@ -148,33 +148,9 @@ def _constant_storage_slot_for_accessor(callee: Any) -> str | None:
     (``Governable._pendingGovernor()``), or ``None``. Limited to address returns and one constant slot so a
     bytes32 flag can't be misread as a principal.
     """
-    if callee is None:
-        return None
-    try:
-        from services.static.contract_analysis_pipeline.secondary_impl import (
-            _SLOT_CONST_TYPES,
-            _any_transitive_ir,
-            _const_slot_value,
-            _ir_is_sload,
-        )
-    except Exception:  # pragma: no cover - import edge
-        return None
-    return_type = getattr(callee, "return_type", None)
-    if not (return_type and len(return_type) == 1 and str(return_type[0]) in ("address", "address payable")):
-        return None
-    if not _any_transitive_ir(callee, _ir_is_sload):
-        return None
-    try:
-        read = list(callee.all_state_variables_read())
-    except Exception:  # pragma: no cover - slither edge
-        return None
-    consts = [v for v in read if getattr(v, "is_constant", False) and str(getattr(v, "type", "")) in _SLOT_CONST_TYPES]
-    if len(consts) != 1:
-        return None
-    val = _const_slot_value(consts[0])
-    if val is None or val < 0:
-        return None
-    return "0x" + format(val, "064x")
+    from .storage_accessors import constant_address_slot
+
+    return constant_address_slot(callee)
 
 
 # ``PSAT_PROVENANCE_INTERNAL_CALL_DEPTH`` and ``PSAT_PROVENANCE_WORKLIST_CAP`` override the defaults.
@@ -193,14 +169,30 @@ DEFAULT_INTERNAL_CALL_DEPTH = _env_int("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", 4)
 DEFAULT_WORKLIST_ITER_CAP = _env_int("PSAT_PROVENANCE_WORKLIST_CAP", 200)
 # A value rewritten more often than this is churning, not converging.
 DEFAULT_WIDEN_AFTER = _env_int("PSAT_PROVENANCE_WIDEN_AFTER", 8)
+DEFAULT_SOURCE_CAP = _env_int("PSAT_PROVENANCE_SOURCE_CAP", 128)
+DEFAULT_ORIGIN_CAP = _env_int("PSAT_PROVENANCE_ORIGIN_CAP", 2048)
+DEFAULT_MEMBER_DEPTH = _env_int("PSAT_PROVENANCE_MEMBER_DEPTH", 16)
+
+
+def _over_budget(sources: SourceSet) -> bool:
+    if len(sources) > DEFAULT_SOURCE_CAP:
+        return True
+    origins = 0
+    for source in sources:
+        origins += 1 + len(source.derived_from or ())
+        if origins > DEFAULT_ORIGIN_CAP or len(source.member_path) > DEFAULT_MEMBER_DEPTH:
+            return True
+        if any(len(origin.member_path) > DEFAULT_MEMBER_DEPTH for origin in (source.derived_from or ())):
+            return True
+    return False
 
 
 def widen(s: SourceSet) -> SourceSet:
     """Widening: drop ``callee_args_digest`` from members (and their ``derived_from``).
 
     The digest hashes the set itself, so self-referential assignments (``inv = f(inv)`` in OZ ``Math.mulDiv``) mint new
-    variants forever; every other field is finite per function. The digest is never published and ``derived_from``
-    origins survive, so nothing observable is lost.
+    variants forever. Recursive member paths and growing origin sets have separate budgets. The digest is never
+    published and ``derived_from`` origins survive this widening step.
     """
     if is_top(s):
         return s
@@ -228,6 +220,7 @@ class ProvenanceMap:
     sources: dict[str, SourceSet]
     # Per-run rewrite counts for the widening trigger.
     update_counts: dict[str, int] = field(default_factory=dict)
+    saturated: set[str] = field(default_factory=set)
 
     def get(self, var_name: str) -> SourceSet:
         return self.sources.get(var_name, EMPTY)
@@ -239,11 +232,22 @@ class ProvenanceMap:
         otherwise oscillate) and finite. Converging values never widen.
         """
         prev = self.sources.get(var_name, EMPTY)
+        if var_name in self.saturated:
+            return False
+        if _over_budget(value):
+            # Never truncate a set: that could retain only a misleading precise origin.
+            self.saturated.add(var_name)
+            value = TOP
         if prev == value:
             return False
         count = self.update_counts.get(var_name, 0)
         if count >= DEFAULT_WIDEN_AFTER:
-            value = widen(union(prev, value))
+            joined = union(prev, value)
+            if _over_budget(joined):
+                self.saturated.add(var_name)
+                value = TOP
+            else:
+                value = widen(joined)
             if prev == value:
                 return False
         self.update_counts[var_name] = count + 1
@@ -298,9 +302,10 @@ class ProvenanceEngine:
             iterations += 1
         # Widening keeps this well under the cap; the cap backstops growth widening doesn't cover.
         self.iterations_run = iterations
-        if iterations >= self.worklist_cap:
-            # Unknown values stay empty; consumers read absent as unknown.
-            pass
+        if changed:
+            # The last iteration is not a fixed point. Publishing its partial origins
+            # could mistake one branch for the complete authority/asset destination.
+            self.provenance.sources = dict.fromkeys(self.provenance.sources, TOP)
         return self.provenance
 
     def _seed_parameters(self) -> None:

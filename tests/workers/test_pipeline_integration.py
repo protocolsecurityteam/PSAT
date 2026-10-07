@@ -787,6 +787,8 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
 
     worker = StaticWorker()
     session = MagicMock()
+    verified_settings = {"viaIR": True, "optimizer": {"enabled": True, "runs": 200}}
+    monkeypatch.setattr("workers.static_worker.get_artifact", lambda *_a: verified_settings)
 
     job = _job(name="TestContract")
 
@@ -830,6 +832,7 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
     assert passed_sources == sources
     assert passed_meta["contract_name"] == "Test"
     assert passed_build["evm_version"] == "shanghai"
+    assert passed_build["verified_settings"] == verified_settings
     assert passed_remap == []
 
 
@@ -909,6 +912,60 @@ def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
     assert phases["dependency_static"].severity == "degraded"
     assert "static dep error" in phases["dependency_static"].message
     assert "dynamic dep error" in phases["dependency_dynamic"].message
+
+
+def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
+    """Catches import errors and wiring bugs in the real process()."""
+    from workers.base import JobHandledDirectly
+    from workers.static_worker import StaticWorker
+
+    worker = StaticWorker()
+    session = MagicMock()
+    monkeypatch.setattr("workers.static_worker.get_artifact", lambda *_a: None)
+
+    job = _job(name="MyProxy")
+
+    sources = {"src/Proxy.sol": "pragma solidity ^0.8.19;\ncontract Proxy {}"}
+
+    monkeypatch.setattr("workers.static_worker.get_source_files", lambda _s, _j: sources)
+
+    contract_row = SimpleNamespace(
+        address=TARGET,
+        contract_name="Proxy",
+        compiler_version="v0.8.19",
+        language="solidity",
+        evm_version="shanghai",
+        optimization=True,
+        optimization_runs=200,
+        source_format="flat",
+        source_file_count=1,
+        remappings=[],
+        is_proxy=True,
+        source_verified=True,
+    )
+    session.execute.return_value.scalar_one_or_none.return_value = contract_row
+    session.refresh = MagicMock()
+
+    monkeypatch.setattr(worker, "_resolve_proxy", lambda *_a, **_kw: None)
+    monkeypatch.setattr(worker, "_run_dependency_phase", lambda *_a, **_kw: None)
+    monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
+
+    completed = []
+    monkeypatch.setattr("db.queue.complete_job", lambda _s, _j, detail="": completed.append(True))
+
+    # Proxies short-circuit to spawn an impl child job.
+    slither_called = []
+    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *_a, **_kw: slither_called.append(True) or True)
+    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *_a, **_kw: slither_called.append(True))
+
+    try:
+        worker.process(session, job)
+        assert False, "Expected JobHandledDirectly"
+    except JobHandledDirectly:
+        pass
+
+    assert len(completed) == 1, "complete_job should have been called"
+    assert len(slither_called) == 0, "Slither/analysis should NOT run for proxy contracts"
 
 
 def test_worker_stage_chain_is_complete(monkeypatch):

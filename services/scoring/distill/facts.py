@@ -201,15 +201,6 @@ def distill_contract_signals(
     return signals
 
 
-# Artifact bodies are immutable, so caching by ``(job_id, artifact_name)`` can't give two answers. Tests clear
-# it via :func:`clear_transcript_cache`.
-_TRANSCRIPT_CACHE: dict[tuple[str, str], Any] = {}
-
-
-def clear_transcript_cache() -> None:
-    _TRANSCRIPT_CACHE.clear()
-
-
 class _TranscriptReader:
     """Reads the execution behind a verdict out of the transcript it points at.
 
@@ -220,6 +211,7 @@ class _TranscriptReader:
 
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._cache: dict[tuple[str, str], Any] = {}
 
     def execution(self, *, transcript_ptr: Any, effect_verdict_id: int | None) -> EX.ProvingExecution:
         parts = EX.pointer_parts(transcript_ptr)
@@ -235,8 +227,8 @@ class _TranscriptReader:
         return EX.from_transcript(blob, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
 
     def _body(self, parts: tuple[str, str]) -> Any:
-        if parts in _TRANSCRIPT_CACHE:
-            return _TRANSCRIPT_CACHE[parts]
+        if parts in self._cache:
+            return self._cache[parts]
         from db.models import Artifact
         from db.queue import _artifact_row_to_value
         from db.storage import StorageKeyAbsent, StorageKeyMissing
@@ -266,7 +258,9 @@ class _TranscriptReader:
                 context={"transcript_job_id": str(job_id), "artifact_name": name},
             )
             body = EX.REASON_FETCH_FAILED
-        _TRANSCRIPT_CACHE[parts] = body
+        # Share successful immutable bodies only within this contract fact load; failed reads must be retryable.
+        if isinstance(body, dict):
+            self._cache[parts] = body
         return body
 
 

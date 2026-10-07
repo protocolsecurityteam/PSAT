@@ -256,18 +256,18 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-# ``status=0`` shapes that are answers (empty token/tx lists): exact status + known message + empty list. Opt-in per
-# call site via ``empty_result_ok`` so no other error can reach a caller as data.
-_EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found"})
+# ``status=0`` shapes that are answers. Token/tx lists retain their strict empty-list contract; getLogs also returns
+# a textual empty result. Opt-in per call site via ``empty_result_ok`` so no other error reaches a caller as data.
+_EMPTY_RESULT_MESSAGES = frozenset({"no token found", "no transactions found"})
 
 
-def _is_empty_result(data: dict) -> bool:
+def _is_empty_result(data: dict, *, logs: bool = False) -> bool:
     result = data.get("result")
-    return (
-        str(data.get("status")).strip() == "0"
-        and str(data.get("message", "")).strip() in _EMPTY_RESULT_MESSAGES
-        and isinstance(result, list)
-        and not result
+    message = str(data.get("message", "")).strip().lower()
+    return str(data.get("status")).strip() == "0" and (
+        (message in _EMPTY_RESULT_MESSAGES and result == [])
+        or (logs and message == "no records found" and result in ([], ""))
+        or (logs and isinstance(result, str) and result.strip().lower() == "no records found")
     )
 
 
@@ -344,7 +344,8 @@ def get(
             _pg_cache_put(module, action, chain_id, params, data)
             return data
 
-        if empty_result_ok and _is_empty_result(data):
+        if empty_result_ok and _is_empty_result(data, logs=(module, action) == ("logs", "getLogs")):
+            data = {**data, "result": []}
             # A lag-empty frozen for a fresh tx would permanently delete its CREATE frames.
             if cache_empty:
                 _pg_cache_put(module, action, chain_id, params, data)
@@ -721,6 +722,12 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 usd_value = (raw_balance / (10**decimals)) * price_usd
                 if not math.isfinite(usd_value) or usd_value >= 1e20:
                     usd_value = None
+            from utils.quote_validation import quote_refusal
+
+            refusal = quote_refusal(price_usd, usd_value)
+            if refusal:
+                price_usd = 0.0
+                usd_value = None
             results.append(
                 {
                     "token_address": (entry.get("TokenAddress") or "").lower(),
@@ -731,6 +738,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                     "balance": raw_balance,
                     "price_usd": price_usd if decimals is not None and price_usd > 0 else None,
                     "usd_value": usd_value,
+                    "price_refusal": refusal,
                 }
             )
     # Ask of raw entries: dropping zero-balance entries makes a full page look short.
@@ -760,6 +768,9 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
         # An empty list per one third-party index, not proof nothing is held.
         status = ASSET_SET_STATUS_RETURNED_EMPTY
         basis = f"etherscan addresstokenbalance, {pages_read} page(s), empty list"
+    refused_quotes = sum(bool(row.get("price_refusal")) for row in results)
+    if refused_quotes:
+        basis += f"; {refused_quotes} quotes failed price validation and remain unpriced"
     return TokenBalancePage(
         rows=sorted(results, key=lambda t: t.get("usd_value") or 0, reverse=True),
         page_length=returned,

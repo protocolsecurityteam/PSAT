@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars as _contextvars
 import os
+from dataclasses import replace
 from typing import Any, cast
 
 from ..predicate_types import (
@@ -67,6 +68,10 @@ _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.Contex
 # Callees being gate-inlined, breaking mutual recursion and bounding depth.
 _inline_gate_callee_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
     "psat_predicate_inline_gate_callee_stack", default=()
+)
+
+_return_helper_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
+    "psat_predicate_return_helpers", default=()
 )
 
 
@@ -358,17 +363,7 @@ def _build_subtree_from_value(
         op_type = getattr(defining_ir, "type", None)
         if op_type == getattr(UnaryType, "BANG", "!"):
             inner_value = defining_ir.rvalue
-            flipped_polarity = "allowed_when_true" if gate.polarity == "allowed_when_false" else "allowed_when_false"
-            inner_gate = RevertGate(
-                kind=gate.kind,
-                condition_value=inner_value,
-                polarity=flipped_polarity,
-                node=gate.node,
-                containing_function=gate.containing_function,
-                call_chain=list(gate.call_chain),
-                expression_text=gate.expression_text,
-                basis=list(gate.basis),
-            )
+            inner_gate = gate.negated(inner_value)
             return _build_subtree_from_value(inner_value, prov, inner_gate, function)
 
     if isinstance(defining_ir, Binary):
@@ -533,7 +528,7 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
     callee, sub_prov, _return_value, inner = resolved
     op_name: str | None = None
     children: list[PredicateTree] = []
-    if isinstance(inner, Binary):
+    if inner is not None and isinstance(inner, Binary):
         op_name = _binary_op(getattr(inner, "type", None))
         if op_name not in ("and", "or"):
             return None
@@ -550,7 +545,40 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
         inner_callee = getattr(inner, "function", None)
         asm_op = _detect_assembly_combinator_op(inner_callee) if inner_callee else None
         if asm_op is None:
-            return None
+            if not (getattr(callee, "view", False) or getattr(callee, "pure", False)):
+                return None
+            # A wrapper returning another helper must expand that helper's whole return tree,
+            # not classify its first return as a leaf (which can be an early `return false`).
+            stack = _return_helper_stack.get()
+            if id(callee) in stack or len(stack) >= DEFAULT_INTERNAL_CALL_DEPTH:
+                return make_leaf_node(
+                    _unsupported_leaf(
+                        reason="internal_return_recursion_limit",
+                        expression=gate.expression_text,
+                        references_msg_sender=any(s.kind in _CALLER_SOURCES for s in _call_site_arg_origins(ir, prov)),
+                    )
+                )
+            token = _return_helper_stack.set(stack + (id(callee),))
+            try:
+                inner_gate = replace(gate, node=None, containing_function=callee, condition_value=_return_value)
+                nested = _build_internal_call_or_and_subtree(inner, sub_prov, inner_gate)
+                # Only substitute a complete return tree. An opaque/effectful helper
+                # must keep the outer call's delegated gate and probeable descriptor.
+                pending = [nested] if nested is not None else []
+                while pending:
+                    node = pending.pop()
+                    leaf = node.get("leaf") or {}
+                    if leaf.get("confidence") == "low" or leaf.get("kind") == "unsupported":
+                        return None
+                    if leaf.get("authority_role") == "business" and any(
+                        operand.get("source") in {"computed", "top", "view_call", "external_call"}
+                        for operand in leaf.get("operands", [])
+                    ):
+                        return None
+                    pending.extend(node.get("children") or [])
+                return _attach_call_site_arg_origins_to_tree(nested, ir, prov) if nested is not None else None
+            finally:
+                _return_helper_stack.reset(token)
         op_name = asm_op
         call_args = list(getattr(inner, "arguments", []) or [])
         if not call_args:

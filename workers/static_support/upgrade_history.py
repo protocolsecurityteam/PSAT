@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 
 def _merge_upgrade_history(prev: dict, new: dict) -> dict:
-    """Append-only merge; events deduped by (block, tx, type) and timelines rebuilt."""
+    """Append-only merge by log identity; indexless legacy events collapse only when their payloads agree."""
     from services.discovery.upgrade_history import _build_implementation_timeline
 
     merged_proxies: dict[str, dict] = {}
@@ -28,15 +30,19 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
         prev_events = prev_proxy.get("events", [])
         new_events = new_proxy.get("events", [])
 
-        seen: set[tuple[int, str, str]] = set()
+        seen: set[tuple] = set()
         merged_events: list[dict] = []
         for event in prev_events + new_events:
-            key = (event.get("block_number", 0), event.get("tx_hash", ""), event.get("event_type", ""))
+            index = event.get("log_index")
+            if isinstance(index, int) and index >= 0:
+                key = (event.get("block_number", 0), event.get("tx_hash", ""), event.get("event_type", ""), index)
+            else:
+                key = (json.dumps({k: v for k, v in event.items() if k != "log_index"}, sort_keys=True),)
             if key not in seen:
                 seen.add(key)
                 merged_events.append(event)
 
-        merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
+        merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index") or 0))
 
         current_impl = new_proxy.get("current_implementation") or prev_proxy.get("current_implementation")
         implementations = _build_implementation_timeline(merged_events, current_impl)

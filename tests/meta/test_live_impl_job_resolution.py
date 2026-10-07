@@ -5,8 +5,12 @@ Lives outside ``tests/live/`` so it runs offline.
 
 from __future__ import annotations
 
+import inspect
 import time
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from tests.support.live_helpers import _resolve_impl_job
 
@@ -95,12 +99,14 @@ def test_resolve_impl_job_returns_immediately_when_already_completed():
     assert client.poll_calls == 0, "no polling should fire when the matched job is already terminal"
 
 
-def test_resolve_impl_job_returns_failed_terminal_without_polling():
-    """The sibling bug fixed in commit fff4cb2."""
+@pytest.mark.parametrize("status", ["completed", "failed", "failed_terminal"])
+def test_resolve_impl_job_returns_terminal_status_without_hiding_failure(status):
+    from tests.live.test_solmate_authority import analyzed_veda_teller
+
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-3"
     client = _StubClient(
-        children=[{"job_id": impl_job_id, "address": impl_addr, "status": "failed_terminal"}],
+        children=[{"job_id": impl_job_id, "address": impl_addr, "status": status}],
         all_jobs=[],
         job_states={},
     )
@@ -112,8 +118,28 @@ def test_resolve_impl_job_returns_failed_terminal_without_polling():
     )
 
     assert impl_job is not None
-    assert impl_job["status"] == "failed_terminal"
+    assert impl_job["status"] == status
     assert client.poll_calls == 0
+    impl_job.update(stage="static", error="analysis broke")
+    fixture = inspect.unwrap(analyzed_veda_teller)
+    fixture_client = SimpleNamespace(submit_and_wait=lambda _: impl_job, base_url="http://preview.local")
+    if status == "completed":
+        assert fixture(fixture_client) is impl_job
+    else:
+        try:
+            with pytest.raises(pytest.fail.Exception) as failure:
+                fixture(fixture_client)
+        except pytest.skip.Exception:
+            pytest.fail("A terminal pipeline failure was hidden by a live-fixture skip")
+        for detail in (impl_job_id, status, "static", "analysis broke"):
+            assert detail in str(failure.value)
+
+    def timeout(_):
+        raise TimeoutError("still processing")
+
+    fixture_client.submit_and_wait = timeout
+    with pytest.raises(pytest.skip.Exception, match="did not finish in time"):
+        fixture(fixture_client)
 
 
 def test_resolve_impl_job_polls_through_processing_to_failed_terminal():

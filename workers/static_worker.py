@@ -33,7 +33,7 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, sanitize_evm_version
+from services.discovery.fetch import _confine, verified_solc_version, write_compiler_input
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -42,10 +42,8 @@ from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 from workers.static_support.dynamic_deps import _merge_dynamic_deps, _start_block_from_prev_dyn
 from workers.static_support.source_prep import (
-    _detect_solc_version,
     _detect_src_dir,
     _prune_remappings,
-    _relax_pragmas,
 )
 from workers.static_support.upgrade_history import (
     _apply_known_names_to_uh,
@@ -579,7 +577,7 @@ class StaticWorker(BaseWorker):
             "contract_name": contract_name,
             "compiler_version": contract_row.compiler_version or "",
             "language": contract_row.language or "solidity",
-            "evm_version": contract_row.evm_version or "shanghai",
+            "evm_version": contract_row.evm_version,
             "source_format": contract_row.source_format or "flat",
             "source_file_count": contract_row.source_file_count or len(sources),
             "remappings": list(contract_row.remappings or []),
@@ -588,10 +586,13 @@ class StaticWorker(BaseWorker):
             "source_verified": contract_row.source_verified,
         }
         build_settings = {
-            "evm_version": contract_row.evm_version or "shanghai",
+            "evm_version": contract_row.evm_version,
             "optimization_used": contract_row.optimization or False,
-            "runs": contract_row.optimization_runs or 200,
+            "runs": contract_row.optimization_runs if contract_row.optimization_runs is not None else 200,
         }
+        verified_settings = get_artifact(session, job.id, "compiler_settings")
+        if isinstance(verified_settings, dict):
+            build_settings["verified_settings"] = verified_settings
         remappings = meta.get("remappings", [])
 
         # Lets the graph builder use the display name instead of a proxy's Etherscan name.
@@ -676,6 +677,31 @@ class StaticWorker(BaseWorker):
 
                 if analysis_data is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
+                if isinstance(analysis_data, dict) and (analysis_data.get("subject") or {}).get("kind") in (
+                    "library",
+                    "interface",
+                ):
+                    from db.queue import advance_job
+                    from services.policy.effective_permissions_writer import write_effective_function_rows
+
+                    kind = analysis_data["subject"].get("kind")
+                    write_effective_function_rows(
+                        session,
+                        contract_id=contract_row.id,
+                        function_records=[],
+                        capability_by_function={},
+                        deployment_address=address,
+                    )
+                    self._satisfy_dependencies(session, job, completed_stage=JobStage.static)
+                    self._degrade_dependencies(session, job, reason="source-only classification")
+                    advance_job(
+                        session,
+                        job.id,
+                        JobStage.coverage,
+                        f"Verified {kind} source analyzed; audit coverage pending",
+                        lease_id=job.lease_id,
+                    )
+                    raise JobHandledDirectly()
 
                 with log_timed_phase(logger, "tracking_plan"):
                     self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
@@ -1028,15 +1054,29 @@ class StaticWorker(BaseWorker):
         build_settings: dict,
         remappings: list[str],
     ) -> None:
-        sources = _relax_pragmas(sources)
         for filepath, content in sources.items():
             full_path = _confine(project_dir, filepath)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
 
-        solc_version = _detect_solc_version(sources)
+        language = meta.get("language", "solidity")
+        solc_version = verified_solc_version(meta.get("compiler_version"), sources) if language != "vyper" else "0.8.24"
         src_dir = _detect_src_dir(sources)
-        evm_version = sanitize_evm_version(build_settings.get("evm_version", "shanghai"))
+        evm_version = build_settings.get("evm_version")
+        # This JSON is the authoritative analysis input. Foundry config remains for source tooling only.
+        settings = build_settings.get("verified_settings")
+        if not isinstance(settings, dict):
+            settings = {
+                "optimizer": {
+                    "enabled": bool(build_settings.get("optimization_used")),
+                    "runs": build_settings.get("runs", 200),
+                },
+                "remappings": remappings,
+            }
+            if evm_version:
+                settings["evmVersion"] = evm_version
+        write_compiler_input(project_dir, sources, settings, language=language)
+        evm_line = f"evm_version = {json.dumps(evm_version)}" if evm_version else ""
         optimizer = str(bool(build_settings.get("optimization_used", True))).lower()
         optimizer_runs = int(build_settings.get("runs", 200) or 200)
 
@@ -1048,7 +1088,7 @@ class StaticWorker(BaseWorker):
                 out = "out"
                 libs = ["lib"]
                 solc_version = "{solc_version}"
-                evm_version = "{evm_version}"
+                {evm_line}
                 optimizer = {optimizer}
                 optimizer_runs = {optimizer_runs}
                 auto_detect_solc = false
@@ -1435,6 +1475,9 @@ class StaticWorker(BaseWorker):
             analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
                 project_dir
             )
+            from schemas.static_artifacts import validate_static_artifacts
+
+            validate_static_artifacts(semantic_predicate_trees, semantic_effects)
         except Exception as exc:
             record_degraded(
                 phase="contract_analysis",

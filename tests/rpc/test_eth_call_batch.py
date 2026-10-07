@@ -8,6 +8,9 @@ import services.clients.rpc as rpc
 
 
 class _FakeResponse:
+    status_code = 200
+    headers = {}
+
     def __init__(self, payload):
         self._payload = payload
 

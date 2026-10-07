@@ -672,14 +672,37 @@ def test_merge_dynamic_deps_duplicate_edge_provenance():
     assert prov_hashes == {"0x111", "0x222"}
 
 
-def test_merge_upgrade_history_deduplicates_events():
+@pytest.mark.parametrize("same_transaction", [False, True])
+@pytest.mark.parametrize("indexes", ["indexed", "missing", "null", "mixed"])
+def test_merge_upgrade_history_deduplicates_events(same_transaction, indexes):
+    from copy import deepcopy
+
     from workers.static_worker import _merge_upgrade_history
 
-    merged = _merge_upgrade_history(FAKE_UH_PREV, FAKE_UH_PREV)
     proxy_addr = "0xdac17f958d2ee523a2206206994597c13d831ec7"
-    events = merged["proxies"][proxy_addr]["events"]
-    assert len(events) == 1  # deduplicated
-    assert merged["total_upgrades"] == 1
+    prev = deepcopy(FAKE_UH_PREV)
+    first = prev["proxies"][proxy_addr]["events"][0]
+    second = {**first, "log_index": 1, "implementation": "0x" + "99" * 20}
+    if not same_transaction:
+        second["tx_hash"] = "0x222"
+    for event in (first, second) if indexes != "mixed" else (first,):
+        if indexes in ("missing", "mixed"):
+            event.pop("log_index")
+        elif indexes == "null":
+            event["log_index"] = None
+    new = deepcopy(prev)
+    new["proxies"][proxy_addr]["events"] = [second, deepcopy(first)]
+    new["proxies"][proxy_addr]["current_implementation"] = second["implementation"]
+
+    merged = _merge_upgrade_history(prev, new)
+    for history in (merged, _merge_upgrade_history(merged, new)):
+        proxy = history["proxies"][proxy_addr]
+        assert proxy["events"] == [first, second]
+        assert proxy["upgrade_count"] == history["total_upgrades"] == 2
+        assert [record["address"] for record in proxy["implementations"]] == [
+            first["implementation"],
+            second["implementation"],
+        ]
 
 
 def test_merge_dynamic_deps_trace_errors():

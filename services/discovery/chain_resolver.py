@@ -9,12 +9,9 @@ Probes ``eth_getCode`` via JSON-RPC batches through eRPC (one route per chain), 
 from __future__ import annotations
 
 import contextvars
-import json
 import logging
 import os
 import threading
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,12 +19,12 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from services.clients.rpc import erpc_url_for_chain_id, pinned_block, rpc_headers
+from services.clients.rpc import erpc_url_for_chain_id
 from utils.chains import canonical_chain, canonical_chain_list, chain_enabled
 from utils.logging import record_degraded
 
 from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
-from .static_dependencies import RPC_TIMEOUT_SECONDS, has_deployed_code
+from .static_dependencies import has_deployed_code
 
 logger = logging.getLogger(__name__)
 
@@ -81,18 +78,18 @@ def _erpc_url_for_chain(chain_name: str) -> str | None:
     return erpc_url_for_chain_id(chain_id)
 
 
-def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple[str, str]:
+def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter, chain_id: int | None) -> tuple[str, str]:
     from .static_dependencies import get_code
 
     limiter.wait()
     try:
-        return addr, get_code(rpc_url, addr)
+        return addr, get_code(rpc_url, addr, chain_id=chain_id)
     except RuntimeError as exc:
         _record_error_fill(exc)
         return addr, "0x"
 
 
-def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
+def _batch_get_code(rpc_url: str, addresses: list[str], *, chain_id: int | None = None) -> dict[str, str]:
     """Batch ``eth_getCode`` for many addresses, returning ``{address: bytecode_hex}``.
 
     Sub-batches of ``_BATCH_RPC_SIZE``; falls back to rate-limited individual calls if batching is rejected.
@@ -100,58 +97,32 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
     if not addresses:
         return {}
 
-    block = pinned_block(rpc_url)
-    block_tag = hex(block) if block is not None else "latest"
+    from services.clients.rpc import get_code_batch
+
     results: dict[str, str] = {}
     for i in range(0, len(addresses), _BATCH_RPC_SIZE):
         batch = addresses[i : i + _BATCH_RPC_SIZE]
-        payload = json.dumps(
-            [
-                {"jsonrpc": "2.0", "id": idx, "method": "eth_getCode", "params": [addr, block_tag]}
-                for idx, addr in enumerate(batch)
-            ]
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            rpc_url,
-            data=payload,
-            headers=rpc_headers(
-                rpc_url,
-                {"Accept": "application/json", "User-Agent": "getContractAddresses/1.0"},
-            ),
-        )
         try:
-            with urllib.request.urlopen(request, timeout=max(RPC_TIMEOUT_SECONDS, 30)) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
-            body = None
-
-        # Non-list responses (batch errors, HTTP errors) fall back to individual calls.
-        if not isinstance(body, list):
+            codes = get_code_batch(rpc_url, batch, chain_id=chain_id)
+        except RuntimeError:
+            codes = {}
+        if not codes:
             limiter = RateLimiter(_RPC_RATE_LIMIT)
             with ThreadPoolExecutor(max_workers=_FALLBACK_WORKERS) as executor:
                 # Copy context per submission so trace ids survive.
                 futures = []
                 for addr in batch:
                     ctx = contextvars.copy_context()
-                    futures.append(executor.submit(ctx.run, _individual_get_code, rpc_url, addr, limiter))
+                    futures.append(executor.submit(ctx.run, _individual_get_code, rpc_url, addr, limiter, chain_id))
                 for future in futures:
                     addr, code = future.result()
                     results[addr] = code
             continue
 
-        for item in body:
-            idx = item.get("id")
-            if idx is not None and 0 <= idx < len(batch):
-                # Per-item errors also become ``"0x"``; count them here since the fill loop won't see them.
-                if item.get("error") is not None or "result" not in item:
-                    _record_error_fill(None)
-                code = item.get("result") or "0x"
-                results[batch[idx]] = code if isinstance(code, str) and code.startswith("0x") else "0x"
-        # Fill missing addresses; the RPC answered, just not about this one.
         for addr in batch:
-            if addr not in results:
+            if addr.lower() not in codes:
                 _record_error_fill(None)
-                results[addr] = "0x"
+            results[addr] = codes.get(addr.lower(), "0x")
 
     return results
 
@@ -169,7 +140,7 @@ def _probe_chain_batch(
     error_fills = _ErrorFills()
     token = _probe_error_fills.set(error_fills)
     try:
-        code_map = _batch_get_code(rpc_url, addresses)
+        code_map = _batch_get_code(rpc_url, addresses, chain_id=CHAIN_IDS.get(chain_name))
         hits = {addr for addr, code in code_map.items() if has_deployed_code(code)}
     except Exception as exc:
         # An empty result looks like "no code anywhere", so log it. ``probe_chain`` because ``chain`` would collide with

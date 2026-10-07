@@ -630,7 +630,7 @@ class TestResolveUnknownChains:
         contracts = [{"name": "AI", "address": addr, "chains": ["Ethereum mainnet"], "source": ["exa_deep_research"]}]
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-        def fake_batch_get_code(rpc_url, addresses):
+        def fake_batch_get_code(rpc_url, addresses, *, chain_id=None):
             if rpc_url.endswith("/evm/8453"):
                 return {a: "0x6001" for a in addresses}
             return {a: "0x" for a in addresses}
@@ -653,7 +653,7 @@ def test_resolver_skips_chains_off_the_allowlist(monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     probed: list[str] = []
 
-    def fake_batch_get_code(rpc_url, addresses):
+    def fake_batch_get_code(rpc_url, addresses, *, chain_id=None):
         probed.append(rpc_url)
         return {a: "0x" for a in addresses}
 
@@ -670,7 +670,7 @@ class TestEvidenceBasedChainMembership:
     def _record_probed_chain_ids(monkeypatch) -> list[str]:
         probed: list[str] = []
 
-        def fake_batch_get_code(rpc_url, addresses):
+        def fake_batch_get_code(rpc_url, addresses, *, chain_id=None):
             probed.append(rpc_url.rsplit("/evm/", 1)[-1])
             return {a: "0x" for a in addresses}
 
@@ -680,7 +680,7 @@ class TestEvidenceBasedChainMembership:
 
     def test_declared_chain_hit_is_written(self, monkeypatch):
 
-        def fake_batch_get_code(rpc_url, addresses):
+        def fake_batch_get_code(rpc_url, addresses, *, chain_id=None):
             hit = rpc_url.endswith("/evm/1")
             return {a: ("0x6001" if hit else "0x") for a in addresses}
 
@@ -732,7 +732,7 @@ class TestEvidenceBasedChainMembership:
         )
         monkeypatch.setattr("services.discovery.inventory.expand_from_deployers", lambda *_a, **_kw: [])
 
-        def fake_batch(rpc_url, addrs):
+        def fake_batch(rpc_url, addrs, *, chain_id=None):
             hit = rpc_url.endswith("/evm/42161")
             return {a: ("0x6001" if hit else "0x") for a in addrs}
 
@@ -774,7 +774,7 @@ class TestOrchestratorIntegration:
 
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-        def fake_batch(rpc_url, addrs):
+        def fake_batch(rpc_url, addrs, *, chain_id=None):
             if rpc_url.endswith("/evm/42161"):
                 return {a: ("0x6001" if a == addr_unknown else "0x") for a in addrs}
             return {a: "0x" for a in addrs}

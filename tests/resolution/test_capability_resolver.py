@@ -65,6 +65,22 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
     return job
 
 
+@requires_postgres
+def test_analysis_lookup_uses_recorded_chain_when_request_omits_it(session):
+    from services.resolution.capability_resolver import find_analysis_job_for_address
+
+    address = "0x" + "d8" * 20
+    artifact = {"trees": {"execute()": {"op": "AND", "children": []}}}
+    ethereum_job = _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
+    base_job = _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
+    base_job.chain_id = 8453
+    session.commit()
+    ethereum = find_analysis_job_for_address(session, address, chain="ethereum")
+    base = find_analysis_job_for_address(session, address, chain="base")
+    assert ethereum is not None and ethereum.analysis_job.id == ethereum_job.id
+    assert base is not None and base.analysis_job.id == base_job.id
+
+
 def _seed_contract(session, *, address: str):
     from db.models import Contract, Protocol
 

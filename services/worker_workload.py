@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-# Preserve the custom consumers' existing readiness/timeout semantics, including
-# their historical lack of a next_attempt/dependency predicate.
+# Custom consumers retain their stage dependency rules, but all respect retry backoff.
+ATTEMPT_READY = "(j.next_attempt_at IS NULL OR j.next_attempt_at <= now())"
 COVERAGE_READY = """(
     NOT EXISTS (
         SELECT 1 FROM audit_reports ar WHERE ar.protocol_id=j.protocol_id AND (
@@ -65,7 +65,7 @@ def snapshot(session: Session) -> Workload:
         session.execute(
             text(f"""
             SELECT
-            EXISTS(SELECT 1 FROM jobs j WHERE j.status='queued' AND (
+            EXISTS(SELECT 1 FROM jobs j WHERE j.status='queued' AND {ATTEMPT_READY} AND (
                 (j.stage='coverage' AND ({COVERAGE_READY}
                     OR j.updated_at < now()-(:coverage_timeout * interval '1 second'))) OR
                 (j.stage='selection' AND ({SELECTION_READY}
@@ -110,5 +110,5 @@ def custom_claim_statement(stage: str, *, stuck: bool = False):
         predicate = "j.updated_at < now() - (:timeout * interval '1 second')"
     return text(f"""
         SELECT j.id FROM jobs j WHERE j.stage='{stage}' AND j.status='queued'
-        AND {predicate} ORDER BY j.updated_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
+        AND {ATTEMPT_READY} AND {predicate} ORDER BY j.updated_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
     """)

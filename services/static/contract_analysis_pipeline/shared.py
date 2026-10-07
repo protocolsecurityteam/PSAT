@@ -20,6 +20,12 @@ def _load_json(path: Path, default: Any) -> Any:
 
 
 def _select_subject_contract(slither: Slither, contract_name: str | None):
+    # An explicitly verified library/interface is a real source subject. Do not
+    # silently substitute another contract bundled alongside it.
+    if contract_name:
+        exact = [contract for contract in slither.contracts if contract.name == contract_name]
+        if exact:
+            return exact[0]
     candidates = [
         contract
         for contract in slither.contracts

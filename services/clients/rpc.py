@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import urlparse
@@ -13,6 +16,15 @@ import requests
 from eth_utils.crypto import keccak
 from requests.adapters import HTTPAdapter
 
+from services.clients.rpc_limits import (
+    RpcBackpressure,
+    RpcBillingLimitExceeded,
+    RpcBudgetExceeded,
+    admit,
+    current_scope,
+    error_kind,
+    overload,
+)
 from utils.chains import chain_by_id, chain_name_to_id_map
 from utils.logging import record_degraded
 
@@ -467,6 +479,10 @@ def _pin_calls(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[tuple[s
 
 def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
+    scope = current_scope()
+    if scope is not None:
+        headers["User-Agent"] = f"psat-{scope.stage}/1"
+        headers["X-PSAT-Run-ID"] = scope.run_id
     if _is_configured_erpc_url(rpc_url):
         secret = os.getenv("ERPC_SECRET")
         if secret:
@@ -488,6 +504,125 @@ class RpcClientTimeout(RuntimeError):
     A reject says narrow the query; a timeout says nothing about it. Subclasses ``RuntimeError`` so existing handlers
     still catch it.
     """
+
+
+def _post_rpc(rpc_url: str, payload: Any, *, timeout: float, extra_headers: Mapping[str, str] | None = None):
+    scope = current_scope()
+    items = payload if isinstance(payload, list) else [payload]
+    keys = {item["id"]: _read_key(rpc_url, item["method"], item.get("params", [])) for item in items}
+    found: dict[Any, dict] = {}
+    wire = []
+    duplicates: dict[Any, Any] = {}
+    leaders: dict[str, Any] = {}
+    for item in items:
+        key = keys[item["id"]]
+        cached = None
+        if scope is not None and key is not None:
+            with scope.lock:
+                cached = scope.cache.get(key)
+        if cached is not None:
+            found[item["id"]] = {**copy.deepcopy(cached), "id": item["id"]}
+        elif key is not None and key in leaders:
+            duplicates[item["id"]] = leaders[key]
+        else:
+            wire.append(item)
+            if key is not None:
+                leaders[key] = item["id"]
+    if not wire:
+        return _rpc_response([found[item["id"]] for item in items], isinstance(payload, list))
+    count = len(wire)
+    admit(rpc_url, count)
+    if scope is not None:
+        scope.note_sent(count)
+    response = _get_session().post(
+        rpc_url,
+        json=wire if isinstance(payload, list) else wire[0],
+        timeout=timeout,
+        headers=rpc_headers(rpc_url, extra_headers),
+    )
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    replies = data if isinstance(data, list) else [data]
+    if any(
+        isinstance(item, dict)
+        and error_kind(item.get("error") if response.status_code == 200 else item.get("error", item)) == "billing"
+        for item in replies
+    ):
+        failure = RpcBillingLimitExceeded("RPC provider billing quota exhausted")
+        if scope is not None:
+            scope.failure = failure
+        raise failure
+    if response.status_code in {429, 503}:
+        from utils.secrets import sanitize_url
+
+        cooldown = overload(rpc_url, response.headers.get("Retry-After"))
+        raise RpcBackpressure(
+            f"RPC provider overloaded (HTTP {response.status_code}) for {sanitize_url(rpc_url)}",
+            cooldown,
+        )
+    if response.status_code == 200:
+        if data is None:
+            data = response.json()
+        replies = data if isinstance(data, list) else [data]
+        if any(isinstance(item, dict) and error_kind(item.get("error")) == "capacity" for item in replies):
+            overload(rpc_url, response.headers.get("Retry-After"))
+        sent_ids = {item["id"] for item in wire}
+        for item in replies:
+            if not isinstance(item, dict) or item.get("id") not in sent_ids:
+                continue
+            found[item["id"]] = item
+            key = keys[item["id"]]
+            if (
+                scope is not None
+                and key is not None
+                and ("result" in item or error_kind(item.get("error")) == "execution")
+            ):
+                size = len(json.dumps(item).encode())
+                with scope.lock:
+                    if (
+                        key not in scope.cache
+                        and len(scope.cache) < 2048
+                        and size <= 65536
+                        and scope.cache_bytes + size <= 4 * 1024 * 1024
+                    ):
+                        scope.cache[key] = copy.deepcopy(item)
+                        scope.cache_bytes += size
+        for duplicate, leader in duplicates.items():
+            if leader in found:
+                found[duplicate] = {**found[leader], "id": duplicate}
+        if duplicates or len(wire) != len(items):
+            return _rpc_response(
+                [found[item["id"]] for item in items if item["id"] in found], isinstance(payload, list)
+            )
+    return response
+
+
+def _rpc_response(items: list[dict], batch: bool):
+    response = requests.Response()
+    response.status_code = 200
+    response._content = json.dumps(items if batch else items[0]).encode()
+    return response
+
+
+def _batch_size() -> int:
+    if os.getenv("PSAT_RPC_LIMITER_MODE", "postgres") == "off":
+        return MAX_BATCH_SIZE
+    return max(1, min(MAX_BATCH_SIZE, int(os.getenv("PSAT_RPC_BURST", "10"))))
+
+
+def _read_key(rpc_url: str, method: str, params: list[Any]) -> str | None:
+    # Mutating local-fork state and moving block tags must never reuse a read.
+    if current_scope() is None or is_local_rpc_url(rpc_url):
+        return None
+    position = {"eth_call": 1, "eth_getBalance": 1, "eth_getCode": 1, "eth_getStorageAt": 2}.get(method)
+    if position is None or len(params) <= position:
+        return None
+    block = params[position]
+    if not isinstance(block, str) or not block.startswith("0x"):
+        return None
+    return hashlib.sha256(json.dumps([rpc_url, method, params], sort_keys=True).encode()).hexdigest()
 
 
 def rpc_request(
@@ -513,20 +648,25 @@ def rpc_request(
         if method == "eth_blockNumber":
             return hex(block)
         params = pin_params(method, params, block)
-    session = _get_session()
+    scope = current_scope()
+    cache_key = _read_key(rpc_url, method, params)
+    if scope is not None and cache_key is not None:
+        with scope.lock:
+            cached = scope.cache.get(cache_key)
+        if cached is not None:
+            if "error" in cached:
+                raise RuntimeError(str(cached["error"]))
+            return copy.deepcopy(cached.get("result"))
     effective_timeout = JSON_RPC_TIMEOUT_SECONDS if timeout is None else timeout
     for attempt in range(retries + 1):
-        from services.clients.request_budget import charge_attempt
-
         if attempt and before_retry is not None:
             before_retry()
-        charge_attempt("rpc")
         try:
-            response = session.post(
+            response = _post_rpc(
                 rpc_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                 timeout=effective_timeout,
-                headers=rpc_headers(rpc_url, headers),
+                extra_headers=headers,
             )
             if response.status_code in RETRYABLE_HTTP_CODES and attempt < retries:
                 time.sleep(0.3 * (2**attempt))
@@ -539,6 +679,10 @@ def rpc_request(
                 raise RuntimeError(f"RPC HTTP {response.status_code} for {sanitize_url(rpc_url)}") from None
             payload = response.json()
             if payload.get("error"):
+                if error_kind(payload["error"]) == "capacity":
+                    if scope is not None and isinstance(scope.failure, RpcBackpressure):
+                        raise scope.failure
+                    raise RpcBackpressure("RPC provider capacity exceeded")
                 raise RuntimeError(str(payload["error"]))
             # Hot path: never above DEBUG.
             logger.debug("rpc call", extra={"method": method, "attempt": attempt})
@@ -703,19 +847,16 @@ def rpc_batch_request(
 
     results: list[Any] = [None] * len(calls)
 
-    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
-        chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
+    for chunk_start in range(0, len(calls), _batch_size()):
+        chunk = calls[chunk_start : chunk_start + _batch_size()]
         batch = [
             {"jsonrpc": "2.0", "id": chunk_start + i, "method": method, "params": params}
             for i, (method, params) in enumerate(chunk)
         ]
 
         try:
-            response = _get_session().post(
-                rpc_url,
-                json=batch,
-                timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
-                headers=rpc_headers(rpc_url, headers),
+            response = _post_rpc(
+                rpc_url, batch, timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1), extra_headers=headers
             )
             response.raise_for_status()
         except (requests.HTTPError, requests.ConnectionError, requests.Timeout, OSError) as exc:
@@ -760,49 +901,59 @@ def rpc_batch_request_classified(
 
     # Unanswered slots stay unobserved rather than looking like an earned error.
     results: list[tuple[Any, str]] = [(None, "transport")] * len(calls)
+    for chunk_start, chunk_size, exc, replies in _batch_chunk_replies(rpc_url, calls, headers):
+        if exc is not None:
+            logger.warning(
+                "rpc batch chunk failed wholesale — slots flagged transient",
+                extra={"chunk_start": chunk_start, "chunk_size": chunk_size, "exc_type": type(exc).__name__},
+            )
+            record_degraded(phase="rpc_batch_chunk", exc=exc, context={"chunk_start": chunk_start})
+            continue
+        for idx, item in replies:
+            if item.get("error"):
+                results[idx] = (None, "error" if error_kind(item["error"]) == "execution" else "transport")
+            else:
+                results[idx] = (item.get("result"), "ok")
 
-    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
-        chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
+    return results
+
+
+def _batch_chunk_replies(
+    rpc_url: str, calls: list[tuple[str, list[Any]]], headers: Mapping[str, str] | None = None
+) -> Iterator[tuple[int, int, Exception | None, list[tuple[int, dict]]]]:
+    """POST *calls* in ``MAX_BATCH_SIZE`` chunks, yielding ``(chunk_start, chunk_size, transport_exc, replies)``.
+
+    ``replies`` pairs each well-formed reply with its call index. Never raises for wire failures; a non-list payload
+    (some providers refuse batches that way) yields no replies, since nothing per-call was observed.
+    """
+    for chunk_start in range(0, len(calls), _batch_size()):
+        chunk = calls[chunk_start : chunk_start + _batch_size()]
         batch = [
             {"jsonrpc": "2.0", "id": chunk_start + i, "method": method, "params": params}
             for i, (method, params) in enumerate(chunk)
         ]
-
         try:
-            response = _get_session().post(
-                rpc_url,
-                json=batch,
-                timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
-                headers=rpc_headers(rpc_url, headers),
+            response = _post_rpc(
+                rpc_url, batch, timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1), extra_headers=headers
             )
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            logger.warning(
-                "rpc batch chunk failed wholesale — slots flagged transient",
-                extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
-            )
-            record_degraded(phase="rpc_batch_chunk", exc=exc, context={"chunk_start": chunk_start})
+            yield chunk_start, len(chunk), exc, []
+            if isinstance(exc, (RpcBackpressure, RpcBudgetExceeded)):
+                return
             continue
 
         if isinstance(payload, dict):
             payload = [payload]
         if not isinstance(payload, list):
-            # Some providers refuse batches with a non-list error; nothing per-call was observed.
-            continue
-
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            idx = item.get("id")
-            if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
-                continue
-            if item.get("error"):
-                results[idx] = (None, "error")
-            else:
-                results[idx] = (item.get("result"), "ok")
-
-    return results
+            payload = []
+        replies = [
+            (item["id"], item)
+            for item in payload
+            if isinstance(item, dict) and isinstance(item.get("id"), int) and 0 <= item["id"] < len(calls)
+        ]
+        yield chunk_start, len(chunk), None, replies
 
 
 def rpc_batch_request_with_status(
@@ -818,7 +969,7 @@ def rpc_batch_request_with_status(
     """
     return [
         (result, status != "ok")
-        for result, status in rpc_batch_request_classified(rpc_url, calls, headers, chain_id=chain_id)
+        for result, status in rpc_batch_request_classified(rpc_url, calls, headers=headers, chain_id=chain_id)
     ]
 
 
@@ -862,6 +1013,8 @@ def _eth_call_result_from_rpc_item(item: Mapping[str, Any]) -> EthCallResult:
         if isinstance(error, Mapping):
             raw_msg = error.get("message")
             message = str(raw_msg) if raw_msg is not None else "error"
+            if error_kind(error) != "execution":
+                return EthCallResult(False, "0x", None, f"transport: {message}")
             return EthCallResult(False, "0x", _extract_revert_data(error.get("data")), message)
         return EthCallResult(False, "0x", None, str(error))
     result = item.get("result")
@@ -874,8 +1027,8 @@ def eth_call_batch(
     rpc_url: str,
     calls: Sequence[Mapping[str, str]],
     block_tag: str = "latest",
-    *,
     headers: Mapping[str, str] | None = None,
+    *,
     chain_id: int | None = None,
 ) -> list[EthCallResult]:
     """Batch ``eth_call``s with per-call ``from`` at one ``block_tag``, preserving revert data.
@@ -891,44 +1044,21 @@ def eth_call_batch(
     if block is not None and _is_moving_tag(block_tag):
         block_tag = hex(block)
     results: list[EthCallResult] = [EthCallResult(False, "0x", None, "no_response")] * len(calls)
-    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
-        chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
-        batch = [
-            {"jsonrpc": "2.0", "id": chunk_start + i, "method": "eth_call", "params": [dict(call), block_tag]}
-            for i, call in enumerate(chunk)
-        ]
-        try:
-            response = _get_session().post(
-                rpc_url,
-                json=batch,
-                timeout=max(JSON_RPC_TIMEOUT_SECONDS, len(chunk) * 0.1),
-                headers=rpc_headers(rpc_url, headers),
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except Exception as exc:
+    rpc_calls: list[tuple[str, list[Any]]] = [("eth_call", [dict(call), block_tag]) for call in calls]
+    for chunk_start, chunk_size, exc, replies in _batch_chunk_replies(rpc_url, rpc_calls, headers):
+        if exc is not None:
             from utils.secrets import sanitize_string
 
             msg = f"transport: {sanitize_string(str(exc))}"
             logger.warning(
                 "eth_call batch chunk failed wholesale — slots flagged transient",
-                extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
+                extra={"chunk_start": chunk_start, "chunk_size": chunk_size, "exc_type": type(exc).__name__},
             )
             record_degraded(phase="eth_call_batch_chunk", exc=exc, context={"chunk_start": chunk_start})
-            for i in range(len(chunk)):
+            for i in range(chunk_size):
                 results[chunk_start + i] = EthCallResult(False, "0x", None, msg)
             continue
-
-        if isinstance(payload, dict):
-            payload = [payload]
-        if not isinstance(payload, list):
-            continue
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            idx = item.get("id")
-            if not isinstance(idx, int) or idx < 0 or idx >= len(calls):
-                continue
+        for idx, item in replies:
             results[idx] = _eth_call_result_from_rpc_item(item)
 
     return results

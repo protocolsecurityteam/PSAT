@@ -607,3 +607,68 @@ def test_bound_view_acl_leaf_promotes_to_delegated_authority(tmp_path):
     bound_leaf = _leaves(bound)[0]
     assert bound_leaf["authority_role"] == "delegated_authority"
     assert bound_leaf["references_msg_sender"] is True
+
+
+def _view_key_fixture(monkeypatch, keys, view):
+    import services.resolution.predicate_evaluator.membership as membership_mod
+    from services.resolution.capabilities import CapabilityExpr
+
+    calls: list[list[str]] = []
+
+    def fake_view(**kwargs):
+        calls.append(list(kwargs["args"]))
+        return view(kwargs["args"])
+
+    monkeypatch.setattr(membership_mod, "_observed_event_key_words", lambda **_kwargs: keys)
+    monkeypatch.setattr(membership_mod, "_call_unary_bytes32_view", fake_view)
+
+    class Adapter:
+        _outer_ctx = SimpleNamespace(
+            session=object(), rpc_url="http://rpc", contract_address="0x" + "11" * 20, chain_id=1, block=None
+        )
+
+        def enumerate(self, descriptor, contract_address):
+            return CapabilityExpr.finite_set([descriptor["key_sources"][0]["constant_value"][-40:]], quality="exact")
+
+    descriptor = {
+        "kind": "mapping_membership",
+        "storage_var": "_operatorApprovals",
+        "key_sources": [
+            {"source": "view_call", "callee_signature": "ownerOf(uint256)", "callee_selector": "0x6352211e"},
+            {"source": "msg_sender"},
+        ],
+        "enumeration_hint": [{"topic0": "0x" + "12" * 32, "direction": "add"}],
+    }
+    ctx = SimpleNamespace(adapter=Adapter(), contract_address="0x" + "11" * 20, block=None)
+    return membership_mod, descriptor, ctx, calls
+
+
+def test_view_key_fan_out_stops_after_an_all_reverting_probe(monkeypatch):
+    keys = ["0x" + f"{i:064x}" for i in range(200)]
+    mod, descriptor, ctx, calls = _view_key_fixture(monkeypatch, keys, lambda _args: [])
+
+    cap = mod._resolve_view_key_membership(descriptor, ctx)
+
+    assert [len(batch) for batch in calls] == [mod._VIEW_KEY_PROBE]
+    assert cap is not None and cap.kind == "external_check_only"
+
+
+def test_view_key_fan_out_beyond_the_limit_sends_nothing_and_stays_unresolved(monkeypatch):
+    keys = ["0x" + f"{i:064x}" for i in range(300)]
+    mod, descriptor, ctx, calls = _view_key_fixture(monkeypatch, keys, lambda _args: pytest.fail("no RPC"))
+
+    cap = mod._resolve_view_key_membership(descriptor, ctx)
+
+    assert calls == []
+    assert cap is not None and cap.kind == "external_check_only"
+    assert "view_key_limit_exceeded" in cap.check.extra["basis"]
+
+
+def test_view_key_fan_out_continues_past_a_successful_probe(monkeypatch):
+    keys = ["0x" + f"{i:064x}" for i in range(40)]
+    mod, descriptor, ctx, calls = _view_key_fixture(monkeypatch, keys, lambda args: [args[0]])
+
+    cap = mod._resolve_view_key_membership(descriptor, ctx)
+
+    assert [len(batch) for batch in calls] == [mod._VIEW_KEY_PROBE, 40 - mod._VIEW_KEY_PROBE]
+    assert cap is not None and len(cap.members) == 2

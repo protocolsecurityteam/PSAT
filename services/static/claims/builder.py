@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from utils.logging import record_degraded
+
 from .context import ClaimContext
 from .matchers import discover
 from .registry import emit_claim, legacy_projections, registry, resolve_claim_precedence
@@ -30,8 +32,10 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     ctx = ClaimContext(contract, effects, predicate_trees)
     signatures = ctx.function_signatures()
     functions: dict[str, list[Claim]] = {signature: [] for signature in signatures}
+    errors: list[str] = []
 
     for entry in registry().values():
+        pending: dict[str, Claim] = {}
         try:
             if not entry.gate(ctx):
                 continue
@@ -69,14 +73,19 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
                     evidence.witness["authority_scope_ids"] = [s["id"] for s in selected]
                 elif source_sites:
                     evidence.witness["authority_scope_ids"] = []
-                functions[signature].append(emit_claim(entry.claim_id, evidence.tier, evidence.witness))
-        except Exception:
+                pending[signature] = emit_claim(entry.claim_id, evidence.tier, evidence.witness)
+        except Exception as exc:
+            errors.append(f"claim matcher {entry.claim_id}: {type(exc).__name__}")
+            record_degraded(phase="claim_matcher", exc=exc, context={"claim_id": entry.claim_id})
             logger.warning(
                 "claim matcher %s failed",
                 entry.claim_id,
                 extra={"claim_id": entry.claim_id},
                 exc_info=True,
             )
+        else:
+            for signature, claim in pending.items():
+                functions[signature].append(claim)
 
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
@@ -94,6 +103,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
         "schema_version": SCHEMA_VERSION,
         "contract_name": ctx.contract_name,
         "functions": functions,
+        "errors": errors,
         "abi_selectors": abi_selectors,
     }
 

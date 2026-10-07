@@ -1131,3 +1131,82 @@ def test_boot_sweep_dedupes_pending_selection_pass(db_session, monkeypatch, erpc
         select(Job.id).where(Job.stage == JobStage.selection, Job.protocol_id == protocol.id)
     ).all()
     assert len(selection) == 1
+
+
+@pytest.mark.parametrize("code", ["0x6001", "0x"])
+def test_selection_drains_probe_tail_without_manual_passes(db_session, monkeypatch, erpc_env, code):
+    from db.queue import get_artifact
+    from services.clients.rpc_limits import rpc_scope
+    from workers.base import JobHandledDirectly
+    from workers.selection_worker import SelectionWorker
+
+    monkeypatch.setenv("PSAT_PROBE_PASS_MAX", "2")
+    protocol = _protocol(db_session)
+    candidates = [_contract(db_session, ADDR(0x4000 + i), nominated_protocol_id=protocol.id) for i in range(5)]
+    job = Job(
+        company=protocol.name,
+        protocol_id=protocol.id,
+        stage=JobStage.selection,
+        status=JobStatus.queued,
+        request={"company": protocol.name, "analyze_limit": 5},
+    )
+    db_session.add(job)
+    db_session.commit()
+    seen = _stub_probe_wire(monkeypatch, code=code)
+    worker = SelectionWorker()
+    monkeypatch.setattr(worker, "_heartbeat", lambda *a, **k: None)
+    # No selection activity RPC is needed to test the actual continuation/persistence boundary.
+    monkeypatch.setattr("workers.selection_worker.rank_contract_rows", lambda rows: [])
+    for attempt in range(3):
+        with rpc_scope(str(job.id), "selection"):
+            with pytest.raises(JobHandledDirectly):
+                worker.process(db_session, job)
+        db_session.refresh(job)
+        if attempt < 2:
+            assert job.status == JobStatus.queued
+            assert job.stage == JobStage.selection
+            assert get_artifact(db_session, job.id, "selection_summary") is None
+    assert job.status == JobStatus.completed
+    assert seen["probed"] == [c.address for c in candidates]
+    assert all(c.protocol_id is None for c in candidates)
+
+
+def test_probe_pass_stops_before_stage_allowance_and_preserves_completed_work(db_session, monkeypatch, erpc_env):
+    from services.clients.rpc_limits import RpcBackpressure, current_scope, rpc_scope
+
+    protocol = _protocol(db_session)
+    candidates = [_contract(db_session, ADDR(0x4100 + i), nominated_protocol_id=protocol.id) for i in range(3)]
+    db_session.commit()
+    monkeypatch.setenv("PSAT_RPC_STAGE_LIMIT", "21")
+    seen = _stub_probe_wire(monkeypatch)
+    with rpc_scope("bounded-probe", "selection"):
+        result = run_probe_pass(db_session, protocol.id)
+    assert seen["probed"] == [c.address for c in candidates[:2]]
+    assert result.deferred_contract_ids == (candidates[2].id,)
+
+    # A separate protocol starts fresh, then loses its provider on the second probe.
+    other = _protocol(db_session)
+    first = _contract(db_session, ADDR(0x4200), nominated_protocol_id=other.id)
+    second = _contract(db_session, ADDR(0x4201), nominated_protocol_id=other.id)
+    db_session.commit()
+    wire = probes.rpc_request
+
+    def limited(url, method, params, **kwargs):
+        if method == "eth_getCode" and params[0] == second.address:
+            failure = RpcBackpressure("provider cooling down")
+            scope = current_scope()
+            assert scope is not None
+            scope.failure = failure
+            raise failure
+        return wire(url, method, params, **kwargs)
+
+    monkeypatch.setattr(probes, "rpc_request", limited)
+    with pytest.raises(RpcBackpressure):
+        with rpc_scope("interrupted-probe", "selection"):
+            run_probe_pass(db_session, other.id)
+    db_session.rollback()
+    assert db_session.get(ContractProbeAttempt, (first.id, 1)).results["status"] == "probed"
+    assert (
+        db_session.query(ContractMembershipWitness).filter_by(contract_id=second.id, rule=WITNESS_RULE_W1_CODE).count()
+        == 0
+    )

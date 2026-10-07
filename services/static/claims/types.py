@@ -65,6 +65,7 @@ class ClaimsArtifact(TypedDict):
     schema_version: str
     contract_name: str | None
     functions: dict[str, list[Claim]]
+    errors: NotRequired[list[str]]
     # Canonical selector per function. Present means proven; absent means the signature couldn't be lowered (not a
     # proof); fallback/receive never appear.
     abi_selectors: NotRequired[dict[str, str]]

@@ -226,6 +226,9 @@ def reconcile_pending_effects(session, protocol_id=None, limit=25):
             row.next_attempt_at = now + timedelta(minutes=1)
             continue
         job_id = uuid.uuid4()
+        contract = session.get(Contract, row.contract_id)
+        source_job = session.get(Job, contract.job_id) if contract is not None and contract.job_id else None
+        root_id = ((source_job.request or {}).get("root_job_id") or str(source_job.id)) if source_job else str(job_id)
         job = Job(
             id=job_id,
             address=row.deployment_address,
@@ -237,6 +240,7 @@ def reconcile_pending_effects(session, protocol_id=None, limit=25):
                 "address": row.deployment_address,
                 "chain": chain_by_id(row.chain_id).name,
                 "protocol_id": row.protocol_id,
+                "root_job_id": root_id,
                 "effects_resume_work_id": row.id,
                 "effects_function_ids": [row.function_id],
             },

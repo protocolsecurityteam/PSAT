@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -291,7 +291,10 @@ class BaseWorker:
 
                 started_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                 try:
-                    self.process(session, job)
+                    from services.clients.rpc_limits import rpc_scope
+
+                    with rpc_scope(str(request.get("root_job_id") or job.id), self.stage.value):
+                        self.process(session, job)
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     rss_after = current_rss_bytes()
@@ -416,6 +419,12 @@ class BaseWorker:
                     new_retry_count = prior_retry_count + 1
                     will_retry = kind == "transient" and new_retry_count < max_retries()
                     next_attempt_at = compute_next_attempt(prior_retry_count) if will_retry else None
+                    from services.clients.rpc_limits import RpcBackpressure
+
+                    if isinstance(exc, RpcBackpressure) and next_attempt_at is not None:
+                        next_attempt_at = max(
+                            next_attempt_at, datetime.now(timezone.utc) + timedelta(seconds=exc.retry_after)
+                        )
                     outcome = "requeued" if will_retry else "failed_terminal"
                     exc_type_str = f"{type(exc).__module__}.{type(exc).__name__}"
                     # WARNING when retrying, ERROR when terminal. The traceback goes in ``exc_info`` only on the
@@ -762,7 +771,7 @@ class BaseWorker:
             )
             return 0
 
-    def _degrade_dependencies(self, session: Session, job: Job) -> int:
+    def _degrade_dependencies(self, session: Session, job: Job, *, reason: str = "terminal failure") -> int:
         """Mark this job's pending dependencies ``degraded`` after a terminal failure, so dependents fall back to
         ``external_check_only``. Doesn't commit.
         """
@@ -783,10 +792,11 @@ class BaseWorker:
                 row.satisfied_at = now
             if rows:
                 logger.info(
-                    "Worker %s: job %s degraded %d dependent edge(s) after terminal failure",
+                    "Worker %s: job %s degraded %d dependent edge(s) after %s",
                     self.worker_id,
                     job.id,
                     len(rows),
+                    reason,
                     extra={"dependents_degraded": len(rows)},
                 )
             return len(rows)

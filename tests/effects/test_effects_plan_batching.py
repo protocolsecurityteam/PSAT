@@ -119,7 +119,6 @@ def _run_plan(session, candidates, *, batched: bool):
         simulate=MagicMock(side_effect=AssertionError("_plan must not touch the wire")),
         simulate_supported=False,
         transcript_store=lambda tr: "ptr",
-        call_batch=None,
         anvil_factory=None,
     )
 

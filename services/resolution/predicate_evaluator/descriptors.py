@@ -128,9 +128,22 @@ def _target_address_from_descriptor(descriptor: SetDescriptor, ctx: EvaluationCo
     source = authority.get("address_source") or {}
     if source.get("source") == "state_variable":
         name = _state_var_lookup_key(cast(dict[str, Any], source))
-        value = ctx.state_var_values.get(name) if isinstance(name, str) else None
+        outer = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
+        values = getattr(ctx, "state_var_values", None)
+        if values is None:
+            values = getattr(outer, "state_var_values", None) or {}
+        value = values.get(name) if isinstance(name, str) else None
         if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
             return value.lower()
+        return None
+    if source.get("source") == "view_call" and source.get("storage_slot"):
+        from .authority import _live_resolve_authority_slot
+
+        resolved = _live_resolve_authority_slot(ctx, source.get("storage_slot"))
+        members = (resolved.members or []) if resolved is not None else []
+        if resolved is not None and resolved.membership_quality == "exact" and len(members) == 1:
+            return members[0]
+        return None
     return ctx.contract_address.lower() if ctx.contract_address else None
 
 

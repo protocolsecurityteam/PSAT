@@ -37,7 +37,6 @@ from services.effects.config import (
     SCOPE_PROJECTION,
 )
 from services.effects.harness import (
-    CallBatch,
     ObservedEffect,
     SimContext,
     TranscriptStore,
@@ -60,10 +59,7 @@ class ProbeContext:
     simulate: Simulate
     simulate_supported: bool
     transcript_store: TranscriptStore
-    call_batch: CallBatch | None = None
     anvil_factory: Callable[[], AnvilTransport] | None = None
-    # Upstream request count per probe, for preflight sizing (best-effort).
-    on_requests: Callable[[int], None] | None = None
     # Unset in production: built from ``simulate`` on first use and memoized for the whole context.
     seeder: Seeder | None = None
     _seeder_cache: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)

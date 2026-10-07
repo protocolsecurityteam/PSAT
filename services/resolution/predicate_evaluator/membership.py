@@ -23,6 +23,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
 
+# Observed event keys are only assumed to be valid view arguments. When they are not (ERC721
+# ``isApprovedForAll(ownerOf(tokenId), sender)`` yields owner addresses, not token ids), every call
+# reverts: the 2026-10-05 ENS BaseRegistrar run spent ~1M reverting eth_calls this way.
+_VIEW_KEY_LIMIT = 256
+_VIEW_KEY_PROBE = 16
+
 
 def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr | None:
     if descriptor.get("kind") != "mapping_membership":
@@ -77,13 +83,38 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
 
     if not isinstance(contract_address, str) or not contract_address.startswith("0x"):
         return None
+    if len(role_words) > _VIEW_KEY_LIMIT:
+        logger.warning(
+            "view-key membership skipped: %d observed keys exceed limit %d for %s",
+            len(role_words),
+            _VIEW_KEY_LIMIT,
+            contract_address,
+        )
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=contract_address.lower(),
+                target_call_selector=selector,
+                extra={"basis": ["view_key_membership_unresolved", "view_key_limit_exceeded"]},
+            )
+        )
+    block = getattr(outer_ctx, "block", None) or ctx.block
     admin_words = _call_unary_bytes32_view(
         rpc_url=rpc_url,
         contract_address=contract_address,
         selector=selector,
-        args=role_words,
-        block=getattr(outer_ctx, "block", None) or ctx.block,
+        args=role_words[:_VIEW_KEY_PROBE],
+        block=block,
     )
+    # An all-reverting probe means the keys are not this view's domain; the rest would revert too.
+    if admin_words and len(role_words) > _VIEW_KEY_PROBE:
+        rest = _call_unary_bytes32_view(
+            rpc_url=rpc_url,
+            contract_address=contract_address,
+            selector=selector,
+            args=role_words[_VIEW_KEY_PROBE:],
+            block=block,
+        )
+        admin_words = sorted(set(admin_words) | set(rest))
     if not admin_words:
         return CapabilityExpr.external_check_only(
             ExternalCheck(

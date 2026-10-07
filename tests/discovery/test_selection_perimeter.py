@@ -104,6 +104,45 @@ def _run(worker, session, job):
         pass
 
 
+def test_code_proven_candidate_can_be_analyzed_without_admitting_membership(db_session, seed, worker, monkeypatch):
+    from types import SimpleNamespace
+
+    from db.models import Contract, Job
+    from services.discovery.membership_gate import w1_evidence, write_witness
+
+    protocol_id, company, address_factory = seed
+    addresses = [address_factory() for _ in range(3)]
+    for address in addresses:
+        row = Contract(
+            address=address,
+            chain="ethereum",
+            nominated_protocol_id=protocol_id,
+            confidence=0.9,
+            discovery_sources=["ai_inventory"],
+            contract_name="Candidate",
+        )
+        db_session.add(row)
+        db_session.flush()
+        write_witness(
+            db_session,
+            contract_id=row.id,
+            protocol_id=protocol_id,
+            rule="w1_code",
+            evidence=w1_evidence(chain_id=1, code_probe_block=100),
+        )
+    db_session.commit()
+    monkeypatch.setattr(
+        "workers.selection_worker.run_probe_pass",
+        lambda *a, **k: SimpleNamespace(targeted_contract_ids=(), promoted_contract_ids=()),
+    )
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=1)
+    _run(worker, db_session, job)
+    children = db_session.query(Job).filter(Job.address.in_(addresses)).all()
+    assert len(children) == 1
+    assert children[0].request["analysis_membership_state"] == "candidate"
+    assert all(row.protocol_id is None for row in db_session.query(Contract).filter(Contract.address.in_(addresses)))
+
+
 def _summary(session, job_id) -> dict:
     from db.queue import get_artifact
 
@@ -238,3 +277,21 @@ def test_no_candidates_still_publishes_both_ledgers(db_session, worker, seed):
     summary = _summary(db_session, job.id)
     assert summary["not_selected"] == []
     assert summary["pre_rank_excluded"] == []
+
+
+def test_promotion_followup_keeps_original_run_and_selection_budgets(db_session, seed):
+    from db.models import Job, JobStage, JobStatus
+    from services.discovery.selection_enqueue import enqueue_selection_pass
+
+    protocol_id, company, _ = seed
+    parent = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=37)
+    parent.status = JobStatus.completed
+    parent.stage = JobStage.done
+    parent.request = {**(parent.request or {}), "root_job_id": str(parent.id), "selection_probed_ids": [123]}
+    db_session.commit()
+    assert enqueue_selection_pass(db_session, protocol_id, reason="membership_promotion")
+    followup = db_session.query(Job).filter_by(protocol_id=protocol_id, stage=JobStage.selection).one()
+    assert followup.request["root_job_id"] == str(parent.id)
+    assert followup.request["analyze_limit"] == 37
+    assert followup.company == company
+    assert "selection_probed_ids" not in followup.request

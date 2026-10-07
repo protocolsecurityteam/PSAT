@@ -125,7 +125,7 @@ def _debug_log(enabled: bool, message: str) -> None:
 
 def _get_domain(url: str) -> str:
     try:
-        domain = urlparse(url).netloc.lower()
+        domain = (urlparse(url).hostname or "").lower()
     except ValueError:
         return ""
     return domain[4:] if domain.startswith("www.") else domain

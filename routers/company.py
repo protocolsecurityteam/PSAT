@@ -338,6 +338,14 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
             "contract_count": len(coverage),
             "audit_count": total_audit_count,
             "scoped_audit_count": len(audit_rows),
+            "audit_reports": [
+                _audit_report_to_dict(a)
+                for a in session.scalars(
+                    select(AuditReport)
+                    .where(AuditReport.protocol_id == protocol_row.id)
+                    .order_by(AuditReport.date.desc().nullslast(), AuditReport.id.desc())
+                )
+            ],
             "coverage": coverage,
         }
     _log_endpoint(

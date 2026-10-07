@@ -372,6 +372,8 @@ def test_audit_coverage_endpoint_uses_coverage_table(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["audit_count"] == 1
+    assert len(body["audit_reports"]) == 1
+    assert body["audit_reports"][0]["title"] == "Covers Pool + Vault"
 
     by_name = {c["contract_name"]: c for c in body["coverage"]}
     pool = by_name["Pool"]

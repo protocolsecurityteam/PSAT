@@ -50,6 +50,14 @@ abstract contract Auth {
     }
 }
 contract RolesAuthority is Auth {
+    enum Mode { Closed, Open }
+    struct Config { Authority delegate; Mode mode; uint256 limit; }
+    Mode public mode;
+    Config private config;
+    function() external private callback;
+    function setCallback(function() external next) external { callback = next; }
+    function setMode(Mode next) external { mode = next; }
+    function setConfig(Config calldata next) external { config = next; }
     mapping(address => bytes32) public getUserRoles;
     mapping(address => mapping(bytes4 => bool)) public isCapabilityPublic;
     mapping(bytes4 => mapping(address => bytes32)) public getRolesWithCapability;
@@ -66,8 +74,26 @@ contract RolesAuthority is Auth {
 """
 
 
-def test_solmate_setauthority_is_authority_update(tmp_path):
-    artifact = build_effects(_contract(_compile(tmp_path, _SOLMATE_AUTH), "RolesAuthority"))
+def test_effect_entries_preserve_abi_identity_and_authority_update(tmp_path):
+    contract = _contract(_compile(tmp_path, _SOLMATE_AUTH), "RolesAuthority")
+    artifact = build_effects(contract)
     labels = _info(artifact, "setAuthority(Authority)")["effect_labels"]
     assert "authority_update" in labels
     assert "external_contract_call" not in labels
+    for declared, canonical in [
+        ("setAuthority(Authority)", "setAuthority(address)"),
+        ("setMode(RolesAuthority.Mode)", "setMode(uint8)"),
+        ("setConfig(RolesAuthority.Config)", "setConfig((address,uint8,uint256))"),
+        ("setUserRole(address,uint8,bool)", "setUserRole(address,uint8,bool)"),
+    ]:
+        entry = _info(artifact, declared)
+        assert entry["abi_signature"] == canonical
+        assert entry["selector"] == _selector(canonical)
+        assert entry["writer_selectors"] == [_selector(canonical)]
+    # This ABI type is not lowered by the analyzer yet; absence must stay distinct from fallback/receive.
+    callback = next(fn for fn in contract.functions if fn.name == "setCallback")
+    unknown = _info(artifact, callback.full_name)
+    assert unknown["abi_signature"] is None
+    assert unknown["selector"] is None
+    assert unknown["writer_selectors"] is None
+    assert unknown["state_writes"]
