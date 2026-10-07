@@ -45,7 +45,8 @@ class TestGetDomain:
             pytest.param("https://docs.example.com", "docs.example.com", id="preserves_subdomain"),
             pytest.param("https://Example.COM/Page", "example.com", id="lowercases"),
             pytest.param("", "", id="invalid_url_returns_empty"),
-            pytest.param("https://example.com:8080/path", "example.com:8080", id="port_included_in_netloc"),
+            pytest.param("https://example.com:8080/path", "example.com", id="host_without_port"),
+            pytest.param("https://example.com@other.com/path", "other.com", id="host_without_userinfo"),
         ],
     )
     def test_get_domain(self, url, expected):
