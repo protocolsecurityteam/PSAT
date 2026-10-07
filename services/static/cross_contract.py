@@ -76,6 +76,39 @@ def _propagatable(claim: Any) -> bool:
     return claim_id == C.UPGRADE_IMPLEMENTATION or _is_flow_family(claim_id)
 
 
+def _selector_keys(fn_sig: Any, fn_record: dict[str, Any]) -> set[str]:
+    """The selectors a callee's function record answers to. The caller's sink records the canonical selector; the
+    record's own ``selector`` hashes the declared signature (``sweepTo(IERC20,...)`` keyed wrong). The stamped
+    ``abi_selector`` comes first; the declared form stays as a fallback for artifacts without it.
+    """
+    keys: set[str] = set()
+    abi_selector = fn_record.get("abi_selector")
+    if isinstance(abi_selector, str) and abi_selector.startswith("0x"):
+        keys.add(abi_selector.lower())
+    raw_selector = fn_record.get("selector")
+    selector = (
+        raw_selector
+        if isinstance(raw_selector, str) and raw_selector.startswith("0x")
+        else _compute_selector(str(fn_sig))
+    )
+    if selector:
+        keys.add(selector.lower())
+    return keys
+
+
+def function_selectors(effects_artifact: Any) -> set[str]:
+    """Every selector an effects record's functions answer to."""
+    functions = effects_artifact.get("functions") if isinstance(effects_artifact, dict) else None
+    if not isinstance(functions, dict):
+        return set()
+    return {
+        key
+        for fn_sig, record in functions.items()
+        if isinstance(record, dict)
+        for key in _selector_keys(fn_sig, record)
+    }
+
+
 def build_callee_claim_map(
     effects_by_address: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, list[Claim]]]:
@@ -92,22 +125,7 @@ def build_callee_claim_map(
             claims = [c for c in (fn_record.get("claims") or []) if _propagatable(c)]
             if not claims:
                 continue
-            # The caller's sink records the canonical selector; the record's own ``selector`` hashes the declared
-            # signature (``sweepTo(IERC20,...)`` keyed wrong). Use the stamped ``abi_selector`` first; the declared form
-            # stays as a fallback for artifacts without it.
-            keys: set[str] = set()
-            abi_selector = fn_record.get("abi_selector")
-            if isinstance(abi_selector, str) and abi_selector.startswith("0x"):
-                keys.add(abi_selector.lower())
-            raw_selector = fn_record.get("selector")
-            selector = (
-                raw_selector
-                if isinstance(raw_selector, str) and raw_selector.startswith("0x")
-                else _compute_selector(str(fn_sig))
-            )
-            if selector:
-                keys.add(selector.lower())
-            for key in keys:
+            for key in _selector_keys(fn_sig, fn_record):
                 selector_claims.setdefault(key, []).extend(claims)
         if selector_claims:
             callee_map[address.lower()] = selector_claims
@@ -143,9 +161,11 @@ def _derive_value_flow_claims(
     target_effects: Any,
     controller_values: Any,
     callee_claim_map: dict[str, dict[str, list[Claim]]],
+    callee_implementations: dict[str, str] | None = None,
 ) -> dict[str, list[Claim]]:
     """Value flow and beacon upgrade: a body call resolved via ``controller_values`` inherits the callee's
-    propagatable claims.
+    propagatable claims. A callee in ``callee_implementations`` is a proxy; its witness names the implementation whose
+    claims it inherited.
     """
     var_to_address = _var_to_address(controller_values)
     enriched: dict[str, list[Claim]] = {}
@@ -157,21 +177,19 @@ def _derive_value_flow_claims(
             if not callee_addr:
                 continue
             selector = str(sink.get("selector", "")).lower()
+            implementation = (callee_implementations or {}).get(callee_addr)
             for source in callee_claim_map.get(callee_addr, {}).get(selector, []):
                 claim_id = source["claim_id"]
-                new_claims.append(
-                    emit_claim(
-                        claim_id,
-                        "policy_derived",
-                        {
-                            "kind": "cross_contract_join",
-                            "callee": callee_addr,
-                            "selector": selector,
-                            "sink_id": sink.get("id"),
-                            "source_tier": source.get("tier"),
-                        },
-                    )
-                )
+                witness = {
+                    "kind": "cross_contract_join",
+                    "callee": callee_addr,
+                    "selector": selector,
+                    "sink_id": sink.get("id"),
+                    "source_tier": source.get("tier"),
+                }
+                if implementation:
+                    witness["implementation"] = implementation
+                new_claims.append(emit_claim(claim_id, "policy_derived", witness))
                 logger.info(
                     "Cross-contract: %s calls %s (%s); deriving policy claim %s",
                     fn_sig.split("(")[0],
@@ -190,9 +208,12 @@ def unresolved_callees(
     callees_with_facts: set[str],
     *,
     target_address: str,
+    partial_callees: dict[str, set[str]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Body calls whose callee resolves to an address with no facts to derive from: ``{function_signature: [{sink_id,
     selector, callee}]}``. Value-flow claims for these calls are not determined, which is not "none".
+    ``partial_callees``: ``{callee: selectors}`` for callees whose facts cover only those selectors; a call outside
+    them is a gap too.
     """
     var_to_address = _var_to_address(controller_values)
     target = (target_address or "").lower()
@@ -202,9 +223,12 @@ def unresolved_callees(
         for sink in sinks:
             callee = var_to_address.get(str(sink.get("target", "")).lower().split(".", 1)[0])
             # The zero address is a burn sentinel, not a contract that could have facts.
-            if not callee or callee == target or callee in callees_with_facts or not callee[2:].strip("0"):
+            if not callee or callee == target or not callee[2:].strip("0"):
                 continue
             selector = str(sink.get("selector", "")).lower()
+            covered = (partial_callees or {}).get(callee)
+            if callee in callees_with_facts and (covered is None or selector in covered):
+                continue
             gaps.append({"sink_id": sink.get("id"), "selector": selector, "callee": callee})
         if gaps:
             out[fn_sig] = gaps
@@ -380,12 +404,15 @@ def derive_cross_contract_claims(
     *,
     sibling_transfer_hooks: list[dict[str, str]] | None = None,
     proxy_provenance: dict[str, str] | None = None,
+    callee_implementations: dict[str, str] | None = None,
 ) -> dict[str, list[Claim]]:
-    """Run the four derivations: ``{function_signature: [policy_derived claims]}`` for functions that gained any."""
+    """Run the four derivations: ``{function_signature: [policy_derived claims]}`` for functions that gained any.
+    ``callee_implementations``: ``{proxy: implementation}`` for callees whose facts are their implementation's.
+    """
     discover()  # ensure flow/supply/upgrade ids are registered before emit_claim
     merged: dict[str, list[Claim]] = {}
     for derivation in (
-        _derive_value_flow_claims(target_effects, controller_values, callee_claim_map),
+        _derive_value_flow_claims(target_effects, controller_values, callee_claim_map, callee_implementations),
         _derive_transfer_policy_claims(target_effects, sibling_transfer_hooks),
         _derive_provenance_upgrade_claims(target_effects, proxy_provenance),
     ):
