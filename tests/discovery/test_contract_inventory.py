@@ -798,3 +798,54 @@ class TestOrchestratorIntegration:
         notes = " ".join(result["notes"])
         assert "Chain resolution" in notes
         assert "Activity ranking" not in notes
+
+
+def test_a_provider_402_marks_the_inventory_incomplete(monkeypatch):
+    """OpenRouter out of credits: the page pick failed, the fallback read the wrong pages and the result listed no
+    contracts with ``errors: []``, exactly like a protocol that publishes none. Real LLM client; only the wire is
+    stubbed.
+    """
+    import responses
+
+    from services.discovery import inventory_domain
+
+    monkeypatch.setenv("OPEN_ROUTER_KEY", "test-openrouter-stub-key")
+    hits = [
+        {"url": "https://docs.delta.xyz/contracts", "title": "Delta contracts", "content": "deployed addresses"},
+        {"url": "https://docs.delta.xyz/blog", "title": "Delta blog", "content": "news"},
+    ]
+    monkeypatch.setattr("services.discovery.inventory._tavily_search", lambda *_a, **_kw: hits)
+    monkeypatch.setattr("services.discovery.inventory_domain._tavily_search", lambda *_a, **_kw: hits)
+    monkeypatch.setattr("services.discovery.inventory._llm_select_domain", inventory_domain._llm_select_domain)
+    monkeypatch.setattr("services.discovery.inventory.extract_inventory_entries_from_pages", lambda *_a, **_kw: [])
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json={"error": {"message": "Insufficient credits", "code": 402}},
+            status=402,
+        )
+        result = search_protocol_inventory("Delta", run_deployer=False)
+
+    assert result["contracts"] == []
+    assert result["complete"] is False
+    llm_errors = [error for error in result["errors"] if error.get("provider") == "llm"]
+    assert {error["phase"] for error in llm_errors} == {"inventory_domain_selection", "inventory_page_selection"}
+    assert all("402" in error["error"] for error in llm_errors)
+    assert result["notes"][0].endswith("LLM call(s) failed; the contract list is incomplete")
+
+
+def test_an_inventory_whose_llm_steps_succeed_is_not_marked_incomplete(monkeypatch):
+    monkeypatch.setattr(
+        "services.discovery.inventory._discover_contract_inventory_pages",
+        lambda *_a, **_kw: ([{"url": "https://docs.example.com"}], ["https://docs.example.com"]),
+    )
+    monkeypatch.setattr(
+        "services.discovery.inventory.extract_inventory_entries_from_pages",
+        lambda *_a, **_kw: [_entry()],
+    )
+
+    result = search_protocol_inventory("docs.example.com", run_deployer=False)
+
+    assert "complete" not in result
+    assert not any(error.get("provider") == "llm" for error in result["errors"])
