@@ -32,6 +32,7 @@ from routers import (
     protocols,
     spa,
 )
+from services.auth.sessions import check_production_admin_config
 from utils.company_limit import CompanyReadLimit
 from utils.compression import NegotiatedGZipMiddleware
 from utils.edge import CloudflareBoundary, EdgeConfig
@@ -163,7 +164,7 @@ class BodySizeLimitMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    EdgeConfig.from_env()
+    check_production_admin_config(EdgeConfig.from_env().emails)
     configure_logging()
     try:
         # Avoids a circular import at module load.

@@ -106,8 +106,12 @@ const CONTROLLED_NAMES = ["Vault", "LiquidityPool"];
 
 async function goToSurface(page, { admin = false } = {}) {
   if (admin) {
-    // The Agent tab gates on the presence of an admin key only.
+    // The Agent tab gates on an admin key the deployment accepts.
     await page.addInitScript(() => window.localStorage.setItem("psat_admin_key", "e2e"));
+    await page.route(
+      (url) => url.pathname === "/api/auth/config",
+      (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ enabled: false, providers: [], dev_login: false, admin_key: true }) }),
+    );
   }
   await page.route(/\/api\/company\/[^/]+\/summary$/, (route) =>
     route.fulfill({ contentType: "application/json", body: "{}" })

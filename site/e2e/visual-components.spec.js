@@ -111,6 +111,7 @@ async function setup(page) {
   });
   const api = (re, body, status) => page.route((url) => re.test(url.pathname), (route) => route.fulfill(json(body, status)));
   await api(/^\/api\//, {});
+  await api(/^\/api\/auth\/config$/, { enabled: false, providers: [], dev_login: false, admin_key: true });
   await api(/^\/api\/company\/etherfi$/, COMPANY);
   await api(/^\/api\/company\/etherfi\/summary$/, {});
   await api(/^\/api\/company\/etherfi\/audit_coverage$/, RICH_COVERAGE);

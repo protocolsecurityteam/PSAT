@@ -1,5 +1,6 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 
+import { loadAuthConfig } from "./api/authConfig.js";
 import { api, getAdminKey, setAdminKey } from "./api/client.js";
 import { useIsAdmin } from "./api/useIsAdmin.js";
 import AccountPage from "./account/AccountPage.jsx";
@@ -52,13 +53,17 @@ export default function App() {
     });
   }, []);
 
-  // ?admin=1 prompts once for a key; the only key-entry path now that operator
-  // controls are hidden.
+  // ?admin=1 prompts once for a key where the deployment accepts one
+  // (previews, local); production operators sign in instead.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("admin") === "1" && !getAdminKey()) {
-      const entered = window.prompt("Paste your PSAT admin key:");
-      if (entered) setAdminKey(entered);
-    }
+    if (new URLSearchParams(window.location.search).get("admin") !== "1" || getAdminKey()) return;
+    loadAuthConfig()
+      .then(({ adminKey }) => {
+        if (!adminKey) return;
+        const entered = window.prompt("Paste your PSAT admin key:");
+        if (entered) setAdminKey(entered);
+      })
+      .catch(() => null);
   }, []);
 
   useEffect(() => { analysesRef.current = analyses; }, [analyses]);

@@ -112,6 +112,10 @@ async function setupPage(page) {
     (url) => url.pathname.startsWith("/api/"),
     (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" }),
   );
+  // Previews accept the shared key; production would make the client drop it.
+  await page.route(matchApi("/api/auth/config"), (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ enabled: false, providers: [], dev_login: false, admin_key: true }) }),
+  );
   await page.route(matchApi("/api/analyses"), (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ANALYSES) }),
   );
@@ -218,7 +222,7 @@ test.describe("visual baselines", () => {
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ enabled: true, providers: ["github", "google"], dev_login: false }),
+        body: JSON.stringify({ enabled: true, providers: ["github", "google"], dev_login: false, admin_key: true }),
       }));
     await page.goto("/account", { waitUntil: "domcontentloaded" });
     await page.getByRole("navigation").getByRole("button", { name: "Sign in" }).click();

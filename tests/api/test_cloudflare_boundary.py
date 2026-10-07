@@ -376,3 +376,26 @@ def test_account_routes_skip_operator_access_but_cookies_never_unlock_operator_r
     session_cookie = {**ORIGIN, "Cookie": "psat_session=anything"}
     assert edge_client.get("/api/jobs", headers=session_cookie).status_code == 403
     assert edge_client.post("/api/analyze", headers=session_cookie, json={}).status_code == 403
+
+
+def test_admin_account_must_be_the_operator_access_authenticated(edge_client, signing_keys, monkeypatch):
+    import uuid
+    from unittest.mock import MagicMock
+
+    from db.models import User
+    from routers import deps
+    from tests.conftest import SessionFactory
+
+    session = MagicMock()
+    session.execute.return_value.scalars.return_value.all.return_value = []
+    monkeypatch.setattr(deps, "SessionLocal", SessionFactory(session))
+    monkeypatch.setenv("PSAT_ADMIN_EMAILS", "operator@example.com,boss@example.com")
+    signed_in: dict[str, User] = {}
+    monkeypatch.setattr(deps, "current_user", lambda request: signed_in.get("user"))
+    headers = {**ORIGIN, "CF-Access-Jwt-Assertion": token(signing_keys)}
+
+    signed_in["user"] = User(id=uuid.uuid4(), email="operator@example.com", email_verified=True, is_admin=True)
+    assert edge_client.get("/api/jobs", headers=headers).status_code == 200
+    # Another admin account riding on this operator's Access session is refused.
+    signed_in["user"] = User(id=uuid.uuid4(), email="boss@example.com", email_verified=True, is_admin=True)
+    assert edge_client.get("/api/jobs", headers=headers).status_code == 401

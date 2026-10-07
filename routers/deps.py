@@ -29,16 +29,15 @@ from db.storage import (
 )
 from services.auth.sessions import SESSION_COOKIE, is_admin, resolve_session
 from services.clients.rpc import default_rpc_url
+from utils.edge import is_production
 from utils.logging import trace_id_var
 
 logger = logging.getLogger(__name__)
 
+# Previews and local only; production refuses to start with it set (``check_production_admin_config``).
 ADMIN_KEY = os.environ.get("PSAT_ADMIN_KEY")
 if not ADMIN_KEY:
-    logger.warning(
-        "PSAT_ADMIN_KEY is not set — write endpoints will reject every request. "
-        "Set PSAT_ADMIN_KEY in the environment to enable admin operations."
-    )
+    logger.info("PSAT_ADMIN_KEY is not set; admin endpoints accept only signed-in admin accounts")
 
 # Explicit mainnet default: a required chain param at this layer is impractical.
 DEFAULT_RPC_URL = default_rpc_url(chain_id=1) or ""
@@ -55,7 +54,7 @@ def _reject_admin(request: Request, reason: str) -> None:
         request.url.path,
         extra={"trace_id": trace_id_var.get(), "path": request.url.path, "reason": reason},
     )
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin key required")
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin access required")
 
 
 def _key_reason(x_psat_admin_key: str | None) -> str | None:
@@ -106,14 +105,27 @@ def require_user(request: Request) -> User:
     return user
 
 
+def _account_admin(request: Request, user: User) -> bool:
+    if not is_admin(user):
+        return False
+    if getattr(request.state, "edge_mode", None) != "cloudflare" and not is_production():
+        return True
+    # Behind operator Access the account must be the operator Access authenticated, not merely any admin account.
+    identity = getattr(request.state, "access_identity", None)
+    email = identity.get("email") if isinstance(identity, dict) else None
+    return isinstance(email, str) and email.lower() == user.email.lower()
+
+
 def require_admin(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
-    """An admin is either the shared key (CI, scripts) or a signed-in account on the admin allowlist."""
+    """An admin is a signed-in account on the admin allowlist, or the shared key where one is configured (previews,
+    local).
+    """
     reason = _key_reason(x_psat_admin_key)
     if reason is None:
         return
     # A wrong key is a hard fail even with a valid cookie, so a stale key in a script surfaces instead of hiding.
     user = current_user(request) if not x_psat_admin_key else None
-    if user is not None and is_admin(user):
+    if user is not None and _account_admin(request, user):
         check_same_origin(request)
         # Mutation audit lines carry the same trace_id, which ties them to this account.
         logger.info(
@@ -128,7 +140,7 @@ def is_admin_request(request: Request, x_psat_admin_key: str | None) -> bool:
     if _key_reason(x_psat_admin_key) is None:
         return True
     user = current_user(request)
-    return user is not None and is_admin(user)
+    return user is not None and _account_admin(request, user)
 
 
 def log_admin_mutation(action: str, **fields: Any) -> None:

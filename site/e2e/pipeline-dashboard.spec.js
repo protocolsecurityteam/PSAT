@@ -19,6 +19,10 @@ test.describe("job monitor", () => {
       (url) => url.pathname.startsWith("/api/"),
       (route) => route.fulfill({ status: 200, contentType: "application/json", body: "{}" }),
     );
+    await page.route(
+      (url) => url.pathname === "/api/auth/config",
+      (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ enabled: false, providers: [], dev_login: false, admin_key: true }) }),
+    );
 
     await page.route(/\/api\/jobs(\?|$)/, (route) =>
       route.fulfill({

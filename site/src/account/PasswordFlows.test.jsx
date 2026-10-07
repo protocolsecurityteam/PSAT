@@ -4,6 +4,7 @@ import { render, screen, waitFor, fireEvent, act } from "@testing-library/react"
 import ResetPasswordPage from "./ResetPasswordPage.jsx";
 import SignInModal from "./SignInModal.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
+import { resetAuthConfigForTests } from "../api/authConfig.js";
 import { resetNeonAuthForTests } from "../api/neonAuth.js";
 
 const neon = vi.hoisted(() => ({
@@ -103,6 +104,19 @@ describe("SignInModal — Neon Auth", () => {
       fireEvent.click(github);
     });
     expect(neon.signIn.social).toHaveBeenCalledWith({ provider: "github", callbackURL: window.location.href });
+  });
+
+  it("offers the shared admin key only where the deployment accepts one", async () => {
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: [], dev_login: false, admin_key: false }));
+    const { unmount } = render(<SignInModal onClose={() => {}} />);
+    await screen.findByLabelText("Email");
+    expect(screen.queryByRole("button", { name: "Use an admin key instead" })).toBeNull();
+    unmount();
+
+    resetAuthConfigForTests();
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: [], dev_login: false, admin_key: true }));
+    render(<SignInModal onClose={() => {}} />);
+    expect(await screen.findByRole("button", { name: "Use an admin key instead" })).toBeInTheDocument();
   });
 
   it("says so when sign-in isn't configured", async () => {

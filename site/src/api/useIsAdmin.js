@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 
+import { useAuthConfig } from "./authConfig.js";
 import { getAdminKey } from "./client.js";
 import { useSession } from "./session.js";
 
@@ -16,13 +17,18 @@ function subscribe(callback) {
 const getSnapshot = () => Boolean(getAdminKey());
 const getServerSnapshot = () => false;
 
-// An admin account, or an operator holding the shared key (?admin=1).
-export function useIsAdmin() {
-  const hasKey = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-  const { user } = useSession();
-  return hasKey || Boolean(user?.is_admin);
+// A stored key counts until the server says keys aren't accepted (production),
+// so operator UI doesn't flicker while the config loads. Requests never send
+// it before then (client.js).
+export function useHasAdminKey() {
+  const stored = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const config = useAuthConfig(stored);
+  return stored && config?.adminKey !== false;
 }
 
-export function useHasAdminKey() {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+// An admin account, or an operator holding the shared key (?admin=1).
+export function useIsAdmin() {
+  const hasKey = useHasAdminKey();
+  const { user } = useSession();
+  return hasKey || Boolean(user?.is_admin);
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { loadAuthConfig } from "../api/authConfig.js";
 import { api, setAdminKey } from "../api/client.js";
 import { establishSession, neonAuth, sitePath } from "../api/neonAuth.js";
 import { refreshSession } from "../api/session.js";
@@ -115,13 +116,9 @@ export default function SignInModal({ onClose, initialError = null }) {
   const [error, setError] = useState(initialError);
 
   useEffect(() => {
-    api("/api/auth/config", { silent: true })
-      .then((data) => setConfig({
-        enabled: Boolean(data?.enabled),
-        providers: (data?.providers || []).filter((p) => PROVIDER_LABELS[p]),
-        devLogin: Boolean(data?.dev_login),
-      }))
-      .catch(() => setConfig({ enabled: false, providers: [], devLogin: false }));
+    loadAuthConfig()
+      .then((loaded) => setConfig({ ...loaded, providers: loaded.providers.filter((p) => PROVIDER_LABELS[p]) }))
+      .catch(() => setConfig({ enabled: false, providers: [], devLogin: false, adminKey: false }));
   }, []);
 
   async function socialSignIn(provider) {
@@ -190,7 +187,9 @@ export default function SignInModal({ onClose, initialError = null }) {
           </form>
         )}
         {error && <p className="account-error" role="alert">{error}</p>}
-        <button type="button" className="account-link-btn" onClick={enterAdminKey}>Use an admin key instead</button>
+        {config?.adminKey && (
+          <button type="button" className="account-link-btn" onClick={enterAdminKey}>Use an admin key instead</button>
+        )}
       </div>
     </Modal>
   );
