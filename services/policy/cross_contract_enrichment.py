@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Artifact, Contract, ControllerValue, EffectiveFunction, Job, JobStage, JobStatus
-from db.queue import get_artifact
+from db.queue import failed_semantic_artifact, get_artifact, usable_semantic_artifact
 from services.concurrency import parallel_map
 from services.policy.stale_policy import mark_policy_stale
 from services.static.claims import Claim, resolve_claim_precedence
@@ -340,6 +340,15 @@ def fetch_sibling_facts(
             facts.unreadable[addr] = outcome
             continue
         effects_payload, snapshot_payload, analysed = outcome
+        if failed_semantic_artifact("effects", effects_payload):
+            # A failed effects build is no facts, not a callee whose functions make no claims.
+            record_degraded(
+                phase="cross_contract_enrichment",
+                exc=ValueError("sibling effects artifact is a failed build"),
+                context={"sibling_address": addr, "sibling_job_id": str(job_id)},
+            )
+            facts.unreadable[addr] = None
+            continue
         if not isinstance(effects_payload, dict) or not isinstance(snapshot_payload, dict):
             record_degraded(
                 phase="cross_contract_enrichment",
@@ -653,7 +662,7 @@ def _mark_stale_dependents(
     source_address = call_address(session, job, chain_id=chain_id)
     if not source_address or not holds_facts_for_its_address(session, job, chain_id=chain_id):
         return 0
-    source_effects = get_artifact(session, job.id, "effects")
+    source_effects = usable_semantic_artifact("effects", get_artifact(session, job.id, "effects"))
     source_snapshot = get_artifact(session, job.id, "control_snapshot")
     if not isinstance(source_effects, dict) or not isinstance(source_snapshot, dict):
         return 0

@@ -48,7 +48,7 @@ from db.models import (
     derive_job_chain_id,
     exactness_eligible_cursor_clause,
 )
-from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat
+from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat, usable_semantic_artifact
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
 from services.monitoring.event_topics import WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT
@@ -1883,8 +1883,8 @@ def completed_jobs_query(limit: int | None = None):
 
 def hint_targets_for_job(session: Session, job: Job) -> Iterator[HintTarget]:
     """Every (chain, address, topics) enrolment the job's predicate trees ask for."""
-    artifact = get_artifact(session, job.id, "predicate_trees")
-    if not isinstance(artifact, dict):
+    artifact = usable_semantic_artifact("predicate_trees", get_artifact(session, job.id, "predicate_trees"))
+    if artifact is None:
         return
     job_chain_id = job_chain(job)
     if job_chain_id is None:

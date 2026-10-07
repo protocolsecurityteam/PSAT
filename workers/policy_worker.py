@@ -21,7 +21,7 @@ from db.models import (
 )
 from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import get_artifact, store_artifact
+from db.queue import get_artifact, store_artifact, usable_semantic_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
 from services.clients.rpc import require_rpc_url
@@ -446,8 +446,8 @@ class PolicyWorker(BaseWorker):
         control_snapshot = get_artifact(session, job.id, "control_snapshot")
         resolved_control_graph = get_artifact(session, job.id, "resolved_control_graph")
         # The semantic inputs to ``build_effective_permissions``.
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        effects_artifact = get_artifact(session, job.id, "effects")
+        predicate_trees = usable_semantic_artifact("predicate_trees", get_artifact(session, job.id, "predicate_trees"))
+        effects_artifact = usable_semantic_artifact("effects", get_artifact(session, job.id, "effects"))
         missing_semantic_inputs = [
             name
             for name, artifact in (("predicate_trees", predicate_trees), ("effects", effects_artifact))
@@ -970,8 +970,7 @@ class PolicyWorker(BaseWorker):
         chain_id = _chain_id_for_job(job)
         target_address = call_address(session, job, chain_id=chain_id)
         if target_effects is None:
-            loaded = get_artifact(session, job.id, "effects")
-            target_effects = loaded if isinstance(loaded, dict) else None
+            target_effects = usable_semantic_artifact("effects", get_artifact(session, job.id, "effects"))
 
         with log_timed_phase(logger, "cross_contract_enrichment", durations_ms=durations_ms) as ph:
             # Committed before the fact read: a sibling whose facts land after it marks this job stale again.

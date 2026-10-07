@@ -24,7 +24,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, get_artifact, store_artifact
+from db.queue import create_job, get_artifact, store_artifact, usable_semantic_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -170,9 +170,7 @@ class ResolutionWorker(BaseWorker):
         contract_analysis = get_artifact(session, job.id, "contract_analysis")
         if not isinstance(contract_analysis, dict):
             raise RuntimeError("contract_analysis artifact not found")
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(predicate_trees, dict):
-            predicate_trees = None
+        predicate_trees = usable_semantic_artifact("predicate_trees", get_artifact(session, job.id, "predicate_trees"))
 
         # Impl jobs read storage from the proxy.
         request = job.request if isinstance(job.request, dict) else {}
@@ -501,8 +499,8 @@ class ResolutionWorker(BaseWorker):
         """
         if not deployment_address:
             return 0
-        effects = get_artifact(session, job.id, "effects")
-        if not isinstance(effects, dict):
+        effects = usable_semantic_artifact("effects", get_artifact(session, job.id, "effects"))
+        if effects is None:
             return 0
         receivers = collect_asset_receivers(effects)
         if not receivers:
@@ -618,8 +616,8 @@ class ResolutionWorker(BaseWorker):
 
         from db.models import JobDependency
 
-        predicate_trees = get_artifact(session, job.id, "predicate_trees")
-        if not isinstance(predicate_trees, dict):
+        predicate_trees = usable_semantic_artifact("predicate_trees", get_artifact(session, job.id, "predicate_trees"))
+        if predicate_trees is None:
             return
         tree_maps = [
             tree_map

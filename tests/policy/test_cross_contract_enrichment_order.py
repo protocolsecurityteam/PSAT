@@ -882,6 +882,21 @@ def test_a_gap_names_why_the_callee_had_no_facts(pipeline, callee_state, reason)
     assert (gap["reason"], gap["callee_job_id"]) == (reason, str(callee.id))
 
 
+def test_a_callee_whose_effects_build_failed_is_a_gap(pipeline):
+    """An older job stored a failed build as ``{"error": ...}`` under ``effects``; that is no facts, not a callee
+    whose functions make no claims.
+    """
+    p = pipeline()
+    token = p.job(TOKEN_A)
+    p.land_facts(token, {"schema_version": "semantic", "error": "forced"}, _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["reason"], gap["callee_job_id"]) == ("facts_unreadable", str(token.id))
+
+
 def test_proven_absent_callee_facts_are_a_gap(pipeline, monkeypatch):
     from db.storage import StorageKeyMissing
 

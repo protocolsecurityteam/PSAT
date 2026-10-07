@@ -155,6 +155,8 @@ def collect_contract_analysis_with_artifacts(
         if getattr(fn, "visibility", "") in ("public", "external")
     )
 
+    # A whole-artifact build failure; the analysis then reports itself incomplete so it is never reused as complete.
+    semantic_errors: list[str] = []
     predicate_trees_artifact: dict[str, Any]
     pause_info: PauseInfo
     try:
@@ -167,6 +169,7 @@ def collect_contract_analysis_with_artifacts(
             extra={"exc_type": type(exc).__name__, "phase": "predicate_trees_emit"},
         )
         record_degraded(phase="predicate_trees_emit", exc=exc, context={"project_dir": str(project_dir)})
+        semantic_errors.append(f"predicate_trees_emit: {type(exc).__name__}: {exc}")
         predicate_trees_artifact = {"schema_version": "semantic", "error": str(exc)}
         pause_info = {
             "pause_state_vars": [],
@@ -186,6 +189,7 @@ def collect_contract_analysis_with_artifacts(
             extra={"exc_type": type(exc).__name__, "phase": "effects_emit"},
         )
         record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
+        semantic_errors.append(f"effects_emit: {type(exc).__name__}: {exc}")
         effects_artifact = {"schema_version": "semantic", "error": str(exc)}
 
     # Mint claims from the facts and project them onto legacy ``effect_labels``; must run before semantic_control, which
@@ -269,8 +273,8 @@ def collect_contract_analysis_with_artifacts(
             "source_verified": _source_verified(meta),
         },
         "analysis_status": {
-            "static_analysis_completed": True,
-            "errors": [],
+            "static_analysis_completed": not semantic_errors,
+            "errors": semantic_errors,
         },
         "summary": summary,
         "contract_classification": classification,

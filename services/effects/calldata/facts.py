@@ -13,7 +13,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 
 from sqlalchemy.orm import Session
 
-from db.queue import get_artifact
+from db.queue import get_artifact, usable_semantic_artifact
 from services.policy.effective_permissions import _abi_signature
 from utils.logging import record_degraded
 
@@ -88,13 +88,12 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         return None
     job_id = lookup.analysis_job.id
 
-    effects_art = get_artifact(session, job_id, "effects")
+    effects_art = usable_semantic_artifact("effects", get_artifact(session, job_id, "effects"))
     functions = effects_art.get("functions") if isinstance(effects_art, dict) else None
     if not isinstance(functions, dict) or not functions:
         return None
 
-    trees_art = get_artifact(session, job_id, "predicate_trees")
-    trees_art = trees_art if isinstance(trees_art, dict) else {}
+    trees_art = usable_semantic_artifact("predicate_trees", get_artifact(session, job_id, "predicate_trees")) or {}
     raw_trees = trees_art.get("trees")
     trees: dict[str, Any] = raw_trees if isinstance(raw_trees, dict) else {}
     canonical = {

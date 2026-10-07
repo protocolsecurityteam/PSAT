@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from db.models import ContractMaterialization, SessionLocal
+from db.queue.artifacts import analysis_reports_failure, failed_semantic_artifact
 from db.storage import (
     JSON_CONTENT_TYPE,
     StorageError,
@@ -671,13 +672,16 @@ def publish_materialization(
     Refusals:
 
     ``incomplete_bundle``
-        Missing analysis or tracking plan; publishing it would claim "no analysis".
+        Missing analysis or tracking plan; publishing it would claim "no analysis". Also an analysis that reports a
+        failed semantic build, or failed predicate trees: reused, it would read as complete.
     ``keccak_bound_to_other_address``
         A ready row for this bytecode already names another address.
     ``address_bound_to_other_keccak``
         Another row holds ``(chain, address)`` under a different keccak; we didn't witness which is current.
     """
     if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
+        return PUBLISH_INCOMPLETE_BUNDLE
+    if analysis_reports_failure(analysis) or failed_semantic_artifact("predicate_trees", predicate_trees):
         return PUBLISH_INCOMPLETE_BUNDLE
 
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)

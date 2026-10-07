@@ -5,6 +5,7 @@ from tests.cache_helpers import (
     _create_completed_job_with_static_data,
     db_session,  # noqa: F401
     requires_postgres,
+    store_semantic_artifacts,
 )
 
 pytestmark = requires_postgres
@@ -32,6 +33,7 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     db_session.commit()
     store_source_files(db_session, new_job.id, {"src/T.sol": "contract T {}"})
     store_artifact(db_session, new_job.id, "contract_analysis", data={"summary": {}})
+    store_semantic_artifacts(db_session, new_job.id)
 
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))

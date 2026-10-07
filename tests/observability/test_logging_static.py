@@ -74,7 +74,9 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
     assert getattr(rec, "exc_type", None) == "RuntimeError"
 
     assert trees is not None and trees["error"]
-    assert analysis["analysis_status"]["static_analysis_completed"] is True
+    # The failure is recorded on the analysis too, so it is never reused as a complete one (#113).
+    assert analysis["analysis_status"]["static_analysis_completed"] is False
+    assert analysis["analysis_status"]["errors"] == ["predicate_trees_emit: RuntimeError: predicate IR-gen exploded"]
     assert metrics["secondary_impl_pointers"] == 0
     assert any(k.startswith("phase_ms_") for k in metrics)
 
