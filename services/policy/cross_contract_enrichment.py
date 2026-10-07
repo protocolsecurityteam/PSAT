@@ -12,6 +12,10 @@ finished first:
   now derive (a claim to add, or one it no longer supports), the sibling is marked stale and its policy re-runs with
   every stage after it, so every consumer of the claims sees them.
 
+Facts are keyed by the address a call reaches. A call to a proxy runs its current implementation's code against the
+proxy's storage, which is what that implementation's proxy-context job analysed, so that job's facts sit under the
+proxy's address. A proxy whose current implementation has no such job has no facts.
+
 A body call whose callee resolves to an address with no readable facts is recorded on the function as a
 ``cross_contract_gaps`` entry: its claims are not determined, never "none". The callee's facts landing marks the job
 stale, so the gap heals. A sibling the target can't know about (a hook pointing at it from an unanalysed contract)
@@ -26,7 +30,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import cast, exists, func, or_, select
+from sqlalchemy import and_, case, cast, exists, false, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
@@ -37,17 +41,21 @@ from services.concurrency import parallel_map
 from services.policy.stale_policy import mark_policy_stale
 from services.static.claims import Claim, resolve_claim_precedence
 from services.static.cross_contract import (
+    ProxyCoverage,
     build_callee_claim_map,
     claim_sort_key,
     controller_addresses,
     derive_cross_contract_claims,
+    function_selectors,
     sibling_transfer_hook_links,
 )
+from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
 
 FACT_ARTIFACTS = ("effects", "control_snapshot")
+DIAMOND_PROXY_TYPE = "eip2535"
 
 
 def merge_claims(existing: Iterable[Claim] | None, additions: Iterable[Claim]) -> list[Claim]:
@@ -148,18 +156,63 @@ def _parent_job_uuid(job: Job) -> uuid.UUID | None:
         return None
 
 
+def _on_chain(chain_id: int) -> Any:
+    try:
+        name = chain_by_id(chain_id).name
+    except UnknownChainError:
+        return false()
+    return func.lower(func.coalesce(Contract.chain, "ethereum")) == name
+
+
+def _proxy_address() -> Any:
+    return func.lower(Job.request["proxy_address"].astext)
+
+
+def _runs_behind_proxy(chain_id: int) -> Any:
+    """The job analyses the implementation a proxy on ``chain_id`` currently delegates to. A secondary implementation
+    runs only for calls the primary doesn't take, a diamond routes each selector to its own facet, and a beacon's
+    ``proxy_address`` is the beacon itself.
+    """
+    return and_(
+        Job.request["proxy_address"].astext.isnot(None),
+        Job.request["discovery_relationship"].astext.is_distinct_from("secondary_implementation"),
+        exists().where(
+            Contract.address == _proxy_address(),
+            Contract.is_proxy.is_(True),
+            Contract.proxy_type.is_distinct_from(DIAMOND_PROXY_TYPE),
+            func.lower(Contract.implementation) == func.lower(Job.address),
+            _on_chain(chain_id),
+        ),
+    )
+
+
+def _call_address(chain_id: int) -> Any:
+    """The address whose calls run the job's analysed code against the storage its facts were read from."""
+    return case((_runs_behind_proxy(chain_id), _proxy_address()), else_=func.lower(Job.address))
+
+
+def call_address(session: Session, job: Job, *, chain_id: int) -> str:
+    """The address siblings reach this job's contract at: its proxy when it is the proxy's current implementation."""
+    return session.execute(select(_call_address(chain_id)).where(Job.id == job.id)).scalar_one_or_none() or ""
+
+
 def _fact_holders(chain_id: int, *filters: Any):
-    """Per address on ``chain_id``, the job whose facts are read: among jobs with both fact artifacts, the one owning
-    the address's contract row (the rows the claims land on), else the newest.
+    """Per call address on ``chain_id``, the job whose facts are read: among jobs with both fact artifacts, a proxy's
+    current implementation first, then the one owning its contract row (the rows the claims land on), else the newest.
+    ``filters`` may compare ``_call_address(chain_id)``.
     """
 
     def _has(name: str):
         return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
 
-    address = func.lower(Job.address)
-    owns_contract = exists().where(Contract.job_id == Job.id)
-    return (
-        select(Job.id, address)
+    candidates = (
+        select(
+            Job.id.label("job_id"),
+            _call_address(chain_id).label("address"),
+            _runs_behind_proxy(chain_id).label("behind_proxy"),
+            exists().where(Contract.job_id == Job.id).label("owns_contract"),
+            Job.created_at,
+        )
         .where(
             Job.address.isnot(None),
             Job.chain_id == chain_id,
@@ -167,8 +220,18 @@ def _fact_holders(chain_id: int, *filters: Any):
             *filters,
             *(_has(name) for name in FACT_ARTIFACTS),
         )
-        .distinct(address)
-        .order_by(address, owns_contract.desc(), Job.created_at.desc(), Job.id.desc())
+        .subquery()
+    )
+    return (
+        select(candidates.c.job_id, candidates.c.address)
+        .distinct(candidates.c.address)
+        .order_by(
+            candidates.c.address,
+            candidates.c.behind_proxy.desc(),
+            candidates.c.owns_contract.desc(),
+            candidates.c.created_at.desc(),
+            candidates.c.job_id.desc(),
+        )
     )
 
 
@@ -189,12 +252,12 @@ def _related_to(job: Job) -> Any:
 
 
 def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> list[tuple[Any, str]]:
-    """``[(job_id, address)]`` of the job's siblings on its chain, one fact holder per address."""
+    """``[(job_id, call address)]`` of the job's siblings on its chain, one fact holder per address."""
     rows = session.execute(
         _fact_holders(
             chain_id,
             Job.id != job.id,
-            func.lower(Job.address) != (job.address or "").lower(),
+            _call_address(chain_id) != call_address(session, job, chain_id=chain_id),
             _related_to(job),
         )
     ).all()
@@ -202,17 +265,19 @@ def related_jobs_with_facts(session: Session, job: Job, *, chain_id: int) -> lis
 
 
 def holds_facts_for_its_address(session: Session, job: Job, *, chain_id: int) -> bool:
-    """Whether siblings read this job's facts for its address, rather than another sibling's."""
+    """Whether siblings read this job's facts for its call address, rather than another sibling's."""
     row = session.execute(
         _fact_holders(
-            chain_id, func.lower(Job.address) == (job.address or "").lower(), or_(Job.id == job.id, _related_to(job))
+            chain_id,
+            _call_address(chain_id) == call_address(session, job, chain_id=chain_id),
+            or_(Job.id == job.id, _related_to(job)),
         )
     ).first()
     return row is not None and row[0] == job.id
 
 
 def relevant_siblings(
-    session: Session, job: Job, targets: list[tuple[Any, str]], *, snapshot: Any
+    session: Session, job: Job, targets: list[tuple[Any, str]], *, snapshot: Any, chain_id: int
 ) -> list[tuple[Any, str]]:
     """The siblings a derivation between this job and them can involve: one side's state variables hold the other's
     address. A sibling without a contract row has no controller-value rows to consult, so it's kept.
@@ -226,7 +291,10 @@ def relevant_siblings(
         session.execute(
             select(Contract.job_id)
             .join(ControllerValue, ControllerValue.contract_id == Contract.id)
-            .where(Contract.job_id.in_(ids), func.lower(ControllerValue.value) == (job.address or "").lower())
+            .where(
+                Contract.job_id.in_(ids),
+                func.lower(ControllerValue.value) == call_address(session, job, chain_id=chain_id),
+            )
             .distinct()
         ).scalars()
     )
@@ -242,6 +310,8 @@ class SiblingFacts:
     effects: dict[str, dict] = field(default_factory=dict)
     snapshots: dict[str, dict] = field(default_factory=dict)
     job_for_address: dict[str, Any] = field(default_factory=dict)
+    # Call addresses whose facts are a proxy's implementation's, with that implementation's address.
+    implementations: dict[str, str] = field(default_factory=dict)
     # Addresses whose stored facts couldn't be read, with the read's exception (``None``: not a JSON object).
     unreadable: dict[str, BaseException | None] = field(default_factory=dict)
 
@@ -251,10 +321,11 @@ def fetch_sibling_facts(
     *,
     session_factory: Callable[[], Session],
 ) -> SiblingFacts:
-    def _fetch(target: tuple[Any, str]) -> tuple[Any, Any]:
+    def _fetch(target: tuple[Any, str]) -> tuple[Any, Any, str]:
         job_id, _addr = target
         with session_factory() as s:
-            return get_artifact(s, job_id, "effects"), get_artifact(s, job_id, "control_snapshot")
+            analysed = (s.execute(select(Job.address).where(Job.id == job_id)).scalar_one_or_none() or "").lower()
+            return get_artifact(s, job_id, "effects"), get_artifact(s, job_id, "control_snapshot"), analysed
 
     facts = SiblingFacts()
     for (job_id, addr), outcome in parallel_map(_fetch, targets, max_workers=8):
@@ -268,7 +339,7 @@ def fetch_sibling_facts(
             logger.warning("sibling artifact fetch failed for %s: %s", addr, outcome)
             facts.unreadable[addr] = outcome
             continue
-        effects_payload, snapshot_payload = outcome
+        effects_payload, snapshot_payload, analysed = outcome
         if not isinstance(effects_payload, dict) or not isinstance(snapshot_payload, dict):
             record_degraded(
                 phase="cross_contract_enrichment",
@@ -279,46 +350,83 @@ def fetch_sibling_facts(
             continue
         facts.effects[addr] = effects_payload
         facts.snapshots[addr] = snapshot_payload
+        if analysed and analysed != addr:
+            facts.implementations[addr] = analysed
     return facts
+
+
+def proxy_coverage(session: Session, facts: SiblingFacts, *, chain_id: int) -> dict[str, ProxyCoverage]:
+    """Which calls through each proxy among the callees with facts run the implementation those facts describe."""
+    proxies = sorted(facts.implementations)
+    if not proxies:
+        return {}
+    split = set(
+        session.execute(
+            select(Contract.address).where(
+                Contract.address.in_(proxies),
+                Contract.is_proxy.is_(True),
+                func.cardinality(Contract.secondary_implementations) > 0,
+                _on_chain(chain_id),
+            )
+        ).scalars()
+    )
+    return {
+        address: ProxyCoverage(frozenset(function_selectors(facts.effects.get(address))), address in split)
+        for address in proxies
+    }
 
 
 def _gap_reason(session: Session, callee: str, *, chain_id: int, facts: SiblingFacts) -> tuple[str, Any]:
     """Why the callee had no facts to derive from, with the job that tells (the newest) or ``None``."""
     if callee in facts.unreadable:
         return "facts_unreadable", facts.job_for_address.get(callee)
+    if callee in facts.effects:
+        # A selector the proxy's implementation doesn't take.
+        return "selector_outside_implementation", facts.job_for_address.get(callee)
+
+    holder = session.execute(
+        _fact_holders(
+            chain_id,
+            or_(func.lower(Job.address) == callee, _proxy_address() == callee),
+            _call_address(chain_id) == callee,
+        )
+    ).first()
+    if holder is not None:
+        return "outside_sibling_scope", holder[0]
 
     def _has(name: str):
         return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
 
-    # Facts are keyed by the implementation's address; a call through its proxy can't join them yet.
-    implementation = session.execute(
-        select(Job.id)
-        .where(
-            func.lower(Job.request["proxy_address"].astext) == callee,
-            Job.chain_id == chain_id,
-            _has("effects"),
-            _has("control_snapshot"),
-        )
-        .order_by(Job.created_at.desc(), Job.id.desc())
+    proxy = session.execute(
+        select(Contract.implementation, Contract.proxy_type)
+        .where(Contract.address == callee, Contract.is_proxy.is_(True), _on_chain(chain_id))
+        .order_by(Contract.id)
         .limit(1)
-    ).scalar_one_or_none()
-    if implementation is not None:
-        return "callee_is_proxy", implementation
-
+    ).first()
+    if proxy is not None and proxy[1] == DIAMOND_PROXY_TYPE:
+        return "callee_is_diamond", None
+    if proxy is not None:
+        implementation = (proxy[0] or "").lower()
+        if not implementation:
+            return "implementation_unknown", None
+        analyses = and_(
+            func.lower(Job.address) == implementation,
+            _proxy_address() == callee,
+            Job.request["discovery_relationship"].astext.is_distinct_from("secondary_implementation"),
+        )
+    else:
+        analyses = func.lower(Job.address) == callee
     jobs = session.execute(
         select(Job.id, Job.status, _has("effects") & _has("control_snapshot"))
-        .where(
-            func.lower(Job.address) == callee,
-            Job.chain_id == chain_id,
-            Job.request["effects_resume_work_id"].astext.is_(None),
-        )
+        .where(analyses, Job.chain_id == chain_id, Job.request["effects_resume_work_id"].astext.is_(None))
         .order_by(Job.created_at.desc(), Job.id.desc())
     ).all()
     if not jobs:
-        return "not_analyzed", None
+        return ("implementation_not_analyzed" if proxy is not None else "not_analyzed"), None
     for job_id, _status, has_facts in jobs:
+        # Facts read against a proxy's storage, which don't describe the implementation's own address.
         if has_facts:
-            return "outside_sibling_scope", job_id
+            return "callee_is_implementation", job_id
     for job_id, status, _has_facts in jobs:
         if status in (JobStatus.queued, JobStatus.processing):
             return "analysis_pending", job_id
@@ -542,7 +650,7 @@ def _mark_stale_dependents(
     session_factory: Callable[[], Session],
     replaced_facts: bool,
 ) -> int:
-    source_address = (job.address or "").lower()
+    source_address = call_address(session, job, chain_id=chain_id)
     if not source_address or not holds_facts_for_its_address(session, job, chain_id=chain_id):
         return 0
     source_effects = get_artifact(session, job.id, "effects")
@@ -552,7 +660,9 @@ def _mark_stale_dependents(
     source_job_id = job.id
     targets = related_jobs_with_facts(session, job, chain_id=chain_id)
     target_ids = [job_id for job_id, _ in targets]
-    relevant = {job_id for job_id, _ in relevant_siblings(session, job, targets, snapshot=source_snapshot)}
+    relevant = {
+        job_id for job_id, _ in relevant_siblings(session, job, targets, snapshot=source_snapshot, chain_id=chain_id)
+    }
     holding = jobs_holding_claims_from(session, target_ids, source_address)
     # A gap on this address is now answerable.
     awaiting = jobs_with_gaps_on(session, target_ids, source_address)
@@ -572,6 +682,8 @@ def _mark_stale_dependents(
     ]
     facts = fetch_sibling_facts(to_check, session_factory=session_factory)
     callee_claim_map = build_callee_claim_map({source_address: source_effects})
+    analysed = (job.address or "").lower()
+    implementations = {source_address: analysed} if analysed != source_address else {}
 
     marked = 0
     for target_job_id, address in to_check:
@@ -591,6 +703,7 @@ def _mark_stale_dependents(
                 sibling_transfer_hooks=sibling_transfer_hook_links(
                     address, {source_address: source_effects}, {source_address: source_snapshot}
                 ),
+                callee_implementations=implementations,
             )
             if not contribution and target_job_id not in holding:
                 continue
@@ -626,7 +739,10 @@ def _other_job_held_facts(session: Session, job: Job, *, chain_id: int) -> bool:
     return (
         session.execute(
             _fact_holders(
-                chain_id, func.lower(Job.address) == (job.address or "").lower(), Job.id != job.id, _related_to(job)
+                chain_id,
+                _call_address(chain_id) == call_address(session, job, chain_id=chain_id),
+                Job.id != job.id,
+                _related_to(job),
             )
         ).first()
         is not None
