@@ -904,6 +904,28 @@ def test_a_call_with_no_determined_selector_is_a_gap(pipeline, callee_has_facts,
     assert p.row_claims(caller)[SWEEP] == []
 
 
+def test_a_library_call_proven_to_make_no_call_is_not_a_gap(pipeline):
+    """``ArrayLib.create(tokenA)`` only builds an array: tokenA is an argument, and nothing calls it."""
+    p = pipeline()
+    token = p.job(TOKEN_A)
+    p.land_facts(token, _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    sink = {
+        "id": "s0",
+        "kind": "external_call",
+        "target": "tokenA.create",
+        "selector": None,
+        "origin": "body",
+        "library_signature": "create(address)",
+        "library_makes_no_call": True,
+    }
+    effects = {"functions": {SWEEP: {"selector": _selector(SWEEP), "sinks": [sink], "claims": []}}}
+    p.land_facts(caller, effects, _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    assert _gaps(p, caller)[SWEEP] == []
+
+
 def test_a_low_level_call_is_not_a_gap(pipeline):
     """``tokenA.call(data)`` names no function to join on; it was never a cross-contract call record."""
     p = pipeline()

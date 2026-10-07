@@ -171,7 +171,8 @@ def build_callee_claim_map(
 def _body_external_calls(target_effects: Any) -> dict[str, list[dict[str, Any]]]:
     """Body-origin ``external_call`` sinks with a ``var.method`` target; guard calls aren't value flows. A high-level or
     library call whose selector isn't determined is kept: what it reaches is not determined, not nothing. A low-level
-    call names no function to join on and stays out, as before.
+    call names no function to join on and stays out, as before. So does a library call proven to make no external
+    call: its receiver is only an argument.
     """
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
     if not isinstance(functions, dict):
@@ -188,6 +189,7 @@ def _body_external_calls(target_effects: Any) -> dict[str, list[dict[str, Any]]]
             and s.get("origin") == "body"
             and isinstance(s.get("target"), str)
             and "." in str(s.get("target"))
+            and s.get("library_makes_no_call") is not True
             and (
                 _sink_selector(s) is not None
                 or s.get("library_signature")

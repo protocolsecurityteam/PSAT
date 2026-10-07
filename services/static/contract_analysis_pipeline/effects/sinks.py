@@ -241,16 +241,60 @@ def _classify_node_irs(
     return out
 
 
+# Call operations that never leave the contract; any other call (including a function-pointer call) may.
+_NON_CALLING_OPS = frozenset({"EventCall", "NewArray", "NewStructure", "NewElementaryType"})
+_ASSEMBLY_CALLS = ("call(", "callcode(", "delegatecall(", "staticcall(", "create(", "create2(")
+
+
+def _makes_no_call(fn: Any, visited: set[int] | None = None) -> bool:
+    """True only when ``fn`` and every function it reaches provably make no external call. A missing body or an
+    assembly block it can't see into is not that proof.
+    """
+    from slither.slithir.operations import Call
+
+    visited = set() if visited is None else visited
+    if id(fn) in visited:
+        return True
+    visited.add(id(fn))
+    nodes = getattr(fn, "nodes", None)
+    if not nodes:
+        return False
+    for node in nodes:
+        if "ASSEMBLY" in str(getattr(node, "type", "")) or getattr(node, "inline_asm", None) is not None:
+            return False
+        for ir in _node_irs(node):
+            if not isinstance(ir, Call):
+                continue
+            op = type(ir).__name__
+            if op in _NON_CALLING_OPS:
+                continue
+            if op == "SolidityCall":
+                name = getattr(getattr(ir, "function", None), "name", "") or ""
+                if name.startswith(_ASSEMBLY_CALLS):
+                    return False
+                continue
+            if op in ("InternalCall", "LibraryCall"):
+                callee = getattr(ir, "function", None)
+                if callee is None or not _makes_no_call(callee, visited):
+                    return False
+                continue
+            return False
+    return True
+
+
 def _walk_unit_for_sinks(
     unit: Any,
     visited: set[Any],
     origin: str,
     entry_param_ids: dict[int, int],
     entry_contract: Any,
+    library_call_free: dict[str, bool] | None = None,
 ) -> list[tuple[str, str, str | None, str, ReceiverDescriptor | None, str | None]]:
     """Gather ``(kind, target, selector, origin, receiver, library_signature)`` tuples from ``unit`` and its callees.
 
     ``origin`` becomes ``guard`` once the walk enters a modifier. ``entry_param_ids`` stays the entry's.
+    ``library_call_free`` maps each library call's signature to whether every function so spelled provably makes no
+    external call; one that may call wins, so a shared spelling never proves too much.
     """
     unit_key = getattr(unit, "canonical_name", None) or getattr(unit, "full_name", None) or id(unit)
     if unit_key in visited:
@@ -270,10 +314,16 @@ def _walk_unit_for_sinks(
             if op not in ("InternalCall", "LibraryCall"):
                 continue
             callee = getattr(ir, "function", None)
+            if op == "LibraryCall" and library_call_free is not None:
+                signature = _callee_signature(ir)
+                if signature is not None and library_call_free.get(signature, True):
+                    library_call_free[signature] = callee is not None and _makes_no_call(callee)
             if callee is None or not getattr(callee, "nodes", None):
                 continue
             child_origin = "guard" if (origin == "guard" or _is_modifier_call(ir)) else "body"
-            found.extend(_walk_unit_for_sinks(callee, visited, child_origin, entry_param_ids, entry_contract))
+            found.extend(
+                _walk_unit_for_sinks(callee, visited, child_origin, entry_param_ids, entry_contract, library_call_free)
+            )
     return found
 
 
@@ -286,7 +336,10 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
     entry_param_ids = {
         id(parameter): position for position, parameter in enumerate(getattr(function, "parameters", []) or [])
     }
-    quints = _walk_unit_for_sinks(function, set(), "body", entry_param_ids, getattr(function, "contract", None))
+    library_call_free: dict[str, bool] = {}
+    quints = _walk_unit_for_sinks(
+        function, set(), "body", entry_param_ids, getattr(function, "contract", None), library_call_free
+    )
 
     out: list[SinkRecord] = []
     index: dict[tuple[str, str, str | None, str | None], int] = {}
@@ -310,6 +363,8 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
         }
         if library_signature is not None:
             record["library_signature"] = library_signature
+            if library_call_free.get(library_signature):
+                record["library_makes_no_call"] = True
         index[key] = idx
         out.append(record)
     for key, idx in index.items():

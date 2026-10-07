@@ -59,6 +59,27 @@ library Scale {
     }
 }
 
+library ArrayLib {
+    function create(address a) internal pure returns (address[] memory res) {
+        res = new address[](1);
+        res[0] = a;
+    }
+}
+
+library Pinger {
+    function create(address target) internal returns (address[] memory res) {
+        (bool ok, ) = target.call("");
+        require(ok, "ping failed");
+        res = new address[](0);
+    }
+}
+
+library Hooks {
+    function run(address a, function(address) internal returns (bool) callback) internal returns (bool) {
+        return callback(a);
+    }
+}
+
 contract Payer {
     function pay(IERC20 token, address to, uint256 value) external {
         (bool ok, ) = address(token).call(abi.encodeWithSelector(token.transfer.selector, to, value));
@@ -70,6 +91,8 @@ contract Vault {
     using SafeERC20 for IERC20;
     using Calls for address;
     using Scale for uint256;
+    using ArrayLib for address;
+    using Hooks for address;
 
     IERC20 public weth;
     address public hook;
@@ -89,6 +112,10 @@ contract Vault {
     uint256 internal _n;
     Payer public payer;
     function viaHelper(address to, uint256 amount) external { payer.pay(weth, to, amount); }
+    function tokens() external view returns (address[] memory) { return hook.create(); }
+    function shared() external returns (uint256) { return ArrayLib.create(hook).length + Pinger.create(hook).length; }
+    function hooked() external returns (bool) { return hook.run(_ping); }
+    function _ping(address target) internal returns (bool ok) { (ok, ) = target.call(""); }
 }
 """
 
@@ -171,3 +198,30 @@ def test_a_high_level_helper_flow_keeps_the_selector_its_sink_carries(effects):
     flows = [f for f in effects["viaHelper(address,uint256)"]["value_flows"] if f["kind"] == "callee_erc20_selector"]
     assert flows and {f["selector"] for f in flows} == {helper}
     assert not any(f.get("library_callees") for f in flows)
+
+
+def test_a_library_call_proven_to_make_no_call_says_so(effects):
+    """``ArrayLib.create(hook)`` only builds an array: its receiver is an argument, never called."""
+    assert _sink(effects, "tokens()", "hook.create")["library_makes_no_call"] is True
+
+
+@pytest.mark.parametrize(
+    ("function", "target"),
+    [
+        ("pay(address,uint256)", "weth.safeTransfer"),
+        ("allow(address,uint256)", "weth.safeApprove"),
+        ("nudge(uint256)", "hook.poke"),
+        ("hooked()", "hook.run"),
+    ],
+)
+def test_a_library_call_that_calls_out_claims_nothing(effects, function, target):
+    assert "library_makes_no_call" not in _sink(effects, function, target)
+
+
+def test_a_shared_library_spelling_proves_nothing_when_one_definition_calls(effects):
+    """``ArrayLib.create`` and ``Pinger.create`` share the spelling ``create(address)`` and fold into one sink; the one
+    that calls out keeps it from claiming no call.
+    """
+    sink = _sink(effects, "shared()", "hook.create")
+    assert sink["library_signature"] == "create(address)"
+    assert "library_makes_no_call" not in sink
