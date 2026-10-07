@@ -35,11 +35,15 @@ contract Limits {
     mapping(IToken => uint256) public capOf;
 }
 
+type Price is uint128;
+
 library Auth {
     struct Cfg { address owner; uint256 level; }
     function ok(Cfg memory c, address a) public pure returns (bool) { return c.owner == a; }
     function plain(uint256 x) public pure returns (uint256) { return x; }
     function total(uint256[] storage xs) public view returns (uint256) { return xs.length; }
+    function quote(Price p, uint256[] memory xs) public pure returns (uint256) { return Price.unwrap(p) + xs.length; }
+    function token(IToken t) public pure returns (address) { return address(t); }
 }
 
 interface IRegistry {
@@ -214,10 +218,15 @@ def test_a_library_function_with_a_struct_parameter_has_no_determined_selector(c
     by_name = {fn.name: fn for fn in library.functions}
     assert dispatch_selector(by_name["ok"], by_name["ok"].full_name) is None
     assert dispatch_selector(by_name["total"], by_name["total"].full_name) is None
+    assert dispatch_selector(by_name["token"], by_name["token"].full_name) is None
+    # A value type hashes as its underlying type, in a library as anywhere else.
+    assert dispatch_selector(by_name["quote"], by_name["quote"].full_name) == _sel("quote(uint128,uint256[])")
     assert dispatch_selector(by_name["plain"], by_name["plain"].full_name) == _sel("plain(uint256)")
     records = build_effects(library)["functions"]
     assert records["ok(Auth.Cfg,address)"]["selector"] is None
     assert records["total(uint256[])"]["selector"] is None
     assert records["plain(uint256)"]["selector"] == _sel("plain(uint256)")
     # Selector consumers read the same answer from the predicate artifact: no lowered form for a library.
-    assert "ok(Auth.Cfg,address)" not in build_predicate_artifacts(library).get("canonical_signatures", {})
+    canonical = build_predicate_artifacts(library).get("canonical_signatures", {})
+    assert "ok(Auth.Cfg,address)" not in canonical
+    assert canonical["quote(Price,uint256[])"] == "quote(uint128,uint256[])"

@@ -137,7 +137,8 @@ def dispatch_signature(callee: Any, declared_signature: str | None = None) -> st
     Lowered from the live Slither types; a public state variable's getter uses Slither's own lowered signature.
     ``declared_signature`` (Slither's spelling) stands in only when it is already canonical, since an unlowered name
     hashes to a selector the chain never dispatches. A library hashes struct, enum and contract parameters by name and
-    suffixes storage parameters with `` storage``; neither form is reproduced here, so those functions are undetermined.
+    suffixes storage parameters with `` storage``; neither form is reproduced, so those functions are undetermined
+    (:func:`_library_signature`).
     """
     from slither.core.variables.state_variable import StateVariable
 
@@ -148,13 +149,45 @@ def dispatch_signature(callee: Any, declared_signature: str | None = None) -> st
         except (AttributeError, KeyError, TypeError, ValueError):
             signature = None
     elif getattr(getattr(callee, "contract_declarer", None), "is_library", False):
-        if any(getattr(p, "location", None) == "storage" for p in getattr(callee, "parameters", None) or []):
-            return None
+        return _library_signature(callee)
     elif callee is not None:
         signature = _canonical_signature(callee)
     if signature is None:
         signature = declared_signature
     return signature if isinstance(signature, str) and is_canonical_abi_signature(signature) else None
+
+
+def _library_signature(fn: Any) -> str | None:
+    """A library function's selector signature where it equals the ABI form: elementary parameters, value types as
+    their underlying type, arrays of those. Anything solc hashes by name or location is undetermined.
+    """
+    from slither.core.solidity_types import ArrayType, ElementaryType
+    from slither.core.solidity_types.type_alias import TypeAlias
+
+    def lower(t: Any) -> str | None:
+        if isinstance(t, ArrayType):
+            element = lower(t.type)
+            if element is None:
+                return None
+            return element + ("[]" if t.length is None else f"[{t.length_value}]")
+        if isinstance(t, TypeAlias):
+            return str(t.type)
+        if isinstance(t, ElementaryType):
+            return str(t)
+        return None
+
+    try:
+        parameters = list(fn.parameters)
+        name = fn.name
+    except (AttributeError, KeyError, TypeError):
+        return None
+    if not isinstance(name, str) or any(getattr(p, "location", None) == "storage" for p in parameters):
+        return None
+    lowered = [lower(p.type) for p in parameters]
+    if any(token is None for token in lowered):
+        return None
+    signature = f"{name}({','.join(str(token) for token in lowered)})"
+    return signature if is_canonical_abi_signature(signature) else None
 
 
 def dispatch_selector(callee: Any, declared_signature: str | None = None) -> str | None:
