@@ -1122,15 +1122,16 @@ def test_a_split_proxy_s_selector_outside_its_implementation_is_a_gap(pipeline, 
     assert _gaps(p, caller) == {SWEEP: expected}
 
 
-def test_a_proxy_s_own_admin_selector_its_implementation_lacks_is_a_gap(pipeline):
-    """A transparent proxy answers its admin's ``upgradeTo`` with its own code, which no job analyses."""
+@pytest.mark.parametrize("admin_call", [UPGRADE_TO, "setTarget(address)", "_acceptImplementation()"])
+def test_a_proxy_s_own_admin_selector_its_implementation_lacks_is_a_gap(pipeline, admin_call):
+    """A transparent, Synthetix or Compound proxy answers its upgrade calls with its own code, which no job analyses."""
     p = pipeline()
     _proxy_row(p, PROXY, IMPL_V1)
     implementation = _behind(p, PROXY, IMPL_V1)
     p.land_facts(implementation, _token_effects(), _snapshot({}))
     caller = p.job(CALLER)
     effects = _caller_effects(("tokenA",))
-    effects["functions"][SWEEP]["sinks"].append(_sink("tokenA.upgradeTo", UPGRADE_TO, "s1"))
+    effects["functions"][SWEEP]["sinks"].append(_sink("tokenA.upgrade", admin_call, "s1"))
     p.land_facts(caller, effects, _snapshot({"tokenA": PROXY}))
     p.run(caller)
 

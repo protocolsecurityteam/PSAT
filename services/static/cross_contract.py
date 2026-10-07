@@ -110,15 +110,28 @@ def function_selectors(effects_artifact: Any) -> set[str]:
     }
 
 
-# Selectors a transparent proxy answers with its own code, which no job analyses.
-_PROXY_OWN_SELECTORS = UPGRADE_SELECTORS | {CHANGE_ADMIN}
+# Upgrade and admin selectors a proxy answers with its own code, which no job analyses: transparent/EIP-1967 admin,
+# Synthetix ``Proxy`` and Compound ``Unitroller``.
+_PROXY_OWN_SELECTORS = UPGRADE_SELECTORS | {
+    CHANGE_ADMIN,
+    *(
+        _compute_selector(signature)
+        for signature in (
+            "setTarget(address)",
+            "_setPendingImplementation(address)",
+            "_acceptImplementation()",
+            "_setPendingAdmin(address)",
+            "_acceptAdmin()",
+        )
+    ),
+}
 
 
 @dataclass(frozen=True)
 class ProxyCoverage:
     """The selectors whose calls through a proxy run its analysed implementation. A selector the implementation
-    doesn't answer reaches a secondary implementation when ``split``; otherwise only the proxy's own admin selectors
-    reach unanalysed code, and anything else hits the implementation's fallback.
+    doesn't answer reaches a secondary implementation when ``split``; otherwise only the proxy's own upgrade and admin
+    selectors reach unanalysed code, and anything else hits the implementation's fallback.
     """
 
     selectors: frozenset[str]
