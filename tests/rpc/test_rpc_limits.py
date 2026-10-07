@@ -163,27 +163,48 @@ def test_direct_completion_cannot_hide_exhausted_budget(monkeypatch):
     assert classify(limits.RpcBackpressure("cooldown")) == "transient"
 
 
-def test_successful_batch_counts_calls_not_http_envelopes(monkeypatch):
+@pytest.mark.parametrize(
+    "result", ["0x", {"calls": [{"error": {"code": -32005, "message": "Monthly capacity limit exceeded"}}]}]
+)
+def test_successful_batch_counts_calls_not_http_envelopes(monkeypatch, result):
     def post(*args, **kwargs):
-        return response([{"id": item["id"], "result": "0x"} for item in kwargs["json"]])
+        return response([{"id": item["id"], "result": result} for item in kwargs["json"]])
 
     monkeypatch.setattr(rpc, "_get_session", lambda: SimpleNamespace(post=post))
     budget = RequestBudget(limit=5)
     with request_budget(budget):
-        rpc.rpc_batch_request("https://rpc.example", [("eth_call", [{}, "latest"])] * 3)
+        call = ("debug_traceTransaction", ["0xtx"]) if isinstance(result, dict) else ("eth_call", [{}, "latest"])
+        assert rpc.rpc_batch_request("https://rpc.example", [call] * 3) == [result] * 3
     assert budget.attempts["rpc"] == 3
 
 
-def test_wrapped_capacity_error_is_transport_without_revert_data(monkeypatch):
+@pytest.mark.parametrize(
+    "inner, kind",
+    [
+        ({"code": "ErrEndpointCapacityExceeded"}, "capacity"),
+        ({"code": -32005, "message": "Monthly capacity limit exceeded"}, "billing"),
+        ({"code": -32005, "message": "Daily request quota exhausted"}, "billing"),
+        ({"code": -32000, "message": "Insufficient credits"}, "billing"),
+        ({"code": -32005, "message": "query returned more than 10000 results"}, "range"),
+        ({"code": -32005, "message": "block range limit exceeded"}, "range"),
+        ({"code": -32005, "message": "Rate limit exceeded"}, "capacity"),
+        ({"code": -32005, "message": "Compute units per second exceeded"}, "capacity"),
+        ({"code": -32005, "message": "Credits per second exceeded"}, "capacity"),
+        ({"code": -32005, "message": "Rate limit exceeded; available credits: 1000"}, "capacity"),
+        ({"code": -32005, "message": "Limit exceeded"}, "transport"),
+    ],
+)
+def test_wrapped_capacity_error_is_transport_without_revert_data(monkeypatch, inner, kind):
     error = {
         "code": -32000,
         "message": "upstreams exhausted",
         "data": {
             "code": "ErrUpstreamsExhausted",
-            "cause": [{"code": "ErrEndpointCapacityExceeded"}],
+            "cause": [inner],
             "data": "0xdeadbeef",
         },
     }
+    assert limits.error_kind(inner) == limits.error_kind(error) == kind
     monkeypatch.setattr(
         rpc, "_get_session", lambda: SimpleNamespace(post=lambda *a, **k: response([{"id": 0, "error": error}]))
     )
@@ -194,14 +215,23 @@ def test_wrapped_capacity_error_is_transport_without_revert_data(monkeypatch):
     assert not result.success and result.revert_data is None
 
 
-def test_pinned_duplicate_probes_and_reverts_are_reused_but_callers_are_distinct(monkeypatch):
+@pytest.mark.parametrize(
+    "message",
+    [
+        "execution reverted",
+        "execution reverted: Monthly capacity limit exceeded",
+        "execution reverted: Rate limit exceeded",
+        "execution reverted: block range limit exceeded",
+    ],
+)
+def test_pinned_duplicate_probes_and_reverts_are_reused_but_callers_are_distinct(monkeypatch, message):
     sent = []
 
     def post(*args, **kwargs):
         sent.append(kwargs["json"])
         return response(
             [
-                {"id": item["id"], "error": {"code": 3, "message": "execution reverted", "data": "0x12345678"}}
+                {"id": item["id"], "error": {"code": 3, "message": message, "data": "0x12345678"}}
                 for item in kwargs["json"]
             ]
         )

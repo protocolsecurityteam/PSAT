@@ -33,6 +33,10 @@ class RpcBudgetExceeded(RuntimeError):
     """A bounded run/stage exhausted its allowance; repeating it automatically is unsafe."""
 
 
+class RpcBillingLimitExceeded(RpcBudgetExceeded):
+    """The provider explicitly exhausted an account quota; smaller queries cannot recover it."""
+
+
 @dataclass
 class RpcScope:
     run_id: str
@@ -235,10 +239,14 @@ def error_kind(error: Any) -> str:
     if not isinstance(error, dict):
         return "transport"
     codes: set[Any] = set()
+    messages: list[str] = []
     pending: list[Any] = [error]
     while pending:
         value = pending.pop()
         if isinstance(value, dict):
+            message = value.get("message")
+            if isinstance(message, str):
+                messages.append(message.lower())
             for key in ("code", "originalCode", "statusCode"):
                 code = value.get(key)
                 if isinstance(code, (str, int)):
@@ -246,7 +254,49 @@ def error_kind(error: Any) -> str:
             pending.extend(value.values())
         elif isinstance(value, list):
             pending.extend(value)
-    if codes & {429, -32005, "ErrEndpointCapacityExceeded", "ErrRateLimitRuleExceeded"}:
+    infrastructure = codes & {
+        429,
+        "ErrEndpointCapacityExceeded",
+        "ErrRateLimitRuleExceeded",
+        "ErrUpstreamsExhausted",
+        -32601,
+        "ErrEndpointUnsupported",
+        "ErrUpstreamMethodIgnored",
+    }
+    if not infrastructure and (
+        codes & {3, "ErrEndpointExecutionException"} or any("execution reverted" in message for message in messages)
+    ):
+        return "execution"
+    # -32005 is shared by billing, throughput and query-size limits. Nested provider messages disambiguate it.
+    if any(
+        any(term in message for term in ("monthly", "daily", "billing", "credit"))
+        and any(term in message for term in ("exceeded", "exhausted", "depleted", "insufficient", "limit reached"))
+        and not any(term in message for term in ("per second", "per minute", "per hour"))
+        and (
+            any(term in message for term in ("monthly", "daily"))
+            or not any(term in message for term in ("rate limit", "throughput"))
+        )
+        for message in messages
+    ):
+        return "billing"
+    if any(
+        any(
+            term in message
+            for term in (
+                "block range",
+                "too many blocks",
+                "too many results",
+                "query returned more than",
+                "response size",
+            )
+        )
+        for message in messages
+    ):
+        return "range"
+    if codes & {429, "ErrEndpointCapacityExceeded", "ErrRateLimitRuleExceeded"} or any(
+        any(term in message for term in ("rate limit", "too many requests", "per second", "per minute", "throughput"))
+        for message in messages
+    ):
         return "capacity"
     if "ErrUpstreamsExhausted" in codes:
         return "transport"

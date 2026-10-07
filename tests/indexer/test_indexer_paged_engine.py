@@ -24,6 +24,7 @@ from db.models import (
     IndexedEventLog,
     IndexerWork,
 )
+from services.clients.rpc_limits import RpcBackpressure, RpcBillingLimitExceeded
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, RpcEventLogFetcher
 from tests.conftest import requires_postgres
 from tests.support.sim_chain import SimChain, SimLog, address, topic, word
@@ -363,15 +364,19 @@ def test_a_query_timeout_caps_the_next_visit_below_the_refused_span(db_session, 
 
 
 @pytest.mark.parametrize(
-    "error",
+    "error,warm",
     [
-        "{'code': -32000, 'message': 'upstream unavailable'}",
-        "{'code': -32005, 'message': 'rate limit exceeded'}",
-        "{'code': -32000, 'message': 'requested block range is not synced yet'}",
+        ("{'code': -32000, 'message': 'upstream unavailable'}", False),
+        ("{'code': -32005, 'message': 'rate limit exceeded'}", False),
+        ("{'code': -32000, 'message': 'requested block range is not synced yet'}", False),
+        (RpcBillingLimitExceeded("monthly quota exhausted"), False),
+        (RpcBillingLimitExceeded("monthly quota exhausted"), True),
+        (RpcBackpressure("throughput exceeded"), False),
+        (RpcBackpressure("throughput exceeded"), True),
     ],
-    ids=["outage", "rate_limit", "not_synced"],
+    ids=["outage", "generic_limit", "not_synced", "billing_cold", "billing_warm", "throttle_cold", "throttle_warm"],
 )
-def test_a_transient_upstream_error_bisects_but_sets_no_span_limit(db_session, sim, error):
+def test_upstream_errors_do_not_invent_a_span_limit(db_session, sim, error, warm):
     failed: list[int] = []
 
     def flaky(_chain, lo, hi):
@@ -380,15 +385,36 @@ def test_a_transient_upstream_error_bisects_but_sets_no_span_limit(db_session, s
             return error
         return None
 
-    sim.refuse = flaky
+    requests = []
+
+    def blocked(method, params):
+        if method == "eth_getLogs":
+            requests.append(params[0])
+            raise error
+
+    if isinstance(error, Exception):
+        sim.before_request = blocked
+    else:
+        sim.refuse = flaky
     sim.add_many(1, _uniform(_ADDR, _T1, lo=_SEED + 1, hi=_TARGET, every=50_000))
-    _enroll(db_session, seed=_SEED)
+    addresses = [address(0xE20 + i) for i in range(3)] if warm else [_ADDR]
+    for addr in addresses:
+        _enroll(db_session, addr=addr, seed=_TARGET - 400 if warm else _SEED)
+    if warm:
+        db_session.execute(update(IndexedEventCursor).values(backfill_complete=True))
+        db_session.commit()
+    before = {addr: _cursor(db_session, _T1, addr).last_indexed_block for addr in addresses}
     limits = PageLimits(max_block_span=500_000, initial_span=50_000, target_page_logs=2_000, max_page_logs=50_000)
 
-    _scan(db_session, limits=limits, max_windows_per_cursor=1)
+    summary = _scan(db_session, limits=limits, max_windows_per_cursor=1, scan_mode="warm" if warm else "all")
 
-    assert failed == [500_000]
-    assert _cursor(db_session).request_span_limit is None
+    if isinstance(error, Exception):
+        assert len(requests) == 1, "provider exhaustion must not split ranges or address batches"
+        assert summary.failed_groups == len(addresses)
+        assert {addr: _cursor(db_session, _T1, addr).last_indexed_block for addr in addresses} == before
+    else:
+        assert failed == [500_000]
+    assert all(_cursor(db_session, _T1, addr).request_span_limit is None for addr in addresses)
 
 
 def test_a_persisted_span_limit_never_falls_below_the_bisect_floor(db_session, sim):

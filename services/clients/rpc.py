@@ -18,6 +18,7 @@ from requests.adapters import HTTPAdapter
 
 from services.clients.rpc_limits import (
     RpcBackpressure,
+    RpcBillingLimitExceeded,
     RpcBudgetExceeded,
     admit,
     current_scope,
@@ -539,6 +540,20 @@ def _post_rpc(rpc_url: str, payload: Any, *, timeout: float, extra_headers: Mapp
         timeout=timeout,
         headers=rpc_headers(rpc_url, extra_headers),
     )
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    replies = data if isinstance(data, list) else [data]
+    if any(
+        isinstance(item, dict)
+        and error_kind(item.get("error") if response.status_code == 200 else item.get("error", item)) == "billing"
+        for item in replies
+    ):
+        failure = RpcBillingLimitExceeded("RPC provider billing quota exhausted")
+        if scope is not None:
+            scope.failure = failure
+        raise failure
     if response.status_code in {429, 503}:
         from utils.secrets import sanitize_url
 
@@ -548,7 +563,8 @@ def _post_rpc(rpc_url: str, payload: Any, *, timeout: float, extra_headers: Mapp
             cooldown,
         )
     if response.status_code == 200:
-        data = response.json()
+        if data is None:
+            data = response.json()
         replies = data if isinstance(data, list) else [data]
         if any(isinstance(item, dict) and error_kind(item.get("error")) == "capacity" for item in replies):
             overload(rpc_url, response.headers.get("Retry-After"))

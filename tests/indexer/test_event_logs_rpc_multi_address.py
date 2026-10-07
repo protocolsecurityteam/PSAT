@@ -4,9 +4,16 @@
 
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
+import requests
 
 import services.resolution.repos.event_logs_rpc as event_logs_rpc
+from services.clients import rpc, rpc_limits
 from services.monitoring.event_topics import (
     OWNERSHIP_TRANSFERRED_TOPIC0,
     parse_any_log,
@@ -48,21 +55,87 @@ def _raw_log(
     }
 
 
-def test_multi_address_bisect_floor_re_raises(monkeypatch):
+@pytest.mark.parametrize("method", ["fetch_logs", "visit_logs", "coordinated"])
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize(
+    "failure", ["timeout", "range", "billing", "wrapped_billing", "http_billing", "throttle", "json_throttle"]
+)
+def test_multi_address_bisect_floor_re_raises(monkeypatch, method, scoped, failure):
     calls: list[int] = []
+    wire: list[int] = []
 
-    def fake_rpc(url, method, params, *, chain_id=None):
-        assert params[0]["address"] == [_ADDR_A, _ADDR_B]
-        span = int(params[0]["toBlock"], 16) - int(params[0]["fromBlock"], 16) + 1
-        calls.append(span)
-        raise RuntimeError("{'code': -32603, 'message': 'Internal error: Query timed out'}")
+    def post(_url, **kwargs):
+        request = kwargs["json"]
+        query = request["params"][0]
+        assert query["address"] == [_ADDR_A, _ADDR_B]
+        span = int(query["toBlock"], 16) - int(query["fromBlock"], 16) + 1
+        wire.append(span)
+        error = {"code": -32603, "message": "Internal error: Query timed out"}
+        if failure == "range":
+            error = {"code": -32005, "message": "query returned more than 10000 results"}
+        elif "billing" in failure:
+            error = {"code": -32005, "message": "Monthly capacity limit exceeded"}
+            if failure == "wrapped_billing":
+                error = {"code": "ErrUpstreamsExhausted", "message": "upstreams exhausted", "cause": [error]}
+        elif "throttle" in failure:
+            error = {"code": 429 if failure == "throttle" else -32005, "message": "Rate limit exceeded"}
+        payload = {"id": request["id"], "error": error}
+        if failure == "range" and span <= 10_000:
+            payload = {"id": request["id"], "result": []}
+        response = requests.Response()
+        response.status_code = 429 if failure in ("http_billing", "throttle") else 200
+        response._content = json.dumps(payload).encode()
+        return response
 
-    monkeypatch.setattr(event_logs_rpc, "rpc_request", fake_rpc)
-    fetcher = RpcEventLogFetcher("http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000)
-    with pytest.raises(RuntimeError, match="Query timed out"):
-        fetcher.fetch_logs(event_address=[_ADDR_A, _ADDR_B], topics=[_TOPIC_A], from_block=0, to_block=19_999)
+    monkeypatch.setattr(rpc, "_get_session", lambda: SimpleNamespace(post=post))
+    fetcher = RpcEventLogFetcher(
+        "http://unit.test", max_block_range=1_000_000, min_bisect_span=10_000, result_cap=50_000
+    )
+    request_logs = fetcher._request_logs
 
-    assert calls == [20_000, 10_000]
+    def counted(params):
+        calls.append(int(params[0]["toBlock"], 16) - int(params[0]["fromBlock"], 16) + 1)
+        return request_logs(params)
+
+    monkeypatch.setattr(fetcher, "_request_logs", counted)
+    consume = []
+
+    def scan():
+        with rpc_limits.rpc_scope("log-scan") if scoped else nullcontext():
+            kwargs: dict[str, Any] = dict(
+                event_address=[_ADDR_A, _ADDR_B], topics=[_TOPIC_A], from_block=0, to_block=19_999
+            )
+            if method == "fetch_logs":
+                assert fetcher.fetch_logs(**kwargs) == []
+            else:
+                fetcher.visit_logs(**kwargs, consume=consume.append, bisect=method != "coordinated")
+
+    if failure == "range" and method != "coordinated":
+        scan()
+        assert calls == wire == [20_000, 10_000, 10_000]
+    else:
+        with pytest.raises(RuntimeError) as caught:
+            scan()
+        if "billing" in failure:
+            from workers.retry_policy import classify
+
+            assert type(caught.value).__name__ == "RpcBillingLimitExceeded"
+            assert classify(caught.value) == "terminal"
+            assert calls == wire == [20_000]
+        elif "throttle" in failure:
+            from workers.retry_policy import classify
+
+            assert isinstance(caught.value, rpc_limits.RpcBackpressure)
+            assert classify(caught.value) == "transient"
+            assert calls == wire == [20_000]
+        elif method == "coordinated":
+            assert isinstance(caught.value, event_logs_rpc.RpcRangeTooLarge)
+            assert calls == wire == [20_000]
+        else:
+            assert "Query timed out" in str(caught.value)
+            assert calls == wire == [20_000, 10_000]
+
+    assert not consume
 
 
 def test_raw_dict_decodes_through_governance_parser(monkeypatch):
