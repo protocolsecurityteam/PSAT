@@ -805,7 +805,10 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
     for tree_map in tree_maps:
         for tree in tree_map.values():
             visit(tree)
-    return specs
+    # A present-set replay with no add event names no one (``controllers[c] = address(0)`` is a remove whose adds are
+    # value writes), so its "complete" would be vacuous.
+    with_adds = {spec["mapping_name"] for spec in specs if spec["direction"] == "add"}
+    return [spec for spec in specs if spec["mapping_name"] in with_adds]
 
 
 def _replay_mapping_principals(

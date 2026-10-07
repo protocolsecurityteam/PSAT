@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
@@ -70,6 +71,11 @@ BEHIND_PARTIAL_REASONS = frozenset({"cursor_behind_block", "tail_scan_failed"})
 # A row whose ``data`` isn't word-aligned (stored only in ``data_hex``) can't be decoded against any ABI, so no fold
 # that reads it is complete: the result is partial with this reason, never missing the row silently.
 UNDECODABLE_EVENT_DATA = "undecodable_event_data"
+
+# A writer event a value fold can't replay (its value is neither in the event nor a known zero).
+UNFOLDABLE_WRITER_EVENT = "unfoldable_writer_event"
+
+_ZERO_WORD = "0x" + "0" * 64
 
 
 class UndecodableEventRow(RuntimeError):
@@ -417,9 +423,15 @@ class PostgresEventLogRepo:
                 return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
             key_filters = resolved_filters
 
+        from services.resolution.mapping_enumerator import value_writer_spec_foldable
+
+        if not all(value_writer_spec_foldable(hint) for hint in value_hints):
+            return ValueFoldResult(entries=[], complete=False, partial_reason=UNFOLDABLE_WRITER_EVENT)
         hints_by_topic = _value_hints_by_topic(value_hints)
         if not hints_by_topic:
             return ValueFoldResult(entries=[], complete=False, partial_reason="unresolved_event_key")
+        if any(len({_value_reading(h) for h in hints}) > 1 for hints in hints_by_topic.values()):
+            return ValueFoldResult(entries=[], complete=False, partial_reason="ambiguous_event_direction")
 
         topic0s = sorted(hints_by_topic)
 
@@ -458,14 +470,13 @@ class PostgresEventLogRepo:
                         if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
                             continue
                         member = _word_to_address(event_keys.get(member_key)) if member_key is not None else None
-                    if member is None:
-                        continue
                     value_position = hint.get("value_position")
                     if value_position is None:
-                        continue
-                    value_hex = _word_at_event_arg(topics, data_words, int(value_position), hint)
-                    if value_hex is None:
-                        continue
+                        value_hex = _ZERO_WORD
+                    else:
+                        value_hex = _word_at_event_arg(topics, data_words, int(value_position), hint)
+                    if member is None or value_hex is None:
+                        raise UndecodableEventRow(topic0)
                     position = (
                         int(row.block_number),
                         int(row.transaction_index),
@@ -685,10 +696,19 @@ def _value_hints_by_topic(value_hints: list[dict[str, Any]]) -> dict[str, list[d
     out: dict[str, list[dict[str, Any]]] = {}
     for hint in value_hints:
         topic0 = _normalize_topic(hint.get("topic0"))
-        if topic0 is None or hint.get("value_position") is None:
+        if topic0 is None:
             continue
         out.setdefault(topic0, []).append(hint)
     return out
+
+
+def _value_reading(hint: dict[str, Any]) -> tuple[Any, ...]:
+    """How a hint reads its event: the value word (or zero) and the key map. Two readings of one event conflict."""
+    return (
+        hint.get("value_position"),
+        json.dumps(hint.get("topics_to_keys") or {}, sort_keys=True, default=str),
+        json.dumps(hint.get("data_to_keys") or {}, sort_keys=True, default=str),
+    )
 
 
 def _word_at_event_arg(
