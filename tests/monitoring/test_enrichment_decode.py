@@ -477,25 +477,23 @@ def test_the_budget_is_spent_once_across_every_chain_in_the_pass(db_session, mak
     }
 
     calls: list[dict] = []
-    with patch(
-        "services.monitoring.enrichment.chain_id_for", side_effect=lambda chain: 1 if chain == "ethereum" else 8453
-    ):
-        payloads = run(
-            db_session,
-            events,
-            txs,
-            calls_out=calls,
-            rpc_by_chain={"ethereum": "https://eth.invalid", "base": "https://base.invalid"},
-        )
+    payloads = run(
+        db_session,
+        events,
+        txs,
+        calls_out=calls,
+        rpc_by_chain={"ethereum": "https://eth.invalid", "base": "https://base.invalid"},
+    )
 
     assert sum(len(call["calls"]) for call in calls) == 1
     statuses = {payload["safe_exec"]["status"] for payload in payloads}
     assert statuses == {"decoded", "over_budget"}
 
 
-def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkeypatch):
+@pytest.mark.parametrize("unknown_chain", ["nosuchchain", ""])
+def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkeypatch, unknown_chain):
     monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
-    unresolvable = make_mc(address=ADDR(0x5A30), chain="nosuchchain")
+    unresolvable = make_mc(address=ADDR(0x5A30), chain=unknown_chain)
     resolvable = make_mc(address=ADDR(0x5A31))
     hashes = ["0x" + "ba" * 32, "0x" + "bb" * 32]
     events = [
@@ -507,21 +505,18 @@ def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkey
         for mc, h in zip((unresolvable, resolvable), hashes)
     }
 
-    def only_ethereum(chain):
-        if chain != "ethereum":
-            raise ValueError(f"unknown chain {chain}")
-        return 1
-
-    with patch("services.monitoring.enrichment.chain_id_for", side_effect=only_ethereum):
-        payloads = run(
-            db_session,
-            events,
-            txs,
-            rpc_by_chain={"ethereum": "https://eth.invalid", "nosuchchain": "https://nope.invalid"},
-        )
+    calls = []
+    payloads = run(
+        db_session,
+        events,
+        txs,
+        calls_out=calls,
+        rpc_by_chain={"ethereum": "https://eth.invalid", unknown_chain: "https://nope.invalid"},
+    )
 
     assert "safe_exec" not in payloads[0]
     assert payloads[1]["safe_exec"]["status"] == "decoded"
+    assert len(calls) == 1 and calls[0]["chain_id"] == 1
 
 
 def test_two_executions_of_one_safe_in_one_tx_refuse_attribution(db_session, safe):
