@@ -41,6 +41,7 @@ from services.concurrency import parallel_map
 from services.policy.stale_policy import mark_policy_stale
 from services.static.claims import Claim, resolve_claim_precedence
 from services.static.cross_contract import (
+    ProxyCoverage,
     build_callee_claim_map,
     claim_sort_key,
     controller_addresses,
@@ -54,6 +55,7 @@ from utils.logging import record_degraded
 logger = logging.getLogger(__name__)
 
 FACT_ARTIFACTS = ("effects", "control_snapshot")
+DIAMOND_PROXY_TYPE = "eip2535"
 
 
 def merge_claims(existing: Iterable[Claim] | None, additions: Iterable[Claim]) -> list[Claim]:
@@ -168,7 +170,8 @@ def _proxy_address() -> Any:
 
 def _runs_behind_proxy(chain_id: int) -> Any:
     """The job analyses the implementation a proxy on ``chain_id`` currently delegates to. A secondary implementation
-    runs only for calls the primary doesn't take, and a beacon's ``proxy_address`` is the beacon itself.
+    runs only for calls the primary doesn't take, a diamond routes each selector to its own facet, and a beacon's
+    ``proxy_address`` is the beacon itself.
     """
     return and_(
         Job.request["proxy_address"].astext.isnot(None),
@@ -176,6 +179,7 @@ def _runs_behind_proxy(chain_id: int) -> Any:
         exists().where(
             Contract.address == _proxy_address(),
             Contract.is_proxy.is_(True),
+            Contract.proxy_type.is_distinct_from(DIAMOND_PROXY_TYPE),
             func.lower(Contract.implementation) == func.lower(Job.address),
             _on_chain(chain_id),
         ),
@@ -351,22 +355,25 @@ def fetch_sibling_facts(
     return facts
 
 
-def split_proxy_selectors(session: Session, facts: SiblingFacts, *, chain_id: int) -> dict[str, set[str]]:
-    """``{proxy: selectors}`` for split proxies among the callees with facts: a selector the current implementation
-    doesn't answer to falls through to a secondary implementation, whose facts never stand for the proxy.
-    """
+def proxy_coverage(session: Session, facts: SiblingFacts, *, chain_id: int) -> dict[str, ProxyCoverage]:
+    """Which calls through each proxy among the callees with facts run the implementation those facts describe."""
     proxies = sorted(facts.implementations)
     if not proxies:
         return {}
-    split = session.execute(
-        select(Contract.address).where(
-            Contract.address.in_(proxies),
-            Contract.is_proxy.is_(True),
-            func.cardinality(Contract.secondary_implementations) > 0,
-            _on_chain(chain_id),
-        )
-    ).scalars()
-    return {address: function_selectors(facts.effects.get(address)) for address in split}
+    split = set(
+        session.execute(
+            select(Contract.address).where(
+                Contract.address.in_(proxies),
+                Contract.is_proxy.is_(True),
+                func.cardinality(Contract.secondary_implementations) > 0,
+                _on_chain(chain_id),
+            )
+        ).scalars()
+    )
+    return {
+        address: ProxyCoverage(frozenset(function_selectors(facts.effects.get(address))), address in split)
+        for address in proxies
+    }
 
 
 def _gap_reason(session: Session, callee: str, *, chain_id: int, facts: SiblingFacts) -> tuple[str, Any]:
@@ -374,10 +381,16 @@ def _gap_reason(session: Session, callee: str, *, chain_id: int, facts: SiblingF
     if callee in facts.unreadable:
         return "facts_unreadable", facts.job_for_address.get(callee)
     if callee in facts.effects:
-        # A split proxy's selector its implementation doesn't take.
+        # A selector the proxy's implementation doesn't take.
         return "selector_outside_implementation", facts.job_for_address.get(callee)
 
-    holder = session.execute(_fact_holders(chain_id, _call_address(chain_id) == callee)).first()
+    holder = session.execute(
+        _fact_holders(
+            chain_id,
+            or_(func.lower(Job.address) == callee, _proxy_address() == callee),
+            _call_address(chain_id) == callee,
+        )
+    ).first()
     if holder is not None:
         return "outside_sibling_scope", holder[0]
 
@@ -385,11 +398,13 @@ def _gap_reason(session: Session, callee: str, *, chain_id: int, facts: SiblingF
         return exists().where(Artifact.job_id == Job.id, Artifact.name == name)
 
     proxy = session.execute(
-        select(Contract.implementation)
+        select(Contract.implementation, Contract.proxy_type)
         .where(Contract.address == callee, Contract.is_proxy.is_(True), _on_chain(chain_id))
         .order_by(Contract.id)
         .limit(1)
     ).first()
+    if proxy is not None and proxy[1] == DIAMOND_PROXY_TYPE:
+        return "callee_is_diamond", None
     if proxy is not None:
         implementation = (proxy[0] or "").lower()
         if not implementation:

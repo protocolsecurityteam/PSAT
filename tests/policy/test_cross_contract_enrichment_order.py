@@ -46,6 +46,7 @@ BULK_WITHDRAW = "bulkWithdraw(address,uint256,uint256,address)"
 EXIT = "exit(address,address,uint256,address,uint256)"
 SWEEP = "sweep(address)"
 TRANSFER = "transfer(address,uint256)"
+UPGRADE_TO = "upgradeTo(address)"
 
 
 def _selector(signature: str) -> str:
@@ -1119,6 +1120,74 @@ def test_a_split_proxy_s_selector_outside_its_implementation_is_a_gap(pipeline, 
         else []
     )
     assert _gaps(p, caller) == {SWEEP: expected}
+
+
+def test_a_proxy_s_own_admin_selector_its_implementation_lacks_is_a_gap(pipeline):
+    """A transparent proxy answers its admin's ``upgradeTo`` with its own code, which no job analyses."""
+    p = pipeline()
+    _proxy_row(p, PROXY, IMPL_V1)
+    implementation = _behind(p, PROXY, IMPL_V1)
+    p.land_facts(implementation, _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    effects = _caller_effects(("tokenA",))
+    effects["functions"][SWEEP]["sinks"].append(_sink("tokenA.upgradeTo", UPGRADE_TO, "s1"))
+    p.land_facts(caller, effects, _snapshot({"tokenA": PROXY}))
+    p.run(caller)
+
+    assert _joined(p.row_claims(caller)[SWEEP]) == [("flow.out", PROXY, IMPL_V1)]
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["sink_id"], gap["reason"]) == ("s1", "selector_outside_implementation")
+
+
+def test_a_diamond_never_stands_for_one_facet(pipeline):
+    """A diamond routes each selector to its own facet, even when monitoring records one as its implementation."""
+    p = pipeline()
+    diamond = _proxy_row(p, PROXY, IMPL_V1)
+    diamond.proxy_type = "eip2535"
+    p.session.commit()
+    for facet in (IMPL_V1, IMPL_V2):
+        p.land_facts(_behind(p, PROXY, facet), _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": PROXY}))
+    p.run(caller)
+
+    assert p.row_claims(caller)[SWEEP] == []
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["reason"], gap["callee_job_id"]) == ("callee_is_diamond", None)
+
+
+@pytest.mark.parametrize(("chain", "joined"), [("base", False), ("ethereum", True), (None, True)])
+def test_only_a_proxy_row_on_the_job_s_chain_puts_it_behind_the_proxy(pipeline, chain, joined):
+    p = pipeline()
+    row = _proxy_row(p, PROXY, IMPL_V1)
+    row.chain = chain
+    p.session.commit()
+    p.land_facts(_behind(p, PROXY, IMPL_V1), _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": PROXY}))
+    p.run(caller)
+
+    if joined:
+        assert _joined(p.row_claims(caller)[SWEEP]) == [("flow.out", PROXY, IMPL_V1)]
+    else:
+        assert p.row_claims(caller)[SWEEP] == []
+        assert _gaps(p, caller)[SWEEP][0]["reason"] == "not_analyzed"
+
+
+def test_the_current_implementation_holds_the_proxy_s_facts_over_the_proxy_s_own_job(pipeline):
+    p = pipeline()
+    own = p.job(PROXY)
+    p.land_facts(own, _token_effects(proves_flow=False), _snapshot({}))
+    row = p.session.query(Contract).filter(Contract.address == PROXY).one()
+    assert row.job_id == own.id
+    row.is_proxy, row.implementation = True, IMPL_V1
+    p.session.commit()
+    p.land_facts(_behind(p, PROXY, IMPL_V1), _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _caller_effects(("tokenA",)), _snapshot({"tokenA": PROXY}))
+    p.run(caller)
+
+    assert _joined(p.row_claims(caller)[SWEEP]) == [("flow.out", PROXY, IMPL_V1)]
 
 
 def test_a_direct_call_to_an_implementation_is_not_joined_with_its_proxy_s_facts(pipeline):

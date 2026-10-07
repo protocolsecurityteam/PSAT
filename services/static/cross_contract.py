@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from eth_utils.crypto import keccak
@@ -23,7 +24,7 @@ from .claims import (
     registry,
     resolve_claim_precedence,
 )
-from .claims.matchers._gates import UPGRADE_SELECTORS
+from .claims.matchers._gates import CHANGE_ADMIN, UPGRADE_SELECTORS
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,26 @@ def function_selectors(effects_artifact: Any) -> set[str]:
         if isinstance(record, dict)
         for key in _selector_keys(fn_sig, record)
     }
+
+
+# Selectors a transparent proxy answers with its own code, which no job analyses.
+_PROXY_OWN_SELECTORS = UPGRADE_SELECTORS | {CHANGE_ADMIN}
+
+
+@dataclass(frozen=True)
+class ProxyCoverage:
+    """The selectors whose calls through a proxy run its analysed implementation. A selector the implementation
+    doesn't answer reaches a secondary implementation when ``split``; otherwise only the proxy's own admin selectors
+    reach unanalysed code, and anything else hits the implementation's fallback.
+    """
+
+    selectors: frozenset[str]
+    split: bool
+
+    def covers(self, selector: str) -> bool:
+        if selector in self.selectors:
+            return True
+        return not self.split and selector not in _PROXY_OWN_SELECTORS
 
 
 def build_callee_claim_map(
@@ -208,12 +229,12 @@ def unresolved_callees(
     callees_with_facts: set[str],
     *,
     target_address: str,
-    partial_callees: dict[str, set[str]] | None = None,
+    proxy_coverage: dict[str, ProxyCoverage] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Body calls whose callee resolves to an address with no facts to derive from: ``{function_signature: [{sink_id,
     selector, callee}]}``. Value-flow claims for these calls are not determined, which is not "none".
-    ``partial_callees``: ``{callee: selectors}`` for callees whose facts cover only those selectors; a call outside
-    them is a gap too.
+    ``proxy_coverage``: for callees whose facts are a proxy's implementation's, a call the implementation doesn't run
+    is a gap too.
     """
     var_to_address = _var_to_address(controller_values)
     target = (target_address or "").lower()
@@ -226,8 +247,8 @@ def unresolved_callees(
             if not callee or callee == target or not callee[2:].strip("0"):
                 continue
             selector = str(sink.get("selector", "")).lower()
-            covered = (partial_callees or {}).get(callee)
-            if callee in callees_with_facts and (covered is None or selector in covered):
+            coverage = (proxy_coverage or {}).get(callee)
+            if callee in callees_with_facts and (coverage is None or coverage.covers(selector)):
                 continue
             gaps.append({"sink_id": sink.get("id"), "selector": selector, "callee": callee})
         if gaps:
