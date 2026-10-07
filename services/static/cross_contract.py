@@ -169,7 +169,10 @@ def build_callee_claim_map(
 
 
 def _body_external_calls(target_effects: Any) -> dict[str, list[dict[str, Any]]]:
-    """Body-origin ``external_call`` sinks with a ``var.method`` target and selector; guard calls aren't value flows."""
+    """Body-origin ``external_call`` sinks with a ``var.method`` target; guard calls aren't value flows. A high-level or
+    library call whose selector isn't determined is kept: what it reaches is not determined, not nothing. A low-level
+    call names no function to join on and stays out, as before.
+    """
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
     if not isinstance(functions, dict):
         return {}
@@ -185,8 +188,11 @@ def _body_external_calls(target_effects: Any) -> dict[str, list[dict[str, Any]]]
             and s.get("origin") == "body"
             and isinstance(s.get("target"), str)
             and "." in str(s.get("target"))
-            and isinstance(s.get("selector"), str)
-            and str(s.get("selector")).startswith("0x")
+            and (
+                _sink_selector(s) is not None
+                or s.get("library_signature")
+                or str(s.get("target")).rsplit(".", 1)[-1] not in _LOW_LEVEL_CALLS
+            )
         ]
         if sinks:
             out[fn_sig] = sinks
@@ -210,9 +216,9 @@ def _derive_value_flow_claims(
         for sink in sinks:
             var_name = str(sink.get("target", "")).lower().split(".", 1)[0]
             callee_addr = var_to_address.get(var_name)
-            if not callee_addr:
+            selector = _sink_selector(sink)
+            if not callee_addr or selector is None:
                 continue
-            selector = str(sink.get("selector", "")).lower()
             implementation = (callee_implementations or {}).get(callee_addr)
             for source in callee_claim_map.get(callee_addr, {}).get(selector, []):
                 claim_id = source["claim_id"]
@@ -249,7 +255,7 @@ def unresolved_callees(
     """Body calls whose callee resolves to an address with no facts to derive from: ``{function_signature: [{sink_id,
     selector, callee}]}``. Value-flow claims for these calls are not determined, which is not "none".
     ``proxy_coverage``: for callees whose facts are a proxy's implementation's, a call the implementation doesn't run
-    is a gap too.
+    is a gap too. So is a call whose selector isn't determined (``selector`` ``None``): no facts can be joined to it.
     """
     var_to_address = _var_to_address(controller_values)
     target = (target_address or "").lower()
@@ -261,14 +267,27 @@ def unresolved_callees(
             # The zero address is a burn sentinel, not a contract that could have facts.
             if not callee or callee == target or not callee[2:].strip("0"):
                 continue
-            selector = str(sink.get("selector", "")).lower()
+            selector = _sink_selector(sink)
             coverage = (proxy_coverage or {}).get(callee)
-            if callee in callees_with_facts and (coverage is None or coverage.covers(selector)):
+            if (
+                selector is not None
+                and callee in callees_with_facts
+                and (coverage is None or coverage.covers(selector))
+            ):
                 continue
             gaps.append({"sink_id": sink.get("id"), "selector": selector, "callee": callee})
         if gaps:
             out[fn_sig] = gaps
     return out
+
+
+# ``effects.sinks`` names a low-level call's sink ``<destination>.<call|staticcall|callcode>``.
+_LOW_LEVEL_CALLS = frozenset({"call", "staticcall", "callcode"})
+
+
+def _sink_selector(sink: dict[str, Any]) -> str | None:
+    selector = sink.get("selector")
+    return selector.lower() if isinstance(selector, str) and selector.startswith("0x") else None
 
 
 def _is_bool_mapping(declared_type: Any) -> bool:

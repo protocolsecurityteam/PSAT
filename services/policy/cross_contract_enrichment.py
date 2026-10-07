@@ -452,22 +452,30 @@ def describe_gaps(
     chain_id: int,
     facts: SiblingFacts,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Each gap with the reason its callee had no facts, as observed now; it heals when the callee's facts land."""
+    """Each gap with the reason its callee had no facts, as observed now; it heals when the callee's facts land. A call
+    whose selector isn't determined to a callee that has facts is ``selector_not_determined``; it doesn't heal.
+    """
     reasons = {
         callee: _gap_reason(session, callee, chain_id=chain_id, facts=facts)
         for callee in sorted({gap["callee"] for gaps in gaps_by_function.values() for gap in gaps})
     }
+
+    def _reason(gap: dict[str, Any]) -> str:
+        if gap["selector"] is None and gap["callee"] in facts.effects:
+            return "selector_not_determined"
+        return reasons[gap["callee"]][0]
+
     return {
         fn_sig: sorted(
             (
                 {
                     **gap,
-                    "reason": reasons[gap["callee"]][0],
+                    "reason": _reason(gap),
                     "callee_job_id": str(reasons[gap["callee"]][1]) if reasons[gap["callee"]][1] else None,
                 }
                 for gap in gaps
             ),
-            key=lambda gap: (str(gap.get("sink_id")), gap["selector"], gap["callee"]),
+            key=lambda gap: (str(gap.get("sink_id")), gap["selector"] or "", gap["callee"]),
         )
         for fn_sig, gaps in gaps_by_function.items()
     }

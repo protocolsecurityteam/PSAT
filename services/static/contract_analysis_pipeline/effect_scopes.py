@@ -234,11 +234,11 @@ def _attach_effect_scopes(contract, predicates, effects):
                     if len(sites) >= 256:
                         incomplete.append("effect_site_budget")
                         break
-                    candidates = [("state_write", var, None, None) for var in _node_kind_state_writes(node)]
+                    candidates = [("state_write", var, None, None, None) for var in _node_kind_state_writes(node)]
                     candidates += _classify_node_irs(node, unit, entry_params, contract)
                     for ir in node.irs:
                         if isinstance(ir, (Send, Transfer)):
-                            candidates.append(("external_call", str(ir.destination), None, None))
+                            candidates.append(("external_call", str(ir.destination), None, None, None))
                     calls = [ir for ir in node.irs if isinstance(ir, (InternalCall, LibraryCall))]
                     if not candidates and not calls:
                         continue
@@ -248,7 +248,7 @@ def _attach_effect_scopes(contract, predicates, effects):
                     required = [*inherited, *local]
                     if any(predicate_truth(t) is False for t in required):
                         continue
-                    for kind, target, selector, _ in candidates:
+                    for kind, target, selector, _, library_signature in candidates:
                         paths = [str(getattr(getattr(c, "node", None), "node_id", "unknown")) for c in chain]
                         site_id = "/".join(
                             [entry.full_name, *paths, unit.canonical_name, str(node.node_id), kind, target]
@@ -260,7 +260,10 @@ def _attach_effect_scopes(contract, predicates, effects):
                         matching = [
                             s["id"]
                             for s in record_sinks
-                            if s["kind"] == kind and s["target"] == target and s.get("selector") == selector
+                            if s["kind"] == kind
+                            and s["target"] == target
+                            and s.get("selector") == selector
+                            and s.get("library_signature") == library_signature
                         ]
                         sites.append(
                             {

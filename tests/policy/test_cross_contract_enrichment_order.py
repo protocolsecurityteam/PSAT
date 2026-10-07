@@ -882,6 +882,40 @@ def test_a_gap_names_why_the_callee_had_no_facts(pipeline, callee_state, reason)
     assert (gap["reason"], gap["callee_job_id"]) == (reason, str(callee.id))
 
 
+def _library_call_effects() -> dict:
+    """``tokenA.safeTransfer(...)``: a library call publishes no selector (the token never answers the library's)."""
+    sink = {"id": "s0", "kind": "external_call", "target": "tokenA.safeTransfer", "selector": None, "origin": "body"}
+    return {"functions": {SWEEP: {"selector": _selector(SWEEP), "sinks": [sink], "claims": []}}}
+
+
+@pytest.mark.parametrize(("callee_has_facts", "reason"), [(True, "selector_not_determined"), (False, "not_analyzed")])
+def test_a_call_with_no_determined_selector_is_a_gap(pipeline, callee_has_facts, reason):
+    p = pipeline()
+    if callee_has_facts:
+        token = p.job(TOKEN_A)
+        p.land_facts(token, _token_effects(), _snapshot({}))
+    caller = p.job(CALLER)
+    p.land_facts(caller, _library_call_effects(), _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    [gap] = _gaps(p, caller)[SWEEP]
+    assert (gap["selector"], gap["callee"], gap["reason"]) == (None, TOKEN_A, reason)
+    # The token's transfer claims aren't joined to a call whose selector isn't known.
+    assert p.row_claims(caller)[SWEEP] == []
+
+
+def test_a_low_level_call_is_not_a_gap(pipeline):
+    """``tokenA.call(data)`` names no function to join on; it was never a cross-contract call record."""
+    p = pipeline()
+    caller = p.job(CALLER)
+    sink = {"id": "s0", "kind": "external_call", "target": "tokenA.call", "selector": None, "origin": "body"}
+    effects = {"functions": {SWEEP: {"selector": _selector(SWEEP), "sinks": [sink], "claims": []}}}
+    p.land_facts(caller, effects, _snapshot({"tokenA": TOKEN_A}))
+    p.run(caller)
+
+    assert _gaps(p, caller)[SWEEP] == []
+
+
 def test_a_callee_whose_effects_build_failed_is_a_gap(pipeline):
     """An older job stored a failed build as ``{"error": ...}`` under ``effects``; that is no facts, not a callee
     whose functions make no claims.

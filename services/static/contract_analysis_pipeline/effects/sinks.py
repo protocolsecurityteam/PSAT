@@ -7,11 +7,11 @@ from typing import Any
 from ..summaries import _resolve_cast_head
 from .selectors import (
     _auto_getter_selector,
+    _callee_dispatch_selector,
     _callee_signature,
     _function_full_name,
     _is_fallback_or_receive,
     _node_irs,
-    _selector_for,
 )
 from .types import ReceiverDescriptor, SinkRecord
 
@@ -185,22 +185,23 @@ def _fold_receivers(descriptors: list[ReceiverDescriptor]) -> ReceiverDescriptor
 
 def _classify_node_irs(
     node: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any
-) -> list[tuple[str, str, str | None, ReceiverDescriptor | None]]:
-    """Non-state-write sinks at a node as ``(kind, target, selector, receiver)``; ``receiver`` only for
-    high-level/library calls. ``unit`` owns the node; ``entry_param_ids`` is always the entry's. State writes come
-    from Slither's ``state_variables_written`` instead.
+) -> list[tuple[str, str, str | None, ReceiverDescriptor | None, str | None]]:
+    """Non-state-write sinks at a node as ``(kind, target, selector, receiver, library_signature)``; ``receiver`` only
+    for high-level/library calls, ``library_signature`` (the library function's spelling, which has no selector to
+    tell overloads apart by) only for library calls. ``unit`` owns the node; ``entry_param_ids`` is always the
+    entry's. State writes come from Slither's ``state_variables_written`` instead.
     """
-    out: list[tuple[str, str, str | None, ReceiverDescriptor | None]] = []
+    out: list[tuple[str, str, str | None, ReceiverDescriptor | None, str | None]] = []
     # Node-local def map, so an inline-cast receiver resolves past its temporary.
     def_by_id = {id(lv): ir for ir in _node_irs(node) if (lv := getattr(ir, "lvalue", None)) is not None}
     for ir in _node_irs(node):
         op = type(ir).__name__
         if op == "NewContract":
             target = getattr(ir, "contract_name", None) or str(getattr(ir, "contract_created", "")) or "unknown"
-            out.append(("contract_creation", str(target), None, None))
+            out.append(("contract_creation", str(target), None, None, None))
         elif op in ("HighLevelCall", "LibraryCall"):
             function_name = getattr(ir, "function_name", None) or "call"
-            selector = _selector_for(_callee_signature(ir))
+            selector = _callee_dispatch_selector(ir)
             # A library call's receiver is its first argument; ``destination`` is the library.
             if op == "LibraryCall":
                 arguments = list(getattr(ir, "arguments", []) or [])
@@ -210,32 +211,33 @@ def _classify_node_irs(
             resolved = _resolve_cast_head(head, def_by_id)
             destination_name = getattr(resolved, "name", None) or str(resolved) or "unknown"
             receiver = _receiver_descriptor(resolved, unit, entry_param_ids, entry_contract)
-            out.append(("external_call", f"{destination_name}.{function_name}", selector, receiver))
+            library_signature = _callee_signature(ir) if op == "LibraryCall" else None
+            out.append(("external_call", f"{destination_name}.{function_name}", selector, receiver, library_signature))
         elif op == "LowLevelCall":
             target = getattr(getattr(ir, "destination", None), "name", None) or str(
                 getattr(ir, "destination", None) or "unknown"
             )
             function_name = str(getattr(ir, "function_name", "") or "")
             if function_name == "delegatecall":
-                out.append(("delegatecall", str(target), None, None))
+                out.append(("delegatecall", str(target), None, None, None))
             else:
-                out.append(("external_call", f"{target}.{function_name or 'call'}", None, None))
+                out.append(("external_call", f"{target}.{function_name or 'call'}", None, None, None))
         elif op == "SolidityCall":
             function_name = getattr(getattr(ir, "function", None), "name", "") or ""
             arguments = list(getattr(ir, "arguments", []) or [])
             if function_name.startswith("selfdestruct("):
-                out.append(("selfdestruct", "selfdestruct", None, None))
+                out.append(("selfdestruct", "selfdestruct", None, None, None))
             elif function_name.startswith(("call(", "callcode(", "staticcall(")):
                 target = str(arguments[1]) if len(arguments) > 1 else "unknown"
-                out.append(("external_call", f"assembly_call:{target}", None, None))
+                out.append(("external_call", f"assembly_call:{target}", None, None, None))
             elif function_name.startswith("sstore("):
                 # Slither doesn't record assembly writes in ``state_variables_written``; key by the slot expression.
                 slot = str(arguments[0]) if arguments else "unknown"
-                out.append(("state_write", f"assembly_storage:{slot}", None, None))
+                out.append(("state_write", f"assembly_storage:{slot}", None, None, None))
             elif function_name.startswith("delegatecall("):
                 # Assembly delegatecall (e.g. an EIP-1967 fallback): ``delegatecall(gas, addr, ...)``.
                 target = str(arguments[1]) if len(arguments) > 1 else "assembly_delegatecall"
-                out.append(("delegatecall", f"assembly_delegatecall:{target}", None, None))
+                out.append(("delegatecall", f"assembly_delegatecall:{target}", None, None, None))
     return out
 
 
@@ -245,8 +247,8 @@ def _walk_unit_for_sinks(
     origin: str,
     entry_param_ids: dict[int, int],
     entry_contract: Any,
-) -> list[tuple[str, str, str | None, str, ReceiverDescriptor | None]]:
-    """Gather ``(kind, target, selector, origin, receiver)`` tuples from ``unit`` and its callees.
+) -> list[tuple[str, str, str | None, str, ReceiverDescriptor | None, str | None]]:
+    """Gather ``(kind, target, selector, origin, receiver, library_signature)`` tuples from ``unit`` and its callees.
 
     ``origin`` becomes ``guard`` once the walk enters a modifier. ``entry_param_ids`` stays the entry's.
     """
@@ -255,12 +257,14 @@ def _walk_unit_for_sinks(
         return []
     visited.add(unit_key)
 
-    found: list[tuple[str, str, str | None, str, ReceiverDescriptor | None]] = []
+    found: list[tuple[str, str, str | None, str, ReceiverDescriptor | None, str | None]] = []
     for node in getattr(unit, "nodes", []) or []:
         for var_name in _node_kind_state_writes(node):
-            found.append(("state_write", var_name, None, origin, None))
-        for kind, target, selector, receiver in _classify_node_irs(node, unit, entry_param_ids, entry_contract):
-            found.append((kind, target, selector, origin, receiver))
+            found.append(("state_write", var_name, None, origin, None, None))
+        for kind, target, selector, receiver, library_signature in _classify_node_irs(
+            node, unit, entry_param_ids, entry_contract
+        ):
+            found.append((kind, target, selector, origin, receiver, library_signature))
         for ir in _node_irs(node):
             op = type(ir).__name__
             if op not in ("InternalCall", "LibraryCall"):
@@ -285,10 +289,10 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
     quints = _walk_unit_for_sinks(function, set(), "body", entry_param_ids, getattr(function, "contract", None))
 
     out: list[SinkRecord] = []
-    index: dict[tuple[str, str, str | None], int] = {}
-    receivers: dict[tuple[str, str, str | None], list[ReceiverDescriptor]] = {}
-    for kind, target, selector, origin, receiver in quints:
-        key = (kind, target, selector)
+    index: dict[tuple[str, str, str | None, str | None], int] = {}
+    receivers: dict[tuple[str, str, str | None, str | None], list[ReceiverDescriptor]] = {}
+    for kind, target, selector, origin, receiver, library_signature in quints:
+        key = (kind, target, selector, library_signature)
         if receiver is not None:
             receivers.setdefault(key, []).append(receiver)
         if key in index:
@@ -304,6 +308,8 @@ def _build_sink_records(function: Any) -> list[SinkRecord]:
             "selector": selector,
             "origin": origin,
         }
+        if library_signature is not None:
+            record["library_signature"] = library_signature
         index[key] = idx
         out.append(record)
     for key, idx in index.items():
