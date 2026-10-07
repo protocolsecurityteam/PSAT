@@ -300,7 +300,7 @@ def search_protocol_inventory(
             {"provider": "llm", "phase": phase, "error": message, "count": count}
             for (phase, message), count in sorted(failures.items())
         ]
-        result["errors"] = (list(result.get("errors") or []) + llm_errors)[:12]
+        result["errors"] = (llm_errors + list(result.get("errors") or []))[:12]
         note = f"{sum(failures.values())} LLM call(s) failed; the contract list is incomplete"
         result["notes"] = [note, *(result.get("notes") or [])][:12]
         result["complete"] = False
