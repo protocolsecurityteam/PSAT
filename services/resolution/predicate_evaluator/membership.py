@@ -15,7 +15,7 @@ from ..capabilities import (
     ExternalCheck,
     union,
 )
-from .binding import _selector_for_signature
+from .binding import _selector_for_canonical_signature
 from .telemetry import _bump_resolve_counter
 
 if TYPE_CHECKING:
@@ -44,7 +44,7 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
     selector = view_source.get("callee_selector")
     if not isinstance(selector, str) or not selector.startswith("0x"):
         signature = view_source.get("callee_signature")
-        selector = _selector_for_signature(signature) if isinstance(signature, str) else None
+        selector = _selector_for_canonical_signature(signature)
     if not selector:
         return None
 

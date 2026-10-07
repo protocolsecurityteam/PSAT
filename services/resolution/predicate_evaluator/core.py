@@ -38,7 +38,7 @@ from .binding import (
     _callee_argument_operands,
     _normalize_operand_for_call_arg,
     _normalize_tree_for_frame,
-    _selector_for_signature,
+    _selector_for_canonical_signature,
     _tree_for_signature_or_selector,
 )
 from .descriptors import (
@@ -501,7 +501,7 @@ def _maybe_inline_cross_contract_call(
     if not callee_signature and not callee_selector:
         return None
     if callee_selector is None and callee_signature is not None:
-        callee_selector = _selector_for_signature(callee_signature)
+        callee_selector = _selector_for_canonical_signature(callee_signature)
 
     # The session lives on the outer (adapters) context.
     outer_ctx = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
@@ -599,6 +599,7 @@ def _maybe_inline_cross_contract_call(
             tree_map,
             callee_signature=callee_signature,
             callee_selector=callee_selector,
+            canonical_signatures=artifact.get("canonical_signatures"),
         )
         if callee_tree is not None:
             break

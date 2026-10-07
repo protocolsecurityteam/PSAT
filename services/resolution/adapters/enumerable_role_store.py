@@ -19,8 +19,6 @@ import os
 from collections import Counter
 from typing import Any, TypeGuard
 
-from eth_utils.crypto import keccak
-
 from services.clients.rpc import encode_address_word, multicall3_aggregate3, rpc_request
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
@@ -519,10 +517,10 @@ def _resolve_callee_selector(descriptor: dict) -> str | None:
     selector = descriptor.get("callee_selector")
     if _is_selector(selector):
         return selector.lower()
+    from services.resolution.predicate_evaluator.binding import _selector_for_canonical_signature
+
     signature = descriptor.get("callee_signature")
-    if isinstance(signature, str) and "(" in signature:
-        return "0x" + keccak(text=signature.replace(" ", "")).hex()[:8]
-    return None
+    return _selector_for_canonical_signature(signature.replace(" ", "")) if isinstance(signature, str) else None
 
 
 def _is_single_address_param_signature(signature: Any) -> bool:

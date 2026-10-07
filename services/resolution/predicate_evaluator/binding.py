@@ -252,15 +252,27 @@ def _tree_for_signature_or_selector(
     *,
     callee_signature: str | None,
     callee_selector: str | None,
+    canonical_signatures: Any = None,
 ) -> PredicateTree | None:
+    """The callee's tree, by Slither spelling, else by selector.
+
+    A tree is keyed by Slither's spelling, so its selector is the hash of the artifact's ``canonical_signatures`` entry
+    (or the key itself when already canonical). The key's own hash is kept for callers whose stored selector predates
+    canonical lowering.
+    """
     if callee_signature and callee_signature in trees:
         tree = trees[callee_signature]
         return cast(PredicateTree, tree) if isinstance(tree, dict) else None
     if callee_selector:
+        canonical = canonical_signatures if isinstance(canonical_signatures, dict) else {}
         for signature, tree in trees.items():
-            if not isinstance(signature, str):
+            if not isinstance(signature, str) or not isinstance(tree, dict):
                 continue
-            if _selector_for_signature(signature) == callee_selector and isinstance(tree, dict):
+            selectors = {
+                _selector_for_signature(signature),
+                _selector_for_canonical_signature(canonical.get(signature) or signature),
+            }
+            if callee_selector in selectors:
                 return cast(PredicateTree, tree)
     return None
 
@@ -269,3 +281,14 @@ def _selector_for_signature(signature: str) -> str | None:
     if "(" not in signature or not signature.endswith(")"):
         return None
     return "0x" + keccak(text=signature).hex()[:8]
+
+
+def _selector_for_canonical_signature(signature: Any) -> str | None:
+    """A selector hashed from signature text only when the text is canonical; an unlowered spelling (``exit(address,
+    ERC20,...)``) hashes to a selector the chain never dispatches.
+    """
+    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
+
+    if not isinstance(signature, str) or not is_canonical_abi_signature(signature):
+        return None
+    return _selector_for_signature(signature)
