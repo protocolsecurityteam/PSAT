@@ -194,6 +194,17 @@ def test_fallback_fires_only_on_primary_miss(db_session):
         pytest.param({"extra_artifacts": {"effects": {"error": "failed"}}}, [HASH], id="failed_effects"),
         pytest.param({"extra_artifacts": {"predicate_trees": {"trees": []}}}, [HASH], id="malformed_predicates"),
         pytest.param({"extra_artifacts": {"effects": {"functions": []}}}, [HASH], id="malformed_effects"),
+        pytest.param(
+            {
+                "extra_artifacts": {
+                    "contract_analysis": {
+                        "analysis_status": {"static_analysis_completed": True, "errors": ["claim matcher failed"]}
+                    }
+                }
+            },
+            [HASH],
+            id="incomplete_claims",
+        ),
     ],
 )
 def test_ineligible_cross_chain_donor_is_not_reused(db_session, donor_kwargs, lookup_hashes):

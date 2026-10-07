@@ -21,7 +21,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.storage import artifact_key, get_storage_client, source_file_key
-from schemas.static_artifacts import validate_static_artifacts
+from schemas.static_artifacts import analysis_is_reusable, validate_static_artifacts
 from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
@@ -213,6 +213,8 @@ def _has_reusable_semantics(session: Session, job: Job) -> bool:
     if proven_analysis_schema_version(session, job) != ANALYSIS_SCHEMA_VERSION:
         return False
     try:
+        if not analysis_is_reusable(get_artifact(session, job.id, "contract_analysis")):
+            return False
         trees = get_artifact(session, job.id, "predicate_trees")
         effects = get_artifact(session, job.id, "effects")
     except Exception as exc:

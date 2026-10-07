@@ -239,6 +239,7 @@ def test_build_claims_isolates_a_failing_matcher(failure_at, monkeypatch):
     assert all(c["claim_id"] != entry.claim_id for claims in artifact["functions"].values() for c in claims)
     assert len(errors) == 1
     assert errors[0].context["claim_id"] == entry.claim_id
+    assert any(entry.claim_id in message for message in artifact.get("errors", []))
 
 
 def test_consumer_referenced_ids_are_subset_of_registry():

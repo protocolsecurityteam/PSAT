@@ -32,6 +32,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     ctx = ClaimContext(contract, effects, predicate_trees)
     signatures = ctx.function_signatures()
     functions: dict[str, list[Claim]] = {signature: [] for signature in signatures}
+    errors: list[str] = []
 
     for entry in registry().values():
         pending: dict[str, Claim] = {}
@@ -74,6 +75,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
                     evidence.witness["authority_scope_ids"] = []
                 pending[signature] = emit_claim(entry.claim_id, evidence.tier, evidence.witness)
         except Exception as exc:
+            errors.append(f"claim matcher {entry.claim_id}: {type(exc).__name__}")
             record_degraded(phase="claim_matcher", exc=exc, context={"claim_id": entry.claim_id})
             logger.warning(
                 "claim matcher %s failed",
@@ -100,6 +102,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
         "schema_version": SCHEMA_VERSION,
         "contract_name": ctx.contract_name,
         "functions": functions,
+        "errors": errors,
         "abi_selectors": abi_selectors,
     }
 

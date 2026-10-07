@@ -188,12 +188,15 @@ def collect_contract_analysis_with_artifacts(
 
     # Mint claims from the facts and project them onto legacy ``effect_labels``; must run before semantic_control, which
     # reads them.
+    analysis_errors: list[str] = []
     with _phase("claims", durations_ms):
         try:
             claims_artifact = build_claims(subject_contract, effects_artifact, predicate_trees_artifact)
+            analysis_errors.extend(claims_artifact.get("errors", []))
             attach_claims_to_effects(effects_artifact, claims_artifact)
             project_effect_labels(effects_artifact)
         except Exception as exc:
+            analysis_errors.append(f"claims: {type(exc).__name__}")
             logger.warning(
                 "claims emit failed for %s",
                 project_dir,
@@ -271,7 +274,7 @@ def collect_contract_analysis_with_artifacts(
         },
         "analysis_status": {
             "static_analysis_completed": True,
-            "errors": [],
+            "errors": analysis_errors,
         },
         "summary": summary,
         "contract_classification": classification,

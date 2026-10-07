@@ -1,6 +1,16 @@
 """The required semantic outputs of a successful static analysis."""
 
-from typing import Any
+from typing import Any, TypeGuard
+
+
+def analysis_is_reusable(analysis: Any) -> TypeGuard[dict[str, Any]]:
+    """Partial results may be reported on their job, but must not become a successful cache donor."""
+    if not isinstance(analysis, dict) or "error" in analysis:
+        return False
+    status = analysis.get("analysis_status", {})
+    return (
+        isinstance(status, dict) and status.get("static_analysis_completed", True) is True and not status.get("errors")
+    )
 
 
 def validate_static_artifacts(predicate_trees: Any, effects: Any) -> None:
