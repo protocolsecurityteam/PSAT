@@ -445,27 +445,21 @@ def resolve_contract_capabilities(
 
 def _selector_for_signature(
     signature: str | None,
-    canonical_signatures: Mapping[str, str] | None = None,
+    canonical_signatures: Mapping[str, str | None] | None = None,
 ) -> str | None:
     if not signature or "(" not in signature or not signature.endswith(")"):
         return None
     from eth_utils.crypto import keccak
 
-    # Tree keys are Slither ``full_name`` signatures with user-defined type names; prefer the static stage's canonical
-    # ABI signature so the selector equals the real ``msg.sig``.
-    canonical = (canonical_signatures or {}).get(signature)
-    if isinstance(canonical, str) and "(" in canonical and canonical.endswith(")"):
-        return "0x" + keccak(text=canonical).hex()[:8]
+    from services.policy.effective_permissions import recorded_abi_signature
 
-    from services.policy.effective_permissions import _abi_signature
-    from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
-
-    # Name-based fallback handles contract params but not enums or structs; when lowering is incomplete, return no
-    # selector, since a wrong one silently matches the wrong function.
-    lowered = _abi_signature(signature)
-    if not is_canonical_abi_signature(lowered):
+    # Tree keys are Slither ``full_name`` signatures with user-defined type names; the static stage's canonical ABI
+    # signature makes the selector the real ``msg.sig``. Undetermined gives no selector, since a wrong one silently
+    # matches the wrong function.
+    canonical = recorded_abi_signature(signature, canonical_signatures)
+    if canonical is None:
         return None
-    return "0x" + keccak(text=lowered).hex()[:8]
+    return "0x" + keccak(text=canonical).hex()[:8]
 
 
 # Differential probe wiring, only used when ``PSAT_DIFFERENTIAL_PROBE`` is on.
@@ -558,7 +552,7 @@ def _maybe_differential_probe(
     chain_id: int,
     contract_address: str,
     fn_signature: str | None,
-    canonical_signatures: Mapping[str, str] | None,
+    canonical_signatures: Mapping[str, str | None] | None,
     rpc_url: str | None,
     block: int,
     call_batch: Any = None,
@@ -578,7 +572,9 @@ def _maybe_differential_probe(
         cached = _PROBE_CACHE.get(cache_key)
         if cached is not None:
             return _apply_probe_result(cap, cached)
-    canonical = (canonical_signatures or {}).get(fn_signature) if fn_signature else None
+    from services.policy.effective_permissions import recorded_abi_signature
+
+    canonical = recorded_abi_signature(fn_signature, canonical_signatures) if fn_signature else None
     canonical = canonical or fn_signature
     if call_batch is None:
         if not rpc_url:

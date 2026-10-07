@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 from sqlalchemy.orm import Session
 
 from db.queue import get_artifact, usable_semantic_artifact
-from services.policy.effective_permissions import _abi_signature
+from services.policy.effective_permissions import _canonical_signature_map, recorded_abi_signature
 from utils.logging import record_degraded
 
 from .flows import _selector_of
@@ -30,7 +30,8 @@ class ContractFacts:
     effects: Mapping[str, Any] = field(default_factory=dict)
     # predicate_trees ``trees``: full_name -> guard tree.
     trees: Mapping[str, Any] = field(default_factory=dict)
-    canonical_signatures: Mapping[str, str] = field(default_factory=dict)
+    # ``predicate_trees.canonical_signatures``: ``None`` marks a function whose types couldn't be lowered.
+    canonical_signatures: Mapping[str, str | None] = field(default_factory=dict)
     # contract_analysis value_flows (the shape with ``is_parameter``).
     legacy_value_flows: Mapping[str, list[dict[str, Any]]] = field(default_factory=dict)
     by_selector: Mapping[str, str] = field(default_factory=dict)
@@ -39,7 +40,8 @@ class ContractFacts:
     token_slots: tuple[Mapping[str, Any], ...] = ()
 
     def canonical_signature(self, full_name: str) -> str:
-        return self.canonical_signatures.get(full_name) or _abi_signature(full_name)
+        """The canonical signature, or the spelling when it isn't determined (which hashes to no selector)."""
+        return recorded_abi_signature(full_name, self.canonical_signatures) or full_name
 
 
 @dataclass(frozen=True)
@@ -96,11 +98,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
     trees_art = usable_semantic_artifact("predicate_trees", get_artifact(session, job_id, "predicate_trees")) or {}
     raw_trees = trees_art.get("trees")
     trees: dict[str, Any] = raw_trees if isinstance(raw_trees, dict) else {}
-    canonical = {
-        str(name): str(sig)
-        for name, sig in (trees_art.get("canonical_signatures") or {}).items()
-        if isinstance(sig, str) and "(" in sig and sig.endswith(")")
-    }
+    canonical = _canonical_signature_map(trees_art)
 
     analysis = get_artifact(session, job_id, "contract_analysis")
     legacy_flows = _legacy_value_flow_map(analysis)
@@ -117,8 +115,8 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         if isinstance(artifact_selector, str) and artifact_selector.startswith("0x"):
             by_selector.setdefault(artifact_selector.lower(), str(full_name))
         # The canonical selector wins; an artifact stored before canonical lowering hashed the Slither spelling.
-        sig = canonical.get(str(full_name)) or _abi_signature(str(full_name))
-        computed = _selector_of(sig)
+        sig = recorded_abi_signature(str(full_name), canonical)
+        computed = _selector_of(sig) if sig is not None else None
         if computed:
             by_selector[computed] = str(full_name)
 

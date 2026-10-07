@@ -77,7 +77,7 @@ def _normalize_abi_type(type_name: str) -> str:
         return "bytes"
     if stripped.endswith("]"):
         if "[" not in stripped:
-            return "address"
+            return stripped
         base, suffix = stripped.split("[", 1)
         return f"{_normalize_abi_type(base)}[{suffix}"
 
@@ -89,13 +89,10 @@ def _normalize_abi_type(type_name: str) -> str:
     if stripped.startswith(ELEMENTARY_TYPE_PREFIXES):
         return stripped
 
-    # ``A.B`` is a type nested in ``A``, provably not a contract (no nested contracts), and its real lowering isn't
-    # recoverable from a name. Leave it so a derived selector fails closed.
-    if "." in stripped:
-        return stripped
-
-    # Usually a contract reference; the canonical map resolves the rest.
-    return "address"
+    # A user-defined name: a contract lowers to ``address``, but an enum, struct, value type or function type doesn't,
+    # and a name can't tell them apart. Left unlowered so a derived selector fails closed; Slither's types lower it
+    # upstream.
+    return stripped
 
 
 def _abi_signature(function_signature: str) -> str:
@@ -127,9 +124,9 @@ def _abi_signature(function_signature: str) -> str:
     return f"{name}({normalized_args})"
 
 
-def _canonical_signature_map(predicate_trees: Mapping[str, Any] | None) -> dict[str, str]:
+def _canonical_signature_map(predicate_trees: Mapping[str, Any] | None) -> dict[str, str | None]:
     """``full_name -> canonical ABI signature`` precomputed from Slither, so selectors match ``msg.sig`` for
-    enum/struct params that string normalization can't lower.
+    enum/struct params that string normalization can't lower; ``None`` for a function whose types couldn't be lowered.
     """
     if not isinstance(predicate_trees, dict):
         return {}
@@ -137,25 +134,40 @@ def _canonical_signature_map(predicate_trees: Mapping[str, Any] | None) -> dict[
     if not isinstance(canonical, dict):
         return {}
     return {
-        str(name): str(sig)
+        str(name): (str(sig) if isinstance(sig, str) and "(" in sig and sig.endswith(")") else None)
         for name, sig in canonical.items()
-        if isinstance(sig, str) and "(" in sig and sig.endswith(")")
+        if sig is None or isinstance(sig, str)
     }
 
 
-def _abi_signature_and_selector(
-    function_signature: str, canonical_signatures: Mapping[str, str]
-) -> tuple[str, str | None]:
-    """``(abi_signature, selector)``, preferring the canonical map.
+def recorded_abi_signature(function_signature: str, canonical_signatures: Mapping[str, Any] | None) -> str | None:
+    """The canonical ABI signature of a predicate-artifact function, or ``None`` when it isn't determined.
 
-    ``None`` selector when the fallback couldn't fully lower: a hash of an unlowered type would be a selector the chain
-    never dispatches. ``""`` for fallback/receive, which provably have none (``db/effect_cache.py``'s sentinel).
+    ``canonical_signatures`` holds the lowered form where it differs from Slither's spelling and ``None`` where the
+    types couldn't be lowered. An absent function's spelling stands only through :func:`_abi_signature`'s sound string
+    lowering, which leaves user-defined names unlowered; an artifact from before ``None`` entries existed therefore
+    reads an unlowerable spelling as undetermined, never as a guess.
     """
-    abi_sig = canonical_signatures.get(function_signature) or _abi_signature(function_signature)
-    if has_no_selector(abi_sig):
-        return abi_sig, ""
-    if not is_canonical_abi_signature(abi_sig):
-        return abi_sig, None
+    canonical = canonical_signatures if isinstance(canonical_signatures, Mapping) else {}
+    if function_signature in canonical:
+        recorded = canonical[function_signature]
+        return recorded if isinstance(recorded, str) and is_canonical_abi_signature(recorded) else None
+    lowered = _abi_signature(function_signature)
+    return lowered if is_canonical_abi_signature(lowered) else None
+
+
+def _abi_signature_and_selector(
+    function_signature: str, canonical_signatures: Mapping[str, str | None]
+) -> tuple[str, str | None]:
+    """``(abi_signature, selector)``; the spelling and a ``None`` selector when the signature isn't determined
+    (:func:`recorded_abi_signature`): a hash of an unlowered type would be a selector the chain never dispatches. ``""``
+    for fallback/receive, which provably have none (``db/effect_cache.py``'s sentinel).
+    """
+    if has_no_selector(function_signature):
+        return function_signature, ""
+    abi_sig = recorded_abi_signature(function_signature, canonical_signatures)
+    if abi_sig is None:
+        return function_signature, None
     return abi_sig, "0x" + keccak(text=abi_sig).hex()[:8]
 
 
