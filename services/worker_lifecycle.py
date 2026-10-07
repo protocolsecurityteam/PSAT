@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 
+import psycopg2
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -64,17 +65,47 @@ def register_boot(session: Session, boot: uuid.UUID, machine_id: str) -> None:
     session.commit()
 
 
+class BootSuperseded(RuntimeError):
+    """The lifecycle row names another boot, so this launcher no longer owns the workers."""
+
+
 def boot_phase(session: Session, boot: uuid.UUID) -> str:
+    """The boot's phase, refreshing its heartbeat unless a claim holds the gate row.
+
+    Claims hold the row for their whole transaction; on a CPU-starved machine a heartbeat queued behind them timed
+    out and took the group down. A skipped beat only delays a drain, which the controller refuses without a fresh one.
+    """
     session.execute(text("SET LOCAL statement_timeout = '5s'"))
     phase = session.execute(
         text("""
             UPDATE worker_lifecycle SET heartbeat_at=clock_timestamp()
-            WHERE id=1 AND boot_id=:boot RETURNING phase
+            WHERE id = (SELECT id FROM worker_lifecycle WHERE id=1 AND boot_id=:boot FOR UPDATE SKIP LOCKED)
+            RETURNING phase
         """),
         {"boot": boot},
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if phase is None:
+        phase = session.execute(
+            text("SELECT phase FROM worker_lifecycle WHERE id=1 AND boot_id=:boot"), {"boot": boot}
+        ).scalar_one_or_none()
     session.commit()
+    if phase is None:
+        raise BootSuperseded("worker boot superseded")
     return phase
+
+
+def db_error_detail(exc: BaseException) -> dict[str, str | None]:
+    """Log fields for a failed lifecycle query: the Postgres code and primary message, never the statement.
+
+    Data and constraint errors (SQLSTATE classes 22, 23) can echo bound values, so they keep the code only.
+    """
+    orig = getattr(exc, "orig", exc)
+    if not isinstance(orig, psycopg2.Error):
+        return {"exc_type": type(exc).__name__}
+    detail: dict[str, str | None] = {"exc_type": type(exc).__name__, "pgcode": orig.pgcode}
+    if not (orig.pgcode or "").startswith(("22", "23")):
+        detail["db_error"] = orig.diag.message_primary or (str(orig).splitlines() or [""])[0]
+    return detail
 
 
 def finish_boot(session: Session, boot: uuid.UUID) -> None:

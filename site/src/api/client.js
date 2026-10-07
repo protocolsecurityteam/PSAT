@@ -1,5 +1,8 @@
-// Shared HTTP helper: admin-key header, 401 prompt, JSON/text parsing by
-// Content-Type.
+// Shared HTTP helper: session cookie (fetch's same-origin default), optional
+// admin-key header where the deployment accepts one, sign-in prompt on 401,
+// JSON/text parsing by Content-Type.
+
+import { loadAuthConfig } from "./authConfig.js";
 
 const ADMIN_KEY_STORAGE = "psat_admin_key";
 
@@ -23,8 +26,24 @@ export function setAdminKey(key) {
   }
 }
 
-function buildHeadersWithKey(options, key) {
-  const headers = new Headers(options.headers || {});
+// A stored key is sent only where the server accepts one. Elsewhere
+// (production) it's forgotten: the header would mark every request as an
+// operator call and shadow the signed-in admin account.
+async function usableAdminKey() {
+  const key = getAdminKey();
+  if (!key) return "";
+  try {
+    if ((await loadAuthConfig()).adminKey) return key;
+    setAdminKey("");
+  } catch {
+    // Unknown whether keys are accepted: send none, keep it for next time.
+  }
+  return "";
+}
+
+export async function adminKeyHeaders(init) {
+  const headers = new Headers(init || {});
+  const key = await usableAdminKey();
   if (key && !headers.has("X-PSAT-Admin-Key")) {
     headers.set("X-PSAT-Admin-Key", key);
   }
@@ -32,18 +51,11 @@ function buildHeadersWithKey(options, key) {
 }
 
 async function request(path, options = {}) {
-  // `silent: true` skips the 401 prompt, for background polls.
+  // `silent: true` skips the sign-in prompt, for background polls.
   const { silent, ...fetchOptions } = options;
-  let response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, getAdminKey()) });
+  const response = await fetch(path, { ...fetchOptions, headers: await adminKeyHeaders(fetchOptions.headers) });
   if (response.status === 401 && !silent) {
-    const entered = window.prompt(
-      "Admin key required for this action.\nPaste your PSAT admin key:",
-      getAdminKey(),
-    );
-    if (entered) {
-      setAdminKey(entered);
-      response = await fetch(path, { ...fetchOptions, headers: buildHeadersWithKey(fetchOptions, entered) });
-    }
+    window.dispatchEvent(new Event("psat:auth-required"));
   }
   if (!response.ok) {
     // Callers must tell 404 (absent) from 503 (couldn't find out); a message

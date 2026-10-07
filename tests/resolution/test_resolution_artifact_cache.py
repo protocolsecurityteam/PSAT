@@ -45,7 +45,7 @@ def _isolated_contract_materializations(monkeypatch):
         test_engine.dispose()
 
 
-def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_calls):
+def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_calls, predicate_trees=None):
 
     def _classify(_addr, _rpc, **_kw):
         return {"type": "contract"}
@@ -65,7 +65,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
             "functions": [],
             "state_vars": [],
         }
-        return analysis, None, None
+        return analysis, predicate_trees, None
 
     def _build_plan(_analysis):
         return {"contract_address": "0xabc", "controllers": []}
@@ -136,3 +136,56 @@ def test_materialize_records_build_then_cache_hit_metrics(monkeypatch):
     assert len(scaffold_calls) == 1
     assert metrics.get("materialize_builds") == 1
     assert metrics.get("materialize_cache_hits") == 1
+
+
+_WRITER_LEAF = {
+    "op": "LEAF",
+    "leaf": {
+        "kind": "membership",
+        "authority_role": "caller_authority",
+        "operator": "truthy",
+        "set_descriptor": {
+            "storage_var": "admins",
+            "enumeration_hint": [
+                {
+                    "direction": "add",
+                    "mapping_name": "admins",
+                    "event_signature": "AdminSet(address,bool)",
+                    "event_name": "AdminSet",
+                    "key_position": 0,
+                    "writer_function": "setAdmin(address,bool)",
+                }
+            ],
+        },
+    },
+}
+
+
+@pytest.mark.parametrize("stored", [True, False])
+def test_cache_hits_read_only_the_tree_maps(monkeypatch, stored):
+    predicate_trees = {
+        "schema_version": "semantic",
+        "trees": {"setAdmin(address,bool)": _WRITER_LEAF},
+        "check_trees": {},
+        "effect_scopes": {"setAdmin(address,bool)": [{"id": "s", "predicate": {"ref": "g"}}]},
+        "effect_guards": {"g": _WRITER_LEAF},
+    }
+    _patch_pipeline(
+        monkeypatch,
+        scaffold_calls=[],
+        collect_calls=[],
+        snapshot_calls=[],
+        predicate_trees=predicate_trees if stored else None,
+    )
+
+    _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
+    hit = _materialize_contract_artifacts("0xABC", "http://rpc", workspace_prefix="test", chain="ethereum")
+
+    projected = hit.get("predicate_trees")
+    if not stored:
+        assert projected is None
+        return
+    assert projected == {"trees": predicate_trees["trees"], "check_trees": {}}
+    specs = recursive._mapping_writer_specs_from_predicate_trees(projected)
+    assert specs == recursive._mapping_writer_specs_from_predicate_trees(predicate_trees)
+    assert [s["event_signature"] for s in specs] == ["AdminSet(address,bool)"]

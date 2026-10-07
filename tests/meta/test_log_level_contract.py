@@ -52,7 +52,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         195: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
-        1173: "Boot-time sweep failure; runs before any job context exists.",
+        1195: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # The reanalysis completed before the notifier; recording would mark it degraded.
@@ -68,7 +68,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     },
     "services/resolution/repos/event_logs_rpc.py": {
         # A process-level misconfiguration would stamp every job's stage_errors.
-        42: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
+        43: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
     },
 }
 

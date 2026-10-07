@@ -58,7 +58,7 @@ def list_address_labels() -> AddressLabelsResponse:
         return {"labels": labels, "chain_labels": chain_labels}
 
 
-@router.put("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.put("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin)], response_model=None)
 def upsert_address_label(
     address: str,
     payload: AddressLabelUpsert,
@@ -88,7 +88,7 @@ def upsert_address_label(
         }
 
 
-@router.delete("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.delete("/api/address_labels/{address}", dependencies=[Depends(deps.require_admin)], response_model=None)
 def delete_address_label(
     address: str,
     chain: str | None = Query(default=None),

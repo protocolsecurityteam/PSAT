@@ -6,7 +6,7 @@ import pytest
 
 from db.models import Contract, Job, JobStage, JobStatus, Protocol
 from db.queue import get_artifact
-from services.discovery.inventory import _build_contracts, _group_multi_deployments
+from services.discovery.inventory import _build_contracts, inventory_entries
 from services.discovery.inventory_domain import _infer_chain, _is_explorer_domain
 from services.discovery.inventory_extract import extract_inventory_entries_from_page_text
 from tests.conftest import requires_postgres
@@ -14,9 +14,13 @@ from workers.base import JobHandledDirectly
 from workers.discovery import DiscoveryWorker
 
 
+def _discovery_urls(inventory):
+    entries, _ = inventory_entries(inventory["contracts"], inventory["sources"])
+    return {(e["chain"], e["address"]): inventory["sources"][e["source_ids"][0]] for e in entries}
+
+
 def test_inventory_rerun_preserves_grouped_deployments_chains_and_source_identity():
     from services.discovery.inventory import merge_inventory
-    from services.discovery.inventory_rows import inventory_rows
 
     a, b = ["0x" + byte * 20 for byte in ("41", "42")]
     previous = {
@@ -43,14 +47,13 @@ def test_inventory_rerun_preserves_grouped_deployments_chains_and_source_identit
         "sources": {"s1": "https://docs.example/new"},
     }
     merged = merge_inventory(previous, current)
-    rows = inventory_rows(merged, default_chain="ethereum")
-    assert {(r["chain"], r["address"]): r["discovery_url"] for r in rows} == {
+    assert _discovery_urls(merged) == {
         ("ethereum", a): "https://docs.example/new",
         ("ethereum", b): "https://docs.example/new",
         ("base", a): "https://docs.example/old",
     }
     assert previous["sources"] == {"s1": "https://docs.example/old"}
-    assert len(inventory_rows(merge_inventory(merged, current), default_chain="ethereum")) == 3
+    assert len(_discovery_urls(merge_inventory(merged, current))) == 3
 
 
 @requires_postgres
@@ -66,7 +69,7 @@ def test_company_worker_persists_all_grouped_deployments_with_provenance(db_sess
         {"name": "Twin", "address": a, "chains": ["base"], "source_ids": ["s2"]},
     ]
     inventory = {
-        "contracts": _group_multi_deployments([{**r, "source": ["ai_inventory"], "confidence": 0.9} for r in raw]),
+        "contracts": [{**r, "source": ["ai_inventory"], "confidence": 0.9} for r in raw],
         "sources": {"s1": "https://docs.example/first", "s2": "https://docs.example/second"},
         "official_domain": "docs.example",
     }
@@ -129,7 +132,7 @@ def test_official_entries_survive_higher_scored_deployer_expansion():
         }
         for i in range(1, 5)
     ]
-    contracts, _ = _build_contracts(entries, limit=2)
+    contracts, _, _ = _build_contracts(entries, limit=2)
     assert len(contracts) == 2
     assert any(c["address"] == "0x" + "11" * 20 for c in contracts)
 

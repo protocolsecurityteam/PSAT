@@ -18,6 +18,9 @@ from services.discovery.inventory_domain import (
     _fetch_page,
     _get_domain,
     _infer_chain,
+    _is_explorer_domain,
+    _is_unresolved_safe_link,
+    _link_addresses,
     _llm_select_domain,
     _llm_select_pages,
     _maybe_domain,
@@ -100,6 +103,31 @@ class TestInferChain:
     def test_optimistic_etherscan_url_resolves_to_optimism(self):
         # etherscan.io must not suffix-shadow its own subdomain entry.
         assert _infer_chain("https://optimistic.etherscan.io/address/0x1234", "") == "optimism"
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://app.safe.global/home?safe=eth:0x" + "ab" * 20, "ethereum"),
+            ("https://app.safe.global/transactions/history?safe=arb1%3A0x" + "ab" * 20, "arbitrum"),
+            ("https://gnosis-safe.io/app/oeth:0x" + "ab" * 20 + "/balances", "optimism"),
+            ("https://app.safe.global/home?safe=nochain:0x" + "ab" * 20, "unknown"),
+            ("https://app.safe.global/welcome", "unknown"),
+        ],
+    )
+    def test_safe_link_chain_comes_from_its_prefix(self, url, expected):
+        assert _infer_chain(url, "") == expected
+        assert _is_explorer_domain(_get_domain(url))
+
+    def test_percent_encoded_safe_link_resolves(self):
+        url = "https://app.safe.global/home?safe=base%3A0x" + "AB" * 20
+        assert _link_addresses(url) == {"0x" + "ab" * 20}
+        assert _infer_chain(url, "") == "base"
+
+    def test_unknown_prefix_is_unresolved_not_absent(self):
+        assert _is_unresolved_safe_link("https://app.safe.global/home?safe=gno:0x" + "ab" * 20)
+        assert not _is_unresolved_safe_link("https://app.safe.global/home?safe=eth:0x" + "ab" * 20)
+        assert not _is_unresolved_safe_link("https://app.safe.global/welcome")
+        assert _link_addresses("https://app.safe.global/welcome") == set()
 
 
 class TestResolveChain:

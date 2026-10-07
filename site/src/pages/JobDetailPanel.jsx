@@ -390,7 +390,7 @@ export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
       <section className="job-panel-section">
         <h3 className="job-panel-section-title">Stage timeline</h3>
         {stageTimingsErrored ? (
-          <p className="job-panel-empty">Stage timings require an admin key.</p>
+          <p className="job-panel-empty">Stage timings require admin access.</p>
         ) : stageTimings === null && timelineRows.length === 0 ? (
           <p className="job-panel-empty">Loading…</p>
         ) : timelineRows.length === 0 ? (

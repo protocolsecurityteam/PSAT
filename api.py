@@ -21,15 +21,18 @@ from routers import (
     agent,
     analyses,
     audits,
+    auth,
     company,
     fleet,
     jobs,
+    me,
     meta,
     monitored,
     predicate_capabilities,
     protocols,
     spa,
 )
+from services.auth.sessions import check_production_admin_config
 from utils.company_limit import CompanyReadLimit
 from utils.compression import NegotiatedGZipMiddleware
 from utils.edge import CloudflareBoundary, EdgeConfig
@@ -161,7 +164,7 @@ class BodySizeLimitMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    EdgeConfig.from_env()
+    check_production_admin_config(EdgeConfig.from_env().emails)
     configure_logging()
     try:
         # Avoids a circular import at module load.
@@ -329,6 +332,8 @@ app.include_router(monitored.router)
 app.include_router(address_labels.router)
 app.include_router(agent.router)
 app.include_router(predicate_capabilities.router)
+app.include_router(auth.router)
+app.include_router(me.router)
 # SPA catch-all MUST be last.
 app.include_router(spa.router)
 

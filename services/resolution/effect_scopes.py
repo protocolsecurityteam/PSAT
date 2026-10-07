@@ -10,15 +10,21 @@ from .capabilities import CapabilityExpr, Condition, union
 from .predicate_evaluator import evaluate_tree_with_registry
 
 
-def resolve_effect_scopes(sites, registry, ctx, base_cap=None, all_scopes=None):
+def site_predicates(scopes):
+    """Site id -> predicate across every function's expanded sites."""
+    return {site["id"]: site["predicate"] for sites in scopes.values() for site in sites}
+
+
+def resolve_effect_scopes(sites, registry, ctx, base_cap=None, effect_predicates=None):
+    """Resolve expanded ``sites``; ``effect_predicates`` (site id -> expanded predicate, built once per pass) lets
+    state-authority leaves evaluate their writer sites.
+    """
     from services.policy.capability_surface import capability_surface_openness, project_capability_surface
 
     from .capability_resolver import capability_to_dict
 
-    if all_scopes is not None:
-        ctx.meta["effect_predicates"] = {
-            site["id"]: site["predicate"] for group in all_scopes.values() for site in group
-        }
+    if effect_predicates is not None:
+        ctx.meta["effect_predicates"] = effect_predicates
     records = []
     body_caps = []
     for site in sites:

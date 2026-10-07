@@ -673,11 +673,15 @@ def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[Pr
             subtree = _build_subtree_from_gate(inner_gate, sub_prov, callee)
             if subtree is None or not _tree_has_caller_tainted_leaf(subtree):
                 continue
-            _tag_tree_leaves_basis(subtree, f"inlined_internal_gate:{callee_id}")
+            _tag_tree_leaves_basis(subtree, f"inlined_internal_gate:{_callee_label(callee)}")
             subtrees.append(subtree)
         return subtrees
     finally:
         _inline_gate_callee_stack.reset(token)
+
+
+def _callee_label(callee: Any) -> str:
+    return str(getattr(callee, "canonical_name", None) or getattr(callee, "full_name", None) or callee)
 
 
 def _tree_has_caller_tainted_leaf(tree: Any) -> bool:

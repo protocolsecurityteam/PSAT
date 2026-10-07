@@ -29,6 +29,10 @@ function textResponse(body, init = {}) {
 }
 
 function defaultDispatch(url) {
+  // Like local dev and previews: sign-in off, shared admin key accepted.
+  if (url.pathname === "/api/auth/config") {
+    return jsonResponse({ enabled: false, providers: [], dev_login: false, admin_key: true });
+  }
   // Catch-all: empty JSON. Most components handle empty payloads
   // gracefully (renders an "empty state" or shows zeros).
   if (url.pathname.startsWith("/api/")) return jsonResponse({});

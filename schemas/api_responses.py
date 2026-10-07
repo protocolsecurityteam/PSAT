@@ -283,6 +283,8 @@ class SubscriptionItem(TypedDict):
     label: str | None
     event_filter: dict[str, Any] | None
     created_at: str | None
+    # None for admin-created rows.
+    owner_email: str | None
 
 
 class TvlPoint(TvlSummary):

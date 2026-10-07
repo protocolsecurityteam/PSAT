@@ -7,9 +7,9 @@ from tests.conftest import requires_postgres
 
 
 def _no_auth(api_module):
-    from routers.deps import require_admin_key
+    from routers.deps import require_admin
 
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
+    api_module.app.dependency_overrides[require_admin] = lambda: None
 
 
 def _seed_completed_job_with_artifact(

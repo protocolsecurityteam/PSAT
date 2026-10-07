@@ -265,6 +265,7 @@
   font-family: var(--mono, ui-monospace, monospace);
 }
 .ps-activity-webhook-actions { display: flex; gap: 12px; }
+.ps-activity-webhook-error { font-size: 11px; color: var(--status-err); }
 
 .ps-activity-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .ps-activity-ev { position: relative; display: grid; grid-template-columns: 20px 1fr; gap: 11px; padding: 9px 0; }

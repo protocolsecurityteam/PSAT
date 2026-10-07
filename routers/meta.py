@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import distinct, func, select, text, tuple_
 
@@ -25,7 +25,7 @@ def index():
 
 
 @router.get("/api/health")
-def health(x_psat_admin_key: str | None = Header(default=None)):
+def health(request: Request, x_psat_admin_key: str | None = Header(default=None)):
     """Liveness probe for DB and storage. ``pool`` stats only for admins."""
     from db.models import engine as _engine
 
@@ -45,7 +45,7 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
     # NullPool lacks these counters.
     from sqlalchemy.pool import QueuePool
 
-    if deps.admin_key_valid(x_psat_admin_key) and isinstance(_engine.pool, QueuePool):
+    if deps.is_admin_request(request, x_psat_admin_key) and isinstance(_engine.pool, QueuePool):
         pool = _engine.pool
         body["pool"] = {
             "size": pool.size(),
@@ -70,7 +70,7 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
     return body
 
 
-@router.get("/api/health/monitoring", dependencies=[Depends(deps.require_admin_key)])
+@router.get("/api/health/monitoring", dependencies=[Depends(deps.require_admin)])
 def monitoring_health() -> Any:
     """Monitoring-fleet liveness for an uptime checker: 503 when any daemon is stale or erroring, with per-chain
     detail. Operator-only.
@@ -98,14 +98,14 @@ def version() -> dict[str, str]:
     return {"sha": os.environ.get("GIT_SHA", "unknown")}
 
 
-@router.get("/api/config", dependencies=[Depends(deps.require_admin_key)])
+@router.get("/api/config", dependencies=[Depends(deps.require_admin)])
 def config() -> dict[str, str]:
     from utils.secrets import sanitize_url
 
     return {"default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL)}
 
 
-@router.get("/api/stats", dependencies=[Depends(deps.require_admin_key)], response_model=None)
+@router.get("/api/stats", dependencies=[Depends(deps.require_admin)], response_model=None)
 def pipeline_stats() -> PipelineStatsResponse:
     with deps.SessionLocal() as session:
         # A CREATE2 twin is two entities.

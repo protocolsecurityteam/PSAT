@@ -6,7 +6,7 @@ from services.discovery.chain_resolver import resolve_unknown_chains, validate_c
 from services.discovery.deployer import expand_from_deployers
 from services.discovery.inventory import (
     _build_contracts,
-    _group_multi_deployments,
+    inventory_entries,
     search_protocol_inventory,
 )
 from services.discovery.inventory_domain import CHAIN_IDS
@@ -55,7 +55,7 @@ class TestBuildContracts:
             _entry(address=addr, name="Vault", chain="ethereum", kind="official_inventory_table", url="https://a.com"),
             _entry(address=addr, name="Vault", chain="ethereum", kind="official_inventory_link", url="https://b.com"),
         ]
-        contracts, sources_map = _build_contracts(entries, limit=10)
+        contracts, sources_map, _ = _build_contracts(entries, limit=10)
 
         assert len(contracts) == 1
         c = contracts[0]
@@ -73,21 +73,75 @@ class TestBuildContracts:
             _entry(address=addr, chain="Ethereum mainnet"),
             _entry(address=addr, chain="Base", url="https://base.example.com"),
         ]
-        contracts, _ = _build_contracts(entries, limit=10)
+        contracts, _, _ = _build_contracts(entries, limit=10)
         assert set(contracts[0]["chains"]) == {"ethereum", "base"}
 
-    def test_limit_does_not_truncate_official_inventory(self):
+    def test_sort_order(self):
         entries = [
             _entry(address=f"0x{i:040x}", name=None, kind="official_inventory_text", explorer_url=None)
             for i in range(5)
         ] + [
             _entry(address="0x" + "f" * 40, name="Best", kind="official_inventory_table"),
         ]
-        contracts, _ = _build_contracts(entries, limit=3)
+        contracts, _, dropped = _build_contracts(entries, limit=10)
 
         assert len(contracts) == 6
         assert contracts[0]["address"] == "0x" + "f" * 40
         assert contracts[0]["confidence"] > contracts[-1]["confidence"]
+        assert dropped == {}
+
+    def test_limit_never_cuts_officially_listed_entries(self):
+        listed = [
+            _entry(address=f"0x{i:040x}", name=f"Listed{i}", kind="official_inventory_text", explorer_url=None)
+            for i in range(1, 4)
+        ]
+        inferred = [
+            _entry(
+                address=f"0x{0xD00 + i:040x}",
+                name=f"Inferred{i}",
+                kind="deployer_expansion",
+                url="https://etherscan.io/address/0xdeployer",
+                explorer_url=f"https://etherscan.io/address/0x{0xD00 + i:040x}",
+            )
+            for i in range(4)
+        ]
+        contracts, _, dropped = _build_contracts(listed + inferred, limit=4)
+
+        addresses = {c["address"] for c in contracts}
+        assert {e["address"] for e in listed} <= addresses
+        assert len(contracts) == 4
+        assert sum(c["source"] == ["deployer_expansion"] for c in contracts) == 1
+        assert dropped == {"deployer_expansion_over_limit": 3}
+
+    def test_listed_entries_past_the_limit_are_all_kept(self):
+        listed = [_entry(address=f"0x{i:040x}", name=f"Listed{i}") for i in range(1, 6)]
+        inferred = _entry(
+            address="0x" + "d" * 40,
+            name="Inferred",
+            kind="deployer_expansion",
+            url="https://etherscan.io/address/0xdeployer",
+            explorer_url="https://etherscan.io/address/0x" + "d" * 40,
+        )
+        contracts, _, dropped = _build_contracts([*listed, inferred], limit=2)
+
+        assert {c["address"] for c in contracts} == {e["address"] for e in listed}
+        assert dropped == {"deployer_expansion_over_limit": 1}
+
+    def test_drops_are_counted_by_reason(self):
+        entries = [
+            _entry(address="0x" + "1" * 40, url="", explorer_url=None),
+            _entry(
+                address="0x" + "2" * 40,
+                name=None,
+                kind="deployer_expansion",
+                url="https://etherscan.io/address/0xdeployer",
+            ),
+            _entry(address="0x" + "3" * 40),
+        ]
+        contracts, _, dropped = _build_contracts(entries, limit=10)
+
+        assert [c["address"] for c in contracts] == ["0x" + "3" * 40]
+        assert dropped == {"no_source_url": 1, "unnamed_deployer_only": 1}
 
     def test_name_voting_and_aliases(self):
         addr = "0x" + "c" * 40
@@ -96,7 +150,7 @@ class TestBuildContracts:
             _entry(address=addr, name="Alpha", url="https://b.com"),
             _entry(address=addr, name="Beta", url="https://c.com"),
         ]
-        contracts, _ = _build_contracts(entries, limit=10)
+        contracts, _, _ = _build_contracts(entries, limit=10)
         assert contracts[0]["name"] == "Alpha"
         assert "Beta" in contracts[0].get("aliases", [])
 
@@ -131,6 +185,74 @@ class TestExtractFromPageText:
 
         arb_entry = by_addr["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
         assert arb_entry["chain"] == "arbitrum"
+
+    def test_safe_link_with_unknown_prefix_takes_no_heading_chain_and_is_not_evidence(self):
+        safe = "0x" + "33" * 20
+        html = f"<h2>Ethereum</h2><p>Treasury https://app.safe.global/home?safe=gno:{safe}</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["address"], e["chain"], e["explorer_url"], e["kind"]) for e in entries] == [
+            (safe, "unknown", None, "official_inventory_text")
+        ]
+
+    @pytest.mark.parametrize("requested", [None, "ethereum"])
+    def test_unknown_prefix_never_borrows_a_requested_chain(self, requested):
+        safe = "0x" + "33" * 20
+        html = f"<h2>Ethereum</h2><p>Treasury https://app.safe.global/home?safe=gno:{safe}</p>"
+        table = (
+            "<h2>Ethereum</h2><p>Contract</p><p>Address</p>"
+            f"<p>Treasury</p><p>https://app.safe.global/home?safe=gno:{safe}</p>"
+        )
+
+        for page in (html, table):
+            entries = extract_inventory_entries_from_page_text("https://docs.example.com", page, requested)
+            expected = [] if requested else [("unknown", False)]
+            assert [(e["chain"], e["chain_from_hint"]) for e in entries] == expected
+
+    def test_safe_link_naming_no_safe_is_not_a_locator(self):
+        addr = "0x" + "44" * 20
+        html = f"<h2>Ethereum</h2><p>Vault {addr} https://app.safe.global/welcome</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["address"], e["explorer_url"], e["kind"]) for e in entries] == [
+            (addr, None, "official_inventory_text")
+        ]
+
+    def test_explorer_host_without_an_address_still_sets_the_chain(self):
+        addr = "0x" + "44" * 20
+        html = f"<h2>Ethereum</h2><p>Vault {addr} (view on https://basescan.org)</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["chain"], e["explorer_url"], e["kind"]) for e in entries] == [
+            ("base", None, "official_inventory_text")
+        ]
+
+    def test_safe_link_names_only_its_own_safe(self):
+        safe, app = "0x" + "33" * 20, "0x" + "44" * 20
+        link = f"https://app.safe.global/apps/open?safe=arb1:{safe}&appUrl=https%3A%2F%2Fx.io%2F%3Fa%3D{app}"
+        html = f"<h2>Ethereum</h2><p>Ops multisig {link}</p>"
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        assert [(e["address"], e["chain"], e["explorer_url"]) for e in entries] == [(safe, "arbitrum", link)]
+
+    def test_safe_link_in_a_table_cell(self):
+        safe, unknown = "0x" + "33" * 20, "0x" + "55" * 20
+        html = (
+            "<h2>Ethereum</h2><p>Contract</p><p>Address</p>"
+            f"<p>Treasury</p><p>https://app.safe.global/home?safe=eth:{safe}</p>"
+            f"<p>Other</p><p>https://app.safe.global/home?safe=gno:{unknown}</p>"
+        )
+
+        entries = extract_inventory_entries_from_page_text("https://docs.example.com", html, requested_chain=None)
+
+        by_addr = {e["address"]: e for e in entries}
+        assert all(e["kind"] == "official_inventory_table" for e in entries)
+        assert by_addr[safe]["chain"] == "ethereum" and by_addr[safe]["explorer_url"]
+        assert by_addr[unknown]["chain"] == "unknown" and by_addr[unknown]["explorer_url"] is None
 
     def test_requested_chain_filters_entries(self):
         html = """
@@ -261,8 +383,8 @@ class TestBuildContractsDeployerMerge:
                 explorer_url=f"https://etherscan.io/address/{addr}",
             ),
         ]
-        tavily_contracts, _ = _build_contracts(tavily_only, limit=10)
-        combined_contracts, _ = _build_contracts(combined, limit=10)
+        tavily_contracts, _, _ = _build_contracts(tavily_only, limit=10)
+        combined_contracts, _, _ = _build_contracts(combined, limit=10)
 
         assert combined_contracts[0]["confidence"] > tavily_contracts[0]["confidence"]
 
@@ -353,86 +475,143 @@ class TestExpandFromDeployers:
         assert entries == []
 
 
-class TestGroupMultiDeployments:
-    def test_same_name_different_addresses_grouped(self):
-        contracts = [
-            {
-                "name": "Vault",
-                "address": "0x" + "a" * 40,
-                "chains": ["ethereum"],
-                "confidence": 0.9,
-                "source": ["ai_inventory"],
-                "evidence": {},
-                "source_ids": ["s1"],
-            },
-            {
-                "name": "Vault",
-                "address": "0x" + "b" * 40,
-                "chains": ["arbitrum"],
-                "confidence": 0.8,
-                "source": ["ai_inventory"],
-                "evidence": {},
-                "source_ids": ["s2"],
-            },
-        ]
-        result = _group_multi_deployments(contracts)
-        assert len(result) == 1
-        assert result[0]["name"] == "Vault"
-        assert "deployments" in result[0]
-        assert len(result[0]["deployments"]) == 2
-        assert set(result[0]["chains"]) == {"ethereum", "arbitrum"}
-        assert "address" not in result[0]
+def _inventory_row(name: str | None, address: str, chain: str = "ethereum", **extra: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "address": address,
+        "chains": [chain],
+        "confidence": 1.0,
+        "source": ["ai_inventory"],
+        "source_ids": ["s1"],
+        **extra,
+    }
 
-    def test_same_address_not_grouped(self):
-        contracts = [
-            {
-                "name": "Vault",
-                "address": "0x" + "a" * 40,
-                "chains": ["ethereum"],
-                "confidence": 0.9,
-                "source": ["ai_inventory"],
-                "evidence": {},
-                "source_ids": ["s1"],
-            },
-            {
-                "name": "Vault",
-                "address": "0x" + "a" * 40,
-                "chains": ["ethereum"],
-                "confidence": 0.7,
-                "source": ["ai_inventory"],
-                "evidence": {},
-                "source_ids": ["s2"],
-            },
-        ]
-        result = _group_multi_deployments(contracts)
-        assert len(result) == 1
-        assert "deployments" not in result[0]
-        assert result[0]["address"] == "0x" + "a" * 40
 
-    def test_unnamed_contracts_not_grouped(self):
-        contracts = [
-            {
-                "name": None,
-                "address": "0x" + "a" * 40,
-                "chains": ["ethereum"],
-                "confidence": 0.5,
-                "source": ["deployer_expansion"],
-                "evidence": {},
-                "source_ids": ["s1"],
-            },
-            {
-                "name": None,
-                "address": "0x" + "b" * 40,
-                "chains": ["ethereum"],
-                "confidence": 0.5,
-                "source": ["deployer_expansion"],
-                "evidence": {},
-                "source_ids": ["s2"],
-            },
+class TestInventoryEntries:
+    def test_same_name_contracts_each_stay_an_entry(self):
+        rows = [
+            _inventory_row("HashConsensus", "0x" + "11" * 20),
+            _inventory_row("HashConsensus", "0x" + "22" * 20),
+            _inventory_row("HashConsensus", "0x" + "33" * 20, chain="arbitrum"),
+            _inventory_row("UniqueContract", "0x" + "44" * 20),
         ]
-        result = _group_multi_deployments(contracts)
-        assert len(result) == 2
-        assert all("deployments" not in c for c in result)
+        entries, missing = inventory_entries(rows)
+
+        assert [(e["address"], e["chains"]) for e in entries] == [(r["address"], r["chains"]) for r in rows]
+        assert missing == 0
+
+    def test_legacy_grouped_deployments_expand_with_their_own_chain(self):
+        legacy = {
+            "name": "Vault",
+            "chains": ["ethereum", "arbitrum"],
+            "confidence": 0.9,
+            "source": ["ai_inventory"],
+            "source_ids": ["s1", "s2"],
+            "deployments": [
+                {"address": "0x" + "AA" * 20, "chains": ["ethereum"]},
+                {"address": "0x" + "bb" * 20, "chains": ["arbitrum"], "source_ids": ["s2"]},
+                {"address": "0x" + "cc" * 20, "chains": ["ethereum"]},
+            ],
+        }
+        entries, missing = inventory_entries([legacy, _inventory_row("Other", "0x" + "dd" * 20)])
+
+        assert [(e["address"], e["chains"], e["name"]) for e in entries] == [
+            ("0x" + "aa" * 20, ["ethereum"], "Vault"),
+            ("0x" + "bb" * 20, ["arbitrum"], "Vault"),
+            ("0x" + "cc" * 20, ["ethereum"], "Vault"),
+            ("0x" + "dd" * 20, ["ethereum"], "Other"),
+        ]
+        assert all("deployments" not in e for e in entries)
+        assert entries[0]["source_ids"] == ["s1", "s2"]
+        assert entries[1]["source_ids"] == ["s2"]
+        assert missing == 0
+
+    def test_duplicates_dedupe_by_address_and_chain(self):
+        addr = "0x" + "ab" * 20
+        rows = [
+            _inventory_row("Vault", addr, source_ids=["s1"]),
+            {**_inventory_row("Vault", addr.upper().replace("0X", "0x"), source_ids=["s2"]), "source": ["exa"]},
+            _inventory_row("Vault", addr, chain="base"),
+        ]
+        entries, _ = inventory_entries(rows)
+
+        assert [(e["address"], e["chains"][0]) for e in entries] == [(addr, "ethereum"), (addr, "base")]
+        assert entries[0]["source"] == ["ai_inventory", "exa"]
+        assert entries[0]["source_ids"] == ["s1", "s2"]
+
+    def test_an_address_listed_on_several_chains_yields_an_entry_per_chain(self):
+        addr = "0x" + "ab" * 20
+        entries, _ = inventory_entries([{**_inventory_row("Vault", addr), "chains": ["ethereum", "base"]}])
+
+        assert [(e["chain"], e["chains"]) for e in entries] == [
+            ("ethereum", ["ethereum", "base"]),
+            ("base", ["ethereum", "base"]),
+        ]
+
+    def test_an_entry_already_split_by_chain_stays_on_it(self):
+        addr = "0x" + "ab" * 20
+        split = {**_inventory_row("Vault", addr), "chains": ["ethereum", "base"], "chain": "base"}
+        entries, _ = inventory_entries([split])
+
+        assert [e["chain"] for e in entries] == ["base"]
+
+    def test_chainless_entry_has_no_chain(self):
+        entries, _ = inventory_entries([{"name": "X", "address": "0x" + "ab" * 20, "chains": []}])
+
+        assert entries[0]["chain"] is None
+
+    def test_legacy_deployment_keeps_only_sources_that_name_it(self):
+        own, other = "0x" + "aa" * 20, "0x" + "bb" * 20
+        legacy = {
+            "name": "Vault",
+            "chains": ["ethereum"],
+            "source_ids": ["s1", "s2", "s3", "s4"],
+            "deployments": [{"address": own, "chains": ["ethereum"]}],
+        }
+        sources = {
+            "s1": "https://docs.example.com/contracts",
+            "s2": f"https://etherscan.io/address/{other}",
+            "s3": f"https://etherscan.io/address/{own}",
+            "s4": f"https://app.safe.global/home?safe=eth:{other}",
+        }
+
+        entries, _ = inventory_entries([legacy], sources)
+
+        assert entries[0]["source_ids"] == ["s1", "s3"]
+
+    def test_entries_without_an_address_are_counted(self):
+        rows = [
+            _inventory_row("NoAddress", ""),
+            {"name": "Group", "chains": ["ethereum"], "deployments": [{"chains": ["ethereum"]}, "junk"]},
+            {"name": "EmptyGroup", "chains": ["ethereum"], "deployments": []},
+        ]
+        entries, missing = inventory_entries(rows)
+
+        assert entries == []
+        assert missing == 4
+
+    def test_pipeline_keeps_same_name_deployments(self, monkeypatch):
+        page = (
+            "<h2>Ethereum</h2>"
+            "<p>HashConsensus https://etherscan.io/address/0x" + "11" * 20 + "</p>"
+            "<p>HashConsensus https://etherscan.io/address/0x" + "22" * 20 + "</p>"
+            "<p>Emergency multisig https://app.safe.global/home?safe=arb1:0x" + "33" * 20 + "</p>"
+        )
+        monkeypatch.setattr(
+            "services.discovery.inventory._discover_contract_inventory_pages",
+            lambda *a, **k: ([{"url": "https://docs.example.com/c"}], ["https://docs.example.com/c"]),
+        )
+        monkeypatch.setattr("services.discovery.inventory_extract._fetch_page", lambda url, debug=False: page)
+
+        result = search_protocol_inventory("docs.example.com", limit=10, run_deployer=False)
+
+        by_addr = {c["address"]: c for c in result["contracts"]}
+        assert set(by_addr) == {"0x" + "11" * 20, "0x" + "22" * 20, "0x" + "33" * 20}
+        assert all(c["name"] == "HashConsensus" for a, c in by_addr.items() if a != "0x" + "33" * 20)
+        safe = by_addr["0x" + "33" * 20]
+        assert safe["chains"] == ["arbitrum"]
+        assert any("app.safe.global" in result["sources"][sid] for sid in safe["source_ids"])
+        assert result["dropped"] == {}
 
 
 @pytest.mark.usefixtures("_all_inventory_chains_enabled")

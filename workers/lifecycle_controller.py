@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 from db.models import SessionLocal
 from db.queue import record_heartbeat
-from services.worker_lifecycle import lifecycle_mode
+from services.worker_lifecycle import db_error_detail, lifecycle_mode
 from services.worker_workload import snapshot
 from utils.logging import configure_logging
 
@@ -159,8 +159,9 @@ def run(stop: threading.Event) -> None:
                 fly.start(machine["id"])
         except Exception as exc:
             # Never log HTTP bodies, config or credentials. Any uncertainty inhibits shutdown.
-            logger.error("worker lifecycle pass failed", extra={"exc_type": type(exc).__name__})
-            record_heartbeat("worker_lifecycle", status="error", detail={"exc_type": type(exc).__name__})
+            detail = db_error_detail(exc)
+            logger.error("worker lifecycle pass failed", extra=detail)
+            record_heartbeat("worker_lifecycle", status="error", detail=detail)
         stop.wait(max(0, interval - (time.monotonic() - started)))
 
 

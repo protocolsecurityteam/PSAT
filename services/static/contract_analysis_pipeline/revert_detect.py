@@ -8,6 +8,7 @@ unresolvable assembly reverts, which become one ``opaque`` gate the builder turn
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -112,6 +113,9 @@ def _ir_is_revert(ir: Any) -> bool:
     return name.startswith("revert")
 
 
+expression_text_cache: ContextVar[dict[int, str] | None] = ContextVar("revert_expression_text_cache", default=None)
+
+
 class RevertDetector:
     """Walk a function's IR and return every gated revert path: ``RevertDetector(function).run()``."""
 
@@ -138,8 +142,10 @@ class RevertDetector:
         self._callee_revert_cache: dict[tuple[int, int], bool] = {}
         # Self-recursive helpers report escape on the back-edge.
         self._callee_revert_inprogress: set[int] = set()
-        # ``str(node.expression)`` is the dominant cost; memoized for this detector's lifetime.
-        self._expression_text_cache: dict[int, str] = {}
+        # ``str(node.expression)`` is the dominant cost; memoized for this detector's lifetime, or shared across
+        # detectors while a structural scope is active (the authorization pass builds hundreds per contract).
+        shared = expression_text_cache.get()
+        self._expression_text_cache: dict[int, str] = shared if shared is not None else {}
 
     def _expression_text(self, node: Any) -> str:
         expr = getattr(node, "expression", None)

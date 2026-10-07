@@ -11,7 +11,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests as _requests
 
@@ -42,7 +42,25 @@ EXPLORER_CHAINS = {
     "base.blockscout.com": "base",
 }
 
-_SAFE_CHAIN_PREFIXES = {"eth": "ethereum", "arb1": "arbitrum", "oeth": "optimism", "bnb": "bsc", "matic": "polygon"}
+# Safe{Wallet} links qualify an address with its EIP-3770 chain short name (``app.safe.global/home?safe=eth:0x…``,
+# legacy ``gnosis-safe.io/app/eth:0x…``), so their chain comes from that prefix, not the host.
+SAFE_APP_DOMAINS = ("app.safe.global", "gnosis-safe.io")
+SAFE_CHAIN_PREFIXES = {
+    "eth": "ethereum",
+    "arb1": "arbitrum",
+    "oeth": "optimism",
+    "matic": "polygon",
+    "pol": "polygon",
+    "base": "base",
+    "avax": "avalanche",
+    "bnb": "bsc",
+    "linea": "linea",
+    "scr": "scroll",
+    "zksync": "zksync",
+    "blast": "blast",
+    "mode": "mode",
+}
+_SAFE_QUALIFIED_RE = re.compile(r"^([a-z][a-z0-9-]*):(0x[a-f0-9]{40})$", re.IGNORECASE)
 
 LOW_TRUST_DOMAINS = {
     "coingecko.com",
@@ -118,7 +136,48 @@ def _domain_matches(domain: str, known: str) -> bool:
 
 
 def _is_explorer_domain(domain: str) -> bool:
-    return domain == "app.safe.global" or any(_domain_matches(domain, k) for k in EXPLORER_CHAINS)
+    return any(_domain_matches(domain, k) for k in (*EXPLORER_CHAINS, *SAFE_APP_DOMAINS))
+
+
+def _is_safe_link(url: str) -> bool:
+    return any(_domain_matches(_get_domain(url), known) for known in SAFE_APP_DOMAINS)
+
+
+def _safe_link_target(url: str) -> tuple[str, str] | None:
+    """``(prefix, address)`` from a Safe{Wallet} link's ``safe=`` parameter or path segment; ``None`` when absent.
+
+    Other query parameters (an embedded app's URL) can carry unrelated addresses and are never read.
+    """
+    if not _is_safe_link(url):
+        return None
+    parsed = urlparse(url)
+    candidates = parse_qs(parsed.query).get("safe", []) + unquote(parsed.path).split("/")
+    for candidate in candidates:
+        if match := _SAFE_QUALIFIED_RE.match(candidate.strip()):
+            return match.group(1).lower(), _normalize_address(match.group(2))
+    return None
+
+
+def _safe_link_chain(url: str) -> str | None:
+    """The chain a Safe{Wallet} link qualifies its address with; ``None`` for any other link or an unknown prefix."""
+    target = _safe_link_target(url)
+    return SAFE_CHAIN_PREFIXES.get(target[0]) if target else None
+
+
+def _is_unresolved_safe_link(url: str) -> bool:
+    """A Safe{Wallet} link that names its chain with a prefix not in :data:`SAFE_CHAIN_PREFIXES`: the chain is stated
+    but not determined, so no other signal may stand in for it.
+    """
+    target = _safe_link_target(url)
+    return target is not None and target[0] not in SAFE_CHAIN_PREFIXES
+
+
+def _link_addresses(url: str) -> set[str]:
+    """Addresses a locator link points at: a Safe link's qualified address only, else every address in the URL."""
+    if _is_safe_link(url):
+        target = _safe_link_target(url)
+        return {target[1]} if target else set()
+    return _extract_addresses(url)
 
 
 def _is_low_trust_domain(domain: str) -> bool:
@@ -139,15 +198,9 @@ def _extract_addresses(*values: str) -> set[str]:
 
 
 def _infer_chain(url: str, text: str) -> str:
+    if safe_chain := _safe_link_chain(url):
+        return safe_chain
     domain = _get_domain(url)
-    if domain == "app.safe.global":
-        safe = parse_qs(urlparse(url).query).get("safe", [""])[0]
-        if ":" in safe:
-            prefix = safe.split(":", 1)[0].lower()
-            try:
-                return chain_by_name(_SAFE_CHAIN_PREFIXES.get(prefix, prefix)).name
-            except ValueError:
-                return "unknown"
     # Longest first so subdomains beat their parent (optimistic.etherscan.io vs etherscan.io).
     for known, chain in sorted(EXPLORER_CHAINS.items(), key=lambda kv: -len(kv[0])):
         if _domain_matches(domain, known):

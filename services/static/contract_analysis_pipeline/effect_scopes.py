@@ -6,15 +6,22 @@ remain ANDs. Unresolved control flow is explicit and is never an empty/public pr
 
 from __future__ import annotations
 
+import contextvars
 from copy import deepcopy
 from dataclasses import replace
 
+from .effect_scope_codec import EFFECT_SCOPES_VERSION
 from .effects.sinks import _classify_node_irs, _is_modifier_call, _node_kind_state_writes
 from .predicate_types import PredicateTree, make_and_node, make_or_node
 from .predicates._helpers import _unsupported_leaf
 from .predicates.control_flow import _callee_always_reverts, _forward_reachable_node_ids
 from .predicates.operands import _operand_for_value
-from .predicates.tree import _build_chain_bindings, _build_subtree_from_gate, _stamp_gate_scope
+from .predicates.tree import (
+    _build_chain_bindings,
+    _build_subtree_from_gate,
+    _helper_engine_cache,
+    _stamp_gate_scope,
+)
 from .provenance import ProvenanceEngine
 from .reentrancy_pause import apply_reentrancy_pause_pass
 from .revert_detect import RevertDetector, RevertGate
@@ -28,8 +35,47 @@ def unknown(reason) -> PredicateTree:
     return {"op": "LEAF", "leaf": _unsupported_leaf(reason, reason)}
 
 
+# ``id(start) -> (start, reachable ids)`` for one attach pass; each guard/site pair otherwise re-walks the CFG. The
+# node is held so its id can't be reused mid-pass.
+_reachable_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "psat_effect_scope_reachable_cache", default=None
+)
+
+
 def _reachable(start, end):
-    return id(end) in _forward_reachable_node_ids(start)
+    cache = _reachable_cache.get()
+    if cache is None:
+        return id(end) in _forward_reachable_node_ids(start)
+    hit = cache.get(id(start))
+    if hit is None:
+        hit = cache[id(start)] = (start, _forward_reachable_node_ids(start))
+    return id(end) in hit[1]
+
+
+# ``key -> lowered, stamped tree`` for one attach pass, so every site a guard governs references one tree. Later passes
+# rewrite leaves in place, which is sound because each rewrite depends only on the leaf, never on the site.
+_lowered_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "psat_effect_scope_lowered_cache", default=None
+)
+
+
+def _lower(gate, provenance, entry, key):
+    cache = _lowered_cache.get()
+    if cache is not None and key in cache:
+        return cache[key][1]
+    tree = _build_subtree_from_gate(gate, provenance, entry)
+    if tree is not None:
+        _stamp_gate_scope(tree, gate, entry)
+        # Detached from anything the entry-point analysis holds; those trees are published separately.
+        tree = deepcopy(tree)
+    if cache is not None:
+        # Held so the ids in the key (one engine per entry) can't be reused mid-pass.
+        cache[key] = ((gate, provenance, entry), tree)
+    return tree
+
+
+def _chain_key(chain):
+    return tuple(id(call) for call in chain)
 
 
 def _postdominates(start, guard):
@@ -75,15 +121,12 @@ def _guard_trees(unit, site, chain, entry, provenance, gates):
             out.append(unresolved)
             continue
         bound = replace(gate, call_chain=[*chain, *gate.call_chain])
-        tree = _build_subtree_from_gate(bound, provenance, entry)
-        if tree is None:
-            tree = unknown("effect_guard_not_lowered")
-        else:
-            _stamp_gate_scope(tree, bound, entry)
-        out.append(tree)
+        tree = _lower(bound, provenance, entry, ("gate", id(gate), _chain_key(chain), id(provenance)))
+        out.append(tree or unknown("effect_guard_not_lowered"))
         if owner is unit:
             covered_nodes.add(gate.node)
-    for node in site.dominators:
+    # ``dominators`` is an identity-hashed set; iterate in node order so the AND's children don't follow memory layout.
+    for node in sorted(site.dominators, key=lambda n: n.node_id):
         if node is site or node in covered_nodes or getattr(node.type, "name", "") != "IF":
             continue
         true, false = getattr(node, "son_true", None), getattr(node, "son_false", None)
@@ -102,9 +145,11 @@ def _guard_trees(unit, site, chain, entry, provenance, gates):
             expression_text=str(condition),
             basis=["effect_control_dependency"],
         )
-        tree = _build_subtree_from_gate(gate, provenance, entry) if condition is not None else None
-        if tree is not None:
-            _stamp_gate_scope(tree, gate, entry)
+        tree = (
+            _lower(gate, provenance, entry, ("dominator", id(node), gate.polarity, _chain_key(chain), id(provenance)))
+            if condition is not None
+            else None
+        )
         out.append(tree or unknown("effect_branch_not_lowered"))
     conditional = _conditional_prefix(unit, site, chain, entry, provenance, gates)
     if conditional is not None:
@@ -140,6 +185,20 @@ def _consume_summary_guards(tree, summaries):
 
 
 def attach_effect_scopes(contract, predicates, effects):
+    # Every guard at every site re-lowers the same helper gates; without the helper-engine cache each one re-runs
+    # provenance from scratch.
+    engine_token = _helper_engine_cache.set({})
+    reachable_token = _reachable_cache.set({})
+    lowered_token = _lowered_cache.set({})
+    try:
+        _attach_effect_scopes(contract, predicates, effects)
+    finally:
+        _lowered_cache.reset(lowered_token)
+        _reachable_cache.reset(reachable_token)
+        _helper_engine_cache.reset(engine_token)
+
+
+def _attach_effect_scopes(contract, predicates, effects):
     if not isinstance(effects, dict) or not isinstance(predicates, dict):
         return
     functions = effects.get("functions")
@@ -194,10 +253,10 @@ def attach_effect_scopes(contract, predicates, effects):
                         site_id = "/".join(
                             [entry.full_name, *paths, unit.canonical_name, str(node.node_id), kind, target]
                         )
-                        tree = make_and_node(deepcopy(required)) if required else None
+                        tree = make_and_node(list(required)) if required else None
                         if summaries:
                             tree = _consume_summary_guards(tree, summaries) if tree else None
-                            tree = make_and_node([*deepcopy(summaries), *([tree] if tree else [])])
+                            tree = make_and_node([*summaries, *([tree] if tree else [])])
                         matching = [
                             s["id"]
                             for s in record_sinks
@@ -297,7 +356,7 @@ def attach_effect_scopes(contract, predicates, effects):
                 site["predicate"] = tree
             functions[signature]["effect_scopes"] = sites
         predicates["effect_scopes"] = {sig: sites for sig, sites in sites_by_function.items() if sites}
-        effects["effect_scopes_version"] = 1
+        effects["effect_scopes_version"] = EFFECT_SCOPES_VERSION
 
 
 def _conditional_prefix(unit, site, chain, entry, provenance, gates):
@@ -360,9 +419,7 @@ def _conditional_prefix(unit, site, chain, entry, provenance, gates):
                 current.append(unknown("helper_control_requires_summary"))
                 continue
             bound = replace(gate, call_chain=[*chain, *gate.call_chain])
-            tree = _build_subtree_from_gate(bound, provenance, entry)
-            if tree is not None:
-                _stamp_gate_scope(tree, bound, entry)
+            tree = _lower(bound, provenance, entry, ("gate", id(gate), _chain_key(chain), id(provenance)))
             current.append(tree or unknown("effect_guard_not_lowered"))
         if any(predicate_truth(t) is False for t in current):
             continue
@@ -386,9 +443,9 @@ def _conditional_prefix(unit, site, chain, entry, provenance, gates):
                     expression_text=str(value),
                     basis=["effect_path_condition"],
                 )
-                tree = _build_subtree_from_gate(gate, provenance, entry)
-                if tree is not None:
-                    _stamp_gate_scope(tree, gate, entry)
+                tree = _lower(
+                    gate, provenance, entry, ("path", id(node), gate.polarity, _chain_key(chain), id(provenance))
+                )
                 if tree is not None and predicate_truth(tree) is False:
                     continue
                 if key is None and (tree is None or predicate_truth(tree) is not True):

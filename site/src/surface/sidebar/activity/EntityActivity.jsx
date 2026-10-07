@@ -179,7 +179,7 @@ export function EntityActivity({
           subscriptions={subscriptions}
           isAdmin={isAdmin}
           saving={saving}
-          onAttachWebhook={(url, label, groupKeys) => onAttachWebhook(contract, url, label, groupKeys)}
+          onAttachWebhook={(target, groupKeys) => onAttachWebhook(contract, target, groupKeys)}
         />
       ) : null}
 

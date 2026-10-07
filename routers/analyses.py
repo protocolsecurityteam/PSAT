@@ -206,7 +206,7 @@ def analysis_artifact(
         lookup_name = artifact_name[:-4]
 
     if lookup_name.lower() not in _CONSUMER_SAFE_ARTIFACTS:
-        deps.require_admin_key(request, x_psat_admin_key)
+        deps.require_admin(request, x_psat_admin_key)
 
     with deps.SessionLocal() as session:
         stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)

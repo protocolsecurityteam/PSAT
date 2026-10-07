@@ -11,6 +11,8 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 
+import { resetAuthConfigForTests } from "../api/authConfig.js";
+import { resetSessionForTests } from "../api/session.js";
 import { resetFetchMock } from "./fetchMock.js";
 
 // React Flow + ELK measure DOM nodes via ResizeObserver. jsdom doesn't
@@ -64,6 +66,8 @@ if (typeof window !== "undefined") {
 
 beforeEach(() => {
   resetFetchMock();
+  resetSessionForTests();
+  resetAuthConfigForTests();
   // Reset URL to a clean state so each test starts at "/".
   window.history.replaceState({}, "", "/");
   // Clear the admin key so each test starts as a non-admin (keyless); tests

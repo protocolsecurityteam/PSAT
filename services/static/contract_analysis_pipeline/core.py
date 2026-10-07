@@ -17,6 +17,7 @@ from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
 from utils.logging import record_degraded, record_stage_metric
 
 from ..claims import attach_claims_to_effects, build_claims, project_effect_labels
+from .effect_scope_codec import encode_effect_scopes
 from .effects import EffectsArtifact, build_effects
 from .predicate_artifacts import (
     build_predicate_artifacts_with_pause_info,
@@ -287,6 +288,9 @@ def collect_contract_analysis_with_artifacts(
         "controller_tracking": controller_tracking,
         "secondary_impl_pointers": secondary_impl_pointers,
     }
+
+    # Every in-process consumer of the site predicates has run; from here on the artifacts are in their stored form.
+    encode_effect_scopes(predicate_trees_artifact, effects_artifact)
 
     total_ms = int((time.monotonic() - pipeline_started) * 1000)
     _emit_pipeline_profile(

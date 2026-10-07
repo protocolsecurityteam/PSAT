@@ -63,6 +63,14 @@ def matches(template: str, path: str) -> bool:
     return re.fullmatch(pattern, path) is not None
 
 
+def account_route(path: str) -> bool:
+    """Sign-in (OAuth and email/password) and the signed-in user's own resources: open to any visitor (the app
+    authenticates them by session cookie), so not gated on operator Access. Never cacheable: they carry a cookie or set
+    one.
+    """
+    return path == "/api/me" or path.startswith(("/api/me/", "/api/auth/"))
+
+
 def public_read(method: str, path: str) -> bool:
     if method not in {"GET", "HEAD"}:
         return False
@@ -78,6 +86,10 @@ def public_read(method: str, path: str) -> bool:
     return any(matches(template, path) for template in PUBLIC_READS)
 
 
+def is_production(env: Mapping[str, str] | None = None) -> bool:
+    return (os.environ if env is None else env).get("FLY_APP_NAME") == "psat"
+
+
 @dataclass(frozen=True)
 class EdgeConfig:
     mode: str
@@ -90,7 +102,7 @@ class EdgeConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> EdgeConfig:
         env = os.environ if env is None else env
-        production = env.get("FLY_APP_NAME") == "psat"
+        production = is_production(env)
         mode = env.get("PSAT_EDGE_MODE", "cloudflare" if production else "local")
         if mode not in {"local", "preview", "cloudflare"} or (production and mode != "cloudflare"):
             raise ValueError("Invalid PSAT_EDGE_MODE for this deployment")
@@ -212,10 +224,13 @@ class CloudflareBoundary:
             or path.startswith("/monitor/")
         )
         operator = operator or target in {"/docs", "/redoc", "/openapi.json"}
-        operator = operator or (target.startswith("/api/") and not public_read(request.method, target))
+        operator = operator or (
+            target.startswith("/api/") and not public_read(request.method, target) and not account_route(target)
+        )
         operator = operator or "x-psat-admin-key" in request.headers or "authorization" in request.headers
         scope.setdefault("state", {})["edge_visitor_ip"] = None
         scope["state"]["edge_operator"] = operator
+        scope["state"]["edge_mode"] = self.config.mode
 
         async def response_send(message):
             if message["type"] == "http.response.start":

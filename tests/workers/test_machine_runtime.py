@@ -110,7 +110,10 @@ def test_singleton_loss_kills_child_before_launcher_returns(runtime, monkeypatch
         original(owner)
 
     monkeypatch.setattr(ProcessSingleton, "check", lose)
+    started = time.monotonic()
     assert machine_runtime.run("workers", threading.Event()) == 1
+    # The child sleeps 30s; ownership loss must not wait for it.
+    assert time.monotonic() - started < 10
     import os
 
     with pytest.raises(ProcessLookupError):
@@ -163,3 +166,99 @@ while not stop:
         thread.join(8)
     # The deployment may exit nonzero, but the healthy monitor must not be interrupted before the stop request.
     assert not thread.is_alive()
+
+
+def _cancelled_query(session):
+    # A real statement cancellation, as a lock wait past statement_timeout produces.
+    session.execute(text("SET LOCAL statement_timeout = '1ms'"))
+    session.execute(text("SELECT pg_sleep(0.05)"))
+
+
+def _sleeper(tmp_path):
+    pidfile = tmp_path / "pid"
+    return pidfile, [
+        sys.executable,
+        "-c",
+        "import os,sys,time,signal,pathlib; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0));"
+        " pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+        str(pidfile),
+    ]
+
+
+def test_transient_heartbeat_failures_do_not_kill_the_group(runtime, monkeypatch, tmp_path, caplog):
+    pidfile, command = _sleeper(tmp_path)
+    monkeypatch.setattr(machine_runtime, "commands", lambda _: [command])
+    failures = []
+    real_phase = machine_runtime.boot_phase
+
+    def flaky(session, boot):
+        if len(failures) < 2:
+            failures.append(boot)
+            _cancelled_query(session)
+        return real_phase(session, boot)
+
+    monkeypatch.setattr(machine_runtime, "boot_phase", flaky)
+    monkeypatch.setattr(machine_runtime, "SUPERVISION_INTERVAL_S", 0.05)
+    stop = threading.Event()
+    results = []
+    thread = threading.Thread(target=lambda: results.append(machine_runtime.run("workers", stop)))
+    with caplog.at_level("WARNING", logger="workers.machine_runtime"):
+        thread.start()
+        try:
+            wait_for(lambda: len(failures) == 2 and pidfile.exists())
+            time.sleep(1.5)
+            assert thread.is_alive()
+        finally:
+            stop.set()
+            thread.join(8)
+    assert results == [0]
+    retries = [r for r in caplog.records if r.getMessage().startswith("process supervision query failed")]
+    assert [(r.pgcode, r.db_error) for r in retries] == [("57014", "canceling statement due to statement timeout")] * 2
+
+
+def test_sustained_supervision_failure_gives_up_after_the_grace(runtime, monkeypatch, tmp_path, caplog):
+    _, command = _sleeper(tmp_path)
+    monkeypatch.setattr(machine_runtime, "commands", lambda _: [command])
+    monkeypatch.setattr(machine_runtime, "SUPERVISION_GRACE_S", 0.3)
+    monkeypatch.setattr(machine_runtime, "SUPERVISION_INTERVAL_S", 0.05)
+    monkeypatch.setattr(machine_runtime, "boot_phase", lambda session, boot: _cancelled_query(session))
+    with caplog.at_level("ERROR", logger="workers.machine_runtime"):
+        assert machine_runtime.run("workers", threading.Event()) == 1
+    fatal = [r for r in caplog.records if r.getMessage() == "process ownership or supervision failed"]
+    assert fatal and fatal[0].pgcode == "57014"
+
+
+def test_a_superseded_boot_ends_the_group_at_once(runtime, monkeypatch, tmp_path, caplog):
+    pidfile, command = _sleeper(tmp_path)
+    monkeypatch.setattr(machine_runtime, "commands", lambda _: [command])
+    monkeypatch.setattr(machine_runtime, "SUPERVISION_GRACE_S", 3600.0)
+    real_phase = machine_runtime.boot_phase
+
+    def superseded(session, boot):
+        if pidfile.exists():
+            session.execute(text("UPDATE worker_lifecycle SET boot_id=gen_random_uuid() WHERE id=1"))
+            session.commit()
+        return real_phase(session, boot)
+
+    monkeypatch.setattr(machine_runtime, "boot_phase", superseded)
+    with caplog.at_level("ERROR", logger="workers.machine_runtime"):
+        assert machine_runtime.run("workers", threading.Event()) == 1
+    assert any(getattr(r, "reason", None) == "worker boot superseded" for r in caplog.records)
+
+
+def test_a_terminated_singleton_session_ends_the_group_on_the_first_failed_check(runtime, monkeypatch):
+    import uuid
+
+    monkeypatch.setattr(machine_runtime, "SUPERVISION_GRACE_S", 3600.0)
+    owner = ProcessSingleton("workers", DATABASE_URL)
+    try:
+        assert owner.acquire()
+        supervision = machine_runtime._Supervision("monitor", owner, uuid.uuid4())
+        assert supervision.poll("running") == "running"
+        runtime.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": owner.pid})
+        runtime.commit()
+        with pytest.raises(Exception):
+            supervision.poll("running")
+        assert owner.connection.closed
+    finally:
+        owner.close()
