@@ -32,7 +32,10 @@ def analyzed_veda_teller(live_client: LiveClient) -> dict:
     except TimeoutError as exc:
         pytest.skip(f"Veda Teller analysis did not finish in time on {live_client.base_url}: {exc}")
     if job["status"] != "completed":
-        pytest.skip(f"Veda Teller analysis did not complete (status={job['status']})")
+        pytest.fail(
+            f"Veda Teller job {job.get('job_id')} did not complete: "
+            f"status={job['status']}, stage={job.get('stage')}, error={job.get('error')}"
+        )
     return job
 
 
