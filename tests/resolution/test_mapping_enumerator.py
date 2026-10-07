@@ -463,6 +463,7 @@ def test_address_predicate_with_decimal_zero_rhs_keeps_nonzero_workers():
         pytest.param({"op": "eq", "rhs_values": ["1"], "value_type": "uint256", "mask": "FLAG"}, id="mask"),
         pytest.param({"op": "between", "rhs_values": ["1"], "value_type": "uint256"}, id="unknown_op"),
         pytest.param({"op": "eq", "rhs_values": ["1"], "value_type": "string"}, id="dynamic_type"),
+        pytest.param({"op": "eq", "rhs_values": ["0x12345678"], "value_type": "bytes4"}, id="left_aligned_bytes4"),
     ],
 )
 def test_unevaluable_predicate_is_not_determined_never_empty(predicate):
@@ -566,6 +567,57 @@ def test_live_value_fold_replays_removals_as_zero():
     )
     assert result["status"] == "complete"
     assert filter_value_entries(result["entries"], _CONTROLLER_PREDICATE) == [kept]
+
+
+def test_bytes32_value_compares_as_its_full_word():
+    from services.resolution.mapping_enumerator import _value_predicate_passes
+
+    word = "0x" + "12345678" + "0" * 56
+    assert _value_predicate_passes(word, {"op": "eq", "rhs_values": [word], "value_type": "bytes32"}) is True
+
+
+def test_live_value_fold_takes_a_removal_and_a_set_reading_the_same_word_as_one_reading():
+    # ``st[k] = uint8(0); emit StSet(k, 0)`` beside ``st[k] = v; emit StSet(k, v)``: both read the event's value word.
+    from services.resolution.mapping_enumerator import enumerate_mapping_values, filter_value_entries
+
+    configured = _event_topic0(_CONFIGURED_SIG)
+    specs = [_controller_specs()[0], {**_controller_specs()[0], "direction": "remove"}]
+    kept, dropped = _addr("79e0946e1c186e745f1352d7c21ab04700c99f71"), _addr("961708aa6bc3b79dff302f3f1525ed1bebc6f35b")
+    logs = [
+        _controller_log(configured, [kept, _addr("5b6122c109b78c6755486966148c1d70a50a47d7")], block=1, log_index=0),
+        _controller_log(configured, [dropped, _addr("a1e2481a9cd0cb0447eeb1cbc26f1b3fff3bec20")], block=2, log_index=0),
+        _controller_log(configured, [dropped, "0x" + "0" * 40], block=3, log_index=0),
+    ]
+    client, _ = _fake_client([(logs, None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, specs),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "complete"
+    assert filter_value_entries(result["entries"], _CONTROLLER_PREDICATE) == [kept]
+
+
+def test_live_value_fold_refuses_two_readings_of_one_event():
+    from services.resolution.mapping_enumerator import enumerate_mapping_values
+
+    specs = [_controller_specs()[0], {**_controller_specs()[0], "direction": "remove", "value_position": None}]
+    client, calls = _fake_client([([], None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, specs),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "incomplete_ambiguous_writer_event"
+    assert calls["n"] == 0
 
 
 def test_live_value_fold_refuses_a_writer_whose_value_it_cannot_read():

@@ -236,6 +236,7 @@ def _extract_value_word(
 _ZERO_WORD = "0x" + "0" * 64
 _ADDRESS_MASK = (1 << 160) - 1
 _SIGNED_INT_TYPE = re.compile(r"int\d*")
+_SHORT_FIXED_BYTES = re.compile(r"bytes([1-9]|[12]\d|3[01])")
 
 
 def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool | None:
@@ -256,8 +257,9 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool |
         return actual != 0
 
     value_type = str(predicate.get("value_type") or "uint256").strip()
-    # A dynamic value's event word is a hash or an offset, not the value.
-    if value_type in ("string", "bytes") or value_type.endswith("]"):
+    # A dynamic value's event word is a hash or an offset, not the value; a short ``bytesN`` is left-aligned, so its
+    # integer reading isn't the rhs literal's.
+    if value_type in ("string", "bytes") or value_type.endswith("]") or _SHORT_FIXED_BYTES.fullmatch(value_type):
         return None
     mask_raw = predicate.get("mask")
     if mask_raw is not None:
@@ -662,8 +664,8 @@ def _db_cache_enabled() -> bool:
     return os.getenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "1").lower() in ("1", "true", "yes")
 
 
-# Value-scan statuses where a write was skipped or never readable: any key's latest value may be wrong, so the entries
-# bound nothing (unlike a truncated scan, whose entries are proven up to where it stopped).
+# Value-scan statuses where a write was skipped or never readable before the scan ended: any key's latest value may be
+# wrong, so the entries bound nothing.
 UNREADABLE_VALUE_SCAN_STATUSES = frozenset(
     {
         "incomplete_undecodable_event",
@@ -719,9 +721,7 @@ async def enumerate_mapping_values(
     for specs in topic0_to_specs.values():
         readings: dict[str, set[tuple[Any, ...]]] = {}
         for spec in specs:
-            readings.setdefault(spec["mapping_name"], set()).add(
-                (spec["direction"] == "remove", spec.get("value_position"), spec["key_position"])
-            )
+            readings.setdefault(spec["mapping_name"], set()).add((spec.get("value_position"), spec["key_position"]))
         if any(len(r) > 1 for r in readings.values()):
             return _unscanned("incomplete_ambiguous_writer_event")
 

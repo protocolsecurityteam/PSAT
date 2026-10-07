@@ -169,3 +169,16 @@ def test_row_missing_its_value_word_is_undecodable_not_skipped(ctx, db_session, 
     assert cap.kind == "unsupported"
     assert cap.unsupported_reason == "event_data_undecodable"
     assert no_live_calls == []
+
+
+def test_two_readings_of_one_event_are_not_determined(ctx, no_live_calls):
+    descriptor = copy.deepcopy(_DESCRIPTOR)
+    descriptor["enumeration_hint"].append(
+        {**descriptor["enumeration_hint"][0], "direction": "remove", "value_position": None}
+    )
+
+    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
+
+    assert cap.kind == "unsupported"
+    assert cap.unsupported_reason == "value_writer_event_ambiguous"
+    assert no_live_calls == []

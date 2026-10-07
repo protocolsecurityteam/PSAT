@@ -703,7 +703,9 @@ def _value_hints_by_topic(value_hints: list[dict[str, Any]]) -> dict[str, list[d
 
 
 def _value_reading(hint: dict[str, Any]) -> tuple[Any, ...]:
-    """How a hint reads its event: the value word (or zero) and the key map. Two readings of one event conflict."""
+    """How a hint reads its event: the value word (or zero for a removal) and the key map. Two readings of one event
+    conflict.
+    """
     return (
         hint.get("value_position"),
         json.dumps(hint.get("topics_to_keys") or {}, sort_keys=True, default=str),
