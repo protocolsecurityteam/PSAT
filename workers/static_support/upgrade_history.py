@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 
+def _same_upgrade_log(a: dict, b: dict) -> bool:
+    """Whether two events are copies of one log.
+
+    Two indexed logs are the same log only at the same index. An event without ``log_index`` (rebuilt from
+    ``upgrade_events`` rows) is a copy only of an event it can't be told apart from: same block, transaction, type
+    and every recorded field.
+    """
+    if (a.get("block_number", 0), a.get("tx_hash", ""), a.get("event_type", "")) != (
+        b.get("block_number", 0),
+        b.get("tx_hash", ""),
+        b.get("event_type", ""),
+    ):
+        return False
+    a_index, b_index = a.get("log_index"), b.get("log_index")
+    if isinstance(a_index, int) and isinstance(b_index, int):
+        return a_index == b_index
+    shared = (set(a) & set(b)) - {"log_index"}
+    return all(a[key] == b[key] for key in shared)
+
+
 def _merge_upgrade_history(prev: dict, new: dict) -> dict:
-    """Append-only merge; events deduped by (block, tx, type) and timelines rebuilt."""
+    """Append-only merge; copies of one log are kept once (:func:`_same_upgrade_log`) and timelines rebuilt."""
     from services.discovery.upgrade_history import _build_implementation_timeline
 
     merged_proxies: dict[str, dict] = {}
@@ -28,12 +48,9 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
         prev_events = prev_proxy.get("events", [])
         new_events = new_proxy.get("events", [])
 
-        seen: set[tuple[int, str, str]] = set()
         merged_events: list[dict] = []
         for event in prev_events + new_events:
-            key = (event.get("block_number", 0), event.get("tx_hash", ""), event.get("event_type", ""))
-            if key not in seen:
-                seen.add(key)
+            if not any(_same_upgrade_log(event, kept) for kept in merged_events):
                 merged_events.append(event)
 
         merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
