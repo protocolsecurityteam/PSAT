@@ -31,6 +31,16 @@ pragma solidity ^0.8.19;
 interface IToken {}
 contract Token {}
 
+contract Limits {
+    mapping(IToken => uint256) public capOf;
+}
+
+library Auth {
+    struct Cfg { address owner; uint256 level; }
+    function ok(Cfg memory c, address a) public pure returns (bool) { return c.owner == a; }
+    function plain(uint256 x) public pure returns (uint256) { return x; }
+}
+
 interface IRegistry {
     function canAct(address who, IToken token) external view returns (bool);
     function rateOf(IToken token) external view returns (uint256);
@@ -41,6 +51,7 @@ contract C {
     struct Order { uint256 amount; address to; }
 
     IRegistry public registry;
+    Limits public limits;
     IToken public token;
     uint256 internal _n;
 
@@ -58,6 +69,10 @@ contract C {
         require(registry.rateOf(token) > 0, "no rate");
         _n = 3;
     }
+    function capped() external {
+        require(limits.capOf(token) > 0, "no cap");
+        _n = 5;
+    }
     fallback() external payable { _n = 4; }
     receive() external payable {}
 }
@@ -73,10 +88,15 @@ CANONICAL = {
 
 
 @pytest.fixture(scope="module")
-def contract(tmp_path_factory) -> Any:
+def compiled(tmp_path_factory) -> dict[str, Any]:
     path = tmp_path_factory.mktemp("canonical_selectors") / "C.sol"
     path.write_text(textwrap.dedent(SOURCE).strip() + "\n")
-    return next(c for c in Slither(str(path)).contracts if c.name == "C")
+    return {c.name: c for c in Slither(str(path)).contracts}
+
+
+@pytest.fixture(scope="module")
+def contract(compiled) -> Any:
+    return compiled["C"]
 
 
 @pytest.fixture(scope="module")
@@ -172,3 +192,26 @@ def test_dispatch_signature_falls_back_only_to_a_canonical_spelling():
     assert dispatch_selector(None, "rateOf(IToken)") is None
     assert dispatch_selector(None, None) is None
     assert dispatch_selector(None, "fallback()") is None
+
+
+def test_a_public_getter_call_carries_the_getter_dispatch_selector(trees):
+    operands = [
+        node
+        for node in _nodes(trees["capped()"])
+        if node.get("source") == "external_call" and node.get("callee") == "capOf"
+    ]
+    assert operands
+    assert {op["callee_selector"] for op in operands} == {_sel("capOf(address)")}
+
+
+def test_a_library_function_with_a_struct_parameter_has_no_determined_selector(compiled):
+    """A library hashes struct and enum parameters by name (``ok(Auth.Cfg,address)``), not by ABI tuple."""
+    from services.static.contract_analysis_pipeline.predicate_artifacts import dispatch_selector
+
+    library = compiled["Auth"]
+    by_name = {fn.name: fn for fn in library.functions}
+    assert dispatch_selector(by_name["ok"], by_name["ok"].full_name) is None
+    assert dispatch_selector(by_name["plain"], by_name["plain"].full_name) == _sel("plain(uint256)")
+    records = build_effects(library)["functions"]
+    assert records["ok(Auth.Cfg,address)"]["selector"] is None
+    assert records["plain(uint256)"]["selector"] == _sel("plain(uint256)")

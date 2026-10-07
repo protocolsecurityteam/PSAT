@@ -514,13 +514,17 @@ def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str 
 
 
 def _resolve_callee_selector(descriptor: dict) -> str | None:
-    selector = descriptor.get("callee_selector")
-    if _is_selector(selector):
-        return selector.lower()
-    from services.resolution.predicate_evaluator.binding import _selector_for_canonical_signature
+    from services.resolution.predicate_evaluator.binding import (
+        _selector_for_canonical_signature,
+        _stored_dispatch_selector,
+    )
 
     signature = descriptor.get("callee_signature")
-    return _selector_for_canonical_signature(signature.replace(" ", "")) if isinstance(signature, str) else None
+    signature = signature.replace(" ", "") if isinstance(signature, str) else None
+    selector = _stored_dispatch_selector(descriptor.get("callee_selector"), signature)
+    if _is_selector(selector):
+        return selector.lower()
+    return _selector_for_canonical_signature(signature)
 
 
 def _is_single_address_param_signature(signature: Any) -> bool:

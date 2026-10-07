@@ -31,7 +31,7 @@ from .authority import (
     _resolve_param_keyed_authority_mapping,
     _view_call_caller_selects_key,
 )
-from .binding import _selector_for_signature
+from .binding import _selector_for_signature, _stored_dispatch_selector
 from .descriptors import _condition_from_leaf
 from .telemetry import _is_zero_address, _state_var_lookup_key
 
@@ -220,7 +220,7 @@ def _resolve_equality_principal(
     if src == "external_call":
         # Authority lives in another contract (``PauserRegistry.unpauser()``) whose address we don't have offline. Gated
         # query-only check, never public.
-        selector = op.get("callee_selector")
+        selector = _stored_dispatch_selector(op.get("callee_selector"), op.get("callee_signature"))
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=None,

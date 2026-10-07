@@ -36,10 +36,12 @@ from .adapters import SetAdapter, _NullAdapter
 from .binding import (
     _bind_callee_parameters,
     _callee_argument_operands,
+    _callee_tree_entry,
+    _key_dispatch_selector,
     _normalize_operand_for_call_arg,
     _normalize_tree_for_frame,
     _selector_for_canonical_signature,
-    _tree_for_signature_or_selector,
+    _stored_dispatch_selector,
 )
 from .descriptors import (
     _condition_from_leaf,
@@ -493,13 +495,14 @@ def _maybe_inline_cross_contract_call(
     caught via ``evaluation_stack`` keyed on ``(chain_id, address, signature)`` and return ``external_check_only``.
     """
     callee_signature = descriptor.get("callee_signature")
-    callee_selector = descriptor.get("callee_selector")
+    stored_selector = descriptor.get("callee_selector")
     if not isinstance(callee_signature, str):
         callee_signature = None
-    if not isinstance(callee_selector, str):
-        callee_selector = None
-    if not callee_signature and not callee_selector:
+    if not isinstance(stored_selector, str):
+        stored_selector = None
+    if not callee_signature and not stored_selector:
         return None
+    callee_selector = _stored_dispatch_selector(stored_selector, callee_signature)
     if callee_selector is None and callee_signature is not None:
         callee_selector = _selector_for_canonical_signature(callee_signature)
 
@@ -593,17 +596,17 @@ def _maybe_inline_cross_contract_call(
             call_args=call_args,
         )
 
-    callee_tree = None
+    entry = None
     for tree_map in tree_maps:
-        callee_tree = _tree_for_signature_or_selector(
+        entry = _callee_tree_entry(
             tree_map,
             callee_signature=callee_signature,
-            callee_selector=callee_selector,
+            callee_selector=callee_selector or stored_selector,
             canonical_signatures=artifact.get("canonical_signatures"),
         )
-        if callee_tree is not None:
+        if entry is not None:
             break
-    if callee_tree is None:
+    if entry is None:
         return _materialize_external_check_from_candidates(
             session=session,
             outer_ctx=outer_ctx,
@@ -613,6 +616,9 @@ def _maybe_inline_cross_contract_call(
             call_args=call_args,
         )
 
+    callee_key, callee_tree = entry
+    # The function actually found decides the dispatch selector (``msg.sig`` below, any materializer ``eth_call``).
+    callee_selector = _key_dispatch_selector(callee_key, artifact.get("canonical_signatures")) or callee_selector
     callee_tree = _bind_callee_parameters(
         callee_tree,
         call_args,

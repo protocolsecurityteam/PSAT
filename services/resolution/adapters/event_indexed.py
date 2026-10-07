@@ -248,7 +248,7 @@ class EventIndexedAdapter:
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=target,
-                target_call_selector=descriptor.get("callee_selector"),
+                target_call_selector=_descriptor_dispatch_selector(descriptor),
                 extra=extra,
             )
         )
@@ -302,7 +302,7 @@ class EventIndexedAdapter:
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=event_address,
-                target_call_selector=descriptor.get("callee_selector"),
+                target_call_selector=_descriptor_dispatch_selector(descriptor),
                 extra={
                     "basis": ["no_index_cursor", "caller_keyed_membership_allowlist"],
                     "deferred_pending_index": True,
@@ -596,3 +596,9 @@ def _fold_event_history(
         block=block,
         **tail_kwargs,
     )
+
+
+def _descriptor_dispatch_selector(descriptor: dict) -> str | None:
+    from services.resolution.predicate_evaluator.binding import _stored_dispatch_selector
+
+    return _stored_dispatch_selector(descriptor.get("callee_selector"), descriptor.get("callee_signature"))

@@ -136,7 +136,8 @@ def dispatch_signature(callee: Any, declared_signature: str | None = None) -> st
 
     Lowered from the live Slither types; a public state variable's getter uses Slither's own lowered signature.
     ``declared_signature`` (Slither's spelling) stands in only when it is already canonical, since an unlowered name
-    hashes to a selector the chain never dispatches.
+    hashes to a selector the chain never dispatches. A library hashes struct and enum parameters by name, not by ABI
+    type, so its non-elementary functions are left undetermined.
     """
     from slither.core.variables.state_variable import StateVariable
 
@@ -146,7 +147,7 @@ def dispatch_signature(callee: Any, declared_signature: str | None = None) -> st
             signature = callee.solidity_signature
         except (AttributeError, KeyError, TypeError, ValueError):
             signature = None
-    elif callee is not None:
+    elif callee is not None and not getattr(getattr(callee, "contract_declarer", None), "is_library", False):
         signature = _canonical_signature(callee)
     if signature is None:
         signature = declared_signature

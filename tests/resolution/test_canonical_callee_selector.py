@@ -21,7 +21,7 @@ slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.resolution.adapters.enumerable_role_store import _resolve_callee_selector  # noqa: E402
-from services.resolution.predicate_evaluator.binding import _tree_for_signature_or_selector  # noqa: E402
+from services.resolution.predicate_evaluator.binding import _callee_tree_entry  # noqa: E402
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree  # noqa: E402
 from tests.conftest import requires_postgres  # noqa: E402
 
@@ -48,21 +48,46 @@ _TREE = {"op": "LEAF", "leaf": {"kind": "equality", "operator": "truthy", "opera
     ],
 )
 def test_callee_tree_lookup_by_selector(selector, canonical, found):
-    got = _tree_for_signature_or_selector(
+    got = _callee_tree_entry(
         {CALLEE_KEY: _TREE},
         callee_signature=CALLER_SPELLING,
         callee_selector=selector,
         canonical_signatures=canonical,
     )
-    assert (got is _TREE) is found
+    assert got == ((CALLEE_KEY, _TREE) if found else None)
 
 
 def test_an_already_canonical_key_matches_without_a_map():
     trees = {"isOperator(address)": _TREE}
-    got = _tree_for_signature_or_selector(
+    got = _callee_tree_entry(
         trees, callee_signature=None, callee_selector=_sel("isOperator(address)"), canonical_signatures=None
     )
-    assert got is _TREE
+    assert got == ("isOperator(address)", _TREE)
+
+
+@pytest.mark.parametrize(
+    ("selector", "signature", "expected"),
+    [
+        # Written before canonical lowering: the hash of an unlowered spelling is no selector at all.
+        pytest.param(_sel(CALLER_SPELLING), CALLER_SPELLING, None, id="legacy_invented"),
+        pytest.param(_sel(CALLEE_CANONICAL), CALLER_SPELLING, _sel(CALLEE_CANONICAL), id="canonical_kept"),
+        pytest.param(
+            _sel("hasRole(bytes32,address)"),
+            "hasRole(bytes32,address)",
+            _sel("hasRole(bytes32,address)"),
+            id="canonical_spelling",
+        ),
+        pytest.param("0x12345678", None, "0x12345678", id="selector_only"),
+        pytest.param(None, CALLER_SPELLING, None, id="absent"),
+    ],
+)
+def test_a_stored_selector_hashed_from_an_unlowered_spelling_is_dropped(selector, signature, expected):
+    from services.resolution.predicate_evaluator.binding import _stored_dispatch_selector
+
+    assert _stored_dispatch_selector(selector, signature) == expected
+    # Every reader that dispatches on a descriptor selector sees the same answer.
+    descriptor = {"callee_selector": selector, "callee_signature": signature}
+    assert _resolve_callee_selector(descriptor) == (expected.lower() if expected else None)
 
 
 @pytest.mark.parametrize(
@@ -128,6 +153,25 @@ def _opaque_callee_tree() -> dict[str, Any]:
     }
 
 
+def _with_legacy_selectors(trees: dict[str, Any]) -> dict[str, Any]:
+    """The caller trees as stored before canonical lowering: each descriptor carries the hash of its spelling."""
+    for node in _nodes(trees):
+        descriptor = node.get("set_descriptor")
+        if isinstance(descriptor, dict) and isinstance(descriptor.get("callee_signature"), str):
+            descriptor["callee_selector"] = _sel(descriptor["callee_signature"])
+    return trees
+
+
+def _nodes(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _nodes(child)
+
+
 def _resolve_two_hop(session, caller_trees: dict[str, Any], callee_artifact: dict[str, Any]) -> dict[str, Any]:
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
     from db.queue import store_artifact
@@ -191,3 +235,33 @@ def test_inlining_reaches_a_callee_spelled_differently_through_the_canonical_sel
     assert cap["kind"] == "external_check_only"
     assert "inline_refine_only_guard" in _basis(cap)
     assert cap["check"]["target_call_selector"] == _sel(CALLEE_CANONICAL)
+
+
+@requires_postgres
+def test_a_tree_stored_before_lowering_dispatches_the_canonical_selector(db_session, monkeypatch):
+    """The stored hash of ``onlyOperator(address,IToken)`` is never the child frame's ``msg.sig`` nor a published
+    check selector; the callee's own canonical entry decides ``msg.sig``."""
+    import services.resolution.predicate_evaluator.core as core
+
+    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
+    frames: list[Any] = []
+    original = core._normalize_tree_for_frame
+
+    def _spy(tree, frame):
+        frames.append(frame)
+        return original(tree, frame)
+
+    monkeypatch.setattr(core, "_normalize_tree_for_frame", _spy)
+    caller = _with_legacy_selectors(_caller_trees())
+    cap = _resolve_two_hop(
+        db_session,
+        caller,
+        {
+            "trees": {CALLER_SPELLING: _opaque_callee_tree()},
+            "canonical_signatures": {CALLER_SPELLING: CALLEE_CANONICAL},
+        },
+    )
+    assert frames, "the legacy tree must still inline"
+    assert {frame.current_msg_sig for frame in frames} == {_sel(CALLEE_CANONICAL)}
+    assert cap["kind"] == "external_check_only"
+    assert cap["check"]["target_call_selector"] is None
