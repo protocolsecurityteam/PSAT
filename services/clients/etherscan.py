@@ -256,18 +256,18 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-# ``status=0`` shapes that are answers (empty token/tx lists): exact status + known message + empty list. Opt-in per
-# call site via ``empty_result_ok`` so no other error can reach a caller as data.
-_EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found"})
+# ``status=0`` shapes that are answers. Token/tx lists retain their strict empty-list contract; getLogs also returns
+# a textual empty result. Opt-in per call site via ``empty_result_ok`` so no other error reaches a caller as data.
+_EMPTY_RESULT_MESSAGES = frozenset({"no token found", "no transactions found"})
 
 
-def _is_empty_result(data: dict) -> bool:
+def _is_empty_result(data: dict, *, logs: bool = False) -> bool:
     result = data.get("result")
-    return (
-        str(data.get("status")).strip() == "0"
-        and str(data.get("message", "")).strip() in _EMPTY_RESULT_MESSAGES
-        and isinstance(result, list)
-        and not result
+    message = str(data.get("message", "")).strip().lower()
+    return str(data.get("status")).strip() == "0" and (
+        (message in _EMPTY_RESULT_MESSAGES and result == [])
+        or (logs and message == "no records found" and result in ([], ""))
+        or (logs and isinstance(result, str) and result.strip().lower() == "no records found")
     )
 
 
@@ -344,7 +344,8 @@ def get(
             _pg_cache_put(module, action, chain_id, params, data)
             return data
 
-        if empty_result_ok and _is_empty_result(data):
+        if empty_result_ok and _is_empty_result(data, logs=(module, action) == ("logs", "getLogs")):
+            data = {**data, "result": []}
             # A lag-empty frozen for a fresh tx would permanently delete its CREATE frames.
             if cache_empty:
                 _pg_cache_put(module, action, chain_id, params, data)

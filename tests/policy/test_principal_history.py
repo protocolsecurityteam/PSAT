@@ -179,9 +179,10 @@ class _FakeEtherscanResponse:
 
 
 @pytest.fixture(autouse=True)
-def _clear_principal_history_caches():
+def _clear_principal_history_caches(monkeypatch):
     # The module memoizes authority logs process-wide.
     principal_history._LOG_CACHE.clear()
+    monkeypatch.setattr("services.clients.etherscan._wait_rate_limit", lambda: None)
     yield
     principal_history._LOG_CACHE.clear()
 
@@ -212,15 +213,15 @@ def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
         public_cap_topic: [],
     }
 
-    monkeypatch.setattr("services.clients.etherscan.get", lambda *a, **k: {"result": _ROLES_AUTHORITY_ABI})
-
-    def _fake_requests_get(url, params=None, timeout=None):
-        topic0 = (params or {}).get("topic0")
+    def _fake_get(module, action, chain_id, **params):
+        if module == "contract":
+            return {"result": _ROLES_AUTHORITY_ABI}
+        assert (module, action, chain_id) == ("logs", "getLogs", 1)
+        topic0 = params.get("topic0")
         batch = logs_by_topic.get(topic0, []) if isinstance(topic0, str) else []
-        payload = {"status": "1", "result": batch} if batch else {"status": "0", "result": "No records found"}
-        return _FakeEtherscanResponse(payload)
+        return {"status": "1", "result": batch}
 
-    monkeypatch.setattr(requests, "get", _fake_requests_get)
+    monkeypatch.setattr("services.clients.etherscan.get", _fake_get)
 
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
@@ -306,20 +307,37 @@ def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
     principal_history.clear_log_cache()
 
 
-def test_log_cache_ttl_expiry_refetches(monkeypatch):
+@pytest.mark.parametrize("pages", [1, 2])
+@pytest.mark.parametrize("empty_result", [[], "", "No records found"])
+def test_log_cache_ttl_expiry_refetches(monkeypatch, pages, empty_result):
+    from services.clients.request_budget import RequestBudget, RequestBudgetExceeded, request_budget
+
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     calls: list = []
+    waits: list = []
+    monkeypatch.setattr("services.clients.etherscan._wait_rate_limit", lambda: waits.append(True))
 
     def _counting_get(url, params=None, timeout=None):
-        calls.append((params or {}).get("topic0"))
-        return _FakeEtherscanResponse({"status": "0", "result": "No records found"})
+        assert params is not None
+        assert params["chainid"] == "8453"
+        assert (params["module"], params["action"]) == ("logs", "getLogs")
+        calls.append(params)
+        if int(params["page"]) < pages:
+            return _FakeEtherscanResponse({"status": "1", "result": [{"blockNumber": "0x1"}] * 1000})
+        return _FakeEtherscanResponse({"status": "0", "message": "No records found", "result": empty_result})
 
     monkeypatch.setattr(requests, "get", _counting_get)
 
-    principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
-    assert len(calls) == 1
-    principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
-    assert len(calls) == 1
-    monkeypatch.setattr(principal_history, "_LOG_CACHE_TTL_S", -1.0)
-    principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
-    assert len(calls) == 2
+    budget = RequestBudget(limit=pages * 2)
+    with request_budget(budget):
+        first = principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=8453, topic0=SELECTOR)
+        assert len(first) == (pages - 1) * 1000
+        assert budget.attempts["etherscan"] == len(calls) == len(waits) == pages
+        assert principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=8453, topic0=SELECTOR) == first
+        assert len(calls) == pages
+        monkeypatch.setattr(principal_history, "_LOG_CACHE_TTL_S", -1.0)
+        assert principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=8453, topic0=SELECTOR) == first
+        assert budget.attempts["etherscan"] == len(calls) == len(waits) == pages * 2
+        with pytest.raises(RequestBudgetExceeded):
+            principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=8453, topic0=SELECTOR)
+        assert len(calls) == pages * 2

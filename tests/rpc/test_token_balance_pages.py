@@ -63,6 +63,8 @@ class TestTheEmptyAnswerIsNotAFailure:
             {"status": "0", "message": "NOTOK", "result": "Max rate limit reached"},
             {"status": "0", "message": "No token found", "result": "No token found"},
             {"status": "0", "message": "No transactions found", "result": "No transactions found"},
+            {"status": "0", "message": "No records found", "result": ""},
+            {"status": "0", "message": "NOTOK", "result": "No records found"},
             {"status": "0", "message": "No token found", "result": [{"TokenAddress": "0x1"}]},
         ],
     )
