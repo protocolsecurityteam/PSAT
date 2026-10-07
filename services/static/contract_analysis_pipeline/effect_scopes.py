@@ -347,6 +347,14 @@ def _attach_effect_scopes(contract, predicates, effects):
         known = deepcopy(predicates.get("trees") or {})
         classified = {**known, **{k: v for k, v in scopes.items() if v is not None}}
         apply_writer_gate_pass(contract, classified)
+        # A site's authority leaves need the same leaf evidence as its entry point's tree; without the writer-event
+        # hints a role check no adapter can enumerate overrides the entry point's resolved principals.
+        from .internal_authority_slot import apply_internal_authority_slot_pass
+        from .predicate_artifacts import apply_mapping_event_hint_pass, apply_solmate_authority_hint_pass
+
+        apply_mapping_event_hint_pass(contract, classified)
+        apply_solmate_authority_hint_pass(contract, classified)
+        apply_internal_authority_slot_pass(contract, classified)
         apply_reentrancy_pause_pass(contract, classified)
         # Membership inventories are source evidence shared with the entry analysis; do not synthesize per-site quorums.
         from .authorization import attach_membership_inventories
