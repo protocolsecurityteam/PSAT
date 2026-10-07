@@ -47,30 +47,35 @@ export default function App() {
   }, []);
 
   // Back from GitHub/Google: trade the verifier for our session, or reopen sign-in with why it failed.
+  // Only then handle ?admin=1, so it sees the session the verifier just opened.
   useEffect(() => {
+    const adminParam = new URLSearchParams(window.location.search).get("admin") === "1";
     finishSocialSignIn().then((message) => {
-      if (!message) return;
-      setSignInError(message);
-      setSignInOpen(true);
+      if (message) {
+        setSignInError(message);
+        setSignInOpen(true);
+      } else if (adminParam) {
+        handleAdminParam();
+      }
     });
   }, []);
 
   // ?admin=1 prompts once for a key where the deployment accepts one
   // (previews, local); production operators get the sign-in dialog instead.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("admin") !== "1" || getAdminKey()) return;
-    loadAuthConfig()
-      .then(async ({ adminKey }) => {
-        if (adminKey) {
-          const entered = window.prompt("Paste your PSAT admin key:");
-          if (entered) setAdminKey(entered);
-          return;
-        }
-        const { status } = await refreshSession();
-        if (status !== "signed_in") setSignInOpen(true);
-      })
-      .catch(() => null);
-  }, []);
+  async function handleAdminParam() {
+    try {
+      if ((await loadAuthConfig()).adminKey) {
+        if (getAdminKey()) return;
+        const entered = window.prompt("Paste your PSAT admin key:");
+        if (entered) setAdminKey(entered);
+        return;
+      }
+      const { status } = await refreshSession();
+      if (status !== "signed_in") setSignInOpen(true);
+    } catch {
+      // Config unreadable: neither prompt for a key nor claim sign-in is needed.
+    }
+  }
 
   useEffect(() => { analysesRef.current = analyses; }, [analyses]);
   useEffect(() => {

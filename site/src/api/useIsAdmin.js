@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-import { useAuthConfig } from "./authConfig.js";
+import { useAuthConfig, useAuthConfigFailed } from "./authConfig.js";
 import { getAdminKey } from "./client.js";
 import { useSession } from "./session.js";
 
@@ -32,10 +32,12 @@ export function useIsAdmin() {
 }
 
 // Whether useIsAdmin's answer is settled: the session read, and with a stored
-// key the auth config, have both come back.
+// key the auth config read, have both finished. A failed config read settles
+// as "key not accepted".
 export function useAdminResolved() {
   const stored = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const config = useAuthConfig(stored);
+  const configFailed = useAuthConfigFailed();
   const { status } = useSession();
-  return status !== "unknown" && (!stored || config !== null);
+  return status !== "unknown" && (!stored || config !== null || configFailed);
 }
