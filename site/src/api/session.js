@@ -12,6 +12,7 @@ const listeners = new Set();
 function emit(next) {
   state = next;
   for (const fn of listeners) fn();
+  return next;
 }
 
 export function refreshSession() {

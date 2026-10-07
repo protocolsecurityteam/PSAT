@@ -93,7 +93,12 @@ def _social_providers() -> list[str]:
 @router.get("/api/auth/config")
 def auth_config() -> dict:
     enabled = neon.enabled()
-    return {"enabled": enabled, "providers": _social_providers() if enabled else [], "dev_login": _dev_login_enabled()}
+    return {
+        "enabled": enabled,
+        "providers": _social_providers() if enabled else [],
+        "dev_login": _dev_login_enabled(),
+        "admin_key": bool(deps.ADMIN_KEY),
+    }
 
 
 @router.api_route("/api/auth/neon/{path:path}", methods=["GET", "POST"])

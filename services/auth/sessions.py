@@ -8,11 +8,13 @@ import hashlib
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Mapping
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from db.models import User, UserSession
+from utils.edge import is_production
 
 SESSION_COOKIE = "psat_session"
 SESSION_TTL = timedelta(days=30)
@@ -23,8 +25,20 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def admin_emails() -> frozenset[str]:
-    return frozenset(e.strip().lower() for e in os.environ.get("PSAT_ADMIN_EMAILS", "").split(",") if e.strip())
+def admin_emails(env: Mapping[str, str] | None = None) -> frozenset[str]:
+    raw = (os.environ if env is None else env).get("PSAT_ADMIN_EMAILS", "")
+    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
+def check_production_admin_config(access_emails: frozenset[str], env: Mapping[str, str] | None = None) -> None:
+    """Production admins are signed-in accounts that also pass operator Access; the shared key is preview/local only."""
+    env = os.environ if env is None else env
+    if not is_production(env):
+        return
+    if env.get("PSAT_ADMIN_KEY"):
+        raise ValueError("PSAT_ADMIN_KEY must not be set in production")
+    if not admin_emails(env) <= access_emails:
+        raise ValueError("Every PSAT_ADMIN_EMAILS entry must also be in PSAT_ACCESS_EMAILS")
 
 
 def is_admin(user: User) -> bool:

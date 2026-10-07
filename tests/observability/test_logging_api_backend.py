@@ -105,7 +105,7 @@ def test_require_admin_key_warns_on_reject_without_leaking_key(caplog, monkeypat
         with pytest.raises(HTTPException) as ei:
             deps.require_admin(_make_request("/api/analyze"), "wrong-key")
     assert ei.value.status_code == 401
-    rec = _rec(caplog, "admin key rejected")
+    rec = _rec(caplog, "admin access rejected")
     assert rec.levelno == logging.WARNING
     assert rec.reason == "key_mismatch"
     assert rec.path == "/api/analyze"

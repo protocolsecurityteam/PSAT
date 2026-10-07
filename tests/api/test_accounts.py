@@ -138,8 +138,18 @@ def test_proxy_refuses_cross_origin_posts_and_odd_paths(client, fake_neon, path,
 
 
 def test_auth_is_off_without_a_neon_url(client, fake_neon, monkeypatch):
+    from routers import deps
+
     monkeypatch.delenv("NEON_AUTH_BASE_URL")
-    assert client.get("/api/auth/config").json() == {"enabled": False, "providers": [], "dev_login": False}
+    monkeypatch.setattr(deps, "ADMIN_KEY", None)
+    assert client.get("/api/auth/config").json() == {
+        "enabled": False,
+        "providers": [],
+        "dev_login": False,
+        "admin_key": False,
+    }
+    monkeypatch.setattr(deps, "ADMIN_KEY", "test-admin-key")
+    assert client.get("/api/auth/config").json()["admin_key"] is True
     assert client.get("/api/auth/neon/get-session").status_code == 404
     assert client.post("/api/auth/session", headers=SAME_ORIGIN).status_code == 404
 
@@ -299,6 +309,34 @@ def test_admin_routes_accept_key_or_admin_account_only(client, db_session, real_
     # Removing the email from the allowlist demotes the open session at once.
     monkeypatch.setenv("PSAT_ADMIN_EMAILS", "")
     assert client.get(path).status_code == 401
+
+
+def test_production_refuses_the_admin_key_and_admins_outside_access():
+    from services.auth.sessions import check_production_admin_config
+
+    access = frozenset({"boss@example.com", "ops@example.com"})
+    prod = {"FLY_APP_NAME": "psat", "PSAT_ADMIN_EMAILS": "Boss@example.com"}
+    check_production_admin_config(access, prod)
+    with pytest.raises(ValueError, match="PSAT_ADMIN_KEY"):
+        check_production_admin_config(access, {**prod, "PSAT_ADMIN_KEY": "k"})
+    with pytest.raises(ValueError, match="PSAT_ACCESS_EMAILS"):
+        check_production_admin_config(access, {**prod, "PSAT_ADMIN_EMAILS": "boss@example.com,eve@example.com"})
+    # Previews keep the key for the live suite.
+    check_production_admin_config(frozenset(), {"FLY_APP_NAME": "psat-pr-1", "PSAT_ADMIN_KEY": "k"})
+
+
+def test_production_admin_account_needs_a_matching_access_identity(monkeypatch):
+    from types import SimpleNamespace
+
+    from db.models import User
+    from routers import deps
+
+    monkeypatch.setenv("FLY_APP_NAME", "psat")
+    user = User(email="boss@example.com", email_verified=True, is_admin=True)
+    request = SimpleNamespace(state=SimpleNamespace(psat_user=user))
+    assert not deps.is_admin_request(request, None)  # pyright: ignore[reportArgumentType]
+    request.state.access_identity = {"email": "Boss@example.com"}
+    assert deps.is_admin_request(request, None)  # pyright: ignore[reportArgumentType]
 
 
 @requires_postgres

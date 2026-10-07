@@ -1,7 +1,9 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 
+import { loadAuthConfig } from "./api/authConfig.js";
 import { api, getAdminKey, setAdminKey } from "./api/client.js";
-import { useIsAdmin } from "./api/useIsAdmin.js";
+import { refreshSession } from "./api/session.js";
+import { useAdminResolved, useIsAdmin } from "./api/useIsAdmin.js";
 import AccountPage from "./account/AccountPage.jsx";
 import ResetPasswordPage from "./account/ResetPasswordPage.jsx";
 import SignInModal from "./account/SignInModal.jsx";
@@ -34,6 +36,7 @@ export default function App() {
   const analysesRef = useRef([]);
   const doneTimerRef = useRef(null);
   const isAdmin = useIsAdmin();
+  const adminResolved = useAdminResolved();
   const [signInOpen, setSignInOpen] = useState(false);
   const [signInError, setSignInError] = useState(null);
 
@@ -44,22 +47,35 @@ export default function App() {
   }, []);
 
   // Back from GitHub/Google: trade the verifier for our session, or reopen sign-in with why it failed.
+  // Only then handle ?admin=1, so it sees the session the verifier just opened.
   useEffect(() => {
+    const adminParam = new URLSearchParams(window.location.search).get("admin") === "1";
     finishSocialSignIn().then((message) => {
-      if (!message) return;
-      setSignInError(message);
-      setSignInOpen(true);
+      if (message) {
+        setSignInError(message);
+        setSignInOpen(true);
+      } else if (adminParam) {
+        handleAdminParam();
+      }
     });
   }, []);
 
-  // ?admin=1 prompts once for a key; the only key-entry path now that operator
-  // controls are hidden.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("admin") === "1" && !getAdminKey()) {
-      const entered = window.prompt("Paste your PSAT admin key:");
-      if (entered) setAdminKey(entered);
+  // ?admin=1 prompts once for a key where the deployment accepts one
+  // (previews, local); production operators get the sign-in dialog instead.
+  async function handleAdminParam() {
+    try {
+      if ((await loadAuthConfig()).adminKey) {
+        if (getAdminKey()) return;
+        const entered = window.prompt("Paste your PSAT admin key:");
+        if (entered) setAdminKey(entered);
+        return;
+      }
+      const { status } = await refreshSession();
+      if (status !== "signed_in") setSignInOpen(true);
+    } catch {
+      // Config unreadable: neither prompt for a key nor claim sign-in is needed.
     }
-  }, []);
+  }
 
   useEffect(() => { analysesRef.current = analyses; }, [analyses]);
   useEffect(() => {
@@ -70,8 +86,8 @@ export default function App() {
 
   // /monitor is operator-only.
   useEffect(() => {
-    if (viewMode === "monitor" && !isAdmin) navigate("/", "default");
-  }, [viewMode, isAdmin]);
+    if (viewMode === "monitor" && adminResolved && !isAdmin) navigate("/", "default");
+  }, [viewMode, isAdmin, adminResolved]);
 
   function navigate(path, mode) {
     const m = mode || parseLocationPath(path).mode;

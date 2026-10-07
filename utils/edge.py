@@ -86,6 +86,10 @@ def public_read(method: str, path: str) -> bool:
     return any(matches(template, path) for template in PUBLIC_READS)
 
 
+def is_production(env: Mapping[str, str] | None = None) -> bool:
+    return (os.environ if env is None else env).get("FLY_APP_NAME") == "psat"
+
+
 @dataclass(frozen=True)
 class EdgeConfig:
     mode: str
@@ -98,7 +102,7 @@ class EdgeConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> EdgeConfig:
         env = os.environ if env is None else env
-        production = env.get("FLY_APP_NAME") == "psat"
+        production = is_production(env)
         mode = env.get("PSAT_EDGE_MODE", "cloudflare" if production else "local")
         if mode not in {"local", "preview", "cloudflare"} or (production and mode != "cloudflare"):
             raise ValueError("Invalid PSAT_EDGE_MODE for this deployment")
@@ -226,6 +230,7 @@ class CloudflareBoundary:
         operator = operator or "x-psat-admin-key" in request.headers or "authorization" in request.headers
         scope.setdefault("state", {})["edge_visitor_ip"] = None
         scope["state"]["edge_operator"] = operator
+        scope["state"]["edge_mode"] = self.config.mode
 
         async def response_send(message):
             if message["type"] == "http.response.start":

@@ -4,7 +4,7 @@ import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import { api } from "../api/client.js";
-import { useIsAdmin } from "../api/useIsAdmin.js";
+import { useAdminResolved, useIsAdmin } from "../api/useIsAdmin.js";
 import { AgentPanel } from "./inspector/AgentPanel.jsx";
 import { findCaller, findFunctionMatches, findFunctionView } from "./lane.js";
 import { useSurfaceSelection } from "./useSurfaceSelection.js";
@@ -96,12 +96,18 @@ function ProtocolSurface({
   // Agent is admin-only and the most useful first stop for admins; everyone
   // else opens in Detail.
   const [sidebarMode, setSidebarMode] = useState(() => (isAdmin ? "agent" : "detail"));
-  // Don't leave admin-only content on screen after the key clears.
+  // Admin status can settle after mount (session, auth config): open Agent
+  // then, once, and don't leave admin-only content on screen once it's gone.
+  const adminResolved = useAdminResolved();
+  const adminSettled = useRef(adminResolved);
   useEffect(() => {
-    if (!isAdmin && sidebarMode === "agent") {
+    if (adminResolved && !adminSettled.current) {
+      adminSettled.current = true;
+      if (isAdmin && sidebarMode === "detail") setSidebarMode("agent");
+    } else if (!isAdmin && sidebarMode === "agent") {
       setSidebarMode("detail");
     }
-  }, [isAdmin, sidebarMode]);
+  }, [adminResolved, isAdmin, sidebarMode]);
   // Upgrade history per proxy job, fetched lazily: /api/company reports
   // upgrade_count=null until the chain monitor ingests events.
   const [upgradeHistoryCache, setUpgradeHistoryCache] = useState({});

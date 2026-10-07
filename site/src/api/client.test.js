@@ -140,3 +140,39 @@ describe("company provenance", () => {
     },
   );
 });
+
+describe("shared admin key", () => {
+  function recordKeyHeaders() {
+    const sent = [];
+    setFetchHandler("/api/jobs", (url, init) => {
+      sent.push(new Headers(init?.headers).get("X-PSAT-Admin-Key"));
+      return [];
+    });
+    return sent;
+  }
+
+  it("is sent where the deployment accepts one", async () => {
+    window.localStorage.setItem("psat_admin_key", "preview-key");
+    const sent = recordKeyHeaders();
+    await api("/api/jobs");
+    expect(sent).toEqual(["preview-key"]);
+  });
+
+  it("is never sent to production, and a stale stored key is forgotten", async () => {
+    window.localStorage.setItem("psat_admin_key", "stale-key");
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: [], dev_login: false, admin_key: false }));
+    const sent = recordKeyHeaders();
+    await api("/api/jobs");
+    expect(sent).toEqual([null]);
+    expect(window.localStorage.getItem("psat_admin_key")).toBeNull();
+  });
+
+  it("is held back but kept when the config can't be read", async () => {
+    window.localStorage.setItem("psat_admin_key", "preview-key");
+    setFetchHandler("/api/auth/config", () => new Response("", { status: 503 }));
+    const sent = recordKeyHeaders();
+    await api("/api/jobs");
+    expect(sent).toEqual([null]);
+    expect(window.localStorage.getItem("psat_admin_key")).toBe("preview-key");
+  });
+});

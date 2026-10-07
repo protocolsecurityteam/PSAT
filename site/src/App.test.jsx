@@ -13,7 +13,7 @@
 // changes during legitimate refactors.
 
 import React from "react";
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App.jsx";
@@ -109,6 +109,76 @@ describe("App router smoke tests", () => {
       window.dispatchEvent(new Event("psat:auth-required"));
     });
     expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
+  });
+
+  it("?admin=1 asks for the shared key only where the deployment accepts one", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue(null);
+    navigateTo("/?admin=1");
+    render(<App />);
+    await waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+  });
+
+  it("?admin=1 on production opens sign-in instead of asking for a key", async () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("pasted-key");
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github"], dev_login: false, admin_key: false }));
+    // Any route works; /account renders fastest.
+    navigateTo("/account?admin=1");
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("?admin=1 on production opens sign-in even with an old key still stored", async () => {
+    window.localStorage.setItem("psat_admin_key", "stale-key");
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github"], dev_login: false, admin_key: false }));
+    navigateTo("/account?admin=1");
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Continue with GitHub" })).toBeInTheDocument();
+  });
+
+  it("?admin=1 waits for a returning social sign-in instead of opening sign-in over it", async () => {
+    let signedIn = false;
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: ["github"], dev_login: false, admin_key: false }));
+    setFetchHandler("/api/me", () => (signedIn
+      ? { email: "boss@example.com", is_admin: true }
+      : new Response(JSON.stringify({ detail: "Sign in required" }), { status: 401, headers: { "Content-Type": "application/json" } })));
+    setFetchHandler("/api/auth/session", async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      signedIn = true;
+      return { status: "signed_in" };
+    });
+    navigateTo("/account?admin=1&neon_auth_session_verifier=v1");
+    render(<App />);
+    await waitFor(() => expect(signedIn).toBe(true));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByRole("button", { name: "Continue with GitHub" })).toBeNull();
+  });
+
+  it("a stored key shows no operator UI until the server confirms keys are accepted", async () => {
+    window.localStorage.setItem("psat_admin_key", "stale-key");
+    setFetchHandler("/api/auth/config", () => new Promise(() => {}));
+    navigateTo("/monitor");
+    render(<App />);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.queryByText(/Active · queued \+ processing/i)).toBeNull();
+  });
+
+  it("a stored key with an unreadable config settles as non-admin", async () => {
+    window.localStorage.setItem("psat_admin_key", "preview-key");
+    setFetchHandler("/api/auth/config", () => new Response("", { status: 503 }));
+    navigateTo("/monitor");
+    render(<App />);
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    expect(window.localStorage.getItem("psat_admin_key")).toBe("preview-key");
+  });
+
+  it("a stale stored key on production neither unlocks /monitor nor survives", async () => {
+    window.localStorage.setItem("psat_admin_key", "stale-key");
+    setFetchHandler("/api/auth/config", () => ({ enabled: true, providers: [], dev_login: false, admin_key: false }));
+    navigateTo("/monitor");
+    render(<App />);
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    await waitFor(() => expect(window.localStorage.getItem("psat_admin_key")).toBeNull());
   });
 
   it("renders the company overview at /company/:name", async () => {

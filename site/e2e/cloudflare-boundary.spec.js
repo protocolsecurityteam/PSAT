@@ -27,7 +27,8 @@ test("anonymous browsing, origin denial, and both operator credentials", async (
   page.once("dialog", (dialog) => dialog.accept("test-admin-key"));
   await page.goto("/__test_login");
   await expect(page).toHaveURL(/\/operator\/\?admin=1$/);
-  expect(await page.evaluate(() => localStorage.getItem("psat_admin_key"))).toBe("test-admin-key");
+  // The prompt waits for /api/auth/config to confirm this deployment accepts keys.
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("psat_admin_key"))).toBe("test-admin-key");
   // page.request shares the browser's signed, HTTP-only test Access cookie.
   expect((await page.request.get("/api/jobs")).status()).toBe(401);
   for (const path of ["/api/jobs", "/operator/api/jobs"]) {
