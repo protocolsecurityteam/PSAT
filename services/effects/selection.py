@@ -40,7 +40,12 @@ from db.models import (
     JobStatus,
     TvlSnapshot,
 )
-from services.effects.config import EFFECT_CLASS_SUPPLY, EFFECT_CLASS_VALUE_OUT, NATIVE_ASSET_LOG_EMITTER
+from services.effects.config import (
+    EFFECT_CLASS_FREEZE_PAUSE,
+    EFFECT_CLASS_SUPPLY,
+    EFFECT_CLASS_VALUE_OUT,
+    NATIVE_ASSET_LOG_EMITTER,
+)
 from services.monitoring.balance_reads import positive_raw_balance
 from utils import claim_ids as C
 from utils.balance_status import (
@@ -55,9 +60,11 @@ logger = logging.getLogger(__name__)
 _NODE_PREFIX = "address:"
 
 # Claim families that re-enroll an already-claimed function: ``flow.*`` needs the value-reach probe, ``supply.*`` the
-# mint-backing probe. Other families are already explained.
+# mint-backing probe, ``pause.set`` the freeze probe (a static claim names the latch; only the fork witnesses what it
+# freezes). Other families are already explained.
 _FLOW_CLAIMS = frozenset({C.FLOW_OUT, C.FLOW_IN})
 _SUPPLY_CLAIMS = frozenset({C.SUPPLY_MINT, C.SUPPLY_BURN})
+_PAUSE_CLAIMS = frozenset({C.PAUSE_SET})
 
 # Claims that don't explain value/supply behaviour (``rate_limit.consume`` is a zero-weight fact,
 # ``delegatecall.execute`` names code provenance). Filtered before :func:`_enrolled_families`, so a row carrying only
@@ -116,7 +123,7 @@ class Candidate:
     value_at_stake_usd: Decimal = _ZERO_USD
     # Where the state lives; empty for legacy or non-proxy rows.
     deployment_address: str = ""
-    # ``None``: blank, synthesize every class. Non-empty: re-enrolled for exactly those flow/supply families.
+    # ``None``: blank, synthesize every class. Non-empty: re-enrolled for exactly those flow/supply/pause families.
     restrict_families: frozenset[str] | None = None
     # The protocol's witnessed holdings from ``contract_balances`` (not control edges, which carry no fund flow), per
     # asset, for the value-reach probe. ``acting_balance_usd`` is this deployment's balance, the floor when nothing is
@@ -794,7 +801,7 @@ def _cascade_rows(
     Probed from :data:`calldata.NEUTRAL_CALLER`. Kept narrow to avoid wrapper noise.
 
     Filter (b), the blank-claim gate, runs in Python (:func:`_enrolled_families`): blank rows get full synthesis,
-    flow/supply-claimed rows are re-enrolled for those families, other claimed rows are dropped in
+    flow/supply/pause-claimed rows are re-enrolled for those families, other claimed rows are dropped in
     :func:`select_candidates`.
 
     ``scope`` narrows to one job's contracts (:class:`JobScope`); ``None`` is protocol-wide.
@@ -846,7 +853,7 @@ def _enrolled_families(claims: Any, *, public: bool = False) -> frozenset[str] |
     """Which effect families to probe, from the claims.
 
     * ``None``: blank (``[]``, SQL NULL and JSON null alike); synthesize everything.
-    * non-empty: re-enrolled for ``value_out`` and/or ``supply``.
+    * non-empty: re-enrolled for ``value_out``, ``supply`` and/or ``freeze_pause``.
     * empty: only other claims, already explained; dropped. Unrecognised shapes enroll nothing.
 
     :data:`_ENROLLMENT_TRANSPARENT_CLAIM_IDS` are removed first so they never turn a blank row into a dropped one.
@@ -871,6 +878,8 @@ def _enrolled_families(claims: Any, *, public: bool = False) -> frozenset[str] |
             families.add(EFFECT_CLASS_VALUE_OUT)
         elif cid in _SUPPLY_CLAIMS:
             families.add(EFFECT_CLASS_SUPPLY)
+        elif cid in _PAUSE_CLAIMS:
+            families.add(EFFECT_CLASS_FREEZE_PAUSE)
     return frozenset(families)
 
 
