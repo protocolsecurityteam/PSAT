@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from utils.logging import record_degraded
+
 from .context import ClaimContext
 from .matchers import discover
 from .registry import emit_claim, legacy_projections, registry, resolve_claim_precedence
@@ -16,7 +18,8 @@ logger = logging.getLogger(__name__)
 def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArtifact:
     """Run every registered matcher over the facts and return the claims artifact.
 
-    A raising matcher only forfeits its own claims. Each claim keeps its strongest tier; ordering is deterministic.
+    A raising matcher forfeits all of its claims, recorded as degraded: a prefix from the functions it reached before
+    raising would read as its complete verdict. Each claim keeps its strongest tier; ordering is deterministic.
     """
     if (
         isinstance(effects, dict)
@@ -31,7 +34,9 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     signatures = ctx.function_signatures()
     functions: dict[str, list[Claim]] = {signature: [] for signature in signatures}
 
+    failed_matchers: list[str] = []
     for entry in registry().values():
+        matched: list[tuple[str, Claim]] = []
         try:
             if not entry.gate(ctx):
                 continue
@@ -69,14 +74,19 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
                     evidence.witness["authority_scope_ids"] = [s["id"] for s in selected]
                 elif source_sites:
                     evidence.witness["authority_scope_ids"] = []
-                functions[signature].append(emit_claim(entry.claim_id, evidence.tier, evidence.witness))
-        except Exception:
+                matched.append((signature, emit_claim(entry.claim_id, evidence.tier, evidence.witness)))
+        except Exception as exc:
+            record_degraded(phase="claim_matcher", exc=exc, context={"claim_id": entry.claim_id})
             logger.warning(
-                "claim matcher %s failed",
+                "claim matcher %s failed; none of its claims are published",
                 entry.claim_id,
                 extra={"claim_id": entry.claim_id},
                 exc_info=True,
             )
+            failed_matchers.append(entry.claim_id)
+            continue
+        for signature, claim in matched:
+            functions[signature].append(claim)
 
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
@@ -95,6 +105,7 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
         "contract_name": ctx.contract_name,
         "functions": functions,
         "abi_selectors": abi_selectors,
+        "failed_matchers": failed_matchers,
     }
 
 

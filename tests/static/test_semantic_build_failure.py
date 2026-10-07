@@ -91,7 +91,13 @@ def test_the_static_worker_keeps_a_failed_build_away_from_the_facts(db_session, 
 @requires_postgres
 @pytest.mark.parametrize(
     "degradation",
-    ["legacy_trees_error_shape", "legacy_effects_error_shape", "effects_error_artifact", "effects_missing"],
+    [
+        "legacy_trees_error_shape",
+        "legacy_effects_error_shape",
+        "effects_error_artifact",
+        "effects_missing",
+        "analysis_reports_failure",
+    ],
 )
 def test_a_degraded_donor_is_never_a_static_cache(db_session, degradation):  # noqa: F811
     from db.models import Artifact
@@ -106,8 +112,16 @@ def test_a_degraded_donor_is_never_a_static_cache(db_session, degradation):  # n
         store_artifact(db_session, donor.id, "effects", data=dict(ERROR_SHAPE))
     elif degradation == "effects_error_artifact":
         store_artifact(db_session, donor.id, "effects_error", data=dict(ERROR_SHAPE))
-    else:
+    elif degradation == "effects_missing":
         db_session.query(Artifact).filter(Artifact.job_id == donor.id, Artifact.name == "effects").delete()
+    else:
+        # A claim matcher raised: the effects stay complete-shaped, only the analysis records it.
+        store_artifact(
+            db_session,
+            donor.id,
+            "contract_analysis",
+            data={"analysis_status": {"static_analysis_completed": False, "errors": ["claim_matcher: x"]}},
+        )
     db_session.commit()
 
     assert find_completed_static_cache(db_session, ADDR_A) is None
@@ -169,3 +183,65 @@ def test_a_degraded_nested_build_fails_the_node_instead_of_caching(tmp_path, mon
     monkeypatch.setattr(core, "build_effects", _boom)
     with pytest.raises(recursive.DegradedStaticAnalysisError, match="effects_emit"):
         recursive._build_static_artifacts(ADDR_A, "t", chain_id=1)
+
+
+@requires_postgres
+def test_a_ready_row_holding_a_failed_build_fails_the_nested_node(cm_db):  # noqa: F811
+    """A row published before failed builds were refused is not served: its analysis rests on the failed trees."""
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import ContractMaterialization
+    from services.resolution import recursive
+
+    keccak = "0x" + "33" * 32
+    cm_db.add(
+        ContractMaterialization(
+            chain="1",
+            bytecode_keccak=keccak,
+            address=ADDR_A.lower(),
+            contract_name="C",
+            analysis={"subject": {"address": ADDR_A.lower(), "name": "C"}},
+            tracking_plan={"contract_address": ADDR_A.lower(), "tracked_controllers": []},
+            predicate_trees=dict(ERROR_SHAPE),
+            status="ready",
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        )
+    )
+    cm_db.commit()
+
+    with pytest.raises(recursive.DegradedStaticAnalysisError, match="failed predicate build"):
+        recursive._materialize_with_cross_process_cache(
+            effective_address=ADDR_A, bytecode_keccak=keccak, workspace_prefix="t", chain="ethereum"
+        )
+
+
+def test_a_matcher_that_raised_reports_the_analysis_incomplete(tmp_path):
+    from services.static.claims import RegistryEntry, register
+    from services.static.claims.registry import _REGISTRY
+    from services.static.contract_analysis_pipeline import core
+    from tests.support.foundry_project import write_foundry_project
+
+    def _raises(_ctx, _fn):
+        raise RuntimeError("matcher blew up")
+
+    register(
+        RegistryEntry(
+            claim_id="test.raising_in_pipeline",
+            sentence="always explodes",
+            gate=lambda _ctx: True,
+            trigger=_raises,
+            legacy_projection=None,
+            consumer_family="control_plane",
+            grant_class="control.gate",
+        )
+    )
+    try:
+        analysis, _trees, _effects = core.collect_contract_analysis_with_artifacts(
+            write_foundry_project(tmp_path, "C", SOURCE)
+        )
+    finally:
+        _REGISTRY.pop("test.raising_in_pipeline", None)
+
+    assert analysis["analysis_status"] == {
+        "static_analysis_completed": False,
+        "errors": ["claim_matcher: test.raising_in_pipeline"],
+    }

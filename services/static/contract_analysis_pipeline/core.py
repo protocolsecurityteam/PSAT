@@ -199,6 +199,10 @@ def collect_contract_analysis_with_artifacts(
             claims_artifact = build_claims(subject_contract, effects_artifact, predicate_trees_artifact)
             attach_claims_to_effects(effects_artifact, claims_artifact)
             project_effect_labels(effects_artifact)
+            # A matcher that raised published nothing; its claims are not determined, not absent.
+            semantic_errors.extend(
+                f"claim_matcher: {claim_id}" for claim_id in claims_artifact.get("failed_matchers") or []
+            )
         except Exception as exc:
             logger.warning(
                 "claims emit failed for %s",
@@ -206,6 +210,7 @@ def collect_contract_analysis_with_artifacts(
                 extra={"exc_type": type(exc).__name__, "phase": "claims"},
             )
             record_degraded(phase="claims", exc=exc, context={"project_dir": str(project_dir)})
+            semantic_errors.append(f"claims: {type(exc).__name__}: {exc}")
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)

@@ -25,7 +25,13 @@ from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
-from .artifacts import SEMANTIC_PAYLOAD_KEYS, failed_semantic_artifact, get_artifact, store_artifact
+from .artifacts import (
+    SEMANTIC_PAYLOAD_KEYS,
+    analysis_reports_failure,
+    failed_semantic_artifact,
+    get_artifact,
+    store_artifact,
+)
 
 logger = logging.getLogger("db.queue")
 
@@ -129,7 +135,8 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
 
 
 def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
-    """Whether a donor holds both semantic artifacts, readable and not a failed build.
+    """Whether a donor holds both semantic artifacts, readable and not a failed build, under an analysis that doesn't
+    report a failure.
 
     A failed build (``<name>_error``, or the older error shape under the artifact's own name) copied into a new job
     would never be rebuilt.
@@ -146,7 +153,7 @@ def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
     )
     if not names.issuperset(SEMANTIC_PAYLOAD_KEYS) or any(f"{name}_error" in names for name in SEMANTIC_PAYLOAD_KEYS):
         return False
-    for name in SEMANTIC_PAYLOAD_KEYS:
+    for name in ("contract_analysis", *SEMANTIC_PAYLOAD_KEYS):
         try:
             value = get_artifact(session, job_id, name)
         except Exception as exc:
@@ -160,6 +167,9 @@ def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
             )
             return False
         if not isinstance(value, dict) or failed_semantic_artifact(name, value):
+            return False
+        # A failed claim matcher leaves complete-shaped effects; only the analysis says its claims are missing.
+        if name == "contract_analysis" and analysis_reports_failure(value):
             return False
     return True
 
