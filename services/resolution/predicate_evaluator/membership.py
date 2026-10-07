@@ -15,6 +15,7 @@ from ..capabilities import (
     ExternalCheck,
     union,
 )
+from ..pass_memo import canonical, memoized
 from .binding import _selector_for_canonical_signature, _stored_dispatch_selector
 from .telemetry import _bump_resolve_counter
 
@@ -77,12 +78,17 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
 
     if not isinstance(contract_address, str) or not contract_address.startswith("0x"):
         return None
-    admin_words = _call_unary_bytes32_view(
-        rpc_url=rpc_url,
-        contract_address=contract_address,
-        selector=selector,
-        args=role_words,
-        block=getattr(outer_ctx, "block", None) or ctx.block,
+    view_block = getattr(outer_ctx, "block", None) or ctx.block
+    admin_words = memoized(
+        outer_ctx,
+        ("unary_bytes32_view", rpc_url, contract_address.lower(), selector.lower(), tuple(role_words), view_block),
+        lambda: _call_unary_bytes32_view(
+            rpc_url=rpc_url,
+            contract_address=contract_address,
+            selector=selector,
+            args=role_words,
+            block=view_block,
+        ),
     )
     if not admin_words:
         return CapabilityExpr.external_check_only(
@@ -113,6 +119,46 @@ def _observed_event_key_words(
     key_index: int,
 ) -> list[str] | None:
     """Key words observed in the indexed rows for ``event_hints``; None when a row carries undecodable data."""
+    from services.resolution.adapters.event_indexed import _resolve_event_address
+
+    hint_key = tuple(
+        (
+            _resolve_event_address(cast(dict[str, Any], descriptor), hint, outer_ctx),
+            str(hint.get("topic0") or "").lower(),
+            canonical(hint.get("topics_to_keys") or {}),
+            canonical(hint.get("data_to_keys") or {}),
+        )
+        for hint in event_hints
+    )
+    return memoized(
+        outer_ctx,
+        (
+            "observed_event_key_words",
+            getattr(outer_ctx, "chain_id", None),
+            getattr(outer_ctx, "block", None),
+            hint_key,
+            key_index,
+            id(session),
+        ),
+        lambda: _scan_observed_event_key_words(
+            session=session,
+            outer_ctx=outer_ctx,
+            descriptor=descriptor,
+            event_hints=event_hints,
+            key_index=key_index,
+        ),
+        keep_alive=(session,),
+    )
+
+
+def _scan_observed_event_key_words(
+    *,
+    session: Any,
+    outer_ctx: Any,
+    descriptor: SetDescriptor,
+    event_hints: list[dict[str, Any]],
+    key_index: int,
+) -> list[str] | None:
     from sqlalchemy import func, select
 
     from db.models import IndexedEventLog

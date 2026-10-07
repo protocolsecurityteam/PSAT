@@ -48,6 +48,7 @@ from .one_shot_probe import (
     resolve_one_shot_state,
     tree_has_one_shot_role,
 )
+from .pass_memo import PASS_MEMO
 from .permissionless_shapes import CALLER_GATE_BASIS_TAGS
 from .predicate_evaluator import evaluate_tree_with_registry
 from .repos import PostgresEventLogRepo
@@ -336,6 +337,8 @@ def resolve_contract_capabilities(
     live_read_memo: dict[Any, Any] = {}
     # Per-pass Solmate RolesAuthority folds, one per authority; discarded with this frame.
     solmate_role_states: dict[Any, Any] = {}
+    # Per-pass leaf evaluations shared by entry points, their effect-scope sites and inlined children (``pass_memo``).
+    leaf_memo: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
     # Pin one finalized height for the whole pass (#119), stepped back ``resolver_pin_margin`` so healthy cursors stay
     # ``exact`` and stalled ones demote. ``None`` leaves it unpinned, which demotes (safe). The differential probe keeps
@@ -377,6 +380,7 @@ def resolve_contract_capabilities(
                 "resolve_counters": resolve_counters,
                 "live_read_memo": live_read_memo,
                 "solmate_role_states": solmate_role_states,
+                PASS_MEMO: leaf_memo,
             },
         )
         fn_started = time.monotonic()
