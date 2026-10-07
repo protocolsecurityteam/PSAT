@@ -136,8 +136,8 @@ def dispatch_signature(callee: Any, declared_signature: str | None = None) -> st
 
     Lowered from the live Slither types; a public state variable's getter uses Slither's own lowered signature.
     ``declared_signature`` (Slither's spelling) stands in only when it is already canonical, since an unlowered name
-    hashes to a selector the chain never dispatches. A library hashes struct and enum parameters by name, not by ABI
-    type, so its non-elementary functions are left undetermined.
+    hashes to a selector the chain never dispatches. A library hashes struct, enum and contract parameters by name and
+    suffixes storage parameters with `` storage``; neither form is reproduced here, so those functions are undetermined.
     """
     from slither.core.variables.state_variable import StateVariable
 
@@ -147,7 +147,10 @@ def dispatch_signature(callee: Any, declared_signature: str | None = None) -> st
             signature = callee.solidity_signature
         except (AttributeError, KeyError, TypeError, ValueError):
             signature = None
-    elif callee is not None and not getattr(getattr(callee, "contract_declarer", None), "is_library", False):
+    elif getattr(getattr(callee, "contract_declarer", None), "is_library", False):
+        if any(getattr(p, "location", None) == "storage" for p in getattr(callee, "parameters", None) or []):
+            return None
+    elif callee is not None:
         signature = _canonical_signature(callee)
     if signature is None:
         signature = declared_signature
@@ -269,7 +272,7 @@ def _build_predicate_artifacts_with_pause_info(
             fns_attempted += 1
             # No selector to canonicalize.
             if not _is_fallback_or_receive(fn):
-                canonical = _canonical_signature(fn)
+                canonical = dispatch_signature(fn, fn.full_name)
                 if canonical is not None and canonical != fn.full_name:
                     canonical_signatures[fn.full_name] = canonical
             fn_started = time.monotonic()

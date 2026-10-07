@@ -39,6 +39,7 @@ library Auth {
     struct Cfg { address owner; uint256 level; }
     function ok(Cfg memory c, address a) public pure returns (bool) { return c.owner == a; }
     function plain(uint256 x) public pure returns (uint256) { return x; }
+    function total(uint256[] storage xs) public view returns (uint256) { return xs.length; }
 }
 
 interface IRegistry {
@@ -205,13 +206,18 @@ def test_a_public_getter_call_carries_the_getter_dispatch_selector(trees):
 
 
 def test_a_library_function_with_a_struct_parameter_has_no_determined_selector(compiled):
-    """A library hashes struct and enum parameters by name (``ok(Auth.Cfg,address)``), not by ABI tuple."""
+    """A library hashes a struct parameter by name (``ok(Auth.Cfg,address)``) and a storage parameter with its
+    location (``total(uint256[] storage)``); Slither's spelling and the ABI lowering reproduce neither."""
     from services.static.contract_analysis_pipeline.predicate_artifacts import dispatch_selector
 
     library = compiled["Auth"]
     by_name = {fn.name: fn for fn in library.functions}
     assert dispatch_selector(by_name["ok"], by_name["ok"].full_name) is None
+    assert dispatch_selector(by_name["total"], by_name["total"].full_name) is None
     assert dispatch_selector(by_name["plain"], by_name["plain"].full_name) == _sel("plain(uint256)")
     records = build_effects(library)["functions"]
     assert records["ok(Auth.Cfg,address)"]["selector"] is None
+    assert records["total(uint256[])"]["selector"] is None
     assert records["plain(uint256)"]["selector"] == _sel("plain(uint256)")
+    # Selector consumers read the same answer from the predicate artifact: no lowered form for a library.
+    assert "ok(Auth.Cfg,address)" not in build_predicate_artifacts(library).get("canonical_signatures", {})
