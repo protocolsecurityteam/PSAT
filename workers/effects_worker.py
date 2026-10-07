@@ -292,7 +292,6 @@ class _Seams:
     transcript_store: Any
     capability_store: CapabilityStore
     chain_id: int
-    call_batch: Any = None
     anvil_factory: Any = None
     # ``() -> int | None``: the head, pinned once at preflight for every Tier-1 probe. ``None`` in tests.
     block_number: Any = None
@@ -327,7 +326,6 @@ class _Counters:
     verdicts_written: int = 0
     discrepancies_filed: int = 0
     new_idiom_candidates: int = 0
-    upstream_requests: int = 0
     # ``None`` until a sample succeeds, never a fake 0 MB.
     peak_anvil_rss_mb: int | None = None
     # Candidate units: candidates that never reached the worklist.
@@ -380,7 +378,7 @@ class EffectsWorker(BaseWorker):
         if self._injected_seams is not None:
             return self._injected_seams
 
-        from services.clients.rpc import eth_call_batch, require_rpc_url
+        from services.clients.rpc import require_rpc_url
         from services.effects.simulate import eth_simulate_v1
 
         chain_id = _chain_id_for_job(job)
@@ -395,9 +393,6 @@ class EffectsWorker(BaseWorker):
         def simulate(calls, block_tag, overrides):
             return eth_simulate_v1(rpc_url, calls, block_tag, overrides, chain_id=chain_id)
 
-        def call_batch(calls, block_tag="latest"):
-            return eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
-
         def block_number() -> int | None:
             from services.clients.rpc import rpc_request
 
@@ -411,7 +406,6 @@ class EffectsWorker(BaseWorker):
             transcript_store=self._make_transcript_store(session, job),
             capability_store=self._capability_store,
             chain_id=chain_id,
-            call_batch=call_batch,
             anvil_factory=self._anvil_factory(chain_id, rpc_url),
             block_number=block_number,
         )
@@ -708,9 +702,6 @@ class EffectsWorker(BaseWorker):
         except UnknownChainError:
             hardfork = "prague"
 
-        def on_requests(n: int) -> None:
-            counters.upstream_requests += max(0, n)
-
         # Built here so the job owns its cost ceiling and can report spend; the same conditions as the lazy path.
         self._seeder = None
         if supported and input_seeding_enabled():
@@ -726,9 +717,7 @@ class EffectsWorker(BaseWorker):
             simulate=seams.simulate,
             simulate_supported=supported,
             transcript_store=seams.transcript_store,
-            call_batch=seams.call_batch,
             anvil_factory=seams.anvil_factory,
-            on_requests=on_requests,
             seeder=self._seeder,
         )
 
@@ -1403,7 +1392,6 @@ class EffectsWorker(BaseWorker):
         record_stage_metric("verdicts_written", counters.verdicts_written)
         record_stage_metric("discrepancies_filed", counters.discrepancies_filed)
         record_stage_metric("new_idiom_candidates", counters.new_idiom_candidates)
-        record_stage_metric("upstream_requests", counters.upstream_requests)
         # Only when a sample succeeded.
         record_stage_metric("peak_anvil_rss_measured", counters.peak_anvil_rss_mb is not None)
         if counters.peak_anvil_rss_mb is not None:

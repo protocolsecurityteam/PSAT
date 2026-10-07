@@ -60,7 +60,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
     },
     "workers/effects_worker.py": {
         # A resource side-effect, not a degraded verdict.
-        486: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        480: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
     "services/effects/anvil.py": {
         714: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",

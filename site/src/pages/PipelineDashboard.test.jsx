@@ -482,7 +482,7 @@ describe("PipelineDashboard — job drill-in", () => {
             elapsed_s: 22,
             worker_id: "EffectsWorker-7",
             status: "success",
-            metrics: { candidates_in: 12, cache_hits_kernel: 9, verdicts_written: 12, discrepancies_filed: 1 },
+            metrics: { candidates_in: 12, cache_hits_kernel: 9, verdicts_written: 12, discrepancies_filed: 1, upstream_requests: 0 },
           },
           coverage: { stage: "coverage", elapsed_s: 4, worker_id: "CoverageWorker-1", status: "success", metrics: {} },
         },
@@ -507,6 +507,7 @@ describe("PipelineDashboard — job drill-in", () => {
     expect(within(dock).getByText("candidates")).toBeInTheDocument();
     expect(within(dock).getByText("kernel hits")).toBeInTheDocument();
     expect(within(dock).getByText("verdicts")).toBeInTheDocument();
+    expect(within(dock).queryByText(/rpc reqs|upstream requests/)).not.toBeInTheDocument();
     expect(within(dock).getByText(/EffectsWorker-7/)).toBeInTheDocument();
   });
 
