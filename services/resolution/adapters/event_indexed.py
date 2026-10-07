@@ -190,7 +190,7 @@ class EventIndexedAdapter:
                 basis = ["no_index_cursor"]
                 if _descriptor_is_caller_keyed(descriptor):
                     basis.append("caller_keyed_membership_allowlist")
-                return self._external_check(descriptor, first_hint, ctx, basis)
+                return self._external_check(descriptor, first_hint, ctx, basis, awaited_hints=event_hints)
             merged.extend(result.members)
             if result.confidence == "partial" and worst_confidence == "enumerable":
                 worst_confidence = "partial"
@@ -224,6 +224,8 @@ class EventIndexedAdapter:
         hint: dict,
         ctx: EvaluationContext,
         basis: list[str],
+        *,
+        awaited_hints: list[dict] | None = None,
     ) -> CapabilityExpr:
         extra: dict[str, Any] = {
             "basis": basis,
@@ -235,6 +237,9 @@ class EventIndexedAdapter:
         # Only ``no_index_cursor`` waits on the index (see solmate_roles._check_only).
         if "no_index_cursor" in basis:
             extra["deferred_pending_index"] = True
+            topic0s = _awaited_topic0s(awaited_hints)
+            if topic0s:
+                extra["deferred_topic0s"] = topic0s
         target = _resolve_event_address(descriptor, hint, ctx)
         logger.debug(
             "event_indexed decision",
@@ -280,7 +285,7 @@ class EventIndexedAdapter:
         if status == "ok" and durable is not None:
             return durable
         if status == "cold":
-            return self._deferred_value_check(descriptor, ctx, event_address)
+            return self._deferred_value_check(descriptor, ctx, event_address, awaited_hints=set_hints)
         if status == "behind":
             # The durable rows are warm but unproven past their frontier; a full live re-scan is never the fallback.
             return CapabilityExpr.unsupported("event_fold_tail_unavailable")
@@ -294,21 +299,27 @@ class EventIndexedAdapter:
         descriptor: dict,
         ctx: EvaluationContext,
         event_address: str | None,
+        *,
+        awaited_hints: list[dict] | None = None,
     ) -> CapabilityExpr:
         """Defer a cold-index value fold to a gated ``external_check_only`` tagged ``deferred_pending_index`` (keyed
         on ``target_address`` by ``deferred_reconciler``). The ``caller_keyed_membership_allowlist`` basis keeps
         the function gated until the index warms.
         """
+        extra: dict[str, Any] = {
+            "basis": ["no_index_cursor", "caller_keyed_membership_allowlist"],
+            "deferred_pending_index": True,
+            "callee_function": descriptor.get("callee_function"),
+            "callee_signature": descriptor.get("callee_signature"),
+        }
+        topic0s = _awaited_topic0s(awaited_hints)
+        if topic0s:
+            extra["deferred_topic0s"] = topic0s
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=event_address,
                 target_call_selector=_descriptor_dispatch_selector(descriptor),
-                extra={
-                    "basis": ["no_index_cursor", "caller_keyed_membership_allowlist"],
-                    "deferred_pending_index": True,
-                    "callee_function": descriptor.get("callee_function"),
-                    "callee_signature": descriptor.get("callee_signature"),
-                },
+                extra=extra,
             )
         )
 
@@ -464,6 +475,13 @@ class EventIndexedAdapter:
                 }
             ],
         )
+
+
+def _awaited_topic0s(hints: list[dict] | None) -> list[str]:
+    """The topic cursors a cold fold waits on, so the reconciler re-resolves once those (not any cursor at the
+    address) are complete.
+    """
+    return sorted({str(h["topic0"]).lower() for h in hints or [] if isinstance(h, dict) and h.get("topic0")})
 
 
 def _caller_event_arg_position(descriptor: dict, hint: dict) -> int | None:

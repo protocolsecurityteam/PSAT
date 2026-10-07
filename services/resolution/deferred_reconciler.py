@@ -47,9 +47,21 @@ DEFERRED_MARKER = "deferred_pending_index"
 _ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
 
 
-def _iter_deferred_authorities(node: Any) -> Iterator[str]:
-    """Yield ``target_address`` for every ``external_check_only`` leaf flagged ``deferred_pending_index``, walking
-    ``children`` and ``signer``.
+# A deferral's authority and the topic cursors it waits on; an empty tuple (adapters that don't name topics) waits on
+# any exactness-eligible cursor at the address.
+Deferral = tuple[str, tuple[str, ...]]
+
+
+def _deferral(addr: Any, topic0s: Any) -> Deferral | None:
+    if not (isinstance(addr, str) and addr.startswith("0x") and len(addr) == 42):
+        return None
+    topics = tuple(sorted({t.lower() for t in topic0s if isinstance(t, str)})) if isinstance(topic0s, list) else ()
+    return addr.lower(), topics
+
+
+def _iter_deferrals(node: Any) -> Iterator[Deferral]:
+    """Yield every deferral flagged ``deferred_pending_index``: on an ``external_check_only`` leaf, or carried as a
+    trace step by a combinator that folded the probe away (a negated denylist), walking ``children`` and ``signer``.
     """
     if not isinstance(node, dict):
         return
@@ -57,14 +69,25 @@ def _iter_deferred_authorities(node: Any) -> Iterator[str]:
         check = node.get("check") or {}
         extra = check.get("extra") or {}
         if extra.get(DEFERRED_MARKER):
-            addr = check.get("target_address")
-            if isinstance(addr, str) and addr.startswith("0x") and len(addr) == 42:
-                yield addr.lower()
+            deferral = _deferral(check.get("target_address"), extra.get("deferred_topic0s"))
+            if deferral is not None:
+                yield deferral
+    for step in node.get("trace") or []:
+        if isinstance(step, dict) and step.get(DEFERRED_MARKER):
+            deferral = _deferral(step.get("target_address"), step.get("deferred_topic0s"))
+            if deferral is not None:
+                yield deferral
     for child in node.get("children") or []:
-        yield from _iter_deferred_authorities(child)
+        yield from _iter_deferrals(child)
     signer = node.get("signer")
     if isinstance(signer, dict):
-        yield from _iter_deferred_authorities(signer)
+        yield from _iter_deferrals(signer)
+
+
+def _iter_deferred_authorities(node: Any) -> Iterator[str]:
+    """The authority address of every deferral :func:`_iter_deferrals` finds."""
+    for address, _topic0s in _iter_deferrals(node):
+        yield address
 
 
 def _chain_name_for(chain_id: int) -> str | None:
@@ -168,6 +191,29 @@ def _authority_backfilled(session: Session, chain_id: int, event_address: str) -
     return row is not None
 
 
+def _deferral_backfilled(session: Session, chain_id: int, deferral: Deferral) -> bool:
+    """Whether a deferral's re-resolution can answer: each topic cursor it named is backfilled and exactness-eligible,
+    or, when it named none, some cursor at the address is (:func:`_authority_backfilled`).
+
+    Waiting on the named cursors keeps a still-cold topic from re-enqueueing every pass while another topic at the
+    same address is already warm.
+    """
+    address, topic0s = deferral
+    if not topic0s:
+        return _authority_backfilled(session, chain_id, address)
+    warm = set(
+        session.execute(
+            select(func.lower(IndexedEventCursor.topic0))
+            .where(IndexedEventCursor.chain_id == chain_id)
+            .where(func.lower(IndexedEventCursor.event_address) == address)
+            .where(func.lower(IndexedEventCursor.topic0).in_(topic0s))
+            .where(IndexedEventCursor.backfill_complete.is_(True))
+            .where(exactness_eligible_cursor_clause())
+        ).scalars()
+    )
+    return warm.issuperset(topic0s)
+
+
 def _address_has_active_job(session: Session, address: str | None, *, chain_id: int, exclude_job_id: Any) -> bool:
     """Whether a queued/processing job exists for ``(address, chain_id)`` other than ``exclude_job_id``.
 
@@ -206,10 +252,10 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
     ).all()
 
-    # job_id -> (address, deferred authority addresses)
-    by_job: dict[Any, tuple[str | None, set[str]]] = {}
+    # job_id -> (address, deferrals)
+    by_job: dict[Any, tuple[str | None, set[Deferral]]] = {}
     for job_id, address, capability_expr in rows:
-        authorities = set(_iter_deferred_authorities(capability_expr))
+        authorities = set(_iter_deferrals(capability_expr))
         if not authorities:
             continue
         _addr, existing = by_job.setdefault(job_id, (address, set()))
@@ -219,7 +265,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     # doesn't overwrite, since a linked-route job owns a contract and can't be an orphan candidate.
     adopt: dict[Any, int] = {}
     for job_id, address, capability_expr, contract_id in _orphaned_marker_rows(session, chain_id):
-        authorities = set(_iter_deferred_authorities(capability_expr))
+        authorities = set(_iter_deferrals(capability_expr))
         if not authorities:
             continue
         _addr, existing = by_job.setdefault(job_id, (address, set()))
@@ -241,8 +287,8 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     for job_id, (address, authorities) in by_job.items():
         if reenqueued >= limit:
             break
-        # Wait until every authority is warm, bounding re-enqueues to one per transition.
-        if not all(_authority_backfilled(session, chain_id, addr) for addr in authorities):
+        # Wait until every deferral can answer, bounding re-enqueues to one per transition.
+        if not all(_deferral_backfilled(session, chain_id, deferral) for deferral in authorities):
             continue
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
@@ -273,7 +319,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
             "deferred-resolution reconciler re-enqueued policy for job %s address=%s authorities=%s",
             job_id,
             address,
-            sorted(authorities),
+            sorted({addr for addr, _topics in authorities}),
         )
 
     if reenqueued:
