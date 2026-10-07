@@ -153,6 +153,7 @@ def test_process_runs_against_real_queue_and_fake_dapp(
         return {
             "addresses": addresses,
             "interaction_count": len(addresses),
+            "url_outcomes": [{"url": url, "outcome": "loaded", "status": 200, "reason": None} for url in urls],
         }
 
     monkeypatch.setattr(dapp_worker_module, "crawl_dapp", fake_crawl)
@@ -295,3 +296,46 @@ def test_persists_dapp_interactions(
     assert rows[1].type == "personal_sign"
     assert rows[1].to_address is None
     assert rows[1].message == "Sign in"
+
+
+@requires_postgres
+def test_a_crawl_whose_page_never_loaded_is_not_published_as_no_contracts(
+    db_session: Session,
+    dapp_worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from utils.logging import degraded_errors_var
+
+    url = "https://www.ether.fi"
+
+    def fake_crawl(urls, *, chain_id=1, wait=10, progress=None):
+        return {
+            "addresses": [],
+            "interaction_count": 0,
+            "url_outcomes": [
+                {"url": url, "outcome": "blocked", "status": 429, "reason": "x-vercel-mitigated=challenge"}
+            ],
+        }
+
+    monkeypatch.setattr(dapp_worker_module, "crawl_dapp", fake_crawl)
+    job = create_job(db_session, {"dapp_urls": [url], "chain_id": 1}, initial_stage=JobStage.dapp_crawl)
+
+    errors: list = []
+    token = degraded_errors_var.set(errors)
+    try:
+        with pytest.raises(JobHandledDirectly):
+            dapp_worker_module.DAppCrawlWorker().process(db_session, job)
+    finally:
+        degraded_errors_var.reset(token)
+
+    db_session.refresh(job)
+    assert job.detail == (
+        "DApp crawl not_loaded: 0 of 1 URL(s) loaded; 0 addresses written to contracts table, not a complete list"
+    )
+    results = get_artifact(db_session, job.id, "dapp_crawl_results")
+    assert isinstance(results, dict)
+    assert (results["crawl_status"], results["addresses_found"]) == ("not_loaded", 0)
+    assert results["url_outcomes"][0]["outcome"] == "blocked"
+    summary = get_artifact(db_session, job.id, "discovery_summary")
+    assert isinstance(summary, dict) and summary["crawl_status"] == "not_loaded"
+    assert [(e.phase, (e.context or {}).get("url")) for e in errors] == [("dapp_page_load", url)]

@@ -28,7 +28,10 @@ async def _crawl_async(
     token_balance: str = "0x84595161401484A000000",
     wait: int = 10,
     progress: ProgressCallback | None = None,
+    outcomes: dict[str, dict] | None = None,
 ) -> InteractionLog:
+    if outcomes is None:
+        outcomes = {}
     wallet = HoneypotWallet()
     logger.info("Honeypot wallet: %s", wallet.address)
     if progress:
@@ -44,6 +47,13 @@ async def _crawl_async(
 
     logger.info("Crawling %d URLs...", len(urls))
     interaction_log = await crawler.crawl(urls, wait_seconds=wait, progress=progress)
+    # A URL the crawl never reached has no recorded outcome; it is not a loaded page.
+    outcomes.update(
+        {
+            url: crawler.url_outcomes.get(url) or {"outcome": "failed", "status": None, "reason": "not_visited"}
+            for url in urls
+        }
+    )
     return interaction_log
 
 
@@ -54,7 +64,10 @@ def crawl_dapp(
     wait: int = 10,
     progress: ProgressCallback | None = None,
 ) -> dict:
-    """Crawl DApp URLs and return discovered contract addresses."""
+    """Crawl DApp URLs and return discovered contract addresses, with each URL's load outcome (``url_outcomes``,
+    from ``browser.page_load_outcome``): a URL that didn't load contributes nothing, which is not "no contracts".
+    """
+    outcomes: dict[str, dict] = {}
 
     async def _bounded() -> InteractionLog:
         return await asyncio.wait_for(
@@ -63,6 +76,7 @@ def crawl_dapp(
                 chain_id=chain_id,
                 wait=wait,
                 progress=progress,
+                outcomes=outcomes,
             ),
             timeout=_DAPP_CRAWL_TIMEOUT_SECONDS,
         )
@@ -88,4 +102,5 @@ def crawl_dapp(
         "interactions": [asdict(i) for i in interaction_log.interactions],
         "interaction_count": len(interaction_log.interactions),
         "session_start": interaction_log.session_start,
+        "url_outcomes": [{"url": url, **outcomes[url]} for url in urls],
     }
