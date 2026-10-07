@@ -38,8 +38,10 @@ from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materi
 from services.policy import build_effective_permissions, build_principal_labels
 from services.policy.cross_contract_enrichment import (
     apply_claims_to_payload,
+    call_address,
     describe_gaps,
     fetch_sibling_facts,
+    proxy_coverage,
     related_jobs_with_facts,
     relevant_siblings,
     selector_by_function_key,
@@ -965,7 +967,8 @@ class PolicyWorker(BaseWorker):
         )
 
         request = job.request if isinstance(job.request, dict) else {}
-        target_address = (job.address or "").lower()
+        chain_id = _chain_id_for_job(job)
+        target_address = call_address(session, job, chain_id=chain_id)
         if target_effects is None:
             loaded = get_artifact(session, job.id, "effects")
             target_effects = loaded if isinstance(loaded, dict) else None
@@ -978,8 +981,9 @@ class PolicyWorker(BaseWorker):
                 relevant_siblings(
                     session,
                     job,
-                    related_jobs_with_facts(session, job, chain_id=_chain_id_for_job(job)),
+                    related_jobs_with_facts(session, job, chain_id=chain_id),
                     snapshot=control_snapshot,
+                    chain_id=chain_id,
                 ),
                 session_factory=SessionLocal,
             )
@@ -998,6 +1002,7 @@ class PolicyWorker(BaseWorker):
                 proxy_provenance=proxy_provenance_from_classifications(
                     deployment_address, get_artifact(session, job.id, "classifications")
                 ),
+                callee_implementations=facts.implementations,
             )
             gaps = describe_gaps(
                 session,
@@ -1006,8 +1011,9 @@ class PolicyWorker(BaseWorker):
                     control_snapshot.get("controller_values", {}),
                     set(facts.effects),
                     target_address=target_address,
+                    proxy_coverage=proxy_coverage(session, facts, chain_id=chain_id),
                 ),
-                chain_id=_chain_id_for_job(job),
+                chain_id=chain_id,
                 facts=facts,
             )
             ph["siblings"] = len(facts.effects)
