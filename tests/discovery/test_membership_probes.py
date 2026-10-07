@@ -231,3 +231,133 @@ def test_fetch_creations_batches_five_per_call(db_session, monkeypatch):
     assert set(out) == {a.lower() for a in addresses}
     witness = db_session.get(ContractCreationWitness, (1, addresses[0].lower()))
     assert witness is not None and witness.creation_tx_hash == _TX and witness.creation_block == 7
+
+
+def _race_second_writer(first, write_first, write_second):
+    """Run *write_first* in *first* and leave it uncommitted, start *write_second* on its own connection so it blocks
+    on the same key, commit *first*, and return the second writer's exception (or ``None``).
+    """
+    import threading
+    import time
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from tests.conftest import DATABASE_URL
+
+    engine = create_engine(DATABASE_URL)
+    outcome: list[BaseException | None] = []
+
+    def second() -> None:
+        with Session(engine) as session:
+            try:
+                write_second(session)
+                session.commit()
+                outcome.append(None)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the asserting thread
+                session.rollback()
+                outcome.append(exc)
+
+    try:
+        write_first(first)
+        thread = threading.Thread(target=second)
+        thread.start()
+        with engine.connect() as watcher:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                waiting = watcher.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    )
+                ).scalar_one()
+                if waiting:
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("second writer never blocked on the first writer's row")
+        first.commit()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    finally:
+        engine.dispose()
+    return outcome[0]
+
+
+def test_concurrent_code_probes_of_one_address_both_succeed(db_session):
+    address = ADDR(0x300)
+
+    error = _race_second_writer(
+        db_session,
+        lambda s: probes._record_code_probe(s, chain_id=1, address=address, block_number=100, code_absent=False),
+        lambda s: probes._record_code_probe(s, chain_id=1, address=address, block_number=101, code_absent=False),
+    )
+
+    assert error is None
+    db_session.expire_all()
+    witness = db_session.get(ContractCreationWitness, (1, address))
+    assert witness is not None and witness.code_probe_block == 101
+
+
+def test_upgrade_history_witness_never_overwrites_a_concurrent_probe(db_session):
+    from db.creation_witnesses import upsert_creation_witness
+
+    address = ADDR(0x302)
+
+    error = _race_second_writer(
+        db_session,
+        lambda s: probes._record_code_probe(s, chain_id=1, address=address, block_number=500, code_absent=False),
+        lambda s: upsert_creation_witness(
+            s,
+            chain_id=1,
+            address=address,
+            keep_existing=True,
+            creation_tx_hash=_TX,
+            creation_block=9,
+            code_probe_block=8,
+            code_absent_at_probe=True,
+        ),
+    )
+
+    assert error is None
+    db_session.expire_all()
+    witness = db_session.get(ContractCreationWitness, (1, address))
+    assert witness is not None
+    assert (witness.code_probe_block, witness.code_absent_at_probe, witness.creation_tx_hash) == (500, False, None)
+
+
+def test_concurrent_probe_attempts_of_one_contract_merge(db_session):
+    protocol = _protocol(db_session)
+    row = _contract(db_session, ADDR(0x303), nominated=protocol.id)
+    db_session.commit()
+    good = {"status": "probed", "resolved_addresses": [_OWNER]}
+    failed = {"status": "rpc_error", "error": "timeout"}
+
+    error = _race_second_writer(
+        db_session,
+        lambda s: probes._persist_attempt(s, contract_id=row.id, chain_id=1, block_number=100, results=good),
+        lambda s: probes._persist_attempt(s, contract_id=row.id, chain_id=1, block_number=None, results=failed),
+    )
+
+    assert error is None
+    db_session.expire_all()
+    attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
+    assert attempt is not None
+    assert attempt.block_number == 100
+    assert attempt.results == {**good, "last_error": failed}
+
+
+def test_witness_upsert_refreshes_a_row_already_loaded(db_session):
+    from db.creation_witnesses import upsert_creation_witness
+
+    address = ADDR(0x301)
+    upsert_creation_witness(db_session, chain_id=1, address=address)
+    loaded = db_session.get(ContractCreationWitness, (1, address))
+    assert loaded is not None and loaded.creation_tx_hash is None
+
+    upsert_creation_witness(db_session, chain_id=1, address=address.upper().replace("0X", "0x"), creation_tx_hash=_TX)
+
+    refreshed = db_session.get(ContractCreationWitness, (1, address))
+    assert refreshed is loaded and refreshed.creation_tx_hash == _TX
+    with pytest.raises(ValueError):
+        upsert_creation_witness(db_session, chain_id=1, address=address, fetched_at=None)

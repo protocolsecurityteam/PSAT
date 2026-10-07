@@ -1121,7 +1121,7 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
     A factory-deployed proxy's deployment ``Upgraded`` looks like an upgrade on the receipt, so require both Etherscan
     naming the creation tx and ``eth_getCode`` showing no code the block before.
     """
-    from db.models import ContractCreationWitness
+    from db.creation_witnesses import upsert_creation_witness
     from services.clients.etherscan import get as etherscan_get
     from services.clients.rpc import rpc_request
 
@@ -1177,14 +1177,17 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
                     else:
                         probe_block = None
 
-        row = session.get(ContractCreationWitness, (chain_id, address))
-        if row is None:
-            row = ContractCreationWitness(chain_id=chain_id, address=address)
-            session.add(row)
-        row.creation_tx_hash = creation_tx
-        row.creation_block = creation_block
-        row.code_probe_block = probe_block
-        row.code_absent_at_probe = code_absent
+        # Called only for addresses with no row; a concurrent membership probe's latest-block reading must win.
+        upsert_creation_witness(
+            session,
+            chain_id=chain_id,
+            address=address,
+            keep_existing=True,
+            creation_tx_hash=creation_tx,
+            creation_block=creation_block,
+            code_probe_block=probe_block,
+            code_absent_at_probe=code_absent,
+        )
         written += 1
     return written
 

@@ -21,6 +21,9 @@ from .inventory_domain import (
     _debug_log,
     _discover_contract_inventory_pages,
     _domain_candidates_from_results,
+    _get_domain,
+    _is_explorer_domain,
+    _link_addresses,
     _llm_select_domain,
     _maybe_domain,
     _tavily_search,
@@ -130,21 +133,31 @@ def _determine_sources(evidence: list[dict[str, Any]]) -> list[str]:
     return sources
 
 
-def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Build the contract list and a ``{url: id}`` sources map; contracts reference source ids."""
+def _build_contracts(
+    entries: list[dict[str, Any]], limit: int
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, int]]:
+    """Build the contract list, a ``{url: id}`` sources map that contracts reference, and dropped-entry counts by
+    reason.
+
+    *limit* bounds only deployer-expansion-only entries: an address the protocol's own pages list is never cut to make
+    room for one inferred from a deployer wallet.
+    """
     grouped = _collapse_unknown_chain_entries(entries)
     sources_map: dict[str, str] = {}  # url → id
     contracts: list[dict[str, Any]] = []
+    dropped: Counter[str] = Counter()
     for address, evidence in grouped.items():
         _chain, chains = _select_chain_summary(evidence)
         name, aliases = _select_name(evidence)
         confidence, evidence_counts = score_inventory_evidence(_chain, evidence)
         page_urls, explorer_urls = _collect_source_urls(evidence)
         if not page_urls and not explorer_urls:
+            dropped["no_source_url"] += 1
             continue
         source_types = _determine_sources(evidence)
         # Unnamed deployer-only contracts can't be catalogued or analysed.
         if not name and source_types == ["deployer_expansion"]:
+            dropped["unnamed_deployer_only"] += 1
             continue
         source_ids = _register_sources(sources_map, page_urls, explorer_urls)
         contract: dict[str, Any] = {
@@ -160,88 +173,92 @@ def _build_contracts(entries: list[dict[str, Any]], limit: int) -> tuple[list[di
             contract["aliases"] = aliases
         contracts.append(contract)
 
-    sorted_contracts = sorted(
-        contracts,
-        key=lambda item: (
+    def _rank(item: dict[str, Any]) -> tuple:
+        return (
             -float(item["confidence"]),
             item["name"] is None,
             str(item.get("name") or ""),
             CHAIN_SORT_ORDER.get(item["chains"][0] if item["chains"] else "unknown", 50),
             item["address"],
-        ),
-    )[:limit]
-    return sorted_contracts, sources_map
+        )
+
+    listed = [c for c in contracts if c["source"] != ["deployer_expansion"]]
+    inferred = sorted((c for c in contracts if c["source"] == ["deployer_expansion"]), key=_rank)
+    room = max(limit - len(listed), 0)
+    if len(inferred) > room:
+        dropped["deployer_expansion_over_limit"] += len(inferred) - room
+    return sorted(listed + inferred[:room], key=_rank), sources_map, dict(dropped)
 
 
-def _group_multi_deployments(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse same-named contracts at different addresses across chains into one entry with ``deployments``."""
-    by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    ungroupable: list[dict[str, Any]] = []
+def _own_source_ids(base_ids: list[str], address: str, sources: dict[str, str]) -> list[str]:
+    """The legacy group's source ids that can speak for *address*: pages, and locator links naming it."""
+    own: list[str] = []
+    for sid in base_ids:
+        url = sources.get(sid)
+        if not isinstance(url, str):
+            continue
+        if _is_explorer_domain(_get_domain(url)) and address not in _link_addresses(url):
+            continue
+        own.append(sid)
+    return own
+
+
+def inventory_entries(
+    contracts: list[dict[str, Any]], sources: dict[str, str] | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    """One entry per ``(address, chain)``, each carrying that ``chain``, and how many listed deployments had no
+    address.
+
+    An address listed on several chains yields an entry per chain (``chains`` keeps the full list); an entry that
+    already carries ``chain`` is one of these. Expands the legacy shape that folded same-named contracts into one
+    entry carrying ``deployments[]`` and no top-level ``address``; with *sources*, an expanded deployment keeps only
+    the group's sources that can speak for it. A duplicate keeps the first entry and unions ``source`` and
+    ``source_ids``.
+    """
+    out: list[dict[str, Any]] = []
+    by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
+    missing_address = 0
     for contract in contracts:
-        name = contract.get("name")
-        if not name:
-            ungroupable.append(contract)
-            continue
-        by_name[name.lower()].append(contract)
-
-    result: list[dict[str, Any]] = []
-    for _key, group in by_name.items():
-        if len(group) == 1:
-            result.append(group[0])
-            continue
-
-        unique_addresses = {c["address"] for c in group}
-        if len(unique_addresses) == 1:
-            result.append(group[0])
-            continue
-
-        # Base on the highest-confidence entry.
-        group.sort(key=lambda c: -c.get("confidence", 0))
-        base = group[0].copy()
-        all_chains: list[str] = []
-        seen_chains: set[str] = set()
-        deployments: list[dict[str, Any]] = []
-        all_source_ids: list[str] = []
-        seen_source_ids: set[str] = set()
-        max_confidence = 0.0
-
-        for contract in group:
-            dep: dict[str, Any] = {"address": contract["address"]}
-            dep_chains = canonical_chain_list(contract.get("chains", ["unknown"])) or ["unknown"]
-            dep["chains"] = dep_chains
-            for ch in dep_chains:
-                if ch not in seen_chains:
-                    all_chains.append(ch)
-                    seen_chains.add(ch)
-            if contract.get("activity"):
-                dep["activity"] = contract["activity"]
-            if contract.get("rank_score") is not None:
-                dep["rank_score"] = contract["rank_score"]
-            deployments.append(dep)
-            max_confidence = max(max_confidence, contract.get("confidence", 0))
-            for sid in contract.get("source_ids", []):
-                if sid not in seen_source_ids:
-                    all_source_ids.append(sid)
-                    seen_source_ids.add(sid)
-
-        base["chains"] = canonical_chain_list(all_chains) or []
-        base["confidence"] = max_confidence
-        base["source_ids"] = all_source_ids
-        base["deployments"] = deployments
-        base.pop("address", None)
-        result.append(base)
-
-    result.extend(ungroupable)
-    result.sort(
-        key=lambda item: (
-            -float(item.get("rank_score", item.get("confidence", 0))),
-            item.get("name") is None,
-            str(item.get("name") or ""),
-            CHAIN_SORT_ORDER.get(item["chains"][0] if item.get("chains") else "unknown", 50),
-            item.get("address", ""),
-        ),
-    )
-    return result
+        deployments = contract.get("deployments")
+        if isinstance(deployments, list) and not contract.get("address"):
+            base = {k: v for k, v in contract.items() if k != "deployments"}
+            expanded = []
+            for dep in deployments:
+                if not isinstance(dep, dict):
+                    missing_address += 1
+                    continue
+                entry = {**base, **dep}
+                if sources is not None and "source_ids" not in dep:
+                    address = str(dep.get("address") or "").lower()
+                    entry["source_ids"] = _own_source_ids(list(base.get("source_ids") or []), address, sources)
+                expanded.append(entry)
+            if not deployments:
+                missing_address += 1
+        else:
+            expanded = [contract]
+        for entry in expanded:
+            address = str(entry.get("address") or "").strip().lower()
+            if not address:
+                missing_address += 1
+                continue
+            if "chain" in entry:
+                per_chain: list[str | None] = [canonical_chain(entry.get("chain"))]
+            else:
+                per_chain = list(canonical_chain_list(entry.get("chains")) or []) or [None]
+            for chain in per_chain:
+                key = (address, chain)
+                kept = by_key.get(key)
+                if kept is None:
+                    kept = {**entry, "address": address, "chain": chain}
+                    by_key[key] = kept
+                    out.append(kept)
+                    continue
+                for field in ("source", "source_ids"):
+                    merged = list(kept.get(field) or [])
+                    merged.extend(v for v in entry.get(field) or [] if v not in merged)
+                    if merged:
+                        kept[field] = merged
+    return out, missing_address
 
 
 def search_protocol_inventory(
@@ -318,6 +335,7 @@ def search_protocol_inventory(
             "pages_considered": [],
             "pages_selected": [],
             "contracts": [],
+            "dropped": {},
             "errors": errors[:12],
             "notes": notes[:12],
         }
@@ -369,7 +387,7 @@ def search_protocol_inventory(
             notes.append(f"Deployer expansion failed: {exc}")
 
     entries = tavily_entries + deployer_entries
-    contracts, sources_map = _build_contracts(entries, limit=limit)
+    contracts, sources_map, dropped = _build_contracts(entries, limit=limit)
 
     # Resolve unknown chains before ranking (activity needs a chain id).
     def _primary_chain(c: dict[str, Any]) -> str:
@@ -410,8 +428,6 @@ def search_protocol_inventory(
     # No ranking here: the selection stage ranks all sources together
     # (``services/discovery/ranking.rank_contract_rows``).
 
-    contracts = _group_multi_deployments(contracts)
-
     if not contracts:
         notes.append("No inventory contracts extracted from selected pages")
     notes.append(f"Tavily queries used: {queries_used[0]}/{max_queries}")
@@ -435,6 +451,7 @@ def search_protocol_inventory(
         "pages_selected": selected_urls[:5],
         "sources": sources_by_id,
         "contracts": contracts,
+        "dropped": dropped,
         "errors": errors[:12],
         "notes": notes[:12],
         "warning": (
@@ -456,12 +473,46 @@ def merge_inventory(prev: dict, new: dict) -> dict:
     """Merge a previous inventory with a new one.
 
     Shared contracts take the new entry with the higher confidence; previous-only contracts decay by
-    :data:`CONFIDENCE_DECAY` and drop below :data:`CONFIDENCE_FLOOR`.
+    :data:`CONFIDENCE_DECAY` and drop below :data:`CONFIDENCE_FLOOR`. Source ids are per run, so a previous-only
+    contract's ids are re-keyed onto the merged sources map by URL.
     """
-    prev_contracts = {c["address"].lower(): c for c in prev.get("contracts", []) if c.get("address")}
-    new_contracts = {c["address"].lower(): c for c in new.get("contracts", []) if c.get("address")}
+    prev_sources = prev.get("sources") or {}
+    new_sources = new.get("sources") or {}
+    remap_sources = isinstance(prev_sources, dict) and isinstance(new_sources, dict)
+    merged_sources: dict[str, str] = dict(new_sources) if isinstance(new_sources, dict) else {}
+    prev_id_to_merged: dict[str, str] = {}
+    if remap_sources:
+        id_by_url = {url: sid for sid, url in merged_sources.items()}
+        for old_id, url in prev_sources.items():
+            if url not in id_by_url:
+                sid = old_id
+                n = len(merged_sources) + 1
+                while sid in merged_sources:
+                    sid, n = f"s{n}", n + 1
+                merged_sources[sid] = url
+                id_by_url[url] = sid
+            prev_id_to_merged[old_id] = id_by_url[url]
 
-    merged: dict[str, dict] = {}
+    def _rekeyed(entry: dict) -> dict:
+        if not remap_sources:
+            return dict(entry)
+        source_ids = list(
+            dict.fromkeys(prev_id_to_merged[i] for i in entry.get("source_ids") or [] if i in prev_id_to_merged)
+        )
+        return {**entry, "source_ids": source_ids}
+
+    prev_entries, prev_missing = inventory_entries(
+        prev.get("contracts", []), prev_sources if isinstance(prev_sources, dict) else None
+    )
+    new_entries, new_missing = inventory_entries(
+        new.get("contracts", []), new_sources if isinstance(new_sources, dict) else None
+    )
+    prev_contracts = {(c["address"], c["chain"]): c for c in prev_entries}
+    new_contracts = {(c["address"], c["chain"]): c for c in new_entries}
+    dropped: Counter[str] = Counter(new.get("dropped") or {})
+    dropped["no_address"] += prev_missing + new_missing
+
+    merged: dict[tuple[str, str | None], dict] = {}
 
     for addr, entry in new_contracts.items():
         if addr not in prev_contracts:
@@ -475,10 +526,11 @@ def merge_inventory(prev: dict, new: dict) -> dict:
 
     for addr, entry in prev_contracts.items():
         if addr not in new_contracts:
-            decayed_entry = dict(entry)
+            decayed_entry = _rekeyed(entry)
             prev_conf = entry.get("confidence", 0) or 0
             decayed_conf = prev_conf * CONFIDENCE_DECAY
             if decayed_conf < CONFIDENCE_FLOOR:
+                dropped["stale_below_confidence_floor"] += 1
                 continue
             decayed_entry["confidence"] = decayed_conf
             merged[addr] = decayed_entry
@@ -490,6 +542,7 @@ def merge_inventory(prev: dict, new: dict) -> dict:
         "company": new.get("company", prev.get("company")),
         "chain": new.get("chain", prev.get("chain")),
         "official_domain": new.get("official_domain") or prev.get("official_domain"),
+        "dropped": {reason: n for reason, n in dropped.items() if n},
         "errors": new.get("errors"),
         "notes": new.get("notes"),
     }
@@ -506,11 +559,6 @@ def merge_inventory(prev: dict, new: dict) -> dict:
                 deduped.append(page)
         result[key] = deduped
 
-    prev_sources = prev.get("sources") or {}
-    new_sources = new.get("sources") or {}
-    if isinstance(prev_sources, dict) and isinstance(new_sources, dict):
-        result["sources"] = {**prev_sources, **new_sources}
-    else:
-        result["sources"] = new_sources or prev_sources
+    result["sources"] = merged_sources if remap_sources else (new_sources or prev_sources)
 
     return result
