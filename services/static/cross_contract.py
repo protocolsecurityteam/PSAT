@@ -78,9 +78,11 @@ def _propagatable(claim: Any) -> bool:
 
 
 def _selector_keys(fn_sig: Any, fn_record: dict[str, Any]) -> set[str]:
-    """The selectors a callee's function record answers to. The caller's sink records the canonical selector; the
-    record's own ``selector`` hashes the declared signature (``sweepTo(IERC20,...)`` keyed wrong). The stamped
-    ``abi_selector`` comes first; the declared form stays as a fallback for artifacts without it.
+    """The selectors a callee's function record answers to. The caller's sink records the canonical selector; a
+    record stored before canonical lowering hashed the declared signature in its own ``selector``
+    (``sweepTo(IERC20,...)`` keyed wrong). The stamped ``abi_selector`` comes first. With no recorded selector the
+    declared form's hash is a name-identity key, not a dispatch claim: it only meets a caller sink that hashed the same
+    unlowered spelling.
     """
     keys: set[str] = set()
     abi_selector = fn_record.get("abi_selector")

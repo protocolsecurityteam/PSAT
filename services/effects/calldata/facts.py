@@ -117,7 +117,7 @@ def _load_contract_facts_uncached(session: Session, address: str) -> ContractFac
         artifact_selector = info.get("selector")
         if isinstance(artifact_selector, str) and artifact_selector.startswith("0x"):
             by_selector.setdefault(artifact_selector.lower(), str(full_name))
-        # The canonical selector wins; the artifact's own derives from the lossy Slither full_name.
+        # The canonical selector wins; an artifact stored before canonical lowering hashed the Slither spelling.
         sig = canonical.get(str(full_name)) or _abi_signature(str(full_name))
         computed = _selector_of(sig)
         if computed:

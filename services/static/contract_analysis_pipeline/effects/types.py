@@ -152,7 +152,9 @@ class ValueFlow(TypedDict):
 class EffectInfo(TypedDict):
     effect_scopes: NotRequired[list[dict[str, Any]]]
     function: str
+    # Hashed from ``abi_signature``; ``""`` for fallback/receive, ``None`` when the signature can't be lowered.
     selector: str | None
+    # Canonical ABI types; ``function`` keeps Slither's spelling.
     abi_signature: str | None
     sinks: list[SinkRecord]
     state_writes: list[StateWriteFact]
@@ -161,7 +163,7 @@ class EffectInfo(TypedDict):
     effect_labels: list[str]
     effect_targets: list[str]
     action_summary: str
-    writer_selectors: list[str]
+    writer_selectors: list[str] | None
     # A selector-bearing, non-view, non-pure entry point; lets policy surface state-changing functions with no sink as
     # unsupported.
     state_changing: bool

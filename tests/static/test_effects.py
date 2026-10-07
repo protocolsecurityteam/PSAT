@@ -95,5 +95,5 @@ def test_effect_entries_preserve_abi_identity_and_authority_update(tmp_path):
     unknown = _info(artifact, callback.full_name)
     assert unknown["abi_signature"] is None
     assert unknown["selector"] is None
-    assert unknown["writer_selectors"] == []
+    assert unknown["writer_selectors"] is None
     assert unknown["state_writes"]

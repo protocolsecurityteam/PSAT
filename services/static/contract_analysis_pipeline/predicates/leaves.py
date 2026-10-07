@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from eth_utils.crypto import keccak
-
 from ..predicate_types import (
     ComparisonOperator,
     LeafKind,
@@ -658,7 +656,7 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
     """``require(other.check(...))``: the call's result drives the gate."""
     callee_name = getattr(getattr(ir, "function", None), "name", None) or getattr(ir, "function_name", None)
     callee_signature = _callee_signature(ir)
-    callee_selector = _selector_for_signature(callee_signature)
+    callee_selector = _dispatch_selector(getattr(ir, "function", None), callee_signature)
     args_operands = [_operand_for_value(a, prov) for a in getattr(ir, "arguments", ())]
     operator: LeafOperator = "truthy" if gate.polarity == "allowed_when_true" else "falsy"
     leaf = _make_leaf(
@@ -759,7 +757,7 @@ def _build_self_gate_leaf(prov: ProvenanceMap, gate: RevertGate, operating_fn: A
     signature = getattr(fn, "full_name", None)
     if not (isinstance(signature, str) and "(" in signature and signature.endswith(")")):
         return None
-    selector = _selector_for_signature(signature)
+    selector = _dispatch_selector(fn, signature)
     caller_operand: Operand = {"source": "msg_sender"}
     leaf = _make_leaf(
         kind="external_bool",
@@ -798,12 +796,11 @@ def _callee_signature(ir: Any) -> str | None:
     return None
 
 
-def _selector_for_signature(signature: str | None) -> str | None:
-    if not signature:
-        return None
-    if "(" not in signature or not signature.endswith(")"):
-        return None
-    return "0x" + keccak(text=signature).hex()[:8]
+def _dispatch_selector(callee: Any, declared_signature: str | None) -> str | None:
+    # ``callee_signature`` keeps Slither's spelling; the selector is the one the call dispatches.
+    from ..predicate_artifacts import dispatch_selector
+
+    return dispatch_selector(callee, declared_signature)
 
 
 def _build_generic_external_set_descriptor(

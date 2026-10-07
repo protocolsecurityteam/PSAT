@@ -23,6 +23,7 @@ from ..permissionless_shapes import (
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
+from .binding import _stored_dispatch_selector
 from .permit import _leaf_is_permit_shape
 from .telemetry import _is_zero_address, _record_delegated_gate_unresolved, _state_var_lookup_key
 
@@ -62,7 +63,7 @@ def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = 
     selector = None
     for op in leaf.get("operands") or []:
         if op.get("source") == "external_call":
-            raw = op.get("callee_selector")
+            raw = _stored_dispatch_selector(op.get("callee_selector"), op.get("callee_signature"))
             selector = raw if isinstance(raw, str) else selector
     check = ExternalCheck(
         target_address=None,
@@ -104,7 +105,7 @@ def _external_check_from_descriptor(
     ctx: EvaluationContext,
 ) -> CapabilityExpr:
     target_address = _target_address_from_descriptor(descriptor, ctx)
-    selector = descriptor.get("callee_selector")
+    selector = _stored_dispatch_selector(descriptor.get("callee_selector"), descriptor.get("callee_signature"))
     check = ExternalCheck(
         target_address=target_address,
         target_call_selector=selector if isinstance(selector, str) else None,

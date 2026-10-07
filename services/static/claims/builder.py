@@ -90,8 +90,9 @@ def build_claims(contract: Any, effects: Any, predicate_trees: Any) -> ClaimsArt
     for signature in functions:
         functions[signature] = resolve_claim_precedence(functions[signature])
 
-    # Retain the canonical stamp for consumers of older effects artifacts as well.
-    # Unlowerable signatures are omitted; fallback/receive have no selector.
+    # The canonical ABI selector (the real ``msg.sig``). Readers prefer it because an effects record stored before
+    # canonical lowering hashed the declared signature, wrong for interface/enum/struct params. Unlowerable signatures
+    # are omitted (not determined); fallback/receive have no selector.
     abi_selectors = {
         signature: selector
         for signature in signatures

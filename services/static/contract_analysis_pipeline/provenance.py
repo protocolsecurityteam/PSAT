@@ -603,7 +603,7 @@ class ProvenanceEngine:
                     callee=callee_name,
                     callee_args_digest=_digest(args_union),
                     callee_signature=callee_signature,
-                    callee_selector=_selector_for_signature(callee_signature),
+                    callee_selector=_dispatch_selector(getattr(ir, "function", None), callee_signature),
                     # The only readable record that, e.g., ``msg.sender`` was consumed.
                     derived_from=arg_origins(args_union),
                 )
@@ -662,7 +662,7 @@ class ProvenanceEngine:
             kind="view_call",
             callee=callee_name,
             callee_signature=callee_name,
-            callee_selector=_selector_for_signature(callee_name),
+            callee_selector=_dispatch_selector(callee, callee_name),
             callee_args_digest=_digest(args_union),
             storage_slot=accessor_slot,
             derived_from=arg_origins(args_union),
@@ -855,10 +855,11 @@ def _callee_signature(ir: Any) -> str | None:
     return None
 
 
-def _selector_for_signature(signature: str | None) -> str | None:
-    if not signature or "(" not in signature or not signature.endswith(")"):
-        return None
-    return "0x" + keccak(text=signature).hex()[:8]
+def _dispatch_selector(callee: Any, declared_signature: str | None) -> str | None:
+    # ``callee_signature`` keeps Slither's spelling; the selector is the one the call dispatches.
+    from .predicate_artifacts import dispatch_selector
+
+    return dispatch_selector(callee, declared_signature)
 
 
 def _canonical_source_key(source: "Source") -> str:

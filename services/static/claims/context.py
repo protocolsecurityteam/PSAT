@@ -183,11 +183,11 @@ class ClaimContext:
     def predicate_tree(self, function: str) -> Any | None:
         return self._trees.get(function)
 
-    def selector(self, function: str) -> str:
-        """Selector the facts recorded for ``function`` (empty for fallback/receive)."""
+    def selector(self, function: str) -> str | None:
+        """Selector the facts recorded for ``function``: ``""`` for fallback/receive, ``None`` when not determined."""
         record = self._functions.get(function) or {}
         selector = record.get("selector")
-        return selector if isinstance(selector, str) else ""
+        return selector if isinstance(selector, str) else None
 
     def canonical_signature(self, function: str) -> str | None:
         """Canonical signature from the predicate pipeline, else ``None``."""

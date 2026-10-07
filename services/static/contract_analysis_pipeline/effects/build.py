@@ -8,7 +8,7 @@ from ..record_ordering import attach_record_ordering
 from ..summaries import _action_summary, _effect_labels
 from ..token_slots import derive_token_slots
 from .origins import _ENGINE_BUNDLE_SCOPE
-from .selectors import _function_full_name, _is_fallback_or_receive, _own_selector
+from .selectors import _function_full_name, _is_fallback_or_receive, _own_abi_signature, _selector_for
 from .sinks import _build_sink_records, _is_externally_observable, _is_state_changing_entry_point
 from .state_writes import _state_write_facts
 from .types import (
@@ -38,16 +38,15 @@ def _effect_targets_from_sinks(sinks: list[SinkRecord]) -> list[str]:
     return seen
 
 
-def _writer_selectors_for(function: Any, sinks: list[SinkRecord]) -> list[str]:
+def _writer_selectors_for(function: Any, sinks: list[SinkRecord], selector: str | None) -> list[str] | None:
     """A state-write function's own selector (HyperSync replays it to attribute the write); a list because overloads
-    accumulate.
+    accumulate. ``None`` when the function writes but its selector is not determined.
     """
     has_state_write = any(s["kind"] == "state_write" for s in sinks)
-    if not has_state_write:
+    if not has_state_write or _is_fallback_or_receive(function):
         return []
-    selector = _own_selector(function)
     if selector is None:
-        return []
+        return None
     return [selector]
 
 
@@ -95,8 +94,6 @@ def _reconcile_value_flow_labels(
 
 
 def _effect_info_for_function(function: Any) -> EffectInfo:
-    from ..predicate_artifacts import _canonical_signature
-
     sinks = _build_sink_records(function)
     state_writes = _state_write_facts(function, sinks)
     zero_value_sinks: set[str] = set()
@@ -132,12 +129,18 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
     summary = _action_summary(labels, list(effect_targets))
 
     signature = _function_full_name(function)
-    # Distinguish a proven selectorless entry from one whose ABI type cannot be lowered.
-    selector = "" if _is_fallback_or_receive(function) else _own_selector(function)
+    # "" is the no-selector sentinel (fallback/receive), matching ``db/effect_cache.py``; ``None`` is not determined.
+    abi_signature: str | None
+    selector: str | None
+    if _is_fallback_or_receive(function):
+        abi_signature, selector = signature, ""
+    else:
+        abi_signature = _own_abi_signature(function)
+        selector = _selector_for(abi_signature)
     return {
         "function": signature,
         "selector": selector,
-        "abi_signature": _canonical_signature(function),
+        "abi_signature": abi_signature,
         "sinks": sinks,
         "state_writes": state_writes,
         "value_flows": value_flows,
@@ -145,7 +148,7 @@ def _effect_info_for_function(function: Any) -> EffectInfo:
         "effect_labels": list(labels),
         "effect_targets": list(effect_targets),
         "action_summary": summary,
-        "writer_selectors": _writer_selectors_for(function, sinks),
+        "writer_selectors": _writer_selectors_for(function, sinks, selector),
         "state_changing": _is_state_changing_entry_point(function),
         "parameter_names": [str(getattr(p, "name", "") or "") for p in (getattr(function, "parameters", None) or [])],
         "payable": bool(getattr(function, "payable", False)),
