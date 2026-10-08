@@ -231,7 +231,18 @@ def _root_artifacts(
     contract_analysis: dict,
     tracking_plan: dict,
     snapshot: ControlSnapshot,
+    *,
+    proxy_address: str | None = None,
 ) -> LoadedArtifacts:
+    """The graph root's bundle. An impl job roots at its proxy, as resolution does: the proxy holds the state and emits
+    the events the root's mapping replay reads.
+    """
+    if proxy_address:
+        tracking_plan = {**tracking_plan, "contract_address": proxy_address}
+        contract_analysis = {
+            **contract_analysis,
+            "subject": {**contract_analysis.get("subject", {}), "address": proxy_address},
+        }
     return {
         "analysis": contract_analysis,
         "tracking_plan": tracking_plan,
@@ -239,15 +250,47 @@ def _root_artifacts(
     }
 
 
+def _materialization_by_bytecode(
+    session: Session, address: str, *, chain: str, rpc_url: str, chain_id: int
+) -> tuple[str, Any] | None:
+    """``(analysed address, materialization)`` for *address*, found the way resolution's walk found it: a proxy is
+    analysed as its implementation, and the row is looked up by that code's keccak, since a row stays bound to the first
+    address that built it.
+    """
+    from db import contract_materializations as cm
+    from services.clients.rpc import get_code_with_keccak
+    from services.discovery.classifier import classify_single
+
+    classification = classify_single(address, rpc_url, chain_id=chain_id)
+    effective = address
+    if classification.get("type") == "proxy":
+        impl = classification.get("implementation")
+        if not isinstance(impl, str) or not impl:
+            return None
+        effective = impl.lower()
+    _code, keccak = get_code_with_keccak(rpc_url, effective, chain_id=chain_id)
+    if not keccak:
+        return None
+    row = cm.find_by_keccak(session, chain=chain, bytecode_keccak=keccak)
+    return (effective, row) if row is not None else None
+
+
 def _load_nested_artifacts(
-    session: Session, job_id, *, chain: str, replay_trees_for: Collection[str] = ()
+    session: Session,
+    job_id,
+    *,
+    chain: str,
+    replay_trees_for: Collection[str] = (),
+    rpc_url: str | None = None,
+    chain_id: int | None = None,
 ) -> dict[str, LoadedArtifacts]:
     """Hydrate the resolution stage's ``recursive.*`` artifacts.
 
     Those rows hold only runtime slices (snapshot, effective_permissions); analysis and tracking_plan come from
     ``contract_materializations`` per address. Bundles missing analysis or snapshot are dropped (``_resolve_authority``
     and the graph refresh need both). ``replay_trees_for`` names the addresses whose mapping-member replay the refresh
-    re-runs, which also need their predicate trees.
+    re-runs, which also need their predicate trees; one with no row at its own address (a proxy, or code first built
+    at another address) is hydrated by bytecode, given ``rpc_url`` and ``chain_id``.
     """
     import copy
 
@@ -277,6 +320,7 @@ def _load_nested_artifacts(
     # miss drops the bundle.
     require_chain(chain=chain, context="policy nested-artifact hydration")
     for address, bundle in bundles.items():
+        lookup_failed = False
         try:
             mrow = cm.find_by_address(session, chain=chain, address=address)
         except Exception as exc:
@@ -297,12 +341,39 @@ def _load_nested_artifacts(
                 extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
             )
             mrow = None
+            lookup_failed = True
+        analysed_address: str | None = None
+        if mrow is None and not lookup_failed and address in replay_trees_for and rpc_url and chain_id is not None:
+            try:
+                found = _materialization_by_bytecode(session, address, chain=chain, rpc_url=rpc_url, chain_id=chain_id)
+            except Exception as exc:
+                session.rollback()
+                record_degraded(
+                    phase="nested_bytecode_hydration",
+                    exc=exc,
+                    context={"job_id": str(job_id), "bundle_address": address, "bundle_chain": chain},
+                )
+                logger.warning(
+                    "Bytecode hydration failed for %s on %s; its mapping replay is not re-run",
+                    address,
+                    chain,
+                    extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
+                )
+                found = None
+            if found is not None:
+                analysed_address, mrow = found
         if mrow is None:
             continue
         if mrow.analysis:
             bundle["analysis"] = copy.deepcopy(mrow.analysis)
         if mrow.tracking_plan:
             bundle["tracking_plan"] = copy.deepcopy(mrow.tracking_plan)
+        if analysed_address is not None:
+            # As resolution materialized it: the analysed code's subject, storage read at the node.
+            if isinstance(bundle.get("analysis"), dict):
+                bundle["analysis"]["subject"] = {**bundle["analysis"].get("subject", {}), "address": analysed_address}
+            if isinstance(bundle.get("tracking_plan"), dict):
+                bundle["tracking_plan"]["contract_address"] = address
         if address in replay_trees_for:
             try:
                 trees = cm.hydrate_predicate_trees(mrow)
@@ -503,8 +574,16 @@ class PolicyWorker(BaseWorker):
         if not isinstance(control_snapshot, dict):
             raise RuntimeError("control_snapshot artifact not found")
 
+        request = job.request if isinstance(job.request, dict) else {}
+        root_address = str(request.get("proxy_address") or job.address or "").lower()
         nested_artifacts = _load_nested_artifacts(
-            session, job.id, chain=chain_name, replay_trees_for=unsettled_replay_addresses(resolved_control_graph)
+            session,
+            job.id,
+            chain=chain_name,
+            # The root replays from its own bundle.
+            replay_trees_for=unsettled_replay_addresses(resolved_control_graph) - {root_address},
+            rpc_url=rpc_url,
+            chain_id=chain_id,
         )
 
         authority_snapshot: dict | None = None
@@ -683,7 +762,12 @@ class PolicyWorker(BaseWorker):
         if not isinstance(tracking_plan, dict):
             tracking_plan = {}
         # Attach the updated effective_permissions so role principals can be projected.
-        root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
+        root_bundle = _root_artifacts(
+            contract_analysis,
+            tracking_plan,
+            cast(ControlSnapshot, control_snapshot),
+            proxy_address=request.get("proxy_address"),
+        )
         root_bundle["effective_permissions"] = ep_data
         # The root always re-walks; its trees let it re-run its mapping-member replay.
         root_bundle["predicate_trees"] = predicate_trees if isinstance(predicate_trees, dict) else None

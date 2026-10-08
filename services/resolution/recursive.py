@@ -43,6 +43,7 @@ from services.resolution.mapping_enumerator import (
     MAPPING_ENUMERATION_AWAITS,
     MAPPING_ENUMERATION_SOURCE,
     MAPPING_ENUMERATION_STATUS,
+    SCAN_UNPINNED,
 )
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
@@ -823,7 +824,9 @@ MAPPING_SOURCE_EVENT_INDEX = "event_index"
 MAPPING_SOURCE_HYPERSYNC = "hypersync"
 MAPPING_SOURCE_NONE = "none"
 # HyperSync statuses reached without contacting HyperSync.
-_UNSCANNED_MAPPING_STATUSES = frozenset({"skipped", "deferred_no_floor", "incomplete_no_hypersync_coverage"})
+_UNSCANNED_MAPPING_STATUSES = frozenset(
+    {"skipped", "deferred_no_floor", "incomplete_no_hypersync_coverage", SCAN_UNPINNED}
+)
 
 
 class MappingReplay(NamedTuple):
@@ -882,10 +885,10 @@ def _mapping_awaits(
 ) -> dict[str, Any] | None:
     """What the index must reach for a re-run to read the member set: warm, eligible cursors on every writer topic, and
     with a failed tail, a frontier at the block the tail missed. ``None`` when no index progress would settle it (an
-    undecodable row, an ambiguous writer event, an unpinned pass over warm cursors).
+    undecodable row, an ambiguous writer event).
     """
     from services.resolution.event_tail import TAIL_SCAN_FAILED, TAIL_SPAN_EXCEEDED
-    from services.resolution.mapping_enumerator import INDEX_COLD, INDEX_CURSOR_BEHIND
+    from services.resolution.mapping_enumerator import INDEX_COLD, INDEX_CURSOR_BEHIND, INDEX_UNPINNED
 
     if indexed is None or not indexed.topic0s:
         return None
@@ -894,7 +897,8 @@ def _mapping_awaits(
         "event_address": address.lower(),
         "topic0s": sorted(indexed.topic0s),
     }
-    if indexed.reason == INDEX_COLD:
+    # Warm cursors read on an unpinned pass are already satisfied, so the reconciler re-runs it with a fresh pin.
+    if indexed.reason in {INDEX_COLD, INDEX_UNPINNED}:
         return awaits
     if indexed.reason in {TAIL_SCAN_FAILED, TAIL_SPAN_EXCEEDED, INDEX_CURSOR_BEHIND} and isinstance(block, int):
         return {**awaits, "covers_block": block}
@@ -965,7 +969,9 @@ def _replay_mapping_principals(
         )
         return MappingReplay("complete", MAPPING_SOURCE_EVENT_INDEX)
 
-    status, principals = _replay_mapping_over_hypersync(address=address, mapping_specs=mapping_specs, chain_id=chain_id)
+    status, principals = _replay_mapping_over_hypersync(
+        address=address, mapping_specs=mapping_specs, chain_id=chain_id, block=resolution_block
+    )
     _publish_mapping_principals(
         address=address,
         principals=principals,
@@ -984,7 +990,7 @@ def _replay_mapping_principals(
 
 
 def _replay_mapping_over_hypersync(
-    *, address: str, mapping_specs: list[WriterEventSpec], chain_id: int
+    *, address: str, mapping_specs: list[WriterEventSpec], chain_id: int, block: int | None
 ) -> tuple[str, list[EnumeratedPrincipal]]:
     hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
     logger.info(
@@ -997,6 +1003,9 @@ def _replay_mapping_over_hypersync(
     )
     if not hypersync_token:
         return "skipped", []
+    if not isinstance(block, int):
+        # No end to prove; and the cache keys on no block, so an unpinned scan would serve later pinned reads.
+        return SCAN_UNPINNED, []
 
     from services.resolution.creation_block_floor import resolve_scan_floor
 
@@ -1018,6 +1027,7 @@ def _replay_mapping_over_hypersync(
             chain=str(chain_id),
             bearer_token=hypersync_token,
             from_block=scan_floor,
+            to_block=block,
         )
     except Exception as exc:
         # Bounds are handled inside; raises here are unexpected (auth, load).

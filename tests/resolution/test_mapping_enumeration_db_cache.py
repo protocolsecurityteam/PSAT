@@ -114,7 +114,7 @@ def _deny_spec():
 def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
-    pages = [([_log(rely_topic, indexed_args=[alice], block=10)], None)]
+    pages = [([_log(rely_topic, indexed_args=[alice], block=10)], 1_001)]
     client, counter = _fake_client(pages)
 
     addr = "0x" + "AA" * 20
@@ -123,6 +123,7 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
         addr,
         cast(Any, [_rely_spec()]),
         from_block=0,
+        to_block=1_000,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
         timeout_s=10,
@@ -142,6 +143,7 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
         addr,
         cast(Any, [_rely_spec()]),
         from_block=0,
+        to_block=1_000,
         client=new_client,
         hypersync_module=_FakeHypersyncModule(),
         timeout_s=10,

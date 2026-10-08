@@ -98,12 +98,16 @@ def _isolated(monkeypatch, db_session):
 
 
 class _HyperSync:
-    """The HyperSync client wire: serves ``logs`` once, or raises ``error`` on every request."""
+    """The HyperSync client wire: serves ``logs`` in one page that reaches the query's (exclusive) ``to_block``, or
+    raises ``error`` on every request.
+    """
 
-    def __init__(self, logs: list[Any] | None = None, error: Exception | None = None) -> None:
+    def __init__(self, logs: list[Any] | None = None, error: Exception | None = None, *, stall: bool = False) -> None:
         self.logs = logs or []
         self.error = error
+        self.stall = stall
         self.built = 0
+        self.to_blocks: list[int | None] = []
 
     def install(self, monkeypatch) -> _HyperSync:
         def _build(_module, *, url, bearer_token):
@@ -113,10 +117,11 @@ class _HyperSync:
         monkeypatch.setattr("services.resolution.hypersync_bound.build_hypersync_client", _build)
         return self
 
-    async def get(self, _query):
+    async def get(self, query):
+        self.to_blocks.append(query.to_block)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(data=list(self.logs), next_block=None)
+        return SimpleNamespace(data=list(self.logs), next_block=None if self.stall else query.to_block)
 
 
 def _hs_log(topic0: str, member: str, block: int) -> SimpleNamespace:
@@ -366,6 +371,7 @@ def test_index_and_hypersync_folds_agree(db_session, sequence):
             TIMELOCK,
             SPECS,
             from_block=0,
+            to_block=PIN,
             client=_HyperSync([_hs_log(t, m, b) for t, m, b in sequence]),
             hypersync_module=_FakeHypersyncModule(),
         )
@@ -398,6 +404,7 @@ def test_index_and_hypersync_folds_agree_on_a_key_in_event_data(db_session):
             TIMELOCK,
             specs,
             from_block=0,
+            to_block=PIN,
             client=_HyperSync([SimpleNamespace(topics=[t], data=_word(m), block_number=b) for t, m, b in sequence]),
             hypersync_module=_FakeHypersyncModule(),
         )
@@ -543,8 +550,39 @@ def test_cold_or_ineligible_index_falls_back_to_hypersync(db_session, monkeypatc
     replay, _nodes, edges = _replay()
 
     assert hypersync.built == 1
+    # HyperSync's ``to_block`` is exclusive; the pin itself is read.
+    assert hypersync.to_blocks == [PIN + 1]
     assert replay.status == "complete" and replay.source == "hypersync"
     assert _member_edges(edges) == [f"address:{EXECUTOR}"]
+
+
+def test_a_hypersync_fallback_that_stalls_short_of_the_pin_is_not_complete(db_session, monkeypatch):
+    monkeypatch.setenv("ENVIO_API_TOKEN", "token")
+    hypersync = _HyperSync([_hs_log(GRANT_T0, EXECUTOR, 150)], stall=True).install(monkeypatch)
+
+    replay, _nodes, edges = _replay()
+
+    assert hypersync.built == 1
+    assert replay.status == "incomplete_stalled" and replay.source == "hypersync"
+    # The members it did read stay published, but not as the whole set.
+    assert _member_edges(edges) == [f"address:{EXECUTOR}"]
+    assert replay.awaits == {"chain_id": 1, "event_address": TIMELOCK, "topic0s": sorted([GRANT_T0, REVOKE_T0])}
+
+
+@pytest.mark.parametrize("warm", [True, False], ids=["warm", "cold"])
+def test_an_unpinned_replay_scans_nothing_and_awaits_a_pinned_rerun(db_session, monkeypatch, warm):
+    monkeypatch.setenv("ENVIO_API_TOKEN", "token")
+    hypersync = _HyperSync([_hs_log(GRANT_T0, EXECUTOR, 150)]).install(monkeypatch)
+    if warm:
+        _warm(db_session)
+        _row(db_session, GRANT_T0, SAFE, 150)
+
+    replay, nodes, edges = _replay(block=None)
+
+    assert hypersync.built == 0
+    assert replay.status == "incomplete_unpinned" and replay.source == "none"
+    assert edges == {} and nodes == {}
+    assert replay.awaits == {"chain_id": 1, "event_address": TIMELOCK, "topic0s": sorted([GRANT_T0, REVOKE_T0])}
 
 
 def test_cold_index_with_hypersync_403_is_error_with_no_members_and_awaits(db_session, monkeypatch):
@@ -1150,7 +1188,11 @@ def test_policy_refresh_hands_the_walk_the_trees_its_replays_need(monkeypatch):
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
     trees = _timelock_trees()
-    stored_graph = {"nodes": [_node(TIMELOCK, 0, {}), _node(SAFE, 1, {**_awaiting(), "address": SAFE})], "edges": []}
+    # The root is unsettled too, but replays from its own bundle.
+    stored_graph = {
+        "nodes": [_node(TIMELOCK, 0, _awaiting()), _node(SAFE, 1, {**_awaiting(), "address": SAFE})],
+        "edges": [],
+    }
     artifacts = {
         "contract_analysis": {"contract_address": TIMELOCK, "contract_name": "Timelock", "functions": []},
         "control_snapshot": {"contract_address": TIMELOCK, "controller_values": {}},
@@ -1188,3 +1230,249 @@ def test_policy_refresh_hands_the_walk_the_trees_its_replays_need(monkeypatch):
 
     assert loaded["replay_trees_for"] == {SAFE}
     assert walked["root_artifacts"]["predicate_trees"] is trees
+
+
+# Impl jobs and nested proxies -----------------------------------------------------------------------------------------
+
+PROXY = "0x" + "a0" * 20
+IMPL = "0x" + "1b" * 20
+
+
+def test_an_impl_jobs_policy_refresh_roots_and_replays_at_its_proxy(db_session, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from workers.policy_worker import PolicyWorker
+
+    # The proxy emits the events; the impl address has none.
+    _warm(db_session, address=PROXY)
+    _row(db_session, GRANT_T0, SAFE, 150, address=PROXY)
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    session.execute.return_value.scalars.return_value.all.return_value = []
+    # What resolution stored for an impl job: the impl's analysis and plan, the proxy's state, a graph rooted at it.
+    artifacts = {
+        "contract_analysis": {"subject": {"address": IMPL, "name": "Impl"}, "functions": []},
+        "control_snapshot": {"contract_address": PROXY, "controller_values": {}},
+        "resolved_control_graph": {"nodes": [_node(PROXY, 0, {})], "edges": []},
+        "control_tracking_plan": {"schema_version": "0.1", "contract_address": IMPL, "tracked_controllers": []},
+        "predicate_trees": _timelock_trees(),
+    }
+    stored: dict[str, Any] = {}
+    monkeypatch.setattr("workers.policy_worker.get_artifact", lambda _s, _j, name: artifacts.get(name))
+    monkeypatch.setattr(
+        "workers.policy_worker.store_artifact", lambda _s, _j, name, data=None, **_kw: stored.__setitem__(name, data)
+    )
+    monkeypatch.setattr(
+        "workers.policy_worker.build_effective_permissions", lambda *a, **kw: {"schema_version": "1", "functions": []}
+    )
+    monkeypatch.setattr("workers.policy_worker.build_principal_labels", lambda *a, **kw: {"principals": []})
+    monkeypatch.setattr(PolicyWorker, "_enrich_cross_contract", lambda *a, **kw: {})
+    monkeypatch.setattr(
+        recursive,
+        "classify_resolved_address_with_status",
+        lambda _rpc, addr, **_k: ("timelock", {"address": addr}, True),
+    )
+    monkeypatch.setattr("services.resolution.capability_resolver._resolve_resolution_block", lambda *_a, **_k: PIN)
+    replayed: list[str] = []
+    real_replay = recursive._replay_mapping_principals
+    monkeypatch.setattr(
+        recursive, "_replay_mapping_principals", lambda **kw: replayed.append(kw["address"]) or real_replay(**kw)
+    )
+    job = SimpleNamespace(
+        id="job-1",
+        address=IMPL,
+        name="Impl",
+        company=None,
+        protocol_id=None,
+        request={"rpc_url": "https://rpc.example", "chain_id": 1, "proxy_address": PROXY},
+    )
+
+    PolicyWorker().process(session, cast(Any, job))
+
+    assert replayed == [PROXY]
+    graph = stored["resolved_control_graph"]
+    assert [n["address"] for n in graph["nodes"] if n["depth"] == 0] == [PROXY]
+    assert IMPL not in {n["address"] for n in graph["nodes"]}
+    root = next(n for n in graph["nodes"] if n["address"] == PROXY)
+    assert root["details"]["mapping_enumeration_status"] == "complete"
+    assert root["details"]["mapping_enumeration_source"] == "event_index"
+    assert sorted(e["to_id"] for e in graph["edges"] if e["relation"] == "mapping_member") == [f"address:{SAFE}"]
+
+
+def _eip1167(target: str) -> str:
+    from services.discovery.classifier import EIP1167_PREFIX, EIP1167_SUFFIX
+
+    return "0x" + EIP1167_PREFIX + target[2:] + EIP1167_SUFFIX
+
+
+def _code_wire(monkeypatch, codes: dict[str, str] | Exception) -> list[str]:
+    """The classifier's wire: ``eth_getCode`` from *codes*, every proxy slot zero, every probe call empty. The bytecode
+    caches are emptied so every code read reaches it; returns the addresses whose code was read.
+    """
+    from services.clients import rpc
+
+    monkeypatch.setattr(rpc, "_GETCODE_CACHE", {})
+    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", False)
+    reads: list[str] = []
+
+    def _rpc(_url, method, params, **_kw):
+        if isinstance(codes, Exception):
+            raise codes
+        if method == "eth_call":
+            return "0x"
+        assert method == "eth_getCode"
+        reads.append(params[0].lower())
+        return codes[params[0].lower()]
+
+    monkeypatch.setattr(rpc, "rpc_request", _rpc)
+    monkeypatch.setattr("services.discovery.static_dependencies.rpc_request", _rpc)
+    monkeypatch.setattr(
+        "services.discovery.classifier.rpc_batch_request_with_status",
+        lambda _url, calls, **_kw: [("0x" + "0" * 64, False) for _ in calls],
+    )
+    return reads
+
+
+def _materialize_impl(db_session, code: str) -> None:
+    from eth_utils.crypto import keccak
+
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import ContractMaterialization
+
+    db_session.query(ContractMaterialization).filter(ContractMaterialization.address == IMPL).delete()
+    db_session.add(
+        ContractMaterialization(
+            chain="1",
+            bytecode_keccak="0x" + keccak(bytes.fromhex(code[2:])).hex(),
+            address=IMPL,
+            contract_name="MinterImpl",
+            status="ready",
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+            analysis={"subject": {"address": IMPL, "name": "MinterImpl"}},
+            tracking_plan={"schema_version": "0.1", "contract_address": IMPL, "tracked_controllers": []},
+            predicate_trees=_timelock_trees(),
+        )
+    )
+    db_session.commit()
+
+
+def _job_with_nested_snapshots(db_session, *addresses: str) -> Job:
+    from db.nested_artifacts import artifact_key
+    from db.queue import store_artifact
+
+    job = Job(
+        address="0x" + "10" * 20, status=JobStatus.processing, stage=JobStage.policy, request={"chain": "ethereum"}
+    )
+    db_session.add(job)
+    db_session.commit()
+    for address in addresses:
+        snapshot = _bundle(address, "Nested")["snapshot"]
+        store_artifact(db_session, job.id, artifact_key(address, "snapshot"), data=snapshot)
+    db_session.commit()
+    return job
+
+
+IMPL_CODE = "0x6080604052" + "1b" * 8
+# A second deployment of the impl's code; its row stays bound to IMPL, the first address that built it.
+TWIN = "0x" + "d9" * 20
+
+
+@pytest.mark.parametrize("warm", [True, False], ids=["index-warm", "index-cold"])
+@pytest.mark.parametrize(
+    ("node", "analysed", "code_reads"),
+    [
+        pytest.param(PROXY, IMPL, [PROXY, IMPL], id="proxy"),
+        pytest.param(TWIN, TWIN, [TWIN], id="same-code-elsewhere"),
+    ],
+)
+def test_an_unsettled_nested_node_without_its_own_row_replays_from_the_row_its_code_shares(
+    db_session, monkeypatch, node, analysed, code_reads, warm
+):
+    from workers import policy_worker
+
+    settled_proxy = "0x" + "a1" * 20
+    _materialize_impl(db_session, IMPL_CODE)
+    reads = _code_wire(monkeypatch, {PROXY: _eip1167(IMPL), IMPL: IMPL_CODE, TWIN: IMPL_CODE})
+    job = _job_with_nested_snapshots(db_session, node, settled_proxy)
+    # As the live run left it: a lower bound from a timed-out scan, and no await.
+    stored_graph = {
+        "nodes": [
+            _node("0x" + "10" * 20, 0, {}),
+            _node(
+                node,
+                1,
+                {"mapping_enumeration_status": "incomplete_timeout", "mapping_enumeration_source": "hypersync"},
+            ),
+            _node(settled_proxy, 1, {"mapping_enumeration_status": "complete"}),
+        ],
+        "edges": [],
+    }
+
+    bundles = policy_worker._load_nested_artifacts(
+        db_session,
+        job.id,
+        chain="ethereum",
+        replay_trees_for=recursive.unsettled_replay_addresses(stored_graph),
+        rpc_url="http://rpc.test",
+        chain_id=1,
+    )
+
+    # Only the unsettled node pays the lookup; a settled one stays as before.
+    assert reads == code_reads
+    assert set(bundles) == {node}
+    # As resolution materialized it: the analysed code's subject and trees, storage read at the node.
+    assert bundles[node]["analysis"]["subject"]["address"] == analysed
+    assert bundles[node]["tracking_plan"]["contract_address"] == node
+    assert bundles[node].get("predicate_trees") == {"trees": _timelock_trees()["trees"]}
+
+    if warm:
+        _warm(db_session, address=node)
+        _row(db_session, GRANT_T0, SAFE, 150, address=node)
+    monkeypatch.setattr(
+        recursive,
+        "_materialize_contract_artifacts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("nested artifacts must come from the override")),
+    )
+    monkeypatch.setattr(
+        recursive,
+        "classify_resolved_address_with_status",
+        lambda _rpc, addr, **_k: ("contract", {"address": addr}, True),
+    )
+    monkeypatch.setattr("services.resolution.capability_resolver._resolve_resolution_block", lambda *_a, **_k: PIN)
+    graph, _ = resolve_control_graph(
+        root_artifacts=_bundle("0x" + "10" * 20, "Root"),
+        rpc_url="http://rpc.test",
+        chain_id=1,
+        nested_artifacts_override=bundles,
+        initial_graph=cast(Any, stored_graph),
+    )
+
+    details = next(n for n in graph["nodes"] if n["address"] == node)["details"]
+    if warm:
+        assert details["mapping_enumeration_status"] == "complete"
+        assert details["mapping_enumeration_source"] == "event_index"
+        assert "mapping_enumeration_awaits" not in details
+        assert [e["to_id"] for e in graph["edges"] if e["relation"] == "mapping_member"] == [f"address:{SAFE}"]
+    else:
+        # Re-run against the node's own cursors, so the reconciler can bring it back once they warm.
+        assert details["mapping_enumeration_status"] == "skipped"
+        assert cast(dict, details["mapping_enumeration_awaits"])["event_address"] == node
+
+
+def test_an_unreadable_node_is_dropped_and_recorded_without_failing_the_stage(db_session, monkeypatch):
+    from utils.logging import degraded_errors_var
+    from workers import policy_worker
+
+    _code_wire(monkeypatch, RuntimeError("upstream 503"))
+    job = _job_with_nested_snapshots(db_session, PROXY)
+    degraded: list = []
+    token = degraded_errors_var.set(degraded)
+    try:
+        bundles = policy_worker._load_nested_artifacts(
+            db_session, job.id, chain="ethereum", replay_trees_for={PROXY}, rpc_url="http://rpc.test", chain_id=1
+        )
+    finally:
+        degraded_errors_var.reset(token)
+
+    assert bundles == {}
+    assert [d.phase for d in degraded] == ["nested_bytecode_hydration"]

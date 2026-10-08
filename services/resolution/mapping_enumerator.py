@@ -65,7 +65,8 @@ class EnumerationResult(TypedDict):
 
     principals: list[EnumeratedPrincipal]
     # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error" | "incomplete_ambiguous_writer_event" (a
-    # conflicted event was dropped) | "incomplete_no_writer_specs" | "incomplete_no_hypersync_coverage"
+    # conflicted event was dropped) | "incomplete_no_writer_specs" | "incomplete_no_hypersync_coverage" |
+    # "incomplete_stalled" | "incomplete_unpinned"
     status: str
     pages_fetched: int
     last_block_scanned: int
@@ -171,10 +172,16 @@ def _event_topic0(signature: str) -> str:
     return _normalize_hex("0x" + digest)
 
 
+# A scan that ended without proving it read through its block: it stalled short of it, or it had no block to read to.
+SCAN_STALLED = "incomplete_stalled"
+SCAN_UNPINNED = "incomplete_unpinned"
+
+
 def _build_query(hypersync_module, contract_address: str, topic0s: list[str], from_block: int, to_block: int | None):
+    """``to_block`` is the last block read; HyperSync's ``Query.to_block`` is exclusive."""
     return hypersync_module.Query(
         from_block=from_block,
-        to_block=to_block,
+        to_block=None if to_block is None else to_block + 1,
         logs=[
             hypersync_module.LogSelection(
                 address=[contract_address.lower()],
@@ -185,6 +192,17 @@ def _build_query(hypersync_module, contract_address: str, topic0s: list[str], fr
             log=[field.value for field in hypersync_module.LogField],
         ),
     )
+
+
+def _scan_reached(next_block: Any, to_block: int | None) -> bool:
+    """Whether a page's ``next_block`` proves the scan read through ``to_block``. A ``next_block`` that stops advancing,
+    or is missing, proves nothing, and with no ``to_block`` there is no end to prove.
+    """
+    return isinstance(to_block, int) and isinstance(next_block, int) and next_block > to_block
+
+
+def _unproven_end_status(to_block: int | None) -> str:
+    return SCAN_UNPINNED if to_block is None else SCAN_STALLED
 
 
 def _topics_from_log(log: Any) -> list[str]:
@@ -521,8 +539,8 @@ async def enumerate_mapping_allowlist(
     timeout_s: float | None = None,
     max_pages: int | None = None,
 ) -> EnumerationResult:
-    """Replay mapping-writer events into a current allowlist; truncation is reported via
-    ``EnumerationResult.status``.
+    """Replay mapping-writer events through ``to_block`` into a current allowlist; truncation is reported via
+    ``EnumerationResult.status``, and only a scan HyperSync shows reached past ``to_block`` is ``complete``.
     """
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
@@ -580,6 +598,7 @@ async def enumerate_mapping_allowlist(
     started = time.monotonic()
     # Dropping an ambiguous event makes the fold incomplete regardless of the scan.
     status: str = "incomplete_ambiguous_writer_event" if ambiguous_dropped else "complete"
+    reached_end = False
     error: str | None = None
     while True:
         if time.monotonic() - started > eff_timeout:
@@ -643,16 +662,21 @@ async def enumerate_mapping_allowlist(
         fold_allowlist_logs(logs, topic0_to_specs, state)
 
         next_from = getattr(result, "next_block", None)
-        if next_from is None or next_from <= current_from:
+        if _scan_reached(next_from, to_block):
+            reached_end = True
+            break
+        if not isinstance(next_from, int) or next_from <= current_from:
             break
         current_from = next_from
         query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
 
+    if status == "complete" and not reached_end:
+        status = _unproven_end_status(to_block)
     return EnumerationResult(
         principals=allowlist_principals(state),
         status=status,
         pages_fetched=page_count,
-        last_block_scanned=current_from,
+        last_block_scanned=to_block if reached_end and to_block is not None else current_from,
         error=error,
     )
 
@@ -817,7 +841,8 @@ async def enumerate_mapping_values(
     Unlike ``enumerate_mapping_allowlist`` (add/remove present-set), this keeps each key's most recent value: the
     ``value_position`` word, or zero for a ``remove`` (``m[k] = address(0)``, ``delete m[k]``). The EventIndexedAdapter
     then filters by ``ValuePredicate``. A writer whose value can't be read, two readings of one event, or a log the
-    specs can't decode leaves the map incomplete rather than silently missing that write.
+    specs can't decode leaves the map incomplete rather than silently missing that write, as does a scan not shown to
+    reach past ``to_block``.
     """
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
@@ -863,6 +888,7 @@ async def enumerate_mapping_values(
     page_count = 0
     started = time.monotonic()
     status = "complete"
+    reached_end = False
     error: str | None = None
     while True:
         if time.monotonic() - started > eff_timeout:
@@ -915,10 +941,16 @@ async def enumerate_mapping_values(
         if status != "complete":
             break
         next_from = getattr(result, "next_block", None)
-        if next_from is None or next_from <= current_from:
+        if _scan_reached(next_from, to_block):
+            reached_end = True
+            break
+        if not isinstance(next_from, int) or next_from <= current_from:
             break
         current_from = next_from
         query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
+
+    if status == "complete" and not reached_end:
+        status = _unproven_end_status(to_block)
 
     entries: list[EnumeratedKeyValue] = [
         {
@@ -934,7 +966,7 @@ async def enumerate_mapping_values(
         entries=entries,
         status=status,
         pages_fetched=page_count,
-        last_block_scanned=current_from,
+        last_block_scanned=to_block if reached_end and to_block is not None else current_from,
         error=error,
     )
 

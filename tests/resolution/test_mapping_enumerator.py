@@ -89,6 +89,8 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
+# The pinned block a complete scan must read through.
+_PIN = 30_000_000
 _ALICE_WORD = "0x" + _addr("aa11")[2:].rjust(64, "0")
 _BOB_WORD = _addr("bb22")[2:].rjust(64, "0")
 
@@ -325,13 +327,14 @@ def test_rpc_error_surfaces_status_not_silent_fallback():
 def test_sync_wrapper_caches_results():
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
-    pages = [([_log(rely_topic, indexed_args=[alice], block=10)], None)]
+    pages = [([_log(rely_topic, indexed_args=[alice], block=10)], _PIN + 1)]
     client, calls = _fake_client(pages)
 
     result1 = enumerate_mapping_allowlist_sync(
         "0x" + "AA" * 20,
         cast(Any, [_rely_spec()]),
         from_block=0,
+        to_block=_PIN,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
         timeout_s=10,
@@ -345,6 +348,7 @@ def test_sync_wrapper_caches_results():
         "0x" + "AA" * 20,
         cast(Any, [_rely_spec()]),
         from_block=0,
+        to_block=_PIN,
         client=client,
         hypersync_module=_FakeHypersyncModule(),
     )
@@ -392,7 +396,7 @@ def test_value_predicate_eq_filters_to_matching_keys():
                     _set_log(topic0, a, 10, block=100, log_index=0),
                     _set_log(topic0, b, 7, block=100, log_index=1),
                 ],
-                None,
+                _PIN + 1,
             )
         ]
     )
@@ -401,6 +405,7 @@ def test_value_predicate_eq_filters_to_matching_keys():
             "0xCC00000000000000000000000000000000000001",
             cast(Any, [_owner_set_spec()]),
             from_block=0,
+            to_block=_PIN,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )
@@ -555,12 +560,13 @@ def test_live_value_fold_replays_removals_as_zero():
         ),
         _controller_log(removed, [dropped], block=22427216, log_index=0),
     ]
-    client, _ = _fake_client([(logs, None)])
+    client, _ = _fake_client([(logs, _PIN + 1)])
     result = _run(
         enumerate_mapping_values(
             "0xe982615d461dd5cd06575bbea87624fda4e3de17",
             cast(Any, _controller_specs()),
             from_block=0,
+            to_block=_PIN,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )
@@ -588,12 +594,13 @@ def test_live_value_fold_takes_a_removal_and_a_set_reading_the_same_word_as_one_
         _controller_log(configured, [dropped, _addr("a1e2481a9cd0cb0447eeb1cbc26f1b3fff3bec20")], block=2, log_index=0),
         _controller_log(configured, [dropped, "0x" + "0" * 40], block=3, log_index=0),
     ]
-    client, _ = _fake_client([(logs, None)])
+    client, _ = _fake_client([(logs, _PIN + 1)])
     result = _run(
         enumerate_mapping_values(
             "0xe982615d461dd5cd06575bbea87624fda4e3de17",
             cast(Any, specs),
             from_block=0,
+            to_block=_PIN,
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )
@@ -760,3 +767,75 @@ def test_no_writer_specs_reports_incomplete_not_complete():
     )
     assert result["principals"] == []
     assert result["status"] == "incomplete_no_writer_specs"
+
+
+class _PagedClient:
+    """Serves ``pages`` in order, repeating the last, and records each query's ``to_block``."""
+
+    def __init__(self, pages: Sequence[tuple[Sequence[Any], Any]]) -> None:
+        self.pages = list(pages)
+        self.to_blocks: list[Any] = []
+
+    async def get(self, query):
+        self.to_blocks.append(query.to_block)
+        logs, next_block = self.pages[min(len(self.to_blocks), len(self.pages)) - 1]
+        return SimpleNamespace(data=list(logs), next_block=next_block)
+
+
+_ALICE_RELY = [_log(_event_topic0("Rely(address)"), indexed_args=[ALICE], block=10)]
+
+
+@pytest.mark.parametrize(
+    ("pages", "to_block", "status"),
+    [
+        pytest.param([(_ALICE_RELY, 500), ([], _PIN + 1)], _PIN, "complete", id="reads-past-the-pin"),
+        pytest.param([(_ALICE_RELY, _PIN)], _PIN, "incomplete_stalled", id="stops-at-the-pin"),
+        pytest.param([(_ALICE_RELY, None)], _PIN, "incomplete_stalled", id="no-next-block"),
+        pytest.param([(_ALICE_RELY, 0)], _PIN, "incomplete_stalled", id="next-block-not-advancing"),
+        pytest.param([(_ALICE_RELY, None)], None, "incomplete_unpinned", id="unpinned"),
+    ],
+)
+def test_a_scan_is_complete_only_once_hypersync_reads_past_its_block(pages, to_block, status):
+    client = _PagedClient(pages)
+
+    result = _run(
+        _enumerate(
+            "0x" + "aa" * 20,
+            cast(Any, [_rely_spec()]),
+            from_block=0,
+            to_block=to_block,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+
+    assert result["status"] == status
+    # The members read so far stay, as a lower bound when the scan proves no end.
+    assert [p["address"] for p in result["principals"]] == [ALICE]
+    assert set(client.to_blocks) == {None if to_block is None else to_block + 1}
+    if status == "complete":
+        assert result["last_block_scanned"] == _PIN
+
+
+@pytest.mark.parametrize(
+    ("next_block", "status"), [(_PIN + 1, "complete"), (None, "incomplete_stalled"), (_PIN, "incomplete_stalled")]
+)
+def test_a_value_fold_is_complete_only_once_hypersync_reads_past_its_block(next_block, status):
+    from services.resolution.mapping_enumerator import enumerate_mapping_values
+
+    client = _PagedClient([([_set_log(_event_topic0("OwnerSet(address,uint256)"), ALICE, 10, block=100)], next_block)])
+
+    result = _run(
+        enumerate_mapping_values(
+            "0x" + "cc" * 20,
+            cast(Any, [_owner_set_spec()]),
+            from_block=0,
+            to_block=_PIN,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+
+    assert result["status"] == status
+    assert [e["key"] for e in result["entries"]] == [ALICE.lower()]
+    assert set(client.to_blocks) == {_PIN + 1}
