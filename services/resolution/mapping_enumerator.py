@@ -10,13 +10,18 @@ import os
 import re
 import threading
 import time
-from typing import Any, TypedDict
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from eth_utils.crypto import keccak
 
 from services.clients.rpc import normalize_hex as _normalize_hex
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
 from utils.logging import record_degraded
+
+if TYPE_CHECKING:
+    from services.resolution.event_tail import TailScanner
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,12 @@ def _cache_ttl_s() -> float:
     return float(os.getenv("PSAT_MAPPING_ENUMERATION_CACHE_TTL_S", "1800"))
 
 
+# Keys a graph node's details carry for its mapping-member replay.
+MAPPING_ENUMERATION_STATUS = "mapping_enumeration_status"
+MAPPING_ENUMERATION_SOURCE = "mapping_enumeration_source"
+MAPPING_ENUMERATION_AWAITS = "mapping_enumeration_awaits"
+
+
 class EnumeratedPrincipal(TypedDict):
     address: str
     mapping_name: str
@@ -54,7 +65,8 @@ class EnumerationResult(TypedDict):
 
     principals: list[EnumeratedPrincipal]
     # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error" | "incomplete_ambiguous_writer_event" (a
-    # conflicted event was dropped) | "incomplete_no_writer_specs" | "incomplete_no_hypersync_coverage"
+    # conflicted event was dropped) | "incomplete_no_writer_specs" | "incomplete_no_hypersync_coverage" |
+    # "incomplete_stalled" | "incomplete_unpinned"
     status: str
     pages_fetched: int
     last_block_scanned: int
@@ -160,10 +172,16 @@ def _event_topic0(signature: str) -> str:
     return _normalize_hex("0x" + digest)
 
 
+# A scan that ended without proving it read through its block: it stalled short of it, or it had no block to read to.
+SCAN_STALLED = "incomplete_stalled"
+SCAN_UNPINNED = "incomplete_unpinned"
+
+
 def _build_query(hypersync_module, contract_address: str, topic0s: list[str], from_block: int, to_block: int | None):
+    """``to_block`` is the last block read; HyperSync's ``Query.to_block`` is exclusive."""
     return hypersync_module.Query(
         from_block=from_block,
-        to_block=to_block,
+        to_block=None if to_block is None else to_block + 1,
         logs=[
             hypersync_module.LogSelection(
                 address=[contract_address.lower()],
@@ -174,6 +192,17 @@ def _build_query(hypersync_module, contract_address: str, topic0s: list[str], fr
             log=[field.value for field in hypersync_module.LogField],
         ),
     )
+
+
+def _scan_reached(next_block: Any, to_block: int | None) -> bool:
+    """Whether a page's ``next_block`` proves the scan read through ``to_block``. A ``next_block`` that stops advancing,
+    or is missing, proves nothing, and with no ``to_block`` there is no end to prove.
+    """
+    return isinstance(to_block, int) and isinstance(next_block, int) and next_block > to_block
+
+
+def _unproven_end_status(to_block: int | None) -> str:
+    return SCAN_UNPINNED if to_block is None else SCAN_STALLED
 
 
 def _topics_from_log(log: Any) -> list[str]:
@@ -334,39 +363,11 @@ def _extract_key_address(
     return ""
 
 
-async def enumerate_mapping_allowlist(
-    contract_address: str,
-    writer_specs: list[WriterEventSpec],
-    *,
-    from_block: int,
-    hypersync_url: str = DEFAULT_HYPERSYNC_URL,
-    bearer_token: str | None = None,
-    to_block: int | None = None,
-    client: Any = None,
-    hypersync_module: Any = None,
-    timeout_s: float | None = None,
-    max_pages: int | None = None,
-) -> EnumerationResult:
-    """Replay mapping-writer events into a current allowlist; truncation is reported via
-    ``EnumerationResult.status``.
-    """
-    eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
-    eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
-
-    if not writer_specs:
-        # No specs means nothing was observed; "complete" would publish a vacuous scan as exhaustive.
-        return EnumerationResult(
-            principals=[],
-            status="incomplete_no_writer_specs",
-            pages_fetched=0,
-            last_block_scanned=from_block,
-            error=None,
-        )
-
+def writer_topic_specs(writer_specs: list[WriterEventSpec]) -> tuple[dict[str, list[WriterEventSpec]], bool]:
+    """Writer specs by topic0, minus any topic whose specs disagree on direction; the flag says one was dropped."""
     topic0_to_specs: dict[str, list[WriterEventSpec]] = {}
     for spec in writer_specs:
-        topic0 = _event_topic0(spec["event_signature"])
-        topic0_to_specs.setdefault(topic0, []).append(spec)
+        topic0_to_specs.setdefault(_event_topic0(spec["event_signature"]), []).append(spec)
     ambiguous_dropped = False
     for topic0, specs in list(topic0_to_specs.items()):
         directions = {spec["direction"] for spec in specs}
@@ -382,6 +383,179 @@ async def enumerate_mapping_allowlist(
         )
         ambiguous_dropped = True
         del topic0_to_specs[topic0]
+    return topic0_to_specs, ambiguous_dropped
+
+
+# (mapping_name, member) -> {"present", "history", "last_block"}
+AllowlistState = dict[tuple[str, str], dict[str, Any]]
+
+
+def fold_allowlist_logs(
+    logs: Iterable[Any],
+    topic0_to_specs: dict[str, list[WriterEventSpec]],
+    state: AllowlistState,
+) -> None:
+    """Fold writer logs, in log order, into ``state``.
+
+    A log exposes ``topics``, ``data`` (one hex string) and ``block_number``: HyperSync logs as they come, stored rows
+    through :func:`indexed_replay_log`. Both sources share this fold so their membership can't drift.
+    """
+    for raw_log in logs:
+        topics = _topics_from_log(raw_log)
+        if not topics:
+            continue
+        matching_specs = topic0_to_specs.get(topics[0])
+        if not matching_specs:
+            continue
+        for spec in matching_specs:
+            key_address = _extract_key_address(
+                raw_log,
+                spec["key_position"],
+                indexed_positions=list(spec.get("indexed_positions") or []),
+            )
+            if not key_address.startswith("0x") or len(key_address) != 42:
+                continue
+            block = int(getattr(raw_log, "block_number", 0) or 0)
+            entry = state.setdefault(
+                (spec["mapping_name"], key_address),
+                {"present": False, "history": [], "last_block": 0},
+            )
+            entry["present"] = spec["direction"] == "add"
+            entry["history"].append(spec["direction"])
+            entry["last_block"] = max(entry["last_block"], block)
+
+
+def allowlist_principals(state: AllowlistState) -> list[EnumeratedPrincipal]:
+    return [
+        {
+            "address": addr,
+            "mapping_name": mapping_name,
+            "direction_history": list(entry["history"]),
+            "last_seen_block": int(entry["last_block"]),
+        }
+        for (mapping_name, addr), entry in state.items()
+        if entry["present"]
+    ]
+
+
+@dataclass(frozen=True)
+class ReplayLog:
+    topics: list[str]
+    data: str
+    block_number: int
+
+
+def indexed_replay_log(row: Any) -> ReplayLog:
+    """A stored row or tail log (``topics`` + ``data_words``) as the fold reads it; raises ``UndecodableEventRow`` for
+    data that isn't word-aligned (``data_hex``), which no fold may skip.
+    """
+    from services.resolution.repos.event_logs_pg import UndecodableEventRow, row_is_undecodable
+
+    if row_is_undecodable(row):
+        raise UndecodableEventRow(str(getattr(row, "topic0", "") or ""))
+    words = [str(w) for w in (getattr(row, "data_words", None) or [])]
+    return ReplayLog(
+        topics=[str(t) for t in (getattr(row, "topics", None) or [])],
+        data="0x" + "".join(w[2:] if w.startswith("0x") else w for w in words),
+        block_number=int(row.block_number),
+    )
+
+
+# Why a durable read couldn't prove the member set. Only ``INDEX_COLD`` and a failed tail clear once the index advances.
+INDEX_COLD = "no_index_cursor"
+INDEX_UNPINNED = "unpinned_block"
+INDEX_UNDECODABLE = "undecodable_event_data"
+INDEX_AMBIGUOUS = "ambiguous_writer_event"
+INDEX_NO_WRITER_SPECS = "no_writer_specs"
+INDEX_CURSOR_BEHIND = "cursor_behind_block"
+
+
+@dataclass(frozen=True)
+class IndexedAllowlist:
+    """A member set read from the durable event index; ``complete`` only when every writer topic is proven through
+    ``block``.
+    """
+
+    principals: list[EnumeratedPrincipal]
+    complete: bool
+    topic0s: tuple[str, ...]
+    reason: str | None = None
+    last_indexed_block: int | None = None
+
+
+def enumerate_mapping_allowlist_from_index(
+    repo: Any,
+    *,
+    chain_id: int,
+    contract_address: str,
+    writer_specs: list[WriterEventSpec],
+    block: int | None,
+    tail: "TailScanner | None",
+) -> IndexedAllowlist:
+    """The allowlist from the logs ``PostgresEventLogRepo.logs_through_block`` proves complete through ``block``."""
+    from services.resolution.repos.event_logs_pg import UndecodableEventRow
+
+    topic0_to_specs, ambiguous_dropped = writer_topic_specs(writer_specs)
+    topic0s = tuple(sorted(topic0_to_specs))
+    if not writer_specs:
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_NO_WRITER_SPECS)
+    if ambiguous_dropped or not topic0s:
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_AMBIGUOUS)
+
+    state: AllowlistState = {}
+    try:
+        read = repo.logs_through_block(
+            chain_id=chain_id, event_address=contract_address.lower(), topic0s=list(topic0s), block=block, tail=tail
+        )
+        if not read.complete:
+            return IndexedAllowlist(
+                principals=[],
+                complete=False,
+                topic0s=topic0s,
+                reason=read.reason,
+                last_indexed_block=read.last_indexed_block,
+            )
+        fold_allowlist_logs((indexed_replay_log(log) for log in read.logs), topic0_to_specs, state)
+    except UndecodableEventRow:
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_UNDECODABLE)
+    return IndexedAllowlist(
+        principals=allowlist_principals(state),
+        complete=True,
+        topic0s=topic0s,
+        last_indexed_block=read.last_indexed_block,
+    )
+
+
+async def enumerate_mapping_allowlist(
+    contract_address: str,
+    writer_specs: list[WriterEventSpec],
+    *,
+    from_block: int,
+    hypersync_url: str = DEFAULT_HYPERSYNC_URL,
+    bearer_token: str | None = None,
+    to_block: int | None = None,
+    client: Any = None,
+    hypersync_module: Any = None,
+    timeout_s: float | None = None,
+    max_pages: int | None = None,
+) -> EnumerationResult:
+    """Replay mapping-writer events through ``to_block`` into a current allowlist; truncation is reported via
+    ``EnumerationResult.status``, and only a scan HyperSync shows reached past ``to_block`` is ``complete``.
+    """
+    eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
+    eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
+
+    if not writer_specs:
+        # No specs means nothing was observed; "complete" would publish a vacuous scan as exhaustive.
+        return EnumerationResult(
+            principals=[],
+            status="incomplete_no_writer_specs",
+            pages_fetched=0,
+            last_block_scanned=from_block,
+            error=None,
+        )
+
+    topic0_to_specs, ambiguous_dropped = writer_topic_specs(writer_specs)
     if not topic0_to_specs:
         # Every writer event was ambiguous, so nothing was scanned; "complete" would look like a real empty scan.
         return EnumerationResult(
@@ -418,12 +592,13 @@ async def enumerate_mapping_allowlist(
 
     from services.resolution.hypersync_bound import hypersync_slot
 
-    state: dict[tuple[str, str], dict[str, Any]] = {}
+    state: AllowlistState = {}
     current_from = from_block
     page_count = 0
     started = time.monotonic()
     # Dropping an ambiguous event makes the fold incomplete regardless of the scan.
     status: str = "incomplete_ambiguous_writer_event" if ambiguous_dropped else "complete"
+    reached_end = False
     error: str | None = None
     while True:
         if time.monotonic() - started > eff_timeout:
@@ -484,57 +659,24 @@ async def enumerate_mapping_allowlist(
                 "next_block": getattr(result, "next_block", None),
             },
         )
-        for raw_log in logs:
-            topics = _topics_from_log(raw_log)
-            if not topics:
-                continue
-            topic0 = topics[0]
-            matching_specs = topic0_to_specs.get(topic0)
-            if not matching_specs:
-                continue
-            for spec in matching_specs:
-                key_address = _extract_key_address(
-                    raw_log,
-                    spec["key_position"],
-                    indexed_positions=list(spec.get("indexed_positions") or []),
-                )
-                if not key_address.startswith("0x") or len(key_address) != 42:
-                    continue
-                block = int(getattr(raw_log, "block_number", 0) or 0)
-                entry = state.setdefault(
-                    (spec["mapping_name"], key_address),
-                    {"present": False, "history": [], "last_block": 0},
-                )
-                if spec["direction"] == "add":
-                    entry["present"] = True
-                else:
-                    entry["present"] = False
-                entry["history"].append(spec["direction"])
-                entry["last_block"] = max(entry["last_block"], block)
+        fold_allowlist_logs(logs, topic0_to_specs, state)
 
         next_from = getattr(result, "next_block", None)
-        if next_from is None or next_from <= current_from:
+        if _scan_reached(next_from, to_block):
+            reached_end = True
+            break
+        if not isinstance(next_from, int) or next_from <= current_from:
             break
         current_from = next_from
         query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
 
-    out: list[EnumeratedPrincipal] = []
-    for (mapping_name, addr), entry in state.items():
-        if not entry["present"]:
-            continue
-        out.append(
-            {
-                "address": addr,
-                "mapping_name": mapping_name,
-                "direction_history": list(entry["history"]),
-                "last_seen_block": int(entry["last_block"]),
-            }
-        )
+    if status == "complete" and not reached_end:
+        status = _unproven_end_status(to_block)
     return EnumerationResult(
-        principals=out,
+        principals=allowlist_principals(state),
         status=status,
         pages_fetched=page_count,
-        last_block_scanned=current_from,
+        last_block_scanned=to_block if reached_end and to_block is not None else current_from,
         error=error,
     )
 
@@ -699,7 +841,8 @@ async def enumerate_mapping_values(
     Unlike ``enumerate_mapping_allowlist`` (add/remove present-set), this keeps each key's most recent value: the
     ``value_position`` word, or zero for a ``remove`` (``m[k] = address(0)``, ``delete m[k]``). The EventIndexedAdapter
     then filters by ``ValuePredicate``. A writer whose value can't be read, two readings of one event, or a log the
-    specs can't decode leaves the map incomplete rather than silently missing that write.
+    specs can't decode leaves the map incomplete rather than silently missing that write, as does a scan not shown to
+    reach past ``to_block``.
     """
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
@@ -745,6 +888,7 @@ async def enumerate_mapping_values(
     page_count = 0
     started = time.monotonic()
     status = "complete"
+    reached_end = False
     error: str | None = None
     while True:
         if time.monotonic() - started > eff_timeout:
@@ -797,10 +941,16 @@ async def enumerate_mapping_values(
         if status != "complete":
             break
         next_from = getattr(result, "next_block", None)
-        if next_from is None or next_from <= current_from:
+        if _scan_reached(next_from, to_block):
+            reached_end = True
+            break
+        if not isinstance(next_from, int) or next_from <= current_from:
             break
         current_from = next_from
         query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
+
+    if status == "complete" and not reached_end:
+        status = _unproven_end_status(to_block)
 
     entries: list[EnumeratedKeyValue] = [
         {
@@ -816,7 +966,7 @@ async def enumerate_mapping_values(
         entries=entries,
         status=status,
         pages_fetched=page_count,
-        last_block_scanned=current_from,
+        last_block_scanned=to_block if reached_end and to_block is not None else current_from,
         error=error,
     )
 

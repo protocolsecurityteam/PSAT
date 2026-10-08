@@ -38,6 +38,7 @@ from db.models import (
     WINDOW_STATS_NOT_DETERMINED,
     AddressFloorWitness,
     Contract,
+    ControlGraphNode,
     ControllerValue,
     IndexedEventCursor,
     IndexedEventLog,
@@ -54,7 +55,9 @@ from services.clients.rpc import require_rpc_url, rpc_request
 from services.monitoring.event_topics import WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
+from services.resolution.deferred_reconciler import unsettled_mapping_await
 from services.resolution.indexer_work import mark_dirty
+from services.resolution.mapping_enumerator import MAPPING_ENUMERATION_AWAITS
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, MalformedLogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
@@ -1881,14 +1884,39 @@ def completed_jobs_query(limit: int | None = None):
     return query if limit is None else query.limit(limit)
 
 
+def _unsettled_replay_targets(session: Session, job: Job, job_chain_id: int) -> Iterator[HintTarget]:
+    """Writer topics of the job's graph replays still waiting on the index.
+
+    A nested contract with no completed job of its own is never enrolled from its own trees; these topics come from
+    those trees' authority-bearing writer hints, so they enrol with the same basis.
+    """
+    rows = session.execute(
+        select(ControlGraphNode.details)
+        .join(Contract, Contract.id == ControlGraphNode.contract_id)
+        .where(Contract.job_id == job.id)
+        .where(ControlGraphNode.details.has_key(MAPPING_ENUMERATION_AWAITS))
+    ).scalars()
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for details in rows:
+        pending = unsettled_mapping_await(details, job_chain_id)
+        if pending is None or not _is_enrollable_event_address(pending[0]):
+            continue
+        address, topics, _covers_block = pending
+        if (address, topics) in seen:
+            continue
+        seen.add((address, topics))
+        yield HintTarget("hint", job_chain_id, address, topics)
+
+
 def hint_targets_for_job(session: Session, job: Job) -> Iterator[HintTarget]:
-    """Every (chain, address, topics) enrolment the job's predicate trees ask for."""
-    artifact = usable_semantic_artifact("predicate_trees", get_artifact(session, job.id, "predicate_trees"))
-    if artifact is None:
-        return
+    """Every (chain, address, topics) enrolment the job's predicate trees and its graph's unsettled replays ask for."""
     job_chain_id = job_chain(job)
     if job_chain_id is None:
         # Defensive; the query filter guarantees an id.
+        return
+    yield from _unsettled_replay_targets(session, job, job_chain_id)
+    artifact = usable_semantic_artifact("predicate_trees", get_artifact(session, job.id, "predicate_trees"))
+    if artifact is None:
         return
     values = _state_var_values_for_job(session, job)
     for descriptor in _descriptors_from_artifact(artifact):

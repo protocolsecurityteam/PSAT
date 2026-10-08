@@ -239,7 +239,8 @@ def test_replay_mapping_principals_skips_self_membership(monkeypatch):
         lambda address, chain_id: 100,
     )
 
-    def fake_enumerate(address, specs, *, chain, bearer_token, from_block):
+    def fake_enumerate(address, specs, *, chain, bearer_token, from_block, to_block):
+        assert to_block == 200
         return {
             "principals": [
                 {
@@ -287,8 +288,10 @@ def test_replay_mapping_principals_skips_self_membership(monkeypatch):
         nodes=nodes,
         edges=edges,
         chain_id=1,
+        resolution_block=200,
     )
-    assert status == "complete"
+    assert status.status == "complete"
+    assert status.source == "hypersync"
     edge_list = list(edges.values())
     assert [(e["from_id"], e["to_id"], e["relation"]) for e in edge_list] == [
         (f"address:{contract}", f"address:{member}", "mapping_member")

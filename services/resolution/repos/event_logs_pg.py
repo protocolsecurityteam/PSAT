@@ -75,6 +75,21 @@ UNDECODABLE_EVENT_DATA = "undecodable_event_data"
 # A writer event a value fold can't replay (its value is neither in the event nor a known zero).
 UNFOLDABLE_WRITER_EVENT = "unfoldable_writer_event"
 
+NO_INDEX_CURSOR = "no_index_cursor"
+UNPINNED_BLOCK = "unpinned_block"
+CURSOR_BEHIND_BLOCK = "cursor_behind_block"
+
+
+@dataclass(frozen=True)
+class IndexedLogs:
+    """Stored rows then tail logs in log order; ``complete`` only when they are every log through ``block``."""
+
+    logs: tuple[Any, ...]
+    complete: bool
+    reason: str | None = None
+    last_indexed_block: int | None = None
+
+
 _ZERO_WORD = "0x" + "0" * 64
 
 
@@ -162,7 +177,7 @@ class PostgresEventLogRepo:
         if key_filters is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
-        cursor_block, complete = self._cursor_state(chain_id, event_address, topic0)
+        cursor_block, complete = self.cursor_state(chain_id, event_address, topic0)
 
         q = (
             select(IndexedEventLog)
@@ -274,7 +289,7 @@ class PostgresEventLogRepo:
             return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
 
         topic0s = sorted(hints_by_topic)
-        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        cursor_states = {topic0: self.cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         # Indexed means backfill complete, not just an advanced cursor.
         complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
         warm_block = min(complete_blocks) if len(complete_blocks) == len(topic0s) else None
@@ -436,7 +451,7 @@ class PostgresEventLogRepo:
         topic0s = sorted(hints_by_topic)
 
         # Any cold topic means the fold can't be complete, so read cursors first and skip the scan.
-        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        cursor_states = {topic0: self.cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         complete = all(c_block is not None and done for c_block, done in cursor_states.values())
         if not complete:
             _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
@@ -556,6 +571,48 @@ class PostgresEventLogRepo:
             raise UndecodableEventRow(event_address)
         return rows
 
+    def logs_through_block(
+        self,
+        *,
+        chain_id: int,
+        event_address: str,
+        topic0s: list[str],
+        block: int | None,
+        tail: "TailScanner | None",
+    ) -> IndexedLogs:
+        """Every log for ``topic0s`` through ``block`` under ``fold_event_history``'s completeness rules.
+
+        Every cursor must be exactness-eligible and ``backfill_complete``. Covered cursors read rows to the max
+        frontier; behind ones cut rows at the least advanced cursor and need a complete ``tail`` over
+        ``(warm, block]``. Raises :class:`UndecodableEventRow` for a row or tail log no fold may skip.
+        """
+        topics = sorted({t.lower() for t in topic0s if isinstance(t, str)})
+        states = [self.cursor_state(chain_id, event_address, topic0) for topic0 in topics]
+        if not topics or any(cursor_block is None or not done for cursor_block, done in states):
+            return IndexedLogs(logs=(), complete=False, reason=NO_INDEX_CURSOR)
+        if not isinstance(block, int):
+            return IndexedLogs(logs=(), complete=False, reason=UNPINNED_BLOCK)
+        frontiers = [cursor_block for cursor_block, _done in states if cursor_block is not None]
+        warm_block = min(frontiers)
+        behind = warm_block < block
+        # Behind: cut at the least advanced cursor so the tail never applies a row twice. Covered: the max frontier
+        # admits every indexed row.
+        rows = self.iter_event_rows(
+            chain_id=chain_id,
+            event_address=event_address,
+            topic0s=topics,
+            block=warm_block if behind else max(frontiers),
+        )
+        if not behind:
+            return IndexedLogs(logs=tuple(rows), complete=True, last_indexed_block=warm_block)
+        scan = tail(event_address.lower(), topics, warm_block, block) if tail is not None else None
+        if scan is None or not scan.complete:
+            reason = CURSOR_BEHIND_BLOCK if scan is None else (scan.reason or CURSOR_BEHIND_BLOCK)
+            return IndexedLogs(logs=(), complete=False, reason=reason, last_indexed_block=warm_block)
+        if any(row_is_undecodable(log) for log in scan.logs):
+            raise UndecodableEventRow(event_address)
+        return IndexedLogs(logs=(*rows, *scan.logs), complete=True, last_indexed_block=block)
+
     def min_indexed_block(self, *, chain_id: int, event_address: str, topic0s: list[str]) -> int | None:
         """Lowest cursor block across ``topic0s``, or ``None`` when any backfill is incomplete.
 
@@ -564,12 +621,12 @@ class PostgresEventLogRepo:
         topics = [t for t in topic0s if isinstance(t, str)]
         if not topics:
             return None
-        states = [self._cursor_state(chain_id, event_address, t) for t in topics]
+        states = [self.cursor_state(chain_id, event_address, t) for t in topics]
         if any(block is None or not complete for block, complete in states):
             return None
         return min(block for block, _ in states if block is not None)
 
-    def _cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
+    def cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
         """``(last_indexed_block, backfill_complete)`` for one cursor, or ``(None, False)``.
 
         Every exactness gate goes through here, and a complete zero-row fold is published as exact-empty. Eligibility is

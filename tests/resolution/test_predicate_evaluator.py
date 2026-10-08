@@ -312,7 +312,7 @@ def test_view_call_mapping_key_expands_to_returned_role_members(monkeypatch):
     monkeypatch.setattr(
         evaluator_mod,
         "_observed_event_key_words",
-        lambda **_kwargs: ["0x" + "bb" * 32],
+        lambda **_kwargs: evaluator_mod.ObservedKeyWords(words=["0x" + "bb" * 32], complete=True),
     )
     monkeypatch.setattr(
         evaluator_mod,
@@ -556,7 +556,7 @@ def test_observed_event_key_words_hypersync_floors_from_block(monkeypatch):
     event_addr = "0x" + "33" * 20
     descriptor = {"key_sources": [{"source": "msg_sender"}]}
     hints = [{"topic0": "0x" + "ab" * 32, "event_address": event_addr, "topics_to_keys": {1: 0}}]
-    outer = SimpleNamespace(meta={}, chain_id=1, block=None)
+    outer = SimpleNamespace(meta={}, chain_id=1, block=8_000_000)
 
     _observed_event_key_words_from_hypersync(
         outer_ctx=outer, descriptor=cast(Any, descriptor), event_hints=hints, key_index=0

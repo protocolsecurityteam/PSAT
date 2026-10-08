@@ -104,9 +104,10 @@ def test_recursive_cold_no_floor_does_not_live_scan(monkeypatch):
         nodes=nodes,
         edges=edges,
         chain_id=1,
+        resolution_block=5_000_000,
     )
     assert called["n"] == 0
-    assert status == "deferred_no_floor"
+    assert status.status == "deferred_no_floor"
 
 
 # (d) durable-cursor floor source (DB-backed) ------------------------------
@@ -273,10 +274,10 @@ def test_enumerator_constructs_client_through_the_bound():
     captured: dict = {}
 
     class _FakeClient:
-        async def get(self, _query):
+        async def get(self, query):
             from types import SimpleNamespace
 
-            return SimpleNamespace(data=[], next_block=None)
+            return SimpleNamespace(data=[], next_block=query.to_block)
 
     class _FakeFieldEnumMeta(type):
         def __iter__(cls):
@@ -316,6 +317,7 @@ def test_enumerator_constructs_client_through_the_bound():
             "0x" + "aa" * 20,
             [spec],  # pyright: ignore[reportArgumentType]
             from_block=5_000_000,
+            to_block=5_000_100,
             bearer_token="tok",
             hypersync_module=_FakeModule(),
         )
