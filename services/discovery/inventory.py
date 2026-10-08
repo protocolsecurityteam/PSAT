@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from utils.chains import UnknownChainError, canonical_chain, canonical_chain_list, chain_by_name
-from utils.logging import record_degraded
+from utils.logging import observe_degraded, record_degraded
 
 from .chain_resolver import resolve_unknown_chains, validate_claimed_chains
 from .deployer import expand_from_deployers
@@ -261,7 +261,53 @@ def inventory_entries(
     return out, missing_address
 
 
+# Inventory discovery's LLM steps; each records its own failure as degraded and falls back to less.
+_LLM_PHASES = frozenset({"inventory_domain_selection", "inventory_page_selection"})
+
+
 def search_protocol_inventory(
+    company: str,
+    chain: str | None = None,
+    limit: int = 500,
+    max_queries: int = 4,
+    run_deployer: bool = True,
+    debug: bool = False,
+    declared_chains: list[str] | None = None,
+) -> dict[str, Any]:
+    """Officially published contract addresses for ``company``.
+
+    A failed LLM step (a provider ``402``, an expired key) leaves the fallback reading the wrong pages, so the contract
+    list is a shortfall, not a count: each distinct failure is listed in ``errors``, a note says the list is incomplete
+    and ``complete`` is ``False``, so neither a consumer nor :func:`merge_inventory` reads a missing contract as absent.
+    """
+    with observe_degraded() as degraded:
+        result = _search_protocol_inventory(
+            company,
+            chain=chain,
+            limit=limit,
+            max_queries=max_queries,
+            run_deployer=run_deployer,
+            debug=debug,
+            declared_chains=declared_chains,
+        )
+    failures: dict[tuple[str, str], int] = {}
+    for error in degraded:
+        if error.phase in _LLM_PHASES:
+            key = (error.phase, f"{error.exc_type}: {error.message}")
+            failures[key] = failures.get(key, 0) + 1
+    if failures:
+        llm_errors = [
+            {"provider": "llm", "phase": phase, "error": message, "count": count}
+            for (phase, message), count in sorted(failures.items())
+        ]
+        result["errors"] = (llm_errors + list(result.get("errors") or []))[:12]
+        note = f"{sum(failures.values())} LLM call(s) failed; the contract list is incomplete"
+        result["notes"] = [note, *(result.get("notes") or [])][:12]
+        result["complete"] = False
+    return result
+
+
+def _search_protocol_inventory(
     company: str,
     chain: str | None = None,
     limit: int = 500,
@@ -473,8 +519,9 @@ def merge_inventory(prev: dict, new: dict) -> dict:
     """Merge a previous inventory with a new one.
 
     Shared contracts take the new entry with the higher confidence; previous-only contracts decay by
-    :data:`CONFIDENCE_DECAY` and drop below :data:`CONFIDENCE_FLOOR`. Source ids are per run, so a previous-only
-    contract's ids are re-keyed onto the merged sources map by URL.
+    :data:`CONFIDENCE_DECAY` and drop below :data:`CONFIDENCE_FLOOR`, unless the new run is incomplete: a contract it
+    missed is not evidence the contract is gone, so it carries over undecayed and the merge stays incomplete. Source ids
+    are per run, so a previous-only contract's ids are re-keyed onto the merged sources map by URL.
     """
     prev_sources = prev.get("sources") or {}
     new_sources = new.get("sources") or {}
@@ -524,16 +571,19 @@ def merge_inventory(prev: dict, new: dict) -> dict:
             merged_entry["confidence"] = max(prev_conf, new_conf)
             merged[addr] = merged_entry
 
+    new_is_incomplete = new.get("complete") is False
     for addr, entry in prev_contracts.items():
         if addr not in new_contracts:
-            decayed_entry = _rekeyed(entry)
-            prev_conf = entry.get("confidence", 0) or 0
-            decayed_conf = prev_conf * CONFIDENCE_DECAY
+            carried = _rekeyed(entry)
+            if new_is_incomplete:
+                merged[addr] = carried
+                continue
+            decayed_conf = (entry.get("confidence", 0) or 0) * CONFIDENCE_DECAY
             if decayed_conf < CONFIDENCE_FLOOR:
                 dropped["stale_below_confidence_floor"] += 1
                 continue
-            decayed_entry["confidence"] = decayed_conf
-            merged[addr] = decayed_entry
+            carried["confidence"] = decayed_conf
+            merged[addr] = carried
 
     sorted_contracts = sorted(merged.values(), key=lambda c: c.get("confidence", 0) or 0, reverse=True)
 
@@ -546,6 +596,8 @@ def merge_inventory(prev: dict, new: dict) -> dict:
         "errors": new.get("errors"),
         "notes": new.get("notes"),
     }
+    if new_is_incomplete:
+        result["complete"] = False
 
     for key in ("pages_considered", "pages_selected"):
         prev_pages = prev.get(key, []) or []

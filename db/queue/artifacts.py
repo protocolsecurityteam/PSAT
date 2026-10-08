@@ -151,6 +151,32 @@ def get_artifact(session: Session, job_id: Any, name: str) -> dict | list | str 
     return _artifact_row_to_value(artifact)
 
 
+# The key a successful build of each semantic artifact always carries. A failed build is stored under
+# ``<name>_error``; older jobs stored ``{"schema_version": ..., "error": ...}`` under the artifact's own name.
+SEMANTIC_PAYLOAD_KEYS = {"predicate_trees": "trees", "effects": "functions"}
+
+
+def failed_semantic_artifact(name: str, value: Any) -> bool:
+    """Whether *value* is a failed ``predicate_trees``/``effects`` build: an ``error`` and no payload."""
+    payload_key = SEMANTIC_PAYLOAD_KEYS.get(name)
+    return payload_key is not None and isinstance(value, dict) and "error" in value and payload_key not in value
+
+
+def analysis_reports_failure(analysis: Any) -> bool:
+    """Whether a ``contract_analysis`` says one of its semantic builds failed."""
+    status = analysis.get("analysis_status") if isinstance(analysis, dict) else None
+    return isinstance(status, dict) and status.get("static_analysis_completed") is False
+
+
+def usable_semantic_artifact(name: str, value: Any) -> dict | None:
+    """A read ``predicate_trees``/``effects`` artifact, or ``None`` when it is missing, not an object, or a failed
+    build. A failure must read as not determined, never as a contract with no guards or no effects.
+    """
+    if not isinstance(value, dict) or failed_semantic_artifact(name, value):
+        return None
+    return value
+
+
 def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
     """All artifacts for a job as ``{name: data_or_text}``, fetching storage bodies in parallel.
 

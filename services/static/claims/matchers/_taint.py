@@ -237,7 +237,7 @@ def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) 
     # Computed as the effects producer computes sink selectors, so it joins against tree leaves the same way.
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
-    from ...contract_analysis_pipeline.effects import _callee_signature, _selector_for
+    from ...contract_analysis_pipeline.effects import _callee_dispatch_selector
 
     parameters = list(getattr(function, "parameters", None) or [])
     definitions = _definitions(function)
@@ -254,7 +254,7 @@ def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) 
                 destination_operand, destination_state, definitions, parameters
             )
             proven = destination_kind == "param"
-            selector = _selector_for(_callee_signature(ir))
+            selector = _callee_dispatch_selector(ir)
             if selector:
                 (param_selectors if proven else withheld_selectors).add(selector)
             callee_name = getattr(ir, "function_name", None)

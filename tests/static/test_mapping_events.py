@@ -189,6 +189,52 @@ def test_write_direction(fn_name, mapping_name, value_type, write, event_sig, ex
     assert specs[0]["direction"] == expected_direction
 
 
+def _conversion(lvalue: Any, variable: Any) -> SimpleNamespace:
+    return _named("TypeConversion", lvalue=lvalue, variable=variable)
+
+
+def _converted_write_spec(source: Any) -> dict[str, Any]:
+    # MasterMinter ``removeController``: Slither assigns ``address(0)`` through ``TMP = CONVERT 0 to address``.
+    controllers = _mapping("controllers", value_type="address")
+    key = _local("_controller")
+    ref = _tmp("REF_1", type_str="address")
+    converted = _tmp("TMP_1", type_str="address")
+    fn = _function(
+        "removeController",
+        nodes=[
+            _node(
+                [
+                    _index(controllers, key, ref),
+                    _conversion(converted, source),
+                    _assignment(ref, converted),
+                    _event_call("ControllerRemoved(address)", [key]),
+                ]
+            )
+        ],
+        written=[controllers],
+    )
+    specs = discover_mapping_writer_events(_contract([fn]))
+    assert len(specs) == 1
+    return dict(specs[0])
+
+
+def test_address_zero_through_type_conversion_is_a_removal():
+    spec = _converted_write_spec(_constant(0))
+    assert spec["direction"] == "remove"
+    assert spec["value_position"] is None
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(_constant(1), id="nonzero_constant"),
+        pytest.param(_local("newWorker"), id="variable"),
+    ],
+)
+def test_type_conversion_of_anything_but_zero_stays_a_set(source):
+    assert _converted_write_spec(source)["direction"] == "set"
+
+
 def test_dedupes_on_mapping_event_direction():
     wards = _mapping("wards")
     guy_a = _local("guy_a")

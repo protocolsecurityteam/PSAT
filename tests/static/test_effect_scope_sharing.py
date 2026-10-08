@@ -16,6 +16,11 @@ from services.resolution.effect_scopes import resolve_effect_scopes, site_predic
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts, core, effect_scopes
 from services.static.contract_analysis_pipeline.authorization import attach_membership_inventories
 from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
+from services.static.contract_analysis_pipeline.internal_authority_slot import apply_internal_authority_slot_pass
+from services.static.contract_analysis_pipeline.predicate_artifacts import (
+    apply_mapping_event_hint_pass,
+    apply_solmate_authority_hint_pass,
+)
 from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass
 from services.static.contract_analysis_pipeline.structural_evidence import (
     _has_state_dependency,
@@ -264,6 +269,9 @@ def test_leaf_passes_give_shared_trees_what_they_give_per_site_copies(project, m
     for contract, shared, copies, sites_by_function in run.passes:
         with structural_scope(contract):
             apply_writer_gate_pass(contract, copies)
+            apply_mapping_event_hint_pass(contract, copies)
+            apply_solmate_authority_hint_pass(contract, copies)
+            apply_internal_authority_slot_pass(contract, copies)
             apply_reentrancy_pause_pass(contract, copies)
             attach_membership_inventories(contract, copies)
             effect_scopes.attach_storage_dependencies(contract, copies, sites_by_function)

@@ -17,10 +17,12 @@ from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, R
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
     create_job,
+    failed_semantic_artifact,
     get_artifact,
     get_source_files,
     reconcile_impl_job_for_proxy,
     store_artifact,
+    usable_semantic_artifact,
 )
 from schemas.contract_analysis import ContractAnalysis
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
@@ -1445,6 +1447,15 @@ class StaticWorker(BaseWorker):
             store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
             return None
 
+        # A failed build is kept for diagnosis under ``<name>_error``, never under the name policy reads as the facts.
+        for name, artifact in (("predicate_trees", semantic_predicate_trees), ("effects", semantic_effects)):
+            if failed_semantic_artifact(name, artifact):
+                store_artifact(session, job.id, f"{name}_error", data=artifact)
+        if failed_semantic_artifact("predicate_trees", semantic_predicate_trees):
+            semantic_predicate_trees = None
+        if failed_semantic_artifact("effects", semantic_effects):
+            semantic_effects = None
+
         # ``predicate_trees`` and ``effects`` feed policy. ``default=str`` so a stray non-JSON analyzer object degrades
         # rather than killing the job.
         (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
@@ -1588,7 +1599,9 @@ class StaticWorker(BaseWorker):
         try:
             analysis = get_artifact(session, job.id, "contract_analysis")
             tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
-            predicate_trees = get_artifact(session, job.id, "predicate_trees")
+            predicate_trees = usable_semantic_artifact(
+                "predicate_trees", get_artifact(session, job.id, "predicate_trees")
+            )
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
@@ -1634,7 +1647,7 @@ class StaticWorker(BaseWorker):
                 contract_name=contract_name,
                 analysis=analysis,
                 tracking_plan=tracking_plan,
-                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                predicate_trees=predicate_trees,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
                 # Only a bundle this job produced may overwrite a current row; otherwise a fresh analysis and a later

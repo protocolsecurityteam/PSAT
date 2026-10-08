@@ -544,7 +544,7 @@ def _maybe_inline_cross_contract_call(
         )
 
     # A proxy registry's predicate_trees live on its implementation job.
-    from db.queue import get_artifact
+    from db.queue import get_artifact, usable_semantic_artifact
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
     lookup = find_analysis_job_for_address(
@@ -555,8 +555,10 @@ def _maybe_inline_cross_contract_call(
     )
     if lookup is None:
         return None
-    artifact = get_artifact(session, lookup.analysis_job.id, "predicate_trees")
-    if not isinstance(artifact, dict):
+    artifact = usable_semantic_artifact(
+        "predicate_trees", get_artifact(session, lookup.analysis_job.id, "predicate_trees")
+    )
+    if artifact is None:
         return None
     from services.resolution.adapters import CallFrame
 

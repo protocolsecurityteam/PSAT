@@ -277,9 +277,11 @@ def _callee_tree_entry(
 
 
 def _key_dispatch_selector(key: str, canonical_signatures: Any) -> str | None:
-    """The selector that reaches the function a tree is keyed under (its Slither spelling), or ``None``."""
+    """The selector that reaches the function a tree is keyed under (its Slither spelling), or ``None``: also when the
+    artifact records ``None`` for it, its types couldn't be lowered and its spelling isn't the signature.
+    """
     canonical = canonical_signatures if isinstance(canonical_signatures, dict) else {}
-    return _selector_for_canonical_signature(canonical.get(key) or key)
+    return _selector_for_canonical_signature(canonical[key] if key in canonical else key)
 
 
 def _stored_dispatch_selector(selector: Any, signature: Any) -> str | None:

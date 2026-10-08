@@ -226,7 +226,10 @@ def test_a_library_function_with_a_struct_parameter_has_no_determined_selector(c
     assert records["ok(Auth.Cfg,address)"]["selector"] is None
     assert records["total(uint256[])"]["selector"] is None
     assert records["plain(uint256)"]["selector"] == _sel("plain(uint256)")
-    # Selector consumers read the same answer from the predicate artifact: no lowered form for a library.
+    # Selector consumers read the same answer from the predicate artifact: recorded as not determined, which an absent
+    # entry (the spelling) would not say for ``total(uint256[])``.
     canonical = build_predicate_artifacts(library).get("canonical_signatures", {})
-    assert "ok(Auth.Cfg,address)" not in canonical
+    assert canonical["ok(Auth.Cfg,address)"] is None
+    assert canonical["total(uint256[])"] is None
+    assert "plain(uint256)" not in canonical
     assert canonical["quote(Price,uint256[])"] == "quote(uint128,uint256[])"

@@ -20,6 +20,7 @@ from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
     EDGE_RELATION_EXTERNAL_CALL_TARGET,
 )
+from db.queue.artifacts import analysis_reports_failure, failed_semantic_artifact
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis, ControllerProvenance
 from schemas.control_tracking import (
@@ -59,6 +60,12 @@ class UnresolvedProxyError(RuntimeError):
 
     Analysing the delegatecall shell yields an empty guard set that reads as permissionless, so materialization fails
     closed and the BFS records a degraded node.
+    """
+
+
+class DegradedStaticAnalysisError(RuntimeError):
+    """A nested contract whose predicate or effects build failed; its guards are not determined, so the BFS records a
+    degraded node instead of resolving from them.
     """
 
 
@@ -208,6 +215,12 @@ def _build_static_artifacts(
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
         analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
+    if analysis_reports_failure(analysis):
+        # Raised so the cache records ``failed`` (rebuilt on the next request) and the node stays undetermined, rather
+        # than a ready row built on failed semantics.
+        raise DegradedStaticAnalysisError(
+            f"static analysis of {effective_address} failed: {'; '.join(analysis['analysis_status']['errors'])}"
+        )
 
     plan = build_control_tracking_plan(analysis)
     return contract_name, analysis, plan, predicate_trees
@@ -322,6 +335,9 @@ def _materialize_with_cross_process_cache(
     # ``None`` on rows before c1d2e3f4a5b6; the mapping-writer extraction short-circuits. That extraction is the only
     # reader and never mutates, so the two maps it reads are projected out without copying the ORM-cached blob.
     predicate_trees_cached = cm.hydrate_predicate_trees(row)
+    if failed_semantic_artifact("predicate_trees", predicate_trees_cached):
+        # A row published before failed builds were refused: its analysis rests on the failed trees too.
+        raise DegradedStaticAnalysisError(f"materialization for {effective_address} holds a failed predicate build")
     predicate_trees = (
         {k: predicate_trees_cached[k] for k in ("trees", "check_trees") if k in predicate_trees_cached}
         if predicate_trees_cached
@@ -789,7 +805,10 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
     for tree_map in tree_maps:
         for tree in tree_map.values():
             visit(tree)
-    return specs
+    # A present-set replay with no add event names no one (``controllers[c] = address(0)`` is a remove whose adds are
+    # value writes), so its "complete" would be vacuous.
+    with_adds = {spec["mapping_name"] for spec in specs if spec["direction"] == "add"}
+    return [spec for spec in specs if spec["mapping_name"] in with_adds]
 
 
 def _replay_mapping_principals(

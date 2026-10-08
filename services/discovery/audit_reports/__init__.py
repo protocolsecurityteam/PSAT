@@ -18,6 +18,8 @@ from typing import Any
 
 import requests as _requests
 
+from utils.logging import observe_degraded
+
 from .. import solodit as _solodit
 from ..audit_reports_llm import classify_search_results, generate_followup_query
 from ..inventory_domain import _debug_log, _tavily_search
@@ -180,6 +182,18 @@ _AUDITOR_PORTFOLIO_REPOS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Audit discovery's LLM steps; each records its own failure as degraded and carries on with less.
+_LLM_PHASES = frozenset(
+    {
+        "audit_followup_query",
+        "audit_classification",
+        "audit_extraction",
+        "audit_validate_cluster",
+        "audit_filename_metadata",
+    }
+)
+
+
 def search_audit_reports(
     company: str,
     official_domain: str | None = None,
@@ -188,8 +202,34 @@ def search_audit_reports(
 ) -> dict[str, Any]:
     """Search the web for third-party audit reports for a protocol.
 
-    Returns ``{reports, queries_used, errors, notes}``.
+    Returns ``{reports, queries_used, errors, notes}``. A failed LLM step (a provider ``402``, an expired key) makes the
+    report list a shortfall, not a count: each distinct failure is listed in ``errors`` and a note says the list is
+    incomplete, so a consumer never reads it as "no more audits".
     """
+    with observe_degraded() as degraded:
+        result = _search_audit_reports(company, official_domain=official_domain, max_queries=max_queries, debug=debug)
+    failures: dict[tuple[str, str], int] = {}
+    for error in degraded:
+        if error.phase in _LLM_PHASES:
+            key = (error.phase, f"{error.exc_type}: {error.message}")
+            failures[key] = failures.get(key, 0) + 1
+    if failures:
+        llm_errors = [
+            {"provider": "llm", "phase": phase, "error": message, "count": count}
+            for (phase, message), count in sorted(failures.items())
+        ]
+        result["errors"] = (list(result.get("errors") or []) + llm_errors)[:12]
+        note = f"{sum(failures.values())} LLM call(s) failed; the report list is incomplete"
+        result["notes"] = [note, *(result.get("notes") or [])][:12]
+    return result
+
+
+def _search_audit_reports(
+    company: str,
+    official_domain: str | None = None,
+    max_queries: int = 2,
+    debug: bool = False,
+) -> dict[str, Any]:
     clean_company = company.strip()
     if not clean_company:
         raise ValueError("company must not be empty")

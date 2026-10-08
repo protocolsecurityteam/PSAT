@@ -73,7 +73,7 @@ def _trees_map(predicate_trees: Any) -> dict[str, Any]:
     return trees if isinstance(trees, dict) else {}
 
 
-def _canonical_map(predicate_trees: Any) -> dict[str, str]:
+def _canonical_map(predicate_trees: Any) -> dict[str, str | None]:
     if not isinstance(predicate_trees, dict):
         return {}
     canonical = predicate_trees.get("canonical_signatures")
@@ -195,28 +195,32 @@ class ClaimContext:
         return canonical if isinstance(canonical, str) else None
 
     def abi_signature(self, function: str) -> str | None:
-        """The signature whose keccak is this function's on-chain selector.
+        """The signature whose keccak is this function's on-chain selector, or ``None`` when it isn't determined.
 
-        The predicate artifact only records a canonical form when it differs and is absent on degraded runs, so fall
-        back to the full name if already elementary, else lower the Slither parameter types (recovers e.g. Safe
-        ``execTransaction``'s enum param).
+        The predicate artifact records the canonical form where it differs and ``None`` where it couldn't be lowered;
+        absent, the full name stands if already elementary. With no artifact (a degraded run) the Slither parameter
+        types are lowered here instead (recovers e.g. Safe ``execTransaction``'s enum param), library rule included.
         """
         if function in self._abi_signatures:
             return self._abi_signatures[function]
-        resolved = self.canonical_signature(function)
-        if resolved is None:
-            resolved = function if _is_canonical_signature(function) else self._lower_signature_from_slither(function)
+        resolved: str | None
+        if function in self._canonical:
+            resolved = self.canonical_signature(function)
+        elif _is_canonical_signature(function):
+            resolved = function
+        else:
+            resolved = self._lower_signature_from_slither(function)
         self._abi_signatures[function] = resolved
         return resolved
 
     def _lower_signature_from_slither(self, function: str) -> str | None:
-        from ..contract_analysis_pipeline.predicate_artifacts import _canonical_signature
+        from ..contract_analysis_pipeline.predicate_artifacts import dispatch_signature
 
         for fn in getattr(self.contract, "functions", None) or []:
             if (getattr(fn, "full_name", None) or getattr(fn, "name", None)) != function:
                 continue
             try:
-                return _canonical_signature(fn)
+                return dispatch_signature(fn, function)
             except Exception:  # pragma: no cover - defensive: a degraded IR
                 logger.debug("canonical signature lowering failed for %s", function, exc_info=True)
                 return None

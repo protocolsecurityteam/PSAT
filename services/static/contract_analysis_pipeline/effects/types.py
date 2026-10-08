@@ -58,6 +58,12 @@ class SinkRecord(TypedDict):
     origin: str  # body | guard
     # High-level/library call sinks only; absent elsewhere, which fails preconditions like ``not_determined``.
     receiver: NotRequired[ReceiverDescriptor]
+    # Library call sinks only: the library function's Slither spelling. Text, never hashed: the receiver doesn't
+    # answer the library's selector, so ``selector`` is ``None``.
+    library_signature: NotRequired[str]
+    # Library call sinks only, and only when proven: the library function and all it reaches never run code at another
+    # address, so its receiver is never called. Absent is not determined.
+    library_makes_no_call: NotRequired[bool]
 
 
 class StateWriteFact(TypedDict):
@@ -90,6 +96,9 @@ class ValueFlow(TypedDict):
 
     kind: str  # callee_erc20_selector | native_transfer_send | low_level_value_call
     selector: str | None
+    # Bare names of the token-first library functions carrying the move (``safeTransfer``); their call sinks have no
+    # selector, so a consumer finds the carrier by name.
+    library_callees: NotRequired[list[str]]
     # ``in``/``out`` are this contract's own moves (it is payer or payee). ``value_router`` is a move the entry only
     # caused (a router into a vault, or a pull between third parties) and never drives a direction label;
     # ``from_is_self`` says which way.

@@ -27,7 +27,13 @@ from .origins import (
     _target_variable_site,
     _UnitCtx,
 )
-from .selectors import _callee_signature, _selector_for, _token_first_transfer
+from .selectors import (
+    _ERC20_TRANSFER_FROM_SELECTOR,
+    _ERC20_TRANSFER_SELECTOR,
+    _callee_dispatch_selector,
+    _callee_signature,
+    _token_first_transfer,
+)
 from .setters import _aliased_storage_writes, _setter_scan_complete, _setter_state_vars
 from .sinks import _bare_callee_name, _is_modifier_call
 from .types import (
@@ -39,6 +45,19 @@ from .types import (
     KindTier,
     ValueFlow,
 )
+
+_FlowKey = tuple[str, str | None, str, bool, str, tuple[str, ...]]
+
+
+def _flow_key(flow: ValueFlow) -> _FlowKey:
+    return (
+        flow["kind"],
+        flow["selector"],
+        flow["direction"],
+        flow["from_is_self"],
+        flow["origin"],
+        tuple(flow.get("library_callees") or ()),
+    )
 
 
 def _arg_is_address_this(arg: Any, this_ids: set[int], this_names: set[str]) -> bool:
@@ -70,23 +89,21 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     flows: list[ValueFlow] = []
     # Routed flows are appended after the walk so same-contract flow order is unchanged.
     router_flows: list[ValueFlow] = []
-    seen: set[tuple[str, str | None, str, bool, str]] = set()
+    seen: set[_FlowKey] = set()
     # Keyed by (unit, bindings, crossed): divergent bindings re-walk so the fold sees the disagreement, and routed and
     # same-contract walks classify against different contracts.
     visited: set[tuple[int, Any, Any, bool]] = set()
-    target_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
-    amount_sites: dict[tuple[str, str | None, str, bool, str], list[tuple[str, str]]] = {}
-    target_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
-    amount_indexes: dict[tuple[str, str | None, str, bool, str], list[int | None]] = {}
+    target_sites: dict[_FlowKey, list[tuple[str, str]]] = {}
+    amount_sites: dict[_FlowKey, list[tuple[str, str]]] = {}
+    target_indexes: dict[_FlowKey, list[int | None]] = {}
+    amount_indexes: dict[_FlowKey, list[int | None]] = {}
     # Per amount site, so the fold decides agreement.
-    amount_record_sites: dict[tuple[str, str | None, str, bool, str], list[ElementRecordSite | None]] = {}
+    amount_record_sites: dict[_FlowKey, list[ElementRecordSite | None]] = {}
     # Per destination site: variable, writers and scan completeness in the site's own context (a routed walk classifies
     # against the callee's contract).
-    target_variable_sites: dict[
-        tuple[str, str | None, str, bool, str], list[tuple[str | None, str | None, tuple[str, ...], bool, str | None]]
-    ] = {}
+    target_variable_sites: dict[_FlowKey, list[tuple[str | None, str | None, tuple[str, ...], bool, str | None]]] = {}
     # Per routed flow: identities of the ops carrying it. Sites with none record nothing (blocks, never proves).
-    router_ops_by_key: dict[tuple[str, str | None, str, bool, str], set[tuple[str | None, str | None]]] = {}
+    router_ops_by_key: dict[_FlowKey, set[tuple[str | None, str | None]]] = {}
 
     entry_contract = getattr(function, "contract", None)
     # Classification context per contract; crossing a ``HighLevelCall`` rebuilds it for the callee, so ``address(this)``
@@ -146,6 +163,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         routed_unless_sink_is_self: bool = False,
         router_op: tuple[str | None, str | None] | None = None,
         op_identity: tuple[str | None, str | None] | None = None,
+        library_callee: str | None = None,
     ) -> None:
         # A provably-zero move moves nothing and would also collapse a real send on the same key to indeterminate, so
         # drop it for every sink kind. Never under ``amount_override`` (the slot is a token id and 0 is a real NFT), nor
@@ -165,7 +183,10 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
         # bridge) is only caused here, and an unresolved destination proves nothing.
         if routed_unless_sink_is_self and target_site[0] != "self":
             flow = {**flow, "direction": "value_router"}
-        key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
+        if library_callee:
+            # Part of the key: a library-carried move stays its own flow rather than folding into a direct transfer's.
+            flow = {**flow, "library_callees": [library_callee]}
+        key = _flow_key(flow)
         if flow["direction"] == "value_router":
             # A move past a boundary is carried by the crossing call; a boundary-less routed pull by its own op.
             identity = router_op if crossed else op_identity
@@ -259,7 +280,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                     )
                 elif op == "HighLevelCall":
                     signature = _callee_signature(ir)
-                    selector = _selector_for(signature)
+                    selector = _callee_dispatch_selector(ir)
                     arguments = list(getattr(ir, "arguments", []) or [])
                     if selector in _ERC20_PULL_SELECTORS:
                         from_arg = arguments[0] if arguments else None
@@ -318,7 +339,16 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                 token_first = _token_first_transfer(ir) if op in ("HighLevelCall", "LibraryCall") else None
                 if token_first is not None:
                     signature = _callee_signature(ir)
-                    selector = _selector_for(signature)
+                    # A library call publishes the ERC-20 move the token receives, which the recognizer proved, and
+                    # names its carrier (its sink has no selector); a high-level helper keeps the selector it is called
+                    # on, which its sink carries too.
+                    library_callee = _bare_callee_name(signature) if op == "LibraryCall" else None
+                    if op != "LibraryCall":
+                        selector = _callee_dispatch_selector(ir)
+                    elif token_first[0] == "send":
+                        selector = _ERC20_TRANSFER_SELECTOR
+                    else:
+                        selector = _ERC20_TRANSFER_FROM_SELECTOR
                     if token_first[0] == "send":
                         _kind, to_arg, amount_arg = token_first
                         add(
@@ -334,6 +364,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             context(),
                             crossed,
                             router_op=router_op,
+                            library_callee=library_callee,
                         )
                     else:  # pull
                         _kind, from_arg, to_arg, amount_arg = token_first
@@ -353,6 +384,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                             routed_unless_sink_is_self=not from_self,
                             router_op=router_op,
                             op_identity=(selector, _bare_callee_name(signature)),
+                            library_callee=library_callee,
                         )
                 if op in ("InternalCall", "LibraryCall"):
                     # Still descend into a recognized callee: the recognizer only fires where the walk sees no flow, and
@@ -378,7 +410,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
                     # Route into a resolved in-unit callee whose body moves value (``BoringVault.enter``/``exit``),
                     # rebasing the context onto the callee's contract.
                     signature = _callee_signature(ir)
-                    selector = _selector_for(signature)
+                    selector = _callee_dispatch_selector(ir)
                     is_direct_value = (
                         selector in _ERC20_PULL_SELECTORS
                         or selector in _ERC20_SEND_SELECTORS
@@ -404,7 +436,7 @@ def _value_flow_facts(function: Any, *, zero_value_sinks: set[str] | None = None
     walk(function, "body", True, None, None, 0, False, entry_contract)
     flows.extend(router_flows)
     for flow in flows:
-        key = (flow["kind"], flow["selector"], flow["direction"], flow["from_is_self"], flow["origin"])
+        key = _flow_key(flow)
         if flow["direction"] == "value_router":
             ops = sorted(router_ops_by_key.get(key, ()), key=lambda op: (op[0] or "", op[1] or ""))
             if ops:

@@ -153,3 +153,23 @@ class TestProtocolCreation:
         assert spies["protocol_calls"] == [expected_call]
         assert job.protocol_id == 1
         assert job.company == expected_company
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "outcome"),
+    [
+        (200, {}, {"outcome": "loaded", "status": 200, "reason": None}),
+        (
+            429,
+            {"x-vercel-mitigated": "challenge"},
+            {"outcome": "blocked", "status": 429, "reason": "x-vercel-mitigated=challenge"},
+        ),
+        (403, {"CF-Mitigated": "challenge"}, {"outcome": "blocked", "status": 403, "reason": "cf-mitigated=challenge"}),
+        (404, {}, {"outcome": "error_status", "status": 404, "reason": "http_404"}),
+        (None, None, {"outcome": "failed", "status": None, "reason": "no_response"}),
+    ],
+)
+def test_page_load_outcome(dapp_worker_module, status, headers, outcome):
+    from services.crawlers.dapp.browser import page_load_outcome
+
+    assert page_load_outcome(status, headers) == outcome

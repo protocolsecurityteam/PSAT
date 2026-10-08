@@ -188,7 +188,11 @@ def _clear_principal_history_caches():
 
 def _teller_predicate_trees() -> tuple[str, dict]:
     data = json.loads((_SOLMATE_FIXTURES / "teller_predicate_trees.json").read_text())
-    return data["contract"], {"trees": {"addAsset(ERC20)": data["trees"]["addAsset(ERC20)"]}}
+    # The static stage records the lowered form of every contract-typed signature.
+    return data["contract"], {
+        "trees": {"addAsset(ERC20)": data["trees"]["addAsset(ERC20)"]},
+        "canonical_signatures": {"addAsset(ERC20)": "addAsset(address)"},
+    }
 
 
 def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):

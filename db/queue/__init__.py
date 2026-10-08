@@ -7,12 +7,15 @@ from db.storage import artifact_key, source_file_key
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
 from .artifacts import (
     _artifact_row_to_value,
+    analysis_reports_failure,
     count_analysis_children,
+    failed_semantic_artifact,
     get_all_artifacts,
     get_artifact,
     get_source_files,
     store_artifact,
     store_source_files,
+    usable_semantic_artifact,
 )
 from .discovery import (
     bulk_upsert_discovered_contracts,
@@ -70,6 +73,7 @@ from .static_cache import (
 )
 
 __all__ = [
+    "analysis_reports_failure",
     "DEFAULT_DAEMON_LEASE_TTL_S",
     "DEFAULT_JOB_LEASE_TTL_S",
     "DEFAULT_JOB_STALE_TIMEOUT",
@@ -109,6 +113,7 @@ __all__ = [
     "find_completed_static_cache",
     "find_existing_job_for_address",
     "find_previous_company_inventory",
+    "failed_semantic_artifact",
     "get_all_artifacts",
     "get_artifact",
     "get_or_create_protocol",
@@ -127,4 +132,5 @@ __all__ = [
     "try_acquire_daemon_lease",
     "update_job_detail",
     "upsert_discovered_contract",
+    "usable_semantic_artifact",
 ]

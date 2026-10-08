@@ -486,7 +486,9 @@ def _enumerate_param_keyed_mapping_values(
         )
     except Exception:
         return [], {}
-    if scan["status"] == "error":
+    from services.resolution.mapping_enumerator import UNREADABLE_VALUE_SCAN_STATUSES
+
+    if scan["status"] == "error" or scan["status"] in UNREADABLE_VALUE_SCAN_STATUSES:
         return [], {}
     values: list[str] = []
     seen: set[str] = set()

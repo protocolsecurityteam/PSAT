@@ -261,6 +261,27 @@ def record_degraded(
     accumulator.append(error)
 
 
+@contextmanager
+def observe_degraded() -> Iterator[list["StageError"]]:
+    """Yield a list that, on exit, holds the degraded errors recorded inside the block.
+
+    In a job context they still reach the job's ``stage_errors``; outside one they are collected only here.
+    """
+    accumulator = degraded_errors_var.get()
+    token = None
+    if accumulator is None:
+        accumulator = []
+        token = degraded_errors_var.set(accumulator)
+    start = len(accumulator)
+    observed: list[StageError] = []
+    try:
+        yield observed
+    finally:
+        observed.extend(accumulator[start:])
+        if token is not None:
+            degraded_errors_var.reset(token)
+
+
 def record_stage_metric(key: str, value: Any) -> None:
     """Record one progress metric into the stage's ``stage_timing`` artifact; later writes overwrite.
 
@@ -384,6 +405,7 @@ __all__ = [
     "bind_trace_context",
     "configure_logging",
     "degraded_errors_var",
+    "observe_degraded",
     "log_timed_phase",
     "record_degraded",
     "record_stage_metric",

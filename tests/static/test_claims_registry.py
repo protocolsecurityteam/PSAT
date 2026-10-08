@@ -225,6 +225,42 @@ def test_build_claims_isolates_a_failing_matcher():
     assert all(c["claim_id"] != "test.raising_matcher" for c in artifact["functions"]["deploy()"])
 
 
+def test_a_matcher_that_raises_partway_publishes_no_prefix():
+    """It answered ``deploy()`` and raised on ``ping()``; that prefix is not its verdict, and ``zap()`` after the
+    failure was never evaluated.
+    """
+    from utils.logging import degraded_errors_var
+
+    def _answers_deploy_then_raises(_ctx: ClaimContext, fn: str) -> ClaimEvidence | None:
+        if fn == "deploy()":
+            return ClaimEvidence(tier="standard_exact", witness={"kind": "test"})
+        raise RuntimeError("matcher blew up partway")
+
+    facts = _facts()
+    facts["functions"]["zap()"] = {"function": "zap()", "selector": "0x2b6d0b7c", "sinks": [], "effect_labels": []}
+    entry = RegistryEntry(
+        claim_id="test.partial_matcher",
+        sentence="answers one function then explodes",
+        gate=lambda _ctx: True,
+        trigger=_answers_deploy_then_raises,
+        legacy_projection=None,
+        consumer_family="control_plane",
+        grant_class="control.gate",
+    )
+    register(entry)
+    errors: list = []
+    token = degraded_errors_var.set(errors)
+    try:
+        artifact = build_claims(None, facts, {})
+    finally:
+        degraded_errors_var.reset(token)
+        _REGISTRY.pop("test.partial_matcher", None)
+
+    published = {fn: [c["claim_id"] for c in claims] for fn, claims in artifact["functions"].items()}
+    assert published == {"deploy()": ["contract_deployment"], "ping()": [], "zap()": []}
+    assert [(e.phase, (e.context or {}).get("claim_id")) for e in errors] == [("claim_matcher", "test.partial_matcher")]
+
+
 def test_consumer_referenced_ids_are_subset_of_registry():
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     assert CONSUMER_REFERENCED_CLAIM_IDS <= set(registry())

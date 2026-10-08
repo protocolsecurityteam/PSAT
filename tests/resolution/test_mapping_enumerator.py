@@ -434,6 +434,229 @@ def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
     assert not _value_predicate_passes(zero_word, {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"})
 
 
+# MasterMinter ``onlyController``: ``controllers[msg.sender] != address(0)`` stores the rhs as decimal ``"0"``.
+_CONTROLLER_PREDICATE = {"op": "ne", "rhs_values": ["0"], "value_type": "address"}
+_WORKER_WORD = "0x0000000000000000000000005b6122c109b78c6755486966148c1d70a50a47d7"
+_ZERO = "0x" + "0" * 64
+
+
+def _entry(key: str, value_hex: str) -> Any:
+    return {"key": key, "mapping_name": "controllers", "value_hex": value_hex, "last_block": 1, "last_log_index": 0}
+
+
+def test_address_predicate_with_decimal_zero_rhs_keeps_nonzero_workers():
+    from services.resolution.mapping_enumerator import _value_predicate_passes, filter_value_entries
+
+    assert _value_predicate_passes(_WORKER_WORD, _CONTROLLER_PREDICATE) is True
+    assert _value_predicate_passes(_ZERO, _CONTROLLER_PREDICATE) is False
+    live, removed = _addr("79e0946e1c186e745f1352d7c21ab04700c99f71"), _addr("961708aa6bc3b79dff302f3f1525ed1bebc6f35b")
+    assert filter_value_entries([_entry(live, _WORKER_WORD), _entry(removed, _ZERO)], _CONTROLLER_PREDICATE) == [live]
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        pytest.param({"op": "ne", "rhs_values": ["CONTROLLER_NONE"], "value_type": "address"}, id="named_constant"),
+        pytest.param({"op": "eq", "rhs_values": ["keccak256(MINTER)"], "value_type": "bytes32"}, id="expression"),
+        pytest.param({"op": "eq", "rhs_values": [], "value_type": "uint256"}, id="no_rhs"),
+        pytest.param({"op": "in", "rhs_values": ["1", "TWO"], "value_type": "uint256"}, id="in_partly_unparseable"),
+        pytest.param({"op": "eq", "rhs_values": ["1"], "value_type": "uint256", "mask": "FLAG"}, id="mask"),
+        pytest.param({"op": "between", "rhs_values": ["1"], "value_type": "uint256"}, id="unknown_op"),
+        pytest.param({"op": "eq", "rhs_values": ["1"], "value_type": "string"}, id="dynamic_type"),
+        pytest.param({"op": "eq", "rhs_values": ["0x12345678"], "value_type": "bytes4"}, id="left_aligned_bytes4"),
+    ],
+)
+def test_unevaluable_predicate_is_not_determined_never_empty(predicate):
+    from services.resolution.mapping_enumerator import filter_value_entries
+
+    assert filter_value_entries([], predicate) is None
+    assert filter_value_entries([_entry(_addr("a11ce"), _WORKER_WORD)], predicate) is None
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        pytest.param({"op": "eq", "rhs_values": ["0"], "value_type": "uint256"}, id="eq_zero"),
+        pytest.param({"op": "lt", "rhs_values": ["10"], "value_type": "uint256"}, id="below_threshold"),
+        pytest.param({"op": "in", "rhs_values": ["0", "1"], "value_type": "uint256"}, id="in_with_zero"),
+    ],
+)
+def test_predicate_admitting_unwritten_keys_has_no_finite_answer(predicate):
+    from services.resolution.mapping_enumerator import filter_value_entries
+
+    assert filter_value_entries([_entry(_addr("a11ce"), "0x" + "05".rjust(64, "0"))], predicate) is None
+
+
+def test_value_predicate_reads_bools_signed_ints_and_masks():
+    from services.resolution.mapping_enumerator import _value_predicate_passes
+
+    one = "0x" + "1".rjust(64, "0")
+    minus_one = "0x" + "f" * 64
+    assert _value_predicate_passes(one, {"op": "eq", "rhs_values": ["True"], "value_type": "bool"}) is True
+    assert _value_predicate_passes(one, {"op": "eq", "rhs_values": ["False"], "value_type": "bool"}) is False
+    assert _value_predicate_passes(minus_one, {"op": "lt", "rhs_values": ["0"], "value_type": "int256"}) is True
+    assert _value_predicate_passes(minus_one, {"op": "lt", "rhs_values": ["0"], "value_type": "uint256"}) is False
+    flagged = "0x" + "6".rjust(64, "0")
+    assert _value_predicate_passes(flagged, {"op": "eq", "rhs_values": ["2"], "value_type": "uint256", "mask": "0x2"})
+    assert _value_predicate_passes("0x12", {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"}) is None
+
+
+_CONFIGURED_SIG = "ControllerConfigured(address,address)"
+_REMOVED_SIG = "ControllerRemoved(address)"
+
+
+def _controller_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "mapping_name": "controllers",
+            "event_signature": _CONFIGURED_SIG,
+            "event_name": "ControllerConfigured",
+            "key_position": 0,
+            "indexed_positions": [0, 1],
+            "direction": "set",
+            "writer_function": "configureController(address,address)",
+            "value_position": 1,
+        },
+        {
+            "mapping_name": "controllers",
+            "event_signature": _REMOVED_SIG,
+            "event_name": "ControllerRemoved",
+            "key_position": 0,
+            "indexed_positions": [0],
+            "direction": "remove",
+            "writer_function": "removeController(address)",
+            "value_position": None,
+        },
+    ]
+
+
+def _controller_log(topic0: str, args: list[str], *, block: int, log_index: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        topics=[topic0] + [_indexed_topic(a) for a in args],
+        data="0x",
+        block_number=block,
+        transaction_hash="0x" + "f" * 64,
+        log_index=log_index,
+    )
+
+
+def test_live_value_fold_replays_removals_as_zero():
+    from services.resolution.mapping_enumerator import enumerate_mapping_values, filter_value_entries
+
+    configured, removed = _event_topic0(_CONFIGURED_SIG), _event_topic0(_REMOVED_SIG)
+    kept = _addr("79e0946e1c186e745f1352d7c21ab04700c99f71")
+    dropped = _addr("961708aa6bc3b79dff302f3f1525ed1bebc6f35b")
+    logs = [
+        _controller_log(
+            configured, [kept, _addr("5b6122c109b78c6755486966148c1d70a50a47d7")], block=7933088, log_index=0
+        ),
+        _controller_log(
+            configured, [dropped, _addr("a1e2481a9cd0cb0447eeb1cbc26f1b3fff3bec20")], block=22427099, log_index=0
+        ),
+        _controller_log(removed, [dropped], block=22427216, log_index=0),
+    ]
+    client, _ = _fake_client([(logs, None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, _controller_specs()),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "complete"
+    assert filter_value_entries(result["entries"], _CONTROLLER_PREDICATE) == [kept]
+
+
+def test_bytes32_value_compares_as_its_full_word():
+    from services.resolution.mapping_enumerator import _value_predicate_passes
+
+    word = "0x" + "12345678" + "0" * 56
+    assert _value_predicate_passes(word, {"op": "eq", "rhs_values": [word], "value_type": "bytes32"}) is True
+
+
+def test_live_value_fold_takes_a_removal_and_a_set_reading_the_same_word_as_one_reading():
+    # ``st[k] = uint8(0); emit StSet(k, 0)`` beside ``st[k] = v; emit StSet(k, v)``: both read the event's value word.
+    from services.resolution.mapping_enumerator import enumerate_mapping_values, filter_value_entries
+
+    configured = _event_topic0(_CONFIGURED_SIG)
+    specs = [_controller_specs()[0], {**_controller_specs()[0], "direction": "remove"}]
+    kept, dropped = _addr("79e0946e1c186e745f1352d7c21ab04700c99f71"), _addr("961708aa6bc3b79dff302f3f1525ed1bebc6f35b")
+    logs = [
+        _controller_log(configured, [kept, _addr("5b6122c109b78c6755486966148c1d70a50a47d7")], block=1, log_index=0),
+        _controller_log(configured, [dropped, _addr("a1e2481a9cd0cb0447eeb1cbc26f1b3fff3bec20")], block=2, log_index=0),
+        _controller_log(configured, [dropped, "0x" + "0" * 40], block=3, log_index=0),
+    ]
+    client, _ = _fake_client([(logs, None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, specs),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "complete"
+    assert filter_value_entries(result["entries"], _CONTROLLER_PREDICATE) == [kept]
+
+
+def test_live_value_fold_refuses_two_readings_of_one_event():
+    from services.resolution.mapping_enumerator import enumerate_mapping_values
+
+    specs = [_controller_specs()[0], {**_controller_specs()[0], "direction": "remove", "value_position": None}]
+    client, calls = _fake_client([([], None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, specs),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "incomplete_ambiguous_writer_event"
+    assert calls["n"] == 0
+
+
+def test_live_value_fold_refuses_a_writer_whose_value_it_cannot_read():
+    from services.resolution.mapping_enumerator import enumerate_mapping_values
+
+    specs = _controller_specs()
+    specs[1]["direction"] = "set"  # the pre-fix hint shape: value written but not in the event
+    client, calls = _fake_client([([], None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, specs),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "incomplete_unfoldable_writer_event"
+    assert calls["n"] == 0
+
+
+def test_live_value_fold_marks_an_undecodable_log_incomplete():
+    from services.resolution.mapping_enumerator import enumerate_mapping_values
+
+    configured = _event_topic0(_CONFIGURED_SIG)
+    truncated = _controller_log(configured, [_addr("79e0946e1c186e745f1352d7c21ab04700c99f71")], block=1, log_index=0)
+    client, _ = _fake_client([([truncated], None)])
+    result = _run(
+        enumerate_mapping_values(
+            "0xe982615d461dd5cd06575bbea87624fda4e3de17",
+            cast(Any, _controller_specs()[:1]),
+            from_block=0,
+            client=client,
+            hypersync_module=_FakeHypersyncModule(),
+        )
+    )
+    assert result["status"] == "incomplete_undecodable_event"
+
+
 # The old address-only L1 key collided across chains and specs; a same-chain same-specs repeat must still hit.
 
 

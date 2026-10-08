@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Artifact, Contract, ControllerValue, EffectiveFunction, Job, JobStage, JobStatus
-from db.queue import get_artifact
+from db.queue import failed_semantic_artifact, get_artifact, usable_semantic_artifact
 from services.concurrency import parallel_map
 from services.policy.stale_policy import mark_policy_stale
 from services.static.claims import Claim, resolve_claim_precedence
@@ -340,6 +340,15 @@ def fetch_sibling_facts(
             facts.unreadable[addr] = outcome
             continue
         effects_payload, snapshot_payload, analysed = outcome
+        if failed_semantic_artifact("effects", effects_payload):
+            # A failed effects build is no facts, not a callee whose functions make no claims.
+            record_degraded(
+                phase="cross_contract_enrichment",
+                exc=ValueError("sibling effects artifact is a failed build"),
+                context={"sibling_address": addr, "sibling_job_id": str(job_id)},
+            )
+            facts.unreadable[addr] = None
+            continue
         if not isinstance(effects_payload, dict) or not isinstance(snapshot_payload, dict):
             record_degraded(
                 phase="cross_contract_enrichment",
@@ -443,22 +452,30 @@ def describe_gaps(
     chain_id: int,
     facts: SiblingFacts,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Each gap with the reason its callee had no facts, as observed now; it heals when the callee's facts land."""
+    """Each gap with the reason its callee had no facts, as observed now; it heals when the callee's facts land. A call
+    whose selector isn't determined to a callee that has facts is ``selector_not_determined``; it doesn't heal.
+    """
     reasons = {
         callee: _gap_reason(session, callee, chain_id=chain_id, facts=facts)
         for callee in sorted({gap["callee"] for gaps in gaps_by_function.values() for gap in gaps})
     }
+
+    def _reason(gap: dict[str, Any]) -> str:
+        if gap["selector"] is None and gap["callee"] in facts.effects:
+            return "selector_not_determined"
+        return reasons[gap["callee"]][0]
+
     return {
         fn_sig: sorted(
             (
                 {
                     **gap,
-                    "reason": reasons[gap["callee"]][0],
+                    "reason": _reason(gap),
                     "callee_job_id": str(reasons[gap["callee"]][1]) if reasons[gap["callee"]][1] else None,
                 }
                 for gap in gaps
             ),
-            key=lambda gap: (str(gap.get("sink_id")), gap["selector"], gap["callee"]),
+            key=lambda gap: (str(gap.get("sink_id")), gap["selector"] or "", gap["callee"]),
         )
         for fn_sig, gaps in gaps_by_function.items()
     }
@@ -653,7 +670,7 @@ def _mark_stale_dependents(
     source_address = call_address(session, job, chain_id=chain_id)
     if not source_address or not holds_facts_for_its_address(session, job, chain_id=chain_id):
         return 0
-    source_effects = get_artifact(session, job.id, "effects")
+    source_effects = usable_semantic_artifact("effects", get_artifact(session, job.id, "effects"))
     source_snapshot = get_artifact(session, job.id, "control_snapshot")
     if not isinstance(source_effects, dict) or not isinstance(source_snapshot, dict):
         return 0

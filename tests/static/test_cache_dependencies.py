@@ -682,6 +682,71 @@ def test_merge_upgrade_history_deduplicates_events():
     assert merged["total_upgrades"] == 1
 
 
+_PROXY = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+_IMPL_1 = "0x0000000000000000000000000000000000000041"
+_IMPL_2 = "0x0000000000000000000000000000000000000042"
+
+
+def _upgraded(implementation: str, log_index: int | None, *, block: int = 100, tx: str = "0xabc") -> dict:
+    event = {"event_type": "upgraded", "block_number": block, "tx_hash": tx, "implementation": implementation}
+    if log_index is not None:
+        event["log_index"] = log_index
+    return event
+
+
+def _history(*events: dict) -> dict:
+    return {
+        "schema_version": "0.1",
+        "target_address": _PROXY,
+        "proxies": {
+            _PROXY: {
+                "proxy_address": _PROXY,
+                "proxy_type": "eip1967",
+                "current_implementation": _IMPL_2,
+                "upgrade_count": len(events),
+                "events": list(events),
+            }
+        },
+        "total_upgrades": len(events),
+    }
+
+
+def test_merge_upgrade_history_keeps_two_logs_of_one_transaction():
+    from workers.static_worker import _merge_upgrade_history
+
+    first, second = _upgraded(_IMPL_1, 0), _upgraded(_IMPL_2, 1)
+    merged = _merge_upgrade_history(_history(first), _history(first, second))
+
+    proxy = merged["proxies"][_PROXY]
+    assert proxy["events"] == [first, second]
+    assert (proxy["upgrade_count"], merged["total_upgrades"]) == (2, 2)
+    assert [impl["address"] for impl in proxy["implementations"]] == [_IMPL_1, _IMPL_2]
+
+
+def test_merge_upgrade_history_keeps_one_copy_of_an_indexed_log():
+    from workers.static_worker import _merge_upgrade_history
+
+    merged = _merge_upgrade_history(_history(_upgraded(_IMPL_1, 3)), _history(_upgraded(_IMPL_1, 3)))
+
+    assert merged["proxies"][_PROXY]["events"] == [_upgraded(_IMPL_1, 3)]
+    assert merged["total_upgrades"] == 1
+
+
+def test_merge_upgrade_history_collapses_an_unindexed_event_only_into_its_indistinguishable_copy():
+    """An event rebuilt from ``upgrade_events`` rows has no index: it is a copy of the indexed log naming the same
+    implementation, and distinct from one naming another.
+    """
+    from workers.static_worker import _merge_upgrade_history
+
+    legacy_first, legacy_second = _upgraded(_IMPL_1, None), _upgraded(_IMPL_2, None)
+    merged = _merge_upgrade_history(
+        _history(legacy_first, legacy_second), _history(_upgraded(_IMPL_1, 0), _upgraded(_IMPL_2, 1))
+    )
+
+    assert merged["proxies"][_PROXY]["events"] == [legacy_first, legacy_second]
+    assert merged["total_upgrades"] == 2
+
+
 def test_merge_dynamic_deps_trace_errors():
     from workers.static_worker import _merge_dynamic_deps
 

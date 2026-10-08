@@ -50,19 +50,25 @@ def _extract_index_writes(function: Any) -> list[tuple[str, list[Any], Any]]:
     triples: list[tuple[str, list[Any], Any]] = []
     for node in getattr(function, "nodes", []) or []:
         definitions: dict[str, Any] = {}
+        conversions: dict[str, Any] = {}
         for ir in getattr(node, "irs", []) or []:
             kind = _ir_name(ir)
             if kind in {"Index", "Member"}:
                 lvalue_name = _var_name(getattr(ir, "lvalue", None))
                 if lvalue_name:
                     definitions[lvalue_name] = ir
+            elif kind == "TypeConversion":
+                lvalue_name = _var_name(getattr(ir, "lvalue", None))
+                if lvalue_name:
+                    conversions[lvalue_name] = getattr(ir, "variable", None)
             elif kind == "Assignment":
                 lvalue_name = _var_name(getattr(ir, "lvalue", None))
                 defining = definitions.get(lvalue_name)
                 write = _mapping_write_from_index(defining, definitions)
                 if write is not None:
                     mapping_name, keys = write
-                    triples.append((mapping_name, keys, getattr(ir, "rvalue", None)))
+                    rvalue = getattr(ir, "rvalue", None)
+                    triples.append((mapping_name, keys, _converted_zero_constant(rvalue, conversions) or rvalue))
             elif kind == "Delete":
                 operand_name = _var_name(getattr(ir, "lvalue", None))
                 defining = definitions.get(operand_name)
@@ -71,6 +77,30 @@ def _extract_index_writes(function: Any) -> list[tuple[str, list[Any], Any]]:
                     mapping_name, keys = write
                     triples.append((mapping_name, keys, None))
     return triples
+
+
+def _converted_zero_constant(value: Any, conversions: dict[str, Any]) -> Any | None:
+    """The zero ``Constant`` behind ``address(0)`` / ``bytes32(0)``, which Slither assigns through a ``TypeConversion``
+    temporary. Only zero is unwrapped: it stays zero under every conversion, while a nonzero literal can be truncated
+    by a nested narrowing conversion.
+    """
+    seen: set[str] = set()
+    while _ir_name(value) not in ("Constant", ""):
+        name = _var_name(value)
+        if name in seen or name not in conversions:
+            return None
+        seen.add(name)
+        value = conversions[name]
+    if _ir_name(value) != "Constant":
+        return None
+    raw: Any = getattr(value, "value", None)
+    if isinstance(raw, bool):
+        return None
+    try:
+        numeric = int(raw, 16) if isinstance(raw, str) and raw.startswith("0x") else int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if numeric == 0 else None
 
 
 def _mapping_write_from_index(defining: Any, definitions: dict[str, Any]) -> tuple[str, list[Any]] | None:

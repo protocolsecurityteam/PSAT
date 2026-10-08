@@ -11,7 +11,7 @@ from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_KEY_SOU
 
 from ..capabilities import CapabilityExpr, ExternalCheck
 from ..event_tail import TailScanner, tail_scanner_for
-from ..repos.event_logs_pg import BEHIND_PARTIAL_REASONS, UNDECODABLE_EVENT_DATA
+from ..repos.event_logs_pg import BEHIND_PARTIAL_REASONS, UNDECODABLE_EVENT_DATA, UNFOLDABLE_WRITER_EVENT
 from . import EnumerationResult, EvaluationContext
 
 if TYPE_CHECKING:
@@ -102,13 +102,22 @@ class EventIndexedAdapter:
                 if h.get("direction") == "set" and h.get("value_position") is not None and h.get("topic0")
             ]
             if set_hints:
-                # A caller-keyed ACL must fold on the caller's event-arg position, not the hint's innermost key (e.g.
-                # the selector).
-                fold_key_position = (
-                    _caller_event_arg_position(descriptor, set_hints[0]) if implicit_predicate is not None else None
-                )
+                from ..mapping_enumerator import value_writer_spec_foldable
+
+                # Every writer of the mapping moves a key's latest value; one the fold can't replay leaves it unknown.
+                writer_hints = [h for h in hints if h.get("topic0")]
+                if not all(value_writer_spec_foldable(h) for h in writer_hints):
+                    return CapabilityExpr.unsupported("value_writer_event_unfoldable")
+                fold_key_position = None
+                if implicit_predicate is not None:
+                    # A caller-keyed ACL must fold on the caller's event-arg position, not the hint's innermost key
+                    # (e.g. the selector), and every writer event must carry the caller at the same position.
+                    positions = {_caller_event_arg_position(descriptor, h) for h in writer_hints}
+                    if len(positions) != 1:
+                        return CapabilityExpr.unsupported("value_writer_caller_position_ambiguous")
+                    fold_key_position = positions.pop()
                 return self._enumerate_value_predicate(
-                    descriptor, set_hints, value_predicate, ctx, fold_key_position=fold_key_position
+                    descriptor, writer_hints, value_predicate, ctx, fold_key_position=fold_key_position
                 )
 
         repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
@@ -190,7 +199,7 @@ class EventIndexedAdapter:
                 basis = ["no_index_cursor"]
                 if _descriptor_is_caller_keyed(descriptor):
                     basis.append("caller_keyed_membership_allowlist")
-                return self._external_check(descriptor, first_hint, ctx, basis)
+                return self._external_check(descriptor, first_hint, ctx, basis, awaited_hints=event_hints)
             merged.extend(result.members)
             if result.confidence == "partial" and worst_confidence == "enumerable":
                 worst_confidence = "partial"
@@ -224,6 +233,8 @@ class EventIndexedAdapter:
         hint: dict,
         ctx: EvaluationContext,
         basis: list[str],
+        *,
+        awaited_hints: list[dict] | None = None,
     ) -> CapabilityExpr:
         extra: dict[str, Any] = {
             "basis": basis,
@@ -235,6 +246,9 @@ class EventIndexedAdapter:
         # Only ``no_index_cursor`` waits on the index (see solmate_roles._check_only).
         if "no_index_cursor" in basis:
             extra["deferred_pending_index"] = True
+            topic0s = _awaited_topic0s(awaited_hints)
+            if topic0s:
+                extra["deferred_topic0s"] = topic0s
         target = _resolve_event_address(descriptor, hint, ctx)
         logger.debug(
             "event_indexed decision",
@@ -280,7 +294,7 @@ class EventIndexedAdapter:
         if status == "ok" and durable is not None:
             return durable
         if status == "cold":
-            return self._deferred_value_check(descriptor, ctx, event_address)
+            return self._deferred_value_check(descriptor, ctx, event_address, awaited_hints=set_hints)
         if status == "behind":
             # The durable rows are warm but unproven past their frontier; a full live re-scan is never the fallback.
             return CapabilityExpr.unsupported("event_fold_tail_unavailable")
@@ -294,21 +308,27 @@ class EventIndexedAdapter:
         descriptor: dict,
         ctx: EvaluationContext,
         event_address: str | None,
+        *,
+        awaited_hints: list[dict] | None = None,
     ) -> CapabilityExpr:
         """Defer a cold-index value fold to a gated ``external_check_only`` tagged ``deferred_pending_index`` (keyed
         on ``target_address`` by ``deferred_reconciler``). The ``caller_keyed_membership_allowlist`` basis keeps
         the function gated until the index warms.
         """
+        extra: dict[str, Any] = {
+            "basis": ["no_index_cursor", "caller_keyed_membership_allowlist"],
+            "deferred_pending_index": True,
+            "callee_function": descriptor.get("callee_function"),
+            "callee_signature": descriptor.get("callee_signature"),
+        }
+        topic0s = _awaited_topic0s(awaited_hints)
+        if topic0s:
+            extra["deferred_topic0s"] = topic0s
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=event_address,
                 target_call_selector=_descriptor_dispatch_selector(descriptor),
-                extra={
-                    "basis": ["no_index_cursor", "caller_keyed_membership_allowlist"],
-                    "deferred_pending_index": True,
-                    "callee_function": descriptor.get("callee_function"),
-                    "callee_signature": descriptor.get("callee_signature"),
-                },
+                extra=extra,
             )
         )
 
@@ -325,6 +345,7 @@ class EventIndexedAdapter:
         """Fold the value predicate over the durable index:
 
         - ``("ok", finite_set)``: exact, the rows proven through the evaluated block (directly or by a complete tail);
+        - ``("ok", unsupported)``: the rows are proven but the predicate or a writer event can't be evaluated;
         - ``("cold", None)``: backfill incomplete, caller defers;
         - ``("behind", None)``: warm but behind the evaluated block with no complete tail, caller fails closed;
         - ``("undecodable", None)``: a row the fold needs carries undecodable data, caller fails closed;
@@ -342,7 +363,8 @@ class EventIndexedAdapter:
                 "topics_to_keys": hint.get("topics_to_keys") or {},
                 "data_to_keys": hint.get("data_to_keys") or {},
                 "indexed_positions": list(hint.get("indexed_positions") or []),
-                "value_position": int(hint["value_position"]),
+                "direction": hint.get("direction"),
+                "value_position": None if hint.get("value_position") is None else int(hint["value_position"]),
             }
             for hint in set_hints
         ]
@@ -367,12 +389,18 @@ class EventIndexedAdapter:
                 return "behind", None
             if result.partial_reason == UNDECODABLE_EVENT_DATA:
                 return "undecodable", None
+            if result.partial_reason == UNFOLDABLE_WRITER_EVENT:
+                return "ok", CapabilityExpr.unsupported("value_writer_event_unfoldable")
+            if result.partial_reason == "ambiguous_event_direction":
+                return "ok", CapabilityExpr.unsupported("value_writer_event_ambiguous")
             # Any other partial reason is structural and falls through to live replay.
             return "absent", None
 
         from ..mapping_enumerator import filter_value_entries
 
         keys = filter_value_entries(cast(Any, result.entries), value_predicate)
+        if keys is None:
+            return "ok", CapabilityExpr.unsupported("value_predicate_not_evaluable")
         if result.scan_window is None:
             return "ok", CapabilityExpr.finite_set(keys, quality="exact", confidence="enumerable")
         return "ok", CapabilityExpr.finite_set(
@@ -405,13 +433,17 @@ class EventIndexedAdapter:
                     "event_name": hint.get("event_name") or "",
                     "key_position": key_position,
                     "indexed_positions": list(hint.get("indexed_positions") or []),
-                    "direction": "set",
+                    "direction": "remove" if hint.get("direction") == "remove" else "set",
                     "writer_function": hint.get("writer_function") or "",
-                    "value_position": int(hint["value_position"]),
+                    "value_position": None if hint.get("value_position") is None else int(hint["value_position"]),
                 }
             )
 
-        from ..mapping_enumerator import enumerate_mapping_values_sync, filter_value_entries
+        from ..mapping_enumerator import (
+            UNREADABLE_VALUE_SCAN_STATUSES,
+            enumerate_mapping_values_sync,
+            filter_value_entries,
+        )
 
         meta = ctx.meta or {}
         kwargs: dict[str, Any] = {"value_predicate": value_predicate}
@@ -447,7 +479,13 @@ class EventIndexedAdapter:
         except Exception:
             return CapabilityExpr.unsupported("mapping_value_scan_failed")
 
+        if scan["status"] in UNREADABLE_VALUE_SCAN_STATUSES:
+            # A skipped write could have changed any key's value, so the listed keys bound nothing.
+            reason = _VALUE_SCAN_UNREADABLE.get(scan["status"], "value_writer_event_unfoldable")
+            return CapabilityExpr.unsupported(reason)
         keys = filter_value_entries(scan["entries"], value_predicate)
+        if keys is None:
+            return CapabilityExpr.unsupported("value_predicate_not_evaluable")
         is_complete = scan["status"] == "complete"
         return CapabilityExpr.finite_set(
             keys,
@@ -464,6 +502,21 @@ class EventIndexedAdapter:
                 }
             ],
         )
+
+
+_VALUE_SCAN_UNREADABLE = {
+    "incomplete_undecodable_event": "event_data_undecodable",
+    "incomplete_unfoldable_writer_event": "value_writer_event_unfoldable",
+    "incomplete_ambiguous_writer_event": "value_writer_event_ambiguous",
+    "incomplete_no_writer_specs": "value_writer_event_unfoldable",
+}
+
+
+def _awaited_topic0s(hints: list[dict] | None) -> list[str]:
+    """The topic cursors a cold fold waits on, so the reconciler re-resolves once those (not any cursor at the
+    address) are complete.
+    """
+    return sorted({str(h["topic0"]).lower() for h in hints or [] if isinstance(h, dict) and h.get("topic0")})
 
 
 def _caller_event_arg_position(descriptor: dict, hint: dict) -> int | None:

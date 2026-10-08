@@ -25,7 +25,13 @@ from utils.chains import canonical_chain
 from utils.logging import record_degraded
 
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
-from .artifacts import get_artifact, store_artifact
+from .artifacts import (
+    SEMANTIC_PAYLOAD_KEYS,
+    analysis_reports_failure,
+    failed_semantic_artifact,
+    get_artifact,
+    store_artifact,
+)
 
 logger = logging.getLogger("db.queue")
 
@@ -128,6 +134,46 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
             return version
 
 
+def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
+    """Whether a donor holds both semantic artifacts, readable and not a failed build, under an analysis that doesn't
+    report a failure.
+
+    A failed build (``<name>_error``, or the older error shape under the artifact's own name) copied into a new job
+    would never be rebuilt.
+    """
+    names = set(
+        session.execute(
+            select(Artifact.name).where(
+                Artifact.job_id == job_id,
+                Artifact.name.in_(
+                    [*SEMANTIC_PAYLOAD_KEYS, *(f"{name}_error" for name in SEMANTIC_PAYLOAD_KEYS)],
+                ),
+            )
+        ).scalars()
+    )
+    if not names.issuperset(SEMANTIC_PAYLOAD_KEYS) or any(f"{name}_error" in names for name in SEMANTIC_PAYLOAD_KEYS):
+        return False
+    for name in ("contract_analysis", *SEMANTIC_PAYLOAD_KEYS):
+        try:
+            value = get_artifact(session, job_id, name)
+        except Exception as exc:
+            # Paired with ``record_degraded`` by hand since this module is outside the level-contract checker.
+            record_degraded(
+                phase="static_cache_donor", exc=exc, context={"donor_job_id": str(job_id), "artifact": name}
+            )
+            logger.warning(
+                "static-cache donor artifact unreadable; the donor is skipped",
+                extra={"donor_job_id": str(job_id), "artifact": name, "exc_type": type(exc).__name__},
+            )
+            return False
+        if not isinstance(value, dict) or failed_semantic_artifact(name, value):
+            return False
+        # A failed claim matcher leaves complete-shaped effects; only the analysis says its claims are missing.
+        if name == "contract_analysis" and analysis_reports_failure(value):
+            return False
+    return True
+
+
 def find_completed_static_cache(
     session: Session,
     address: str,
@@ -193,6 +239,9 @@ def find_completed_static_cache(
         if not summary:
             continue
 
+        if not contract_row.is_proxy and not _semantic_bundle_complete(session, candidate.id):
+            continue
+
         return candidate
 
     # Cross-chain fallback.
@@ -248,6 +297,8 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
             select(Artifact).where(Artifact.job_id == candidate.id, Artifact.name == "contract_analysis").limit(1)
         ).scalar_one_or_none()
         if not has_analysis:
+            continue
+        if not _semantic_bundle_complete(session, candidate.id):
             continue
         return candidate
     return None

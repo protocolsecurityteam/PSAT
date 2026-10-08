@@ -21,6 +21,30 @@ logger = logging.getLogger(__name__)
 _DAPP_PARALLEL = max(1, int(os.environ.get("PSAT_DAPP_PARALLEL", "3")))
 
 
+# Bot protection answers a challenge instead of the site: Vercel (429 + ``x-vercel-mitigated``) and Cloudflare (403 +
+# ``cf-mitigated``) mark it with a header.
+_MITIGATION_HEADERS = ("x-vercel-mitigated", "cf-mitigated")
+
+
+def page_load_outcome(status: int | None, headers: dict[str, str] | None) -> dict[str, object]:
+    """``{"outcome", "status", "reason"}`` for a top-level navigation: ``loaded`` only for a real page; ``blocked`` for
+    a bot-protection challenge; ``error_status`` for an error status, which some SPAs serve their app with, so it is
+    still explored but not a complete capture; ``failed`` when there was no response.
+
+    A page that never loaded proves nothing about the dApp's contracts, so callers must not read its empty capture as
+    "none".
+    """
+    if status is None:
+        return {"outcome": "failed", "status": None, "reason": "no_response"}
+    lowered = {str(k).lower(): v for k, v in (headers or {}).items()}
+    mitigated = next((h for h in _MITIGATION_HEADERS if lowered.get(h)), None)
+    if mitigated is not None:
+        return {"outcome": "blocked", "status": status, "reason": f"{mitigated}={lowered[mitigated]}"}
+    if status >= 400:
+        return {"outcome": "error_status", "status": status, "reason": f"http_{status}"}
+    return {"outcome": "loaded", "status": status, "reason": None}
+
+
 class DAppCrawler:
     def __init__(
         self,
@@ -36,6 +60,8 @@ class DAppCrawler:
         self.token_balance = token_balance
         self.headless = headless
         self.interaction_log = InteractionLog()
+        # url -> ``page_load_outcome`` of its top-level navigation.
+        self.url_outcomes: dict[str, dict[str, object]] = {}
         self._provider_script = build_provider_script(wallet, chain_id, eth_balance, token_balance)
         # So a site that consistently breaks sniffing is visible.
         self._sniff_errors = 0
@@ -756,7 +782,18 @@ class DAppCrawler:
                     try:
                         if progress:
                             progress(f"Opening {site_label}")
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        outcome = page_load_outcome(
+                            response.status if response is not None else None,
+                            await response.all_headers() if response is not None else None,
+                        )
+                        self.url_outcomes[url] = outcome
+                        if outcome["outcome"] in ("blocked", "failed"):
+                            logger.warning(
+                                "DApp page did not load; nothing is captured from it",
+                                extra={"url": url, "outcome": outcome["outcome"], "reason": outcome["reason"]},
+                            )
+                            return
                         await page.wait_for_timeout(3000)
 
                         if progress:
@@ -773,6 +810,13 @@ class DAppCrawler:
                         await page.wait_for_timeout(wait_seconds * 1000)
                     except Exception as e:
                         logger.warning("Error visiting %s: %s", url, e)
+                        # After a load, the exploration stopped partway: still not a complete capture.
+                        prior = self.url_outcomes.get(url) or {}
+                        self.url_outcomes[url] = {
+                            "outcome": "failed",
+                            "status": prior.get("status"),
+                            "reason": type(e).__name__ if not prior else f"after_load:{type(e).__name__}",
+                        }
                     finally:
                         await page.close()
 

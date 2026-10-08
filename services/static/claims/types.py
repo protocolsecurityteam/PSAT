@@ -68,6 +68,8 @@ class ClaimsArtifact(TypedDict):
     # Canonical selector per function. Present means proven; absent means the signature couldn't be lowered (not a
     # proof); fallback/receive never appear.
     abi_selectors: NotRequired[dict[str, str]]
+    # Matchers that raised: none of their claims are published, so for them every function is not determined.
+    failed_matchers: NotRequired[list[str]]
 
 
 @dataclass(frozen=True)
