@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Collection
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import (
     SetDescriptor,
 )
+from utils.logging import record_degraded
 
 from ..capabilities import (
     CapabilityExpr,
@@ -23,6 +26,16 @@ if TYPE_CHECKING:
     from .core import EvaluationContext
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
+
+# Some writer log through the block went unread: a cold or ineligible cursor, a failed tail, or a cut-short scan.
+UNPROVEN_EVENT_KEYS = "event_keys_unproven"
+
+
+class ObservedKeyWords(NamedTuple):
+    """Key words seen in writer events; ``complete`` only when every writer log through the block was read."""
+
+    words: list[str]
+    complete: bool
 
 
 def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr | None:
@@ -54,7 +67,7 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
     ]
     if not event_hints:
         return None
-    role_words = _observed_event_key_words(
+    observed = _observed_event_key_words(
         session=session,
         outer_ctx=outer_ctx,
         descriptor=descriptor,
@@ -62,17 +75,23 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
         key_index=view_index,
     )
     contract_address = getattr(outer_ctx, "contract_address", None) or ctx.contract_address
-    if role_words is None:
+    if observed is None or not observed.complete:
         from services.resolution.repos.event_logs_pg import UNDECODABLE_EVENT_DATA
 
-        # A key the index holds but can't decode would be silently missing from the union below.
+        # A key missing from the union below would drop its admins from the published principals.
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=contract_address.lower() if isinstance(contract_address, str) else None,
                 target_call_selector=selector,
-                extra={"basis": ["view_key_membership_unresolved", UNDECODABLE_EVENT_DATA]},
+                extra={
+                    "basis": [
+                        "view_key_membership_unresolved",
+                        UNDECODABLE_EVENT_DATA if observed is None else UNPROVEN_EVENT_KEYS,
+                    ]
+                },
             )
         )
+    role_words = observed.words
     if not role_words:
         return None
 
@@ -117,8 +136,8 @@ def _observed_event_key_words(
     descriptor: SetDescriptor,
     event_hints: list[dict[str, Any]],
     key_index: int,
-) -> list[str] | None:
-    """Key words observed in the indexed rows for ``event_hints``; None when a row carries undecodable data."""
+) -> ObservedKeyWords | None:
+    """Key words observed in the writer logs for ``event_hints``; None when a log carries undecodable data."""
     from services.resolution.adapters.event_indexed import _resolve_event_address
 
     hint_key = tuple(
@@ -158,62 +177,94 @@ def _scan_observed_event_key_words(
     descriptor: SetDescriptor,
     event_hints: list[dict[str, Any]],
     key_index: int,
-) -> list[str] | None:
-    from sqlalchemy import func, select
-
-    from db.models import IndexedEventLog
-    from services.resolution.adapters.event_indexed import _resolve_event_address
-    from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word, row_is_undecodable
+) -> ObservedKeyWords | None:
+    from services.resolution.event_tail import tail_scanner_for
+    from services.resolution.repos.event_logs_pg import PostgresEventLogRepo, UndecodableEventRow, _row_topic0
 
     scan_chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(scan_chain_id, int):
         # Chainless reads can't default to mainnet.
-        return []
+        return ObservedKeyWords(words=[], complete=False)
+    address_topics, hints_by_address_topic, unaddressed = _hints_by_event_address(descriptor, event_hints, outer_ctx)
 
+    repo = PostgresEventLogRepo(session)
+    tail = tail_scanner_for(outer_ctx)
     out: set[str] = set()
+    unproven: set[str] = set()
+    for event_address, topic0s in address_topics.items():
+        try:
+            read = repo.logs_through_block(
+                chain_id=scan_chain_id,
+                event_address=event_address,
+                topic0s=sorted(topic0s),
+                block=getattr(outer_ctx, "block", None),
+                tail=tail,
+            )
+        except UndecodableEventRow:
+            return None
+        if not read.complete:
+            unproven.add(event_address)
+            continue
+        for log in read.logs:
+            words = _log_key_words(log, hints_by_address_topic.get((event_address, _row_topic0(log)), []), key_index)
+            if words is None:
+                return None
+            out.update(words)
+    complete = not unaddressed
+    if unproven:
+        scanned = _observed_event_key_words_from_hypersync(
+            outer_ctx=outer_ctx,
+            descriptor=descriptor,
+            event_hints=event_hints,
+            key_index=key_index,
+            event_addresses=unproven,
+        )
+        out.update(scanned.words)
+        complete = complete and scanned.complete
+    return ObservedKeyWords(words=sorted(out), complete=complete)
+
+
+def _hints_by_event_address(
+    descriptor: SetDescriptor, event_hints: list[dict[str, Any]], outer_ctx: Any
+) -> tuple[dict[str, set[str]], dict[tuple[str, str], list[dict[str, Any]]], bool]:
+    """Topics per event address and hints per ``(address, topic0)``; the flag is set when a hint names no readable
+    event, so no read of the rest can prove the key set.
+    """
+    from services.resolution.adapters.event_indexed import _resolve_event_address
+
+    address_topics: dict[str, set[str]] = {}
+    hints_by_address_topic: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    unaddressed = False
     for hint in event_hints:
         topic0 = hint.get("topic0")
-        if not isinstance(topic0, str):
-            continue
         event_address = _resolve_event_address(cast(dict[str, Any], descriptor), hint, outer_ctx)
-        if event_address is None:
+        if not isinstance(topic0, str) or event_address is None:
+            unaddressed = True
             continue
-        stmt = (
-            select(IndexedEventLog)
-            .where(IndexedEventLog.chain_id == scan_chain_id)
-            .where(func.lower(IndexedEventLog.event_address) == event_address.lower())
-            .where(func.lower(IndexedEventLog.topic0) == topic0.lower())
-            .order_by(
-                IndexedEventLog.block_number.asc(),
-                IndexedEventLog.transaction_index.asc(),
-                IndexedEventLog.log_index.asc(),
-            )
+        address_topics.setdefault(event_address.lower(), set()).add(topic0.lower())
+        hints_by_address_topic.setdefault((event_address.lower(), topic0.lower()), []).append(hint)
+    return address_topics, hints_by_address_topic, unaddressed
+
+
+def _log_key_words(log: Any, hints: list[dict[str, Any]], key_index: int) -> set[str] | None:
+    """The key words ``log`` writes, or None when a hint can't read its key from it: a writer log always carries every
+    key, so a missing one is unreadable data, not an empty write.
+    """
+    from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word
+
+    words: set[str] = set()
+    for hint in hints:
+        keys = _event_keys(
+            list(getattr(log, "topics", None) or []),
+            list(getattr(log, "data_words", None) or []),
+            hint.get("topics_to_keys") or {},
+            hint.get("data_to_keys") or {},
         )
-        block = getattr(outer_ctx, "block", None)
-        if isinstance(block, int):
-            stmt = stmt.where(IndexedEventLog.block_number <= block)
-        for row in session.execute(stmt).scalars():
-            if row_is_undecodable(row):
-                return None
-            keys = _event_keys(
-                row.topics or [],
-                row.data_words or [],
-                hint.get("topics_to_keys") or {},
-                hint.get("data_to_keys") or {},
-            )
-            word = _normalize_word(keys.get(key_index))
-            if word is not None:
-                out.add(word)
-    if not out:
-        out.update(
-            _observed_event_key_words_from_hypersync(
-                outer_ctx=outer_ctx,
-                descriptor=descriptor,
-                event_hints=event_hints,
-                key_index=key_index,
-            )
-        )
-    return sorted(out)
+        word = _normalize_word(keys.get(key_index))
+        if word is None:
+            return None
+        words.add(word)
+    return words
 
 
 def _observed_event_key_words_from_hypersync(
@@ -222,49 +273,47 @@ def _observed_event_key_words_from_hypersync(
     descriptor: SetDescriptor,
     event_hints: list[dict[str, Any]],
     key_index: int,
-) -> list[str]:
+    event_addresses: Collection[str] | None = None,
+) -> ObservedKeyWords:
+    """Key words from a HyperSync replay of ``event_hints`` (only ``event_addresses`` when given) through the pinned
+    block; ``complete`` only when every address was scanned from its floor through that block.
+    """
     import asyncio
     import os
     import time
 
-    from services.resolution.adapters.event_indexed import _resolve_event_address
     from services.resolution.hypersync_bound import data_words_from_log, logs_from_response, topics_from_log
-    from services.resolution.repos.event_logs_pg import _event_keys, _normalize_word
 
+    incomplete = ObservedKeyWords(words=[], complete=False)
     token = os.getenv("ENVIO_API_TOKEN") or getattr(outer_ctx, "meta", {}).get("hypersync_token")
-    if not token:
-        return []
-    _bump_resolve_counter(outer_ctx, "hypersync_fallback_scans")
-    address_topics: dict[str, set[str]] = {}
-    hints_by_address_topic: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for hint in event_hints:
-        topic0 = hint.get("topic0")
-        if not isinstance(topic0, str):
-            continue
-        event_address = _resolve_event_address(cast(dict[str, Any], descriptor), hint, outer_ctx)
-        if event_address is None:
-            continue
-        address_topics.setdefault(event_address.lower(), set()).add(topic0.lower())
-        hints_by_address_topic.setdefault((event_address.lower(), topic0.lower()), []).append(hint)
+    block = getattr(outer_ctx, "block", None)
+    # Unpinned, the archive tip is the only end a scan could reach, and it proves nothing about the block read later.
+    if not token or not isinstance(block, int):
+        return incomplete
+    address_topics, hints_by_address_topic, unaddressed = _hints_by_event_address(descriptor, event_hints, outer_ctx)
+    if event_addresses is not None:
+        wanted = {a.lower() for a in event_addresses}
+        address_topics = {a: t for a, t in address_topics.items() if a in wanted}
     if not address_topics:
-        return []
+        return incomplete
+    _bump_resolve_counter(outer_ctx, "hypersync_fallback_scans")
 
-    async def _scan() -> list[str]:
+    async def _scan() -> ObservedKeyWords:
         try:
             import hypersync
         except Exception:
-            return []
+            return incomplete
         from services.resolution.hypersync_bound import hypersync_url_for_chain
 
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
         if not isinstance(scan_chain_id, int):
-            return []
+            return incomplete
         # Per-chain endpoint: meta override, env override, registry. No coverage means no scan.
         # ``PSAT_HYPERSYNC_URL`` overrides every chain, so it's a single-chain dev override only.
         registry_url = hypersync_url_for_chain(scan_chain_id)
         url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url
         if not url:
-            return []
+            return incomplete
         url = str(url)
         timeout_s = float(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_TIMEOUT_S", "45"))
         max_pages = int(os.getenv("PSAT_HYPERSYNC_EVENT_FALLBACK_MAX_PAGES", "50"))
@@ -274,6 +323,7 @@ def _observed_event_key_words_from_hypersync(
         from services.resolution.creation_block_floor import resolve_scan_floor
 
         found: set[str] = set()
+        complete = not unaddressed
         for event_address, topic0s in address_topics.items():
             # No floor: defer rather than scan from genesis.
             floor = resolve_scan_floor(
@@ -282,16 +332,18 @@ def _observed_event_key_words_from_hypersync(
                 session=getattr(outer_ctx, "session", None),
             )
             if floor is None:
+                complete = False
                 continue
             current_from = floor
             page_count = 0
             started = time.monotonic()
-            while True:
-                if time.monotonic() - started > timeout_s or page_count >= max_pages:
-                    break
+            reached_end = False
+            readable = True
+            while time.monotonic() - started <= timeout_s and page_count < max_pages:
                 query = hypersync.Query(
                     from_block=current_from,
-                    to_block=getattr(outer_ctx, "block", None),
+                    # ``to_block`` is exclusive.
+                    to_block=block + 1,
                     logs=[
                         hypersync.LogSelection(
                             address=[event_address],
@@ -303,37 +355,42 @@ def _observed_event_key_words_from_hypersync(
                 try:
                     with hypersync_slot(token):
                         response = await client.get(query)
-                except Exception:
+                except Exception as exc:
+                    record_degraded(
+                        phase="observed_event_key_words_scan",
+                        exc=exc,
+                        context={"event_address": event_address, "page_count": page_count},
+                    )
                     break
                 page_count += 1
                 for log in logs_from_response(response):
                     topics = topics_from_log(log)
-                    if not topics:
-                        continue
-                    topic0 = topics[0].lower()
-                    for hint in hints_by_address_topic.get((event_address, topic0), []):
-                        keys = _event_keys(
-                            topics,
-                            data_words_from_log(log),
-                            hint.get("topics_to_keys") or {},
-                            hint.get("data_to_keys") or {},
-                        )
-                        word = _normalize_word(keys.get(key_index))
-                        if word is not None:
-                            found.add(word)
+                    hints = hints_by_address_topic.get((event_address, topics[0].lower()), []) if topics else []
+                    words = _log_key_words(
+                        SimpleNamespace(topics=topics, data_words=data_words_from_log(log)), hints, key_index
+                    )
+                    if not hints or words is None:
+                        readable = False
+                    else:
+                        found.update(words)
                 next_block = getattr(response, "next_block", None)
-                if next_block is None or next_block <= current_from:
+                if not isinstance(next_block, int) or next_block <= current_from:
+                    # A stalled or lagging archive stops short of the block.
                     break
-                block = getattr(outer_ctx, "block", None)
-                if isinstance(block, int) and next_block >= block:
+                if next_block > block:
+                    reached_end = True
                     break
                 current_from = next_block
-        return sorted(found)
+            complete = complete and reached_end and readable
+        return ObservedKeyWords(words=sorted(found), complete=complete)
 
     try:
         return asyncio.run(_scan())
-    except Exception:
-        return []
+    except Exception as exc:
+        record_degraded(
+            phase="observed_event_key_words_scan", exc=exc, context={"chain_id": getattr(outer_ctx, "chain_id", None)}
+        )
+        return incomplete
 
 
 def _call_unary_bytes32_view(

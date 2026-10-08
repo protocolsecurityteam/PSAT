@@ -116,7 +116,7 @@ def test_observed_keys_chain1_scans_mainnet_registry_url(monkeypatch, _capture_b
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 7_000_000)
 
-    _observed(SimpleNamespace(meta={}, chain_id=1, block=None))
+    _observed(SimpleNamespace(meta={}, chain_id=1, block=8_000_000))
     assert _capture_build_url["url"] == MAINNET_URL
 
 
@@ -124,8 +124,8 @@ def test_observed_keys_unavailable_chain_skips_scan(monkeypatch, _capture_build_
     monkeypatch.delenv("PSAT_HYPERSYNC_URL", raising=False)
     monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
 
-    out = _observed(SimpleNamespace(meta={}, chain_id=UNAVAILABLE_CHAIN_ID, block=None))
-    assert out == []
+    out = _observed(SimpleNamespace(meta={}, chain_id=UNAVAILABLE_CHAIN_ID, block=8_000_000))
+    assert out.words == [] and not out.complete
     assert "url" not in _capture_build_url  # registry None → no scan, no mainnet fallback
 
 
@@ -138,5 +138,5 @@ def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_u
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: 7_000_000)
 
-    _observed(SimpleNamespace(meta={"hypersync_url": BASE_URL}, chain_id=UNAVAILABLE_CHAIN_ID, block=None))
+    _observed(SimpleNamespace(meta={"hypersync_url": BASE_URL}, chain_id=UNAVAILABLE_CHAIN_ID, block=8_000_000))
     assert _capture_build_url["url"] == BASE_URL

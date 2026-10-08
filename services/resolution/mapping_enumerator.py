@@ -474,11 +474,7 @@ def enumerate_mapping_allowlist_from_index(
     block: int | None,
     tail: "TailScanner | None",
 ) -> IndexedAllowlist:
-    """The allowlist from ``indexed_event_logs`` under ``PostgresEventLogRepo.fold_event_history``'s completeness rules.
-
-    Every topic cursor must be exactness-eligible and ``backfill_complete``. Covered cursors read rows to the max
-    frontier; behind ones cut rows at the least advanced cursor and need a complete ``tail`` over ``(warm, block]``.
-    """
+    """The allowlist from the logs ``PostgresEventLogRepo.logs_through_block`` proves complete through ``block``."""
     from services.resolution.repos.event_logs_pg import UndecodableEventRow
 
     topic0_to_specs, ambiguous_dropped = writer_topic_specs(writer_specs)
@@ -488,38 +484,27 @@ def enumerate_mapping_allowlist_from_index(
     if ambiguous_dropped or not topic0s:
         return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_AMBIGUOUS)
 
-    address = contract_address.lower()
-    states = [repo.cursor_state(chain_id, address, topic0) for topic0 in topic0s]
-    if any(cursor_block is None or not done for cursor_block, done in states):
-        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_COLD)
-    if not isinstance(block, int):
-        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_UNPINNED)
-    frontiers = [cursor_block for cursor_block, _done in states if cursor_block is not None]
-    warm_block = min(frontiers)
-    behind = warm_block < block
-    # Behind: cut at the least advanced cursor so the tail never applies a row twice. Covered: the max frontier admits
-    # every indexed row.
-    row_ceiling = warm_block if behind else max(frontiers)
-
     state: AllowlistState = {}
     try:
-        rows = repo.iter_event_rows(chain_id=chain_id, event_address=address, topic0s=list(topic0s), block=row_ceiling)
-        fold_allowlist_logs((indexed_replay_log(row) for row in rows), topic0_to_specs, state)
-        if not behind:
+        read = repo.logs_through_block(
+            chain_id=chain_id, event_address=contract_address.lower(), topic0s=list(topic0s), block=block, tail=tail
+        )
+        if not read.complete:
             return IndexedAllowlist(
-                principals=allowlist_principals(state), complete=True, topic0s=topic0s, last_indexed_block=warm_block
+                principals=[],
+                complete=False,
+                topic0s=topic0s,
+                reason=read.reason,
+                last_indexed_block=read.last_indexed_block,
             )
-        scan = tail(address, list(topic0s), warm_block, block) if tail is not None else None
-        if scan is None or not scan.complete:
-            reason = INDEX_CURSOR_BEHIND if scan is None else (scan.reason or INDEX_CURSOR_BEHIND)
-            return IndexedAllowlist(
-                principals=[], complete=False, topic0s=topic0s, reason=reason, last_indexed_block=warm_block
-            )
-        fold_allowlist_logs((indexed_replay_log(log) for log in scan.logs), topic0_to_specs, state)
+        fold_allowlist_logs((indexed_replay_log(log) for log in read.logs), topic0_to_specs, state)
     except UndecodableEventRow:
         return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_UNDECODABLE)
     return IndexedAllowlist(
-        principals=allowlist_principals(state), complete=True, topic0s=topic0s, last_indexed_block=block
+        principals=allowlist_principals(state),
+        complete=True,
+        topic0s=topic0s,
+        last_indexed_block=read.last_indexed_block,
     )
 
 
