@@ -10,13 +10,18 @@ import os
 import re
 import threading
 import time
-from typing import Any, TypedDict
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from eth_utils.crypto import keccak
 
 from services.clients.rpc import normalize_hex as _normalize_hex
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
 from utils.logging import record_degraded
+
+if TYPE_CHECKING:
+    from services.resolution.event_tail import TailScanner
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +45,12 @@ _MAX_PAGES = int(os.getenv("PSAT_MAPPING_ENUMERATION_MAX_PAGES", "50"))
 def _cache_ttl_s() -> float:
     """Read at call time so tests can monkeypatch the TTL."""
     return float(os.getenv("PSAT_MAPPING_ENUMERATION_CACHE_TTL_S", "1800"))
+
+
+# Keys a graph node's details carry for its mapping-member replay.
+MAPPING_ENUMERATION_STATUS = "mapping_enumeration_status"
+MAPPING_ENUMERATION_SOURCE = "mapping_enumeration_source"
+MAPPING_ENUMERATION_AWAITS = "mapping_enumeration_awaits"
 
 
 class EnumeratedPrincipal(TypedDict):
@@ -334,6 +345,184 @@ def _extract_key_address(
     return ""
 
 
+def writer_topic_specs(writer_specs: list[WriterEventSpec]) -> tuple[dict[str, list[WriterEventSpec]], bool]:
+    """Writer specs by topic0, minus any topic whose specs disagree on direction; the flag says one was dropped."""
+    topic0_to_specs: dict[str, list[WriterEventSpec]] = {}
+    for spec in writer_specs:
+        topic0_to_specs.setdefault(_event_topic0(spec["event_signature"]), []).append(spec)
+    ambiguous_dropped = False
+    for topic0, specs in list(topic0_to_specs.items()):
+        directions = {spec["direction"] for spec in specs}
+        if len(directions) <= 1:
+            continue
+        logger.warning(
+            "mapping_enumerator: skipping ambiguous writer event",
+            extra={
+                "topic0": topic0,
+                "directions": sorted(directions),
+                "specs": [(spec["event_signature"], spec["mapping_name"], spec["direction"]) for spec in specs],
+            },
+        )
+        ambiguous_dropped = True
+        del topic0_to_specs[topic0]
+    return topic0_to_specs, ambiguous_dropped
+
+
+# (mapping_name, member) -> {"present", "history", "last_block"}
+AllowlistState = dict[tuple[str, str], dict[str, Any]]
+
+
+def fold_allowlist_logs(
+    logs: Iterable[Any],
+    topic0_to_specs: dict[str, list[WriterEventSpec]],
+    state: AllowlistState,
+) -> None:
+    """Fold writer logs, in log order, into ``state``.
+
+    A log exposes ``topics``, ``data`` (one hex string) and ``block_number``: HyperSync logs as they come, stored rows
+    through :func:`indexed_replay_log`. Both sources share this fold so their membership can't drift.
+    """
+    for raw_log in logs:
+        topics = _topics_from_log(raw_log)
+        if not topics:
+            continue
+        matching_specs = topic0_to_specs.get(topics[0])
+        if not matching_specs:
+            continue
+        for spec in matching_specs:
+            key_address = _extract_key_address(
+                raw_log,
+                spec["key_position"],
+                indexed_positions=list(spec.get("indexed_positions") or []),
+            )
+            if not key_address.startswith("0x") or len(key_address) != 42:
+                continue
+            block = int(getattr(raw_log, "block_number", 0) or 0)
+            entry = state.setdefault(
+                (spec["mapping_name"], key_address),
+                {"present": False, "history": [], "last_block": 0},
+            )
+            entry["present"] = spec["direction"] == "add"
+            entry["history"].append(spec["direction"])
+            entry["last_block"] = max(entry["last_block"], block)
+
+
+def allowlist_principals(state: AllowlistState) -> list[EnumeratedPrincipal]:
+    return [
+        {
+            "address": addr,
+            "mapping_name": mapping_name,
+            "direction_history": list(entry["history"]),
+            "last_seen_block": int(entry["last_block"]),
+        }
+        for (mapping_name, addr), entry in state.items()
+        if entry["present"]
+    ]
+
+
+@dataclass(frozen=True)
+class ReplayLog:
+    topics: list[str]
+    data: str
+    block_number: int
+
+
+def indexed_replay_log(row: Any) -> ReplayLog:
+    """A stored row or tail log (``topics`` + ``data_words``) as the fold reads it; raises ``UndecodableEventRow`` for
+    data that isn't word-aligned (``data_hex``), which no fold may skip.
+    """
+    from services.resolution.repos.event_logs_pg import UndecodableEventRow, row_is_undecodable
+
+    if row_is_undecodable(row):
+        raise UndecodableEventRow(str(getattr(row, "topic0", "") or ""))
+    words = [str(w) for w in (getattr(row, "data_words", None) or [])]
+    return ReplayLog(
+        topics=[str(t) for t in (getattr(row, "topics", None) or [])],
+        data="0x" + "".join(w[2:] if w.startswith("0x") else w for w in words),
+        block_number=int(row.block_number),
+    )
+
+
+# Why a durable read couldn't prove the member set. Only ``INDEX_COLD`` and a failed tail clear once the index advances.
+INDEX_COLD = "no_index_cursor"
+INDEX_UNPINNED = "unpinned_block"
+INDEX_UNDECODABLE = "undecodable_event_data"
+INDEX_AMBIGUOUS = "ambiguous_writer_event"
+INDEX_NO_WRITER_SPECS = "no_writer_specs"
+INDEX_CURSOR_BEHIND = "cursor_behind_block"
+
+
+@dataclass(frozen=True)
+class IndexedAllowlist:
+    """A member set read from the durable event index; ``complete`` only when every writer topic is proven through
+    ``block``.
+    """
+
+    principals: list[EnumeratedPrincipal]
+    complete: bool
+    topic0s: tuple[str, ...]
+    reason: str | None = None
+    last_indexed_block: int | None = None
+
+
+def enumerate_mapping_allowlist_from_index(
+    repo: Any,
+    *,
+    chain_id: int,
+    contract_address: str,
+    writer_specs: list[WriterEventSpec],
+    block: int | None,
+    tail: "TailScanner | None",
+) -> IndexedAllowlist:
+    """The allowlist from ``indexed_event_logs`` under ``PostgresEventLogRepo.fold_event_history``'s completeness rules.
+
+    Every topic cursor must be exactness-eligible and ``backfill_complete``. Covered cursors read rows to the max
+    frontier; behind ones cut rows at the least advanced cursor and need a complete ``tail`` over ``(warm, block]``.
+    """
+    from services.resolution.repos.event_logs_pg import UndecodableEventRow
+
+    topic0_to_specs, ambiguous_dropped = writer_topic_specs(writer_specs)
+    topic0s = tuple(sorted(topic0_to_specs))
+    if not writer_specs:
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_NO_WRITER_SPECS)
+    if ambiguous_dropped or not topic0s:
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_AMBIGUOUS)
+
+    address = contract_address.lower()
+    states = [repo.cursor_state(chain_id, address, topic0) for topic0 in topic0s]
+    if any(cursor_block is None or not done for cursor_block, done in states):
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_COLD)
+    if not isinstance(block, int):
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_UNPINNED)
+    frontiers = [cursor_block for cursor_block, _done in states if cursor_block is not None]
+    warm_block = min(frontiers)
+    behind = warm_block < block
+    # Behind: cut at the least advanced cursor so the tail never applies a row twice. Covered: the max frontier admits
+    # every indexed row.
+    row_ceiling = warm_block if behind else max(frontiers)
+
+    state: AllowlistState = {}
+    try:
+        rows = repo.iter_event_rows(chain_id=chain_id, event_address=address, topic0s=list(topic0s), block=row_ceiling)
+        fold_allowlist_logs((indexed_replay_log(row) for row in rows), topic0_to_specs, state)
+        if not behind:
+            return IndexedAllowlist(
+                principals=allowlist_principals(state), complete=True, topic0s=topic0s, last_indexed_block=warm_block
+            )
+        scan = tail(address, list(topic0s), warm_block, block) if tail is not None else None
+        if scan is None or not scan.complete:
+            reason = INDEX_CURSOR_BEHIND if scan is None else (scan.reason or INDEX_CURSOR_BEHIND)
+            return IndexedAllowlist(
+                principals=[], complete=False, topic0s=topic0s, reason=reason, last_indexed_block=warm_block
+            )
+        fold_allowlist_logs((indexed_replay_log(log) for log in scan.logs), topic0_to_specs, state)
+    except UndecodableEventRow:
+        return IndexedAllowlist(principals=[], complete=False, topic0s=topic0s, reason=INDEX_UNDECODABLE)
+    return IndexedAllowlist(
+        principals=allowlist_principals(state), complete=True, topic0s=topic0s, last_indexed_block=block
+    )
+
+
 async def enumerate_mapping_allowlist(
     contract_address: str,
     writer_specs: list[WriterEventSpec],
@@ -363,25 +552,7 @@ async def enumerate_mapping_allowlist(
             error=None,
         )
 
-    topic0_to_specs: dict[str, list[WriterEventSpec]] = {}
-    for spec in writer_specs:
-        topic0 = _event_topic0(spec["event_signature"])
-        topic0_to_specs.setdefault(topic0, []).append(spec)
-    ambiguous_dropped = False
-    for topic0, specs in list(topic0_to_specs.items()):
-        directions = {spec["direction"] for spec in specs}
-        if len(directions) <= 1:
-            continue
-        logger.warning(
-            "mapping_enumerator: skipping ambiguous writer event",
-            extra={
-                "topic0": topic0,
-                "directions": sorted(directions),
-                "specs": [(spec["event_signature"], spec["mapping_name"], spec["direction"]) for spec in specs],
-            },
-        )
-        ambiguous_dropped = True
-        del topic0_to_specs[topic0]
+    topic0_to_specs, ambiguous_dropped = writer_topic_specs(writer_specs)
     if not topic0_to_specs:
         # Every writer event was ambiguous, so nothing was scanned; "complete" would look like a real empty scan.
         return EnumerationResult(
@@ -418,7 +589,7 @@ async def enumerate_mapping_allowlist(
 
     from services.resolution.hypersync_bound import hypersync_slot
 
-    state: dict[tuple[str, str], dict[str, Any]] = {}
+    state: AllowlistState = {}
     current_from = from_block
     page_count = 0
     started = time.monotonic()
@@ -484,33 +655,7 @@ async def enumerate_mapping_allowlist(
                 "next_block": getattr(result, "next_block", None),
             },
         )
-        for raw_log in logs:
-            topics = _topics_from_log(raw_log)
-            if not topics:
-                continue
-            topic0 = topics[0]
-            matching_specs = topic0_to_specs.get(topic0)
-            if not matching_specs:
-                continue
-            for spec in matching_specs:
-                key_address = _extract_key_address(
-                    raw_log,
-                    spec["key_position"],
-                    indexed_positions=list(spec.get("indexed_positions") or []),
-                )
-                if not key_address.startswith("0x") or len(key_address) != 42:
-                    continue
-                block = int(getattr(raw_log, "block_number", 0) or 0)
-                entry = state.setdefault(
-                    (spec["mapping_name"], key_address),
-                    {"present": False, "history": [], "last_block": 0},
-                )
-                if spec["direction"] == "add":
-                    entry["present"] = True
-                else:
-                    entry["present"] = False
-                entry["history"].append(spec["direction"])
-                entry["last_block"] = max(entry["last_block"], block)
+        fold_allowlist_logs(logs, topic0_to_specs, state)
 
         next_from = getattr(result, "next_block", None)
         if next_from is None or next_from <= current_from:
@@ -518,20 +663,8 @@ async def enumerate_mapping_allowlist(
         current_from = next_from
         query = _build_query(hypersync_module, contract_address, topic0s, current_from, to_block)
 
-    out: list[EnumeratedPrincipal] = []
-    for (mapping_name, addr), entry in state.items():
-        if not entry["present"]:
-            continue
-        out.append(
-            {
-                "address": addr,
-                "mapping_name": mapping_name,
-                "direction_history": list(entry["history"]),
-                "last_seen_block": int(entry["last_block"]),
-            }
-        )
     return EnumerationResult(
-        principals=out,
+        principals=allowlist_principals(state),
         status=status,
         pages_fetched=page_count,
         last_block_scanned=current_from,

@@ -288,7 +288,8 @@ def test_replay_mapping_principals_skips_self_membership(monkeypatch):
         edges=edges,
         chain_id=1,
     )
-    assert status == "complete"
+    assert status.status == "complete"
+    assert status.source == "hypersync"
     edge_list = list(edges.values())
     assert [(e["from_id"], e["to_id"], e["relation"]) for e in edge_list] == [
         (f"address:{contract}", f"address:{member}", "mapping_member")

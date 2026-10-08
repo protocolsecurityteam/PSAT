@@ -11,7 +11,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from typing_extensions import NotRequired
 
@@ -39,6 +39,11 @@ from schemas.resolved_control_graph import (
 )
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold
+from services.resolution.mapping_enumerator import (
+    MAPPING_ENUMERATION_AWAITS,
+    MAPPING_ENUMERATION_SOURCE,
+    MAPPING_ENUMERATION_STATUS,
+)
 from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
 from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
@@ -50,6 +55,9 @@ from .tracking import (
     probe_declared_vault_backlink,
 )
 from .tracking_plan import build_control_tracking_plan
+
+if TYPE_CHECKING:
+    from services.resolution.mapping_enumerator import EnumeratedPrincipal, IndexedAllowlist
 
 logger = logging.getLogger(__name__)
 
@@ -811,6 +819,111 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
     return [spec for spec in specs if spec["mapping_name"] in with_adds]
 
 
+MAPPING_SOURCE_EVENT_INDEX = "event_index"
+MAPPING_SOURCE_HYPERSYNC = "hypersync"
+MAPPING_SOURCE_NONE = "none"
+# HyperSync statuses reached without contacting HyperSync.
+_UNSCANNED_MAPPING_STATUSES = frozenset({"skipped", "deferred_no_floor", "incomplete_no_hypersync_coverage"})
+
+
+class MappingReplay(NamedTuple):
+    status: str
+    source: str
+    # The index condition a re-run waits on; ``None`` when complete or when no index change could settle it.
+    awaits: dict[str, Any] | None = None
+
+
+def _read_mapping_index(
+    *,
+    address: str,
+    mapping_specs: list[WriterEventSpec],
+    chain_id: int,
+    rpc_url: str | None,
+    resolution_block: int | None,
+) -> IndexedAllowlist | None:
+    """The allowlist from the durable event index, or ``None`` when the index can't be read."""
+    from db.models import SessionLocal
+    from services.resolution.event_tail import TailScan, scan_event_tail
+    from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_from_index
+    from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
+
+    def _tail(event_address: str, topic0s: Any, frontier: int, block: int) -> TailScan:
+        assert rpc_url
+        return scan_event_tail(
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            event_address=event_address,
+            topic0s=topic0s,
+            frontier=frontier,
+            block=block,
+        )
+
+    try:
+        with SessionLocal() as session:
+            return enumerate_mapping_allowlist_from_index(
+                PostgresEventLogRepo(session),
+                chain_id=chain_id,
+                contract_address=address,
+                writer_specs=mapping_specs,
+                block=resolution_block,
+                tail=_tail if rpc_url else None,
+            )
+    except Exception as exc:
+        record_degraded(phase="mapping_index_read", exc=exc, context={"address": address, "chain_id": chain_id})
+        logger.warning(
+            "mapping_enumerator: durable index read failed; falling back to HyperSync",
+            extra={"address": address, "chain_id": chain_id, "exc_type": type(exc).__name__},
+        )
+        return None
+
+
+def _mapping_awaits(
+    indexed: IndexedAllowlist | None, *, chain_id: int, address: str, block: int | None
+) -> dict[str, Any] | None:
+    """What the index must reach for a re-run to read the member set: warm, eligible cursors on every writer topic, and
+    with a failed tail, a frontier at the block the tail missed. ``None`` when no index progress would settle it (an
+    undecodable row, an ambiguous writer event, an unpinned pass over warm cursors).
+    """
+    from services.resolution.event_tail import TAIL_SCAN_FAILED, TAIL_SPAN_EXCEEDED
+    from services.resolution.mapping_enumerator import INDEX_COLD, INDEX_CURSOR_BEHIND
+
+    if indexed is None or not indexed.topic0s:
+        return None
+    awaits: dict[str, Any] = {
+        "chain_id": chain_id,
+        "event_address": address.lower(),
+        "topic0s": sorted(indexed.topic0s),
+    }
+    if indexed.reason == INDEX_COLD:
+        return awaits
+    if indexed.reason in {TAIL_SCAN_FAILED, TAIL_SPAN_EXCEEDED, INDEX_CURSOR_BEHIND} and isinstance(block, int):
+        return {**awaits, "covers_block": block}
+    return None
+
+
+def _drop_mapping_member_edges(
+    nodes: dict[str, ResolvedGraphNode], edges: dict[tuple, ResolvedGraphEdge], contract_node_id: str
+) -> None:
+    """Remove a prior walk's ``mapping_member`` edges from *contract_node_id*, and principals left with no edge, so a
+    complete replay replaces them rather than unioning with members it no longer proves.
+    """
+    dropped = [
+        key
+        for key, edge in edges.items()
+        if edge["from_id"] == contract_node_id and edge["relation"] == "mapping_member"
+    ]
+    if not dropped:
+        return
+    targets = {edges[key]["to_id"] for key in dropped}
+    for key in dropped:
+        del edges[key]
+    linked = {edge["from_id"] for edge in edges.values()} | {edge["to_id"] for edge in edges.values()}
+    for node_id in targets - linked:
+        node = nodes.get(node_id)
+        if node is not None and node.get("node_type") == "principal" and not node.get("analyzed"):
+            del nodes[node_id]
+
+
 def _replay_mapping_principals(
     *,
     address: str,
@@ -820,12 +933,59 @@ def _replay_mapping_principals(
     nodes: dict[str, ResolvedGraphNode],
     edges: dict[tuple, ResolvedGraphEdge],
     chain_id: int,
-) -> str:
-    """Replay mapping-writer events for *address* into principal nodes and edges; returns the enumeration status.
+    rpc_url: str | None = None,
+    resolution_block: int | None = None,
+) -> MappingReplay:
+    """Replay mapping-writer events for *address* into principal nodes and edges.
 
-    Floored at the deploy block (no events before it). With no known floor it defers (``deferred_no_floor``) instead of
-    scanning from genesis, which 429-storms HyperSync; enrolled addresses fill in on a later policy pass.
+    The durable event index answers first; HyperSync runs only when the index can't prove the member set. A HyperSync
+    replay is floored at the deploy block, and with no known floor defers (``deferred_no_floor``) instead of scanning
+    from genesis, which 429-storms HyperSync.
     """
+    indexed = _read_mapping_index(
+        address=address,
+        mapping_specs=mapping_specs,
+        chain_id=chain_id,
+        rpc_url=rpc_url,
+        resolution_block=resolution_block,
+    )
+    if indexed is not None and indexed.complete:
+        logger.info(
+            "mapping_enumerator: members read from the durable event index",
+            extra={"address": address, "principals": len(indexed.principals), "block": indexed.last_indexed_block},
+        )
+        _publish_mapping_principals(
+            address=address,
+            principals=indexed.principals,
+            complete=True,
+            contract_node_id=contract_node_id,
+            depth=depth,
+            nodes=nodes,
+            edges=edges,
+        )
+        return MappingReplay("complete", MAPPING_SOURCE_EVENT_INDEX)
+
+    status, principals = _replay_mapping_over_hypersync(address=address, mapping_specs=mapping_specs, chain_id=chain_id)
+    _publish_mapping_principals(
+        address=address,
+        principals=principals,
+        complete=status == "complete",
+        contract_node_id=contract_node_id,
+        depth=depth,
+        nodes=nodes,
+        edges=edges,
+    )
+    source = MAPPING_SOURCE_NONE if status in _UNSCANNED_MAPPING_STATUSES else MAPPING_SOURCE_HYPERSYNC
+    if status == "complete":
+        return MappingReplay(status, source)
+    return MappingReplay(
+        status, source, _mapping_awaits(indexed, chain_id=chain_id, address=address, block=resolution_block)
+    )
+
+
+def _replay_mapping_over_hypersync(
+    *, address: str, mapping_specs: list[WriterEventSpec], chain_id: int
+) -> tuple[str, list[EnumeratedPrincipal]]:
     hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
     logger.info(
         "mapping_enumerator: writer-event specs collected",
@@ -836,7 +996,7 @@ def _replay_mapping_principals(
         },
     )
     if not hypersync_token:
-        return "skipped"
+        return "skipped", []
 
     from services.resolution.creation_block_floor import resolve_scan_floor
 
@@ -846,7 +1006,7 @@ def _replay_mapping_principals(
             "mapping_enumerator: deferring replay (no scan floor resolved)",
             extra={"address": address, "decision": "deferred_no_floor"},
         )
-        return "deferred_no_floor"
+        return "deferred_no_floor", []
 
     from services.resolution.mapping_enumerator import enumerate_mapping_allowlist_sync
 
@@ -867,7 +1027,7 @@ def _replay_mapping_principals(
             address,
             exc,
         )
-        return "error"
+        return "error", []
 
     enumerated = list(result["principals"])
     enumeration_status = result["status"]
@@ -897,8 +1057,22 @@ def _replay_mapping_principals(
         "mapping_enumerator: enumeration complete",
         extra={"address": address, "principals": len(enumerated), "enumeration_status": enumeration_status},
     )
+    return enumeration_status, enumerated
 
-    for principal in enumerated:
+
+def _publish_mapping_principals(
+    *,
+    address: str,
+    principals: list[EnumeratedPrincipal],
+    complete: bool,
+    contract_node_id: str,
+    depth: int,
+    nodes: dict[str, ResolvedGraphNode],
+    edges: dict[tuple, ResolvedGraphEdge],
+) -> None:
+    if complete:
+        _drop_mapping_member_edges(nodes, edges, contract_node_id)
+    for principal in principals:
         member_addr = principal["address"]
         if member_addr.lower() == address.lower():
             # Skip self-membership edges (e.g. a timelock granted a role on itself): X->X asserts nothing, and
@@ -935,7 +1109,39 @@ def _replay_mapping_principals(
                 "notes": [],
             },
         )
-    return enumeration_status
+
+
+def unsettled_replay_addresses(graph: Any) -> set[str]:
+    """Analysed nodes of a stored graph whose mapping-member replay didn't settle; a refresh re-walks them."""
+    out: set[str] = set()
+    for node in (graph or {}).get("nodes", []) if isinstance(graph, dict) else []:
+        details = node.get("details") if isinstance(node, dict) else None
+        if not node.get("analyzed") or not isinstance(details, dict):
+            continue
+        status = details.get(MAPPING_ENUMERATION_STATUS)
+        address = details.get("address")
+        if status is not None and status != "complete" and isinstance(address, str):
+            out.add(address.lower())
+    return out
+
+
+def _clear_mapping_replay(nodes: dict[str, ResolvedGraphNode], address: str, *, keep_status: bool) -> None:
+    """Drop a seeded node's replay keys when this walk ran no replay for it: the await always, since nothing here will
+    settle it, and the status and source too when the contract no longer has writer specs.
+    """
+    node = nodes.get(_address_node_id(address))
+    if node is None:
+        return
+    stale = (
+        {MAPPING_ENUMERATION_AWAITS}
+        if keep_status
+        else {
+            MAPPING_ENUMERATION_AWAITS,
+            MAPPING_ENUMERATION_STATUS,
+            MAPPING_ENUMERATION_SOURCE,
+        }
+    )
+    node["details"] = {k: v for k, v in node["details"].items() if k not in stale}
 
 
 def _maybe_queue_address(
@@ -1060,17 +1266,48 @@ def resolve_control_graph(
             if not isinstance(edge, dict):
                 continue
             edges[_edge_key(cast(ResolvedGraphEdge, edge))] = cast(ResolvedGraphEdge, dict(edge))
-        # Analysed nested contracts are processed; the root re-walks so fresh role principals get projected.
+        # Analysed nested contracts are processed; the root re-walks so fresh role principals get projected. A nested
+        # contract whose member replay didn't settle is re-walked at its stored depth; its parent stays processed, so
+        # nothing would reach it otherwise.
+        unsettled: list[tuple[int, str]] = []
         for node in initial_graph.get("nodes", []):
             if not isinstance(node, dict) or not node.get("analyzed"):
                 continue
-            node_address = (node.get("details") or {}).get("address")
-            if isinstance(node_address, str):
-                addr = node_address.lower()
-                if addr and addr != root_address:
-                    processed.add(addr)
+            node_details = node.get("details") or {}
+            node_address = node_details.get("address")
+            if not isinstance(node_address, str):
+                continue
+            addr = node_address.lower()
+            if not addr or addr == root_address:
+                continue
+            replay_status = node_details.get(MAPPING_ENUMERATION_STATUS)
+            node_depth = node.get("depth")
+            if replay_status is not None and replay_status != "complete":
+                replay_trees = (nested_artifacts.get(addr) or {}).get("predicate_trees")
+                if isinstance(node_depth, int) and node_depth <= max_depth and isinstance(replay_trees, dict):
+                    unsettled.append((node_depth, addr))
+                    continue
+                # Without its trees no replay runs here, so a stored await would re-enqueue the job forever.
+                seeded_node = nodes.get(_address_node_id(addr))
+                if seeded_node is not None:
+                    seeded_node["details"] = {
+                        k: v for k, v in seeded_node["details"].items() if k != MAPPING_ENUMERATION_AWAITS
+                    }
+            processed.add(addr)
+        for node_depth, addr in sorted(unsettled):
+            _maybe_queue_address(queue, queued, addr, node_depth, max_depth)
 
     from services.concurrency import parallel_map
+
+    # One pin per walk, taken on the first replay so a walk with none pays no ``eth_blockNumber``.
+    pin: dict[str, int | None] = {}
+
+    def _resolution_block() -> int | None:
+        if "block" not in pin:
+            from services.resolution.capability_resolver import _resolve_resolution_block
+
+            pin["block"] = _resolve_resolution_block(rpc_url, None, chain_id=chain_id)
+        return pin["block"]
 
     def _materialize_for_pending(pending: PendingContract) -> tuple[LoadedArtifacts | None, BaseException | None]:
         """Materialize one pending contract.
@@ -1102,11 +1339,15 @@ def resolve_control_graph(
 
     _levels = 0
     while queue:
-        # The queue is depth-ordered; drain the current depth as one concurrent level.
-        target_depth = queue[0]["depth"]
+        # Drain the shallowest depth as one concurrent level. Re-walked seeds enter at their stored depth ahead of the
+        # root's children, so the queue isn't depth-ordered.
+        target_depth = min(entry["depth"] for entry in queue)
         level_pending: list[PendingContract] = []
-        while queue and queue[0]["depth"] == target_depth:
+        for _ in range(len(queue)):
             entry = queue.popleft()
+            if entry["depth"] != target_depth:
+                queue.append(entry)
+                continue
             if entry["address"] in processed or entry["depth"] > max_depth:
                 continue
             level_pending.append(entry)
@@ -1165,6 +1406,7 @@ def resolve_control_graph(
                     contract_name=contract_name,
                     details={"address": address, "materialize_error": err_text},
                 )
+                _clear_mapping_replay(nodes, address, keep_status=True)
                 processed.add(address)
                 continue
 
@@ -1202,7 +1444,7 @@ def resolve_control_graph(
             # Bounded enumeration reports truncation via ``status``.
             mapping_specs = _mapping_writer_specs_from_predicate_trees(artifacts.get("predicate_trees"))
             if mapping_specs:
-                enumeration_status = _replay_mapping_principals(
+                replay = _replay_mapping_principals(
                     address=address,
                     mapping_specs=mapping_specs,
                     contract_node_id=contract_node_id,
@@ -1210,10 +1452,23 @@ def resolve_control_graph(
                     nodes=nodes,
                     edges=edges,
                     chain_id=chain_id,
+                    rpc_url=rpc_url,
+                    resolution_block=_resolution_block(),
                 )
-                # So downstream can flag incomplete allowlists.
+                # So downstream can flag incomplete allowlists, and the reconciler can re-run an unsettled one.
                 if contract_node_id in nodes:
-                    nodes[contract_node_id]["details"]["mapping_enumeration_status"] = enumeration_status
+                    replay_details = nodes[contract_node_id]["details"]
+                    replay_details[MAPPING_ENUMERATION_STATUS] = replay.status
+                    replay_details[MAPPING_ENUMERATION_SOURCE] = replay.source
+                    if replay.awaits is None:
+                        replay_details.pop(MAPPING_ENUMERATION_AWAITS, None)
+                    else:
+                        replay_details[MAPPING_ENUMERATION_AWAITS] = replay.awaits
+            else:
+                # Trees that name no writer leave nothing to replay; absent trees leave the stored status standing.
+                _clear_mapping_replay(
+                    nodes, address, keep_status=not isinstance(artifacts.get("predicate_trees"), dict)
+                )
 
             for controller_id, controller_value in snapshot.get("controller_values", {}).items():
                 controller_address = str(controller_value.get("value", "")).lower()

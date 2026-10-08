@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, aliased
 from db.jsonb import jsonb_has_payload
 from db.models import (
     Contract,
+    ControlGraphNode,
     EffectiveFunction,
     IndexedEventCursor,
     IndexedEventLog,
@@ -35,6 +36,7 @@ from db.models import (
     JobStatus,
     exactness_eligible_cursor_clause,
 )
+from services.resolution.mapping_enumerator import MAPPING_ENUMERATION_AWAITS, MAPPING_ENUMERATION_STATUS
 from services.resolution.role_store_standards import all_topic0s
 from utils.chains import UnknownChainError, chain_by_id, supported_chain_ids
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
@@ -177,7 +179,7 @@ def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
 def _authority_backfilled(session: Session, chain_id: int, event_address: str) -> bool:
     """Whether any exactness-eligible cursor for ``event_address`` has ``backfill_complete``.
 
-    Mid-backfill cursors don't count (re-resolving would re-defer), and neither do cursors ``_cursor_state`` refuses, or
+    Mid-backfill cursors don't count (re-resolving would re-defer), and neither do cursors ``cursor_state`` refuses, or
     every pass would re-enqueue a resolution that still defers.
     """
     row = session.execute(
@@ -320,6 +322,102 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
             job_id,
             address,
             sorted({addr for addr, _topics in authorities}),
+        )
+
+    if reenqueued:
+        session.commit()
+    else:
+        session.rollback()
+    return reenqueued
+
+
+# An unsettled replay's awaited authority and topics, plus the frontier a failed tail left unproven (``None`` if any).
+MappingAwait = tuple[str, tuple[str, ...], int | None]
+
+
+def unsettled_mapping_await(details: Any, chain_id: int) -> MappingAwait | None:
+    """The await an unsettled node on ``chain_id`` names, or ``None`` when it is settled, on another chain, or names no
+    topics (a re-run could not be told apart from this one).
+    """
+    if not isinstance(details, dict) or details.get(MAPPING_ENUMERATION_STATUS) == "complete":
+        return None
+    awaits = details.get(MAPPING_ENUMERATION_AWAITS)
+    if not isinstance(awaits, dict) or awaits.get("chain_id") != chain_id:
+        return None
+    deferral = _deferral(awaits.get("event_address"), awaits.get("topic0s"))
+    if deferral is None or not deferral[1]:
+        return None
+    covers = awaits.get("covers_block")
+    return deferral[0], deferral[1], covers if isinstance(covers, int) and not isinstance(covers, bool) else None
+
+
+def _mapping_await_satisfied(session: Session, chain_id: int, pending: MappingAwait) -> bool:
+    """Whether the index can now answer the replay: every awaited topic cursor is backfilled and exactness-eligible,
+    and, after a failed tail, every one has reached the block that tail missed.
+    """
+    address, topic0s, covers_block = pending
+    if not _deferral_backfilled(session, chain_id, (address, topic0s)):
+        return False
+    if covers_block is None:
+        return True
+    frontier = session.execute(
+        select(func.min(IndexedEventCursor.last_indexed_block))
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == address)
+        .where(func.lower(IndexedEventCursor.topic0).in_(topic0s))
+    ).scalar()
+    return isinstance(frontier, int) and frontier >= covers_block
+
+
+def reconcile_unsettled_mapping_replays(session: Session, *, chain_id: int, limit: int = 200) -> int:
+    """One pass over completed jobs whose graph holds a mapping-member replay that didn't settle.
+
+    Re-enqueues a job's policy stage once the index can answer one of its awaited replays; returns the count. The re-run
+    reads that replay from the index and drops the await, so a job isn't selected again for it; an await whose cursors
+    never warm never re-enqueues. Commits only when something was re-enqueued.
+    """
+    rows = session.execute(
+        select(Job.id, Job.address, ControlGraphNode.details)
+        .join(Contract, Contract.job_id == Job.id)
+        .join(ControlGraphNode, ControlGraphNode.contract_id == Contract.id)
+        .where(Job.status == JobStatus.completed)
+        .where(Job.stage == JobStage.done)
+        .where(Job.chain_id == chain_id)
+        .where(ControlGraphNode.details.has_key(MAPPING_ENUMERATION_AWAITS))
+    ).all()
+
+    by_job: dict[Any, tuple[str | None, set[MappingAwait]]] = {}
+    for job_id, address, details in rows:
+        pending = unsettled_mapping_await(details, chain_id)
+        if pending is None:
+            continue
+        by_job.setdefault(job_id, (address, set()))[1].add(pending)
+
+    reenqueued = 0
+    satisfied: dict[MappingAwait, bool] = {}
+    for job_id, (address, awaits) in by_job.items():
+        if reenqueued >= limit:
+            break
+        ready = []
+        for pending in sorted(awaits, key=lambda a: (a[0], a[1], a[2] or 0)):
+            if pending not in satisfied:
+                satisfied[pending] = _mapping_await_satisfied(session, chain_id, pending)
+            if satisfied[pending]:
+                ready.append(pending[0])
+        if not ready:
+            continue
+        job = session.get(Job, job_id)
+        if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
+            continue
+        if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
+            continue
+        _requeue_policy(job, "Re-resolving: durable event index caught up for an unsettled mapping replay")
+        reenqueued += 1
+        logger.info(
+            "mapping-replay reconciler re-enqueued policy for job %s address=%s authorities=%s",
+            job_id,
+            address,
+            sorted(set(ready)),
         )
 
     if reenqueued:

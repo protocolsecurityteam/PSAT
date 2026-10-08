@@ -47,16 +47,16 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # ``test_allow_list_entries_still_present``.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "services/resolution/indexer_scheduler.py": {
-        103: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
-        129: "Indexer daemon has no job accumulator; a failed witness retry pass leaves every candidate due.",
-        195: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
+        104: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
+        130: "Indexer daemon has no job accumulator; a failed witness retry pass leaves every candidate due.",
+        198: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
         1151: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # The reanalysis completed before the notifier; recording would mark it degraded.
-        923: "Notifier side-effect; reanalysis already completed before this fired.",
+        950: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # A resource side-effect, not a degraded verdict.

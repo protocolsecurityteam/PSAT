@@ -17,6 +17,7 @@ from services.resolution.deferred_reconciler import (
     enqueue_reorg_refreshes,
     reconcile_deferred_resolutions,
     reconcile_role_set_drift,
+    reconcile_unsettled_mapping_replays,
     refresh_invalidated_job,
 )
 from services.resolution.indexer_work import (
@@ -181,13 +182,15 @@ def drain_reconciliation(
                 with fenced_commits(session, partial(renew_claim, claim=claim)):
                     a = reconcile_deferred_resolutions(session, chain_id=chain_id, limit=job_limit)
                     b = reconcile_role_set_drift(session, chain_id=chain_id, limit=job_limit)
+                    c = reconcile_unsettled_mapping_replays(session, chain_id=chain_id, limit=job_limit)
                 # Also fences writes a reconciler left uncommitted.
                 renew_claim(session, claim)
-                deferred += a
+                deferred += a + c
                 drift += b
                 # Keep the remainder when a cap was hit.
-                finish(session, claim, success=a < job_limit and b < job_limit)
-                pending += a >= job_limit or b >= job_limit
+                capped = a >= job_limit or b >= job_limit or c >= job_limit
+                finish(session, claim, success=not capped)
+                pending += capped
         except Exception as exc:
             pending += 1
             session.rollback()

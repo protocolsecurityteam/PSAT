@@ -162,7 +162,7 @@ class PostgresEventLogRepo:
         if key_filters is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
 
-        cursor_block, complete = self._cursor_state(chain_id, event_address, topic0)
+        cursor_block, complete = self.cursor_state(chain_id, event_address, topic0)
 
         q = (
             select(IndexedEventLog)
@@ -274,7 +274,7 @@ class PostgresEventLogRepo:
             return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
 
         topic0s = sorted(hints_by_topic)
-        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        cursor_states = {topic0: self.cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         # Indexed means backfill complete, not just an advanced cursor.
         complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
         warm_block = min(complete_blocks) if len(complete_blocks) == len(topic0s) else None
@@ -436,7 +436,7 @@ class PostgresEventLogRepo:
         topic0s = sorted(hints_by_topic)
 
         # Any cold topic means the fold can't be complete, so read cursors first and skip the scan.
-        cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
+        cursor_states = {topic0: self.cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
         complete = all(c_block is not None and done for c_block, done in cursor_states.values())
         if not complete:
             _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
@@ -564,12 +564,12 @@ class PostgresEventLogRepo:
         topics = [t for t in topic0s if isinstance(t, str)]
         if not topics:
             return None
-        states = [self._cursor_state(chain_id, event_address, t) for t in topics]
+        states = [self.cursor_state(chain_id, event_address, t) for t in topics]
         if any(block is None or not complete for block, complete in states):
             return None
         return min(block for block, _ in states if block is not None)
 
-    def _cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
+    def cursor_state(self, chain_id: int, event_address: str, topic0: str) -> tuple[int | None, bool]:
         """``(last_indexed_block, backfill_complete)`` for one cursor, or ``(None, False)``.
 
         Every exactness gate goes through here, and a complete zero-row fold is published as exact-empty. Eligibility is

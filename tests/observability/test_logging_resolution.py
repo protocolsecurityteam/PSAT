@@ -33,7 +33,16 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
         with bind_trace_context(trace_id="t", job_id="j", stage="resolution", worker_id="w"):
             status = recursive._replay_mapping_principals(
                 address="0x" + "ab" * 20,
-                mapping_specs=[{"mapping_name": "allow"}],  # pyright: ignore[reportArgumentType]
+                mapping_specs=[
+                    {  # pyright: ignore[reportArgumentType]
+                        "mapping_name": "allow",
+                        "event_signature": "Allowed(address)",
+                        "event_name": "Allowed",
+                        "key_position": 0,
+                        "indexed_positions": [0],
+                        "direction": "add",
+                    }
+                ],
                 contract_node_id="address:0x" + "ab" * 20,
                 depth=0,
                 nodes={},
@@ -44,7 +53,7 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
         stage_metrics_var.reset(tok_m)
         degraded_errors_var.reset(tok_d)
 
-    assert status == "incomplete_timeout"
+    assert status.status == "incomplete_timeout"
     assert metrics["mapping_enum_incomplete"] == 1
     assert len(accumulator) == 1
     assert accumulator[0].phase == "mapping_enum_incomplete"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -22,6 +22,7 @@ from db.models import (
 from db.nested_artifacts import ARTIFACT_KINDS, KEY_PREFIX, parse_key
 from db.nested_artifacts import store_bundle as store_nested_artifacts
 from db.queue import get_artifact, store_artifact, usable_semantic_artifact
+from db.queue.artifacts import failed_semantic_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
 from services.clients.rpc import require_rpc_url
@@ -55,7 +56,7 @@ from services.policy.stale_policy import clear_policy_stale
 from services.resolution.capability_resolver import _load_state_var_values
 from services.resolution.cross_chain_authority import make_cross_chain_recognizer
 from services.resolution.graph_tables import replace_control_graph_rows
-from services.resolution.recursive import LoadedArtifacts, resolve_control_graph
+from services.resolution.recursive import LoadedArtifacts, resolve_control_graph, unsettled_replay_addresses
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim
 from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
@@ -238,12 +239,15 @@ def _root_artifacts(
     }
 
 
-def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str, LoadedArtifacts]:
+def _load_nested_artifacts(
+    session: Session, job_id, *, chain: str, replay_trees_for: Collection[str] = ()
+) -> dict[str, LoadedArtifacts]:
     """Hydrate the resolution stage's ``recursive.*`` artifacts.
 
     Those rows hold only runtime slices (snapshot, effective_permissions); analysis and tracking_plan come from
     ``contract_materializations`` per address. Bundles missing analysis or snapshot are dropped (``_resolve_authority``
-    and the graph refresh need both).
+    and the graph refresh need both). ``replay_trees_for`` names the addresses whose mapping-member replay the refresh
+    re-runs, which also need their predicate trees.
     """
     import copy
 
@@ -299,6 +303,25 @@ def _load_nested_artifacts(session: Session, job_id, *, chain: str) -> dict[str,
             bundle["analysis"] = copy.deepcopy(mrow.analysis)
         if mrow.tracking_plan:
             bundle["tracking_plan"] = copy.deepcopy(mrow.tracking_plan)
+        if address in replay_trees_for:
+            try:
+                trees = cm.hydrate_predicate_trees(mrow)
+            except Exception as exc:
+                # Without trees the walk keeps the node's stored status and skips its replay; the stage still runs.
+                record_degraded(
+                    phase="nested_replay_trees_hydration",
+                    exc=exc,
+                    context={"job_id": str(job_id), "bundle_address": address, "bundle_chain": chain},
+                )
+                logger.warning(
+                    "Predicate-tree hydration failed for %s on %s; its mapping replay is not re-run",
+                    address,
+                    chain,
+                    extra={"exc_type": type(exc).__name__, "bundle_address": address, "bundle_chain": chain},
+                )
+                trees = None
+            if isinstance(trees, dict) and not failed_semantic_artifact("predicate_trees", trees):
+                bundle["predicate_trees"] = {k: trees[k] for k in ("trees", "check_trees") if k in trees}
 
     return {
         addr: cast(LoadedArtifacts, bundle)
@@ -480,7 +503,9 @@ class PolicyWorker(BaseWorker):
         if not isinstance(control_snapshot, dict):
             raise RuntimeError("control_snapshot artifact not found")
 
-        nested_artifacts = _load_nested_artifacts(session, job.id, chain=chain_name)
+        nested_artifacts = _load_nested_artifacts(
+            session, job.id, chain=chain_name, replay_trees_for=unsettled_replay_addresses(resolved_control_graph)
+        )
 
         authority_snapshot: dict | None = None
         principal_resolution: PrincipalResolution = {
@@ -660,6 +685,8 @@ class PolicyWorker(BaseWorker):
         # Attach the updated effective_permissions so role principals can be projected.
         root_bundle = _root_artifacts(contract_analysis, tracking_plan, cast(ControlSnapshot, control_snapshot))
         root_bundle["effective_permissions"] = ep_data
+        # The root always re-walks; its trees let it re-run its mapping-member replay.
+        root_bundle["predicate_trees"] = predicate_trees if isinstance(predicate_trees, dict) else None
         with log_timed_phase(logger, "graph_refresh", durations_ms=durations_ms) as ph:
             refreshed_graph, refreshed_nested = resolve_control_graph(
                 root_artifacts=root_bundle,

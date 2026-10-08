@@ -106,7 +106,7 @@ def test_recursive_cold_no_floor_does_not_live_scan(monkeypatch):
         chain_id=1,
     )
     assert called["n"] == 0
-    assert status == "deferred_no_floor"
+    assert status.status == "deferred_no_floor"
 
 
 # (d) durable-cursor floor source (DB-backed) ------------------------------

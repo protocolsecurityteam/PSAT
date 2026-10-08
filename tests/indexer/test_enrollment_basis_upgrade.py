@@ -68,7 +68,7 @@ def _eligible(session) -> bool:
         .where(IndexedEventCursor.event_address == _ADDR)
         .values(backfill_complete=True, last_indexed_block=_CREATION + 10)
     )
-    _block, complete = PostgresEventLogRepo(session)._cursor_state(1, _ADDR, _TOPIC)
+    _block, complete = PostgresEventLogRepo(session).cursor_state(1, _ADDR, _TOPIC)
     return complete
 
 
