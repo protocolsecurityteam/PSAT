@@ -244,6 +244,61 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert base_contract.chain == "base"
 
 
+def _bundle_result(name: str) -> dict:
+    import json
+
+    bundle = {
+        "language": "Solidity",
+        "sources": {"src/Bundle.sol": {"content": "pragma solidity ^0.8.24;\ncontract Open {}\ncontract Guarded {}\n"}},
+        "settings": {"optimizer": {"enabled": True, "runs": 200}},
+    }
+    return {
+        "ContractName": name,
+        "SourceCode": "{" + json.dumps(bundle) + "}",
+        "CompilerVersion": "v0.8.24",
+        "OptimizationUsed": "1",
+        "Runs": "200",
+        "EVMVersion": "shanghai",
+        "LicenseType": "MIT",
+    }
+
+
+@pytest.mark.parametrize(("target_name", "reused"), [("Open", False), ("Guarded", True)])
+def test_discovery_reuses_only_the_same_contract_from_a_shared_bundle(db_session, monkeypatch, target_name, reused):
+    from unittest.mock import MagicMock
+
+    from services.discovery.fetch import source_content_hash
+    from workers.discovery import DiscoveryWorker
+
+    donor_job, _ = _make_donor(
+        db_session,
+        address=ADDR_MAINNET,
+        chain="ethereum",
+        source_content_hash=source_content_hash(_bundle_result("Guarded")),
+    )
+    target_job = create_job(db_session, {"address": ADDR_BASE, "chain": "base"})
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "workers.discovery.etherscan.parallel_get",
+        lambda thunks: {"fetch": _bundle_result(target_name), "creators": {ADDR_BASE.lower(): None}},
+    )
+    worker = DiscoveryWorker()
+    worker.update_detail = MagicMock()
+    worker._process_address(db_session, target_job)
+
+    db_session.refresh(target_job)
+    req = target_job.request
+    assert isinstance(req, dict)
+    assert target_job.source_content_hash == source_content_hash(_bundle_result(target_name))
+    if reused:
+        assert req.get("cross_chain_cache_source_job_id") == str(donor_job.id)
+    else:
+        assert "cross_chain_cache_source_job_id" not in req
+        assert not req.get("static_cached")
+        assert get_artifact(db_session, target_job.id, "contract_analysis") is None
+
+
 @pytest.mark.parametrize(
     ("donor_kwargs", "is_proxy"),
     [

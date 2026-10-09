@@ -89,15 +89,17 @@ def source_content_hash(result: dict) -> str:
     The static pipeline is a pure function of the scaffolded project (Slither over the source; no chain state), so equal
     hashes give identical analysis bundles across chains and addresses.
 
-    Covers the source file set (``parse_sources``) and the compiler settings that change the IR: language, EVM version,
-    optimizer on/off and runs, and remappings. Excludes address, constructor args, immutable values and chain id. The
-    solc version comes from the hashed pragmas.
+    Covers the source file set (``parse_sources``), the selected ``ContractName`` (one bundle can verify several
+    contracts), and the compiler settings that change the IR: language, EVM version, optimizer on/off and runs, and
+    remappings. Excludes address, constructor args, immutable values and chain id. The solc version comes from the
+    hashed pragmas.
 
     Returns a ``0x``-prefixed sha256 (66 chars).
     """
     sources = parse_sources(result)
     payload = {
         "sources": sorted(sources.items()),
+        "contract_name": str(result.get("ContractName", "") or ""),
         "remappings": sorted(parse_remappings(result)),
         "language": "vyper" if is_vyper_result(result) else "solidity",
         "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
