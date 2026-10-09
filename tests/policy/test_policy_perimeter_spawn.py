@@ -442,3 +442,31 @@ def test_probe_fires_only_for_role_grant_contract_nodes(monkeypatch):
         chain_id=1,
     ) == {"probe_block": PINNED_BLOCK}
     assert calls == [(MANAGER, VAULT)]
+
+
+@pytest.mark.parametrize(("version_offset", "queued"), [(-1, True), (0, False)], ids=["stale", "current"])
+def test_existing_job_dedupes_only_under_the_current_analyzer(db_session, seed, monkeypatch, version_offset, queued):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import Job, JobStage, JobStatus
+
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    _protocol_id, parent, address_factory = seed
+    node = address_factory()
+    db_session.add(
+        Job(
+            address=node,
+            stage=JobStage.done,
+            status=JobStatus.completed,
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION + version_offset,
+            request={"address": node, "chain": "ethereum"},
+        )
+    )
+    db_session.commit()
+
+    first = _spawn(db_session, parent, _graph(parent.address, [_node(node)]), budget=8)
+    second = _spawn(db_session, parent, _graph(parent.address, [_node(node)]), budget=8)
+
+    assert [q["address"] for q in first["queued"]] == ([node] if queued else [])
+    assert second["queued"] == []
+    assert [r["reason"] for r in second["out_of_population"]] == ["existing_job"]
+    assert len(_jobs_for(db_session, node)) == (2 if queued else 1)

@@ -242,3 +242,36 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     base_contract = db_session.execute(select(Contract).where(Contract.job_id == target_job.id)).scalar_one()
     assert base_contract.chain == "base"
+
+
+@pytest.mark.parametrize(
+    ("donor_kwargs", "is_proxy"),
+    [
+        pytest.param({"schema_version": ANALYSIS_SCHEMA_VERSION - 1}, False, id="stale_stamp"),
+        pytest.param({"schema_version": None}, False, id="unprovable_era"),
+        pytest.param({"schema_version": ANALYSIS_SCHEMA_VERSION - 1, "with_analysis": False}, True, id="stale_proxy"),
+    ],
+)
+def test_address_cache_refuses_a_job_not_proven_current(db_session, donor_kwargs, is_proxy):
+    _job, contract = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", **donor_kwargs)
+    contract.is_proxy = is_proxy
+    db_session.commit()
+    assert find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum") is None
+
+
+def test_address_cache_serves_a_current_proxy(db_session):
+    job, contract = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", with_analysis=False)
+    contract.is_proxy = True
+    db_session.commit()
+    hit = find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum")
+    assert hit is not None and hit.id == job.id
+
+
+@pytest.mark.parametrize(("origin_version", "served"), [(ANALYSIS_SCHEMA_VERSION, True), (None, False)])
+def test_address_cache_follows_a_cache_hit_to_its_origin_era(db_session, origin_version, served):
+    origin, _ = _make_donor(db_session, address=ADDR_OTHER, chain="ethereum", schema_version=origin_version)
+    hit_job, _ = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", schema_version=None)
+    hit_job.request = {**(hit_job.request or {}), "cache_source_job_id": str(origin.id)}
+    db_session.commit()
+    found = find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum")
+    assert (found.id if found is not None else None) == (hit_job.id if served else None)

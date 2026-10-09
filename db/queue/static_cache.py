@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import logging
+import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -92,28 +94,44 @@ def copy_row(session: Session, source: Base, *, exclude: frozenset[str] = frozen
     return new_row
 
 
-def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
+def proven_analysis_schema_version(session: Session, job: Job, memo: dict[str, int | None] | None = None) -> int | None:
     """The analyzer era *job*'s static artifacts were produced under, or None.
 
     ``jobs.analysis_schema_version`` is stamped only on the fetch path, so cache-hit jobs are NULL, which isn't
     "current". Since ``copy_static_cache`` copies the donor's artifacts verbatim, the donor chain is followed to a
     stamped job. Walked to termination (with a visited set), not a hop budget: chains grow with every re-run of busy
-    addresses.
+    addresses. A caller checking many jobs passes one *memo* so jobs on a shared chain are resolved once.
     """
     version = getattr(job, "analysis_schema_version", None)
     if isinstance(version, int):
         return version
 
-    seen: set[str] = {str(getattr(job, "id", ""))}
+    memo = {} if memo is None else memo
+    path: list[str] = [str(getattr(job, "id", ""))]
+
+    def _settle(era: int | None) -> int | None:
+        for job_id in path:
+            memo[job_id] = era
+        return era
+
+    if path[0] in memo:
+        return memo[path[0]]
     current: Job | None = job
     while True:
         request = current.request if current is not None and isinstance(current.request, dict) else {}
         donor_id = request.get("cache_source_job_id")
-        if not donor_id or str(donor_id) in seen:
-            return None
-        seen.add(str(donor_id))
+        if not donor_id or str(donor_id) in path:
+            return _settle(None)
+        if str(donor_id) in memo:
+            return _settle(memo[str(donor_id)])
+        path.append(str(donor_id))
         try:
-            current = session.get(Job, donor_id)
+            # The request holds the id as text; a UUID key lets an already-loaded donor come from the identity map.
+            key: Any = uuid.UUID(str(donor_id))
+        except ValueError:
+            key = donor_id
+        try:
+            current = session.get(Job, key)
         except Exception as exc:
             # A DB error would read as "no witnessed era"; record it. Paired with ``record_degraded`` by hand since this
             # module is outside the level-contract checker.
@@ -126,12 +144,52 @@ def proven_analysis_schema_version(session: Session, job: Job) -> int | None:
                 "donor-era walk could not read a donor job; the era reads as not witnessed",
                 extra={"donor_job_id": str(donor_id), "exc_type": type(exc).__name__, "error": str(exc)},
             )
-            return None
+            return _settle(None)
         if current is None:
-            return None
+            return _settle(None)
         version = getattr(current, "analysis_schema_version", None)
         if isinstance(version, int):
-            return version
+            return _settle(version)
+
+
+def job_stands_for_current_analyzer(session: Session, job: Job, memo: dict[str, int | None] | None = None) -> bool:
+    """Whether an existing job for an address stands in for a new one under the current analyzer.
+
+    A completed job counts only when its era is proven to be ``ANALYSIS_SCHEMA_VERSION``; an unstamped or unprovable era
+    doesn't. Queued, running and retrying jobs stand while their outcome is still being produced; once completed they
+    are judged by their era like any other. A terminal failure counts unless its era is proven to be another one: a
+    failure that never reached the analyzer has no era, and setting it aside would re-spawn it on every lookup.
+    """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    if job.status in (JobStatus.queued, JobStatus.processing, JobStatus.failed):
+        return True
+    era = proven_analysis_schema_version(session, job, memo)
+    if job.status == JobStatus.completed:
+        return era == ANALYSIS_SCHEMA_VERSION
+    return era is None or era == ANALYSIS_SCHEMA_VERSION
+
+
+@functools.cache
+def _not_stamped_with_other_era(version: int):
+    """SQL prefilter for ``job_stands_for_current_analyzer``: drops rows whose own stamp already rules them out."""
+    return or_(
+        Job.status.in_((JobStatus.queued, JobStatus.processing, JobStatus.failed)),
+        Job.analysis_schema_version.is_(None),
+        Job.analysis_schema_version == version,
+    )
+
+
+@functools.cache
+def _stands_without_walk_first(version: int):
+    """Orders first the rows ``job_stands_for_current_analyzer`` accepts from their own columns, so a lookup rarely
+    walks a donor chain.
+    """
+    accepted = or_(
+        Job.status.in_((JobStatus.queued, JobStatus.processing, JobStatus.failed)),
+        Job.analysis_schema_version == version,
+    )
+    return case((accepted, 0), else_=1)
 
 
 def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
@@ -183,16 +241,19 @@ def find_completed_static_cache(
     """A completed job for *address*/*chain* with all static data (source files, ``contract_analysis``, a summaried
     contract row), or ``None``.
 
-    Looks up the contract by (address, chain), since ``copy_static_cache`` may have reassigned it. If that misses and
-    *source_content_hash* is given, falls back to any completed job with the same verified source under the current
-    analyzer; the primary path is unchanged.
+    Only jobs whose era is proven to be the current analyzer's are served. Looks up the contract by (address, chain),
+    since ``copy_static_cache`` may have reassigned it. If that misses and *source_content_hash* is given, falls back to
+    any completed job with the same verified source under the current analyzer.
     """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
     stmt = (
         select(Job)
         .where(
             func.lower(Job.address) == address.lower(),
             Job.status == JobStatus.completed,
             Job.stage == JobStage.done,
+            _not_stamped_with_other_era(ANALYSIS_SCHEMA_VERSION),
         )
         .order_by(Job.updated_at.desc())
     )
@@ -201,7 +262,10 @@ def find_completed_static_cache(
         stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
     candidates = session.execute(stmt).scalars().all()
 
+    eras: dict[str, int | None] = {}
     for candidate in candidates:
+        if proven_analysis_schema_version(session, candidate, eras) != ANALYSIS_SCHEMA_VERSION:
+            continue
         src_count = session.execute(
             select(SourceFile).where(SourceFile.job_id == candidate.id).limit(1)
         ).scalar_one_or_none()
@@ -336,16 +400,48 @@ def find_previous_company_inventory(
     return None
 
 
-def find_existing_job_for_address(session: Session, address: str, chain: str | None = None) -> Job | None:
-    """A non-failed job for *address* (case-insensitive), filtered by *chain* when given."""
-    stmt = select(Job).where(
-        func.lower(Job.address) == address.lower(),
-        Job.status != JobStatus.failed,
-        Job.request["effects_resume_work_id"].astext.is_(None),
+@functools.cache
+def _existing_job_stmt(chain_scoped: bool, version: int, first_only: bool):
+    """Built once: this lookup runs per candidate inside selection and perimeter loops."""
+    stmt = (
+        select(Job)
+        .where(
+            func.lower(Job.address) == bindparam("address"),
+            Job.status != JobStatus.failed,
+            Job.request["effects_resume_work_id"].astext.is_(None),
+            _not_stamped_with_other_era(version),
+        )
+        .order_by(_stands_without_walk_first(version), Job.updated_at.desc())
     )
+    if chain_scoped:
+        stmt = stmt.where(Job.chain_id == bindparam("chain_id"))
+    return stmt.limit(1) if first_only else stmt
+
+
+def find_existing_job_for_address(session: Session, address: str, chain: str | None = None) -> Job | None:
+    """A non-failed job for *address* (case-insensitive) that stands for the current analyzer
+    (``job_stands_for_current_analyzer``), filtered by *chain* when given.
+    """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    params: dict[str, Any] = {"address": address.lower()}
     if chain is not None:
-        stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
-    return session.execute(stmt.limit(1)).scalar_one_or_none()
+        params["chain_id"] = derive_job_chain_id(chain, address)
+    scoped = chain is not None
+    # Rows that stand on their own columns sort first, so the top row usually settles it without loading the rest.
+    first = session.execute(_existing_job_stmt(scoped, ANALYSIS_SCHEMA_VERSION, True), params).scalar_one_or_none()
+    if first is None:
+        return None
+    if (
+        first.status in (JobStatus.queued, JobStatus.processing)
+        or first.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
+    ):
+        return first
+    eras: dict[str, int | None] = {}
+    for candidate in session.execute(_existing_job_stmt(scoped, ANALYSIS_SCHEMA_VERSION, False), params).scalars():
+        if job_stands_for_current_analyzer(session, candidate, eras):
+            return candidate
+    return None
 
 
 def is_known_proxy(session: Session, address: str, chain: str | None = None) -> bool:
