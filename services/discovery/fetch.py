@@ -38,15 +38,24 @@ def sanitize_evm_version(raw: object) -> str:
 def _normalize_source_path(filename: str) -> str:
     """Confine a verified-source key to a project-relative path.
 
-    Bundles often carry absolute keys from the verifier's machine, so a leading root is stripped; ``..`` is rejected,
-    and ``_confine`` re-checks at write time.
+    A leading root and a leading run of ``..`` segments are dropped: both anchor the key to the verifier's machine
+    (``../../node_modules/...``). Keys with the same leading run keep their relative layout, so relative imports
+    between them still resolve. Any other ``..`` must stay inside the path it is collapsed into. ``_confine``
+    re-checks at write time.
     """
     pure = PurePosixPath(filename)
-    # Drop the root anchor and ``.`` segments.
     parts = [p for p in pure.parts if p != "." and not p.startswith("/")]
-    if any(p == ".." for p in parts):
-        raise ValueError(f"Refusing source path with parent traversal: {filename!r}")
-    normalized = "/".join(parts)
+    while parts and parts[0] == "..":
+        parts.pop(0)
+    collapsed: list[str] = []
+    for part in parts:
+        if part != "..":
+            collapsed.append(part)
+        elif collapsed:
+            collapsed.pop()
+        else:
+            raise ValueError(f"Refusing source path that escapes the project: {filename!r}")
+    normalized = "/".join(collapsed)
     if not normalized:
         raise ValueError(f"Empty source path: {filename!r}")
     return normalized
@@ -146,10 +155,12 @@ def parse_sources(result: dict) -> dict[str, str]:
     contract_name = result.get("ContractName", "Contract")
 
     if bundle:
-        sources = {}
+        sources: dict[str, str] = {}
         for filename, obj in bundle["sources"].items():
             content = obj["content"] if isinstance(obj, dict) else obj
             normalized = _normalize_source_path(filename)
+            if normalized in sources and sources[normalized] != content:
+                raise ValueError(f"Source paths collide after normalization: {filename!r} -> {normalized!r}")
             sources[normalized] = content
         return sources
 
