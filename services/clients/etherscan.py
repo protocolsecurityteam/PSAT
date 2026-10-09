@@ -256,9 +256,9 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-# ``status=0`` shapes that are answers (empty token/tx lists): exact status + known message + empty list. Opt-in per
+# ``status=0`` shapes that are answers (empty token/tx/log lists): exact status + known message + empty list. Opt-in per
 # call site via ``empty_result_ok`` so no other error can reach a caller as data.
-_EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found"})
+_EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found", "No records found"})
 
 
 def _is_empty_result(data: dict) -> bool:
