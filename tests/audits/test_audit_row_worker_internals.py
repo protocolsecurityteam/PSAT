@@ -284,7 +284,7 @@ def _lock_timeout() -> Exception:
     return OperationalError("UPDATE audit_reports", {}, Exception("canceling statement due to lock timeout"))
 
 
-def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(caplog):
+def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(caplog, monkeypatch):
     worker = _TestWorker()
     attempts: list[int] = []
 
@@ -293,14 +293,14 @@ def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(c
         worker._running = False
         raise _lock_timeout()
 
-    worker._persist_outcome = failing_persist  # type: ignore[method-assign]
+    monkeypatch.setattr(worker, "_persist_outcome", failing_persist)
     with caplog.at_level(logging.WARNING, logger=worker.log.name):
         worker._persist_with_retry(5, _Outcome())
     assert attempts == [5]
     assert any("unpersisted" in r.getMessage() for r in caplog.records)
 
 
-def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak():
+def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak(monkeypatch):
     worker = _TestWorker()
     failures = iter([_lock_timeout(), _lock_timeout()])
 
@@ -310,7 +310,7 @@ def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak()
             raise failure
         worker.persisted.append((audit_id, result))
 
-    worker._persist_outcome = flaky_persist  # type: ignore[method-assign]
+    monkeypatch.setattr(worker, "_persist_outcome", flaky_persist)
     worker._persist_with_retry(6, "ok")
     assert worker.persisted == [(6, "ok")]
     assert worker._db_failing_since is None

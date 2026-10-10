@@ -58,7 +58,7 @@ def wire(monkeypatch):
 
     def get(_url, params=None, timeout=None):
         calls.append(dict(params or {}))
-        answer = answers.get((params or {}).get("topic0"), NO_RECORDS)
+        answer = answers.get(str((params or {}).get("topic0")), NO_RECORDS)
         if isinstance(answer, Exception):
             raise answer
         return _Response(answer)
