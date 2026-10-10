@@ -447,6 +447,7 @@ class _UnitResolver:
         self._parent = {key: key for key in self._safe_by_key}
         self.overlaps: list[dict[str, Any]] = []
         self._union_overlapping_safes()
+        self.proposers_not_determined: dict[str, list[str]] = {}
         self._proposers = self._timelock_proposer_executors(signals)
         self._members: dict[str, set[str]] = defaultdict(set)
 
@@ -503,11 +504,15 @@ class _UnitResolver:
         self.overlaps.sort(key=lambda o: (o["a"], o["b"]))
 
     def _timelock_proposer_executors(self, signals: list[FunctionSignal]) -> dict[str, dict[str, Any]]:
-        """The weakest Safe proven able to both propose and execute on a timelock; propose-only doesn't let it act as
-        the timelock.
+        """The weakest principal proven able to both propose and execute on each timelock; propose-only doesn't let it
+        act as the timelock.
+
+        A proposer-executor whose own weakness isn't proven (no row, an unread Safe owner set, a contract or an unknown
+        type) could be the weakest path, so its timelock gets no entry and is recorded in
+        ``proposers_not_determined``.
         """
         by_role: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"schedule": set(), "execute": set()})
-        facts_by_key: dict[str, P.PrincipalFacts] = {}
+        facts_by_key: dict[str, P.PrincipalFacts | None] = {}
         for signal in sorted(signals, key=lambda s: (s.chain, s.deployment_address, s.selector, s.claim_id)):
             role = {C.TIMELOCK_SCHEDULE: "schedule", C.TIMELOCK_EXECUTE: "execute"}.get(signal.claim_id)
             if role is None:
@@ -515,29 +520,27 @@ class _UnitResolver:
             timelock_key = entity_key(signal.chain, signal.deployment_address)
             for ref in signal.principal_refs:
                 facts = self._facts.get(int(ref.function_principal_id))
-                if facts is None or facts.resolved_type != "safe" or not facts.owners:
-                    continue
-                by_role[timelock_key][role].add(facts.key)
-                facts_by_key[facts.key] = facts
+                key = facts.key if facts is not None else entity_key(ref.chain, ref.address)
+                by_role[timelock_key][role].add(key)
+                if facts is not None or key not in facts_by_key:
+                    facts_by_key[key] = facts
 
         out: dict[str, dict[str, Any]] = {}
         for timelock_key in sorted(by_role):
             both = sorted(by_role[timelock_key]["schedule"] & by_role[timelock_key]["execute"])
-            best: dict[str, Any] | None = None
-            for safe_key in both:
-                facts = facts_by_key[safe_key]
-                # Weakest path: an unread threshold sorts first and is priced at the uncredited rung.
-                rank = (0, 0.0) if facts.threshold is None else (1, facts.threshold / len(facts.owners))
-                candidate = {
-                    "key": safe_key,
-                    "k": facts.threshold,
-                    "n": len(facts.owners),
-                    "rank": rank,
-                }
-                if best is None or candidate["rank"] < best["rank"]:
-                    best = candidate
-            if best is not None:
-                out[timelock_key] = best
+            entries: list[dict[str, Any]] = []
+            unpriced: list[str] = []
+            for key in both:
+                entry = _proposer_entry(facts_by_key.get(key))
+                if entry is None:
+                    unpriced.append(key)
+                else:
+                    entries.append(entry)
+            if unpriced:
+                self.proposers_not_determined[timelock_key] = unpriced
+            elif entries:
+                # Weakest path; equal weakness falls to the lowest key for a stable unit.
+                out[timelock_key] = min(entries, key=lambda e: (-e["weakness"], e["key"]))
         return out
 
     def unit_for(self, facts: P.PrincipalFacts) -> str:
@@ -563,10 +566,24 @@ class _UnitResolver:
             "timelock_collapses": {
                 timelock: {
                     "into": entry["key"],
-                    "proposer_k_of_n": (f"{entry['k']}/{entry['n']}" if entry["k"] is not None else "not_determined"),
+                    "proposer_kind": entry["kind"],
+                    "proposer_k_of_n": (
+                        "not_applicable"
+                        if entry["kind"] == "eoa"
+                        else f"{entry['k']}/{entry['n']}"
+                        if entry["k"] is not None
+                        else "not_determined"
+                    ),
                     "basis": "proven proposer AND executor",
                 }
                 for timelock, entry in sorted(self._proposers.items())
+            },
+            "timelock_proposers_not_determined": {
+                timelock: {
+                    "principals": keys,
+                    "basis": "a proposer-executor whose own weakness is not proven could be the weakest path",
+                }
+                for timelock, keys in sorted(self.proposers_not_determined.items())
             },
             "owner_set_contradictions": self.owner_set_contradictions,
         }
@@ -611,6 +628,11 @@ class _UnitResolver:
     def _timelock_weakness(self, facts: P.PrincipalFacts, notes: list[str]) -> tuple[float, str, list[str]]:
         discount = K.delay_discount(facts.delay_seconds)
         proposer = self.proposer_for(facts)
+        unpriced = self.proposers_not_determined.get(facts.key)
+        if unpriced:
+            notes.append("timelock_proposer_weakness_not_determined:" + ",".join(unpriced))
+        if proposer is not None and proposer["credit_withheld"]:
+            notes.append(f"safe_kn_credit_withheld:{proposer['protection_basis']}")
         if discount is None:
             notes.append("timelock_delay_not_determined")
             return K.WEAKNESS_TIMELOCK_UNDETERMINED, "timelock(delay not_determined)", notes
@@ -621,16 +643,14 @@ class _UnitResolver:
             notes.append("timelock_delay_proven_zero:no_protection")
             if proposer is None:
                 return K.WEAKNESS_SAFE_UNCREDITED, "timelock(0d, proposer not_determined)", notes
-            base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
             notes.append(f"proposer={_kn(proposer)}")
-            return base, f"timelock 0d via {_kn(proposer)}", notes
+            return proposer["weakness"], f"timelock 0d via {_kn(proposer)}", notes
         if proposer is None:
             # Undetermined proposer-executors earn no delay credit.
             notes.append("timelock_proposer_not_determined:no_delay_credit")
             return K.WEAKNESS_TIMELOCK_UNDETERMINED, f"timelock {days}d(proposer not_determined)", notes
-        base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
         notes.append(f"delay_discount={discount};proposer={_kn(proposer)}")
-        return round(base * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
+        return round(proposer["weakness"] * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
 
     def _role_breadth(self, facts: P.PrincipalFacts) -> float | None:
         """A proven holder floor above one is breadth; it only raises."""
@@ -643,7 +663,37 @@ class _UnitResolver:
 
 def _kn(proposer: dict[str, Any]) -> str:
     """A proposer's k/n, or a refusal; never a fabricated ratio."""
+    if proposer["kind"] == "eoa":
+        return "EOA"
     return f"{proposer['k']}/{proposer['n']}" if proposer["k"] is not None else "k not_determined"
+
+
+def _proposer_entry(facts: P.PrincipalFacts | None) -> dict[str, Any] | None:
+    """A timelock proposer-executor priced as itself, or ``None`` where its own weakness isn't proven."""
+    if facts is None:
+        return None
+    if facts.resolved_type == "eoa":
+        return {
+            "key": facts.key,
+            "kind": "eoa",
+            "k": None,
+            "n": None,
+            "weakness": K.WEAKNESS_EOA,
+            "credit_withheld": False,
+        }
+    if facts.resolved_type == "safe" and facts.owners:
+        return {
+            "key": facts.key,
+            "kind": "safe",
+            "k": facts.threshold,
+            "n": len(facts.owners),
+            "weakness": K.quorum_weakness(
+                facts.threshold, len(facts.owners), credit_withheld=facts.protection_credit_withheld
+            ),
+            "credit_withheld": facts.protection_credit_withheld,
+            "protection_basis": facts.protection_basis,
+        }
+    return None
 
 
 def _safe_weakness(
