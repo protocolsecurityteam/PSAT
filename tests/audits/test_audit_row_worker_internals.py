@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal as _signal
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -295,7 +296,7 @@ def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(c
 
     monkeypatch.setattr(worker, "_persist_outcome", failing_persist)
     with caplog.at_level(logging.WARNING, logger=worker.log.name):
-        worker._persist_with_retry(5, _Outcome())
+        worker._persist_with_retry(5, _Outcome(), claimed_at=time.monotonic())
     assert attempts == [5]
     assert any("unpersisted" in r.getMessage() for r in caplog.records)
 
@@ -311,6 +312,27 @@ def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak(m
         worker.persisted.append((audit_id, result))
 
     monkeypatch.setattr(worker, "_persist_outcome", flaky_persist)
-    worker._persist_with_retry(6, "ok")
+    worker._persist_with_retry(6, "ok", claimed_at=time.monotonic())
     assert worker.persisted == [(6, "ok")]
     assert worker._db_failing_since is None
+
+
+def test_a_persist_that_keeps_failing_gives_up_on_the_row_before_a_peer_could_reclaim_it(caplog, monkeypatch):
+    worker = _TestWorker()
+    worker.idle_poll_interval = 0.01
+    worker.stale_processing_seconds = 1
+    attempts: list[float] = []
+
+    def always_times_out(audit_id: int, _result) -> None:
+        attempts.append(time.monotonic())
+        raise _lock_timeout()
+
+    monkeypatch.setattr(worker, "_persist_outcome", always_times_out)
+    claimed_at = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger=worker.log.name):
+        worker._persist_with_retry(7, _Outcome(), claimed_at=claimed_at)
+
+    assert len(attempts) > 1
+    assert attempts[-1] - claimed_at < worker.stale_processing_seconds * worker.persist_retry_stale_fraction
+    assert worker._running
+    assert any("left unpersisted for stale recovery" in r.getMessage() for r in caplog.records)

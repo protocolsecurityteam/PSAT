@@ -272,3 +272,54 @@ def test_coverage_refresh_lock_timeout_rolls_back_the_whole_scope_write(lifecycl
         holder_tx.rollback()
         holder.close()
     assert tuple(_scope_state(lifecycle, audit_id)) == (None, None)
+
+
+def test_a_persist_blocked_past_its_window_leaves_the_row_and_keeps_the_loop(
+    lifecycle, audits, engines, storage_bucket, monkeypatch
+):
+    worker_engine, blocker_engine = engines
+    downloads: Counter = Counter()
+    target_id, target_url = next(iter(audits.items()))
+    blocker = blocker_engine.connect()
+    blocker_tx = blocker.begin()
+    locked = threading.Event()
+
+    def lock_target_row(url: str) -> None:
+        if url == target_url and not locked.is_set():
+            blocker.execute(text("SELECT 1 FROM audit_reports WHERE id = :id FOR UPDATE"), {"id": target_id})
+            locked.set()
+
+    worker = _worker(monkeypatch, worker_engine, downloads, on_download=lock_target_row)
+    worker.stale_processing_seconds = 2
+    thread, errors = _run(worker)
+    try:
+        assert locked.wait(timeout=10)
+        others = [audit_id for audit_id in audits if audit_id != target_id]
+        assert _wait_for(lambda: all(_statuses(lifecycle, others)[i][0] == "success" for i in others))
+        time.sleep(1.5)
+        assert thread.is_alive() and not errors
+        assert _statuses(lifecycle, [target_id])[target_id] == ("processing", None, None)
+        # Given up, never re-claimed while this worker still held the outcome.
+        assert downloads[target_url] == 1
+
+        # The loop moved on rather than retrying one row until the grace period ends the process.
+        from db.models import AuditReport
+
+        late_url = "https://example.invalid/p9-late.pdf"
+        late = AuditReport(
+            protocol_id=lifecycle.get(AuditReport, target_id).protocol_id,
+            url=late_url,
+            pdf_url=late_url,
+            title="t",
+            auditor="a",
+            date="2025-01-01",
+        )
+        lifecycle.add(late)
+        lifecycle.commit()
+        assert _wait_for(lambda: _statuses(lifecycle, [late.id])[late.id][0] == "success")
+    finally:
+        worker._running = False
+        blocker_tx.rollback()
+        blocker.close()
+        thread.join(timeout=10)
+    assert not errors

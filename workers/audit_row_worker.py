@@ -48,8 +48,11 @@ class AuditRowWorker:
     stale_processing_seconds: int = 600
     stale_recovery_every_n_polls: int = 20
 
-    # A lock or statement timeout is retried with backoff; only one that outlasts this kills the process.
+    # A lock or statement timeout is retried with backoff; claims failing for longer than this kill the process.
     db_failure_grace_seconds: float = 300.0
+    # A persist is retried only within this share of ``stale_processing_seconds`` from the claim, so no peer can
+    # reclaim the row while this worker still holds its outcome.
+    persist_retry_stale_fraction: float = 0.5
 
     thread_name_prefix: str = "audit-row"
 
@@ -135,7 +138,7 @@ class AuditRowWorker:
             session.rollback()
 
     def _db_failed(self, exc: OperationalError, step: str) -> None:
-        """Note one database failure; re-raise once failures have run past the grace period."""
+        """Note one failed claim pass; re-raise once claims have failed for the whole grace period."""
         now = time.monotonic()
         if self._db_failing_since is None:
             self._db_failing_since = now
@@ -150,7 +153,13 @@ class AuditRowWorker:
             extra={"exc_type": type(exc).__name__, "step": step, "failing_for_s": round(failing_for, 1)},
         )
 
-    def _persist_with_retry(self, audit_id: int, result: Any) -> None:
+    def _persist_with_retry(self, audit_id: int, result: Any, *, claimed_at: float) -> None:
+        """Persist, retrying a database timeout; past the retry window (or at shutdown) the row stays 'processing'
+        and stale recovery hands it back to pending.
+        """
+        deadline = claimed_at + min(
+            self.db_failure_grace_seconds, self.stale_processing_seconds * self.persist_retry_stale_fraction
+        )
         backoff = IdlePollDelay(self.idle_poll_interval)
         while True:
             try:
@@ -158,12 +167,24 @@ class AuditRowWorker:
                 self._db_failing_since = None
                 return
             except OperationalError as exc:
-                self._db_failed(exc, "persist")
-                if not self._running:
-                    # The row stays 'processing'; stale recovery hands it back to pending.
-                    self.log.warning("Worker %s: shutting down with audit %s unpersisted", self.worker_id, audit_id)
+                wait = backoff.next_delay()
+                if not self._running or time.monotonic() + wait >= deadline:
+                    self.log.warning(
+                        "Worker %s: audit %s left unpersisted for stale recovery: %s",
+                        self.worker_id,
+                        audit_id,
+                        exc,
+                        extra={"exc_type": type(exc).__name__, "step": "persist"},
+                    )
                     return
-                time.sleep(backoff.next_delay())
+                self.log.warning(
+                    "Worker %s: database error persisting audit %s, retrying: %s",
+                    self.worker_id,
+                    audit_id,
+                    exc,
+                    extra={"exc_type": type(exc).__name__, "step": "persist"},
+                )
+                time.sleep(wait)
 
     def run_loop(self) -> None:
         self.log.info(
@@ -238,6 +259,7 @@ class AuditRowWorker:
                     len(claimed),
                 )
 
+                claimed_at = time.monotonic()
                 # ``Context.run`` cannot be entered concurrently, so each future needs its own context copy.
                 futures = {}
                 for row in claimed:
@@ -250,7 +272,7 @@ class AuditRowWorker:
                         # _process_row must never raise; log rather than leak a 'processing' row until stale recovery.
                         self.log.exception("Unexpected error in %s thread", self.worker_name)
                         continue
-                    self._persist_with_retry(audit_id, result)
+                    self._persist_with_retry(audit_id, result, claimed_at=claimed_at)
                     self._log_outcome(audit_id, result)
 
                 batch_counter += 1
