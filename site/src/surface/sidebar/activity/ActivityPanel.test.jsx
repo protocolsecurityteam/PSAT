@@ -140,6 +140,28 @@ const notDetermined = () =>
     headers: { "Content-Type": "application/json", "X-PSAT-Artifact-State": "not_determined" },
   });
 
+describe("ActivityPanel — upgrade history whose last fetch errored", () => {
+  beforeEach(() => {
+    const proxyRecord = HISTORY.proxies[PROXY.toLowerCase()];
+    mockActivity({
+      contracts: [PROXY_CONTRACT],
+      monitoredEvents: [evRow("erole", "role_granted", 260, { account: I1, sender: I2 })],
+      history: {
+        proxies: { [PROXY.toLowerCase()]: { ...proxyRecord, fetch_status: "error", fetch_errors: ["upgraded"] } },
+      },
+    });
+  });
+
+  it("hedges the rows it shows and attributes no event to an impl", async () => {
+    renderPanel({ selectedMachine: PROXY_MACHINE, isAdmin: true });
+    await showAll();
+    expect(
+      await screen.findByText(/The last upgrade-history fetch did not complete/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/under impl/)).toBeNull();
+  });
+});
+
 describe("ActivityPanel — proxy entity mode", () => {
   beforeEach(() => {
     mockActivity({

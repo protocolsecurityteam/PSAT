@@ -323,3 +323,36 @@ describe("filterTimelineBySalience", () => {
     expect(out.hidden).toBe(timeline.above.length + timeline.below.length);
   });
 });
+
+describe("buildTimeline — a history whose last fetch errored", () => {
+  it("attributes nothing, since an unread upgrade could split any era", () => {
+    const out = buildTimeline({
+      events: [ev("e-role", "role_granted", 260, {})],
+      proxy: { ...PROXY, fetch_status: "error", fetch_errors: ["upgraded"] },
+      enrollmentBlock: 250,
+      isProxy: true,
+    });
+    expect(out.above.find((r) => r.key === "ev:e-role").implAttr).toBeNull();
+  });
+
+  it("does not stretch a single read impl over every block", () => {
+    const single = { current_implementation: CUR, implementations: [{ address: CUR }], fetch_status: "error" };
+    const out = buildTimeline({
+      events: [ev("e-role", "role_granted", 7, {})],
+      proxy: single,
+      enrollmentBlock: null,
+      isProxy: true,
+    });
+    expect(out.above.find((r) => r.key === "ev:e-role").implAttr).toBeNull();
+  });
+
+  it("still attributes from a completed fetch", () => {
+    const out = buildTimeline({
+      events: [ev("e-role", "role_granted", 260, {})],
+      proxy: { ...PROXY, fetch_status: "complete" },
+      enrollmentBlock: 250,
+      isProxy: true,
+    });
+    expect(out.above.find((r) => r.key === "ev:e-role").implAttr).toBe(shortenAddress(I2));
+  });
+});

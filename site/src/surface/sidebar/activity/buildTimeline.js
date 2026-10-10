@@ -69,8 +69,14 @@ function withCause(sub, ev) {
 
 // `above` = live rows (block ≥ enrollment); `below` = dimmed upgrade backfill.
 // No enrollmentBlock means no boundary: everything is `above`.
+// A history whose last fetch errored is the part that was read: an unread
+// upgrade could split any era, so nothing is attributed from it.
+export function historyFetchErrored(proxy) {
+  return proxy?.fetch_status === "error";
+}
+
 export function buildTimeline({ events = [], proxy = null, enrollmentBlock = null, isProxy = false, nameFor = null }) {
-  const eras = isProxy ? implEras(proxy) : [];
+  const eras = isProxy && !historyFetchErrored(proxy) ? implEras(proxy) : [];
   const current = String(proxy?.current_implementation || "").toLowerCase();
   const seenUpgrades = new Set();
   const rows = [];

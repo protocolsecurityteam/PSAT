@@ -5,7 +5,7 @@ import { AlertControls } from "./AlertControls.jsx";
 import { proxyState } from "./helpers.js";
 import { StatusStrip } from "./StatusStrip.jsx";
 import { Timeline } from "./Timeline.jsx";
-import { buildTimeline, filterTimelineBySalience } from "./buildTimeline.js";
+import { buildTimeline, filterTimelineBySalience, historyFetchErrored } from "./buildTimeline.js";
 
 const POLL_MS = 30_000;
 
@@ -195,6 +195,12 @@ export function EntityActivity({
         <div className="ps-activity-unknown" role="status">
           Upgrade history was not read — this proxy's pre-enrollment upgrades
           are unknown, not absent.
+        </div>
+      ) : null}
+      {!historyUnknown && historyFetchErrored(proxy) ? (
+        <div className="ps-activity-unknown" role="status">
+          The last upgrade-history fetch did not complete — the upgrades below
+          are the ones read, and others may be missing.
         </div>
       ) : null}
       <Timeline
