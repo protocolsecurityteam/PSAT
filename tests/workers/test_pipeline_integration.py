@@ -285,7 +285,9 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
     assert any(e["op"] == "STATIC_REF" and e["to"] == f"addr:{DEP_B}" for e in viz["edges"])
 
     # DEP_A gets its own upgrade history when analyzed as a target later.
-    monkeypatch.setattr("services.discovery.upgrade_history._fetch_logs_etherscan", lambda _a, _t, from_block=0: [])
+    monkeypatch.setattr(
+        "services.discovery.upgrade_history._fetch_logs_etherscan", lambda _a, _t, from_block=0, chain_id=1: []
+    )
     from services.clients import etherscan
 
     monkeypatch.setattr(etherscan, "get_contract_info", lambda _a: (None, {}))

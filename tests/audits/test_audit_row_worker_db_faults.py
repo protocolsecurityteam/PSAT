@@ -30,7 +30,7 @@ _SCOPE = "Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 15
 def lifecycle(db_session, monkeypatch):
     boot = uuid.uuid4()
     db_session.execute(text("UPDATE worker_lifecycle SET paused=false, next_start_at=NULL WHERE id=1"))
-    register_boot(db_session, boot, "p9test")
+    register_boot(db_session, boot, "lockfault")
     monkeypatch.setenv("PSAT_WORKER_BOOT_ID", str(boot))
     yield db_session
     db_session.rollback()
@@ -42,10 +42,10 @@ def lifecycle(db_session, monkeypatch):
 def audits(lifecycle):
     from db.models import AuditReport, Protocol
 
-    protocol = Protocol(name=f"p9-{uuid.uuid4().hex[:8]}")
+    protocol = Protocol(name=f"lockfault-{uuid.uuid4().hex[:8]}")
     lifecycle.add(protocol)
     lifecycle.commit()
-    urls = [f"https://example.invalid/p9-{i}.pdf" for i in range(2)]
+    urls = [f"https://example.invalid/lockfault-{i}.pdf" for i in range(2)]
     rows = [
         AuditReport(protocol_id=protocol.id, url=url, pdf_url=url, title="t", auditor="a", date="2025-01-01")
         for url in urls
@@ -305,7 +305,7 @@ def test_a_persist_blocked_past_its_window_leaves_the_row_and_keeps_the_loop(
         # The loop moved on rather than retrying one row until the grace period ends the process.
         from db.models import AuditReport
 
-        late_url = "https://example.invalid/p9-late.pdf"
+        late_url = "https://example.invalid/lockfault-late.pdf"
         late = AuditReport(
             protocol_id=lifecycle.get(AuditReport, target_id).protocol_id,
             url=late_url,
