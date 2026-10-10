@@ -116,6 +116,7 @@ def compute_protocol_score(
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
     principal_facts = P.load_principal_plane(session, refs)
+    stale_inputs = _stale_principal_inputs(signals, principal_facts)
 
     warnings: list[dict[str, Any]] = [
         {
@@ -238,6 +239,7 @@ def compute_protocol_score(
         P.discovery_relation_entities(session, protocol_id),
         composed_signals,
         ceiling_signals,
+        unanswered_signals={_signal_identity(signal) for signal in stale_inputs},
     )
 
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
@@ -354,9 +356,15 @@ def compute_protocol_score(
         ),
     }
 
-    # The grade figures stand or fall together: with findings but no priced denominator, derived numbers go to
-    # provenance instead of beside a withheld grade.
-    scored = bool(findings) and grade_exposure is not None
+    # The grade figures stand or fall together: with findings but no priced denominator, or with signals resting on
+    # principal rows that no longer exist, derived numbers go to provenance instead of beside a withheld grade.
+    withheld_basis: str | None = None
+    if stale_inputs:
+        warnings.append(_stale_inputs_warning(stale_inputs))
+        withheld_basis = GRADE_WITHHELD_STALE_INPUTS
+    elif findings and grade_exposure is None:
+        withheld_basis = GRADE_WITHHELD_EXPOSURE_UNPRICED
+    scored = bool(findings) and withheld_basis is None
     if not scored:
         withheld_rows = [
             {
@@ -367,14 +375,24 @@ def compute_protocol_score(
             }
             for finding in findings
         ]
-        if findings:
+        if withheld_basis is not None:
             provenance["grade_withheld"] = {
                 "grade_lambda_computed": grade_lambda,
                 "confidence_pct_computed": confidence.pop("pct", None),
                 "exposure_usd_computed": exposure_usd,
                 "per_finding": withheld_rows,
-                "reason": "no priced value in the perimeter, so the exposure denominator is not_determined",
+                "basis": withheld_basis,
+                "reason": _WITHHELD_REASONS[withheld_basis].format(signals=len(stale_inputs)),
             }
+            if stale_inputs:
+                provenance["grade_withheld"]["stale_signals"] = [
+                    {
+                        "entity": entity_key(s.chain, s.deployment_address),
+                        "function": s.function_name,
+                        "capability": s.claim_id,
+                    }
+                    for s in stale_inputs
+                ]
         else:
             confidence.pop("pct", None)
 
@@ -1699,4 +1717,39 @@ def _execution_fault_warning(census: dict[str, Any]) -> dict[str, Any]:
         ),
         "records_faulted": census["records_faulted"],
         "faulted_by_reason": dict(census["faulted_by_reason"]),
+    }
+
+
+GRADE_WITHHELD_STALE_INPUTS = "stale_scoring_inputs"
+GRADE_WITHHELD_EXPOSURE_UNPRICED = "exposure_denominator_not_determined"
+_WITHHELD_REASONS = {
+    GRADE_WITHHELD_STALE_INPUTS: (
+        "stale scoring inputs: {signals} enumerated signal(s) name principal rows that no longer exist, so the "
+        "findings they would produce are not_determined"
+    ),
+    GRADE_WITHHELD_EXPOSURE_UNPRICED: "no priced value in the perimeter, so the exposure denominator is not_determined",
+}
+
+
+def _stale_principal_inputs(
+    signals: list[FunctionSignal], principal_facts: dict[int, P.PrincipalFacts]
+) -> list[FunctionSignal]:
+    """Enumerated signals naming a principal row that is gone, in population order.
+
+    A policy re-run replaces principal rows under new ids; signals a failed distillation left behind still name the
+    old ones, and folding what survives would drop exactly the findings whose rows were replaced.
+    """
+    return [
+        signal
+        for signal in signals
+        if signal.principal_state == PRINCIPAL_STATE_ENUMERATED
+        and any(int(ref.function_principal_id) not in principal_facts for ref in signal.principal_refs)
+    ]
+
+
+def _stale_inputs_warning(stale: list[FunctionSignal]) -> dict[str, Any]:
+    return {
+        "kind": "stale_scoring_inputs",
+        "signals": len(stale),
+        "note": "enumerated signals name principal rows that no longer exist; the grade is withheld",
     }

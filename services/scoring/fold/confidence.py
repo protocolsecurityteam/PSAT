@@ -105,6 +105,7 @@ def _confidence(
     discovery_entities: dict[str, set[str]] | None = None,
     composed_signals: set[tuple[Any, ...]] | None = None,
     ceiling_signals: set[tuple[Any, ...]] | None = None,
+    unanswered_signals: set[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the perimeter.
 
@@ -119,6 +120,9 @@ def _confidence(
 
     Keys go through ``value_plane.canonical`` so an implementation doesn't get a second copy of its proxy's band. The
     zero address is excluded. A proven-codeless entity answers reach and capability vacuously but not pricing.
+
+    ``unanswered_signals`` are signals whose own answer can't be read back (an enumerated principal row that is gone);
+    they stay in every denominator and answer nothing.
     """
     perimeter: dict[str, float] = {}
     folded: set[str] = set()
@@ -171,7 +175,7 @@ def _confidence(
             signal.authority_openness == OPENNESS_OPEN
             or signal.principal_state == PRINCIPAL_STATE_ENUMERATED
             or _gate(signal, "exact_empty_credit").is_determined
-        )
+        ) and _signal_identity(signal) not in (unanswered_signals or set())
         reach[key][1] += 1
         scored[key][1] += 1
         if answered:
