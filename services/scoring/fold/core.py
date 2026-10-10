@@ -77,6 +77,7 @@ from utils.scoring_status import (
     MODEL_VERSION,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
+    PRINCIPAL_SET_NOT_EXACT_NOTE,
     PRINCIPAL_STATE_ENUMERATED,
     SCORE_TRIGGER_MANUAL,
     SEVERITY_STATE_PROVEN,
@@ -357,12 +358,16 @@ def compute_protocol_score(
         ),
     }
 
-    # The grade figures stand or fall together: with findings but no priced denominator, or with signals resting on
-    # principal rows that no longer exist, derived numbers go to provenance instead of beside a withheld grade.
+    # The grade figures stand or fall together: with findings but no priced denominator, or with signals whose
+    # principal set is gone or not proven whole, derived numbers go to provenance instead of beside a withheld grade.
+    partial_inputs = _partial_principal_inputs(signals)
     withheld_basis: str | None = None
+    withheld_signals: list[FunctionSignal] = []
     if stale_inputs:
         warnings.append(_stale_inputs_warning(stale_inputs))
-        withheld_basis = GRADE_WITHHELD_STALE_INPUTS
+        withheld_basis, withheld_signals = GRADE_WITHHELD_STALE_INPUTS, stale_inputs
+    elif partial_inputs:
+        withheld_basis, withheld_signals = GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS, partial_inputs
     elif findings and grade_exposure is None:
         withheld_basis = GRADE_WITHHELD_EXPOSURE_UNPRICED
     scored = bool(findings) and withheld_basis is None
@@ -383,16 +388,16 @@ def compute_protocol_score(
                 "exposure_usd_computed": exposure_usd,
                 "per_finding": withheld_rows,
                 "basis": withheld_basis,
-                "reason": _WITHHELD_REASONS[withheld_basis].format(signals=len(stale_inputs)),
+                "reason": _WITHHELD_REASONS[withheld_basis].format(signals=len(withheld_signals)),
             }
-            if stale_inputs:
-                provenance["grade_withheld"]["stale_signals"] = [
+            if withheld_signals:
+                provenance["grade_withheld"]["withheld_by_signals"] = [
                     {
                         "entity": entity_key(s.chain, s.deployment_address),
                         "function": s.function_name,
                         "capability": s.claim_id,
                     }
-                    for s in stale_inputs
+                    for s in withheld_signals
                 ]
         else:
             confidence.pop("pct", None)
@@ -1758,11 +1763,16 @@ def _execution_fault_warning(census: dict[str, Any]) -> dict[str, Any]:
 
 
 GRADE_WITHHELD_STALE_INPUTS = "stale_scoring_inputs"
+GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS = "partial_principal_sets"
 GRADE_WITHHELD_EXPOSURE_UNPRICED = "exposure_denominator_not_determined"
 _WITHHELD_REASONS = {
     GRADE_WITHHELD_STALE_INPUTS: (
         "stale scoring inputs: {signals} enumerated signal(s) name principal rows that no longer exist, so the "
         "findings they would produce are not_determined"
+    ),
+    GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS: (
+        "partial principal sets: {signals} restricted signal(s) rest on a role set not proven whole, so who can call "
+        "them, and the findings that would follow, are not_determined"
     ),
     GRADE_WITHHELD_EXPOSURE_UNPRICED: "no priced value in the perimeter, so the exposure denominator is not_determined",
 }
@@ -1781,6 +1791,19 @@ def _stale_principal_inputs(
         for signal in signals
         if signal.principal_state == PRINCIPAL_STATE_ENUMERATED
         and any(int(ref.function_principal_id) not in principal_facts for ref in signal.principal_refs)
+    ]
+
+
+def _partial_principal_inputs(signals: list[FunctionSignal]) -> list[FunctionSignal]:
+    """Grade-bearing signals whose principal set distillation found short of ``exact``: folding without them would
+    drop findings their unfound members carry.
+    """
+    return [
+        signal
+        for signal in signals
+        if signal.enters_grade
+        and signal.principal_state != PRINCIPAL_STATE_ENUMERATED
+        and any(note.startswith(PRINCIPAL_SET_NOT_EXACT_NOTE) for note in signal.witness_notes)
     ]
 
 

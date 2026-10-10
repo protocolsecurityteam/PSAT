@@ -83,7 +83,7 @@ def test_after_a_failed_refresh_the_grade_is_withheld_not_improved(fold):
     withheld = document.provenance["grade_withheld"]
     assert withheld["basis"] == "stale_scoring_inputs"
     assert withheld["reason"].startswith("stale scoring inputs: 1 enumerated signal(s)")
-    assert withheld["stale_signals"] == [
+    assert withheld["withheld_by_signals"] == [
         {"entity": entity_key("ethereum", VAULT), "function": "f", "capability": "upgrade.implementation"}
     ]
     # The fold-from-survivors figure is kept only as provenance, and confidence is charged for the unreadable answer.
@@ -102,7 +102,7 @@ def test_an_unpriced_perimeter_still_withholds_for_its_own_reason(fold):
     withheld = document.provenance["grade_withheld"]
     assert withheld["basis"] == "exposure_denominator_not_determined"
     assert withheld["reason"] == "no priced value in the perimeter, so the exposure denominator is not_determined"
-    assert "stale_signals" not in withheld
+    assert "withheld_by_signals" not in withheld
 
 
 @pytest.fixture
@@ -189,3 +189,33 @@ def test_the_persisted_path_withholds_after_policy_replaces_principal_rows(db_se
     assert after.grade_state == GRADE_STATE_NOT_DETERMINED
     assert after.provenance["grade_withheld"]["basis"] == "stale_scoring_inputs"
     assert "stale_scoring_inputs" in {w["kind"] for w in after.warnings}
+
+
+def test_a_partial_principal_set_withholds_the_grade_rather_than_dropping_its_finding(fold):
+    public, privileged = _population()
+    partial = replace(
+        privileged,
+        principal_state="not_determined",
+        principal_refs=(),
+        witness_notes=("principal_set_not_exact:lower_bound",),
+    )
+    document = fold([public, partial], value=value_plane(BALANCES), principals={})
+
+    assert document.grade_state == GRADE_STATE_NOT_DETERMINED
+    assert (document.grade_lambda, document.grade_exposure, document.confidence_pct) == (None, None, None)
+    withheld = document.provenance["grade_withheld"]
+    assert withheld["basis"] == "partial_principal_sets"
+    assert withheld["reason"].startswith("partial principal sets: 1 restricted signal(s)")
+    assert withheld["withheld_by_signals"] == [
+        {"entity": entity_key("ethereum", VAULT), "function": "f", "capability": "upgrade.implementation"}
+    ]
+    assert withheld["grade_lambda_computed"] == 97.0
+
+
+def test_an_unresolved_signal_without_a_partial_set_keeps_the_grade_as_before(fold):
+    public, privileged = _population()
+    unresolved = replace(privileged, principal_state="not_determined", principal_refs=())
+    document = fold([public, unresolved], value=value_plane(BALANCES), principals={})
+
+    assert document.grade_state == GRADE_STATE_COMPUTED
+    assert "grade_withheld" not in document.provenance

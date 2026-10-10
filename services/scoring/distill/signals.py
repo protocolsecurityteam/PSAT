@@ -25,6 +25,7 @@ from utils.scoring_status import (
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
     OPENNESS_RESTRICTED,
+    PRINCIPAL_SET_NOT_EXACT_NOTE,
     PRINCIPAL_STATE_ENUMERATED,
     PRINCIPAL_STATE_NONE_REQUIRED,
     PRINCIPAL_STATE_NOT_DETERMINED,
@@ -328,7 +329,7 @@ def _build_signal(
         # Members not yet found (possibly EOAs) would be missing from the fold, so the set answers nothing.
         fields["principal_state"] = PRINCIPAL_STATE_NOT_DETERMINED
         fields["principal_refs"] = ()
-        notes.add("principal_set_not_exact:" + ",".join(inexact))
+        notes.add(PRINCIPAL_SET_NOT_EXACT_NOTE + ",".join(inexact))
     elif principals:
         fields["principal_state"] = PRINCIPAL_STATE_ENUMERATED
         fields["principal_refs"] = tuple(

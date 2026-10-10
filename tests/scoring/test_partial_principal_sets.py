@@ -195,6 +195,10 @@ def test_errored_timelock_lower_bound_set_and_exact_set_together(world, db_sessi
     assert finding["principal_unit"] == entity_key("ethereum", exact_member)
     assert finding["weakness"] == 0.9
     assert "restricted_privileged_no_principal" in {w["kind"] for w in document.warnings}
+    # Folding without the partial set's members would read safer than proven, so the grade is withheld.
+    assert document.grade_state == "not_determined"
+    assert document.provenance["grade_withheld"]["basis"] == "partial_principal_sets"
+    assert [s["function"] for s in document.provenance["grade_withheld"]["withheld_by_signals"]] == ["upgradeToAndCall"]
     assert document.provenance["closure_admission"]["controller_enumeration_not_determined"] == {timelock_key: "error"}
     confidence = document.model_parameters["confidence_detail"]
     assert confidence["controller_enumeration_not_determined"] == 1
@@ -224,6 +228,7 @@ def test_the_same_world_proven_whole_keeps_its_findings_and_charges_nothing(worl
     }
     assert all(f["weakness"] == 0.9 for f in document.findings)
     assert "restricted_privileged_no_principal" not in {w["kind"] for w in document.warnings}
+    assert (document.provenance.get("grade_withheld") or {}).get("basis") != "partial_principal_sets"
     assert document.provenance["closure_admission"]["controller_enumeration_not_determined"] == {}
     assert document.model_parameters["confidence_detail"]["controller_enumeration_not_determined"] == 0
 
