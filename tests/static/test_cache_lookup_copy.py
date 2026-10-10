@@ -21,9 +21,12 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
 
     _create_completed_job_with_static_data(db_session, address=ADDR_A)
 
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
     new_job = create_job(db_session, {"address": ADDR_A, "name": "TestContract2"})
     new_job.status = JobStatus.completed
     new_job.stage = JobStage.done
+    new_job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     db_session.commit()
 
     contract = Contract(job_id=new_job.id, address=ADDR_A, chain="ethereum", contract_name="TestContract2")

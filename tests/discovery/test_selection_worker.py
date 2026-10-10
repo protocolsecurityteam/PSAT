@@ -596,3 +596,73 @@ def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
     monkeypatch.setattr(probes, "rpc_batch_request", fake_rpc_batch_request)
     monkeypatch.setattr(probes.etherscan, "get", fake_etherscan_get)
     return seen
+
+
+def _completed_job(session, address: str, version: int | None):
+    from db.models import Job, JobStage, JobStatus
+
+    job = Job(
+        address=address,
+        stage=JobStage.done,
+        status=JobStatus.completed,
+        analysis_schema_version=version,
+        request={"address": address, "chain": "ethereum"},
+    )
+    session.add(job)
+    session.commit()
+    return job
+
+
+def _children_of(session, selection_job):
+    from db.models import Job
+
+    return (
+        session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(selection_job.id)))
+        .scalars()
+        .all()
+    )
+
+
+@requires_postgres
+@pytest.mark.parametrize("is_proxy", [False, True], ids=["contract", "proxy"])
+def test_stale_existing_job_is_reanalysed_once_across_runs(db_session, worker, seed_protocol, is_proxy):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    protocol_id, company, addr = seed_protocol
+    target = addr()
+    _add_contract(
+        db_session,
+        protocol_id=protocol_id,
+        address=target,
+        discovery_sources="inventory",
+        confidence=0.9,
+        is_proxy=is_proxy,
+    )
+    _completed_job(db_session, target, ANALYSIS_SCHEMA_VERSION - 1)
+
+    first = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
+    with pytest.raises(JobHandledDirectly):
+        worker.process(db_session, first)
+    assert [c.address for c in _children_of(db_session, first)] == [target]
+
+    if is_proxy:
+        return
+    second = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
+    with pytest.raises(JobHandledDirectly):
+        worker.process(db_session, second)
+    assert _children_of(db_session, second) == []
+
+
+@requires_postgres
+def test_current_existing_job_is_not_reanalysed(db_session, worker, seed_protocol):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    protocol_id, company, addr = seed_protocol
+    target = addr()
+    _add_contract(db_session, protocol_id=protocol_id, address=target, discovery_sources="inventory", confidence=0.9)
+    _completed_job(db_session, target, ANALYSIS_SCHEMA_VERSION)
+
+    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
+    with pytest.raises(JobHandledDirectly):
+        worker.process(db_session, job)
+    assert _children_of(db_session, job) == []

@@ -242,3 +242,91 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert ca["subject"]["address"] == ADDR_BASE.lower()
     base_contract = db_session.execute(select(Contract).where(Contract.job_id == target_job.id)).scalar_one()
     assert base_contract.chain == "base"
+
+
+def _bundle_result(name: str) -> dict:
+    import json
+
+    bundle = {
+        "language": "Solidity",
+        "sources": {"src/Bundle.sol": {"content": "pragma solidity ^0.8.24;\ncontract Open {}\ncontract Guarded {}\n"}},
+        "settings": {"optimizer": {"enabled": True, "runs": 200}},
+    }
+    return {
+        "ContractName": name,
+        "SourceCode": "{" + json.dumps(bundle) + "}",
+        "CompilerVersion": "v0.8.24",
+        "OptimizationUsed": "1",
+        "Runs": "200",
+        "EVMVersion": "shanghai",
+        "LicenseType": "MIT",
+    }
+
+
+@pytest.mark.parametrize(("target_name", "reused"), [("Open", False), ("Guarded", True)])
+def test_discovery_reuses_only_the_same_contract_from_a_shared_bundle(db_session, monkeypatch, target_name, reused):
+    from unittest.mock import MagicMock
+
+    from services.discovery.fetch import source_content_hash
+    from workers.discovery import DiscoveryWorker
+
+    donor_job, _ = _make_donor(
+        db_session,
+        address=ADDR_MAINNET,
+        chain="ethereum",
+        source_content_hash=source_content_hash(_bundle_result("Guarded")),
+    )
+    target_job = create_job(db_session, {"address": ADDR_BASE, "chain": "base"})
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "workers.discovery.etherscan.parallel_get",
+        lambda thunks: {"fetch": _bundle_result(target_name), "creators": {ADDR_BASE.lower(): None}},
+    )
+    worker = DiscoveryWorker()
+    worker.update_detail = MagicMock()
+    worker._process_address(db_session, target_job)
+
+    db_session.refresh(target_job)
+    req = target_job.request
+    assert isinstance(req, dict)
+    assert target_job.source_content_hash == source_content_hash(_bundle_result(target_name))
+    if reused:
+        assert req.get("cross_chain_cache_source_job_id") == str(donor_job.id)
+    else:
+        assert "cross_chain_cache_source_job_id" not in req
+        assert not req.get("static_cached")
+        assert get_artifact(db_session, target_job.id, "contract_analysis") is None
+
+
+@pytest.mark.parametrize(
+    ("donor_kwargs", "is_proxy"),
+    [
+        pytest.param({"schema_version": ANALYSIS_SCHEMA_VERSION - 1}, False, id="stale_stamp"),
+        pytest.param({"schema_version": None}, False, id="unprovable_era"),
+        pytest.param({"schema_version": ANALYSIS_SCHEMA_VERSION - 1, "with_analysis": False}, True, id="stale_proxy"),
+    ],
+)
+def test_address_cache_refuses_a_job_not_proven_current(db_session, donor_kwargs, is_proxy):
+    _job, contract = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", **donor_kwargs)
+    contract.is_proxy = is_proxy
+    db_session.commit()
+    assert find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum") is None
+
+
+def test_address_cache_serves_a_current_proxy(db_session):
+    job, contract = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", with_analysis=False)
+    contract.is_proxy = True
+    db_session.commit()
+    hit = find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum")
+    assert hit is not None and hit.id == job.id
+
+
+@pytest.mark.parametrize(("origin_version", "served"), [(ANALYSIS_SCHEMA_VERSION, True), (None, False)])
+def test_address_cache_follows_a_cache_hit_to_its_origin_era(db_session, origin_version, served):
+    origin, _ = _make_donor(db_session, address=ADDR_OTHER, chain="ethereum", schema_version=origin_version)
+    hit_job, _ = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", schema_version=None)
+    hit_job.request = {**(hit_job.request or {}), "cache_source_job_id": str(origin.id)}
+    db_session.commit()
+    found = find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum")
+    assert (found.id if found is not None else None) == (hit_job.id if served else None)

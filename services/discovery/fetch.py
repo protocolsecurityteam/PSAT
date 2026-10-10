@@ -38,15 +38,24 @@ def sanitize_evm_version(raw: object) -> str:
 def _normalize_source_path(filename: str) -> str:
     """Confine a verified-source key to a project-relative path.
 
-    Bundles often carry absolute keys from the verifier's machine, so a leading root is stripped; ``..`` is rejected,
-    and ``_confine`` re-checks at write time.
+    A leading root and a leading run of ``..`` segments are dropped: both anchor the key to the verifier's machine
+    (``../../node_modules/...``). Keys with the same leading run keep their relative layout, so relative imports
+    between them still resolve. Any other ``..`` must stay inside the path it is collapsed into. ``_confine``
+    re-checks at write time.
     """
     pure = PurePosixPath(filename)
-    # Drop the root anchor and ``.`` segments.
     parts = [p for p in pure.parts if p != "." and not p.startswith("/")]
-    if any(p == ".." for p in parts):
-        raise ValueError(f"Refusing source path with parent traversal: {filename!r}")
-    normalized = "/".join(parts)
+    while parts and parts[0] == "..":
+        parts.pop(0)
+    collapsed: list[str] = []
+    for part in parts:
+        if part != "..":
+            collapsed.append(part)
+        elif collapsed:
+            collapsed.pop()
+        else:
+            raise ValueError(f"Refusing source path that escapes the project: {filename!r}")
+    normalized = "/".join(collapsed)
     if not normalized:
         raise ValueError(f"Empty source path: {filename!r}")
     return normalized
@@ -89,15 +98,17 @@ def source_content_hash(result: dict) -> str:
     The static pipeline is a pure function of the scaffolded project (Slither over the source; no chain state), so equal
     hashes give identical analysis bundles across chains and addresses.
 
-    Covers the source file set (``parse_sources``) and the compiler settings that change the IR: language, EVM version,
-    optimizer on/off and runs, and remappings. Excludes address, constructor args, immutable values and chain id. The
-    solc version comes from the hashed pragmas.
+    Covers the source file set (``parse_sources``), the selected ``ContractName`` (one bundle can verify several
+    contracts), and the compiler settings that change the IR: language, EVM version, optimizer on/off and runs, and
+    remappings. Excludes address, constructor args, immutable values and chain id. The solc version comes from the
+    hashed pragmas.
 
     Returns a ``0x``-prefixed sha256 (66 chars).
     """
     sources = parse_sources(result)
     payload = {
         "sources": sorted(sources.items()),
+        "contract_name": str(result.get("ContractName", "") or ""),
         "remappings": sorted(parse_remappings(result)),
         "language": "vyper" if is_vyper_result(result) else "solidity",
         "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
@@ -144,10 +155,12 @@ def parse_sources(result: dict) -> dict[str, str]:
     contract_name = result.get("ContractName", "Contract")
 
     if bundle:
-        sources = {}
+        sources: dict[str, str] = {}
         for filename, obj in bundle["sources"].items():
             content = obj["content"] if isinstance(obj, dict) else obj
             normalized = _normalize_source_path(filename)
+            if normalized in sources and sources[normalized] != content:
+                raise ValueError(f"Source paths collide after normalization: {filename!r} -> {normalized!r}")
             sources[normalized] = content
         return sources
 
@@ -169,38 +182,167 @@ def parse_remappings(result: dict) -> list[str]:
 
 _MIN_SOLC = "0.8.24"  # 0.8.21-0.8.23 have Natspec.cpp internal compiler errors on some OZ contracts
 
+_Version = tuple[int, int, int]
+# (version, inclusive); ``None`` is unbounded.
+_Bound = tuple[_Version, bool] | None
+
+# The body may span lines but holds only version-expression characters, so prose after a commented
+# ``pragma solidity`` never reaches code further down.
+_SOLIDITY_PRAGMA_RE = re.compile(r"(pragma\s+solidity\s+)([0-9xX*.^~<>=|\s-]*)(?=;)")
+_VERSION_PATTERN = r"\d+\.\d+\.\d+"
+_PRAGMA_TOKEN_RE = re.compile(
+    rf"(?P<hyphen>(?P<hyphen_lo>{_VERSION_PATTERN})\s+-\s+(?P<hyphen_hi>{_VERSION_PATTERN}))"
+    rf"|(?:(?P<op>\^|~|>=|<=|>|<|=)\s*)?(?P<version>{_VERSION_PATTERN})"
+    r"|(?P<alt>\|\|)"
+)
+
+
+def _parse_version(raw: str) -> _Version:
+    major, minor, patch = (int(x) for x in raw.split("."))
+    return major, minor, patch
+
+
+def _format_version(version: _Version) -> str:
+    return ".".join(str(x) for x in version)
+
+
+def _comparator_bounds(op: str, version: _Version) -> tuple[_Bound, _Bound]:
+    """``(lower, upper)`` for one comparator, reading an exact pin as the ``^`` it is relaxed to."""
+    major, minor, patch = version
+    if op in ("", "=", "^"):
+        if major > 0:
+            ceiling = (major + 1, 0, 0)
+        elif minor > 0:
+            ceiling = (0, minor + 1, 0)
+        else:
+            ceiling = (0, 0, patch + 1)
+        return (version, True), (ceiling, False)
+    if op == "~":
+        return (version, True), ((major, minor + 1, 0), False)
+    if op == ">=":
+        return (version, True), None
+    if op == ">":
+        return (version, False), None
+    if op == "<=":
+        return None, (version, True)
+    return None, (version, False)
+
+
+class _Range:
+    """One ``||`` alternative of a pragma: the intersection of its comparators."""
+
+    def __init__(self) -> None:
+        self.lower: _Bound = None
+        self.upper: _Bound = None
+
+    def constrain(self, lower: _Bound, upper: _Bound) -> None:
+        if lower is not None and (
+            self.lower is None or lower[0] > self.lower[0] or (lower[0] == self.lower[0] and not lower[1])
+        ):
+            self.lower = lower
+        if upper is not None and (
+            self.upper is None or upper[0] < self.upper[0] or (upper[0] == self.upper[0] and not upper[1])
+        ):
+            self.upper = upper
+
+    def admits(self, version: _Version) -> bool:
+        if self.lower is not None:
+            bound, inclusive = self.lower
+            if version < bound or (version == bound and not inclusive):
+                return False
+        if self.upper is not None:
+            bound, inclusive = self.upper
+            if version > bound or (version == bound and not inclusive):
+                return False
+        return True
+
+    def least(self) -> _Version | None:
+        if self.lower is None:
+            return None
+        (major, minor, patch), inclusive = self.lower
+        return (major, minor, patch) if inclusive else (major, minor, patch + 1)
+
+    def greatest_nameable(self) -> _Version | None:
+        """The highest version known to exist under the ceiling: ``<0.8.20`` names 0.8.19, ``<0.9.0`` names none."""
+        if self.upper is None:
+            return None
+        (major, minor, patch), inclusive = self.upper
+        if inclusive:
+            return major, minor, patch
+        return (major, minor, patch - 1) if patch > 0 else None
+
+
+def _pragma_ranges(body: str) -> list[_Range]:
+    ranges = [_Range()]
+    for match in _PRAGMA_TOKEN_RE.finditer(body):
+        if match.group("alt"):
+            ranges.append(_Range())
+        elif match.group("hyphen"):
+            low = _parse_version(match.group("hyphen_lo"))
+            high = _parse_version(match.group("hyphen_hi"))
+            ranges[-1].constrain((low, True), (high, True))
+        else:
+            ranges[-1].constrain(*_comparator_bounds(match.group("op") or "", _parse_version(match.group("version"))))
+    return [r for r in ranges if r.lower is not None or r.upper is not None]
+
+
+def _solidity_pragmas(sources: dict[str, str]) -> list[list[_Range]]:
+    pragmas = []
+    for content in sources.values():
+        for match in _SOLIDITY_PRAGMA_RE.finditer(content):
+            ranges = _pragma_ranges(match.group(2))
+            if ranges:
+                pragmas.append(ranges)
+    return pragmas
+
 
 def _detect_solc_version(sources: dict[str, str]) -> str:
-    min_tuple = tuple(int(x) for x in _MIN_SOLC.split("."))
-    versions = []
-    for content in sources.values():
-        for m in re.finditer(r"pragma\s+solidity\s+(<=|>=|[<>^~=]?)\s*(0\.\d+\.\d+)", content):
-            op, ver = m.group(1), m.group(2)
-            # ``<``/``<=`` is a ceiling, not a target (``<0.9.0`` would pin a nonexistent solc).
-            if op in ("<", "<="):
-                continue
-            versions.append(ver)
-    if not versions:
-        return _MIN_SOLC
-    detected = max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
-    detected_tuple = tuple(int(x) for x in detected.split("."))
-    if detected_tuple[:2] == min_tuple[:2] and detected_tuple < min_tuple:
-        return _MIN_SOLC
-    return detected
+    """One solc that satisfies every ``pragma solidity`` in the bundle as ``_relax_pragmas`` rewrites it.
+
+    Prefers the highest lower bound (of the newest ``||`` alternative), floored to ``_MIN_SOLC`` on its minor line.
+    When a ceiling rules that out, the newest admissible version named by some bound is used; if nothing is admissible
+    the preference stands and the compile reports the conflict.
+    """
+    pragmas = _solidity_pragmas(sources)
+    floor = _parse_version(_MIN_SOLC)
+    lowers = []
+    for ranges in pragmas:
+        bounded = [v for v in (r.least() for r in ranges) if v is not None]
+        if bounded:
+            lowers.append(max(bounded))
+    preferred = max(lowers) if lowers else floor
+    if preferred[:2] == floor[:2] and preferred < floor:
+        preferred = floor
+
+    def admitted(version: _Version) -> bool:
+        return all(any(r.admits(version) for r in ranges) for ranges in pragmas)
+
+    if admitted(preferred):
+        return _format_version(preferred)
+    candidates = {v for ranges in pragmas for r in ranges for v in (r.least(), r.greatest_nameable()) if v is not None}
+    viable = sorted(v for v in candidates if admitted(v))
+    below = [v for v in viable if v <= preferred]
+    if below:
+        return _format_version(below[-1])
+    if viable:
+        return _format_version(viable[0])
+    return _format_version(preferred)
 
 
 def _relax_pragmas(sources: dict[str, str]) -> dict[str, str]:
-    """Rewrite exact pragmas to ``^X.Y.Z``: Foundry checks them against solc_version even with auto-detect off,
-    blocking newer patch compilers.
+    """Rewrite every exact constraint in each ``pragma solidity`` to ``^X.Y.Z``: Foundry checks pragmas against
+    solc_version even with auto-detect off, which would block the newer patch compiler ``_detect_solc_version`` picks.
     """
-    relaxed = {}
-    for path, content in sources.items():
-        relaxed[path] = re.sub(
-            r"(pragma\s+solidity\s+)=?\s*(0\.\d+\.\d+)",
-            r"\1^\2",
-            content,
-        )
-    return relaxed
+
+    def relax_token(match: re.Match[str]) -> str:
+        if match.group("version") and (match.group("op") or "=") == "=":
+            return "^" + match.group("version")
+        return match.group(0)
+
+    def relax_pragma(match: re.Match[str]) -> str:
+        return match.group(1) + _PRAGMA_TOKEN_RE.sub(relax_token, match.group(2))
+
+    return {path: _SOLIDITY_PRAGMA_RE.sub(relax_pragma, content) for path, content in sources.items()}
 
 
 def _project_src_dir(sources: dict[str, str]) -> str:

@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import bindparam, func, select, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from db.models import Job, JobDependency, JobStage, JobStatus, derive_job_chain_id
 
 from .heartbeats import DEFAULT_JOB_LEASE_TTL_S, DEFAULT_JOB_STALE_TIMEOUT, LeaseLost
+from .static_cache import _not_stamped_with_other_era, _stands_without_walk_first, job_stands_for_current_analyzer
 
 logger = logging.getLogger("db.queue")
 
@@ -293,6 +295,38 @@ def _convert_impl_job_to_proxy_context(
     session.commit()
 
 
+@functools.cache
+def _impl_job_stmt(kind: str, chain_scoped: bool, root_scoped: bool, version: int, *, first_only: bool):
+    """Built once per shape: the reconcile runs for every implementation, facet and secondary impl of a proxy job.
+
+    ``kind`` is ``same_proxy`` or ``standalone`` (jobs that could stand, those standing on their own columns first) or
+    ``other_proxy`` (any job behind a different proxy).
+    """
+    proxy = func.lower(Job.request["proxy_address"].as_string())
+    # The lower() form lets ``ix_jobs_lower_address_chain_id`` serve the lookup.
+    where = [
+        Job.address == bindparam("impl"),
+        func.lower(Job.address) == bindparam("impl"),
+        # An effects-only retry isn't an implementation analysis.
+        Job.request["effects_resume_work_id"].astext.is_(None),
+    ]
+    # Filter chain in every branch, so another chain's job never looks like a duplicate.
+    if chain_scoped:
+        where.append(Job.chain_id == bindparam("chain_id"))
+    if root_scoped:
+        where.append(Job.request["root_job_id"].as_string() == bindparam("root"))
+    if kind == "other_proxy":
+        stmt = select(Job.id).where(*where, proxy != bindparam("proxy"))
+    else:
+        match = proxy == bindparam("proxy") if kind == "same_proxy" else proxy.is_(None)
+        stmt = (
+            select(Job)
+            .where(*where, match, _not_stamped_with_other_era(version))
+            .order_by(_stands_without_walk_first(version), Job.updated_at.desc())
+        )
+    return stmt.limit(1) if first_only else stmt
+
+
 def reconcile_impl_job_for_proxy(
     session: Session,
     *,
@@ -310,41 +344,35 @@ def reconcile_impl_job_for_proxy(
     * ``"spawn"``: create a proxy-context child (no job, or only another proxy's; a shared impl gets one per
     deployment).
 
-    ``root_job_id`` scopes lookups to the current cascade for ``--force`` re-runs.
+    ``root_job_id`` scopes lookups to the current cascade for ``--force`` re-runs. Only jobs that stand for the current
+    analyzer (``job_stands_for_current_analyzer``) skip or get backpatched; a stale one leads to a fresh spawn.
     """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
     impl_lc = impl_addr.lower()
     proxy_lc = proxy_addr.lower()
+    params: dict[str, Any] = {"impl": impl_lc, "proxy": proxy_lc}
+    if chain is not None:
+        params["chain_id"] = derive_job_chain_id(chain, impl_lc)
+    if root_job_id is not None:
+        params["root"] = root_job_id
+    shape = (chain is not None, root_job_id is not None, ANALYSIS_SCHEMA_VERSION)
+    eras: dict[str, int | None] = {}
 
-    def _scoped(stmt):
-        # An effects-only retry isn't an implementation analysis.
-        stmt = stmt.where(Job.request["effects_resume_work_id"].astext.is_(None))
-        # Filter chain in both branches; it used to apply only with a root, letting another chain's job look like a
-        # duplicate.
-        if chain is not None:
-            stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, impl_lc))
-        if root_job_id is not None:
-            stmt = stmt.where(Job.request["root_job_id"].as_string() == root_job_id)
-        return stmt
+    def _first_standing(kind: str) -> Job | None:
+        first = session.execute(_impl_job_stmt(kind, *shape, first_only=True), params).scalar_one_or_none()
+        if first is None or job_stands_for_current_analyzer(session, first, eras):
+            return first
+        for candidate in session.execute(_impl_job_stmt(kind, *shape, first_only=False), params).scalars():
+            if job_stands_for_current_analyzer(session, candidate, eras):
+                return candidate
+        return None
 
-    same_proxy = session.execute(
-        _scoped(
-            select(Job).where(
-                Job.address == impl_lc,
-                func.lower(Job.request["proxy_address"].as_string()) == proxy_lc,
-            )
-        ).limit(1)
-    ).scalar_one_or_none()
+    same_proxy = _first_standing("same_proxy")
     if same_proxy is not None:
         return "skip"
 
-    standalone = session.execute(
-        _scoped(
-            select(Job).where(
-                Job.address == impl_lc,
-                Job.request["proxy_address"].as_string().is_(None),
-            )
-        ).limit(1)
-    ).scalar_one_or_none()
+    standalone = _first_standing("standalone")
     if standalone is not None:
         _convert_impl_job_to_proxy_context(
             session,
@@ -355,7 +383,7 @@ def reconcile_impl_job_for_proxy(
         )
         return "backpatched"
 
-    other_proxy = session.execute(_scoped(select(Job.id).where(Job.address == impl_lc)).limit(1)).scalar_one_or_none()
+    other_proxy = session.execute(_impl_job_stmt("other_proxy", *shape, first_only=True), params).scalar_one_or_none()
     if other_proxy is not None:
         logger.warning(
             "Shared implementation %s is behind multiple proxies; spawning a separate "

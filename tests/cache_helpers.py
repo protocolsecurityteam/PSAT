@@ -269,6 +269,7 @@ def store_semantic_artifacts(session, job_id) -> None:
 
 
 def _create_completed_job_with_static_data(session, address=ADDR_A):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import (
         Contract,
         ContractSummary,
@@ -281,6 +282,8 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     job = create_job(session, {"address": address, "name": "TestContract"})
     job.status = JobStatus.completed
     job.stage = JobStage.done
+    # The fetch path stamps every analysed job with its analyzer era.
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     session.commit()
 
     contract = Contract(

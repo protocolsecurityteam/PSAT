@@ -23,9 +23,12 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
 
     store_artifact = _sqlite_compatible_store_artifact
 
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
     job = create_job(session, {"address": address, "name": name, "chain": chain})
     job.status = JobStatus.completed
     job.stage = JobStage.done
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     session.commit()
 
     contract = Contract(

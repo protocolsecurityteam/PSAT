@@ -35,7 +35,7 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, sanitize_evm_version
+from services.discovery.fetch import _confine, _detect_solc_version, _relax_pragmas, sanitize_evm_version
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -43,12 +43,7 @@ from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 from workers.static_support.dynamic_deps import _merge_dynamic_deps, _start_block_from_prev_dyn
-from workers.static_support.source_prep import (
-    _detect_solc_version,
-    _detect_src_dir,
-    _prune_remappings,
-    _relax_pragmas,
-)
+from workers.static_support.source_prep import _detect_src_dir, _prune_remappings
 from workers.static_support.upgrade_history import (
     _apply_known_names_to_uh,
     _from_block_for_upgrade_history,
