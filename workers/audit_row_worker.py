@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select, Update
 
@@ -29,6 +30,7 @@ from utils.memory import (
     current_rss_bytes,
     mb,
 )
+from workers.base import IdlePollDelay
 
 logger = logging.getLogger("workers.audit_row_worker")
 
@@ -46,6 +48,9 @@ class AuditRowWorker:
     stale_processing_seconds: int = 600
     stale_recovery_every_n_polls: int = 20
 
+    # A lock or statement timeout is retried with backoff; only one that outlasts this kills the process.
+    db_failure_grace_seconds: float = 300.0
+
     thread_name_prefix: str = "audit-row"
 
     log: logging.Logger = logger
@@ -54,6 +59,7 @@ class AuditRowWorker:
         configure_logging()
         self.worker_id = f"{self.worker_name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._running = True
+        self._db_failing_since: float | None = None
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
 
@@ -128,6 +134,37 @@ class AuditRowWorker:
         else:
             session.rollback()
 
+    def _db_failed(self, exc: OperationalError, step: str) -> None:
+        """Note one database failure; re-raise once failures have run past the grace period."""
+        now = time.monotonic()
+        if self._db_failing_since is None:
+            self._db_failing_since = now
+        failing_for = now - self._db_failing_since
+        if failing_for >= self.db_failure_grace_seconds:
+            raise exc
+        self.log.warning(
+            "Worker %s: database error during %s, retrying: %s",
+            self.worker_id,
+            step,
+            exc,
+            extra={"exc_type": type(exc).__name__, "step": step, "failing_for_s": round(failing_for, 1)},
+        )
+
+    def _persist_with_retry(self, audit_id: int, result: Any) -> None:
+        backoff = IdlePollDelay(self.idle_poll_interval)
+        while True:
+            try:
+                self._persist_outcome(audit_id, result)
+                self._db_failing_since = None
+                return
+            except OperationalError as exc:
+                self._db_failed(exc, "persist")
+                if not self._running:
+                    # The row stays 'processing'; stale recovery hands it back to pending.
+                    self.log.warning("Worker %s: shutting down with audit %s unpersisted", self.worker_id, audit_id)
+                    return
+                time.sleep(backoff.next_delay())
+
     def run_loop(self) -> None:
         self.log.info(
             "%s worker %s starting (batch=%d, pool=%d, idle=%ss, stale=%ss)",
@@ -162,6 +199,7 @@ class AuditRowWorker:
         rss_at_boot = boot_rss
         batch_counter = 0
         poll_counter = 0
+        db_backoff = IdlePollDelay(self.idle_poll_interval)
         try:
             while self._running:
                 poll_counter += 1
@@ -171,8 +209,17 @@ class AuditRowWorker:
                     if poll_counter % self.stale_recovery_every_n_polls == 0:
                         self._recover_stale_rows(session)
                     claimed = self._claim_batch(session)
+                except OperationalError as exc:
+                    # The claim's transaction rolled back, so no row was marked: nothing is claimed this pass.
+                    self._db_failed(exc, "claim")
+                    claimed = None
                 finally:
                     session.close()
+                if claimed is None:
+                    time.sleep(db_backoff.next_delay())
+                    continue
+                db_backoff.reset()
+                self._db_failing_since = None
 
                 if self.heartbeat_process:
                     # Fires before the batch (and on idle) so this counts rows claimed this pass.
@@ -203,7 +250,7 @@ class AuditRowWorker:
                         # _process_row must never raise; log rather than leak a 'processing' row until stale recovery.
                         self.log.exception("Unexpected error in %s thread", self.worker_name)
                         continue
-                    self._persist_outcome(audit_id, result)
+                    self._persist_with_retry(audit_id, result)
                     self._log_outcome(audit_id, result)
 
                 batch_counter += 1

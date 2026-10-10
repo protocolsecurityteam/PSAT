@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.sql import Select, Update
 
 from db.models import AuditReport, SessionLocal
@@ -126,6 +127,9 @@ class AuditTextExtractionWorker(AuditRowWorker):
                 audit.text_sha256 = result.text_sha256
                 audit.text_extracted_at = now
             session.commit()
+        except OperationalError:
+            session.rollback()
+            raise
         except Exception as exc:
             session.rollback()
             logger.warning(

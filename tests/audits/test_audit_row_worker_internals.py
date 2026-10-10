@@ -276,3 +276,41 @@ def test_audit_concurrency_overridable_via_env(_restore_audit_worker_modules, mo
 
     assert text_mod.AuditTextExtractionWorker.max_concurrent == 3
     assert scope_mod.AuditScopeExtractionWorker.max_concurrent == 5
+
+
+def _lock_timeout() -> Exception:
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("UPDATE audit_reports", {}, Exception("canceling statement due to lock timeout"))
+
+
+def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(caplog):
+    worker = _TestWorker()
+    attempts: list[int] = []
+
+    def failing_persist(audit_id: int, _result) -> None:
+        attempts.append(audit_id)
+        worker._running = False
+        raise _lock_timeout()
+
+    worker._persist_outcome = failing_persist  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING, logger=worker.log.name):
+        worker._persist_with_retry(5, _Outcome())
+    assert attempts == [5]
+    assert any("unpersisted" in r.getMessage() for r in caplog.records)
+
+
+def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak():
+    worker = _TestWorker()
+    failures = iter([_lock_timeout(), _lock_timeout()])
+
+    def flaky_persist(audit_id: int, result) -> None:
+        failure = next(failures, None)
+        if failure is not None:
+            raise failure
+        worker.persisted.append((audit_id, result))
+
+    worker._persist_outcome = flaky_persist  # type: ignore[method-assign]
+    worker._persist_with_retry(6, "ok")
+    assert worker.persisted == [(6, "ok")]
+    assert worker._db_failing_since is None
