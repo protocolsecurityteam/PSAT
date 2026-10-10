@@ -273,7 +273,7 @@ _FAILED_STATUSES = frozenset({JobStatus.failed, JobStatus.failed_terminal})
 
 
 def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, list[dict[str, Any]]]:
-    """``(member_count, members with no completed analysis job)``, each with its witness token and newest job."""
+    """``(member_count, members with no completed analysis job)``, each with its witness token and last failed job."""
     members = session.execute(
         select(Contract.id, Contract.address, Contract.chain, Contract.contract_name)
         .where(Contract.protocol_id == protocol_id, Contract.address.is_not(None))
@@ -311,20 +311,18 @@ def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, l
         jobs = jobs_by_entity.get(_entity_key(_canonical_chain_name(chain), address), [])
         if any(status == JobStatus.completed for _, status, _ in jobs):
             continue
-        newest = max(jobs, key=lambda job: job[2]) if jobs else None
+        # Only finished attempts are named: a queued or running job changes nothing the page republishes on.
+        failed = [job for job in jobs if job[1] in _FAILED_STATUSES]
+        last_failed = max(failed, key=lambda job: job[2]) if failed else None
         out.append(
             {
                 "contract_id": contract_id,
                 "address": address.lower(),
                 "chain": chain,
                 "name": name,
-                "analysis_state": (
-                    MEMBER_ANALYSIS_FAILED
-                    if any(status in _FAILED_STATUSES for _, status, _ in jobs)
-                    else MEMBER_ANALYSIS_NOT_COMPLETED
-                ),
-                "job_id": str(newest[0]) if newest else None,
-                "job_status": newest[1].value if newest else None,
+                "analysis_state": MEMBER_ANALYSIS_FAILED if failed else MEMBER_ANALYSIS_NOT_COMPLETED,
+                "last_failed_job_id": str(last_failed[0]) if last_failed else None,
+                "last_failed_job_status": last_failed[1].value if last_failed else None,
             }
         )
     return len(members), sorted(out, key=lambda m: (m["analysis_state"], m["chain"] or "", m["address"]))

@@ -72,15 +72,15 @@ def test_overview_lists_unanalyzed_members_as_not_determined(db_session):
         ("ethereum", mainnet_twin.address.lower()),
     }
     assert listed[("ethereum", failed.address.lower())]["analysis_state"] == "analysis_failed"
-    assert listed[("ethereum", failed.address.lower())]["job_status"] == "failed_terminal"
-    assert listed[("ethereum", never.address.lower())] | {"job_id": None} == {
+    assert listed[("ethereum", failed.address.lower())]["last_failed_job_status"] == "failed_terminal"
+    assert listed[("ethereum", never.address.lower())] == {
         "contract_id": never.id,
         "address": never.address.lower(),
         "chain": "ethereum",
         "name": "never",
         "analysis_state": "analysis_not_completed",
-        "job_id": None,
-        "job_status": None,
+        "last_failed_job_id": None,
+        "last_failed_job_status": None,
     }
     assert listed[("ethereum", mainnet_twin.address.lower())]["analysis_state"] == "analysis_failed"
 
@@ -193,3 +193,26 @@ def test_a_member_job_failing_invalidates_the_prepared_overview_but_a_heartbeat_
     session.execute(update(Job).where(Job.id == job.id).values(status=JobStatus.queued))
     session.commit()
     assert _tokens(session) != after_failure
+
+
+def test_a_queued_retry_leaves_the_published_failed_attempt_and_the_page_fresh(prepared):
+    session, protocol, factory = prepared
+    address = _addr("retry")
+    failed_job = _add_job(session, address=address, protocol_id=protocol.id, status=JobStatus.failed_terminal)
+    _add_contract(session, address=address, job=failed_job, protocol_id=protocol.id)
+    assert worker.refresh_one(factory) == "prepared"
+    session.execute(update(Revision).values(changed_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
+    session.commit()
+
+    retry = _add_job(session, address=address, protocol_id=protocol.id, status=JobStatus.queued)
+    session.execute(update(Job).where(Job.id == retry.id).values(status=JobStatus.processing))
+    session.commit()
+    assert source(session, protocol.name) == "prepared"
+
+    (member,) = [
+        m
+        for m in build_company_overview(session, protocol.name)["member_analysis"]["not_analyzed"]
+        if m["address"] == address
+    ]
+    assert member["analysis_state"] == "analysis_failed"
+    assert (member["last_failed_job_id"], member["last_failed_job_status"]) == (str(failed_job.id), "failed_terminal")
