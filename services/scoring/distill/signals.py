@@ -159,6 +159,24 @@ def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> l
     return signals
 
 
+FINITE_SET_ORIGIN = "semantic_capability:finite_set"
+
+
+def _inexact_finite_set_qualities(principals: list[Any]) -> list[str]:
+    """The membership qualities short of ``exact`` among the finite-set rows a signal rests on; absent reads as
+    ``not_determined``.
+    """
+    qualities: set[str] = set()
+    for principal in principals:
+        details = principal.details if isinstance(principal.details, dict) else {}
+        if principal.origin != FINITE_SET_ORIGIN and "membership_quality" not in details:
+            continue
+        quality = details.get("membership_quality")
+        if quality != "exact":
+            qualities.add(str(quality) if quality else NOT_DETERMINED)
+    return sorted(qualities)
+
+
 def _openness(func: Any) -> str:
     value = func.authority_openness
     if value in (OPENNESS_OPEN, OPENNESS_RESTRICTED, OPENNESS_NOT_DETERMINED):
@@ -302,9 +320,15 @@ def _build_signal(
     notes.update(severity_notes)
 
     fields["authority_openness"] = openness
+    inexact = _inexact_finite_set_qualities(principals)
     if openness == OPENNESS_OPEN:
         fields["principal_state"] = PRINCIPAL_STATE_NONE_REQUIRED
         fields["principal_refs"] = ()
+    elif principals and inexact:
+        # Members not yet found (possibly EOAs) would be missing from the fold, so the set answers nothing.
+        fields["principal_state"] = PRINCIPAL_STATE_NOT_DETERMINED
+        fields["principal_refs"] = ()
+        notes.add("principal_set_not_exact:" + ",".join(inexact))
     elif principals:
         fields["principal_state"] = PRINCIPAL_STATE_ENUMERATED
         fields["principal_refs"] = tuple(
