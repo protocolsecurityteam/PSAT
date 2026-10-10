@@ -181,3 +181,36 @@ def test_equal_weakness_safes_keep_the_smaller_k_of_n_as_the_published_proposer(
     assert finding["principal_unit"] == KEY_SAFE
     assert "via 3/4" in str(finding["weakest_gate"])
     assert document.provenance["principal_units"]["timelock_collapses"][KEY_TIMELOCK]["proposer_k_of_n"] == "3/4"
+
+
+@pytest.mark.parametrize(
+    ("delay", "discounted"), [pytest.param(TWO_DAYS, True, id="2d"), pytest.param(0.0, False, id="0d")]
+)
+def test_an_unpriced_proposer_never_makes_a_proven_eoa_path_read_safer(fold, delay, discounted):
+    discount = K.delay_discount(delay) if discounted else 1.0
+    assert discount is not None
+    principals = _principals({2: facts(2, TIMELOCK, "timelock", delay=delay), 4: facts(4, OTHER, "contract")})
+    document, finding = _run(fold, (EOA_REF, PrincipalRef(4, "ethereum", OTHER)), principals=principals)
+    eoa_only, eoa_finding = _run(fold, (EOA_REF,), principals=principals)
+
+    expected = round(K.WEAKNESS_EOA * discount, 4)
+    assert finding["weakness"] == expected == eoa_finding["weakness"]
+    assert finding["principal_unit"] == KEY_TIMELOCK
+    assert "proposer not_determined" in str(finding["weakest_gate"])
+    assert f"weakest_proven_proposer_floor=EOA:{expected}" in finding["witness_notes"]
+    assert document.provenance["principal_units"]["timelock_proposers_not_determined"][KEY_TIMELOCK]
+    assert document.grade_lambda == eoa_only.grade_lambda
+
+
+def test_an_unread_delay_never_prices_a_proven_eoa_proposer_below_an_eoa(fold):
+    principals = _principals({2: facts(2, TIMELOCK, "timelock")})
+    _, finding = _run(fold, (EOA_REF,), principals=principals)
+    assert finding["weakness"] == K.WEAKNESS_EOA
+    assert "timelock(delay not_determined)" in str(finding["weakest_gate"])
+
+
+def test_a_stronger_proven_proposer_leaves_the_undetermined_rung_as_it_was(fold):
+    principals = _principals({4: facts(4, OTHER, "contract")})
+    _, finding = _run(fold, (SAFE_REF, PrincipalRef(4, "ethereum", OTHER)), principals=principals)
+    assert finding["weakness"] == K.WEAKNESS_TIMELOCK_UNDETERMINED
+    assert not any(n.startswith("weakest_proven_proposer_floor") for n in finding["witness_notes"])

@@ -467,6 +467,9 @@ class _UnitResolver:
         self.overlaps: list[dict[str, Any]] = []
         self._union_overlapping_safes()
         self.proposers_not_determined: dict[str, list[str]] = {}
+        # The weakest proven proposer-executor of a timelock whose entry is withheld: its price is a floor, never
+        # undercut by the undetermined rung.
+        self._proposer_floors: dict[str, dict[str, Any]] = {}
         self._proposers = self._timelock_proposer_executors(signals)
         self._members: dict[str, set[str]] = defaultdict(set)
 
@@ -557,6 +560,8 @@ class _UnitResolver:
                     entries.append(entry)
             if unpriced:
                 self.proposers_not_determined[timelock_key] = unpriced
+                if entries:
+                    self._proposer_floors[timelock_key] = min(entries, key=_proposer_rank)
             elif entries:
                 # Weakest path. Within one weakness rung an unread threshold sorts first, then the smaller k/n, then the
                 # key, so the published proposer is stable.
@@ -653,24 +658,48 @@ class _UnitResolver:
             notes.append("timelock_proposer_weakness_not_determined:" + ",".join(unpriced))
         if proposer is not None and proposer["credit_withheld"]:
             notes.append(f"safe_kn_credit_withheld:{proposer['protection_basis']}")
+        floor = proposer or self._proposer_floors.get(facts.key)
         if discount is None:
             notes.append("timelock_delay_not_determined")
-            return K.WEAKNESS_TIMELOCK_UNDETERMINED, "timelock(delay not_determined)", notes
+            return (
+                self._floored(K.WEAKNESS_TIMELOCK_UNDETERMINED, floor, 1.0, notes),
+                "timelock(delay not_determined)",
+                notes,
+            )
         delay_seconds = float(facts.delay_seconds) if facts.delay_seconds is not None else 0.0
         days = int(delay_seconds // 86400)
         if delay_seconds == 0:
             # A proven zero delay is proven-absent protection.
             notes.append("timelock_delay_proven_zero:no_protection")
             if proposer is None:
-                return K.WEAKNESS_SAFE_UNCREDITED, "timelock(0d, proposer not_determined)", notes
+                return (
+                    self._floored(K.WEAKNESS_SAFE_UNCREDITED, floor, 1.0, notes),
+                    "timelock(0d, proposer not_determined)",
+                    notes,
+                )
             notes.append(f"proposer={_kn(proposer)}")
             return proposer["weakness"], f"timelock 0d via {_kn(proposer)}", notes
         if proposer is None:
             # Undetermined proposer-executors earn no delay credit.
             notes.append("timelock_proposer_not_determined:no_delay_credit")
-            return K.WEAKNESS_TIMELOCK_UNDETERMINED, f"timelock {days}d(proposer not_determined)", notes
+            return (
+                self._floored(K.WEAKNESS_TIMELOCK_UNDETERMINED, floor, discount, notes),
+                f"timelock {days}d(proposer not_determined)",
+                notes,
+            )
         notes.append(f"delay_discount={discount};proposer={_kn(proposer)}")
         return round(proposer["weakness"] * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
+
+    @staticmethod
+    def _floored(weakness: float, floor: dict[str, Any] | None, discount: float, notes: list[str]) -> float:
+        """An undetermined rung never reads safer than a proposer-executor proven to be there."""
+        if floor is None:
+            return weakness
+        proven = round(floor["weakness"] * discount, 4)
+        if proven <= weakness:
+            return weakness
+        notes.append(f"weakest_proven_proposer_floor={_kn(floor)}:{proven}")
+        return proven
 
     def _role_breadth(self, facts: P.PrincipalFacts) -> float | None:
         """A proven holder floor above one is breadth; it only raises."""
