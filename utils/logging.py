@@ -296,8 +296,8 @@ def record_stage_metric(key: str, value: Any) -> None:
 
 
 # Jobs executing in this process, and jobs ever started. ``process_cpu_s`` and ``children_cpu_s`` cover every job that
-# ran during a phase, so a phase record attributes those two to its own job only when ``job_concurrency`` (in flight
-# at the start plus started during the phase) is 1.
+# ran during a phase (plus threads outside any job), so ``job_concurrency`` (in flight at the start plus started during
+# the phase) above 1 means they are shared with other jobs; 1 rules other jobs out, not background threads.
 _jobs_in_flight = 0
 _jobs_started = 0
 _jobs_in_flight_lock = threading.Lock()

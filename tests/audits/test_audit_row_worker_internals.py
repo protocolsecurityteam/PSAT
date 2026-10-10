@@ -296,7 +296,7 @@ def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(c
 
     monkeypatch.setattr(worker, "_persist_outcome", failing_persist)
     with caplog.at_level(logging.WARNING, logger=worker.log.name):
-        worker._persist_with_retry(5, _Outcome(), claimed_at=time.monotonic())
+        assert worker._persist_with_retry(5, _Outcome(), claimed_at=time.monotonic()) is False
     assert attempts == [5]
     assert any("unpersisted" in r.getMessage() for r in caplog.records)
 
@@ -312,7 +312,7 @@ def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak(m
         worker.persisted.append((audit_id, result))
 
     monkeypatch.setattr(worker, "_persist_outcome", flaky_persist)
-    worker._persist_with_retry(6, "ok", claimed_at=time.monotonic())
+    assert worker._persist_with_retry(6, "ok", claimed_at=time.monotonic()) is True
     assert worker.persisted == [(6, "ok")]
     assert worker._db_failing_since is None
 
@@ -330,9 +330,28 @@ def test_a_persist_that_keeps_failing_gives_up_on_the_row_before_a_peer_could_re
     monkeypatch.setattr(worker, "_persist_outcome", always_times_out)
     claimed_at = time.monotonic()
     with caplog.at_level(logging.WARNING, logger=worker.log.name):
-        worker._persist_with_retry(7, _Outcome(), claimed_at=claimed_at)
+        assert worker._persist_with_retry(7, _Outcome(), claimed_at=claimed_at) is False
 
     assert len(attempts) > 1
     assert attempts[-1] - claimed_at < worker.stale_processing_seconds * worker.persist_retry_stale_fraction
     assert worker._running
     assert any("left unpersisted for stale recovery" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unpersisted_outcome_is_not_logged_as_the_rows_result(caplog, monkeypatch):
+    worker = _TestWorker(batches=[[_FakeRow(8)]])
+    monkeypatch.setattr(worker, "_persist_with_retry", lambda audit_id, result, *, claimed_at: False)
+    logged: list[int] = []
+    monkeypatch.setattr(worker, "_log_outcome", lambda audit_id, result: logged.append(audit_id))
+    original_claim = worker._claim_batch
+
+    def claim_then_stop(session):
+        batch = original_claim(session)
+        if not batch:
+            worker._running = False
+        return batch
+
+    monkeypatch.setattr(worker, "_claim_batch", claim_then_stop)
+    worker.run_loop()
+    assert worker.processed == [8]
+    assert logged == []

@@ -197,7 +197,7 @@ def test_an_unpriced_proposer_never_makes_a_proven_eoa_path_read_safer(fold, del
     assert finding["weakness"] == expected == eoa_finding["weakness"]
     assert finding["principal_unit"] == KEY_TIMELOCK
     assert "proposer not_determined" in str(finding["weakest_gate"])
-    assert f"weakest_proven_proposer_floor=EOA:{expected}" in finding["witness_notes"]
+    assert f"proven_proposer_floor=EOA:{expected}" in finding["witness_notes"]
     assert document.provenance["principal_units"]["timelock_proposers_not_determined"][KEY_TIMELOCK]
     assert document.grade_lambda == eoa_only.grade_lambda
 
@@ -213,4 +213,4 @@ def test_a_stronger_proven_proposer_leaves_the_undetermined_rung_as_it_was(fold)
     principals = _principals({4: facts(4, OTHER, "contract")})
     _, finding = _run(fold, (SAFE_REF, PrincipalRef(4, "ethereum", OTHER)), principals=principals)
     assert finding["weakness"] == K.WEAKNESS_TIMELOCK_UNDETERMINED
-    assert not any(n.startswith("weakest_proven_proposer_floor") for n in finding["witness_notes"])
+    assert not any(n.startswith("proven_proposer_floor") for n in finding["witness_notes"])

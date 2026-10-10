@@ -703,7 +703,7 @@ class _UnitResolver:
         proven = round(floor["weakness"] * discount, 4)
         if proven <= weakness:
             return weakness
-        notes.append(f"weakest_proven_proposer_floor={_kn(floor)}:{proven}")
+        notes.append(f"proven_proposer_floor={_kn(floor)}:{proven}")
         return proven
 
     def _role_breadth(self, facts: P.PrincipalFacts) -> float | None:
@@ -1771,8 +1771,8 @@ _WITHHELD_REASONS = {
         "findings they would produce are not_determined"
     ),
     GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS: (
-        "partial principal sets: {signals} restricted signal(s) rest on a role set not proven whole, so who can call "
-        "them, and the findings that would follow, are not_determined"
+        "partial principal sets: {signals} grade-bearing signal(s) rest on a role set not proven whole, so who can "
+        "call them, and the findings that would follow, are not_determined"
     ),
     GRADE_WITHHELD_EXPOSURE_UNPRICED: "no priced value in the perimeter, so the exposure denominator is not_determined",
 }

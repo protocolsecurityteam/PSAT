@@ -205,7 +205,7 @@ def test_a_partial_principal_set_withholds_the_grade_rather_than_dropping_its_fi
     assert (document.grade_lambda, document.grade_exposure, document.confidence_pct) == (None, None, None)
     withheld = document.provenance["grade_withheld"]
     assert withheld["basis"] == "partial_principal_sets"
-    assert withheld["reason"].startswith("partial principal sets: 1 restricted signal(s)")
+    assert withheld["reason"].startswith("partial principal sets: 1 grade-bearing signal(s)")
     assert withheld["withheld_by_signals"] == [
         {"entity": entity_key("ethereum", VAULT), "function": "f", "capability": "upgrade.implementation"}
     ]

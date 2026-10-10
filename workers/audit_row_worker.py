@@ -153,9 +153,9 @@ class AuditRowWorker:
             extra={"exc_type": type(exc).__name__, "step": step, "failing_for_s": round(failing_for, 1)},
         )
 
-    def _persist_with_retry(self, audit_id: int, result: Any, *, claimed_at: float) -> None:
+    def _persist_with_retry(self, audit_id: int, result: Any, *, claimed_at: float) -> bool:
         """Persist, retrying a database timeout; past the retry window (or at shutdown) the row stays 'processing'
-        and stale recovery hands it back to pending.
+        and stale recovery hands it back to pending. Returns whether the outcome was persisted.
         """
         deadline = claimed_at + min(
             self.db_failure_grace_seconds, self.stale_processing_seconds * self.persist_retry_stale_fraction
@@ -165,7 +165,7 @@ class AuditRowWorker:
             try:
                 self._persist_outcome(audit_id, result)
                 self._db_failing_since = None
-                return
+                return True
             except OperationalError as exc:
                 wait = backoff.next_delay()
                 if not self._running or time.monotonic() + wait >= deadline:
@@ -176,7 +176,7 @@ class AuditRowWorker:
                         exc,
                         extra={"exc_type": type(exc).__name__, "step": "persist"},
                     )
-                    return
+                    return False
                 self.log.warning(
                     "Worker %s: database error persisting audit %s, retrying: %s",
                     self.worker_id,
@@ -226,10 +226,12 @@ class AuditRowWorker:
                 poll_counter += 1
 
                 session = SessionLocal()
+                claimed_at = time.monotonic()
                 try:
                     if poll_counter % self.stale_recovery_every_n_polls == 0:
                         self._recover_stale_rows(session)
                     claimed = self._claim_batch(session)
+                    claimed_at = time.monotonic()
                 except OperationalError as exc:
                     # The claim's transaction rolled back, so no row was marked: nothing is claimed this pass.
                     self._db_failed(exc, "claim")
@@ -259,7 +261,6 @@ class AuditRowWorker:
                     len(claimed),
                 )
 
-                claimed_at = time.monotonic()
                 # ``Context.run`` cannot be entered concurrently, so each future needs its own context copy.
                 futures = {}
                 for row in claimed:
@@ -272,8 +273,8 @@ class AuditRowWorker:
                         # _process_row must never raise; log rather than leak a 'processing' row until stale recovery.
                         self.log.exception("Unexpected error in %s thread", self.worker_name)
                         continue
-                    self._persist_with_retry(audit_id, result, claimed_at=claimed_at)
-                    self._log_outcome(audit_id, result)
+                    if self._persist_with_retry(audit_id, result, claimed_at=claimed_at):
+                        self._log_outcome(audit_id, result)
 
                 batch_counter += 1
                 rss_after = current_rss_bytes()
