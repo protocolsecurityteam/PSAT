@@ -169,3 +169,15 @@ def test_a_safe_with_its_module_set_proven_empty_keeps_full_credit_behind_a_time
     _, finding = _run(fold, (SAFE_REF,), principals=_principals({1: proven_empty}))
     assert finding["weakness"] == 0.136
     assert not any(n.startswith("safe_kn_credit_withheld") for n in finding["witness_notes"])
+
+
+@pytest.mark.parametrize("five_of_six_address", ["0x" + "1" * 40, "0x" + "f" * 40])
+def test_equal_weakness_safes_keep_the_smaller_k_of_n_as_the_published_proposer(fold, five_of_six_address):
+    six_owners = tuple("0x" + c * 40 for c in "abcdef")
+    principals = _principals({5: facts(5, five_of_six_address, "safe", owners=six_owners, threshold=5)})
+    refs = (SAFE_REF, PrincipalRef(5, "ethereum", five_of_six_address))
+    document, finding = _run(fold, refs, principals=principals)
+
+    assert finding["principal_unit"] == KEY_SAFE
+    assert "via 3/4" in str(finding["weakest_gate"])
+    assert document.provenance["principal_units"]["timelock_collapses"][KEY_TIMELOCK]["proposer_k_of_n"] == "3/4"

@@ -558,8 +558,9 @@ class _UnitResolver:
             if unpriced:
                 self.proposers_not_determined[timelock_key] = unpriced
             elif entries:
-                # Weakest path; equal weakness falls to the lowest key for a stable unit.
-                out[timelock_key] = min(entries, key=lambda e: (-e["weakness"], e["key"]))
+                # Weakest path. Within one weakness rung an unread threshold sorts first, then the smaller k/n, then the
+                # key, so the published proposer is stable.
+                out[timelock_key] = min(entries, key=_proposer_rank)
         return out
 
     def unit_for(self, facts: P.PrincipalFacts) -> str:
@@ -685,6 +686,12 @@ def _kn(proposer: dict[str, Any]) -> str:
     if proposer["kind"] == "eoa":
         return "EOA"
     return f"{proposer['k']}/{proposer['n']}" if proposer["k"] is not None else "k not_determined"
+
+
+def _proposer_rank(entry: dict[str, Any]) -> tuple[float, int, float, str]:
+    k, n = entry["k"], entry["n"]
+    ratio = 0.0 if k is None or not n else k / n
+    return (-entry["weakness"], 0 if k is None else 1, ratio, entry["key"])
 
 
 def _proposer_entry(facts: P.PrincipalFacts | None) -> dict[str, Any] | None:
