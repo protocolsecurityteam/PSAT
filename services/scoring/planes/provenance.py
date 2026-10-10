@@ -235,8 +235,13 @@ def load_ledgers(session: Session, protocol_id: int) -> dict[str, Any]:
 
 
 def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, Any]]:
-    """Whether the perimeter was settled when scored; a failed queue read is ``not_determined``, not "unsettled"."""
+    """Whether the perimeter was settled when scored; a failed queue read is ``not_determined``, not "unsettled".
+
+    With nothing pending, a member with no completed analysis leaves the perimeter ``not_determined``: no more work is
+    coming, and its part of the protocol was never read.
+    """
     from db.models import Job, JobStatus, PendingEffectsWork
+    from services.aggregations.company_overview.jobs import members_without_analysis
 
     try:
         pending = (
@@ -255,14 +260,24 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
             )
             .scalar()
         )
+        members, unanalyzed = members_without_analysis(session, protocol_id)
     except Exception as exc:  # pragma: no cover - a failed read is a real third state
         return PERIMETER_NOT_DETERMINED, {"error": type(exc).__name__}
     if pending is None or pending_effects is None:
         return PERIMETER_NOT_DETERMINED, {"pending_jobs": pending, "pending_balance_effects": pending_effects}
-    return (PERIMETER_SETTLED if pending == 0 and pending_effects == 0 else PERIMETER_UNSETTLED), {
+    by_state: dict[str, int] = defaultdict(int)
+    for member in unanalyzed:
+        by_state[member["analysis_state"]] += 1
+    detail = {
         "pending_jobs": int(pending),
         "pending_balance_effects": int(pending_effects),
+        "members": members,
+        "members_not_analyzed": dict(sorted(by_state.items())),
+        "members_not_analyzed_entities": [entity_key(m["chain"], m["address"]) for m in unanalyzed],
     }
+    if pending or pending_effects:
+        return PERIMETER_UNSETTLED, detail
+    return (PERIMETER_NOT_DETERMINED if unanalyzed else PERIMETER_SETTLED), detail
 
 
 def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePlane) -> dict[str, Any]:

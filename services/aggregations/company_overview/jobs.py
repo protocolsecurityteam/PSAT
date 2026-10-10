@@ -262,3 +262,74 @@ def _secondary_impl_contracts(
         if sc is not None:
             out.append(sc)
     return out
+
+
+# A member with no completed analysis is not_determined, never dropped and never shown as analyzed. The token follows
+# the statuses the company-page jobs trigger publishes (completed, failed, failed_terminal), so a queued or running
+# retry never changes it.
+MEMBER_ANALYSIS_FAILED = "analysis_failed"
+MEMBER_ANALYSIS_NOT_COMPLETED = "analysis_not_completed"
+_FAILED_STATUSES = frozenset({JobStatus.failed, JobStatus.failed_terminal})
+
+
+def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, list[dict[str, Any]]]:
+    """``(member_count, members with no completed analysis job)``, each with its witness token and newest job."""
+    members = session.execute(
+        select(Contract.id, Contract.address, Contract.chain, Contract.contract_name)
+        .where(Contract.protocol_id == protocol_id, Contract.address.is_not(None))
+        .order_by(Contract.id)
+    ).all()
+    if not members:
+        return 0, []
+    addresses = sorted({address.lower() for _, address, _, _ in members})
+    track(session, "address", addresses)
+    jobs_by_entity: dict[str, list[tuple[Any, JobStatus, datetime]]] = {}
+    for job_id, address, status, chain_id, request_chain, updated_at, created_at in session.execute(
+        select(
+            Job.id,
+            Job.address,
+            Job.status,
+            Job.chain_id,
+            Job.request["chain"].astext,
+            Job.updated_at,
+            Job.created_at,
+        ).where(
+            func.lower(Job.address).in_(addresses),
+            Job.request["effects_resume_work_id"].astext.is_(None),
+        )
+    ):
+        job_chain_id = chain_id if isinstance(chain_id, int) else derive_job_chain_id(request_chain, address) or 1
+        try:
+            chain_name = chain_by_id(job_chain_id).name
+        except UnknownChainError:
+            continue
+        recency = updated_at or created_at or datetime.min.replace(tzinfo=timezone.utc)
+        jobs_by_entity.setdefault(_entity_key(chain_name, address), []).append((job_id, status, recency))
+
+    out: list[dict[str, Any]] = []
+    for contract_id, address, chain, name in members:
+        jobs = jobs_by_entity.get(_entity_key(_canonical_chain_name(chain), address), [])
+        if any(status == JobStatus.completed for _, status, _ in jobs):
+            continue
+        newest = max(jobs, key=lambda job: job[2]) if jobs else None
+        out.append(
+            {
+                "contract_id": contract_id,
+                "address": address.lower(),
+                "chain": chain,
+                "name": name,
+                "analysis_state": (
+                    MEMBER_ANALYSIS_FAILED
+                    if any(status in _FAILED_STATUSES for _, status, _ in jobs)
+                    else MEMBER_ANALYSIS_NOT_COMPLETED
+                ),
+                "job_id": str(newest[0]) if newest else None,
+                "job_status": newest[1].value if newest else None,
+            }
+        )
+    return len(members), sorted(out, key=lambda m: (m["analysis_state"], m["chain"] or "", m["address"]))
+
+
+def _canonical_chain_name(contract_chain: str | None) -> str:
+    """The contract's chain as the registry name a job's chain id resolves to (aliases and NULL mainnet agree)."""
+    return chain_by_id(_contract_chain_id(contract_chain)).name
