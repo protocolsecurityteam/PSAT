@@ -146,3 +146,21 @@ def test_execute_job_marks_its_job_in_flight_for_phase_records(_advance, _signal
 
     (record,) = [r for r in handler.records if r.getMessage().startswith("phase complete")]
     assert cast(Any, record).job_concurrency == 1
+
+
+def test_a_job_that_starts_and_ends_inside_the_phase_is_counted(caplog):
+    with caplog.at_level(logging.INFO, logger=_LOGGER.name):
+        with job_in_flight():
+            with log_timed_phase(_LOGGER, "overlapped"):
+
+                def short_job() -> None:
+                    with job_in_flight():
+                        _burn(0.05)
+
+                other = threading.Thread(target=short_job)
+                other.start()
+                other.join()
+
+    fields = cast(Any, _phase_record(caplog))
+    assert fields.job_concurrency == 2
+    assert fields.process_cpu_s >= 0.04

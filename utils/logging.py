@@ -295,17 +295,20 @@ def record_stage_metric(key: str, value: Any) -> None:
     metrics[key] = value
 
 
-# Jobs executing in this process. ``process_cpu_s`` and ``children_cpu_s`` cover every one of them, so a phase record
-# attributes those two to its own job only when ``job_concurrency`` is 1.
+# Jobs executing in this process, and jobs ever started. ``process_cpu_s`` and ``children_cpu_s`` cover every job that
+# ran during a phase, so a phase record attributes those two to its own job only when ``job_concurrency`` (in flight
+# at the start plus started during the phase) is 1.
 _jobs_in_flight = 0
+_jobs_started = 0
 _jobs_in_flight_lock = threading.Lock()
 
 
 @contextmanager
 def job_in_flight() -> Iterator[None]:
-    global _jobs_in_flight
+    global _jobs_in_flight, _jobs_started
     with _jobs_in_flight_lock:
         _jobs_in_flight += 1
+        _jobs_started += 1
     try:
         yield
     finally:
@@ -341,7 +344,8 @@ def log_timed_phase(
     thread_cpu_start = time.thread_time()
     process_cpu_start = time.process_time()
     children_cpu_start = _children_cpu_s()
-    concurrency_start = _jobs_in_flight
+    with _jobs_in_flight_lock:
+        in_flight_start, started_before = _jobs_in_flight, _jobs_started
     extra: dict[str, Any] = dict(fields)
     success = False
     try:
@@ -357,7 +361,7 @@ def log_timed_phase(
             "cpu_s": round(time.thread_time() - thread_cpu_start, 4),
             "process_cpu_s": round(time.process_time() - process_cpu_start, 4),
             "children_cpu_s": round(_children_cpu_s() - children_cpu_start, 4),
-            "job_concurrency": max(concurrency_start, _jobs_in_flight),
+            "job_concurrency": in_flight_start + (_jobs_started - started_before),
         }
         if success:
             logger.info(
