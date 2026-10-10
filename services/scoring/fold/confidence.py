@@ -145,6 +145,8 @@ def _confidence(
         admit(key)
         for controlled in closure.controlled_by(key):
             admit(controlled)
+    for key in sorted(closure.controllers_not_determined):
+        admit(key)
     # Below here is what discovery proved exists, counted per relation against the walked base.
     walked = set(perimeter)
     discovery = discovery_entities or {}
@@ -219,6 +221,14 @@ def _confidence(
                 else:
                     own_witness_signals += 1
                     credit_paths_by_key[key].add(CREDIT_PATH_OWN)
+
+    # Who controls an anchor whose member replay never completed is a question posed and not answered.
+    unread_controllers = sorted(
+        {value_plane.canonical(key) for key in closure.controllers_not_determined if not P.is_zero_key(key)}
+    )
+    for key in unread_controllers:
+        reach[key][1] += 1
+        scored[key][1] += 1
 
     def weighted(table: dict[str, list[int]]) -> float:
         total = 0.0
@@ -351,6 +361,7 @@ def _confidence(
         "implementation_entities_folded": len(folded),
         "zero_address_entities_excluded": len(zero_excluded),
         "proven_codeless_answered": len(codeless_answered),
+        "controller_enumeration_not_determined": len(unread_controllers),
         "discovery_relation_entities_admitted": discovery_admitted,
         "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (

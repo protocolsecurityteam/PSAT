@@ -216,6 +216,9 @@ from services.scoring.planes.conferral import (
     load_conferral_plane as load_conferral_plane,
 )
 from services.scoring.planes.control import (
+    MAPPING_ENUMERATION_STATUS as MAPPING_ENUMERATION_STATUS,
+)
+from services.scoring.planes.control import (
     REFUSAL_MALFORMED_NODE_ID as REFUSAL_MALFORMED_NODE_ID,
 )
 from services.scoring.planes.control import (
@@ -238,6 +241,9 @@ from services.scoring.planes.control import (
 )
 from services.scoring.planes.control import (
     RenouncedAuthority as RenouncedAuthority,
+)
+from services.scoring.planes.control import (
+    controllers_not_determined as controllers_not_determined,
 )
 from services.scoring.planes.control import (
     load_control_closure as load_control_closure,
@@ -666,6 +672,8 @@ __all__ = [
     "discovery_relation_entities",
     "load_conferral_plane",
     "load_control_closure",
+    "controllers_not_determined",
+    "MAPPING_ENUMERATION_STATUS",
     "load_deletability_plane",
     "load_router_flow_plane",
     "load_ledgers",

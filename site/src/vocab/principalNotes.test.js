@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  controllerEnumerationNote,
   sharedDeployerNote,
   signerOverlapNote,
   terminalControllerNote,
@@ -202,5 +203,23 @@ describe("sharedDeployerNote — heuristic hint, never an org-identity claim", (
       details: { shared_deployer: { deployer: "0xdep", addresses: ["0xself"] } },
     });
     expect(note).toBeNull();
+  });
+});
+
+describe("controllerEnumerationNote", () => {
+  it("names each unread status in words and keeps unknown tokens raw", () => {
+    const note = controllerEnumerationNote({
+      controller_enumeration: { state: "not_determined", status: "error,incomplete_brand_new" },
+    });
+    expect(note.statuses).toEqual([
+      { token: "error", word: "enumeration errored" },
+      { token: "incomplete_brand_new", word: "incomplete_brand_new" },
+    ]);
+  });
+
+  it("is null for a complete set, an absent replay, or no entity", () => {
+    expect(controllerEnumerationNote({ controller_enumeration: { state: "complete" } })).toBeNull();
+    expect(controllerEnumerationNote({})).toBeNull();
+    expect(controllerEnumerationNote(null)).toBeNull();
   });
 });

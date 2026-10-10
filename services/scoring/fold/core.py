@@ -263,6 +263,7 @@ def compute_protocol_score(
         "closure_admission": {
             "refusals": closure.refusal_counts(),
             "renounced": closure.renounced_counts(),
+            "controller_enumeration_not_determined": dict(closure.controllers_not_determined),
             "reading": (
                 "refusals are EDGES this closure declined to admit, by rule: the zero address "
                 "is a burn sentinel and not an assessable entity, so it is refused as principal "

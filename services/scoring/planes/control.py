@@ -21,6 +21,9 @@ from services.scoring.planes._shared import (
 )
 from services.scoring.schema import NOT_DETERMINED, coalesce_chain, entity_key
 
+MAPPING_ENUMERATION_STATUS = "mapping_enumeration_status"
+MAPPING_ENUMERATION_COMPLETE = "complete"
+
 
 @dataclass(frozen=True)
 class ControlEdge:
@@ -73,11 +76,14 @@ class ControlClosure:
     """The protocol's control edges indexed by principal, each with its relation and scope.
 
     ``controlled_by`` is derived adjacency. ``refusals`` and ``renounced`` are published counts, not silent drops.
+    ``controllers_not_determined`` names the anchors whose mapping-member replay never completed, by status: their
+    missing inbound edges are unread, not absent.
     """
 
     edges: tuple[ControlEdge, ...] = ()
     refusals: tuple[RefusedEdge, ...] = ()
     renounced: tuple[RenouncedAuthority, ...] = ()
+    controllers_not_determined: dict[str, str] = field(default_factory=dict)
     _out: dict[str, tuple[ControlEdge, ...]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -132,7 +138,7 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
     ``contracts.beacon`` join as column witnesses (the beacon being the broadest code-control link), each tagged with
     its own witness string.
     """
-    from db.models import Contract, ControlGraphEdge
+    from db.models import Contract, ControlGraphEdge, ControlGraphNode
 
     edges: list[ControlEdge] = []
     refusals: list[RefusedEdge] = []
@@ -205,6 +211,15 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                 edge_id=edge.id,
             )
         )
+    replay_statuses: dict[str, set[str]] = defaultdict(set)
+    for address, details, chain in (
+        session.query(ControlGraphNode.address, ControlGraphNode.details, Contract.chain)
+        .join(Contract, Contract.id == ControlGraphNode.contract_id)
+        .filter(Contract.protocol_id == protocol_id, ControlGraphNode.details.has_key(MAPPING_ENUMERATION_STATUS))
+        .order_by(ControlGraphNode.id)
+        .all()
+    ):
+        replay_statuses[entity_key(chain, address)].add(str(details.get(MAPPING_ENUMERATION_STATUS)))
     for contract in session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all():
         chain = coalesce_chain(contract.chain)
         for column, witness in (
@@ -222,4 +237,21 @@ def load_control_closure(session: Session, protocol_id: int) -> ControlClosure:
                     witness=witness,
                 )
             )
-    return ControlClosure(edges=tuple(edges), refusals=tuple(refusals), renounced=tuple(renounced))
+    return ControlClosure(
+        edges=tuple(edges),
+        refusals=tuple(refusals),
+        renounced=tuple(renounced),
+        controllers_not_determined=controllers_not_determined(replay_statuses),
+    )
+
+
+def controllers_not_determined(replay_statuses: dict[str, set[str]]) -> dict[str, str]:
+    """Entities whose member replay completed in no graph, with the statuses it did reach.
+
+    Edges are unioned across every graph that holds the node, so one completed replay supplies the whole member set.
+    """
+    return {
+        key: ",".join(sorted(statuses))
+        for key, statuses in sorted(replay_statuses.items())
+        if MAPPING_ENUMERATION_COMPLETE not in statuses
+    }
