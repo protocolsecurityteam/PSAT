@@ -37,7 +37,7 @@ UPGRADE = [{"claim_id": "upgrade.implementation", "tier": "standard_exact", "wit
 
 
 def _address(tag: str) -> str:
-    return "0x" + (uuid.uuid4().hex + tag.encode().hex())[:40]
+    return "0x" + (tag.encode().hex() + uuid.uuid4().hex + uuid.uuid4().hex)[:40]
 
 
 class _World:
