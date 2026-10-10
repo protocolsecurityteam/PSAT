@@ -66,6 +66,9 @@ class Contract(Base):
     implementation: Mapped[str | None] = mapped_column(String(42), nullable=True)
     beacon: Mapped[str | None] = mapped_column(String(42), nullable=True)
     admin: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # The last upgrade-history fetch for this proxy: 'complete' | 'error' (a topic failed, so its ``upgrade_events``
+    # are a partial set) | NULL (never fetched since the field was added).
+    upgrade_history_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Extra logic contracts beyond the EIP-1967 implementation: split proxies whose fallback delegatecalls an address in
     # a state variable (e.g. LRTSquared's ``adminImpl``). Resolved against the proxy's storage and analysed as
     # proxy-child jobs. See services/discovery/secondary_impl.py.

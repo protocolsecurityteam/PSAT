@@ -194,6 +194,7 @@ def load_upgrade_provenance(session: Session, protocol_id: int) -> dict[str, Any
     per_contract = {
         str(cid): {
             "upgrade_count": entry.get("count"),
+            "history_fetch_status": entry.get("basis", {}).get("history_fetch_status"),
             "executor_kinds": entry.get("basis", {}).get("executor_kinds"),
             "recorded_event_coverage": entry.get("basis", {}).get("recorded_event_coverage"),
             "direct_upgrade_witnessed_at_block": entry.get("basis", {}).get("direct_upgrade_witnessed_at_block"),
