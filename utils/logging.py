@@ -22,8 +22,10 @@ import contextvars
 import json
 import logging
 import os
+import resource
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -293,6 +295,29 @@ def record_stage_metric(key: str, value: Any) -> None:
     metrics[key] = value
 
 
+# Jobs executing in this process. ``process_cpu_s`` and ``children_cpu_s`` cover every one of them, so a phase record
+# attributes those two to its own job only when ``job_concurrency`` is 1.
+_jobs_in_flight = 0
+_jobs_in_flight_lock = threading.Lock()
+
+
+@contextmanager
+def job_in_flight() -> Iterator[None]:
+    global _jobs_in_flight
+    with _jobs_in_flight_lock:
+        _jobs_in_flight += 1
+    try:
+        yield
+    finally:
+        with _jobs_in_flight_lock:
+            _jobs_in_flight -= 1
+
+
+def _children_cpu_s() -> float:
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+
 @contextmanager
 def log_timed_phase(
     logger: logging.Logger,
@@ -308,8 +333,15 @@ def log_timed_phase(
     Yields a dict whose keys merge into the line's ``extra``. The duration is recorded into ``durations_ms`` and
     ``phase_ms_<phase>`` even if the block raises; the INFO line is emitted only on clean exit unless the caller asks
     otherwise.
+
+    The line also carries CPU: ``cpu_s`` is the calling thread's own, so work the phase fans out to other threads is in
+    ``process_cpu_s`` only; ``children_cpu_s`` is subprocesses reaped during the phase.
     """
     start = time.monotonic()
+    thread_cpu_start = time.thread_time()
+    process_cpu_start = time.process_time()
+    children_cpu_start = _children_cpu_s()
+    concurrency_start = _jobs_in_flight
     extra: dict[str, Any] = dict(fields)
     success = False
     try:
@@ -321,19 +353,25 @@ def log_timed_phase(
             durations_ms[phase] = ms
         if record_metric:
             record_stage_metric(f"phase_ms_{phase}", ms)
+        cpu = {
+            "cpu_s": round(time.thread_time() - thread_cpu_start, 4),
+            "process_cpu_s": round(time.process_time() - process_cpu_start, 4),
+            "children_cpu_s": round(_children_cpu_s() - children_cpu_start, 4),
+            "job_concurrency": max(concurrency_start, _jobs_in_flight),
+        }
         if success:
             logger.info(
                 "phase complete: %s (%dms)",
                 phase,
                 ms,
-                extra={"duration_ms": ms, "phase": phase, **extra},
+                extra={"duration_ms": ms, "phase": phase, **cpu, **extra},
             )
         elif log_failure:
             logger.info(
                 "phase ended with error: %s (%dms)",
                 phase,
                 ms,
-                extra={"duration_ms": ms, "phase": phase, "outcome": "failed", **extra},
+                extra={"duration_ms": ms, "phase": phase, "outcome": "failed", **cpu, **extra},
             )
 
 
