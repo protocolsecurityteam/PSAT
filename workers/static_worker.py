@@ -34,7 +34,15 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, _relax_pragmas, compile_settings, render_foundry_toml
+from services.discovery.fetch import (
+    CompilerUnavailableError,
+    _confine,
+    _relax_pragmas,
+    compile_settings,
+    render_foundry_toml,
+    scaffolded_solc_version,
+    solc_installed,
+)
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -674,6 +682,11 @@ class StaticWorker(BaseWorker):
                     analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
 
                 if analysis_data is None:
+                    solc_version = scaffolded_solc_version(project_dir)
+                    if solc_version is not None and not solc_installed(solc_version):
+                        raise CompilerUnavailableError(
+                            f"Contract analysis failed for {contract_name} ({address}) without solc {solc_version}."
+                        )
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
                 with log_timed_phase(logger, "tracking_plan"):
@@ -1033,9 +1046,10 @@ class StaticWorker(BaseWorker):
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
 
+        language = str(build_settings.get("language") or "solidity")
         settings = compile_settings(
             sources,
-            language=str(build_settings.get("language") or "solidity"),
+            language=language,
             compiler_version=build_settings.get("compiler_version"),
             evm_version=build_settings.get("evm_version"),
             optimizer=build_settings.get("optimization_used"),
@@ -1043,6 +1057,12 @@ class StaticWorker(BaseWorker):
             via_ir=build_settings.get("via_ir"),
         )
         (project_dir / "foundry.toml").write_text(render_foundry_toml(_detect_src_dir(sources), settings))
+        meta = {
+            **meta,
+            "solc_version": settings.solc_version if language == "solidity" else None,
+            "via_ir": settings.via_ir,
+            "via_ir_used": False,
+        }
 
         # Keep only remappings whose targets contain sources.
         pruned = _prune_remappings(remappings, set(sources.keys()))
@@ -1432,6 +1452,11 @@ class StaticWorker(BaseWorker):
             _log_phase_error(str(job.id), address, contract_name, "contract_analysis", str(exc))
             store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
             return None
+        try:
+            build_meta = json.loads((project_dir / "contract_meta.json").read_text())
+        except (OSError, ValueError):
+            build_meta = {}
+        record_stage_metric("ir_fallback", isinstance(build_meta, dict) and build_meta.get("via_ir_used") is True)
 
         # A failed build is kept for diagnosis under ``<name>_error``, never under the name policy reads as the facts.
         for name, artifact in (("predicate_trees", semantic_predicate_trees), ("effects", semantic_effects)):

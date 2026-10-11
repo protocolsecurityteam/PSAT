@@ -6,6 +6,7 @@ failure may be its download, so the next graph build tries again.
 from __future__ import annotations
 
 import importlib
+import json
 from typing import cast
 
 import pytest
@@ -124,3 +125,32 @@ def test_a_failure_without_the_compiler_on_disk_is_retried(_wire, monkeypatch, t
     for _ in range(2):
         assert _child_after_graph_build().get("analysis_state") == "attempt_failed"
     assert _wire["n"] == 2
+
+
+@requires_postgres
+def test_a_via_ir_bundle_is_remembered_only_after_its_via_ir_retry_fails(_wire, monkeypatch, cm_db):  # noqa: F811
+    from services.static.contract_analysis_pipeline import core
+
+    bundle = {
+        "language": "Solidity",
+        "sources": {"src/Broken.sol": {"content": BROKEN["SourceCode"]}},
+        "settings": {"viaIR": True},
+    }
+    via_ir_broken = {**BROKEN, "SourceCode": "{" + json.dumps(bundle) + "}"}
+    monkeypatch.setattr(
+        importlib.import_module("services.discovery.fetch"), "get_source", lambda *_a, **_k: dict(via_ir_broken)
+    )
+    parses = {"n": 0}
+    real = core.Slither
+
+    def counting(target, *args, **kwargs):
+        parses["n"] += 1
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(core, "Slither", counting)
+
+    for _ in range(2):
+        assert _child_after_graph_build().get("analysis_state") == "attempt_failed"
+    assert (_wire["n"], parses["n"]) == (1, 2)
+    row = cm_db.query(ContractMaterialization).filter_by(bytecode_keccak=CHILD_KECCAK).one()
+    assert (row.status, row.deterministic_failure) == ("failed", True)

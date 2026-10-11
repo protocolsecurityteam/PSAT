@@ -40,7 +40,7 @@ from schemas.resolved_control_graph import (
     ResolvedNodeType,
 )
 from services.discovery.classifier import ClassificationIncompleteError
-from services.discovery.fetch import fetch, scaffold
+from services.discovery.fetch import fetch, scaffold, scaffolded_solc_version, solc_installed
 from services.resolution.mapping_enumerator import (
     MAPPING_ENUMERATION_AWAITS,
     MAPPING_ENUMERATION_SOURCE,
@@ -237,9 +237,11 @@ def _build_static_artifacts(
             raise
         except Exception as exc:
             # Without the compiler on disk the failure may be its download, which a later build can get past.
-            if _solc_installed(_scaffolded_solc_version(project_dir)):
+            if solc_installed(scaffolded_solc_version(project_dir)):
                 raise NestedCompileError(f"build of {effective_address} failed: {type(exc).__name__}: {exc}") from exc
             raise
+        if _build_meta(project_dir).get("via_ir_used") is True:
+            _bump_materialize_metric("materialize_ir_fallbacks")
     if analysis_reports_failure(analysis):
         # Raised so the cache records ``failed`` (served until the source or analyzer changes) and the node stays
         # undetermined, rather than a ready row built on failed semantics.
@@ -251,25 +253,12 @@ def _build_static_artifacts(
     return contract_name, analysis, plan, predicate_trees
 
 
-def _scaffolded_solc_version(project_dir: Path) -> str | None:
-    meta = project_dir / "contract_meta.json"
+def _build_meta(project_dir: Path) -> dict[str, Any]:
     try:
-        value = json.loads(meta.read_text()).get("solc_version")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return value if isinstance(value, str) and value else None
-
-
-def _solc_installed(version: str | None) -> bool:
-    """Whether Foundry has ``version`` on disk (``FOUNDRY_SOLC``, else the svm store it installs into)."""
-    if not version:
-        return False
-    override = os.environ.get("FOUNDRY_SOLC")
-    if override:
-        return Path(override).is_file()
-    xdg = os.environ.get("XDG_DATA_HOME")
-    roots = (Path.home() / ".svm", Path(xdg) / "svm" if xdg else Path.home() / ".local" / "share" / "svm")
-    return any((root / version / f"solc-{version}").is_file() for root in roots)
+        meta = json.loads((project_dir / "contract_meta.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:

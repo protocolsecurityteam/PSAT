@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import textwrap
 from dataclasses import dataclass
@@ -468,7 +469,13 @@ def verified_compile_settings(result: dict, sources: dict[str, str]) -> CompileS
     )
 
 
+_VIA_IR_OFF = "via_ir = false\n"
+
+
 def render_foundry_toml(src_dir: str, settings: CompileSettings) -> str:
+    """The first build is always without viaIR: Slither reads the AST, which viaIR doesn't change, and the legacy
+    pipeline compiles faster. ``enable_via_ir`` turns it on for the one retry a viaIR-verified bundle gets.
+    """
     return textwrap.dedent(
         f"""\
         [profile.default]
@@ -479,10 +486,49 @@ def render_foundry_toml(src_dir: str, settings: CompileSettings) -> str:
         evm_version = "{settings.evm_version}"
         optimizer = {str(settings.optimizer).lower()}
         optimizer_runs = {settings.optimizer_runs}
-        via_ir = {str(settings.via_ir).lower()}
+        via_ir = false
         auto_detect_solc = false
     """
     )
+
+
+class CompilerUnavailableError(RuntimeError):
+    """A build failed with its solc release not on disk, so the failure may be the release's download."""
+
+
+def solc_installed(version: str | None) -> bool:
+    """Whether Foundry has ``version`` on disk (``FOUNDRY_SOLC``, else the svm store it installs releases into)."""
+    if not version:
+        return False
+    override = os.environ.get("FOUNDRY_SOLC")
+    if override:
+        return Path(override).is_file()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    roots = (Path.home() / ".svm", Path(xdg) / "svm" if xdg else Path.home() / ".local" / "share" / "svm")
+    return any((root / version / f"solc-{version}").is_file() for root in roots)
+
+
+def scaffolded_solc_version(project_dir: Path) -> str | None:
+    """The solc release a scaffolded Solidity project builds with, from its ``contract_meta.json``."""
+    try:
+        meta = json.loads((project_dir / "contract_meta.json").read_text())
+    except (OSError, ValueError):
+        return None
+    value = meta.get("solc_version") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def enable_via_ir(project_dir: Path) -> bool:
+    """Switch a scaffolded project's build to viaIR; ``False`` when it isn't a viaIR-off project from this writer."""
+    toml = project_dir / "foundry.toml"
+    try:
+        text = toml.read_text()
+    except OSError:
+        return False
+    if _VIA_IR_OFF not in text:
+        return False
+    toml.write_text(text.replace(_VIA_IR_OFF, "via_ir = true\n", 1))
+    return True
 
 
 def _relax_pragmas(sources: dict[str, str]) -> dict[str, str]:
@@ -543,6 +589,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
         "evm_version": result.get("EVMVersion", ""),
         "solc_version": settings.solc_version if language == "solidity" else None,
         "via_ir": settings.via_ir,
+        "via_ir_used": False,
         "license": result.get("LicenseType", ""),
         "source_format": "standard_json" if bundle else "flat",
         "source_file_count": len(sources),

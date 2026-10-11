@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from typing import Any
 from slither.slither import Slither
 
 from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
+from services.discovery.fetch import enable_via_ir
 from utils.logging import record_degraded, record_stage_metric
 
 from ..claims import attach_claims_to_effects, build_claims, project_effect_labels
@@ -120,6 +122,24 @@ def _slither_target(project_dir: Path, meta: dict) -> str:
     return str(candidates[0])
 
 
+def _parse_with_ir_fallback(project_dir: Path, meta: dict) -> Slither:
+    """Parse the project as scaffolded (without viaIR); a viaIR-verified bundle that fails gets one retry with it.
+
+    The retry's failure is the build's failure. ``via_ir_used`` in ``contract_meta.json`` records which build parsed.
+    """
+    target = _slither_target(project_dir, meta)
+    try:
+        return Slither(target)
+    except Exception:
+        if meta.get("via_ir") is not True or not enable_via_ir(project_dir):
+            raise
+    logger.info("compile without viaIR failed; retrying with the verified viaIR", extra={"phase": "ir_fallback"})
+    slither = Slither(target)
+    meta["via_ir_used"] = True
+    (project_dir / "contract_meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return slither
+
+
 def collect_contract_analysis(project_dir: Path) -> ContractAnalysis:
     """The analysis dict only; the static worker uses :func:`collect_contract_analysis_with_artifacts` to also get
     the predicate and effects artifacts from one parse.
@@ -142,7 +162,7 @@ def collect_contract_analysis_with_artifacts(
     _guard_vyper_version(project_dir, meta)
 
     with _phase("slither_parse", durations_ms):
-        slither = Slither(_slither_target(project_dir, meta))
+        slither = _parse_with_ir_fallback(project_dir, meta)
 
     subject_contract = _select_subject_contract(slither, meta.get("contract_name"))
     if subject_contract is None:

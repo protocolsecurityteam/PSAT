@@ -21,6 +21,7 @@ from db.storage import (
     StorageUnavailable,
 )
 from services.discovery.classifier import ClassificationIncompleteError
+from services.discovery.fetch import CompilerUnavailableError
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 
 # Neon idle disconnects surface as OperationalError; don't terminally fail the job for them.
@@ -74,6 +75,8 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # Fail-closed proxy-slot read self-heals once RPC recovers; a terminal kill would erase the implementation's
     # surface.
     ClassificationIncompleteError,
+    # Forge downloads solc releases on first use; a failed download leaves the build undetermined, not proven broken.
+    CompilerUnavailableError,
     # Infra blips; the effects stage degrades-and-advances on exhaustion regardless.
     AnvilSpawnError,
     ForkRpcTimeoutError,

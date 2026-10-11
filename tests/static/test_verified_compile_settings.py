@@ -102,9 +102,17 @@ def _standard_json(settings: dict, *, pragma: str = "pragma solidity ^0.8.20;", 
 
 def test_standard_json_settings_win_over_the_flat_fields(tmp_path):
     result = _standard_json({"viaIR": True, "evmVersion": "cancun", "optimizer": {"enabled": False, "runs": 999}})
-    toml = _foundry(scaffold("0xabc", result, tmp_path / "proj"))
-    assert (toml["solc_version"], toml["via_ir"], toml["evm_version"]) == ("0.8.27", "true", "cancun")
-    assert (toml["optimizer"], toml["optimizer_runs"]) == ("false", "999")
+    project = scaffold("0xabc", result, tmp_path / "proj")
+    toml = _foundry(project)
+    assert (toml["solc_version"], toml["evm_version"], toml["optimizer"], toml["optimizer_runs"]) == (
+        "0.8.27",
+        "cancun",
+        "false",
+        "999",
+    )
+    # The verified viaIR is the retry's setting; the first build is without it.
+    meta = json.loads((project / "contract_meta.json").read_text())
+    assert (toml["via_ir"], meta["via_ir"], meta["via_ir_used"]) == ("false", True, False)
 
 
 def test_flat_fields_fill_in_what_settings_omit(tmp_path):
@@ -159,8 +167,10 @@ def test_static_worker_builds_with_the_row_settings(tmp_path):
         "0.7.1",
         "istanbul",
         "1500",
-        "true",
+        "false",
     )
+    meta = json.loads((project / "contract_meta.json").read_text())
+    assert (meta["solc_version"], meta["via_ir"], meta["via_ir_used"]) == ("0.7.1", True, False)
 
 
 def _require_solc(version: str) -> Path:
