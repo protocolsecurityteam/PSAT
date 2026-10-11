@@ -355,7 +355,8 @@ def members_without_analysis(session: Session, protocol_id: int) -> MemberAnalys
             chain_name = chain_by_id(job_chain_id).name
         except UnknownChainError:
             continue
-        recency = updated_at or created_at or datetime.min.replace(tzinfo=timezone.utc)
+        # Attempts order by when they started: an older job finishing after a newer one failed is still the older.
+        recency = created_at or updated_at or datetime.min.replace(tzinfo=timezone.utc)
         jobs_by_entity.setdefault(_entity_key(chain_name, address), []).append(
             _MemberJob(job_id, status, recency, eras.get(job_id))
         )

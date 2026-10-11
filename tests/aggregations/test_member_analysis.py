@@ -238,7 +238,7 @@ def _attempt(session, protocol, contract, status: JobStatus, version: int | None
         analysis_schema_version=version,
     )
     job.chain_id = 1
-    job.updated_at = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    job.created_at = job.updated_at = datetime.now(timezone.utc) - timedelta(seconds=age_s)
     session.commit()
     return job
 
@@ -268,6 +268,24 @@ def test_a_stale_analysis_with_a_newer_failure_is_not_determined_and_names_the_s
     state, detail = perimeter_state(db_session, protocol.id)
     assert state == PERIMETER_NOT_DETERMINED
     assert detail["members_stale_analysis_versions"] == {str(STALE_ERA): 1}
+
+
+def test_an_older_analysis_finishing_after_a_newer_attempt_failed_is_still_superseded(db_session):
+    protocol = _add_protocol(db_session, f"members-late-finish-{uuid.uuid4().hex[:8]}")
+    member = _member(db_session, protocol, "late", JobStatus.failed_terminal)
+    retry = db_session.execute(select(Job).where(Job.address == member.address)).scalar_one()
+    stale = _attempt(db_session, protocol, member, JobStatus.completed, STALE_ERA, age_s=600)
+    # The older job started first but finished after the newer attempt failed.
+    retry.created_at = datetime.now(timezone.utc) - timedelta(seconds=300)
+    retry.updated_at = datetime.now(timezone.utc) - timedelta(seconds=200)
+    stale.updated_at = datetime.now(timezone.utc) - timedelta(seconds=100)
+    db_session.commit()
+
+    block, listed = _listed(db_session, protocol)
+    entry = listed[member.address.lower()]
+    assert (block["analyzed"], block["not_determined"]) == (0, 1)
+    assert (entry["analysis_state"], entry["last_failed_job_id"]) == ("analysis_failed", str(retry.id))
+    assert (entry["stale_analysis_job_id"], entry["stale_analysis_version"]) == (str(stale.id), STALE_ERA)
 
 
 def _scored(session, protocol, contract) -> None:
@@ -303,10 +321,9 @@ def test_an_older_analysis_with_no_failed_retry_stays_analysed_and_names_its_ver
 
     protocol = _add_protocol(db_session, f"members-stale-only-{uuid.uuid4().hex[:8]}")
     member = _member(db_session, protocol, "stale-only", JobStatus.failed_terminal)
+    an_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     db_session.execute(
-        update(Job)
-        .where(Job.address == member.address)
-        .values(updated_at=datetime.now(timezone.utc) - timedelta(hours=1))
+        update(Job).where(Job.address == member.address).values(created_at=an_hour_ago, updated_at=an_hour_ago)
     )
     db_session.commit()
     # An older failure, then the older analysis, then a retry still in flight: nothing newer has failed.
