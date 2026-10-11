@@ -507,3 +507,17 @@ def test_the_cache_fingerprint_follows_the_key_filter():
     other = [{**spec, "key_filter": {**spec["key_filter"], "words": None}} for spec in specs]
 
     assert len({specs_fingerprint(specs), specs_fingerprint(unfiltered), specs_fingerprint(other)}) == 3
+
+
+def test_an_authority_call_to_itself_reads_no_other_contract():
+    own = json.loads(json.dumps(_external_role_check("roleRegistry")))
+    own["leaf"]["set_descriptor"]["authority_contract"]["address_source"] = {"source": "self_address"}
+    other = _external_role_check("roleRegistry")
+
+    assert recursive._authority_contract_vars({"trees": {"a()": own}}) == frozenset()
+    assert recursive._authority_contract_vars({"trees": {"a()": own, "b()": other}}) == {"roleRegistry"}
+    # An authority contract named any other way can't be matched to an edge, so the contract's edges stay ambiguous.
+    unnamed = json.loads(json.dumps(other))
+    unnamed["leaf"]["set_descriptor"]["authority_contract"]["address_source"] = {"source": "parameter"}
+    assert recursive._authority_contract_vars({"trees": {"c()": unnamed}}) is None
+    assert recursive._authority_contract_vars(None) is None

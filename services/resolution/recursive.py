@@ -1015,10 +1015,12 @@ def _authority_contract_vars(predicate_trees: Any) -> frozenset[str] | None:
         if not isinstance(authority, dict):
             return
         source = authority.get("address_source")
+        kind = source.get("source") if isinstance(source, dict) else None
         name = source.get("state_variable_name") if isinstance(source, dict) else None
-        if isinstance(source, dict) and source.get("source") == "state_variable" and isinstance(name, str) and name:
+        if kind == "state_variable" and isinstance(name, str) and name:
             names.add(name)
-        else:
+        elif kind != "self_address":
+            # A call to itself (``this.hasRole``) reads no other contract.
             unread = True
 
     for key in ("trees", "check_trees"):
