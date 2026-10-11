@@ -231,7 +231,9 @@ def find_dependency_provider_job_for_address(
         for job in _jobs_for_address(session, address, chain=chain, completed_only=False, include_terminal=True)
         if stands(job)
     ]
-    runtime_jobs.sort(key=lambda job: job.status == JobStatus.failed_terminal)
+    # A live attempt first (it will produce the implementation job), then completed ones, then standing failures.
+    order = {JobStatus.queued: 0, JobStatus.processing: 0, JobStatus.completed: 1}
+    runtime_jobs.sort(key=lambda job: order.get(job.status, 2))
     for runtime_job in runtime_jobs:
         contract = _contract_for_job(session, runtime_job, chain=chain)
         impl_addr = _implementation_of(contract)

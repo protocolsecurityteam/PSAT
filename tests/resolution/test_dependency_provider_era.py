@@ -440,3 +440,20 @@ def test_a_beacon_over_a_stale_implementation_satisfies_without_spawning(session
 
     assert [job.id for job in _provider_jobs(session, beacon)] == [beacon_job.id]
     assert _edge(session, depender).status == "satisfied"
+
+
+def test_a_spawned_provider_is_found_even_after_the_proxy_job_is_touched(session):
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update
+
+    proxy, impl = _address("e3"), _address("e4")
+    proxy_job, _stale_impl = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=STALE)
+    _emit(session, _depender(session), proxy)
+    # A later write to the completed proxy job sorts it ahead of the queued provider by recency.
+    session.execute(update(Job).where(Job.id == proxy_job.id).values(updated_at=datetime.now(timezone.utc)))
+    session.commit()
+
+    _emit(session, _depender(session), proxy)
+
+    assert [job.status for job in _provider_jobs(session, proxy)] == [JobStatus.completed, JobStatus.queued]
