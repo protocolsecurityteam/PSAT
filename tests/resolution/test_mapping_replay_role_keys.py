@@ -587,6 +587,101 @@ def test_a_nested_contract_from_the_materialization_cache_keeps_its_uncertain_gu
     assert scorer == surface == expected
 
 
+@pytest.mark.parametrize("uncertain", [True, False], ids=["uncertain-guard", "every-guard-read"])
+def test_a_policy_refresh_rewalk_keeps_an_unsettled_nested_contracts_uncertain_guards(
+    db_session, monkeypatch, cm_db, uncertain
+):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import ContractMaterialization
+    from db.nested_artifacts import artifact_key
+    from db.queue import store_artifact
+    from workers import policy_worker
+
+    trees = _uncertain_timelock_trees()
+    if not uncertain:
+        trees.pop("guard_extraction_uncertain")
+    timelock = _bundle()
+    cm_db.add(
+        ContractMaterialization(
+            chain="1",
+            bytecode_keccak="0x" + "4e" * 32,
+            address=ANCHOR,
+            contract_name="Timelock",
+            analysis=timelock["analysis"],
+            tracking_plan=timelock["tracking_plan"],
+            predicate_trees=trees,
+            status="ready",
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        )
+    )
+    cm_db.commit()
+    monkeypatch.setattr(
+        recursive,
+        "_materialize_contract_artifacts",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("nested artifacts must come from the policy load")),
+    )
+    _history(db_session)
+    protocol = _add_protocol(db_session, f"role-keys-refresh-{uncertain}")
+    job = _add_job(db_session, address=VAULT, protocol_id=protocol.id, request={"address": VAULT, "chain": "ethereum"})
+    contract = _add_contract(db_session, address=VAULT, job=job, protocol_id=protocol.id, contract_name="Member")
+    store_artifact(db_session, job.id, artifact_key(ANCHOR, "snapshot"), data=timelock["snapshot"])
+    db_session.commit()
+    vault = _vault(_owner_check(), "state_variable:owner")
+    # Resolution's stored graph: the timelock's replay found a cold index and awaits it.
+    unsettled = {
+        "mapping_enumeration_status": "skipped",
+        "mapping_enumeration_source": "none",
+        "mapping_enumeration_awaits": {
+            "chain_id": 1,
+            "event_address": ANCHOR,
+            "topic0s": sorted([GRANT_T0, REVOKE_T0]),
+        },
+    }
+    stored_graph: dict[str, Any] = {
+        "schema_version": "0.1",
+        "root_contract_address": VAULT,
+        "max_depth": 6,
+        "nodes": [
+            {
+                "id": f"address:{address}",
+                "address": address,
+                "node_type": "contract",
+                "resolved_type": "timelock",
+                "label": name,
+                "contract_name": name,
+                "depth": depth,
+                "analyzed": True,
+                "details": {"address": address, **details},
+                "artifacts": {},
+            }
+            for address, name, depth, details in ((VAULT, "Vault", 0, {}), (ANCHOR, "Timelock", 1, unsettled))
+        ],
+        "edges": [],
+    }
+
+    nested = policy_worker._load_nested_artifacts(
+        db_session,
+        job.id,
+        chain="ethereum",
+        replay_trees_for=recursive.unsettled_replay_addresses(stored_graph) - {VAULT},
+    )
+    graph, _ = resolve_control_graph(
+        root_artifacts=vault,
+        rpc_url="http://rpc.test",
+        chain_id=1,
+        nested_artifacts_override=nested,
+        initial_graph=cast(Any, stored_graph),
+    )
+    replace_control_graph_rows(db_session, contract_id=contract.id, deployment_address=None, resolved_graph=graph)
+    db_session.commit()
+
+    details = next(n["details"] for n in graph["nodes"] if n["address"] == ANCHOR)
+    assert details["mapping_enumeration_status"] == "complete"
+    scorer, surface = _anchor_controllers(db_session, protocol)
+    expected = ALL_HOLDERS if uncertain else {PROPOSER, OPERATOR_REVOKED_PROPOSER_KEPT}
+    assert scorer == surface == expected
+
+
 def test_a_gating_contract_with_an_uncertain_guard_may_read_any_role(db_session, monkeypatch):
     _history(db_session)
     _role_admin_wire(monkeypatch)
