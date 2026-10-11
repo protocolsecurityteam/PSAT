@@ -161,16 +161,18 @@ def _signals_for_function(facts: _ContractFacts, func: Any, *, job_id: Any) -> l
 
 
 FINITE_SET_ORIGIN = "semantic_capability:finite_set"
+SIGNATURE_WITNESS_ORIGIN = "semantic_capability:signature_witness"
+_FINITE_SET_ORIGINS = frozenset({FINITE_SET_ORIGIN, SIGNATURE_WITNESS_ORIGIN})
 
 
 def _inexact_finite_set_qualities(principals: list[Any]) -> list[str]:
-    """The membership qualities short of ``exact`` among the finite-set rows a signal rests on; absent reads as
-    ``not_determined``.
+    """The membership qualities short of ``exact`` among the finite-set rows a signal rests on (a signer set is one);
+    absent reads as ``not_determined``.
     """
     qualities: set[str] = set()
     for principal in principals:
         details = principal.details if isinstance(principal.details, dict) else {}
-        if principal.origin != FINITE_SET_ORIGIN and "membership_quality" not in details:
+        if principal.origin not in _FINITE_SET_ORIGINS and "membership_quality" not in details:
             continue
         quality = details.get("membership_quality")
         if quality != "exact":

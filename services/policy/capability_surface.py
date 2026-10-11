@@ -679,6 +679,7 @@ def _rows_for_signature_witness(cap_dict: dict[str, Any], conditions: list[dict[
                         "signer_kind": "finite_set",
                         "source": "semantic_predicate_capability_resolver",
                         "resolver_path": resolver_path(signer),
+                        "membership_quality": signer.get("membership_quality"),
                     },
                     conditions + signer_conditions,
                 ),
@@ -722,6 +723,17 @@ def _details_with_conditions(details: dict[str, Any], conditions: list[dict[str,
     return details
 
 
+def merged_membership_quality(a: Any, b: Any) -> Any:
+    """The weaker of two membership qualities for one address: ``lower_bound`` beats ``exact``, and a missing or
+    unrecognised quality (``None``) beats both, so a merge never reads more complete than its weakest operand.
+    """
+    if a == b:
+        return a
+    if {a, b} <= {"exact", "lower_bound"}:
+        return "lower_bound"
+    return None
+
+
 def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -744,6 +756,10 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 trace.extend(item for item in row_details.get("trace") or [] if item not in trace)
                 if trace:
                     existing_details["trace"] = trace
+                if "membership_quality" in existing_details or "membership_quality" in row_details:
+                    existing_details["membership_quality"] = merged_membership_quality(
+                        existing_details.get("membership_quality"), row_details.get("membership_quality")
+                    )
             existing["details"] = existing_details
             continue
         copied = dict(row)

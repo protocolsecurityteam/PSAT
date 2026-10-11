@@ -6,7 +6,7 @@ Surface, not a contract nobody controls. An ``exact`` set beside them keeps ever
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +21,7 @@ from db.models import (
     Protocol,
 )
 from services.aggregations.company_overview import build_company_overview
+from services.resolution.capabilities import MembershipQuality
 from services.resolution.mapping_enumerator import MAPPING_ENUMERATION_STATUS as RESOLVER_STATUS_KEY
 from services.scoring.cli import distill_protocol_in_memory
 from services.scoring.distill import distill_contract_signals
@@ -250,3 +251,125 @@ def test_an_unread_controller_set_is_charged_against_its_entity_and_keyed_by_cha
     uncharged = world.score().model_parameters["confidence_detail"]
     assert charged["reachability_answered_pct"] < uncharged["reachability_answered_pct"]
     assert charged["capability_scored_pct"] < uncharged["capability_scored_pct"]
+
+
+def _finite(member: str, quality: str | None) -> dict[str, Any]:
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    cap = capability_to_dict(CapabilityExpr.finite_set([member], quality=cast(MembershipQuality, quality or "exact")))
+    if quality is None:
+        cap.pop("membership_quality")
+    return cap
+
+
+def _rows(cap: dict[str, Any]) -> list[dict[str, Any]]:
+    from services.policy.capability_surface import project_capability_surface
+
+    return project_capability_surface(cap).principal_rows
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "merged"),
+    [
+        pytest.param("exact", "lower_bound", "lower_bound", id="exact-then-lower"),
+        pytest.param("lower_bound", "exact", "lower_bound", id="lower-then-exact"),
+        pytest.param("exact", None, None, id="exact-then-missing"),
+        pytest.param(None, "exact", None, id="missing-then-exact"),
+        pytest.param("lower_bound", None, None, id="lower-then-missing"),
+        pytest.param("exact", "exact", "exact", id="exact-unchanged"),
+    ],
+)
+def test_one_address_on_two_operands_keeps_the_weakest_quality(left, right, merged):
+    member = _address("or")
+    (row,) = _rows({"kind": "OR", "children": [_finite(member, left), _finite(member, right)]})
+    assert row["details"]["membership_quality"] == merged
+
+
+def _signer_cap(member: str, quality: str) -> dict[str, Any]:
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    return capability_to_dict(
+        CapabilityExpr.signature_witness(CapabilityExpr.finite_set([member], quality=cast(MembershipQuality, quality)))
+    )
+
+
+def _gated_by_rows(world: _World, contract: Contract, name: str, rows: list[dict[str, Any]]) -> None:
+    function = EffectiveFunction(
+        contract_id=contract.id,
+        deployment_address=contract.address,
+        function_name=name,
+        selector="0x" + uuid.uuid4().hex[:8],
+        abi_signature=f"{name}()",
+        authority_public=False,
+        authority_openness="restricted",
+        claims=UPGRADE,
+    )
+    world.session.add(function)
+    world.session.flush()
+    for row in rows:
+        world.session.add(
+            FunctionPrincipal(
+                function_id=function.id,
+                address=row["address"],
+                resolved_type=row.get("resolved_type"),
+                origin=row["origin"],
+                principal_type=row["principal_type"],
+                details=row["details"],
+            )
+        )
+    world.session.commit()
+
+
+def test_a_merged_partial_set_reaches_scoring_as_not_determined_in_either_order(world):
+    vault = world.contract(_address("vault"))
+    member = _address("eoa")
+    for name, children in (
+        ("upgradeTo", [_finite(member, "exact"), _finite(member, "lower_bound")]),
+        ("upgradeToAndCall", [_finite(member, "lower_bound"), _finite(member, "exact")]),
+    ):
+        _gated_by_rows(world, vault, name, _rows({"kind": "OR", "children": children}))
+
+    for name in ("upgradeTo", "upgradeToAndCall"):
+        signal = _signal(world, vault, name)
+        assert signal.principal_state == PRINCIPAL_STATE_NOT_DETERMINED
+        assert "principal_set_not_exact:lower_bound" in signal.witness_notes
+
+
+def test_a_partial_signer_set_gives_a_not_determined_signal(world):
+    vault = world.contract(_address("vault"))
+    signer = _address("signer")
+    rows = _rows(_signer_cap(signer, "lower_bound"))
+    assert [(r["origin"], r["details"]["membership_quality"]) for r in rows] == [
+        ("semantic_capability:signature_witness", "lower_bound")
+    ]
+    _gated_by_rows(world, vault, "upgradeTo", rows)
+
+    signal = _signal(world, vault, "upgradeTo")
+    assert signal.principal_state == PRINCIPAL_STATE_NOT_DETERMINED
+    assert "principal_set_not_exact:lower_bound" in signal.witness_notes
+
+
+def test_a_signer_row_with_no_recorded_quality_answers_nothing(world):
+    vault = world.contract(_address("vault"))
+    (row,) = _rows(_signer_cap(_address("signer"), "exact"))
+    row["details"].pop("membership_quality")
+    _gated_by_rows(world, vault, "upgradeTo", [row])
+
+    signal = _signal(world, vault, "upgradeTo")
+    assert signal.principal_state == PRINCIPAL_STATE_NOT_DETERMINED
+    assert "principal_set_not_exact:not_determined" in signal.witness_notes
+
+
+def test_exact_operands_and_an_exact_signer_set_are_unchanged(world):
+    vault = world.contract(_address("vault"))
+    member, signer = _address("eoa"), _address("signer")
+    _gated_by_rows(world, vault, "upgradeTo", _rows({"kind": "OR", "children": [_finite(member, "exact")] * 2}))
+    _gated_by_rows(world, vault, "upgradeToAndCall", _rows(_signer_cap(signer, "exact")))
+
+    for name, address in (("upgradeTo", member), ("upgradeToAndCall", signer)):
+        signal = _signal(world, vault, name)
+        assert signal.principal_state == PRINCIPAL_STATE_ENUMERATED
+        assert [ref.address for ref in signal.principal_refs] == [address.lower()]
+        assert not any(n.startswith("principal_set_not_exact") for n in signal.witness_notes)
