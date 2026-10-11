@@ -218,3 +218,37 @@ describe("balance evidence coverage", () => {
     expect(screen.queryByText(/coverage partial/)).not.toBeInTheDocument();
   });
 });
+
+describe("member analysis coverage", () => {
+  it("lists members with no completed analysis as not determined, by token", () => {
+    renderPanel({
+      companyData: companyData({
+        member_analysis: {
+          members: 5,
+          analyzed: 2,
+          not_determined: 3,
+          by_state: { analysis_failed: 2, analysis_not_completed: 1 },
+          not_analyzed: [],
+        },
+      }),
+    });
+    expect(screen.getByRole("status", { name: "Member contracts not determined" })).toHaveTextContent(
+      "3 of 5 member contracts not determined · 2 analysis failed · 1 analysis not completed",
+    );
+  });
+
+  it("shows nothing when every member is analyzed", () => {
+    renderPanel({
+      companyData: companyData({
+        member_analysis: {
+          members: 2,
+          analyzed: 2,
+          not_determined: 0,
+          by_state: { analysis_failed: 0, analysis_not_completed: 0 },
+          not_analyzed: [],
+        },
+      }),
+    });
+    expect(screen.queryByRole("status", { name: "Member contracts not determined" })).toBeNull();
+  });
+});

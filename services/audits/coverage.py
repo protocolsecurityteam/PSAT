@@ -30,6 +30,7 @@ from db.models import (
     Contract,
     UpgradeEvent,
 )
+from schemas.upgrade_history import UPGRADE_FETCH_ERROR
 from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 # Audits published shortly after an upgrade usually reviewed the older impl.
 GRACE_DAYS: Final[int] = 14
+
+
+SUCCESSOR_NOT_DETERMINED = "not_determined"
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class ImplWindow:
     from_ts: datetime | None
     to_ts: datetime | None
     # 'none' — open. 'known' — replaced at a known block. 'block_unknown' — replaced, upper bound unknown.
+    # 'not_determined' — the proxy's last history fetch errored, so an unread upgrade could fall inside or end it.
     successor: str = "none"
 
 
@@ -59,7 +64,7 @@ def _publishable_block_bounds(window: ImplWindow | None) -> tuple[int | None, in
     """
     if window is None:
         return None, None
-    if window.from_block is None or window.successor == "block_unknown":
+    if window.from_block is None or window.successor in ("block_unknown", SUCCESSOR_NOT_DETERMINED):
         return None, None
     return window.from_block, window.to_block
 
@@ -178,10 +183,15 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
         events_by_proxy.setdefault(ev.contract_id, []).append(ev)
 
     proxy_addr_by_id: dict[int, str] = {}
+    unread_history: set[int] = set()
     if proxy_ids:
-        rows = session.execute(select(Contract.id, Contract.address).where(Contract.id.in_(proxy_ids))).all()
-        for pid, addr in rows:
+        rows = session.execute(
+            select(Contract.id, Contract.address, Contract.upgrade_history_status).where(Contract.id.in_(proxy_ids))
+        ).all()
+        for pid, addr, history_status in rows:
             proxy_addr_by_id[pid] = addr or ""
+            if history_status == UPGRADE_FETCH_ERROR:
+                unread_history.add(pid)
 
     windows_by_addr: dict[str, list[ImplWindow]] = {}
     for addr_lower, proxy_id_set in addr_to_proxies.items():
@@ -202,6 +212,8 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
                     to_block = nxt.block_number
                     to_ts = nxt.timestamp
                     successor = "known" if nxt.block_number is not None else "block_unknown"
+                if pid in unread_history:
+                    successor = SUCCESSOR_NOT_DETERMINED
                 windows.append(
                     ImplWindow(
                         proxy_contract_id=pid,
@@ -231,8 +243,16 @@ def _compute_impl_windows_for_contract(session: Session, contract: Contract) -> 
 def _confidence_for_impl_era(audit_ts: datetime | None, windows: list[ImplWindow]) -> tuple[str, ImplWindow | None]:
     """``(confidence, window)``: high inside a window, medium within ``GRACE_DAYS`` of a boundary, low otherwise.
 
-    Low rows still emit so the UI can flag badly-timed name matches.
+    Low rows still emit so the UI can flag badly-timed name matches. A window whose bounds weren't fully read is never
+    better than low.
     """
+    confidence, window = _confidence_for_read_era(audit_ts, windows)
+    if window is not None and window.successor == SUCCESSOR_NOT_DETERMINED:
+        return "low", window
+    return confidence, window
+
+
+def _confidence_for_read_era(audit_ts: datetime | None, windows: list[ImplWindow]) -> tuple[str, ImplWindow | None]:
     if not windows:
         return "low", None
 
@@ -371,12 +391,14 @@ def _resolve_impl_for_address(
 ) -> Contract | None:
     """Impl row for a coverage insert.
 
-    Proxy with no history: current ``implementation``. With history but no placeable window: ``None`` rather than
-    rebinding to today's impl.
+    Proxy with no history: current ``implementation``. With history but no placeable window, or a history whose last
+    fetch errored: ``None`` rather than rebinding to today's impl.
     """
     chain_key = _normalize_chain(row.chain)
     if not row.is_proxy:
         return row
+    if row.upgrade_history_status == UPGRADE_FETCH_ERROR:
+        return None
     proxy_events = proxy_events_cache.get(row.id)
     if proxy_events is None:
         proxy_events = list(

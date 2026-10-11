@@ -23,6 +23,7 @@ from services.governance.primary_controller import (
     function_capabilities as _function_capabilities,
 )
 from services.scoring.planes import CONTROL_RELATIONS as SCORER_REACH_RELATIONS
+from services.scoring.planes import MAPPING_ENUMERATION_STATUS, controllers_not_determined
 from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
 )
@@ -380,6 +381,12 @@ def build_governance_view(
         if not owner_groups[owner_addr]:
             del owner_groups[owner_addr]
 
+    controller_enumeration = _controller_enumeration(contracts_by_job_id, cgn_by_cid)
+    for entry in contracts:
+        state = controller_enumeration.get(_entity_key(entry.get("chain"), entry.get("address")))
+        if state is not None:
+            entry["controller_enumeration"] = state
+
     hierarchy = _build_ownership_hierarchy(contracts, owner_groups)
     protocol_ids = {c.protocol_id for c in contracts_by_job_id.values() if c is not None and c.protocol_id is not None}
     reach_edges = _protocol_reach_edges(session, protocol_ids)
@@ -544,6 +551,15 @@ def build_governance_view(
             | {_entity_chain(e) for e in co_controls.get(p_addr_lc, [])}
         )
         p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
+        states = [controller_enumeration.get(_entity_key(chain, p_addr_lc)) for chain in p.get("chains") or []]
+        unread = [state for state in states if state and state["state"] == "not_determined"]
+        if unread:
+            p["controller_enumeration"] = {
+                "state": "not_determined",
+                "status": ",".join(sorted({state["status"] for state in unread})),
+            }
+        elif any(states):
+            p["controller_enumeration"] = {"state": "complete"}
 
     # What the source can do to the target, from the same machinery as ``controls_detail`` so edge and panel can't
     # disagree. ``[]`` isn't proof of inability.
@@ -933,3 +949,25 @@ def _build_flows_and_principals(
     for pr in principals_out:
         pr["chains"] = sorted(pr["chains"])
     return fund_flows, principals_out
+
+
+def _controller_enumeration(
+    contracts_by_job_id: dict[Any, Contract], cgn_by_cid: dict[int, list[ControlGraphNode]]
+) -> dict[str, dict[str, str]]:
+    """Per entity with a member replay: ``complete``, or ``not_determined`` with the statuses it reached.
+
+    Without it an unread member set draws as a contract nobody controls. Entities with no replay get no entry.
+    """
+    chain_by_cid = {c.id: c.chain for c in contracts_by_job_id.values() if c is not None}
+    statuses: dict[str, set[str]] = {}
+    for cid, nodes in cgn_by_cid.items():
+        for node in nodes:
+            details = node.details if isinstance(node.details, dict) else {}
+            status = details.get(MAPPING_ENUMERATION_STATUS)
+            if status is not None:
+                statuses.setdefault(_entity_key(chain_by_cid.get(cid), node.address), set()).add(str(status))
+    unread = controllers_not_determined(statuses)
+    return {
+        key: ({"state": "not_determined", "status": unread[key]} if key in unread else {"state": "complete"})
+        for key in statuses
+    }

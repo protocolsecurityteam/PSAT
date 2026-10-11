@@ -11,6 +11,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import CompanyOverview from "./CompanyOverview.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
+import { SUPPORTED_PAYLOAD_SCHEMA } from "../api/client.js";
 import SCORE_ETHERFI from "../test/fixtures/score_etherfi.json";
 
 const ADDR = "0x1111111111111111111111111111111111111111";
@@ -214,11 +215,11 @@ describe("CompanyOverview — hero subtitle before coverage loads", () => {
 });
 
 describe("CompanyOverview — prepared provenance", () => {
-  const preparedHeaders = (source, preparedAt) => ({
+  const preparedHeaders = (source, preparedAt, section) => ({
     "Content-Type": "application/json",
     "X-PSAT-Response-Source": source,
     "X-PSAT-Prepared-At": preparedAt,
-    "X-PSAT-Payload-Schema": "1",
+    "X-PSAT-Payload-Schema": String(SUPPORTED_PAYLOAD_SCHEMA[section]),
     ...(source === "prepared-stale" ? { "X-PSAT-Stale-Reason": "data" } : {}),
   });
 
@@ -230,7 +231,7 @@ describe("CompanyOverview — prepared provenance", () => {
       () => {
         served.summary += 1;
         return new Response(JSON.stringify({ tvl: null }), {
-          headers: preparedHeaders(summarySource, "2026-09-29T10:00:00Z"),
+          headers: preparedHeaders(summarySource, "2026-09-29T10:00:00Z", "summary"),
         });
       },
     );
@@ -238,7 +239,7 @@ describe("CompanyOverview — prepared provenance", () => {
       (url) => url.pathname === "/api/company/twinco",
       () => new Response(
         JSON.stringify({ protocol_id: 42, contracts: [], principals: [], fund_flows: [], ownership_hierarchy: [] }),
-        { headers: preparedHeaders("prepared", "2026-09-29T09:00:00Z") },
+        { headers: preparedHeaders("prepared", "2026-09-29T09:00:00Z", "overview") },
       ),
     );
     return served;

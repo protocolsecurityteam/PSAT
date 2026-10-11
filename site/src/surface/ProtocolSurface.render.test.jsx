@@ -10,6 +10,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import ProtocolSurface from "./ProtocolSurface.jsx";
 import { installCommonApiMocks } from "../test/commonApiMocks.js";
 import { setFetchHandler } from "../test/fetchMock.js";
+import { SUPPORTED_PAYLOAD_SCHEMA } from "../api/client.js";
 import { ETHERFI_COMPANY } from "../test/fixtures.js";
 
 function expectNoCrash() {
@@ -60,7 +61,7 @@ describe("ProtocolSurface", () => {
           "X-PSAT-Response-Source": "prepared-stale",
           "X-PSAT-Stale-Reason": "code",
           "X-PSAT-Prepared-At": "2026-09-29T08:00:00Z",
-          "X-PSAT-Payload-Schema": "1",
+          "X-PSAT-Payload-Schema": String(SUPPORTED_PAYLOAD_SCHEMA.overview),
         },
       },
     ));

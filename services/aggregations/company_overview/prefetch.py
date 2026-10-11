@@ -23,6 +23,7 @@ from db.models import (
     PrincipalLabel,
     UpgradeEvent,
 )
+from services.scoring.planes import MAPPING_ENUMERATION_STATUS
 
 from .jobs import _time_phase
 from .principals import _PRINCIPAL_TYPES_SQL, _SETTLED_CONTROLLER_TYPES, _claim_ids_list, _principal_lookup_type
@@ -377,7 +378,15 @@ def _prefetch_child_tables(
         for n in s.execute(
             select(ControlGraphNode).where(
                 ControlGraphNode.contract_id.in_(id_list),
-                _node_keep_predicate(ControlGraphNode),
+                or_(
+                    _node_keep_predicate(ControlGraphNode),
+                    # An errored replay can leave the node sourcing no edge; its status is still read. The canvas trim
+                    # drops it again, so edges are unaffected.
+                    and_(
+                        jsonb_has_payload(ControlGraphNode.details),
+                        ControlGraphNode.details.has_key(MAPPING_ENUMERATION_STATUS),
+                    ),
+                ),
             )
         ).scalars():
             local.setdefault(n.contract_id, []).append(n)

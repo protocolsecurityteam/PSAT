@@ -295,3 +295,44 @@ describe("EntityCard balances tab count", () => {
     expect(within(tab).getByText("1")).toBeInTheDocument();
   });
 });
+
+describe("EntityCard controller enumeration", () => {
+  it("badges a contract whose member replay never completed, naming the status", () => {
+    const { getByText } = render(
+      <EntityCard
+        machine={machine({ controller_enumeration: { state: "not_determined", status: "error" } })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    const badge = getByText("Controllers not determined");
+    expect(badge).toHaveAttribute("title", "enumeration errored");
+  });
+
+  it("badges a principal-only timelock the same way", () => {
+    const { getByText } = render(
+      <EntityCard
+        principal={{
+          address: TIMELOCK,
+          type: "timelock",
+          details: {},
+          controller_enumeration: { state: "not_determined", status: "incomplete_timeout" },
+        }}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    expect(getByText("Controllers not determined")).toHaveAttribute("title", "enumeration timed out");
+  });
+
+  it("shows nothing extra for a complete member set", () => {
+    const { queryByText } = render(
+      <EntityCard
+        machine={machine({ controller_enumeration: { state: "complete" } })}
+        onSelectGuard={vi.fn()}
+        governsIndex={new Map()}
+      />,
+    );
+    expect(queryByText("Controllers not determined")).toBeNull();
+  });
+});

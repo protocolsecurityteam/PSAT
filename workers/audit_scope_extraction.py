@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select, Update
 
@@ -205,6 +206,9 @@ class AuditScopeExtractionWorker(AuditRowWorker):
                 self._maybe_backfill_date(audit, outcome.extracted_date)
                 self._refresh_coverage(session, audit_id)
             session.commit()
+        except OperationalError:
+            session.rollback()
+            raise
         except Exception as exc:
             session.rollback()
             logger.warning(
@@ -244,6 +248,9 @@ class AuditScopeExtractionWorker(AuditRowWorker):
                 audit_id,
                 inserted,
             )
+        except OperationalError:
+            # The transaction is aborted, so the scope write can't commit either; the whole persist is retried.
+            raise
         except Exception as exc:
             logger.warning(
                 "Failed to refresh coverage for audit %s — scope persist still proceeds: %s",
