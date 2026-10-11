@@ -594,9 +594,10 @@ def test_a_gating_contract_with_an_uncertain_guard_may_read_any_role(db_session,
     vault = _vault(_owner_check(), "state_variable:registry")
     # ``registry`` gates one function by address; another function's guard wasn't extracted and may call
     # ``registry.hasRole(X, msg.sender)``.
-    vault["predicate_trees"]["guard_extraction_uncertain"] = ["sweep(address)"]
+    gating_trees = cast(dict[str, Any], vault.get("predicate_trees"))
+    gating_trees["guard_extraction_uncertain"] = ["sweep(address)"]
 
     _member_with_graph(db_session, protocol, vault, VAULT, override={ANCHOR: _bundle(trees=REGISTRY_TREES)})
 
     assert _anchor_controllers(db_session, protocol) == (ALL_HOLDERS, ALL_HOLDERS)
-    assert recursive._authority_contract_vars(vault["predicate_trees"]) is None
+    assert recursive._authority_contract_vars(gating_trees) is None
