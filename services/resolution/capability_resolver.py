@@ -305,11 +305,23 @@ def resolve_contract_capabilities(
 
     ``session`` must stay open: adapters read repos lazily. ``chain_id`` binds the live reads. ``job_id`` targets an
     in-progress job (the default completed-job filter would skip it). ``chain`` plus ``job_id`` scope the
-    ``ControllerValue`` lookup so other runs' rows don't leak in; without ``job_id`` it falls back to address-only with
-    a warning.
+    ``ControllerValue`` lookup so other runs' rows don't leak in; without ``job_id`` it falls back to the chain's latest
+    row with a warning. ``None`` when the chain can't be determined.
     """
     addr = address.lower()
     runtime_addr = addr
+    # Every lookup below is chain-scoped: the given chain, else the job's, else ``chain_id``'s.
+    chain = canonical_chain(chain)
+    if chain is None and job_id is not None:
+        anchor = session.get(Job, job_id)
+        chain = _job_chain(anchor) if anchor is not None else None
+    elif chain is None:
+        try:
+            chain = chain_by_id(chain_id).name
+        except UnknownChainError:
+            chain = None
+    if chain is None:
+        return None
     if job_id is not None:
         job = session.get(Job, job_id)
         if job is None or (job.address or "").lower() != addr:
@@ -354,15 +366,6 @@ def resolve_contract_capabilities(
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
-    # Best-effort default from Job.request; without it the lookup is address-only.
-    if chain is None and isinstance(analysis_job.request, dict):
-        req_chain = analysis_job.request.get("chain")
-        if isinstance(req_chain, str) and req_chain:
-            chain = req_chain
-    if chain is None and isinstance(runtime_job.request, dict):
-        req_chain = runtime_job.request.get("chain")
-        if isinstance(req_chain, str) and req_chain:
-            chain = req_chain
     explicit_rpc_url: str | None = None
     for candidate_job in (analysis_job, runtime_job):
         if not isinstance(candidate_job.request, dict):
@@ -923,18 +926,21 @@ def _load_state_var_values(
     """Persisted ``controller_values`` for ``address``, keyed by bare state-variable name.
 
     Stored ids are ``"<kind>:<name>"``; the prefix is stripped and ``state_variable:`` rows win over others with the
-    same name. Scoped to ``Contract.job_id`` when given, else the latest contract for the address (and ``chain`` if
-    given). Empty dict when nothing matches.
+    same name. Scoped to ``Contract.job_id`` when given, else the latest contract for the address on the chain (the
+    given ``chain``, else the job's). Empty dict when nothing matches or the chain can't be determined: a same-address
+    row on another chain never answers.
     """
     chain = canonical_chain(chain)
     if job_id is not None:
+        job = session.get(Job, job_id)
+        if chain is None and job is not None:
+            chain = _job_chain(job)
         stmt = select(Contract).where(Contract.job_id == job_id)
         if chain is not None:
             stmt = stmt.where(_contract_on_chain(chain))
         contract = session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
         if contract is not None:
             # Scope to this deployment so a shared impl reads only its own proxy's values.
-            job = session.get(Job, job_id)
             deployment = (
                 normalize_deployment(job.request.get("proxy_address"))
                 if job is not None and isinstance(job.request, dict)
@@ -942,7 +948,7 @@ def _load_state_var_values(
             )
             return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
     else:
-        # Address-only lookup can pick up another job's or chain's rows; record it.
+        # Address-only lookup can pick up another job's rows; record it.
         record_degraded(
             phase="state_var_values_no_job_id",
             exc=RuntimeError("_load_state_var_values called without job_id"),
@@ -953,10 +959,14 @@ def _load_state_var_values(
             extra={"address": address, "chain": chain},
         )
 
-    stmt = select(Contract).where(func.lower(Contract.address) == address.lower())
-    if chain is not None:
-        stmt = stmt.where(_contract_on_chain(chain))
-    stmt = stmt.order_by(Contract.created_at.desc()).limit(1)
+    if chain is None:
+        return {}
+    stmt = (
+        select(Contract)
+        .where(func.lower(Contract.address) == address.lower(), _contract_on_chain(chain))
+        .order_by(Contract.created_at.desc())
+        .limit(1)
+    )
     contract = session.execute(stmt).scalar_one_or_none()
     if contract is None:
         return {}

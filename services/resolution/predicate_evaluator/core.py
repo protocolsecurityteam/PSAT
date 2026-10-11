@@ -639,9 +639,12 @@ def _maybe_inline_cross_contract_call(
         session,
         lookup.analysis_job.address or registry_addr,
         job_id=lookup.analysis_job.id,
+        chain=registry_chain,
     )
     if not state_var_values and lookup.runtime_job.id != lookup.analysis_job.id:
-        state_var_values = _load_state_var_values(session, registry_addr, job_id=lookup.runtime_job.id)
+        state_var_values = _load_state_var_values(
+            session, registry_addr, job_id=lookup.runtime_job.id, chain=registry_chain
+        )
 
     parent_this = getattr(parent_frame, "current_address_this", None) or getattr(
         parent_frame, "executing_contract_address", None
