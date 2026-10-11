@@ -1241,7 +1241,7 @@
             },
             {
               "target": "token.functionCall",
-              "selector": "0xa0b5ffb0",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -1304,10 +1304,10 @@
                     "router_ops": [
                       {
                         "callee": "safeTransferFrom",
-                        "selector": "0x5beae096"
+                        "selector": "0x23b872dd"
                       }
                     ],
-                    "selector": "0x5beae096",
+                    "selector": "0x23b872dd",
                     "target_kind": {
                       "kind": "immutable",
                       "tier": "dispositive_ast"
@@ -1336,7 +1336,7 @@
           "value_flows": [
             {
               "kind": "callee_erc20_selector",
-              "selector": "0x5beae096",
+              "selector": "0x23b872dd",
               "direction": "value_router",
               "from_is_self": false,
               "origin": "body",
@@ -1351,7 +1351,7 @@
               "amount_param_index": 1,
               "router_ops": [
                 {
-                  "selector": "0x5beae096",
+                  "selector": "0x23b872dd",
                   "callee": "safeTransferFrom"
                 }
               ],
@@ -1368,7 +1368,7 @@
             },
             {
               "target": "token.safeTransferFrom",
-              "selector": "0x5beae096",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -1542,7 +1542,7 @@
                     "amount_param_index": 2,
                     "from_is_self": false,
                     "kind": "callee_erc20_selector",
-                    "selector": "0x5beae096",
+                    "selector": "0x23b872dd",
                     "target_kind": {
                       "kind": "self",
                       "tier": "static_trace"
@@ -1572,7 +1572,7 @@
           "value_flows": [
             {
               "kind": "callee_erc20_selector",
-              "selector": "0x5beae096",
+              "selector": "0x23b872dd",
               "direction": "in",
               "from_is_self": false,
               "origin": "body",
@@ -1596,7 +1596,7 @@
             },
             {
               "target": "token.safeTransferFrom",
-              "selector": "0x5beae096",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -1791,7 +1791,7 @@
                     },
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
-                    "selector": "0xd0c407e1",
+                    "selector": "0xa9059cbb",
                     "target_kind": {
                       "kind": "several",
                       "tier": "dispositive_ast"
@@ -1831,7 +1831,7 @@
           "value_flows": [
             {
               "kind": "callee_erc20_selector",
-              "selector": "0xd0c407e1",
+              "selector": "0xa9059cbb",
               "direction": "out",
               "from_is_self": true,
               "origin": "body",
@@ -1864,7 +1864,7 @@
             },
             {
               "target": "token.safeTransfer",
-              "selector": "0xd0c407e1",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -1924,7 +1924,7 @@
                     },
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
-                    "selector": "0xd0c407e1",
+                    "selector": "0xa9059cbb",
                     "target_kind": {
                       "kind": "immutable",
                       "tier": "dispositive_ast"
@@ -1954,7 +1954,7 @@
           "value_flows": [
             {
               "kind": "callee_erc20_selector",
-              "selector": "0xd0c407e1",
+              "selector": "0xa9059cbb",
               "direction": "out",
               "from_is_self": true,
               "origin": "body",
@@ -1994,7 +1994,7 @@
             },
             {
               "target": "token.safeTransfer",
-              "selector": "0xd0c407e1",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -2059,7 +2059,7 @@
                     "amount_param_index": 2,
                     "from_is_self": true,
                     "kind": "callee_erc20_selector",
-                    "selector": "0xd0c407e1",
+                    "selector": "0xa9059cbb",
                     "target_constraint": {
                       "state": "not_determined"
                     },
@@ -2093,7 +2093,7 @@
           "value_flows": [
             {
               "kind": "callee_erc20_selector",
-              "selector": "0xd0c407e1",
+              "selector": "0xa9059cbb",
               "direction": "out",
               "from_is_self": true,
               "origin": "body",
@@ -2118,7 +2118,7 @@
             },
             {
               "target": "token.safeTransfer",
-              "selector": "0xd0c407e1",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -2537,7 +2537,7 @@
             },
             {
               "target": "shareAmount.mulDivDown",
-              "selector": "0xb67bee04",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -3328,7 +3328,7 @@
           "external_calls": [
             {
               "target": "reserveAsset.safeTransferFrom",
-              "selector": "0x5beae096",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": "0xf85cb5c8",
@@ -4239,7 +4239,7 @@
           "external_calls": [
             {
               "target": "module.functionDelegateCall",
-              "selector": "0xee33b7e2",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": "0xb86d5298",
@@ -4364,7 +4364,7 @@
           "external_calls": [
             {
               "target": "this.functionDelegateCall",
-              "selector": "0xee33b7e2",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -5017,7 +5017,7 @@
           "external_calls": [
             {
               "target": "data.send",
-              "selector": "0x202d45d3",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -5103,7 +5103,7 @@
             },
             {
               "target": "target.callContract",
-              "selector": "0x24d78c05",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -5239,7 +5239,7 @@
             },
             {
               "target": "target.functionCallWithValue",
-              "selector": "0x2a011594",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,
@@ -5316,7 +5316,7 @@
             },
             {
               "target": "target.functionCall",
-              "selector": "0xa0b5ffb0",
+              "selector": "",
               "origin": "body",
               "receiver": {
                 "auto_getter_selector": null,

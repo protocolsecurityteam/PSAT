@@ -21,7 +21,7 @@ from db.queue import (
 from services.crawlers.dapp.crawl import crawl_dapp
 from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 from utils.chains import UnknownChainError, chain_by_id
-from utils.logging import log_timed_phase, record_stage_metric
+from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 
 logger = logging.getLogger("workers.dapp_crawl")
@@ -78,6 +78,19 @@ class DAppCrawlWorker(BaseWorker):
 
         addresses = result["addresses"]
         logger.info("DApp crawl found %d addresses for job %s", len(addresses), job.id)
+        url_outcomes = list(result.get("url_outcomes") or [])
+        crawl_status = _crawl_status(urls, url_outcomes)
+        for outcome in url_outcomes:
+            if outcome.get("outcome") == "loaded":
+                continue
+            # A page that never loaded (bot challenge, error status, crash) captured nothing: its share of the dApp's
+            # contracts is not determined, never "none".
+            record_degraded(
+                phase="dapp_page_load",
+                exc=RuntimeError(f"{outcome.get('outcome')}: {outcome.get('reason')}"),
+                context={"url": outcome.get("url"), "status": outcome.get("status")},
+            )
+        record_stage_metric("dapp_urls_not_loaded", sum(1 for o in url_outcomes if o.get("outcome") != "loaded"))
 
         store_artifact(
             session,
@@ -85,6 +98,8 @@ class DAppCrawlWorker(BaseWorker):
             "dapp_crawl_results",
             data={
                 "urls_crawled": urls,
+                "crawl_status": crawl_status,
+                "url_outcomes": url_outcomes,
                 "addresses_found": len(addresses),
                 "addresses": addresses,
                 "interaction_count": result.get("interaction_count", 0),
@@ -151,6 +166,7 @@ class DAppCrawlWorker(BaseWorker):
             data={
                 "mode": "dapp_crawl",
                 "urls": urls,
+                "crawl_status": crawl_status,
                 "discovered_count": len(addresses),
             },
         )
@@ -159,12 +175,24 @@ class DAppCrawlWorker(BaseWorker):
             job.name = f"DApp crawl ({len(urls)} URLs)"
             session.commit()
 
-        complete_job(
-            session,
-            job.id,
-            f"DApp crawl complete: {len(addresses)} addresses written to contracts table",
-        )
+        if crawl_status == "complete":
+            detail = f"DApp crawl complete: {len(addresses)} addresses written to contracts table"
+        else:
+            loaded = sum(1 for o in url_outcomes if o.get("outcome") == "loaded")
+            detail = (
+                f"DApp crawl {crawl_status}: {loaded} of {len(urls)} URL(s) loaded; {len(addresses)} addresses written "
+                "to contracts table, not a complete list"
+            )
+        complete_job(session, job.id, detail)
         raise JobHandledDirectly()
+
+
+def _crawl_status(urls: list[str], url_outcomes: list[dict]) -> str:
+    """``complete`` only when every URL's page loaded; ``partial`` when some did; ``not_loaded`` when none did."""
+    loaded = {o.get("url") for o in url_outcomes if o.get("outcome") == "loaded"}
+    if all(url in loaded for url in urls):
+        return "complete"
+    return "partial" if loaded else "not_loaded"
 
 
 def main():

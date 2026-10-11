@@ -14,6 +14,7 @@ import uuid
 
 import pytest
 
+from tests.cache_helpers import store_semantic_artifacts
 from tests.conftest import requires_postgres
 
 
@@ -78,6 +79,7 @@ def _completed_source_with_null_contract(session, address, request_chain):
 
     store_source_files(session, job.id, {"src/Legacy.sol": "contract Legacy {}"})
     store_artifact(session, job.id, "contract_analysis", data={"summary": {}})
+    store_semantic_artifacts(session, job.id)
     return job
 
 

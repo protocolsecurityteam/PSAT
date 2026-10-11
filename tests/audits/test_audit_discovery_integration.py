@@ -676,3 +676,33 @@ def test_sync_reports_url_collisions_within_one_batch(db_session):
     assert degraded[0].context["collisions"] == [
         {"url": shared, "overwritten_title": "Omniscia Audit", "kept_title": "Restaking Of stETH Holdings"}
     ]
+
+
+def test_a_provider_402_is_listed_as_a_shortfall_not_a_count(solodit_stub, http_stubs, monkeypatch):
+    """OpenRouter out of credits left classification empty; the result read "LLM classified 0 result(s)" exactly
+    like a protocol with no audits. Real LLM client; only the wire is stubbed.
+    """
+    from services.discovery.audit_reports import search_audit_reports
+
+    monkeypatch.setenv("OPEN_ROUTER_KEY", "test-openrouter-stub-key")
+    tavily_returns(
+        http_stubs,
+        {
+            '"Delta" smart contract security audit report': [
+                {"title": "Delta audit", "url": "https://x.com/delta-audit.pdf", "content": "security audit"},
+            ],
+        },
+    )
+    http_stubs.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        json={"error": {"message": "Insufficient credits", "code": 402}},
+        status=402,
+    )
+
+    result = search_audit_reports("Delta", official_domain="delta.xyz")
+
+    assert result["reports"] == []
+    phases = {error["phase"] for error in result["errors"] if error.get("provider") == "llm"}
+    assert {"audit_followup_query", "audit_classification"} <= phases
+    assert all("402" in error["error"] for error in result["errors"] if error.get("provider") == "llm")
+    assert result["notes"][0].endswith("LLM call(s) failed; the report list is incomplete")

@@ -234,11 +234,11 @@ def _attach_effect_scopes(contract, predicates, effects):
                     if len(sites) >= 256:
                         incomplete.append("effect_site_budget")
                         break
-                    candidates = [("state_write", var, None, None) for var in _node_kind_state_writes(node)]
+                    candidates = [("state_write", var, None, None, None) for var in _node_kind_state_writes(node)]
                     candidates += _classify_node_irs(node, unit, entry_params, contract)
                     for ir in node.irs:
                         if isinstance(ir, (Send, Transfer)):
-                            candidates.append(("external_call", str(ir.destination), None, None))
+                            candidates.append(("external_call", str(ir.destination), None, None, None))
                     calls = [ir for ir in node.irs if isinstance(ir, (InternalCall, LibraryCall))]
                     if not candidates and not calls:
                         continue
@@ -248,7 +248,7 @@ def _attach_effect_scopes(contract, predicates, effects):
                     required = [*inherited, *local]
                     if any(predicate_truth(t) is False for t in required):
                         continue
-                    for kind, target, selector, _ in candidates:
+                    for kind, target, selector, _, library_signature in candidates:
                         paths = [str(getattr(getattr(c, "node", None), "node_id", "unknown")) for c in chain]
                         site_id = "/".join(
                             [entry.full_name, *paths, unit.canonical_name, str(node.node_id), kind, target]
@@ -260,7 +260,10 @@ def _attach_effect_scopes(contract, predicates, effects):
                         matching = [
                             s["id"]
                             for s in record_sinks
-                            if s["kind"] == kind and s["target"] == target and s.get("selector") == selector
+                            if s["kind"] == kind
+                            and s["target"] == target
+                            and s.get("selector") == selector
+                            and s.get("library_signature") == library_signature
                         ]
                         sites.append(
                             {
@@ -344,6 +347,14 @@ def _attach_effect_scopes(contract, predicates, effects):
         known = deepcopy(predicates.get("trees") or {})
         classified = {**known, **{k: v for k, v in scopes.items() if v is not None}}
         apply_writer_gate_pass(contract, classified)
+        # A site's authority leaves need the same leaf evidence as its entry point's tree; without the writer-event
+        # hints a role check no adapter can enumerate overrides the entry point's resolved principals.
+        from .internal_authority_slot import apply_internal_authority_slot_pass
+        from .predicate_artifacts import apply_mapping_event_hint_pass, apply_solmate_authority_hint_pass
+
+        apply_mapping_event_hint_pass(contract, classified)
+        apply_solmate_authority_hint_pass(contract, classified)
+        apply_internal_authority_slot_pass(contract, classified)
         apply_reentrancy_pause_pass(contract, classified)
         # Membership inventories are source evidence shared with the entry analysis; do not synthesize per-site quorums.
         from .authorization import attach_membership_inventories

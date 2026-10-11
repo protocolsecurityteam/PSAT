@@ -61,5 +61,5 @@ def test_repo_returns_rows_with_raw_column_comparison(db_session):
     assert len(lowered) == 40
     mixed = repo.iter_event_rows(chain_id=1, event_address=TARGET_ADDR.upper(), topic0s=[TARGET_TOPIC0.upper()])
     assert len(mixed) == 40
-    block, complete = repo._cursor_state(1, TARGET_ADDR.upper(), TARGET_TOPIC0.upper())
+    block, complete = repo.cursor_state(1, TARGET_ADDR.upper(), TARGET_TOPIC0.upper())
     assert (block, complete) == (10_000, True)

@@ -315,7 +315,7 @@ def test_solmate_roles_defer_on_an_undecodable_role_row(db_session):
 
 
 def test_membership_key_words_refuse_an_undecodable_row(db_session):
-    db_session.add(_row())
+    db_session.add_all([_warm_cursor(), _row()])
     db_session.flush()
 
     class _Ctx:

@@ -160,6 +160,8 @@ def collect_contract_analysis_with_artifacts(
         if getattr(fn, "visibility", "") in ("public", "external")
     )
 
+    # A whole-artifact build failure; the analysis then reports itself incomplete so it is never reused as complete.
+    semantic_errors: list[str] = []
     predicate_trees_artifact: dict[str, Any]
     pause_info: PauseInfo
     try:
@@ -172,7 +174,14 @@ def collect_contract_analysis_with_artifacts(
             extra={"exc_type": type(exc).__name__, "phase": "predicate_trees_emit"},
         )
         record_degraded(phase="predicate_trees_emit", exc=exc, context={"project_dir": str(project_dir)})
-        raise
+        semantic_errors.append(f"predicate_trees_emit: {type(exc).__name__}: {exc}")
+        predicate_trees_artifact = {"schema_version": "semantic", "error": str(exc)}
+        pause_info = {
+            "pause_state_vars": [],
+            "pause_toggle_functions": [],
+            "reentrancy_state_vars": [],
+            "reentrancy_guarded_functions": [],
+        }
 
     effects_artifact: EffectsArtifact | dict[str, Any]
     try:
@@ -185,25 +194,28 @@ def collect_contract_analysis_with_artifacts(
             extra={"exc_type": type(exc).__name__, "phase": "effects_emit"},
         )
         record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
-        raise
+        semantic_errors.append(f"effects_emit: {type(exc).__name__}: {exc}")
+        effects_artifact = {"schema_version": "semantic", "error": str(exc)}
 
     # Mint claims from the facts and project them onto legacy ``effect_labels``; must run before semantic_control, which
     # reads them.
-    analysis_errors: list[str] = []
     with _phase("claims", durations_ms):
         try:
             claims_artifact = build_claims(subject_contract, effects_artifact, predicate_trees_artifact)
-            analysis_errors.extend(claims_artifact.get("errors", []))
             attach_claims_to_effects(effects_artifact, claims_artifact)
             project_effect_labels(effects_artifact)
+            # A matcher that raised published nothing; its claims are not determined, not absent.
+            semantic_errors.extend(
+                f"claim_matcher: {claim_id}" for claim_id in claims_artifact.get("failed_matchers") or []
+            )
         except Exception as exc:
-            analysis_errors.append(f"claims: {type(exc).__name__}")
             logger.warning(
                 "claims emit failed for %s",
                 project_dir,
                 extra={"exc_type": type(exc).__name__, "phase": "claims"},
             )
             record_degraded(phase="claims", exc=exc, context={"project_dir": str(project_dir)})
+            semantic_errors.append(f"claims: {type(exc).__name__}: {exc}")
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)
@@ -274,8 +286,8 @@ def collect_contract_analysis_with_artifacts(
             else ("library" if getattr(subject_contract, "is_library", False) else "contract"),
         },
         "analysis_status": {
-            "static_analysis_completed": True,
-            "errors": analysis_errors,
+            "static_analysis_completed": not semantic_errors,
+            "errors": semantic_errors,
         },
         "summary": summary,
         "contract_classification": classification,

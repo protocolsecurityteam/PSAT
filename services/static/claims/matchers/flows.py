@@ -33,6 +33,9 @@ def _carries(sink: dict[str, Any], flows: list[dict[str, Any]]) -> bool:
         if flow.get("direction") != "value_router":
             if (selector is not None and selector == flow.get("selector")) or _is_value_call(sink):
                 return True
+            # A token-first library move: the library call publishes no selector, so the flow names its carrier.
+            if selector is None and _bare_sink_callee(sink) in (flow.get("library_callees") or ()):
+                return True
             continue
         for op in flow.get("router_ops") or []:
             if not isinstance(op, dict):

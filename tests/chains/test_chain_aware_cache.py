@@ -5,13 +5,13 @@ from tests.cache_helpers import (
     _sqlite_compatible_store_artifact,
     db_session,  # noqa: F401
     requires_postgres,
+    store_semantic_artifacts,
 )
 
 pytestmark = requires_postgres
 
 
 def _create_completed_job_with_chain(session, address, chain, name="TestContract"):
-    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import (
         Contract,
         ContractSummary,
@@ -22,6 +22,8 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
     from db.queue import create_job, store_source_files
 
     store_artifact = _sqlite_compatible_store_artifact
+
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
     job = create_job(session, {"address": address, "name": name, "chain": chain})
     job.status = JobStatus.completed
@@ -76,8 +78,7 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
     )
 
     store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
-    store_artifact(session, job.id, "predicate_trees", data={"schema_version": "semantic", "trees": {}})
-    store_artifact(session, job.id, "effects", data={"schema_version": "semantic", "functions": {}})
+    store_semantic_artifacts(session, job.id)
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
     store_artifact(session, job.id, "control_tracking_plan", data={"controllers": []})

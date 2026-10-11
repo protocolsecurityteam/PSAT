@@ -127,3 +127,40 @@ def test_null_chain_contract_adopts_an_existing_mainnet_job(api_client, db_sessi
     db_session.expire_all()
     row = db_session.query(Contract).filter_by(protocol_id=proto.id, address=addr).one()
     assert row.job_id == eth_job.id
+
+
+@requires_postgres
+def test_stale_existing_job_is_not_adopted(api_client, db_session):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import Contract, Job, JobStage, JobStatus, Protocol
+    from db.queue import create_job
+
+    proto = Protocol(name=f"era-{uuid.uuid4().hex[:10]}")
+    db_session.add(proto)
+    db_session.commit()
+
+    addr = _addr()
+    stale = create_job(db_session, {"address": addr, "chain": "ethereum"})
+    stale.status = JobStatus.completed
+    stale.stage = JobStage.done
+    stale.analysis_schema_version = ANALYSIS_SCHEMA_VERSION - 1
+    db_session.add(
+        Contract(
+            protocol_id=proto.id,
+            address=addr,
+            chain="ethereum",
+            contract_name="Shared",
+            job_id=None,
+            discovery_sources=["inventory"],
+        )
+    )
+    db_session.commit()
+
+    for _ in range(2):
+        r = api_client.post(f"/api/company/{proto.name}/analyze-remaining")
+        assert r.status_code == 200, r.text
+
+    db_session.expire_all()
+    row = db_session.query(Contract).filter_by(protocol_id=proto.id, address=addr).one()
+    assert row.job_id is not None and row.job_id != stale.id
+    assert db_session.query(Job).filter(Job.address == addr).count() == 2

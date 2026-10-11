@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from services.resolution.capabilities import DEFERRED_MARKER
 from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
 from utils.scoring_status import OPENNESS_STATES, TRACE_STEP_ENUMERABLE_ROLE_STORE, TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
@@ -563,6 +564,9 @@ def _authority_basis(cap_dict: dict[str, Any]) -> str | None:
         if not isinstance(step, dict):
             return None
         name = step.get("step")
+        if step.get(DEFERRED_MARKER):
+            # A deferral riding along from a denylist names no members.
+            continue
         if name == "authority_getter_basis":
             basis = step.get("basis")
             if not isinstance(basis, str):
@@ -702,7 +706,12 @@ def resolver_path(cap_dict: dict[str, Any]) -> list[str] | None:
     trace = cap_dict.get("trace")
     if not isinstance(trace, list):
         return None
-    steps = [str(step["step"]) for step in trace if isinstance(step, dict) and step.get("step")]
+    # A deferral carried from a folded denylist resolves no members.
+    steps = [
+        str(step["step"])
+        for step in trace
+        if isinstance(step, dict) and step.get("step") and not step.get(DEFERRED_MARKER)
+    ]
     return steps or None
 
 

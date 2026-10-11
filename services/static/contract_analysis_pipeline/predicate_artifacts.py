@@ -295,8 +295,9 @@ def _build_predicate_artifacts_with_pause_info(
         check_trees: dict[str, PredicateTree] = {}
         # Entry points whose caller-authority EQ/NEQ guard couldn't be lowered; policy must not default them to public.
         guard_uncertain: set[str] = set()
-        # full_name -> canonical signature where they differ, so selector consumers key on the real ``msg.sig``.
-        canonical_signatures: dict[str, str] = {}
+        # full_name -> canonical signature where they differ, so selector consumers key on the real ``msg.sig``;
+        # ``None`` where the types can't be lowered, so an absent entry can't be read as "the spelling is canonical".
+        canonical_signatures: dict[str, str | None] = {}
         # ``functions_entry_points`` is deduped. ``functions`` includes shadowed bases of overridden virtuals, which the
         # builder ran fully and then discarded (~146 s per contract on CumulativeMerkleDrop).
         for fn in getattr(contract, "functions_entry_points", []) or []:
@@ -306,7 +307,7 @@ def _build_predicate_artifacts_with_pause_info(
             # No selector to canonicalize.
             if not _is_fallback_or_receive(fn):
                 canonical = dispatch_signature(fn, fn.full_name)
-                if canonical is not None and canonical != fn.full_name:
+                if canonical != fn.full_name:
                     canonical_signatures[fn.full_name] = canonical
             fn_started = time.monotonic()
             tree = build_predicate_tree(fn, uncertain_out=guard_uncertain)

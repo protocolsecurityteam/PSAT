@@ -7,6 +7,7 @@ import pytest
 import requests
 from eth_utils.crypto import keccak
 
+from services.clients import etherscan
 from services.policy import principal_history
 from services.policy.principal_history import (
     build_principal_history,
@@ -167,6 +168,10 @@ _ADDASSET_SELECTOR = "0x298410e5"
 _TELLER_AUTHORITY = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
 
 
+# Etherscan's getLogs answer for a topic with no logs.
+_NO_RECORDS = {"status": "0", "message": "No records found", "result": []}
+
+
 class _FakeEtherscanResponse:
     def __init__(self, payload: dict) -> None:
         self._payload = payload
@@ -189,7 +194,11 @@ def _clear_principal_history_caches(monkeypatch):
 
 def _teller_predicate_trees() -> tuple[str, dict]:
     data = json.loads((_SOLMATE_FIXTURES / "teller_predicate_trees.json").read_text())
-    return data["contract"], {"trees": {"addAsset(ERC20)": data["trees"]["addAsset(ERC20)"]}}
+    # The static stage records the lowered form of every contract-typed signature.
+    return data["contract"], {
+        "trees": {"addAsset(ERC20)": data["trees"]["addAsset(ERC20)"]},
+        "canonical_signatures": {"addAsset(ERC20)": "addAsset(address)"},
+    }
 
 
 def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
@@ -289,7 +298,7 @@ def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch
 
 
 def _no_records_get(url, params=None, timeout=None):
-    return _FakeEtherscanResponse({"status": "0", "result": "No records found"})
+    return _FakeEtherscanResponse(_NO_RECORDS)
 
 
 def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
@@ -308,8 +317,7 @@ def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
 
 
 @pytest.mark.parametrize("pages", [1, 2])
-@pytest.mark.parametrize("empty_result", [[], "", "No records found"])
-def test_log_cache_ttl_expiry_refetches(monkeypatch, pages, empty_result):
+def test_log_cache_ttl_expiry_refetches(monkeypatch, pages):
     from services.clients.request_budget import RequestBudget, RequestBudgetExceeded, request_budget
 
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
@@ -324,7 +332,7 @@ def test_log_cache_ttl_expiry_refetches(monkeypatch, pages, empty_result):
         calls.append(params)
         if int(params["page"]) < pages:
             return _FakeEtherscanResponse({"status": "1", "result": [{"blockNumber": "0x1"}] * 1000})
-        return _FakeEtherscanResponse({"status": "0", "message": "No records found", "result": empty_result})
+        return _FakeEtherscanResponse(_NO_RECORDS)
 
     monkeypatch.setattr(requests, "get", _counting_get)
 
@@ -341,3 +349,104 @@ def test_log_cache_ttl_expiry_refetches(monkeypatch, pages, empty_result):
         with pytest.raises(RequestBudgetExceeded):
             principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=8453, topic0=SELECTOR)
         assert len(calls) == pages * 2
+
+
+def _logs_wire(monkeypatch, responses: list[dict]) -> list[dict]:
+    """Serve *responses* in order from the Etherscan wire and record each request's params."""
+    monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
+    monkeypatch.setattr(etherscan, "_RATE_LIMIT_BACKOFF", 0.0)
+    seen: list[dict] = []
+
+    def _wire(url, params=None, timeout=None):
+        seen.append(dict(params or {}))
+        return _FakeEtherscanResponse(responses[len(seen) - 1])
+
+    monkeypatch.setattr(requests, "get", _wire)
+    return seen
+
+
+def test_fetch_logs_retries_the_etherscan_rate_limit(monkeypatch):
+    log = _log(SELECTOR, [], True, 7, 0)
+    seen = _logs_wire(
+        monkeypatch,
+        [
+            {"status": "0", "message": "NOTOK", "result": "Max calls per sec rate limit reached (10/sec)"},
+            {"status": "1", "message": "OK", "result": [log]},
+        ],
+    )
+    assert principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR) == [log]
+    assert len(seen) == 2
+    assert {(p["module"], p["action"], p["topic0"], p["address"]) for p in seen} == {
+        ("logs", "getLogs", SELECTOR, AUTHORITY)
+    }
+
+
+def test_fetch_logs_reads_no_records_as_an_empty_answer(monkeypatch):
+    _logs_wire(monkeypatch, [_NO_RECORDS])
+    assert principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"status": "0", "message": "NOTOK", "result": "Invalid API Key"}, id="error"),
+        pytest.param({"status": "0", "message": "No records found", "result": "No records found"}, id="non_list"),
+    ],
+)
+def test_fetch_logs_never_reads_an_error_as_empty(monkeypatch, payload):
+    _logs_wire(monkeypatch, [payload])
+    with pytest.raises(RuntimeError):
+        principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)
+    assert (1, AUTHORITY, SELECTOR) not in principal_history._LOG_CACHE
+
+
+def test_fetch_logs_pages_until_a_short_page(monkeypatch):
+    full = [_log(SELECTOR, [], True, 10, i) for i in range(1000)]
+    tail = [_log(SELECTOR, [], True, 11, 0)]
+    seen = _logs_wire(monkeypatch, [{"status": "1", "result": full}, {"status": "1", "result": tail}])
+    assert len(principal_history._fetch_logs(authority_address=AUTHORITY, chain_id=1, topic0=SELECTOR)) == 1001
+    assert [p["page"] for p in seen] == ["1", "2"]
+
+
+@pytest.mark.parametrize(("raw", "value"), [("0x", 0), ("0x0", 0), ("0x1a", 26), ("26", 26), (None, 0), (5, 5)])
+def test_index_int_reads_etherscan_log_indexes(raw, value):
+    assert principal_history._index_int(raw) == value
+
+
+def test_a_bare_0x_is_not_read_as_a_block_number():
+    with pytest.raises(ValueError):
+        principal_history._hex_int("0x")
+
+
+def test_bare_0x_quantities_do_not_fail_the_history(monkeypatch):
+    contract, predicate_trees = _teller_predicate_trees()
+    user_role_topic = _topic("UserRoleUpdated(address,uint8,bool)")
+    log = _log(user_role_topic, [_address_topic(USER), _uint_topic(5)], True, 12, 0)
+    log["transactionIndex"] = "0x"
+    log["logIndex"] = "0x"
+
+    real_get = etherscan.get
+
+    def _abi_or_wire(module, action, *args, **kwargs):
+        if (module, action) == ("contract", "getabi"):
+            return {"result": _ROLES_AUTHORITY_ABI}
+        return real_get(module, action, *args, **kwargs)
+
+    monkeypatch.setattr(etherscan, "get", _abi_or_wire)
+    monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
+
+    def _wire(url, params=None, timeout=None):
+        if (params or {}).get("topic0") == user_role_topic:
+            return _FakeEtherscanResponse({"status": "1", "result": [log]})
+        return _FakeEtherscanResponse(_NO_RECORDS)
+
+    monkeypatch.setattr(requests, "get", _wire)
+
+    result = build_principal_history(
+        contract_address=contract,
+        chain_id=1,
+        predicate_trees=predicate_trees,
+        state_var_values={"authority": _TELLER_AUTHORITY},
+    )
+    assert result["sources"][0]["status"] == "ok"
+    assert any(m["principal"] == USER and m["granted_at_log_index"] == 0 for m in result["role_membership"])

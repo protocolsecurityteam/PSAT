@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from db.models import JobStatus
 from tests.conftest import requires_postgres
 from workers.static_worker import StaticWorker
 
@@ -127,11 +128,11 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
     session = MagicMock()
 
     # Calls 1+2 are the first proxy, 3+4 the second; only call 4 hits a prior job.
-    existing_in_cascade = SimpleNamespace(id="prior-impl-in-same-cascade")
+    existing_in_cascade = SimpleNamespace(id="prior-impl-in-same-cascade", status=JobStatus.queued)
     call_count = {"n": 0}
 
-    def _fake_execute(query, *params):
-        if params:
+    def _fake_execute(query, *_params):
+        if "pg_advisory_xact_lock" in str(query):
             return MagicMock()
         call_count["n"] += 1
         result = MagicMock()
@@ -219,7 +220,7 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
 def test_no_force_uses_global_dedupe(monkeypatch):
     worker = StaticWorker()
     session = MagicMock()
-    prior = SimpleNamespace(id="prior-impl-from-other-cascade")
+    prior = SimpleNamespace(id="prior-impl-from-other-cascade", status=JobStatus.queued)
     session.execute.return_value.scalar_one_or_none.return_value = prior
 
     created_jobs: list[dict] = []

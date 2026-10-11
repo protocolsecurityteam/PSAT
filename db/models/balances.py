@@ -524,8 +524,9 @@ class IndexedEventCursor(Base):
     # How the cursor came to exist and, with ``first_indexed_block_basis`` via ``cursor_permits_exactness``, whether it
     # may support an exact result. ``predicate_tree_hint`` and NULL are eligible bases; everything else isn't, including
     # ``tracked_topics_asserted`` (topics with no variable attribution) and the default ``not_determined``. Read in
-    # ``_cursor_state`` (services/resolution/repos/event_logs_pg.py), ``_authority_has_role_store_cursor`` and
-    # ``_authority_backfilled``. Only ever upgraded, to ``predicate_tree_hint``, and only on a witnessed cursor.
+    # ``PostgresEventLogRepo.cursor_state`` (services/resolution/repos/event_logs_pg.py),
+    # ``_authority_has_role_store_cursor`` and ``_authority_backfilled``. Only ever upgraded, to
+    # ``predicate_tree_hint``, and only on a witnessed cursor.
     enrollment_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Largest accepted page, the cap in force, and whether the record is continuous from ``first_indexed_block``. A page
     # at the cap may be truncated, so absence is proven only when every window came back under an enforced cap. NULL on

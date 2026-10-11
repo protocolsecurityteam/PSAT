@@ -23,6 +23,36 @@ def _stub_membership_probe(monkeypatch):
     monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
 
 
+def test_an_incomplete_run_decays_nothing_it_missed():
+    """A run whose LLM steps failed read the wrong pages; a contract it missed is not evidence the contract is gone."""
+    from services.discovery.inventory import merge_inventory
+
+    prev = {
+        "contracts": [
+            {"address": ADDR_A, "name": "ContractA", "confidence": 0.3},
+            {"address": ADDR_B, "name": "ContractB", "confidence": 0.9},
+        ],
+    }
+    new = {"contracts": [], "complete": False, "errors": [{"provider": "llm"}], "notes": ["incomplete"]}
+
+    merged = merge_inventory(prev, new)
+
+    assert {c["address"].lower(): c["confidence"] for c in merged["contracts"]} == {
+        ADDR_A.lower(): 0.3,
+        ADDR_B.lower(): 0.9,
+    }
+    assert merged["complete"] is False
+    assert "stale_below_confidence_floor" not in merged["dropped"]
+
+
+def test_a_complete_run_carries_no_completeness_flag():
+    from services.discovery.inventory import merge_inventory
+
+    merged = merge_inventory({"contracts": []}, {"contracts": []})
+
+    assert "complete" not in merged
+
+
 def test_merge_inventory_new_and_previous():
     from services.discovery.inventory import merge_inventory as _merge_inventory
 

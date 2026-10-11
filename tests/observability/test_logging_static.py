@@ -1,4 +1,6 @@
-"""Required semantic extraction failures remain observable and stop analysis."""
+"""Semantic-emit swallows are WARNING + ``record_degraded``, and ``predicate_fns_attempted`` vs
+``predicate_trees_built`` makes an empty semantic artifact chartable.
+"""
 
 from __future__ import annotations
 
@@ -42,14 +44,19 @@ def _stub_analysis_phases(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "builder, phase",
-    [("build_predicate_artifacts_with_pause_info", "predicate_trees_emit"), ("build_effects", "effects_emit")],
+    "builder, phase, artifact",
+    [
+        ("build_predicate_artifacts_with_pause_info", "predicate_trees_emit", "predicate_trees"),
+        ("build_effects", "effects_emit", "effects"),
+    ],
 )
-def test_core_semantic_emit_failure_records_degraded_and_raises(monkeypatch, tmp_path, caplog, builder, phase):
+def test_core_semantic_emit_failure_records_degraded_not_exception(
+    monkeypatch, tmp_path, caplog, builder, phase, artifact
+):
     _stub_analysis_phases(monkeypatch)
 
     def _boom(_contract):
-        raise RuntimeError("predicate IR-gen exploded")
+        raise RuntimeError("semantic IR-gen exploded")
 
     monkeypatch.setattr(core, "build_predicate_artifacts_with_pause_info", lambda _: ({"trees": {}}, {}))
     monkeypatch.setattr(core, builder, _boom)
@@ -62,8 +69,7 @@ def test_core_semantic_emit_failure_records_degraded_and_raises(monkeypatch, tmp
     try:
         with bind_trace_context(trace_id="t", job_id="j", stage="static", worker_id="StaticWorker-1"):
             with caplog.at_level("WARNING"):
-                with pytest.raises(RuntimeError, match="predicate IR-gen exploded"):
-                    collect_contract_analysis_with_artifacts(tmp_path)
+                analysis, trees, effects = collect_contract_analysis_with_artifacts(tmp_path)
     finally:
         stage_metrics_var.reset(met_token)
         degraded_errors_var.reset(deg_token)
@@ -75,11 +81,17 @@ def test_core_semantic_emit_failure_records_degraded_and_raises(monkeypatch, tmp
     assert emit.stage == "static"
     assert emit.exc_type == "builtins.RuntimeError"
 
-    rec = next(r for r in caplog.records if getattr(r, "phase", None) == phase)
+    rec = next(r for r in caplog.records if r.getMessage().startswith(f"semantic {artifact} emit failed"))
     assert rec.levelname == "WARNING"
     assert getattr(rec, "exc_type", None) == "RuntimeError"
 
-    assert "secondary_impl_pointers" not in metrics
+    failed = trees if artifact == "predicate_trees" else effects
+    assert failed is not None and failed["error"]
+    # The failure is recorded on the analysis too, so it is never reused as a complete one (#113).
+    assert analysis["analysis_status"]["static_analysis_completed"] is False
+    assert analysis["analysis_status"]["errors"] == [f"{phase}: RuntimeError: semantic IR-gen exploded"]
+    assert metrics["secondary_impl_pointers"] == 0
+    assert any(k.startswith("phase_ms_") for k in metrics)
 
 
 def test_unknown_parent_chain_reports_once_per_job(caplog):

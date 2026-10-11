@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal as _signal
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -276,3 +277,81 @@ def test_audit_concurrency_overridable_via_env(_restore_audit_worker_modules, mo
 
     assert text_mod.AuditTextExtractionWorker.max_concurrent == 3
     assert scope_mod.AuditScopeExtractionWorker.max_concurrent == 5
+
+
+def _lock_timeout() -> Exception:
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("UPDATE audit_reports", {}, Exception("canceling statement due to lock timeout"))
+
+
+def test_persist_retry_stops_at_shutdown_and_leaves_the_row_for_stale_recovery(caplog, monkeypatch):
+    worker = _TestWorker()
+    attempts: list[int] = []
+
+    def failing_persist(audit_id: int, _result) -> None:
+        attempts.append(audit_id)
+        worker._running = False
+        raise _lock_timeout()
+
+    monkeypatch.setattr(worker, "_persist_outcome", failing_persist)
+    with caplog.at_level(logging.WARNING, logger=worker.log.name):
+        assert worker._persist_with_retry(5, _Outcome(), claimed_at=time.monotonic()) is False
+    assert attempts == [5]
+    assert any("unpersisted" in r.getMessage() for r in caplog.records)
+
+
+def test_persist_retry_succeeds_after_transient_failures_and_clears_the_streak(monkeypatch):
+    worker = _TestWorker()
+    failures = iter([_lock_timeout(), _lock_timeout()])
+
+    def flaky_persist(audit_id: int, result) -> None:
+        failure = next(failures, None)
+        if failure is not None:
+            raise failure
+        worker.persisted.append((audit_id, result))
+
+    monkeypatch.setattr(worker, "_persist_outcome", flaky_persist)
+    assert worker._persist_with_retry(6, "ok", claimed_at=time.monotonic()) is True
+    assert worker.persisted == [(6, "ok")]
+    assert worker._db_failing_since is None
+
+
+def test_a_persist_that_keeps_failing_gives_up_on_the_row_before_a_peer_could_reclaim_it(caplog, monkeypatch):
+    worker = _TestWorker()
+    worker.idle_poll_interval = 0.01
+    worker.stale_processing_seconds = 1
+    attempts: list[float] = []
+
+    def always_times_out(audit_id: int, _result) -> None:
+        attempts.append(time.monotonic())
+        raise _lock_timeout()
+
+    monkeypatch.setattr(worker, "_persist_outcome", always_times_out)
+    claimed_at = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger=worker.log.name):
+        assert worker._persist_with_retry(7, _Outcome(), claimed_at=claimed_at) is False
+
+    assert len(attempts) > 1
+    assert attempts[-1] - claimed_at < worker.stale_processing_seconds * worker.persist_retry_stale_fraction
+    assert worker._running
+    assert any("left unpersisted for stale recovery" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unpersisted_outcome_is_not_logged_as_the_rows_result(caplog, monkeypatch):
+    worker = _TestWorker(batches=[[_FakeRow(8)]])
+    monkeypatch.setattr(worker, "_persist_with_retry", lambda audit_id, result, *, claimed_at: False)
+    logged: list[int] = []
+    monkeypatch.setattr(worker, "_log_outcome", lambda audit_id, result: logged.append(audit_id))
+    original_claim = worker._claim_batch
+
+    def claim_then_stop(session):
+        batch = original_claim(session)
+        if not batch:
+            worker._running = False
+        return batch
+
+    monkeypatch.setattr(worker, "_claim_batch", claim_then_stop)
+    worker.run_loop()
+    assert worker.processed == [8]
+    assert logged == []

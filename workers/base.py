@@ -32,7 +32,13 @@ from db.queue import (
     update_job_detail,
 )
 from schemas.stage_errors import StageError, StageErrors
-from utils.logging import bind_trace_context, configure_logging, degraded_errors_var, stage_metrics_var
+from utils.logging import (
+    bind_trace_context,
+    configure_logging,
+    degraded_errors_var,
+    job_in_flight,
+    stage_metrics_var,
+)
 from utils.memory import (
     cgroup_memory_current_bytes,
     cgroup_memory_max_bytes,
@@ -221,13 +227,16 @@ class BaseWorker:
         # Test stubs may lack these fields.
         raw_request = getattr(job, "request", None)
         request = raw_request if isinstance(raw_request, dict) else {}
-        with bind_trace_context(
-            trace_id=getattr(job, "trace_id", None),
-            job_id=str(job.id),
-            stage=self.stage.value,
-            worker_id=self.worker_id,
-            address=getattr(job, "address", None),
-            chain=_job_chain_log_value(job, request),
+        with (
+            bind_trace_context(
+                trace_id=getattr(job, "trace_id", None),
+                job_id=str(job.id),
+                stage=self.stage.value,
+                worker_id=self.worker_id,
+                address=getattr(job, "address", None),
+                chain=_job_chain_log_value(job, request),
+            ),
+            job_in_flight(),
         ):
             # Per-job ``record_degraded`` accumulator, reset per job so parallel jobs don't share it.
             degraded_accumulator: list[StageError] = []

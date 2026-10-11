@@ -178,7 +178,7 @@ def _conflict_hints(value_position):
 
 def _run_conflict_fold(hints):
     repo = PostgresEventLogRepo(cast(Any, FakeSession(_conflict_rows())))
-    repo._cursor_state = lambda chain_id, event_address, topic0: (100, True)
+    repo.cursor_state = lambda chain_id, event_address, topic0: (100, True)
     return repo.fold_event_history(
         chain_id=1,
         event_address=ADDR_A,

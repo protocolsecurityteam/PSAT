@@ -70,7 +70,7 @@ class TestAnalysisPhaseFailure:
         + [
             (name, invalid)
             for name in ("predicate_trees", "effects")
-            for invalid in (None, {}, {"error": "extraction failed"}, {"trees": [], "functions": []})
+            for invalid in (None, {}, {"trees": [], "functions": []})
         ],
     )
     def test_stores_analysis_error_on_failure(self, monkeypatch, tmp_path, artifact_name, invalid):

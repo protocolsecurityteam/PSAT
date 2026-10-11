@@ -105,6 +105,7 @@ def _confidence(
     discovery_entities: dict[str, set[str]] | None = None,
     composed_signals: set[tuple[Any, ...]] | None = None,
     ceiling_signals: set[tuple[Any, ...]] | None = None,
+    unanswered_signals: set[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """Monotone in resolution work: the denominator is the perimeter.
 
@@ -119,6 +120,9 @@ def _confidence(
 
     Keys go through ``value_plane.canonical`` so an implementation doesn't get a second copy of its proxy's band. The
     zero address is excluded. A proven-codeless entity answers reach and capability vacuously but not pricing.
+
+    ``unanswered_signals`` are signals whose own answer can't be read back (an enumerated principal row that is gone);
+    they stay in every denominator and answer nothing.
     """
     perimeter: dict[str, float] = {}
     folded: set[str] = set()
@@ -141,6 +145,8 @@ def _confidence(
         admit(key)
         for controlled in closure.controlled_by(key):
             admit(controlled)
+    for key in sorted(closure.controllers_not_determined):
+        admit(key)
     # Below here is what discovery proved exists, counted per relation against the walked base.
     walked = set(perimeter)
     discovery = discovery_entities or {}
@@ -171,7 +177,7 @@ def _confidence(
             signal.authority_openness == OPENNESS_OPEN
             or signal.principal_state == PRINCIPAL_STATE_ENUMERATED
             or _gate(signal, "exact_empty_credit").is_determined
-        )
+        ) and _signal_identity(signal) not in (unanswered_signals or set())
         reach[key][1] += 1
         scored[key][1] += 1
         if answered:
@@ -215,6 +221,14 @@ def _confidence(
                 else:
                     own_witness_signals += 1
                     credit_paths_by_key[key].add(CREDIT_PATH_OWN)
+
+    # Who controls an anchor whose member replay never completed is a question posed and not answered.
+    unread_controllers = sorted(
+        {value_plane.canonical(key) for key in closure.controllers_not_determined if not P.is_zero_key(key)}
+    )
+    for key in unread_controllers:
+        reach[key][1] += 1
+        scored[key][1] += 1
 
     def weighted(table: dict[str, list[int]]) -> float:
         total = 0.0
@@ -347,6 +361,7 @@ def _confidence(
         "implementation_entities_folded": len(folded),
         "zero_address_entities_excluded": len(zero_excluded),
         "proven_codeless_answered": len(codeless_answered),
+        "controller_enumeration_not_determined": len(unread_controllers),
         "discovery_relation_entities_admitted": discovery_admitted,
         "headline_rule": "report the MINIMUM; any larger figure over-claims",
         "monotonicity": (

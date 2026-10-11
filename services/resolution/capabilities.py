@@ -278,9 +278,13 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     if a.kind == "cofinite_blacklist" and b.kind == "cofinite_blacklist":
         # Anyone not in (a.blacklist ∪ b.blacklist).
         return _carry_fold_provenance(
-            CapabilityExpr.cofinite_blacklist(
-                _canon_addresses((a.blacklist or []) + (b.blacklist or [])),
-                blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+            _with_operand_traces(
+                CapabilityExpr.cofinite_blacklist(
+                    _canon_addresses((a.blacklist or []) + (b.blacklist or [])),
+                    blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+                ),
+                a,
+                b,
             ),
             a,
             b,
@@ -311,9 +315,13 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         ab = set((a.blacklist or []))
         bb = set((b.blacklist or []))
         return _carry_fold_provenance(
-            CapabilityExpr.cofinite_blacklist(
-                _canon_addresses(list(ab & bb)),
-                blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+            _with_operand_traces(
+                CapabilityExpr.cofinite_blacklist(
+                    _canon_addresses(list(ab & bb)),
+                    blacklist_quality=_combine_blacklist_quality(a.blacklist_quality, b.blacklist_quality),
+                ),
+                a,
+                b,
             ),
             a,
             b,
@@ -382,13 +390,15 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
         if probe is not None:
             conditions.append(probe)
         # Deliberately no fold provenance: a probe isn't an enumeration and has no height (a test asserts this).
-        return CapabilityExpr.cofinite_blacklist(
+        complement = CapabilityExpr.cofinite_blacklist(
             [],
             blacklist_quality="lower_bound",
             confidence=a.confidence,
             conditions=conditions,
             subject=a.subject,
         )
+        complement.trace = _deferral_steps(a.check)
+        return complement
     if a.kind == "conditional_universal":
         # The negation of a condition isn't always representable (e.g. business invariants).
         return CapabilityExpr.unsupported("negate_conditional_universal")
@@ -541,11 +551,15 @@ def _union_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExpr) -
     fin = set(finite.members or [])
     out = _canon_addresses(list(bl - fin))
     return _carry_fold_provenance(
-        CapabilityExpr.cofinite_blacklist(
-            out,
-            confidence=_meet_confidence(finite.confidence, blacklist.confidence),
-            conditions=list(finite.conditions) + list(blacklist.conditions),
-            blacklist_quality=blacklist.blacklist_quality,
+        _with_operand_traces(
+            CapabilityExpr.cofinite_blacklist(
+                out,
+                confidence=_meet_confidence(finite.confidence, blacklist.confidence),
+                conditions=list(finite.conditions) + list(blacklist.conditions),
+                blacklist_quality=blacklist.blacklist_quality,
+            ),
+            finite,
+            blacklist,
         ),
         finite,
         blacklist,
@@ -637,12 +651,57 @@ def _intersect_cross_subject(a: CapabilityExpr, b: CapabilityExpr) -> Capability
     root stays exact-empty, and an empty bound side can't make the AND look ``resolved_empty``.
     """
     root, bound = (a, b) if b.subject == "bound" else (b, a)
-    return _attach_conditions(root, _bound_as_conditions(bound))
+    out = _attach_conditions(root, _bound_as_conditions(bound))
+    # The bound side's deferrals outlive its folding into a condition.
+    out.trace = (
+        list(out.trace)
+        + _carried_deferrals(bound)
+        + _deferral_steps(bound.check if bound.kind == "external_check_only" else None)
+    )
+    return out
 
 
 def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
     """A bound-subject capability as side conditions: its existing conditions plus one for the delegated check."""
     return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
+
+
+# Same value as ``deferred_reconciler.DEFERRED_MARKER``, shared by value to avoid an import dependency.
+DEFERRED_MARKER = "deferred_pending_index"
+DEFERRED_STEP = "deferred_external_check"
+
+
+def _deferral_steps(check: ExternalCheck | None) -> list[dict[str, Any]]:
+    """A cold-index deferral, as a trace step, for a probe a combinator folds away.
+
+    Without it the reconciler, which finds deferrals by their marker, never re-resolves the result once the index is
+    warm. Only a deferral naming the topic cursors it waits on is carried: the reconciler re-enqueues it once those
+    complete, while an address-level one (a role check, which also defers behind a failing tail) would re-enqueue on
+    every pass.
+    """
+    if check is None or not check.extra.get(DEFERRED_MARKER):
+        return []
+    topic0s = check.extra.get("deferred_topic0s")
+    if not topic0s:
+        return []
+    return [
+        {
+            "step": DEFERRED_STEP,
+            DEFERRED_MARKER: True,
+            "target_address": check.target_address,
+            "deferred_topic0s": list(topic0s),
+        }
+    ]
+
+
+def _carried_deferrals(*operands: CapabilityExpr) -> list[dict[str, Any]]:
+    return [step for operand in operands for step in operand.trace if step.get(DEFERRED_MARKER)]
+
+
+def _with_operand_traces(cap: CapabilityExpr, *operands: CapabilityExpr) -> CapabilityExpr:
+    """Carry the operands' deferrals onto a rebuilt cofinite, which otherwise keeps no trace."""
+    cap.trace = _carried_deferrals(*operands)
+    return cap
 
 
 def _external_check_as_condition(check: ExternalCheck | None) -> Condition | None:

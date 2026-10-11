@@ -225,6 +225,17 @@ def test_zero_receiver_values_are_dropped() -> None:
     assert cap.members == [R1]
 
 
+def test_a_receiver_write_the_scan_cannot_read_is_external_check() -> None:
+    # The later write (data word missing) could have replaced R1, so R1 is not a proven receiver.
+    unreadable = _receiver_set_log(30183, R2, block=20)
+    unreadable.data = "0x"
+    meta = _seeded_meta(_receiver_set_log(30183, R1), unreadable)
+    cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
+
+    assert cap.kind == "external_check_only"
+    assert _principals(cap) == []
+
+
 # --------------------------------------------------------------------------
 # Integration: compile the L1SyncPoolReceiver fixture and prove the static stage
 # stamps the mapping identity + writer specs and resolution enumerates end-to-end.

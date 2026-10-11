@@ -50,7 +50,12 @@ def test_find_completed_static_cache_picks_most_recent(db_session, artifact_name
                 db_session,
                 bad.id,
                 "contract_analysis",
-                data={"analysis_status": {"static_analysis_completed": True, "errors": ["claim matcher failed"]}},
+                data={
+                    "analysis_status": {
+                        "static_analysis_completed": False,
+                        "errors": ["claim_matcher: some_claim"],
+                    }
+                },
             )
         elif isinstance(invalid, str):
             bad.analysis_schema_version = 0 if invalid == "outdated" else None

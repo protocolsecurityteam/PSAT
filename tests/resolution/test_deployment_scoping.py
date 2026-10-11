@@ -31,7 +31,8 @@ def _fn_record(status: str = "resolved_empty") -> dict:
 
 
 def _mk_job(session, address, *, proxy=None, status, stage, root=None):
-    from db.models import Job
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import Job, JobStatus
 
     req = {"address": address}
     if proxy:
@@ -44,6 +45,8 @@ def _mk_job(session, address, *, proxy=None, status, stage, root=None):
         status=status,
         stage=stage,
         request=req,
+        # A completed analysis carries the era the fetch path stamped.
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION if status == JobStatus.completed else None,
         created_at=_now(),
         updated_at=_now(),
     )

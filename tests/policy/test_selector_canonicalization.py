@@ -118,12 +118,19 @@ def test_resolver_selector_uses_artifact_canonical_map(predicate_artifact):
     assert _selector_for_signature(exec_key) != EXECUTE_ADDRESS_BUG
 
 
-def test_selector_for_signature_falls_back_for_contracts_without_map():
-    assert _selector_for_signature("addAsset(ERC20)") == _sel("addAsset(address)")
+def test_selector_for_signature_without_a_map_entry_never_guesses_a_type():
+    """``ERC20`` could be a contract (``address``) or an enum/struct/value type; only the artifact's map, built from
+    Slither's types, lowers it.
+    """
+    assert _selector_for_signature("addAsset(ERC20)") is None
+    assert _selector_for_signature("addAsset(ERC20)", {"addAsset(ERC20)": "addAsset(address)"}) == _sel(
+        "addAsset(address)"
+    )
     assert _selector_for_signature("setNum(uint256)") == SET_NUM_CANONICAL
     assert _selector_for_signature(None) is None
     assert _selector_for_signature("notASignature") is None
-    assert _selector_for_signature("f(uint8)", {"f(uint8)": "bogus-no-parens"}) == _sel("f(uint8)")
+    # A recorded entry that isn't a signature is not determined, not a licence to hash the spelling.
+    assert _selector_for_signature("f(uint8)", {"f(uint8)": "bogus-no-parens"}) is None
 
 
 # Mirrors LayerZeroTeller ``depositAndBridgeWithPermit`` and AvsOperator ``verifyBlsKey``.

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { chainColor, chainLabel } from "../chainMeta.js";
 import { formatDelay, formatUsd, principalLabel, shortAddr } from "../format.js";
+import { controllerEnumerationNote } from "../../vocab/principalNotes.js";
 import { machineFunctions, tabForLane } from "../lane.js";
 import { LANE_META, MACHINE_TABS, ROLE_META, TYPE_META } from "../meta.js";
 import { dedupeAndTagRows } from "../layout/governancePath.js";
@@ -92,6 +93,7 @@ export function EntityCard({
   const fullAddress = machine?.address || principal?.address || address;
 
   const usdLabel = isMachine ? formatUsd(machine.total_usd) : null;
+  const enumerationNote = controllerEnumerationNote(machine) || controllerEnumerationNote(principal);
 
   const tabCounts = isMachine
     ? {
@@ -157,6 +159,15 @@ export function EntityCard({
                 </>
               ) : null}
             </>
+          )}
+          {enumerationNote && (
+            <span
+              className="tag tag-md ps-badge ps-badge-not-determined"
+              style={{ "--badge-accent": "#b45309" }}
+              title={enumerationNote.statuses.map((s) => s.word).join("; ")}
+            >
+              Controllers not determined
+            </span>
           )}
           {principal && (
             <>

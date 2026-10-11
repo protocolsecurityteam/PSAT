@@ -52,23 +52,44 @@ def _own_selector(fn: Any) -> str | None:
 
 
 def _callee_signature(ir: Any) -> str | None:
+    """The callee's signature text, lowered for a high-level call when it can be. Library and internal calls keep
+    Slither's spelling, which parses argument types but is never a selector to hash: see
+    :func:`_callee_dispatch_selector`.
+    """
     fn = getattr(ir, "function", None)
-    # A resolved sibling call joins on the sibling's canonical selector (``cross_contract``), so lower user-defined
-    # types here too; ``addAsset(ERC20)`` would hash wrong. Library calls keep the string form: nothing joins on them.
     if type(ir).__name__ == "HighLevelCall" and fn is not None:
         from ..predicate_artifacts import _canonical_signature
 
         canonical = _canonical_signature(fn)
         if canonical:
             return canonical
-    for attr in ("full_name", "signature_str"):
-        value = getattr(fn, attr, None)
+    for value in (
+        *(getattr(fn, attr, None) for attr in ("full_name", "signature_str")),
+        getattr(ir, "function_name", None),
+    ):
         if isinstance(value, str) and "(" in value and value.endswith(")"):
-            return value.rsplit(".", 1)[-1]
-    value = getattr(ir, "function_name", None)
-    if isinstance(value, str) and "(" in value and value.endswith(")"):
-        return value.rsplit(".", 1)[-1]
+            return _unqualified(value)
     return None
+
+
+def _unqualified(signature: str) -> str:
+    """``Lib.f(Math.Rounding)`` -> ``f(Math.Rounding)``: only the name's qualifier goes, never a parameter type's."""
+    name, params = signature.split("(", 1)
+    return f"{name.rsplit('.', 1)[-1]}({params}"
+
+
+def _callee_dispatch_selector(ir: Any) -> str | None:
+    """The selector the call's destination receives, or ``None`` when it isn't determined.
+
+    Only a high-level call dispatches on its callee's selector. A library call's own selector is never one its first
+    argument answers: whatever that receiver is sent happens in the library body. Types that can't be lowered give no
+    selector rather than a hash of Slither's spelling.
+    """
+    if type(ir).__name__ != "HighLevelCall":
+        return None
+    from ..predicate_artifacts import dispatch_selector
+
+    return dispatch_selector(getattr(ir, "function", None), _callee_signature(ir))
 
 
 def _auto_getter_selector(variable: Any) -> str | None:
@@ -221,7 +242,7 @@ def _erc20_selector_evidence(unit: Any, seen: frozenset[int], depth: int) -> tup
         for ir in _node_irs(node):
             op = type(ir).__name__
             if op == "HighLevelCall":
-                called = _selector_for(_callee_signature(ir))
+                called = _callee_dispatch_selector(ir)
                 if called in wanted:
                     found.add(str(called))
                     visible.add(str(called))

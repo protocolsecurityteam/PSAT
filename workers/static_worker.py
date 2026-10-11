@@ -17,11 +17,14 @@ from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, R
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
     create_job,
+    failed_semantic_artifact,
     get_artifact,
     get_source_files,
     reconcile_impl_job_for_proxy,
     store_artifact,
+    usable_semantic_artifact,
 )
+from db.queue.artifacts import SEMANTIC_PAYLOAD_KEYS
 from schemas.contract_analysis import ContractAnalysis
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
 from services.discovery import (
@@ -41,10 +44,7 @@ from utils.chains import UnknownChainError, chain_by_id, chain_enabled, require_
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
 from workers.static_support.dynamic_deps import _merge_dynamic_deps, _start_block_from_prev_dyn
-from workers.static_support.source_prep import (
-    _detect_src_dir,
-    _prune_remappings,
-)
+from workers.static_support.source_prep import _detect_src_dir, _prune_remappings
 from workers.static_support.upgrade_history import (
     _apply_known_names_to_uh,
     _from_block_for_upgrade_history,
@@ -1475,9 +1475,13 @@ class StaticWorker(BaseWorker):
             analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
                 project_dir
             )
-            from schemas.static_artifacts import validate_static_artifacts
-
-            validate_static_artifacts(semantic_predicate_trees, semantic_effects)
+            # Error-shaped builds are kept below as ``<name>_error``; anything else without its payload map is not a
+            # result at all.
+            for name, artifact in (("predicate_trees", semantic_predicate_trees), ("effects", semantic_effects)):
+                if failed_semantic_artifact(name, artifact):
+                    continue
+                if not isinstance(artifact, dict) or not isinstance(artifact.get(SEMANTIC_PAYLOAD_KEYS[name]), dict):
+                    raise ValueError(f"Incomplete static artifact: {name}")
         except Exception as exc:
             record_degraded(
                 phase="contract_analysis",
@@ -1487,6 +1491,15 @@ class StaticWorker(BaseWorker):
             _log_phase_error(str(job.id), address, contract_name, "contract_analysis", str(exc))
             store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
             return None
+
+        # A failed build is kept for diagnosis under ``<name>_error``, never under the name policy reads as the facts.
+        for name, artifact in (("predicate_trees", semantic_predicate_trees), ("effects", semantic_effects)):
+            if failed_semantic_artifact(name, artifact):
+                store_artifact(session, job.id, f"{name}_error", data=artifact)
+        if failed_semantic_artifact("predicate_trees", semantic_predicate_trees):
+            semantic_predicate_trees = None
+        if failed_semantic_artifact("effects", semantic_effects):
+            semantic_effects = None
 
         # ``predicate_trees`` and ``effects`` feed policy. ``default=str`` so a stray non-JSON analyzer object degrades
         # rather than killing the job.
@@ -1631,7 +1644,9 @@ class StaticWorker(BaseWorker):
         try:
             analysis = get_artifact(session, job.id, "contract_analysis")
             tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
-            predicate_trees = get_artifact(session, job.id, "predicate_trees")
+            predicate_trees = usable_semantic_artifact(
+                "predicate_trees", get_artifact(session, job.id, "predicate_trees")
+            )
         except Exception as exc:
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
@@ -1677,7 +1692,7 @@ class StaticWorker(BaseWorker):
                 contract_name=contract_name,
                 analysis=analysis,
                 tracking_plan=tracking_plan,
-                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                predicate_trees=predicate_trees,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
                 # Only a bundle this job produced may overwrite a current row; otherwise a fresh analysis and a later

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from typing_extensions import NotRequired
 
 from schemas.control_tracking import RESOLVED_CONTROLLER_TYPES, ResolvedControllerType
 from schemas.upgrade_history import (
+    UPGRADE_FETCH_COMPLETE,
+    UPGRADE_FETCH_ERROR,
     ImplementationRecord,
     ProxyUpgradeHistory,
     UpgradeEventRecord,
@@ -228,31 +230,39 @@ def parse_upgrade_log(log: dict) -> _ParsedUpgradeLog | None:
 
 
 def _fetch_logs_etherscan(proxy_address: str, topic0: str, from_block: int = 0, chain_id: int = 1) -> list[dict]:
+    """The topic's logs; "No records found" is an empty answer, and anything else that isn't a log list raises."""
     from services.clients.etherscan import get
 
-    try:
-        data = get(
-            "logs",
-            "getLogs",
-            chain_id=chain_id,
-            address=proxy_address,
-            topic0=topic0,
-            fromBlock=str(from_block),
-            toBlock="99999999",
-        )
-        result = data.get("result", [])
-        return result if isinstance(result, list) else []
-    except RuntimeError:
-        return []
+    data = get(
+        "logs",
+        "getLogs",
+        chain_id=chain_id,
+        empty_result_ok=True,
+        address=proxy_address,
+        topic0=topic0,
+        fromBlock=str(from_block),
+        toBlock="99999999",
+    )
+    result = data.get("result")
+    if not isinstance(result, list):
+        raise RuntimeError(f"Etherscan getLogs returned {type(result).__name__}, not a log list")
+    return result
 
 
-def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> list[_ParsedUpgradeLog]:
-    """All upgrade events for the proxies, sorted chronologically.
+class UpgradeLogFetch(NamedTuple):
+    events: list[_ParsedUpgradeLog]
+    # Proxy address -> event types whose fetch failed; those proxies' histories are incomplete.
+    failed: dict[str, list[str]]
+
+
+def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_id: int = 1) -> UpgradeLogFetch:
+    """All upgrade events for the proxies, sorted chronologically, and the topics that could not be read.
 
     Rate-limited by ``services.clients.etherscan``. ``from_block`` limits history; ``chain_id`` routes to the right
     explorer.
     """
     all_events: list[_ParsedUpgradeLog] = []
+    failed: dict[str, list[str]] = {}
 
     # Calls go through the global Etherscan lock, so threading only overlaps RTTs.
     tasks: list[tuple[str, str]] = []
@@ -274,8 +284,20 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
 
         # Original order so results are deterministic before sorting.
         for addr, topic0 in tasks:
-            raw_logs = results.get(f"{addr}|{topic0}", [])
-            if isinstance(raw_logs, BaseException) or not isinstance(raw_logs, list):
+            raw_logs = results.get(f"{addr}|{topic0}")
+            if not isinstance(raw_logs, list):
+                failed.setdefault(addr, []).append(EVENT_TOPICS[topic0])
+                exc = raw_logs if isinstance(raw_logs, BaseException) else RuntimeError("no result")
+                record_degraded(
+                    phase="upgrade_history_fetch", exc=exc, context={"address": addr, "event": EVENT_TOPICS[topic0]}
+                )
+                logger.warning(
+                    "Upgrade log fetch failed for %s %s: %s",
+                    addr,
+                    EVENT_TOPICS[topic0],
+                    exc,
+                    extra={"exc_type": type(exc).__name__},
+                )
                 continue
             for log in raw_logs:
                 event = parse_upgrade_log(log)
@@ -283,7 +305,7 @@ def fetch_upgrade_events(proxy_addresses: list[str], from_block: int = 0, chain_
                     all_events.append(event)
 
     all_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
-    return all_events
+    return UpgradeLogFetch(all_events, {addr: sorted(types) for addr, types in failed.items()})
 
 
 def _build_implementation_timeline(
@@ -405,7 +427,7 @@ def build_upgrade_history(
             "total_upgrades": 0,
         }
 
-    all_events = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block, chain_id=chain_id)
+    all_events, failed = fetch_upgrade_events(list(proxy_meta.keys()), from_block=from_block, chain_id=chain_id)
 
     events_by_proxy: dict[str, list[_ParsedUpgradeLog]] = {addr: [] for addr in proxy_meta}
     for event in all_events:
@@ -431,7 +453,11 @@ def build_upgrade_history(
             "last_upgrade_block": upgrade_events[-1]["block_number"] if upgrade_events else None,
             "implementations": implementations,
             "events": [_strip_internal(e) for e in proxy_events],
+            "fetch_status": UPGRADE_FETCH_ERROR if addr in failed else UPGRADE_FETCH_COMPLETE,
         }
+        if addr in failed:
+            proxies[addr]["fetch_errors"] = failed[addr]
+            proxies[addr]["refetch_from_block"] = from_block
         total_upgrades += len(upgrade_events)
         all_implementations.extend(implementations)
 
@@ -500,6 +526,7 @@ def project_to_events(
         if proxy_contract is None:
             out["proxies_skipped_no_contract"] += 1
             continue
+        proxy_contract.upgrade_history_status = proxy_info.get("fetch_status")
         session.query(UpgradeEvent).filter(UpgradeEvent.contract_id == proxy_contract.id).delete()
         for evt in proxy_info.get("events", []):
             if evt.get("event_type") != "upgraded":
@@ -1471,16 +1498,50 @@ def upgrade_action_counts(session, contract_ids) -> dict[int, dict]:
     * Deployments are excluded (a proxy's creation emits ``Upgraded``).
     * A post-exclusion zero publishes ``None``: only ERC-1967 topics are folded and ``old_impl`` is NULL on backfilled
     rows, so "none recorded" isn't "none happened".
+    * A proxy whose last history fetch errored publishes ``None`` whatever its rows say: they are the part that was
+    read.
 
     Still an upper bound: events with no receipt fact stay counted.
     """
+    from sqlalchemy import select
+
+    from db.models import Contract
+
+    ids = [int(cid) for cid in (contract_ids or [])]
+    fetch_status = (
+        dict(
+            session.execute(
+                select(Contract.id, Contract.upgrade_history_status).where(
+                    Contract.id.in_(ids), Contract.upgrade_history_status.is_not(None)
+                )
+            ).all()
+        )
+        if ids
+        else {}
+    )
+    folded = _fold_actions(session, ids)
+    for cid, status in fetch_status.items():
+        if status == UPGRADE_FETCH_ERROR and cid not in folded:
+            folded[cid] = {
+                "actions": set(),
+                "events_total": 0,
+                "events_without_tx_hash": 0,
+                "tx_facts_present": 0,
+                "events_unlinked": 0,
+                "deployments_excluded": 0,
+                "kinds": {},
+                "direct_blocks": [],
+                "chain_id": None,
+            }
     out: dict[int, dict] = {}
-    for cid, state in _fold_actions(session, contract_ids).items():
+    for cid, state in folded.items():
         count = len(state["actions"]) + state["events_without_tx_hash"]
         direct = [b for b in state["direct_blocks"] if b is not None]
+        fetch_errored = fetch_status.get(cid) == UPGRADE_FETCH_ERROR
         out[cid] = {
-            "count": count if count > 0 else None,
+            "count": count if count > 0 and not fetch_errored else None,
             "basis": {
+                "history_fetch_status": fetch_status.get(cid) or NOT_DETERMINED,
                 "events_total": state["events_total"],
                 "tx_facts_present": state["tx_facts_present"],
                 "events_unlinked": state["events_unlinked"],

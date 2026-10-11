@@ -222,6 +222,14 @@ def test_mapping_writer_specs_skip_non_authority_leaves(shape):
     assert _mapping_writer_specs_from_predicate_trees(_membership_tree(**shape)) == []
 
 
+def test_mapping_writer_specs_skip_a_mapping_with_only_removals():
+    # MasterMinter ``controllers``: adds are value writes, so a present-set replay of the removals names no one.
+    artifact = _membership_tree(mapping="controllers")
+    hint = artifact["trees"]["f()"]["leaf"]["set_descriptor"]["enumeration_hint"][0]
+    hint.update({"direction": "remove", "event_signature": "ControllerRemoved(address)"})
+    assert _mapping_writer_specs_from_predicate_trees(artifact) == []
+
+
 def test_replay_mapping_principals_skips_self_membership(monkeypatch):
     contract = "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
     member = "0xcccccccccccccccccccccccccccccccccccccccc"
@@ -231,7 +239,8 @@ def test_replay_mapping_principals_skips_self_membership(monkeypatch):
         lambda address, chain_id: 100,
     )
 
-    def fake_enumerate(address, specs, *, chain, bearer_token, from_block):
+    def fake_enumerate(address, specs, *, chain, bearer_token, from_block, to_block):
+        assert to_block == 200
         return {
             "principals": [
                 {
@@ -279,8 +288,10 @@ def test_replay_mapping_principals_skips_self_membership(monkeypatch):
         nodes=nodes,
         edges=edges,
         chain_id=1,
+        resolution_block=200,
     )
-    assert status == "complete"
+    assert status.status == "complete"
+    assert status.source == "hypersync"
     edge_list = list(edges.values())
     assert [(e["from_id"], e["to_id"], e["relation"]) for e in edge_list] == [
         (f"address:{contract}", f"address:{member}", "mapping_member")

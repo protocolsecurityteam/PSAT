@@ -121,6 +121,8 @@ def test_proxy_cache_immutable_eip1167(db_session, monkeypatch):
     assert contract.implementation.lower() == IMPL_ADDR.lower()
 
 
+# The donor is a current-era analysis, so the cache-hit job publishes its materialization, which reads bytecode.
+@pytest.mark.usefixtures("_stub_rpc_bytecode")
 def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
 
     from db.queue import create_job, get_artifact, get_source_files

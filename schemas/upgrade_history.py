@@ -62,6 +62,12 @@ class ImplementationRecord(TypedDict, total=False):
     timestamp_replaced: int | None
 
 
+# A fetch that errored on any topic leaves the proxy's history not_determined: its events are what was read, not every
+# upgrade. ``refetch_from_block`` is where the next refresh resumes, so the failed range is read again.
+UPGRADE_FETCH_COMPLETE = "complete"
+UPGRADE_FETCH_ERROR = "error"
+
+
 class ProxyUpgradeHistory(TypedDict):
     proxy_address: str
     proxy_type: str
@@ -71,6 +77,10 @@ class ProxyUpgradeHistory(TypedDict):
     last_upgrade_block: int | None
     implementations: list[ImplementationRecord]
     events: list[UpgradeEventRecord]
+    # Absent on artifacts from before the field and on ones rebuilt from ``upgrade_events`` rows.
+    fetch_status: NotRequired[str]
+    fetch_errors: NotRequired[list[str]]
+    refetch_from_block: NotRequired[int]
 
 
 class UpgradeHistoryOutput(TypedDict):

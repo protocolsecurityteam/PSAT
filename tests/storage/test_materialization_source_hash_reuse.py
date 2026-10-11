@@ -67,6 +67,28 @@ def test_source_hash_changes_with_source_and_compiler_inputs():
     assert source_content_hash(_flat_result(runs="999")) != base
 
 
+def _standard_json_result(name: str) -> dict[str, Any]:
+    import json
+
+    bundle = {
+        "language": "Solidity",
+        "sources": {"src/Bundle.sol": {"content": "contract Open {}\ncontract Guarded {}\n"}},
+        "settings": {"optimizer": {"enabled": True, "runs": 200}},
+    }
+    return {
+        "ContractName": name,
+        "SourceCode": "{" + json.dumps(bundle) + "}",
+        "EVMVersion": "Default",
+        "OptimizationUsed": "1",
+        "Runs": "200",
+    }
+
+
+def test_source_hash_separates_contracts_selected_from_one_bundle():
+    assert source_content_hash(_standard_json_result("Open")) != source_content_hash(_standard_json_result("Guarded"))
+    assert source_content_hash(_standard_json_result("Open")) == source_content_hash(_standard_json_result("Open"))
+
+
 @requires_postgres
 def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _clean_cm):
     src_hash = "0x" + "de" * 32

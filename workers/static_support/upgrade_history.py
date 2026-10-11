@@ -2,11 +2,50 @@
 
 from __future__ import annotations
 
-import json
+from schemas.upgrade_history import UPGRADE_FETCH_ERROR
+
+
+def _same_upgrade_log(a: dict, b: dict) -> bool:
+    """Whether two events are copies of one log.
+
+    Two indexed logs are the same log only at the same index. An event without ``log_index`` (rebuilt from
+    ``upgrade_events`` rows) is a copy only of an event it can't be told apart from: same block, transaction, type
+    and every recorded field.
+    """
+    if (a.get("block_number", 0), a.get("tx_hash", ""), a.get("event_type", "")) != (
+        b.get("block_number", 0),
+        b.get("tx_hash", ""),
+        b.get("event_type", ""),
+    ):
+        return False
+    a_index, b_index = a.get("log_index"), b.get("log_index")
+    if isinstance(a_index, int) and isinstance(b_index, int):
+        return a_index == b_index
+    shared = (set(a) & set(b)) - {"log_index"}
+    return all(a[key] == b[key] for key in shared)
+
+
+def _merged_fetch_status(prev_proxy: dict, new_proxy: dict) -> dict:
+    """The new fetch's status, which covers everything from the block the previous history resumed at.
+
+    An errored fetch keeps the earliest block either side still has to re-read, so the next refresh repeats it.
+    """
+    if new_proxy.get("fetch_status") != UPGRADE_FETCH_ERROR:
+        return {key: new_proxy[key] for key in ("fetch_status",) if key in new_proxy}
+    resume = [
+        proxy["refetch_from_block"]
+        for proxy in (prev_proxy, new_proxy)
+        if proxy.get("fetch_status") == UPGRADE_FETCH_ERROR and isinstance(proxy.get("refetch_from_block"), int)
+    ]
+    return {
+        "fetch_status": UPGRADE_FETCH_ERROR,
+        "fetch_errors": sorted(set(prev_proxy.get("fetch_errors") or []) | set(new_proxy.get("fetch_errors") or [])),
+        "refetch_from_block": min(resume) if resume else 0,
+    }
 
 
 def _merge_upgrade_history(prev: dict, new: dict) -> dict:
-    """Append-only merge by log identity; indexless legacy events collapse only when their payloads agree."""
+    """Append-only merge; copies of one log are kept once (:func:`_same_upgrade_log`) and timelines rebuilt."""
     from services.discovery.upgrade_history import _build_implementation_timeline
 
     merged_proxies: dict[str, dict] = {}
@@ -30,16 +69,9 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
         prev_events = prev_proxy.get("events", [])
         new_events = new_proxy.get("events", [])
 
-        seen: set[tuple] = set()
         merged_events: list[dict] = []
         for event in prev_events + new_events:
-            index = event.get("log_index")
-            if isinstance(index, int) and index >= 0:
-                key = (event.get("block_number", 0), event.get("tx_hash", ""), event.get("event_type", ""), index)
-            else:
-                key = (json.dumps({k: v for k, v in event.items() if k != "log_index"}, sort_keys=True),)
-            if key not in seen:
-                seen.add(key)
+            if not any(_same_upgrade_log(event, kept) for kept in merged_events):
                 merged_events.append(event)
 
         merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index") or 0))
@@ -57,6 +89,7 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
             "last_upgrade_block": upgrade_events[-1]["block_number"] if upgrade_events else None,
             "implementations": implementations,
             "events": merged_events,
+            **_merged_fetch_status(prev_proxy, new_proxy),
         }
         total_upgrades += len(upgrade_events)
 
@@ -69,8 +102,16 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
 
 
 def _from_block_for_upgrade_history(prev_uh: dict | None) -> int:
+    """One past the last stored event, unless a proxy's last fetch errored: then the block that fetch started from."""
     if not prev_uh or not prev_uh.get("proxies"):
         return 0
+    unread = [
+        proxy.get("refetch_from_block")
+        for proxy in prev_uh["proxies"].values()
+        if proxy.get("fetch_status") == UPGRADE_FETCH_ERROR
+    ]
+    if unread:
+        return min(block if isinstance(block, int) else 0 for block in unread)
     max_block = 0
     for proxy_info in prev_uh["proxies"].values():
         for event in proxy_info.get("events", []):

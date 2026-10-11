@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+CHALLENGE_ADDRESS = "0x" + "c4" * 20
+
 
 def _random_address() -> str:
     return "0x" + secrets.token_hex(20)
@@ -153,6 +155,16 @@ window.__APP_DATA__ = {{
 class _FakeDappHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/challenge":
+            # Vercel's bot checkpoint: a 429 page that is not the dApp, whatever addresses it happens to show.
+            encoded = f"<html><body>Vercel Security Checkpoint {CHALLENGE_ADDRESS}</body></html>".encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("x-vercel-mitigated", "challenge")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         body = self.server.site_map.get(parsed.path)  # pyright: ignore[reportAttributeAccessIssue]
         if body is not None:
             content_type = "text/html; charset=utf-8"
@@ -254,3 +266,29 @@ def test_crawler_captures_interactions_and_addresses_from_fake_dapp(tmp_path, fa
     txs = [i for i in log.interactions if i.type == "sendTransaction"]
     assert len(txs) == 2
     assert {tx.to for tx in txs} == {addresses["deposit_tx"], addresses["stake_tx"]}
+
+
+def test_a_challenged_page_is_recorded_as_not_loaded(fake_dapp_site):
+    """A bot challenge is not the dApp: nothing is captured from it and its outcome says why."""
+    pytest.importorskip("playwright.async_api", reason="Playwright is not installed")
+
+    crawl_module = importlib.import_module("services.crawlers.dapp.crawl")
+    challenge_url = fake_dapp_site["url"] + "challenge"
+    outcomes: dict[str, dict] = {}
+    try:
+        log = asyncio.run(
+            crawl_module._crawl_async([challenge_url, fake_dapp_site["url"]], chain_id=137, wait=1, outcomes=outcomes)
+        )
+    except Exception as exc:
+        _skip_if_playwright_unavailable(exc)
+        raise
+
+    assert outcomes[challenge_url] == {
+        "outcome": "blocked",
+        "status": 429,
+        "reason": "x-vercel-mitigated=challenge",
+    }
+    assert outcomes[fake_dapp_site["url"]]["outcome"] == "loaded"
+    captured = set(log.get_contract_addresses())
+    assert CHALLENGE_ADDRESS not in captured
+    assert fake_dapp_site["addresses"]["root_page"] in captured

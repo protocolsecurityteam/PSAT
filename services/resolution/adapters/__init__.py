@@ -173,15 +173,25 @@ class AdapterRegistry:
         return best[1] if best is not None else None
 
     def enumerate(self, descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr:
-        adapter_cls = self.pick(descriptor, ctx)
+        from ..pass_memo import adapter_context_key, canonical, memoized
+
+        ctx_key, keep_alive = adapter_context_key(ctx)
+        name, cap = memoized(
+            ctx,
+            ("adapter", tuple(self.adapters), canonical(descriptor), ctx_key),
+            lambda: self._enumerate(descriptor, ctx),
+            keep_alive=keep_alive,
+        )
         # Tally which adapter claimed each descriptor, so an adapter that silently stops matching shows as a
         # distribution shift.
         counters = ctx.meta.get("resolve_counters") if isinstance(ctx.meta, dict) else None
         if isinstance(counters, dict):
-            name = adapter_cls.__name__ if adapter_cls is not None else "no_adapter"
             bucket = counters.setdefault("adapter_match", {})
             bucket[name] = bucket.get(name, 0) + 1
+        return cap
+
+    def _enumerate(self, descriptor: SetDescriptor, ctx: EvaluationContext) -> tuple[str, CapabilityExpr]:
+        adapter_cls = self.pick(descriptor, ctx)
         if adapter_cls is None:
-            return CapabilityExpr.unsupported("no_adapter")
-        adapter = adapter_cls()
-        return adapter.enumerate(descriptor, ctx)
+            return "no_adapter", CapabilityExpr.unsupported("no_adapter")
+        return adapter_cls.__name__, adapter_cls().enumerate(descriptor, ctx)

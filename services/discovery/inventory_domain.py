@@ -18,6 +18,7 @@ import requests as _requests
 from services.clients import tavily
 from utils import llm
 from utils.chains import chain_by_name
+from utils.logging import record_degraded
 
 from .static_dependencies import normalize_address as _normalize_address
 
@@ -341,6 +342,7 @@ def _llm_select_domain(
             return selected[0], selected[1:]
         _debug_log(debug, f"LLM returned unparseable response: {response!r}")
     except (_requests.RequestException, json.JSONDecodeError, RuntimeError) as exc:
+        record_degraded(phase="inventory_domain_selection", exc=exc, context={"company": company})
         _debug_log(debug, f"LLM domain selection failed: {exc!r}")
     return None, []
 
@@ -409,6 +411,7 @@ def _llm_select_pages(
         _debug_log(debug, f"LLM recommended {len(recommended)} in-domain URL(s)")
         return recommended
     except (_requests.RequestException, json.JSONDecodeError, RuntimeError) as exc:
+        record_degraded(phase="inventory_page_selection", exc=exc, context={"company": company})
         _debug_log(debug, f"LLM page selection failed: {exc!r}")
         return []
 

@@ -8,8 +8,10 @@ from sqlalchemy.orm import Session
 
 from db.models import AuditContractCoverage, AuditReport, Contract, UpgradeEvent
 from schemas.api_responses import AuditBrief
+from schemas.upgrade_history import UPGRADE_FETCH_ERROR
 from services.audits.serializers import _audit_brief
 from utils.chains import UnknownChainError, chain_by_name
+from utils.scoring_status import NOT_DETERMINED
 
 
 def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dict[str, str | None]:
@@ -49,6 +51,8 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         .scalars()
         .all()
     )
+    # A partial history can't place a window's end, nor rule out an upgrade inside one.
+    history_unread = contract.upgrade_history_status == UPGRADE_FETCH_ERROR
     impl_windows: list[dict[str, Any]] = []
     for i, ev in enumerate(upgrade_rows):
         nxt = upgrade_rows[i + 1] if i + 1 < len(upgrade_rows) else None
@@ -60,6 +64,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
                 "from_ts": ev.timestamp.isoformat() if ev.timestamp else None,
                 "to_ts": nxt.timestamp.isoformat() if (nxt and nxt.timestamp) else None,
                 "tx_hash": ev.tx_hash,
+                "bounds": NOT_DETERMINED if history_unread else "recorded",
             }
         )
 
@@ -157,6 +162,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
             "contract_name": contract.contract_name,
             "is_proxy": contract.is_proxy,
             "current_implementation": contract.implementation,
+            "upgrade_history_status": contract.upgrade_history_status or NOT_DETERMINED,
         },
         "impl_windows": impl_windows,
         "coverage": coverage_out,

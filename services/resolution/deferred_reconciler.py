@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, aliased
 from db.jsonb import jsonb_has_payload
 from db.models import (
     Contract,
+    ControlGraphNode,
     EffectiveFunction,
     IndexedEventCursor,
     IndexedEventLog,
@@ -35,6 +36,7 @@ from db.models import (
     JobStatus,
     exactness_eligible_cursor_clause,
 )
+from services.resolution.mapping_enumerator import MAPPING_ENUMERATION_AWAITS, MAPPING_ENUMERATION_STATUS
 from services.resolution.role_store_standards import all_topic0s
 from utils.chains import UnknownChainError, chain_by_id, supported_chain_ids
 from utils.scoring_status import TRACE_STEP_ENUMERABLE_ROLE_STORE
@@ -47,9 +49,21 @@ DEFERRED_MARKER = "deferred_pending_index"
 _ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
 
 
-def _iter_deferred_authorities(node: Any) -> Iterator[str]:
-    """Yield ``target_address`` for every ``external_check_only`` leaf flagged ``deferred_pending_index``, walking
-    ``children`` and ``signer``.
+# A deferral's authority and the topic cursors it waits on; an empty tuple (adapters that don't name topics) waits on
+# any exactness-eligible cursor at the address.
+Deferral = tuple[str, tuple[str, ...]]
+
+
+def _deferral(addr: Any, topic0s: Any) -> Deferral | None:
+    if not (isinstance(addr, str) and addr.startswith("0x") and len(addr) == 42):
+        return None
+    topics = tuple(sorted({t.lower() for t in topic0s if isinstance(t, str)})) if isinstance(topic0s, list) else ()
+    return addr.lower(), topics
+
+
+def _iter_deferrals(node: Any) -> Iterator[Deferral]:
+    """Yield every deferral flagged ``deferred_pending_index``: on an ``external_check_only`` leaf, or carried as a
+    trace step by a combinator that folded the probe away (a negated denylist), walking ``children`` and ``signer``.
     """
     if not isinstance(node, dict):
         return
@@ -57,14 +71,25 @@ def _iter_deferred_authorities(node: Any) -> Iterator[str]:
         check = node.get("check") or {}
         extra = check.get("extra") or {}
         if extra.get(DEFERRED_MARKER):
-            addr = check.get("target_address")
-            if isinstance(addr, str) and addr.startswith("0x") and len(addr) == 42:
-                yield addr.lower()
+            deferral = _deferral(check.get("target_address"), extra.get("deferred_topic0s"))
+            if deferral is not None:
+                yield deferral
+    for step in node.get("trace") or []:
+        if isinstance(step, dict) and step.get(DEFERRED_MARKER):
+            deferral = _deferral(step.get("target_address"), step.get("deferred_topic0s"))
+            if deferral is not None:
+                yield deferral
     for child in node.get("children") or []:
-        yield from _iter_deferred_authorities(child)
+        yield from _iter_deferrals(child)
     signer = node.get("signer")
     if isinstance(signer, dict):
-        yield from _iter_deferred_authorities(signer)
+        yield from _iter_deferrals(signer)
+
+
+def _iter_deferred_authorities(node: Any) -> Iterator[str]:
+    """The authority address of every deferral :func:`_iter_deferrals` finds."""
+    for address, _topic0s in _iter_deferrals(node):
+        yield address
 
 
 def _chain_name_for(chain_id: int) -> str | None:
@@ -154,7 +179,7 @@ def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
 def _authority_backfilled(session: Session, chain_id: int, event_address: str) -> bool:
     """Whether any exactness-eligible cursor for ``event_address`` has ``backfill_complete``.
 
-    Mid-backfill cursors don't count (re-resolving would re-defer), and neither do cursors ``_cursor_state`` refuses, or
+    Mid-backfill cursors don't count (re-resolving would re-defer), and neither do cursors ``cursor_state`` refuses, or
     every pass would re-enqueue a resolution that still defers.
     """
     row = session.execute(
@@ -166,6 +191,29 @@ def _authority_backfilled(session: Session, chain_id: int, event_address: str) -
         .limit(1)
     ).first()
     return row is not None
+
+
+def _deferral_backfilled(session: Session, chain_id: int, deferral: Deferral) -> bool:
+    """Whether a deferral's re-resolution can answer: each topic cursor it named is backfilled and exactness-eligible,
+    or, when it named none, some cursor at the address is (:func:`_authority_backfilled`).
+
+    Waiting on the named cursors keeps a still-cold topic from re-enqueueing every pass while another topic at the
+    same address is already warm.
+    """
+    address, topic0s = deferral
+    if not topic0s:
+        return _authority_backfilled(session, chain_id, address)
+    warm = set(
+        session.execute(
+            select(func.lower(IndexedEventCursor.topic0))
+            .where(IndexedEventCursor.chain_id == chain_id)
+            .where(func.lower(IndexedEventCursor.event_address) == address)
+            .where(func.lower(IndexedEventCursor.topic0).in_(topic0s))
+            .where(IndexedEventCursor.backfill_complete.is_(True))
+            .where(exactness_eligible_cursor_clause())
+        ).scalars()
+    )
+    return warm.issuperset(topic0s)
 
 
 def _address_has_active_job(session: Session, address: str | None, *, chain_id: int, exclude_job_id: Any) -> bool:
@@ -206,10 +254,10 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
         .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
     ).all()
 
-    # job_id -> (address, deferred authority addresses)
-    by_job: dict[Any, tuple[str | None, set[str]]] = {}
+    # job_id -> (address, deferrals)
+    by_job: dict[Any, tuple[str | None, set[Deferral]]] = {}
     for job_id, address, capability_expr in rows:
-        authorities = set(_iter_deferred_authorities(capability_expr))
+        authorities = set(_iter_deferrals(capability_expr))
         if not authorities:
             continue
         _addr, existing = by_job.setdefault(job_id, (address, set()))
@@ -219,7 +267,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     # doesn't overwrite, since a linked-route job owns a contract and can't be an orphan candidate.
     adopt: dict[Any, int] = {}
     for job_id, address, capability_expr, contract_id in _orphaned_marker_rows(session, chain_id):
-        authorities = set(_iter_deferred_authorities(capability_expr))
+        authorities = set(_iter_deferrals(capability_expr))
         if not authorities:
             continue
         _addr, existing = by_job.setdefault(job_id, (address, set()))
@@ -241,8 +289,8 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     for job_id, (address, authorities) in by_job.items():
         if reenqueued >= limit:
             break
-        # Wait until every authority is warm, bounding re-enqueues to one per transition.
-        if not all(_authority_backfilled(session, chain_id, addr) for addr in authorities):
+        # Wait until every deferral can answer, bounding re-enqueues to one per transition.
+        if not all(_deferral_backfilled(session, chain_id, deferral) for deferral in authorities):
             continue
         job = session.get(Job, job_id)
         if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
@@ -273,7 +321,103 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
             "deferred-resolution reconciler re-enqueued policy for job %s address=%s authorities=%s",
             job_id,
             address,
-            sorted(authorities),
+            sorted({addr for addr, _topics in authorities}),
+        )
+
+    if reenqueued:
+        session.commit()
+    else:
+        session.rollback()
+    return reenqueued
+
+
+# An unsettled replay's awaited authority and topics, plus the frontier a failed tail left unproven (``None`` if any).
+MappingAwait = tuple[str, tuple[str, ...], int | None]
+
+
+def unsettled_mapping_await(details: Any, chain_id: int) -> MappingAwait | None:
+    """The await an unsettled node on ``chain_id`` names, or ``None`` when it is settled, on another chain, or names no
+    topics (a re-run could not be told apart from this one).
+    """
+    if not isinstance(details, dict) or details.get(MAPPING_ENUMERATION_STATUS) == "complete":
+        return None
+    awaits = details.get(MAPPING_ENUMERATION_AWAITS)
+    if not isinstance(awaits, dict) or awaits.get("chain_id") != chain_id:
+        return None
+    deferral = _deferral(awaits.get("event_address"), awaits.get("topic0s"))
+    if deferral is None or not deferral[1]:
+        return None
+    covers = awaits.get("covers_block")
+    return deferral[0], deferral[1], covers if isinstance(covers, int) and not isinstance(covers, bool) else None
+
+
+def _mapping_await_satisfied(session: Session, chain_id: int, pending: MappingAwait) -> bool:
+    """Whether the index can now answer the replay: every awaited topic cursor is backfilled and exactness-eligible,
+    and, after a failed tail, every one has reached the block that tail missed.
+    """
+    address, topic0s, covers_block = pending
+    if not _deferral_backfilled(session, chain_id, (address, topic0s)):
+        return False
+    if covers_block is None:
+        return True
+    frontier = session.execute(
+        select(func.min(IndexedEventCursor.last_indexed_block))
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == address)
+        .where(func.lower(IndexedEventCursor.topic0).in_(topic0s))
+    ).scalar()
+    return isinstance(frontier, int) and frontier >= covers_block
+
+
+def reconcile_unsettled_mapping_replays(session: Session, *, chain_id: int, limit: int = 200) -> int:
+    """One pass over completed jobs whose graph holds a mapping-member replay that didn't settle.
+
+    Re-enqueues a job's policy stage once the index can answer one of its awaited replays; returns the count. The re-run
+    reads that replay from the index and drops the await, so a job isn't selected again for it; an await whose cursors
+    never warm never re-enqueues. Commits only when something was re-enqueued.
+    """
+    rows = session.execute(
+        select(Job.id, Job.address, ControlGraphNode.details)
+        .join(Contract, Contract.job_id == Job.id)
+        .join(ControlGraphNode, ControlGraphNode.contract_id == Contract.id)
+        .where(Job.status == JobStatus.completed)
+        .where(Job.stage == JobStage.done)
+        .where(Job.chain_id == chain_id)
+        .where(ControlGraphNode.details.has_key(MAPPING_ENUMERATION_AWAITS))
+    ).all()
+
+    by_job: dict[Any, tuple[str | None, set[MappingAwait]]] = {}
+    for job_id, address, details in rows:
+        pending = unsettled_mapping_await(details, chain_id)
+        if pending is None:
+            continue
+        by_job.setdefault(job_id, (address, set()))[1].add(pending)
+
+    reenqueued = 0
+    satisfied: dict[MappingAwait, bool] = {}
+    for job_id, (address, awaits) in by_job.items():
+        if reenqueued >= limit:
+            break
+        ready = []
+        for pending in sorted(awaits, key=lambda a: (a[0], a[1], a[2] or 0)):
+            if pending not in satisfied:
+                satisfied[pending] = _mapping_await_satisfied(session, chain_id, pending)
+            if satisfied[pending]:
+                ready.append(pending[0])
+        if not ready:
+            continue
+        job = session.get(Job, job_id)
+        if job is None or job.status != JobStatus.completed or job.stage != JobStage.done:
+            continue
+        if _address_has_active_job(session, job.address, chain_id=chain_id, exclude_job_id=job.id):
+            continue
+        _requeue_policy(job, "Re-resolving: durable event index caught up for an unsettled mapping replay")
+        reenqueued += 1
+        logger.info(
+            "mapping-replay reconciler re-enqueued policy for job %s address=%s authorities=%s",
+            job_id,
+            address,
+            sorted(set(ready)),
         )
 
     if reenqueued:

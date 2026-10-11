@@ -1,5 +1,5 @@
 {
-  "payload_schema": 1,
+  "payload_schema": 2,
   "skeleton": {
     "all_addresses_count": "int",
     "company": "str",
@@ -52,6 +52,16 @@
       }
     ],
     "fund_flows": [],
+    "member_analysis": {
+      "analyzed": "int",
+      "by_state": {
+        "analysis_failed": "int",
+        "analysis_not_completed": "int"
+      },
+      "members": "int",
+      "not_analyzed": [],
+      "not_determined": "int"
+    },
     "ownership_hierarchy": [
       {
         "contracts": [

@@ -11,7 +11,6 @@ from typing import Any
 
 from eth_utils.crypto import keccak
 
-from services.clients import etherscan
 from services.resolution.caller_sources import CALLER_SOURCES
 from services.resolution.capability_resolver import _selector_for_signature
 from utils.logging import record_degraded, record_stage_metric
@@ -515,8 +514,8 @@ def _roles_from_mask(mask: int) -> list[int]:
 def _event_base(log: dict[str, Any]) -> dict[str, Any]:
     return {
         "block_number": _hex_int(log.get("blockNumber")),
-        "transaction_index": _hex_int(log.get("transactionIndex")),
-        "log_index": _hex_int(log.get("logIndex")),
+        "transaction_index": _index_int(log.get("transactionIndex")),
+        "log_index": _index_int(log.get("logIndex")),
         "tx_hash": str(log.get("transactionHash") or "").lower(),
     }
 
@@ -541,13 +540,15 @@ def _fetch_logs(*, authority_address: str, chain_id: int, topic0: str) -> list[d
             if now - inserted_at < _LOG_CACHE_TTL_S:
                 return logs
             del _LOG_CACHE[cache_key]
+    from services.clients import etherscan
+
     out: list[dict[str, Any]] = []
     page = 1
     while True:
         data = etherscan.get(
             "logs",
             "getLogs",
-            chain_id,
+            chain_id=chain_id,
             empty_result_ok=True,
             address=authority_address,
             fromBlock="0",
@@ -556,9 +557,9 @@ def _fetch_logs(*, authority_address: str, chain_id: int, topic0: str) -> list[d
             page=str(page),
             offset="1000",
         )
-        batch = data.get("result")
+        batch = data.get("result") or []
         if not isinstance(batch, list):
-            raise RuntimeError("Etherscan logs returned a non-list result")
+            raise RuntimeError(f"Etherscan logs returned a non-list result for {authority_address} topic {topic0}")
         out.extend(batch)
         if len(out) > MAX_LOGS_PER_TOPIC:
             raise RuntimeError(f"principal history log cap exceeded for {authority_address} topic {topic0}")
@@ -592,6 +593,11 @@ def _hex_int(value: Any) -> int:
         return value
     raw = str(value or "0")
     return int(raw, 16) if raw.startswith("0x") else int(raw)
+
+
+def _index_int(value: Any) -> int:
+    # Etherscan's getLogs writes a zero ``logIndex`` or ``transactionIndex`` as a bare ``0x``.
+    return 0 if value == "0x" else _hex_int(value)
 
 
 def _is_address(value: Any) -> bool:

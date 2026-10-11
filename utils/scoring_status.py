@@ -42,6 +42,8 @@ OPENNESS_VALUES = frozenset(OPENNESS_STATES)
 PRINCIPAL_STATE_ENUMERATED = "enumerated"
 PRINCIPAL_STATE_NONE_REQUIRED = "none_required"
 PRINCIPAL_STATE_NOT_DETERMINED = "not_determined"
+# Witness-note prefix on a signal whose finite principal set isn't proven ``exact``; the fold withholds the grade on it.
+PRINCIPAL_SET_NOT_EXACT_NOTE = "principal_set_not_exact:"
 PRINCIPAL_STATES = (
     PRINCIPAL_STATE_ENUMERATED,
     PRINCIPAL_STATE_NONE_REQUIRED,
