@@ -129,6 +129,7 @@ def test_flat_fields_fill_in_what_settings_omit(tmp_path):
 @pytest.mark.parametrize(
     ("compiler_version", "pragma", "expected"),
     [
+        ("v0.8.33+commit.64118f21", "pragma solidity ^0.8.20;", "osaka"),
         ("v0.8.30+commit.73712a01", "pragma solidity ^0.8.20;", "prague"),
         ("v0.8.27+commit.40a35a09", "pragma solidity ^0.8.20;", "cancun"),
         ("v0.8.24+commit.e11b9ed9", "pragma solidity ^0.8.20;", "shanghai"),
@@ -205,3 +206,34 @@ def test_the_balancer_bundle_compiles_with_its_verified_compiler(tmp_path):
         analysis, _trees, _effects = collect_contract_analysis_with_artifacts(project)
     assert analysis["subject"]["name"] == "ProtocolFeesCollector"
     assert analysis["analysis_status"]["static_analysis_completed"] is True
+
+
+# Each side of every boundary, from the release binaries' ``solc --help`` (``--evm-version`` default).
+@pytest.mark.parametrize(
+    ("solc_version", "expected"),
+    [
+        ("0.4.21", "byzantium"),
+        ("0.5.4", "byzantium"),
+        ("0.5.5", "petersburg"),
+        ("0.5.13", "petersburg"),
+        ("0.5.14", "istanbul"),
+        ("0.8.4", "istanbul"),
+        ("0.8.5", "berlin"),
+        ("0.8.6", "berlin"),
+        ("0.8.7", "london"),
+        ("0.8.17", "london"),
+        ("0.8.18", "paris"),
+        ("0.8.19", "paris"),
+        ("0.8.20", "shanghai"),
+        ("0.8.24", "shanghai"),
+        ("0.8.25", "cancun"),
+        ("0.8.29", "cancun"),
+        ("0.8.30", "prague"),
+        ("0.8.31", "osaka"),
+        ("0.8.34", "osaka"),
+    ],
+)
+def test_solc_default_evm_boundaries(solc_version, expected):
+    from services.discovery.fetch import _resolve_evm_version
+
+    assert _resolve_evm_version("Default", solc_version) == expected

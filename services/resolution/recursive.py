@@ -80,6 +80,10 @@ class DegradedStaticAnalysisError(DeterministicBuildFailure):
     """
 
 
+class ResourceExhaustedBuildError(RuntimeError):
+    """A nested build that ran out of memory; not determined, and not remembered as failed."""
+
+
 class NestedCompileError(DeterministicBuildFailure):
     """A nested contract whose compile or Slither parse failed with its compiler installed; its guards are not
     determined.
@@ -245,9 +249,10 @@ def _build_static_artifacts(
     if analysis_reports_failure(analysis):
         # Raised so the cache records ``failed`` (served until the source or analyzer changes) and the node stays
         # undetermined, rather than a ready row built on failed semantics.
-        raise DegradedStaticAnalysisError(
-            f"static analysis of {effective_address} failed: {'; '.join(analysis['analysis_status']['errors'])}"
-        )
+        message = f"static analysis of {effective_address} failed: {'; '.join(analysis['analysis_status']['errors'])}"
+        if analysis["analysis_status"].get("resource_exhausted"):
+            raise ResourceExhaustedBuildError(message)
+        raise DegradedStaticAnalysisError(message)
 
     plan = build_control_tracking_plan(analysis)
     return contract_name, analysis, plan, predicate_trees

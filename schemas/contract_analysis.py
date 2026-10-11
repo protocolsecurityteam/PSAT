@@ -57,6 +57,8 @@ class Subject(TypedDict):
 class AnalysisStatus(TypedDict):
     static_analysis_completed: bool
     errors: list[str]
+    # Present only when a build failed by running out of memory, which a rebuild may not repeat.
+    resource_exhausted: NotRequired[bool]
 
 
 class Summary(TypedDict):

@@ -14,7 +14,7 @@ from typing import Any
 
 from slither.slither import Slither
 
-from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
+from schemas.contract_analysis import AnalysisStatus, AuditAlignment, ContractAnalysis, Summary
 from services.discovery.fetch import enable_via_ir
 from utils.logging import record_degraded, record_stage_metric
 
@@ -177,6 +177,8 @@ def collect_contract_analysis_with_artifacts(
 
     # A whole-artifact build failure; the analysis then reports itself incomplete so it is never reused as complete.
     semantic_errors: list[str] = []
+    # Running out of memory says nothing about the source, so a rebuild may succeed.
+    resource_exhausted = False
     predicate_trees_artifact: dict[str, Any]
     pause_info: PauseInfo
     try:
@@ -190,6 +192,7 @@ def collect_contract_analysis_with_artifacts(
         )
         record_degraded(phase="predicate_trees_emit", exc=exc, context={"project_dir": str(project_dir)})
         semantic_errors.append(f"predicate_trees_emit: {type(exc).__name__}: {exc}")
+        resource_exhausted = resource_exhausted or isinstance(exc, MemoryError)
         predicate_trees_artifact = {"schema_version": "semantic", "error": str(exc)}
         pause_info = {
             "pause_state_vars": [],
@@ -210,6 +213,7 @@ def collect_contract_analysis_with_artifacts(
         )
         record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
         semantic_errors.append(f"effects_emit: {type(exc).__name__}: {exc}")
+        resource_exhausted = resource_exhausted or isinstance(exc, MemoryError)
         effects_artifact = {"schema_version": "semantic", "error": str(exc)}
 
     # Mint claims from the facts and project them onto legacy ``effect_labels``; must run before semantic_control, which
@@ -231,6 +235,7 @@ def collect_contract_analysis_with_artifacts(
             )
             record_degraded(phase="claims", exc=exc, context={"project_dir": str(project_dir)})
             semantic_errors.append(f"claims: {type(exc).__name__}: {exc}")
+            resource_exhausted = resource_exhausted or isinstance(exc, MemoryError)
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)
@@ -289,6 +294,9 @@ def collect_contract_analysis_with_artifacts(
         "is_nft": classification["is_nft"],
     }
 
+    analysis_status: AnalysisStatus = {"static_analysis_completed": not semantic_errors, "errors": semantic_errors}
+    if resource_exhausted:
+        analysis_status["resource_exhausted"] = True
     analysis: ContractAnalysis = {
         "schema_version": "0.1",
         "subject": {
@@ -297,10 +305,7 @@ def collect_contract_analysis_with_artifacts(
             "compiler_version": meta.get("compiler_version", ""),
             "source_verified": _source_verified(meta),
         },
-        "analysis_status": {
-            "static_analysis_completed": not semantic_errors,
-            "errors": semantic_errors,
-        },
+        "analysis_status": analysis_status,
         "summary": summary,
         "contract_classification": classification,
         "semantic_control": semantic_control,

@@ -97,3 +97,32 @@ def test_a_new_analyzer_version_rebuilds(cm_db, monkeypatch):  # noqa: F811
     rebuilt = _Builder()
     assert _materialize(rebuilt).status == "ready"
     assert rebuilt.calls == 1
+
+
+@pytest.mark.parametrize("prior_status", ["failed", "ready"])
+@requires_postgres
+def test_a_row_from_an_older_analyzer_is_restamped_and_then_remembered(cm_db, prior_status):  # noqa: F811
+    cm_db.add(
+        ContractMaterialization(
+            chain=CHAIN,
+            bytecode_keccak=KECCAK,
+            address=ADDRESS,
+            status=prior_status,
+            error="from the older analyzer" if prior_status == "failed" else None,
+            source_content_hash=SOURCE_HASH,
+            analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
+        )
+    )
+    cm_db.commit()
+
+    builder = _Builder(cm.DeterministicBuildFailure("ParserError 7858"))
+    for _ in range(3):
+        with pytest.raises(cm.DeterministicBuildFailure):
+            _materialize(builder)
+    assert builder.calls == 1
+    row = _row(cm_db)
+    assert (row.status, row.deterministic_failure, row.analysis_schema_version) == (
+        "failed",
+        True,
+        cm.ANALYSIS_SCHEMA_VERSION,
+    )

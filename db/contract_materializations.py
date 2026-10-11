@@ -504,6 +504,7 @@ def materialize_or_wait(
                     "error": None,
                     "deterministic_failure": False,
                     "source_content_hash": claim_stmt.excluded.source_content_hash,
+                    "analysis_schema_version": claim_stmt.excluded.analysis_schema_version,
                     "updated_at": func.now(),
                 },
             )
@@ -538,6 +539,7 @@ def materialize_or_wait(
                     "deterministic_failure": deterministic,
                     "builder_started_at": None,
                     "source_content_hash": stmt.excluded.source_content_hash,
+                    "analysis_schema_version": stmt.excluded.analysis_schema_version,
                     "provenance": stmt.excluded.provenance,
                     "updated_at": func.now(),
                 },

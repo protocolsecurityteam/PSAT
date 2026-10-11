@@ -187,6 +187,27 @@ def test_a_degraded_nested_build_fails_the_node_instead_of_caching(tmp_path, mon
         recursive._build_static_artifacts(ADDR_A, "t", chain_id=1)
 
 
+def test_a_nested_build_out_of_memory_is_not_a_deterministic_failure(tmp_path, monkeypatch):
+    from db.contract_materializations import DeterministicBuildFailure
+    from services.resolution import recursive
+    from services.static.contract_analysis_pipeline import core
+    from tests.support.foundry_project import write_foundry_project
+
+    monkeypatch.setattr(recursive, "fetch", lambda address, chain_id: {"ContractName": "C"})
+    template = write_foundry_project(tmp_path, "C", SOURCE)
+    monkeypatch.setattr(
+        recursive, "scaffold", lambda address, result, project_dir: shutil.copytree(template, project_dir)
+    )
+
+    def _oom(*_a, **_k):
+        raise MemoryError("effects")
+
+    monkeypatch.setattr(core, "build_effects", _oom)
+    with pytest.raises(recursive.ResourceExhaustedBuildError, match="effects_emit") as raised:
+        recursive._build_static_artifacts(ADDR_A, "t", chain_id=1)
+    assert not isinstance(raised.value, DeterministicBuildFailure)
+
+
 @requires_postgres
 def test_a_ready_row_holding_a_failed_build_fails_the_nested_node(cm_db):  # noqa: F811
     """A row published before failed builds were refused is not served: its analysis rests on the failed trees."""

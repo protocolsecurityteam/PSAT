@@ -397,6 +397,7 @@ def select_solc_version(sources: dict[str, str], compiler_version: str | None) -
 
 # solc's own default target per release, for bundles verified with "Default".
 _SOLC_DEFAULT_EVM: tuple[tuple[_Version, str], ...] = (
+    ((0, 8, 31), "osaka"),
     ((0, 8, 30), "prague"),
     ((0, 8, 25), "cancun"),
     ((0, 8, 20), "shanghai"),
