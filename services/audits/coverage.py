@@ -31,6 +31,7 @@ from db.models import (
     UpgradeEvent,
 )
 from schemas.upgrade_history import UPGRADE_FETCH_ERROR
+from services.scoring.schema import coalesce_chain
 from utils.logging import record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
@@ -138,13 +139,17 @@ def _end_of_month(year: int, month: int) -> datetime:
 
 
 def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> dict[int, list[ImplWindow]]:
-    """Impl windows per Contract.id in a fixed number of queries regardless of candidate count."""
-    addr_to_ids: dict[str, list[int]] = {}
+    """Impl windows per Contract.id in a fixed number of queries regardless of candidate count.
+
+    A window comes only from a proxy on the implementation's own chain: an upgrade to the same address on another
+    chain installed a different contract.
+    """
+    entity_to_ids: dict[tuple[str, str], list[int]] = {}
     for c in contracts:
         if c.address:
-            addr_to_ids.setdefault(c.address.lower(), []).append(c.id)
+            entity_to_ids.setdefault((coalesce_chain(c.chain), c.address.lower()), []).append(c.id)
     result: dict[int, list[ImplWindow]] = {c.id: [] for c in contracts}
-    if not addr_to_ids:
+    if not entity_to_ids:
         return result
 
     # ``new_impl`` may be mixed-case.
@@ -152,17 +157,21 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
         select(
             UpgradeEvent.contract_id,
             func.lower(UpgradeEvent.new_impl).label("new_impl_lc"),
+            Contract.chain,
         )
-        .where(func.lower(UpgradeEvent.new_impl).in_(list(addr_to_ids.keys())))
+        .join(Contract, Contract.id == UpgradeEvent.contract_id)
+        .where(func.lower(UpgradeEvent.new_impl).in_(sorted({addr for _chain, addr in entity_to_ids})))
         .distinct()
     ).all()
-    if not proxy_rows:
+    entity_to_proxies: dict[tuple[str, str], set[int]] = {}
+    for pid, impl_addr, proxy_chain in proxy_rows:
+        entity = (coalesce_chain(proxy_chain), impl_addr)
+        if entity in entity_to_ids:
+            entity_to_proxies.setdefault(entity, set()).add(pid)
+    if not entity_to_proxies:
         return result
 
-    proxy_ids = {row[0] for row in proxy_rows}
-    addr_to_proxies: dict[str, set[int]] = {}
-    for pid, impl_addr in proxy_rows:
-        addr_to_proxies.setdefault(impl_addr, set()).add(pid)
+    proxy_ids = {pid for pids in entity_to_proxies.values() for pid in pids}
 
     # NULL blocks sink so a block-less event doesn't corrupt ordering.
     events_by_proxy: dict[int, list[UpgradeEvent]] = {pid: [] for pid in proxy_ids}
@@ -193,8 +202,8 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
             if history_status == UPGRADE_FETCH_ERROR:
                 unread_history.add(pid)
 
-    windows_by_addr: dict[str, list[ImplWindow]] = {}
-    for addr_lower, proxy_id_set in addr_to_proxies.items():
+    for entity, proxy_id_set in entity_to_proxies.items():
+        addr_lower = entity[1]
         windows: list[ImplWindow] = []
         for pid in proxy_id_set:
             proxy_events = events_by_proxy.get(pid) or []
@@ -227,12 +236,8 @@ def _compute_impl_windows_batch(session: Session, contracts: list[Contract]) -> 
                 )
         # Unknown starts sink, matching the SQL order.
         windows.sort(key=lambda w: (w.from_block is None, w.from_block or 0, w.proxy_contract_id))
-        windows_by_addr[addr_lower] = windows
-
-    for addr_lower, contract_ids in addr_to_ids.items():
-        ws = windows_by_addr.get(addr_lower, [])
-        for cid in contract_ids:
-            result[cid] = list(ws)
+        for cid in entity_to_ids[entity]:
+            result[cid] = list(windows)
     return result
 
 

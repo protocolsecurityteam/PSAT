@@ -2,7 +2,7 @@
 // (machine and principal).
 
 import { isRoleIdAddress } from "../format.js";
-import { entityKey } from "../entityKey.js";
+import { entityKey, principalOnChain } from "../entityKey.js";
 
 // Built from all machines and principals; visibility is a canvas concern.
 // Role-id pseudo addresses are excluded. Keyed by (chain, address) so
@@ -18,7 +18,10 @@ export function buildEntityIndex(allMachines = [], principals = [], chain = "eth
     index.set(key, { ...existing, ...patch });
   };
   for (const machine of allMachines) put(machine?.address, { machine });
-  for (const principal of principals) put(principal?.address, { principal });
+  // A principal is per (chain, address): another chain's principal at the same address must not attach here.
+  for (const principal of principals) {
+    if (principalOnChain(principal, chain)) put(principal?.address, { principal });
+  }
   return index;
 }
 

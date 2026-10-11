@@ -25,6 +25,7 @@ from db.models import (
 )
 from services.scoring.planes import MAPPING_ENUMERATION_STATUS
 
+from .entity_keys import _entity_key
 from .jobs import _time_phase
 from .principals import _PRINCIPAL_TYPES_SQL, _SETTLED_CONTROLLER_TYPES, _claim_ids_list, _principal_lookup_type
 
@@ -38,6 +39,28 @@ logger = logging.getLogger("services.aggregations.company_overview")
 _DB_POOL_SIZE = int(os.environ.get("PSAT_DB_POOL_SIZE", "5"))
 _DB_MAX_OVERFLOW = int(os.environ.get("PSAT_DB_MAX_OVERFLOW", "10"))
 _PREFETCH_MAX_WORKERS = max(1, min(4, (_DB_POOL_SIZE + _DB_MAX_OVERFLOW - 1) // 2))
+
+
+def terminal_walk_by_entity(session: Session, contract_ids: list[int]) -> tuple[dict[str, dict[str, Any]], int]:
+    """``principal_labels.details.terminal_principal`` per ``(chain, address)``, first record per entity by label id."""
+    local: dict[str, dict[str, Any]] = {}
+    rows = 0
+    for address, details, chain in session.execute(
+        select(PrincipalLabel.address, PrincipalLabel.details, Contract.chain)
+        .join(Contract, Contract.id == PrincipalLabel.contract_id)
+        .where(
+            PrincipalLabel.contract_id.in_(contract_ids),
+            jsonb_has_payload(PrincipalLabel.details),
+            PrincipalLabel.details.has_key("terminal_principal"),
+        )
+        .order_by(PrincipalLabel.id)
+    ).all():
+        record = (details or {}).get("terminal_principal")
+        if not isinstance(record, dict) or not address:
+            continue
+        local.setdefault(_entity_key(chain, address), record)
+        rows += 1
+    return local, rows
 
 
 def _prefetch_child_tables(
@@ -394,27 +417,10 @@ def _prefetch_child_tables(
         return local, rows
 
     def _terminal_walk(s: Session) -> tuple[dict[str, dict[str, Any]], int]:
-        """``{address: terminal_principal}`` from ``principal_labels`` (the only place it's persisted), for
-        ``terminalControllerNote``.
-
-        Keyed by bare address like the rest of ``principal_lookup``, which has no chain column; a two-chain protocol
-        could cross-annotate in principle (not observed). Fixing that is a producer schema change.
+        """``{"<chain>::<address>": terminal_principal}`` from ``principal_labels`` (the only place it's persisted), for
+        ``terminalControllerNote``; the label is on its recording contract's chain.
         """
-        local: dict[str, dict[str, Any]] = {}
-        rows = 0
-        for address, details in s.execute(
-            select(PrincipalLabel.address, PrincipalLabel.details).where(
-                PrincipalLabel.contract_id.in_(id_list),
-                jsonb_has_payload(PrincipalLabel.details),
-                PrincipalLabel.details.has_key("terminal_principal"),
-            )
-        ).all():
-            record = (details or {}).get("terminal_principal")
-            if not isinstance(record, dict) or not address:
-                continue
-            local.setdefault(address.lower(), record)
-            rows += 1
-        return local, rows
+        return terminal_walk_by_entity(s, id_list)
 
     def _cge(s: Session) -> tuple[dict[int, list[ControlGraphEdge]], int]:
         # Drop an edge iff its target has a CGN row in this contract the keep-clause drops.

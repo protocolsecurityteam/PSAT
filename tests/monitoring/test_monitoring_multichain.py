@@ -47,7 +47,16 @@ def test_enroll_bases_watched_proxy_on_contract_chain(db_session, monkeypatch):
             implementation=_addr("f"),
         )
     )
-    db_session.add(Job(address=proxy_addr, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
+    db_session.add(
+        Job(
+            address=proxy_addr,
+            protocol_id=proto.id,
+            status=JobStatus.completed,
+            stage=JobStage.done,
+            request={"address": proxy_addr, "chain": "base"},
+            chain_id=8453,
+        )
+    )
     db_session.commit()
 
     block_urls: list[str] = []

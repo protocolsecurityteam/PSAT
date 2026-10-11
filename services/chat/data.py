@@ -238,8 +238,17 @@ def upgrade_summary(session, address: str, chain: str | None = None) -> dict[str
         impl_addrs.add(contract.implementation.lower())
     scope_ids = {contract.id}
     if impl_addrs:
+        # The proxy's own protocol and chain: the same address elsewhere is another contract with its own audits.
+        anchor_chain = _canonical_chain(contract.chain)
         scope_ids.update(
-            r[0] for r in session.execute(select(Contract.id).where(func.lower(Contract.address).in_(impl_addrs))).all()
+            cid
+            for cid, chain in session.execute(
+                select(Contract.id, Contract.chain).where(
+                    Contract.protocol_id == contract.protocol_id,
+                    func.lower(Contract.address).in_(impl_addrs),
+                )
+            ).all()
+            if _canonical_chain(chain) == anchor_chain
         )
 
     coverage_rows = session.execute(

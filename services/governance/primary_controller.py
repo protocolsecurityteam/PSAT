@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from services.scoring.schema import entity_key
 from services.static.claims import CONTROL_GRANT_CLASSES, claim_ids_of_class
 from utils import claim_ids as C
 
@@ -100,6 +101,22 @@ def _addr_of(token: str) -> str:
     return token.rsplit("::", 1)[-1]
 
 
+def _principal_identity(principal: Mapping[str, Any]) -> str:
+    """A principal carrying its ``chain`` is that chain's entity (the same address on two chains is two principals);
+    one without is its bare address.
+    """
+    addr = (principal.get("address") or "").lower()
+    chain = principal.get("chain")
+    return entity_key(chain, addr) if addr and chain else addr
+
+
+def _caller_identity(caller: str, contract_key: str, principal_keys: Iterable[str] | Mapping[str, Any]) -> str:
+    """A bare caller of a composite-keyed contract is on that contract's chain."""
+    if caller in principal_keys or "::" in caller or "::" not in contract_key:
+        return caller
+    return f"{contract_key.split('::', 1)[0]}::{caller}"
+
+
 def assign_primary_controllers(
     principals: list[dict[str, Any]],
     fp_addrs_by_contract: Mapping[str, set[str]],
@@ -127,7 +144,7 @@ def assign_primary_controllers(
     """
     principal_by_addr: dict[str, dict[str, Any]] = {}
     for p in principals:
-        addr = (p.get("address") or "").lower()
+        addr = _principal_identity(p)
         if not addr:
             continue
         if p.get("type") not in PRINCIPAL_PRIORITY:
@@ -202,12 +219,13 @@ def assign_primary_controllers(
                 )
         return best
 
-    # Principal identity is the bare address.
+    # Principal identity is the chain entity when principals carry a chain, else the bare address.
     eligibility: dict[str, dict[str, int]] = {addr: {} for addr in principal_by_addr}
     for contract_lc in fp_graph:
         for ctrl, tier in _effective_controllers(contract_lc).items():
-            ctrl_addr = _addr_of(ctrl)
-            owned = eligibility.get(ctrl_addr)
+            owned = eligibility.get(_caller_identity(ctrl, contract_lc, eligibility))
+            if owned is None:
+                owned = eligibility.get(_addr_of(ctrl))
             if owned is not None and owned.get(contract_lc, 0) < tier:
                 owned[contract_lc] = tier
 
@@ -328,7 +346,7 @@ def assign_co_controllers(
     """
     principal_addrs: set[str] = set()
     for p in principals:
-        addr = (p.get("address") or "").lower()
+        addr = _principal_identity(p)
         if addr and p.get("type") in PRINCIPAL_PRIORITY:
             principal_addrs.add(addr)
 
@@ -346,7 +364,8 @@ def assign_co_controllers(
             if not significant:
                 continue
             for caller in callers:
-                if caller in principal_addrs and primary_of.get(c_lc) != caller:
-                    co[caller].add(c_lc)
+                key = _caller_identity(caller, c_lc, principal_addrs)
+                if key in principal_addrs and primary_of.get(c_lc) != key:
+                    co[key].add(c_lc)
 
     return {addr: sorted(contracts) for addr, contracts in co.items()}

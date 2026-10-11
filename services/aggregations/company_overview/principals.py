@@ -5,6 +5,8 @@ from typing import Any
 from db.models import Contract, ControlGraphNode, ControllerValue
 from schemas.control_tracking import MonitoredContractType, ResolvedControllerType
 
+from .entity_keys import _entity_key
+
 _PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
 _PRINCIPAL_TYPES_SQL = tuple(sorted(_PRINCIPAL_TYPES))
 
@@ -94,11 +96,15 @@ def _principal_type_priority(resolved_type: str | None) -> int:
 def _record_principal_lookup(
     lookup: dict[str, dict[str, Any]],
     *,
+    chain: str | None,
     address: str | None,
     resolved_type: str | None,
     label: str | None,
     details: Any,
 ) -> None:
+    """Keyed by ``(chain, address)``: the same address on two chains (a Safe whose networks drifted, an EOA beside a
+    Safe) is two principals.
+    """
     if not address or not address.startswith("0x"):
         return
     details_dict = dict(details) if isinstance(details, dict) else {}
@@ -107,7 +113,7 @@ def _record_principal_lookup(
         return
 
     addr = address.lower()
-    current = lookup.setdefault(addr, {"resolved_type": principal_type, "details": {}})
+    current = lookup.setdefault(_entity_key(chain, addr), {"resolved_type": principal_type, "details": {}})
     current_priority = _principal_type_priority(current.get("resolved_type"))
     principal_priority = _principal_type_priority(principal_type)
     if principal_priority > current_priority:
@@ -126,40 +132,53 @@ def _build_principal_lookup(
     contracts_by_job_id: dict[Any, Contract],
     controller_values_by_cid: dict[int, list[ControllerValue]],
     cgn_by_cid: dict[int, list[ControlGraphNode]],
-    terminal_walk_by_address: dict[str, dict[str, Any]] | None = None,
+    terminal_walk_by_entity: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    """``{"<chain>::<address>": {resolved_type, label, details}}``. A controller value or graph node is on its
+    contract's chain; rows of a contract outside *contracts_by_job_id* have no chain to key by and are skipped.
+    """
     lookup: dict[str, dict[str, Any]] = {}
-    seen_contract_ids: set[int] = set()
-
-    for contract in contracts_by_job_id.values():
-        if not contract or contract.id in seen_contract_ids:
+    chain_by_cid: dict[int, str | None] = {}
+    # Sorted so the label a principal keeps doesn't depend on row order.
+    for contract in sorted(
+        (c for c in contracts_by_job_id.values() if c is not None), key=lambda c: (c.id is None, c.id or 0)
+    ):
+        if contract.id in chain_by_cid:
             continue
-        seen_contract_ids.add(contract.id)
+        chain = getattr(contract, "chain", None)
+        chain_by_cid[contract.id] = chain
         summary = contract.summary
         # Only a proven timelock earns the settled ``timelock`` type; NULL falls to the weak ``contract`` way-point.
         contract_type = "timelock" if summary is not None and summary.has_timelock is True else "contract"
         _record_principal_lookup(
             lookup,
+            chain=chain,
             address=contract.address,
             resolved_type=contract_type,
             label=contract.contract_name,
             details={},
         )
 
-    for values in controller_values_by_cid.values():
+    for cid, values in sorted(controller_values_by_cid.items()):
+        if cid not in chain_by_cid:
+            continue
         for cv in values:
             _record_principal_lookup(
                 lookup,
+                chain=chain_by_cid[cid],
                 address=cv.value,
                 resolved_type=cv.resolved_type,
                 label=cv.source or cv.controller_id,
                 details=cv.details,
             )
 
-    for nodes in cgn_by_cid.values():
+    for cid, nodes in sorted(cgn_by_cid.items()):
+        if cid not in chain_by_cid:
+            continue
         for node in nodes:
             _record_principal_lookup(
                 lookup,
+                chain=chain_by_cid[cid],
                 address=node.address,
                 resolved_type=node.resolved_type,
                 label=node.contract_name or node.label,
@@ -171,13 +190,13 @@ def _build_principal_lookup(
     #
     # * Only ``terminal_principal``: forwarding ``terminal`` could publish a settled key beside a ``resolved_type``
     # still saying ``contract``.
-    # * Only addresses the lookup already carries, so the principal set doesn't widen.
+    # * Only entities the lookup already carries, so the principal set doesn't widen.
     # * ``setdefault``, so a record arriving with a CGN/CV row wins.
     #
     # Status vocabulary lives in ``services.governance.principals``; pre-fix rows may carry ``no_controller``, which
     # renders as unresolved too.
-    for address, record in (terminal_walk_by_address or {}).items():
-        entry = lookup.get(address)
+    for entity, record in (terminal_walk_by_entity or {}).items():
+        entry = lookup.get(entity)
         if entry is None:
             continue
         details = dict(entry.get("details") or {})
@@ -187,12 +206,21 @@ def _build_principal_lookup(
     return lookup
 
 
+def _principal_lookup_for_chain(
+    principal_lookup: dict[str, dict[str, Any]], chain: str | None
+) -> dict[str, dict[str, Any]]:
+    """The lookup's entries on one chain, by bare address, for readers that already know the chain."""
+    prefix = _entity_key(chain, "")
+    return {key[len(prefix) :]: meta for key, meta in principal_lookup.items() if key.startswith(prefix)}
+
+
 def _principal_lookup_meta(
     principal_lookup: dict[str, dict[str, Any]],
+    chain: str | None,
     address: str | None,
     details: Any = None,
 ) -> dict[str, Any]:
-    lookup = principal_lookup.get((address or "").lower(), {})
+    lookup = principal_lookup.get(_entity_key(chain, address), {})
     merged_details = dict(lookup.get("details") or {})
     if isinstance(details, dict):
         merged_details.update(details)

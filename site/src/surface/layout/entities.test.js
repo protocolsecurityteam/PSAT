@@ -33,6 +33,26 @@ describe("buildEntityIndex", () => {
   });
 });
 
+describe("buildEntityIndex with per-chain principals", () => {
+  // The same address is a 4-of-7 Safe on mainnet and a 1-of-1 Safe on Base.
+  const twins = [
+    { address: PRIMARY, type: "safe", chains: ["ethereum"], details: { threshold: 4 } },
+    { address: PRIMARY, type: "safe", chains: ["base"], details: { threshold: 1 } },
+  ];
+
+  it("attaches each chain's own principal, whatever the row order", () => {
+    for (const principals of [twins, [...twins].reverse()]) {
+      expect(buildEntityIndex([], principals, "ethereum").get(entityKey("ethereum", PRIMARY)).principal.details.threshold).toBe(4);
+      expect(buildEntityIndex([], principals, "base").get(entityKey("base", PRIMARY)).principal.details.threshold).toBe(1);
+    }
+  });
+
+  it("keeps a principal published without chains on any chain", () => {
+    const idx = buildEntityIndex([], [{ address: PRIMARY, type: "eoa" }], "base");
+    expect(idx.get(entityKey("base", PRIMARY)).principal.type).toBe("eoa");
+  });
+});
+
 describe("resolveEntity", () => {
   const idx = buildEntityIndex([{ address: VAULT, owner: OFF_INDEX }], []);
 

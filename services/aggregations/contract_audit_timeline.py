@@ -3,13 +3,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import AuditContractCoverage, AuditReport, Contract, UpgradeEvent
 from schemas.api_responses import AuditBrief
 from schemas.upgrade_history import UPGRADE_FETCH_ERROR
 from services.audits.serializers import _audit_brief
+from services.scoring.schema import coalesce_chain
 from utils.chains import UnknownChainError, chain_by_name
 from utils.scoring_status import NOT_DETERMINED
 
@@ -77,17 +78,18 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         if contract.implementation:
             impl_addrs.add(contract.implementation.lower())
         if impl_addrs:
-            impl_contract_ids = (
-                session.execute(
-                    select(Contract.id).where(
+            # An implementation counts only on the proxy's own chain; the same address elsewhere is another contract.
+            anchor_chain = coalesce_chain(contract.chain)
+            scope_contract_ids.update(
+                cid
+                for cid, chain in session.execute(
+                    select(Contract.id, Contract.chain).where(
                         Contract.protocol_id == contract.protocol_id,
-                        Contract.address.in_(impl_addrs),
+                        func.lower(Contract.address).in_(impl_addrs),
                     )
-                )
-                .scalars()
-                .all()
+                ).all()
+                if coalesce_chain(chain) == anchor_chain
             )
-            scope_contract_ids.update(impl_contract_ids)
 
     cov_rows = (
         session.execute(
@@ -181,12 +183,22 @@ def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any
     if not current_impl:
         return "never_audited" if not cov_rows else "unaudited_since_upgrade"
 
-    impl_contract = session.execute(
-        select(Contract).where(
-            Contract.address == current_impl.lower(),
-            Contract.protocol_id == contract.protocol_id,
-        )
-    ).scalar_one_or_none()
+    anchor_chain = coalesce_chain(contract.chain)
+    impl_contract = next(
+        (
+            row
+            for row in session.execute(
+                select(Contract)
+                .where(
+                    func.lower(Contract.address) == current_impl.lower(),
+                    Contract.protocol_id == contract.protocol_id,
+                )
+                .order_by(Contract.id)
+            ).scalars()
+            if coalesce_chain(row.chain) == anchor_chain
+        ),
+        None,
+    )
     if impl_contract is None:
         return "unaudited_since_upgrade" if cov_rows else "never_audited"
 

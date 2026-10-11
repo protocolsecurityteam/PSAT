@@ -188,9 +188,10 @@ def test_company_principal_lookup_promotes_delay_contract_to_timelock() -> None:
         {1: [cast(Any, node)]},
     )
 
-    assert lookup[timelock_addr]["resolved_type"] == "timelock"
-    assert lookup[timelock_addr]["label"] == "ProtocolTimelock"
-    assert lookup[timelock_addr]["details"]["delay"] == 864000
+    key = f"ethereum::{timelock_addr}"
+    assert lookup[key]["resolved_type"] == "timelock"
+    assert lookup[key]["label"] == "ProtocolTimelock"
+    assert lookup[key]["details"]["delay"] == 864000
 
 
 def test_index_serves_html(spa_index) -> None:
