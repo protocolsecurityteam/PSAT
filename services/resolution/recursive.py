@@ -861,7 +861,8 @@ def _mapping_writer_specs_from_predicate_trees(
     key the leaves check (``key_filter``), so the replay harvests ``_roles[PROPOSER_ROLE]``, not every role's holders.
 
     Another contract can gate on this one's mapping through its check functions (``hasRole(role, account)``), so the
-    keys those read count as checked, and one taking a caller-chosen key leaves the mapping unfiltered.
+    keys those read count as checked, and one taking a caller-chosen key leaves the mapping unfiltered. So does any
+    function whose guard couldn't be extracted, since a role checked only there would read as unchecked.
     """
     if not isinstance(predicate_trees, Mapping):
         return []
@@ -968,9 +969,12 @@ def _mapping_writer_specs_from_predicate_trees(
         visit_exposure(tree)
     # A mapping some leaf reads with one key is no two-key mapping to filter.
     filters = {name: f for name, f in _mapping_key_filters(checked).items() if name not in unkeyed}
+    guards_uncertain = bool(predicate_trees.get("guard_extraction_uncertain"))
     for mapping_name, key_filter in filters.items():
         entries = exposed.get(mapping_name, [])
-        if any(e is None or e.words is None or e.position != key_filter["position"] for e in entries):
+        if guards_uncertain or any(
+            e is None or e.words is None or e.position != key_filter["position"] for e in entries
+        ):
             key_filter["words"] = None
             continue
         if key_filter["words"] is not None:

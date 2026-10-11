@@ -390,3 +390,10 @@ def test_a_role_check_on_a_constant_role_adds_that_role():
 
     (first, *_rest) = _filters(trees)
     assert first is not None and first["words"] == sorted([PROPOSER_ROLE, OPERATOR_ROLE])
+
+
+def test_an_uncertain_guard_filters_nothing():
+    trees = {**_trees(), "guard_extraction_uncertain": ["setPauser(address)"]}
+    assert {f["words"] if f else "missing" for f in _filters(trees)} == {None}
+    # The checked roles alone still filter without one.
+    assert {tuple(f["words"]) for f in _filters(_trees()) if f} == {(PROPOSER_ROLE,)}
