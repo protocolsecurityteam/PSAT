@@ -768,7 +768,7 @@ def test_load_contract_facts_indexes_the_canonical_selector(db_session):
         data={"trees": {full_name: OWNER_GATE}, "canonical_signatures": {full_name: canonical}},
     )
     cd._FACTS_CACHE.pop(db_session, None)
-    facts = cd.load_contract_facts(db_session, address)
+    facts = cd.load_contract_facts(db_session, address, 1)
     assert facts is not None
     selector = cd._selector_of(canonical)
     assert selector is not None
@@ -776,6 +776,31 @@ def test_load_contract_facts_indexes_the_canonical_selector(db_session):
     resolved = cd.resolve_function(facts, selector)
     assert resolved is not None
     assert resolved.canonical_signature == canonical
+
+
+@requires_postgres
+def test_load_contract_facts_is_keyed_by_chain_and_address(db_session):
+    address = "0x" + "ce" * 20
+    by_chain = {1: ("ethereum", "pause()"), 8453: ("base", "unpause()")}
+    for chain, full_name in by_chain.values():
+        job = create_job(db_session, {"address": address, "chain": chain, "name": "T"})
+        job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
+        store_artifact(
+            db_session,
+            job.id,
+            "effects",
+            data={"functions": {full_name: _effect_info(full_name, cd._selector_of(full_name) or "")}},
+        )
+        store_artifact(db_session, job.id, "predicate_trees", data={"trees": {full_name: OWNER_GATE}})
+    db_session.commit()
+    cd._FACTS_CACHE.pop(db_session, None)
+
+    for chain_id, (_chain, full_name) in by_chain.items():
+        facts = cd.load_contract_facts(db_session, address, chain_id)
+        assert facts is not None
+        assert list(facts.effects) == [full_name]
+    assert cd.load_contract_facts(db_session, address, 42161) is None
+    assert cd.load_contract_facts(db_session, address, None) is None
 
 
 # Live-acceptance fixtures from the 2026-07-21 mainnet-fork run. Expected values only; the logic never matches on these

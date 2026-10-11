@@ -118,6 +118,9 @@ class Candidate:
     # No ``effect_targets``: it was write-only here and conflates state writes with call heads, which the cascade no
     # longer selects on (:func:`_has_effect_evidence`).
     principal_addresses: tuple[str, ...]
+    # The code row's chain; facts are read for ``(chain_id, contract_address)``. ``None`` when the chain isn't known,
+    # and then no facts are read.
+    chain_id: int | None = None
     # Transitive USD reachable through the control graph; an upper bound used only for ordering. ``Decimal`` so equal
     # values compare equal and the ``function_id`` tiebreak decides.
     value_at_stake_usd: Decimal = _ZERO_USD
@@ -947,19 +950,17 @@ def select_candidates(
     holdings = _token_holdings_by_contract(session, protocol_id, _MAX_TOKEN_ARG_CANDIDATES)
     from services.effects.balance_dependencies import balance_owners
 
+    code_chains: dict[int, int] = {}
+    for cid, name in session.execute(select(Contract.id, Contract.chain).where(Contract.id.in_([r[1] for r in rows]))):
+        try:
+            code_chains[cid] = chain_by_name(name or "ethereum").chain_id
+        except UnknownChainError:
+            continue
     holder_chain = chain_id or (scope.chain_id if scope else None)
     if holder_chain:
         owners = balance_owners(session, protocol_id, holder_chain, [r[6] or r[2] for r in rows])
         holder_ids = {r[0]: owners.get((r[6] or r[2]).lower()) for r in rows}
     else:
-        code_chains = {}
-        for cid, name in session.execute(
-            select(Contract.id, Contract.chain).where(Contract.id.in_([r[1] for r in rows]))
-        ):
-            try:
-                code_chains[cid] = chain_by_name(name or "ethereum").chain_id
-            except UnknownChainError:
-                continue
         holder_ids = {}
         for actual_chain in set(code_chains.values()):
             chain_rows = [r for r in rows if code_chains.get(r[1]) == actual_chain]
@@ -989,6 +990,7 @@ def select_candidates(
                 function_name=name,
                 authority_public=bool(public),
                 principal_addresses=tuple(prins),
+                chain_id=code_chains.get(contract_id),
                 value_at_stake_usd=graph.reachable_value(seeds),
                 deployment_address=deployment_addr,
                 restrict_families=families,
