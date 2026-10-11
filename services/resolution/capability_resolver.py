@@ -731,9 +731,7 @@ def _analysis_lookup_for_runtime_job(
     if _artifact_is_substantive(required_artifact, runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
-    impl_job = _implementation_child_job(
-        session, runtime_job, chain=chain, completed_only=completed_only, keep=current
-    )
+    impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only, keep=current)
     impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
     if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
