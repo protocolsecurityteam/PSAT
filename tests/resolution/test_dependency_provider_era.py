@@ -457,3 +457,19 @@ def test_a_spawned_provider_is_found_even_after_the_proxy_job_is_touched(session
     _emit(session, _depender(session), proxy)
 
     assert [job.status for job in _provider_jobs(session, proxy)] == [JobStatus.completed, JobStatus.queued]
+
+
+def test_a_completed_proxy_job_is_never_a_static_cache_donor(session):
+    """The spawned provider for a proxy over a stale implementation must reach its own static stage, which reconciles
+    the implementation; a cache hit on the completed proxy job would skip it and spawn again on every emission.
+    """
+    from db.models import SourceFile
+    from db.queue import find_completed_static_cache
+
+    proxy, impl = _address("e5"), _address("e6")
+    proxy_job, _impl_job = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=CURRENT)
+    session.add(SourceFile(job_id=proxy_job.id, path="Proxy.sol", content="contract Proxy {}"))
+    store_artifact(session, proxy_job.id, "contract_flags", data={"is_proxy": True})
+    session.commit()
+
+    assert find_completed_static_cache(session, proxy, chain="ethereum") is None
