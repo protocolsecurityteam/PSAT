@@ -23,7 +23,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.storage import artifact_key, get_storage_client, source_file_key
-from utils.chains import canonical_chain
+from utils.chains import UnknownChainError, canonical_chain, chain_by_name
 from utils.logging import record_degraded
 
 from ._chains import _job_chain_name, _mainnet_coalesced_chain
@@ -246,10 +246,10 @@ def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
 def find_completed_static_cache(
     session: Session,
     address: str,
-    chain: str | None = None,
+    chain: str,
     source_content_hash: str | None = None,
 ) -> Job | None:
-    """A completed job for *address*/*chain* with all static data (source files, ``contract_analysis``, a summaried
+    """A completed job for *address* on *chain* with all static data (source files, ``contract_analysis``, a summaried
     contract row), or ``None``.
 
     Only jobs whose era is proven to be the current analyzer's are served. Looks up the contract by (address, chain),
@@ -258,19 +258,21 @@ def find_completed_static_cache(
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
+    try:
+        chain_id = chain_by_name(chain).chain_id
+    except UnknownChainError:
+        return None
     stmt = (
         select(Job)
         .where(
             func.lower(Job.address) == address.lower(),
+            Job.chain_id == chain_id,
             Job.status == JobStatus.completed,
             Job.stage == JobStage.done,
             _not_stamped_with_other_era(ANALYSIS_SCHEMA_VERSION),
         )
         .order_by(Job.updated_at.desc())
     )
-    # Filter on ``jobs.chain_id``.
-    if chain is not None:
-        stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, address))
     candidates = session.execute(stmt).scalars().all()
 
     eras: dict[str, int | None] = {}
@@ -284,18 +286,7 @@ def find_completed_static_cache(
             continue
 
         # By (address, chain), not job_id; the summary join skips stub rows.
-        contract_stmt = (
-            select(Contract)
-            .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-            .where(func.lower(Contract.address) == address.lower())
-        )
-        if chain is not None:
-            # Mainnet-coalesced.
-            contract_stmt = contract_stmt.where(
-                func.lower(func.coalesce(Contract.chain, "ethereum"))
-                == _mainnet_coalesced_chain(canonical_chain(chain))
-            )
-        contract_row = session.execute(contract_stmt.limit(1)).scalar_one_or_none()
+        contract_row = _summaried_contract(session, address, _job_chain_name(candidate))
         if not contract_row:
             continue
 
@@ -356,16 +347,7 @@ def _find_static_cache_by_source_hash(session: Session, source_content_hash: str
         if not has_src:
             continue
         # Chain-qualified: a same-address deployment on another chain may have different source.
-        donor_contract = session.execute(
-            select(Contract)
-            .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-            .where(
-                func.lower(Contract.address) == candidate.address.lower(),
-                func.lower(func.coalesce(Contract.chain, "ethereum"))
-                == _mainnet_coalesced_chain(_job_chain_name(candidate)),
-            )
-            .limit(1)
-        ).scalar_one_or_none()
+        donor_contract = _summaried_contract(session, candidate.address, _job_chain_name(candidate))
         if not donor_contract:
             continue
         has_analysis = session.execute(
@@ -468,35 +450,50 @@ def is_known_proxy(session: Session, address: str, chain: str | None = None) -> 
     return session.execute(stmt.limit(1)).scalar_one_or_none() is not None
 
 
+def _summaried_contract(session: Session, address: str, chain: str) -> Contract | None:
+    """The summaried contract row for (*address*, *chain*), mainnet-coalesced."""
+    return session.execute(
+        select(Contract)
+        .join(ContractSummary, ContractSummary.contract_id == Contract.id)
+        .where(
+            func.lower(Contract.address) == address.lower(),
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(chain),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) -> int | None:
     """Copy cached static data from *source_job_id* to *target_job_id*: the contract row (immutable fields), source
     files, summaries and role definitions, and static artifacts. The source contract is found by (address, chain)
     since earlier copies reassign it. Returns the new ``Contract.id``, or ``None``.
+
+    The row is reassigned, so the donor must be the same deployment: a donor on another chain is refused (a same-source
+    deployment there goes through :func:`copy_static_cache_cross_chain`).
     """
     existing = session.execute(select(Contract).where(Contract.job_id == target_job_id).limit(1)).scalar_one_or_none()
     if existing:
         return existing.id
 
-    # Find the contract by (address, chain); job_id is unreliable after a prior copy.
     src_job = session.get(Job, source_job_id)
-    if not src_job or not src_job.address:
+    target_job = session.get(Job, target_job_id)
+    if not src_job or not src_job.address or target_job is None:
+        return None
+    src_chain = _job_chain_name(src_job)
+    if (target_job.address or "").lower() != src_job.address.lower() or _job_chain_name(target_job) != src_chain:
+        logger.warning(
+            "static-cache copy refused: the donor is another deployment",
+            extra={
+                "donor_job_id": str(source_job_id),
+                "target_job_id": str(target_job_id),
+                "donor_chain": src_chain,
+                "target_chain": _job_chain_name(target_job),
+            },
+        )
         return None
 
-    src_req = src_job.request if isinstance(src_job.request, dict) else {}
-    src_chain = src_req.get("chain")
-
-    src_contract_stmt = (
-        select(Contract)
-        .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-        .where(func.lower(Contract.address) == src_job.address.lower())
-    )
-    if src_chain is not None:
-        # Mainnet-coalesced.
-        src_contract_stmt = src_contract_stmt.where(
-            func.lower(func.coalesce(Contract.chain, "ethereum"))
-            == _mainnet_coalesced_chain(canonical_chain(src_chain))
-        )
-    src_contract = session.execute(src_contract_stmt.limit(1)).scalar_one_or_none()
+    # Find the contract by (address, chain); job_id is unreliable after a prior copy.
+    src_contract = _summaried_contract(session, src_job.address, src_chain)
     if not src_contract:
         return None
 
@@ -601,15 +598,7 @@ def copy_static_cache_cross_chain(
         return None
 
     # Chain-qualified to the donor's own chain.
-    donor_contract = session.execute(
-        select(Contract)
-        .join(ContractSummary, ContractSummary.contract_id == Contract.id)
-        .where(
-            func.lower(Contract.address) == src_job.address.lower(),
-            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(src_job)),
-        )
-        .limit(1)
-    ).scalar_one_or_none()
+    donor_contract = _summaried_contract(session, src_job.address, _job_chain_name(src_job))
     if donor_contract is None:
         return None
 

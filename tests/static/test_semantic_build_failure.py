@@ -104,7 +104,9 @@ def test_a_degraded_donor_is_never_a_static_cache(db_session, degradation):  # n
     from db.queue import find_completed_static_cache, store_artifact
 
     donor = _create_completed_job_with_static_data(db_session, address=ADDR_A)
-    assert find_completed_static_cache(db_session, ADDR_A) is not None, "guard: the healthy donor is reusable"
+    assert find_completed_static_cache(db_session, ADDR_A, chain="ethereum") is not None, (
+        "guard: the healthy donor is reusable"
+    )
 
     if degradation == "legacy_trees_error_shape":
         store_artifact(db_session, donor.id, "predicate_trees", data=dict(ERROR_SHAPE))
@@ -124,7 +126,7 @@ def test_a_degraded_donor_is_never_a_static_cache(db_session, degradation):  # n
         )
     db_session.commit()
 
-    assert find_completed_static_cache(db_session, ADDR_A) is None
+    assert find_completed_static_cache(db_session, ADDR_A, chain="ethereum") is None
 
 
 @pytest.mark.parametrize(

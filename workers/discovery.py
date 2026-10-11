@@ -943,14 +943,21 @@ class DiscoveryWorker(BaseWorker):
         if address is None:
             raise ValueError("Address job missing address")
 
+        request = job.request if isinstance(job.request, dict) else {}
+        # The job's own chain (``chain_id`` first) scopes every lookup below. An address job without a resolvable chain
+        # is a data bug.
+        fetch_chain = require_chain(
+            getattr(job, "chain_id", None),
+            chain=request.get("chain"),
+            context=f"discovery for {address}",
+        )
         # Reuse cached static data from a completed job on the same chain; ``force`` bypasses it (see
         # AnalyzeRequest.force).
-        request = job.request if isinstance(job.request, dict) else {}
         if request.get("force"):
             cached_job = None
             logger.info("Discovery: force=True, skipping static cache lookup for %s", address)
         else:
-            cached_job = find_completed_static_cache(session, address, chain=request.get("chain"))
+            cached_job = find_completed_static_cache(session, address, chain=fetch_chain.name)
         if cached_job is not None:
             self.update_detail(session, job, f"Reusing cached static data for {address}")
             new_contract_id = copy_static_cache(session, cached_job.id, job.id)
@@ -988,13 +995,7 @@ class DiscoveryWorker(BaseWorker):
             )
 
         self.update_detail(session, job, f"Fetching verified source for {address}")
-        # Both Etherscan calls in parallel under the global rate limit. An address job without a resolvable chain is a
-        # data bug.
-        fetch_chain = require_chain(
-            getattr(job, "chain_id", None),
-            chain=request.get("chain") if isinstance(request, dict) else None,
-            context=f"discovery source fetch for {address}",
-        )
+        # Both Etherscan calls in parallel under the global rate limit.
         fetch_chain_id = fetch_chain.chain_id
         with log_timed_phase(logger, "source_fetch"):
             fan_out = etherscan.parallel_get(
@@ -1111,7 +1112,7 @@ class DiscoveryWorker(BaseWorker):
         # code-plane analysis. State is still resolved per (chain, address).
         if not request.get("force"):
             donor = find_completed_static_cache(
-                session, address, chain=request.get("chain"), source_content_hash=this_source_hash
+                session, address, chain=fetch_chain.name, source_content_hash=this_source_hash
             )
             if donor is not None and donor.id != job.id:
                 copied = copy_static_cache_cross_chain(session, donor.id, job.id, target_address=address)

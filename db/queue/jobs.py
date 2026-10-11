@@ -13,6 +13,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from db.models import Job, JobDependency, JobStage, JobStatus, derive_job_chain_id
+from utils.chains import canonical_chain, chain_by_id
 
 from .heartbeats import DEFAULT_JOB_LEASE_TTL_S, DEFAULT_JOB_STALE_TIMEOUT, LeaseLost
 from .static_cache import _not_stamped_with_other_era, _stands_without_walk_first, job_stands_for_current_analyzer
@@ -72,10 +73,14 @@ def create_job(
 
     trace_id = trace_id_var.get() or uuid.uuid4().hex[:16]
     address = request_dict.get("address")
+    # Enqueue-path dual-write, sharing the model default's derivation.
+    chain_id = derive_job_chain_id(request_dict.get("chain"), address)
+    if chain_id is not None and not canonical_chain(request_dict.get("chain")):
+        # Stamped so request readers can't disagree with ``chain_id`` on a chain-less submission.
+        request_dict = {**request_dict, "chain": chain_by_id(chain_id).name}
     job = Job(
         address=address,
-        # Enqueue-path dual-write, sharing the model default's derivation.
-        chain_id=derive_job_chain_id(request_dict.get("chain"), address),
+        chain_id=chain_id,
         company=request_dict.get("company"),
         name=request_dict.get("name"),
         status=JobStatus.queued,

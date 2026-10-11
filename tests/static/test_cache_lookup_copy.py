@@ -42,7 +42,7 @@ def test_find_completed_static_cache_picks_most_recent(db_session):
     db_session.execute(update(Job).where(Job.id == new_job.id).values(updated_at=future))
     db_session.commit()
 
-    found = find_completed_static_cache(db_session, ADDR_A)
+    found = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
     assert found is not None
     assert found.id == new_job.id
 
