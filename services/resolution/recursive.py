@@ -739,7 +739,127 @@ def _mapping_leaf_confers_authority(leaf: Mapping[str, Any]) -> bool:
     return True
 
 
-def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any] | None) -> list[WriterEventSpec]:
+def _key_word(value: Any) -> str | None:
+    """A key value as a 32-byte word: role ids as they are, addresses left-padded."""
+    if not isinstance(value, str) or not value.startswith("0x"):
+        return None
+    body = value[2:].lower()
+    if len(body) == 40:
+        body = body.rjust(64, "0")
+    if len(body) != 64 or any(ch not in "0123456789abcdef" for ch in body):
+        return None
+    return "0x" + body
+
+
+def _snapshot_key_words(snapshot: Mapping[str, Any] | None) -> dict[str, str]:
+    """Role identifiers and state variables the snapshot read, by name, as key words."""
+    words: dict[str, str] = {}
+    for controller_id, payload in ((snapshot or {}).get("controller_values") or {}).items():
+        if not isinstance(controller_id, str) or not isinstance(payload, Mapping):
+            continue
+        word = _key_word(payload.get("value"))
+        if word is not None:
+            words.setdefault(controller_id.split(":", 1)[-1], word)
+    return words
+
+
+def _event_position_of_key(hint: Mapping[str, Any], key_index: int) -> int | None:
+    indexed = sorted({int(p) for p in hint.get("indexed_positions") or [] if isinstance(p, int)})
+    for topic, key in (hint.get("topics_to_keys") or {}).items():
+        if str(key) == str(key_index):
+            rank = int(topic) - 1
+            return indexed[rank] if 0 <= rank < len(indexed) else None
+    for data_index, key in (hint.get("data_to_keys") or {}).items():
+        if str(key) == str(key_index):
+            remaining = int(data_index)
+            position = 0
+            while True:
+                if position not in indexed:
+                    if remaining == 0:
+                        return position
+                    remaining -= 1
+                position += 1
+    return None
+
+
+# The one key view whose domain is the mapping's own other key: any other view is read as "any word".
+_ROLE_ADMIN_VIEW = "getRoleAdmin(bytes32)"
+
+
+class _CheckedKey(NamedTuple):
+    position: int | None
+    # ``None``: any word (the leaf's other key is neither a readable constant nor a key view).
+    words: frozenset[str] | None
+    views: frozenset[str]
+
+
+def _leaf_checked_key(
+    descriptor: Mapping[str, Any], hint: Mapping[str, Any], key_words: Mapping[str, str], address: str
+) -> _CheckedKey | None:
+    """What the leaf checks at the mapping's other key, or ``None`` for a one-key mapping.
+
+    ``hasRole(PROPOSER_ROLE, msg.sender)`` checks one word; ``onlyRole(getRoleAdmin(role))`` checks whatever
+    ``getRoleAdmin`` returns for the roles involved.
+    """
+    key_sources = [source for source in descriptor.get("key_sources") or [] if isinstance(source, Mapping)]
+    if len(key_sources) < 2:
+        return None
+    positions = [_event_position_of_key(hint, index) for index in range(len(key_sources))]
+    others = [index for index, position in enumerate(positions) if position != hint.get("key_position")]
+    if len(key_sources) != 2 or len(others) != 1 or positions[others[0]] is None:
+        return _CheckedKey(None, None, frozenset())
+    source = key_sources[others[0]]
+    kind = source.get("source")
+    word: str | None = None
+    if kind == "constant":
+        word = _key_word(source.get("constant_value"))
+    elif kind == "state_variable" and not source.get("member_path"):
+        word = key_words.get(str(source.get("state_variable_name") or ""))
+    elif kind == "self_address":
+        word = _key_word(address)
+    elif kind == "view_call" and source.get("callee_signature") == _ROLE_ADMIN_VIEW:
+        selector = str(source.get("callee_selector") or "").lower()
+        if re.fullmatch(r"0x[0-9a-f]{8}", selector):
+            return _CheckedKey(positions[others[0]], frozenset(), frozenset({selector}))
+    if word is None:
+        return _CheckedKey(positions[others[0]], None, frozenset())
+    return _CheckedKey(positions[others[0]], frozenset({word}), frozenset())
+
+
+def _mapping_key_filters(checked: Mapping[str, list[_CheckedKey]]) -> dict[str, Any]:
+    """One filter per mapping, the union over its leaves; a mapping whose leaves disagree on the other key's position
+    gets none.
+    """
+    filters: dict[str, Any] = {}
+    for mapping_name, entries in checked.items():
+        positions = {entry.position for entry in entries}
+        if len(positions) != 1 or None in positions:
+            continue
+        words: set[str] | None = set()
+        views: set[str] = set()
+        for entry in entries:
+            if entry.words is None:
+                words = None
+            elif words is not None:
+                words |= entry.words
+            views |= entry.views
+        filters[mapping_name] = {
+            "position": positions.pop(),
+            "words": sorted(words) if words is not None else None,
+            "views": sorted(views),
+        }
+    return filters
+
+
+def _mapping_writer_specs_from_predicate_trees(
+    predicate_trees: Mapping[str, Any] | None,
+    *,
+    key_words: Mapping[str, str] | None = None,
+    address: str = "",
+) -> list[WriterEventSpec]:
+    """Writer-event specs for every mapping an authority leaf reads. On a two-key mapping each spec carries the other
+    key the leaves check (``key_filter``), so the replay harvests ``_roles[PROPOSER_ROLE]``, not every role's holders.
+    """
     if not isinstance(predicate_trees, Mapping):
         return []
     tree_maps = [
@@ -752,6 +872,8 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
 
     specs: list[WriterEventSpec] = []
     seen: set[tuple[Any, ...]] = set()
+    checked: dict[str, list[_CheckedKey]] = {}
+    unkeyed: set[str] = set()
 
     def visit(node: Any) -> None:
         if not isinstance(node, dict):
@@ -785,6 +907,11 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
                 continue
             if not isinstance(key_position, int):
                 continue
+            checked_key = _leaf_checked_key(descriptor, hint, key_words or {}, address)
+            if checked_key is None:
+                unkeyed.add(mapping_name)
+            else:
+                checked.setdefault(mapping_name, []).append(checked_key)
             identity = (
                 mapping_name,
                 event_signature,
@@ -814,10 +941,99 @@ def _mapping_writer_specs_from_predicate_trees(predicate_trees: Mapping[str, Any
     for tree_map in tree_maps:
         for tree in tree_map.values():
             visit(tree)
+    # A mapping some leaf reads with one key is no two-key mapping to filter.
+    filters = {name: f for name, f in _mapping_key_filters(checked).items() if name not in unkeyed}
+    for spec in specs:
+        if spec["mapping_name"] in filters:
+            spec["key_filter"] = filters[spec["mapping_name"]]
     # A present-set replay with no add event names no one (``controllers[c] = address(0)`` is a remove whose adds are
     # value writes), so its "complete" would be vacuous.
     with_adds = {spec["mapping_name"] for spec in specs if spec["direction"] == "add"}
     return [spec for spec in specs if spec["mapping_name"] in with_adds]
+
+
+# Bound on following a key view to its fixed point (an admin of an admin of a checked role).
+_KEY_VIEW_ROUNDS = 8
+
+
+def _view_closure(
+    *, address: str, views: list[str], start: set[str], rpc_url: str | None, block: int | None
+) -> set[str] | None:
+    """Every word the key views (``getRoleAdmin``) return for *start*, followed transitively (an admin of an admin),
+    read at the pinned block; ``None`` when a read fails or it doesn't settle.
+    """
+    from services.clients import rpc as rpc_client
+
+    if not rpc_url or not isinstance(block, int):
+        return None
+    asked: set[str] = set()
+    produced: set[str] = set()
+    frontier = sorted(start)
+    for _ in range(_KEY_VIEW_ROUNDS):
+        if not frontier:
+            return produced
+        asked.update(frontier)
+        calls: list[tuple[str, list[Any]]] = [
+            ("eth_call", [{"to": address.lower(), "data": selector + word[2:]}, hex(block)])
+            for selector in views
+            for word in frontier
+        ]
+        for raw, status in rpc_client.rpc_batch_request_classified(rpc_url, calls):
+            word = _key_word(raw) if status == "ok" else None
+            if word is None:
+                return None
+            produced.add(word)
+        frontier = sorted(produced - asked)
+    return produced if not frontier else None
+
+
+def _members_holding_checked_keys(
+    principals: list[EnumeratedPrincipal],
+    specs: list[WriterEventSpec],
+    *,
+    address: str,
+    rpc_url: str | None,
+    block: int | None,
+) -> list[EnumeratedPrincipal]:
+    """Drop members who hold none of the keys the contract's leaves check (directly or through a key view); a mapping
+    whose checked keys can't be read keeps every member, as before.
+    """
+    allowed: dict[str, set[str] | None] = {}
+    for spec in specs:
+        key_filter = spec.get("key_filter")
+        mapping_name = spec["mapping_name"]
+        if key_filter is None or mapping_name in allowed:
+            continue
+        words = key_filter["words"]
+        if words is None:
+            allowed[mapping_name] = None
+            continue
+        checked = set(words)
+        if key_filter["views"]:
+            held = {word for p in principals if p["mapping_name"] == mapping_name for word in p.get("keys") or []}
+            via_views = _view_closure(
+                address=address, views=key_filter["views"], start=checked | held, rpc_url=rpc_url, block=block
+            )
+            if via_views is None:
+                record_degraded(
+                    phase="mapping_key_view",
+                    exc=RuntimeError("key view unreadable; every member kept"),
+                    context={"address": address, "mapping_name": mapping_name},
+                )
+                allowed[mapping_name] = None
+                continue
+            checked |= via_views
+        allowed[mapping_name] = checked
+    if not allowed:
+        return principals
+    out: list[EnumeratedPrincipal] = []
+    for principal in principals:
+        keys = principal.get("keys")
+        allow = allowed.get(principal["mapping_name"])
+        # An empty word is a log whose other key couldn't be read; it can't be ruled out.
+        if allow is None or keys is None or "" in keys or allow & set(keys):
+            out.append(principal)
+    return out
 
 
 MAPPING_SOURCE_EVENT_INDEX = "event_index"
@@ -953,6 +1169,12 @@ def _replay_mapping_principals(
         rpc_url=rpc_url,
         resolution_block=resolution_block,
     )
+
+    def checked(principals: list[EnumeratedPrincipal]) -> list[EnumeratedPrincipal]:
+        return _members_holding_checked_keys(
+            principals, mapping_specs, address=address, rpc_url=rpc_url, block=resolution_block
+        )
+
     if indexed is not None and indexed.complete:
         logger.info(
             "mapping_enumerator: members read from the durable event index",
@@ -960,7 +1182,7 @@ def _replay_mapping_principals(
         )
         _publish_mapping_principals(
             address=address,
-            principals=indexed.principals,
+            principals=checked(indexed.principals),
             complete=True,
             contract_node_id=contract_node_id,
             depth=depth,
@@ -974,7 +1196,7 @@ def _replay_mapping_principals(
     )
     _publish_mapping_principals(
         address=address,
-        principals=principals,
+        principals=checked(principals),
         complete=status == "complete",
         contract_node_id=contract_node_id,
         depth=depth,
@@ -1452,7 +1674,9 @@ def resolve_control_graph(
             )
 
             # Bounded enumeration reports truncation via ``status``.
-            mapping_specs = _mapping_writer_specs_from_predicate_trees(artifacts.get("predicate_trees"))
+            mapping_specs = _mapping_writer_specs_from_predicate_trees(
+                artifacts.get("predicate_trees"), key_words=_snapshot_key_words(snapshot), address=address
+            )
             if mapping_specs:
                 replay = _replay_mapping_principals(
                     address=address,

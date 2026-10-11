@@ -4,7 +4,20 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 from .shared import _contract_functions
+
+
+class KeyFilter(TypedDict):
+    """For a two-key mapping (``_roles[role][account]``), the event position of the other key and the words the
+    contract's own leaves check there. ``words`` ``None`` means any word; ``views`` are unary views (``getRoleAdmin``)
+    whose results the leaves also check. Set at resolution time only; never part of a static artifact.
+    """
+
+    position: int
+    words: list[str] | None
+    views: list[str]
 
 
 class WriterEventSpec(TypedDict):
@@ -19,6 +32,7 @@ class WriterEventSpec(TypedDict):
     # Position of the assigned value in the event's args: ``None`` for ``add``/``remove``; for ``set``, e.g.
     # ``OwnerSet(addr, val)`` is ``key_position=0, value_position=1``.
     value_position: int | None
+    key_filter: NotRequired[KeyFilter]
 
 
 class _EventMetadata(TypedDict):
