@@ -14,6 +14,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     PredicateTree,
     SetDescriptor,
 )
+from utils.chains import UnknownChainError, chain_by_id
 
 from ..capabilities import (
     CapabilityExpr,
@@ -547,10 +548,15 @@ def _maybe_inline_cross_contract_call(
     from db.queue import get_artifact, usable_semantic_artifact
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
+    try:
+        registry_chain = chain_by_id(chain_id).name
+    except UnknownChainError:
+        return None
     lookup = find_analysis_job_for_address(
         session,
         registry_addr,
         required_artifact="predicate_trees",
+        chain=registry_chain,
         completed_only=False,
     )
     if lookup is None:

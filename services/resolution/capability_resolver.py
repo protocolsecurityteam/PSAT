@@ -32,7 +32,7 @@ from db.queue import (
 )
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
-from utils.chains import UnknownChainError, chain_by_id, require_chain
+from utils.chains import UnknownChainError, canonical_chain, chain_by_id, require_chain
 from utils.logging import record_degraded, record_stage_metric
 
 from . import indexer_settings
@@ -815,7 +815,8 @@ def _jobs_for_address(
     candidates = list(session.execute(stmt).scalars().all())
     if chain is None:
         return candidates
-    return [job for job in candidates if _job_chain(job) == chain]
+    wanted = canonical_chain(chain)
+    return [job for job in candidates if _job_chain(job) == wanted]
 
 
 def _implementation_address(session: Session, runtime_job: Job, chain: str | None) -> str | None:
@@ -878,16 +879,27 @@ def _contract_for_job(session: Session, job: Job, *, chain: str | None) -> Contr
     if not address:
         return None
     stmt = select(Contract).where(func.lower(Contract.address) == address)
-    effective_chain = chain or _job_chain(job)
+    effective_chain = canonical_chain(chain) or _job_chain(job)
     if effective_chain is not None:
-        stmt = stmt.where(Contract.chain == effective_chain)
+        stmt = stmt.where(_contract_on_chain(effective_chain))
     return session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
 
 
+def _contract_on_chain(chain: str):
+    # Legacy mainnet rows have ``chain=NULL``.
+    return func.lower(func.coalesce(Contract.chain, "ethereum")) == chain
+
+
 def _job_chain(job: Job) -> str | None:
+    """The job's canonical chain: ``chain_id`` first, since a chain-less request is a mainnet job."""
+    chain_id = getattr(job, "chain_id", None)
+    if isinstance(chain_id, int):
+        try:
+            return chain_by_id(chain_id).name
+        except UnknownChainError:
+            return None
     request = job.request if isinstance(job.request, dict) else {}
-    chain = request.get("chain")
-    return chain if isinstance(chain, str) and chain else None
+    return canonical_chain(request.get("chain"))
 
 
 def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
@@ -914,10 +926,11 @@ def _load_state_var_values(
     same name. Scoped to ``Contract.job_id`` when given, else the latest contract for the address (and ``chain`` if
     given). Empty dict when nothing matches.
     """
+    chain = canonical_chain(chain)
     if job_id is not None:
         stmt = select(Contract).where(Contract.job_id == job_id)
         if chain is not None:
-            stmt = stmt.where(Contract.chain == chain)
+            stmt = stmt.where(_contract_on_chain(chain))
         contract = session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
         if contract is not None:
             # Scope to this deployment so a shared impl reads only its own proxy's values.
@@ -942,7 +955,7 @@ def _load_state_var_values(
 
     stmt = select(Contract).where(func.lower(Contract.address) == address.lower())
     if chain is not None:
-        stmt = stmt.where(Contract.chain == chain)
+        stmt = stmt.where(_contract_on_chain(chain))
     stmt = stmt.order_by(Contract.created_at.desc()).limit(1)
     contract = session.execute(stmt).scalar_one_or_none()
     if contract is None:
