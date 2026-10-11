@@ -473,3 +473,22 @@ def test_a_completed_proxy_job_is_never_a_static_cache_donor(session):
     session.commit()
 
     assert find_completed_static_cache(session, proxy, chain="ethereum") is None
+
+
+@pytest.mark.parametrize("version", [None, CURRENT], ids=["unstamped", "stamped-current"])
+def test_a_spawned_provider_that_failed_terminally_stands(session, version):
+    proxy, impl = _address("e7"), _address("e8")
+    proxy_job, _stale_impl = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=STALE)
+    _emit(session, _depender(session), proxy)
+    spawned = _provider_jobs(session, proxy)[1]
+    spawned.status = JobStatus.failed_terminal
+    spawned.analysis_schema_version = version
+    session.commit()
+    depender = _depender(session)
+
+    _emit(session, depender, proxy)
+
+    jobs = _provider_jobs(session, proxy)
+    assert [job.id for job in jobs] == [proxy_job.id, spawned.id]
+    edge = _edge(session, depender)
+    assert edge.status == "degraded"

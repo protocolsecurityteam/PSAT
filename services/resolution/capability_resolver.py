@@ -259,6 +259,20 @@ def find_dependency_provider_job_for_address(
             and contract is not None
             and contract.is_proxy
         ):
+            # A provider spawned for it that has since failed terminally stands (no re-spawn per emission).
+            later_failure = next(
+                (
+                    job
+                    for job in runtime_jobs
+                    if job.status == JobStatus.failed_terminal
+                    and job.created_at is not None
+                    and runtime_job.created_at is not None
+                    and job.created_at > runtime_job.created_at
+                ),
+                None,
+            )
+            if later_failure is not None:
+                return AnalysisJobLookup(runtime_job=later_failure, analysis_job=later_failure)
             return None
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
     return None
