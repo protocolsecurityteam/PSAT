@@ -3,13 +3,17 @@ from __future__ import annotations
 from typing import Any, cast
 
 from eth_utils.crypto import keccak
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 import services.resolution.role_store_standards as rss
+from db.models import Contract
 from services.resolution.role_store_standards import (
     SOLADY_ENUMERABLE_ROLES,
     detect_standards,
     resolve_probe_code,
 )
+from tests.conftest import DATABASE_URL, requires_postgres
 
 
 def _sel(sig: str) -> str:
@@ -74,3 +78,32 @@ def test_resolve_probe_code_cycle_terminates(monkeypatch):
     monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: None)
     code = resolve_probe_code(_sess({_PROXY: _IMPL, _IMPL: _PROXY}), _PROXY, 1, rpc_url="http://local")
     assert detect_standards(code) == [SOLADY_ENUMERABLE_ROLES]
+
+
+@requires_postgres
+def test_probe_code_follows_only_the_authoritys_own_chain_implementation(monkeypatch):
+    proxy = "0x" + "a7" * 20
+    mainnet_impl = "0x" + "11" * 20
+    base_impl = "0x" + "22" * 20
+    engine = create_engine(DATABASE_URL)
+    session = Session(engine, expire_on_commit=False)
+    try:
+        session.add(Contract(address=proxy, chain="base", is_proxy=True, implementation=base_impl))
+        session.commit()
+        codes = {proxy: "0xproxy", mainnet_impl: "0xmainnetimpl", base_impl: "0xbaseimpl"}
+        monkeypatch.setattr(rss, "get_code", lambda url, addr, chain_id=None: codes.get(addr.lower()))
+        slot_word = "0x" + "0" * 24 + mainnet_impl[2:]
+        monkeypatch.setattr(
+            rss,
+            "rpc_request",
+            lambda url, method, params, chain_id=None: slot_word if params[0].lower() == proxy else "0x" + "0" * 64,
+        )
+
+        assert resolve_probe_code(session, proxy, 1, rpc_url="http://stub") == "0xmainnetimpl"
+        assert resolve_probe_code(session, proxy, 8453, rpc_url="http://stub") == "0xbaseimpl"
+    finally:
+        session.rollback()
+        session.query(Contract).filter(Contract.address == proxy).delete()
+        session.commit()
+        session.close()
+        engine.dispose()
