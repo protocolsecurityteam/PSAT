@@ -8,6 +8,7 @@ cursors are real test-DB rows, and the readers are the scorer's ``load_control_c
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Any, cast
 
@@ -46,6 +47,7 @@ OPERATOR_ONLY = "0x" + "a3" * 20
 PROPOSER_REVOKED_OPERATOR_KEPT = "0x" + "a4" * 20
 OPERATOR_REVOKED_PROPOSER_KEPT = "0x" + "a5" * 20
 SENDER = "0x" + "ee" * 20
+CONSUMER = "0x" + "c0" * 20
 
 
 def _word(address: str) -> str:
@@ -142,22 +144,23 @@ def _trees() -> dict[str, Any]:
     }
 
 
-def _bundle() -> LoadedArtifacts:
+def _bundle(
+    *, address: str = ANCHOR, trees: dict[str, Any] | None = None, controllers: dict[str, Any] | None = None
+) -> LoadedArtifacts:
     return cast(
         LoadedArtifacts,
         {
-            "analysis": {"subject": {"address": ANCHOR, "name": "Timelock"}},
-            "tracking_plan": {"schema_version": "0.1", "contract_address": ANCHOR, "tracked_controllers": []},
+            "analysis": {"subject": {"address": address, "name": "Timelock"}},
+            "tracking_plan": {"schema_version": "0.1", "contract_address": address, "tracked_controllers": []},
             "snapshot": {
                 "schema_version": "0.1",
-                "contract_address": ANCHOR,
+                "contract_address": address,
                 "contract_name": "Timelock",
                 "block_number": PIN,
-                "controller_values": {
-                    "role_identifier:PROPOSER_ROLE": {"source": "PROPOSER_ROLE", "value": PROPOSER_ROLE},
-                },
+                "controller_values": controllers
+                or {"role_identifier:PROPOSER_ROLE": {"source": "PROPOSER_ROLE", "value": PROPOSER_ROLE}},
             },
-            "predicate_trees": _trees(),
+            "predicate_trees": _trees() if trees is None else trees,
         },
     )
 
@@ -210,13 +213,37 @@ def _history(session) -> None:
     session.commit()
 
 
-def _controllers_read_by_scorer_and_surface(session) -> tuple[set[str], set[str]]:
-    protocol = _add_protocol(session, "role-keys")
-    job = _add_job(session, address=ANCHOR, protocol_id=protocol.id, request={"address": ANCHOR, "chain": "ethereum"})
-    contract = _add_contract(session, address=ANCHOR, job=job, protocol_id=protocol.id, contract_name="Timelock")
-    graph, _ = resolve_control_graph(root_artifacts=_bundle(), rpc_url="http://rpc.test", chain_id=1)
+def _member_with_graph(session, protocol, root: LoadedArtifacts, address: str, override=None) -> None:
+    job = _add_job(session, address=address, protocol_id=protocol.id, request={"address": address, "chain": "ethereum"})
+    contract = _add_contract(session, address=address, job=job, protocol_id=protocol.id, contract_name="Member")
+    graph, _ = resolve_control_graph(
+        root_artifacts=root, rpc_url="http://rpc.test", chain_id=1, nested_artifacts_override=override
+    )
     replace_control_graph_rows(session, contract_id=contract.id, deployment_address=None, resolved_graph=graph)
     session.commit()
+
+
+def _controllers_read_by_scorer_and_surface(
+    session, bundle: LoadedArtifacts | None = None, *, consumer: bool = False
+) -> tuple[set[str], set[str]]:
+    protocol = _add_protocol(session, "role-keys")
+    anchor_bundle = bundle or _bundle()
+    _member_with_graph(session, protocol, anchor_bundle, ANCHOR)
+    if consumer:
+        # The consumer gates on ``registry.hasRole(PAUSER_ROLE, msg.sender)``; its graph walks into the registry.
+        consumer_bundle = _bundle(
+            address=CONSUMER,
+            trees={"schema_version": "semantic", "trees": {}},
+            controllers={
+                "external_contract:roleRegistry": {
+                    "source": "roleRegistry",
+                    "value": ANCHOR,
+                    "resolved_type": "contract",
+                    "authority_provenance": "caller_gate",
+                }
+            },
+        )
+        _member_with_graph(session, protocol, consumer_bundle, CONSUMER, override={ANCHOR: anchor_bundle})
 
     anchor_key = entity_key("ethereum", ANCHOR)
     closure = load_control_closure(session, protocol.id)
@@ -294,3 +321,72 @@ def test_a_one_key_mapping_gets_no_filter():
     specs = recursive._mapping_writer_specs_from_predicate_trees({"trees": {"mint()": leaf}}, key_words={})
 
     assert specs and all("key_filter" not in spec for spec in specs)
+
+
+ALL_HOLDERS = {PROPOSER, ADMIN, OPERATOR_ONLY, PROPOSER_REVOKED_OPERATOR_KEPT, OPERATOR_REVOKED_PROPOSER_KEPT}
+REGISTRY_TREES = {"schema_version": "semantic", "trees": {"grantRole(bytes32,address)": _role_leaf(ROLE_ADMIN_KEY)}}
+
+
+def test_a_registry_alone_keeps_only_its_own_checked_roles(db_session, monkeypatch):
+    _history(db_session)
+    _role_admin_wire(monkeypatch)
+
+    scorer, surface = _controllers_read_by_scorer_and_surface(db_session, _bundle(trees=REGISTRY_TREES))
+
+    assert scorer == surface == {ADMIN}
+
+
+def test_a_registry_another_contract_gates_on_keeps_every_role_holder(db_session, monkeypatch):
+    _history(db_session)
+    _role_admin_wire(monkeypatch)
+
+    scorer, surface = _controllers_read_by_scorer_and_surface(db_session, _bundle(trees=REGISTRY_TREES), consumer=True)
+
+    # The consumer checks a role the registry's own leaves never name, so every holder may be its controller.
+    assert scorer == surface == ALL_HOLDERS
+
+
+HAS_ROLE_CHECK = {
+    "op": "LEAF",
+    "leaf": {
+        "kind": "membership",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [{"source": "parameter", "parameter_index": 0}, {"source": "parameter", "parameter_index": 1}],
+        "set_descriptor": {
+            "kind": "mapping_membership",
+            "key_sources": [
+                {"source": "parameter", "parameter_index": 0, "parameter_name": "role"},
+                {"source": "parameter", "parameter_index": 1, "parameter_name": "account"},
+            ],
+            "storage_var": "_roles",
+            "enumeration_hint": [_hint(GRANTED, "add"), _hint(REVOKED, "remove")],
+        },
+    },
+}
+
+
+def _filters(trees: dict[str, Any]) -> list[Any]:
+    specs = recursive._mapping_writer_specs_from_predicate_trees(
+        trees, key_words=recursive._snapshot_key_words(_bundle()["snapshot"]), address=ANCHOR
+    )
+    return [spec.get("key_filter") for spec in specs]
+
+
+def test_a_role_check_other_contracts_can_call_with_any_role_filters_nothing(db_session, monkeypatch):
+    trees = {**_trees(), "check_trees": {"hasRole(bytes32,address)": HAS_ROLE_CHECK}}
+    assert {f["words"] if f else "missing" for f in _filters(trees)} == {None}
+
+    _history(db_session)
+    _role_admin_wire(monkeypatch)
+    scorer, surface = _controllers_read_by_scorer_and_surface(db_session, _bundle(trees=trees))
+    assert scorer == surface == ALL_HOLDERS
+
+
+def test_a_role_check_on_a_constant_role_adds_that_role():
+    operator_check = json.loads(json.dumps(HAS_ROLE_CHECK))
+    operator_check["leaf"]["set_descriptor"]["key_sources"][0] = {"source": "constant", "constant_value": OPERATOR_ROLE}
+    trees = {**_trees(), "check_trees": {"isOperator(address)": operator_check}}
+
+    (first, *_rest) = _filters(trees)
+    assert first is not None and first["words"] == sorted([PROPOSER_ROLE, OPERATOR_ROLE])

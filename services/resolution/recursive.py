@@ -859,6 +859,9 @@ def _mapping_writer_specs_from_predicate_trees(
 ) -> list[WriterEventSpec]:
     """Writer-event specs for every mapping an authority leaf reads. On a two-key mapping each spec carries the other
     key the leaves check (``key_filter``), so the replay harvests ``_roles[PROPOSER_ROLE]``, not every role's holders.
+
+    Another contract can gate on this one's mapping through its check functions (``hasRole(role, account)``), so the
+    keys those read count as checked, and one taking a caller-chosen key leaves the mapping unfiltered.
     """
     if not isinstance(predicate_trees, Mapping):
         return []
@@ -874,6 +877,25 @@ def _mapping_writer_specs_from_predicate_trees(
     seen: set[tuple[Any, ...]] = set()
     checked: dict[str, list[_CheckedKey]] = {}
     unkeyed: set[str] = set()
+    exposed: dict[str, list[_CheckedKey | None]] = {}
+
+    def visit_exposure(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("op") != "LEAF":
+            for child in node.get("children") or []:
+                visit_exposure(child)
+            return
+        leaf = node.get("leaf")
+        descriptor = leaf.get("set_descriptor") if isinstance(leaf, dict) else None
+        if not isinstance(descriptor, dict):
+            return
+        storage_var = descriptor.get("storage_var")
+        hints = [h for h in descriptor.get("enumeration_hint") or [] if isinstance(h, dict)]
+        names = {h.get("mapping_name") for h in hints} | {storage_var}
+        for mapping_name in {n for n in names if isinstance(n, str) and n}:
+            readable = [_leaf_checked_key(descriptor, h, key_words or {}, address) for h in hints]
+            exposed.setdefault(mapping_name, []).extend(readable or [None])
 
     def visit(node: Any) -> None:
         if not isinstance(node, dict):
@@ -941,8 +963,19 @@ def _mapping_writer_specs_from_predicate_trees(
     for tree_map in tree_maps:
         for tree in tree_map.values():
             visit(tree)
+    check_trees = predicate_trees.get("check_trees")
+    for tree in (check_trees if isinstance(check_trees, Mapping) else {}).values():
+        visit_exposure(tree)
     # A mapping some leaf reads with one key is no two-key mapping to filter.
     filters = {name: f for name, f in _mapping_key_filters(checked).items() if name not in unkeyed}
+    for mapping_name, key_filter in filters.items():
+        entries = exposed.get(mapping_name, [])
+        if any(e is None or e.words is None or e.position != key_filter["position"] for e in entries):
+            key_filter["words"] = None
+            continue
+        if key_filter["words"] is not None:
+            key_filter["words"] = sorted(set(key_filter["words"]).union(*(e.words or () for e in entries if e)))
+            key_filter["views"] = sorted(set(key_filter["views"]).union(*(e.views for e in entries if e)))
     for spec in specs:
         if spec["mapping_name"] in filters:
             spec["key_filter"] = filters[spec["mapping_name"]]
@@ -950,6 +983,25 @@ def _mapping_writer_specs_from_predicate_trees(
     # value writes), so its "complete" would be vacuous.
     with_adds = {spec["mapping_name"] for spec in specs if spec["direction"] == "add"}
     return [spec for spec in specs if spec["mapping_name"] in with_adds]
+
+
+_AUTHORITY_READ_RELATIONS = frozenset({EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED})
+
+
+def _read_as_authority(edges: Mapping[tuple, ResolvedGraphEdge], node_id: str) -> bool:
+    """Whether another contract in the walk names this one as an authority (``registry.hasRole(...)``)."""
+    return any(
+        edge["to_id"] == node_id and edge["from_id"] != node_id and edge["relation"] in _AUTHORITY_READ_RELATIONS
+        for edge in edges.values()
+    )
+
+
+def _keep_every_key(specs: list[WriterEventSpec]) -> list[WriterEventSpec]:
+    out: list[WriterEventSpec] = []
+    for spec in specs:
+        key_filter = spec.get("key_filter")
+        out.append(cast(WriterEventSpec, {**spec, "key_filter": {**key_filter, "words": None}}) if key_filter else spec)
+    return out
 
 
 # Bound on following a key view to its fixed point (an admin of an admin of a checked role).
@@ -1677,6 +1729,9 @@ def resolve_control_graph(
             mapping_specs = _mapping_writer_specs_from_predicate_trees(
                 artifacts.get("predicate_trees"), key_words=_snapshot_key_words(snapshot), address=address
             )
+            if _read_as_authority(edges, contract_node_id):
+                # Another contract gates on this one's state, and may check any of its keys.
+                mapping_specs = _keep_every_key(mapping_specs)
             if mapping_specs:
                 replay = _replay_mapping_principals(
                     address=address,
