@@ -484,9 +484,16 @@ def _probe_safe_protection(
     out["probe_block"] = probe_block
     pinned = hex(probe_block)
 
-    decoded_version = _try_eth_call_decoded(rpc_url, address, "VERSION()", "string", pinned, chain_id=chain_id)
-    read_failed = decoded_version is _PROBE_ERROR
-    version = decoded_version if isinstance(decoded_version, str) else None
+    # A revert is an answer (a Safe-shaped contract without ``VERSION()``); only an unread call is a failure.
+    raw_version, version_state = _eth_call_tristate(rpc_url, address, "VERSION()", pinned, chain_id=chain_id)
+    read_failed = version_state == "error"
+    version: str | None = None
+    if raw_version is not None:
+        try:
+            decoded_version = _decode_abi_value(raw_version, "string")
+        except Exception:
+            decoded_version = None
+        version = decoded_version if isinstance(decoded_version, str) else None
     if version is not None:
         out["safe_version"] = version
 

@@ -62,6 +62,7 @@ def _wire(
     threshold: int = 4,
     storage_raises: bool = False,
     pinned_block: int | None = PROBE_BLOCK,
+    version_raises: str | None = None,
 ):
     """Both classify paths route through the same three helpers."""
     calls: list[tuple[str, str]] = []
@@ -75,6 +76,8 @@ def _wire(
 
     def _fake_eth_call_raw(_rpc_url, addr, signature, block, chain_id=None):
         calls.append((signature, block))
+        if signature == "VERSION()" and version_raises is not None:
+            raise RuntimeError(version_raises)
         return responses.get(signature, "0x")
 
     def _fake_batch(_rpc_url, batch_calls, chain_id=None):
@@ -316,3 +319,31 @@ def test_a_clean_protection_read_is_still_cached(monkeypatch):
     assert _protection(details)["guard"] == "proven_zero"
     assert _protection(details)["module_set"] == []
     assert tracking._CLASSIFY_CACHE
+
+
+@pytest.mark.parametrize(
+    ("error", "failed"),
+    [
+        pytest.param("execution reverted", False, id="revert-is-an-answer"),
+        pytest.param("ConnectionResetError: connection reset by peer", True, id="transport-is-not"),
+    ],
+)
+def test_a_version_revert_is_cached_and_a_version_transport_failure_is_not(monkeypatch, error, failed):
+    _, details, reported = _both_paths(
+        monkeypatch,
+        MODULE_FREE_SAFE,
+        version="1.4.1",
+        head_word=SENTINEL_WORD,
+        guard_word=ZERO_WORD,
+        version_raises=error,
+    )
+    protection = _protection(details)
+    assert (protection["safe_version"], protection["guard"]) == ("not_determined", "not_determined")
+    assert protection["module_set"] == []
+    assert reported is failed
+
+    tracking.clear_classify_cache()
+    _wire(monkeypatch, version=None, head_word=SENTINEL_WORD, guard_word=ZERO_WORD, version_raises=error)
+    _kind, _details, cacheable = tracking.classify_resolved_address_with_status("https://rpc", MODULE_FREE_SAFE)
+    assert cacheable is not failed
+    assert bool(tracking._CLASSIFY_CACHE) is not failed
