@@ -27,7 +27,6 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from db.models import Contract, EffectiveFunction, MonitoredContract, MonitoredEvent
 from services.clients.rpc import rpc_batch_request_classified
-from services.monitoring.chain_rpc import chain_id_for
 from services.monitoring.salience import (
     DATA_KEY_CORRELATED_EVENTS,
     SAFE_EXEC_BATCH_UNDECODABLE,
@@ -41,6 +40,7 @@ from services.monitoring.salience import (
 )
 from services.static.claims.context import abi_selector
 from services.static.claims.matchers._gates import SAFE_EXEC_TRANSACTION
+from utils.chains import chain_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -716,7 +716,7 @@ def enrich_events(
         # An unresolvable chain skips enrichment for that chain (no URL/chain guard); guarded because this function must
         # never raise.
         try:
-            chain_id = chain_id_for(chain)
+            chain_id = chain_by_name(chain).chain_id
         except Exception as exc:
             logger.warning(
                 "Enrichment skipped for %s: chain id not resolved: %s",

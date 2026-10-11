@@ -50,6 +50,7 @@ from .authority import (
 from .operands import (
     _operand_for_value,
     _source_sort_key,
+    _source_to_operand,
     _sources_for_value,
     _sources_from_destination,
 )
@@ -72,6 +73,22 @@ def _build_binary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function:
             ml = _try_membership_via_value_compare(ir, prov, gate, function, operator)
             if ml is not None:
                 return ml
+            for value in (ir.variable_left, ir.variable_right):
+                defining = _find_defining_ir(value, None, function)
+                for _ in range(8):
+                    if not isinstance(defining, TypeConversion):
+                        break
+                    defining = _find_defining_ir(defining.variable, None, function)
+                if isinstance(defining, Index) and _value_type_of_index_ir(defining).startswith("address"):
+                    keys = _reconstruct_index_chain(defining, prov, function)
+                    if any(k.get("source") in _CALLER_SOURCES for k in keys):
+                        unknown = _unsupported_leaf(
+                            reason="unresolved_address_registry_comparison",
+                            expression=gate.expression_text,
+                            references_msg_sender=True,
+                        )
+                        unknown["authority_role"] = "caller_authority"
+                        return unknown
         # ``map[k] >= threshold`` is an M-of-N counter check: emit a comparison leaf with ``set_descriptor`` so
         # writer-gate pass 2 can promote an authority-derived counter.
         if kind == "comparison" and function is not None:
@@ -264,6 +281,9 @@ def _try_membership_via_value_compare(
     base_var = _find_index_base(index_ir, function)
     if base_var is not None:
         descriptor["storage_var"] = getattr(base_var, "name", None)
+        declaration = getattr(base_var, "canonical_name", None)
+        if value_predicate["value_type"].startswith("address") and isinstance(declaration, str):
+            descriptor["storage_var_declaration"] = declaration
 
     # Nonzero membership is an allowlist; equality to the default zero is its absence. The value predicate already
     # carries revert polarity, so an address(0) conversion must not turn membership into a public exclusion.
@@ -287,14 +307,16 @@ def _find_index_value_pair(a: Any, b: Any, function: Any) -> tuple[Any | None, A
     """``(index_ir, const_value, mask_hex)`` when ``a`` is an Index lvalue (optionally masked) and ``b`` a constant,
     literal or constant/immutable state var; else Nones. Covers equality, masked and threshold forms.
     """
-    for _ in range(3):
-        conversion = _find_defining_ir(b, None, function)
-        if not isinstance(conversion, TypeConversion):
-            break
-        b = conversion.variable
-    if not _is_mask_operand(b):
-        return None, None, None
-    const_value = _coerce_constant_value(b)
+    if _is_mask_operand(b):
+        const_value = _coerce_constant_value(b)
+    else:
+        # Solidity lowers address(0) to a temporary TypeConversion, so looking
+        # only for literal operands loses address-valued registry membership.
+        from ..storage_accessors import _constant
+
+        const_value = _constant(b, function, {})
+        if const_value is None:
+            return None, None, None
     defining = _find_defining_ir(a, None, function)
     if isinstance(defining, Index):
         return defining, const_value, None
@@ -544,15 +566,7 @@ def _build_unary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function: 
     op_type = getattr(ir, "type", None)
     if op_type == getattr(UnaryType, "BANG", "!"):
         inner = ir.rvalue
-        flipped_polarity = "allowed_when_true" if gate.polarity == "allowed_when_false" else "allowed_when_false"
-        new_gate = RevertGate(
-            kind=gate.kind,
-            condition_value=inner,
-            polarity=flipped_polarity,
-            node=gate.node,
-            expression_text=gate.expression_text,
-            basis=gate.basis,
-        )
+        new_gate = gate.negated(inner)
         return _build_leaf_from_gate(new_gate, prov, function) or _unsupported_leaf(
             reason="negated_unknown", expression=str(ir)
         )
@@ -662,6 +676,12 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
         (s.state_variable_name for s in sorted(target_sources, key=_source_sort_key) if s.kind == "state_variable"),
         None,
     )
+    slot_targets = [s for s in target_sources if s.kind == "view_call" and s.storage_slot]
+    target_operand = None
+    if len({s.storage_slot for s in slot_targets}) == 1 and not any(
+        s.kind in _CALLER_SOURCES or s.kind == "parameter" for s in target_sources
+    ):
+        target_operand = _source_to_operand(sorted(slot_targets, key=_source_sort_key)[0])
     has_caller_arg = any(
         any(s.kind in ("msg_sender", "tx_origin", "signature_recovery") for s in _sources_for_value(a, prov))
         for a in getattr(ir, "arguments", ())
@@ -669,7 +689,7 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
     # A state target plus caller argument isn't enough (``vault.enter(msg.sender, ...)``, ``token.permit(msg.sender,
     # ...)``); only gate-shaped callees get ``delegated_authority``.
     if (
-        has_state_target
+        (has_state_target or target_operand is not None)
         and has_caller_arg
         and external_bool_leaf_is_gate_shape(leaf.get("callee_state_mutability"), gate.kind, callee_signature)
     ):
@@ -680,6 +700,7 @@ def _build_external_bool_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate) ->
             callee_selector=callee_selector,
             args_operands=args_operands,
             target_state_var=target_state_var,
+            target_operand=target_operand,
         )
         if descriptor is not None:
             leaf["set_descriptor"] = cast(SetDescriptor, descriptor)
@@ -789,14 +810,16 @@ def _build_generic_external_set_descriptor(
     callee_selector: str | None,
     args_operands: list,
     target_state_var: str | None,
+    target_operand: Operand | None = None,
 ) -> dict | None:
-    if target_state_var is None:
+    if target_state_var is None and target_operand is None:
         return None
     descriptor: dict = {
         "kind": "external_set",
         "key_sources": args_operands,
         "authority_contract": {
-            "address_source": {
+            "address_source": target_operand
+            or {
                 "source": "state_variable",
                 "state_variable_name": target_state_var,
             },

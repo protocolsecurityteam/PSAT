@@ -52,6 +52,7 @@ from db.models import (
 from db.queue import HEARTBEAT_EVENT_INDEXER, get_artifact, record_heartbeat, usable_semantic_artifact
 from services.clients.etherscan import get_contract_creation_block
 from services.clients.rpc import require_rpc_url, rpc_request
+from services.clients.rpc_limits import RpcBackpressure, RpcBudgetExceeded
 from services.monitoring.event_topics import WITNESS_TIER_ACTIVITY, WITNESS_TIER_HINT
 from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
@@ -1509,6 +1510,8 @@ def _sweep_batch(
             session.rollback()
             half = len(batch) // 2
             split = [batch[:half], batch[half:]]
+    except (RpcBackpressure, RpcBudgetExceeded) as exc:
+        state.discard(session, exc, chain_id=chain_id, addresses=batch, topics=[], cursors=len(plan.members))
     except RuntimeError as exc:
         session.rollback()
         if len(batch) == 1:

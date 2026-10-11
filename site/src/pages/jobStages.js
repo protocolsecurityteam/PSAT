@@ -86,7 +86,6 @@ const METRIC_LABELS = {
   cache_misses: "cache misses",
   verdicts_written: "verdicts",
   discrepancies_filed: "discrepancies",
-  upstream_requests: "rpc reqs",
   peak_anvil_rss_mb: "anvil rss mb",
   // coverage
   coverage_rows: "coverage rows",
@@ -116,7 +115,8 @@ export function formatMetricValue(key, value) {
 export function orderedMetricEntries(metrics) {
   if (!metrics || typeof metrics !== "object") return [];
   return Object.entries(metrics)
-    .filter(([, v]) => v !== null && v !== undefined)
+    // Historical effects jobs recorded an unmeasured zero for this retired counter.
+    .filter(([key, v]) => key !== "upstream_requests" && v !== null && v !== undefined)
     .sort((a, b) => {
       const ia = METRIC_ORDER.indexOf(a[0]);
       const ib = METRIC_ORDER.indexOf(b[0]);

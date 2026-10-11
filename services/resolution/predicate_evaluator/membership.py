@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
 
+# Observed event keys are only assumed to be valid view arguments. When they are not (ERC721
+# ``isApprovedForAll(ownerOf(tokenId), sender)`` yields owner addresses, not token ids), every call
+# reverts: the 2026-10-05 ENS BaseRegistrar run spent ~1M reverting eth_calls this way.
+_VIEW_KEY_LIMIT = 256
+_VIEW_KEY_PROBE = 16
+
 # Some writer log through the block went unread: a cold or ineligible cursor, a failed tail, or a cut-short scan.
 UNPROVEN_EVENT_KEYS = "event_keys_unproven"
 
@@ -97,17 +103,46 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
 
     if not isinstance(contract_address, str) or not contract_address.startswith("0x"):
         return None
+    if len(role_words) > _VIEW_KEY_LIMIT:
+        logger.warning(
+            "view-key membership skipped: %d observed keys exceed limit %d for %s",
+            len(role_words),
+            _VIEW_KEY_LIMIT,
+            contract_address,
+        )
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=contract_address.lower(),
+                target_call_selector=selector,
+                extra={"basis": ["view_key_membership_unresolved", "view_key_limit_exceeded"]},
+            )
+        )
     view_block = getattr(outer_ctx, "block", None) or ctx.block
-    admin_words = memoized(
-        outer_ctx,
-        ("unary_bytes32_view", rpc_url, contract_address.lower(), selector.lower(), tuple(role_words), view_block),
-        lambda: _call_unary_bytes32_view(
+
+    def _view_admin_words() -> list[str]:
+        probe = _call_unary_bytes32_view(
             rpc_url=rpc_url,
             contract_address=contract_address,
             selector=selector,
-            args=role_words,
+            args=role_words[:_VIEW_KEY_PROBE],
             block=view_block,
-        ),
+        )
+        # An all-reverting probe means the keys are not this view's domain; the rest would revert too.
+        if not probe or len(role_words) <= _VIEW_KEY_PROBE:
+            return probe
+        rest = _call_unary_bytes32_view(
+            rpc_url=rpc_url,
+            contract_address=contract_address,
+            selector=selector,
+            args=role_words[_VIEW_KEY_PROBE:],
+            block=view_block,
+        )
+        return sorted(set(probe) | set(rest))
+
+    admin_words = memoized(
+        outer_ctx,
+        ("unary_bytes32_view", rpc_url, contract_address.lower(), selector.lower(), tuple(role_words), view_block),
+        _view_admin_words,
     )
     if not admin_words:
         return CapabilityExpr.external_check_only(

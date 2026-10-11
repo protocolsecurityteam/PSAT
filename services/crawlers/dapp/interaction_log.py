@@ -53,16 +53,7 @@ class InteractionLog:
 
     def get_address_details(self) -> list[dict]:
         """Unique addresses with the pages, discovery method and explorer-inferred chain."""
-        EXPLORER_CHAINS = {
-            "etherscan": "ethereum",
-            "arbiscan": "arbitrum",
-            "basescan": "base",
-            "polygonscan": "polygon",
-            "bscscan": "bsc",
-            "scrollscan": "scroll",
-            "optimistic.etherscan": "optimism",
-            "snowtrace": "avalanche",
-        }
+        from services.discovery.inventory_domain import _infer_chain
 
         by_addr: dict[str, dict] = {}
         for i in self.interactions:
@@ -79,11 +70,11 @@ class InteractionLog:
                 entry["sources"].add(source)
             # For scraped addresses, ``i.data`` sometimes holds the explorer href.
             for candidate in (i.url, source):
-                if not candidate or not candidate.startswith(("http://", "https://")):
+                if not candidate or not candidate.lower().startswith(("http://", "https://")):
                     continue
-                for explorer, chain in EXPLORER_CHAINS.items():
-                    if explorer in candidate:
-                        entry["chains"].add(chain)
+                chain = _infer_chain(candidate, "")
+                if chain != "unknown":
+                    entry["chains"].add(chain)
 
         return [
             {

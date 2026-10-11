@@ -20,8 +20,10 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 EXA_SEARCH_URL = "https://api.exa.ai/search"
-EXA_RESEARCH_CREATE_URL = "https://api.exa.ai/research/v0/tasks"
-EXA_RESEARCH_GET_URL = "https://api.exa.ai/research/v0/tasks/{task_id}"
+# The retired research/v0 API returns 410. Keep the internal result shape stable
+# while using the documented Agent API (https://exa.ai/docs/agent/quickstart).
+EXA_RESEARCH_CREATE_URL = "https://api.exa.ai/agent/runs"
+EXA_RESEARCH_GET_URL = "https://api.exa.ai/agent/runs/{task_id}"
 REQUEST_TIMEOUT_SECONDS = 30
 DEEP_RESEARCH_POLL_INTERVAL_SECONDS = 5
 DEEP_RESEARCH_MAX_POLL_SECONDS = 600
@@ -264,12 +266,15 @@ def deep_research(
     api_key = _get_api_key()
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
 
-    create_payload: dict[str, Any] = {"instructions": instructions, "model": model}
-    create_payload["output"] = {"schema": schema or _AUDIT_RESEARCH_SCHEMA}
+    create_payload: dict[str, Any] = {
+        "query": instructions,
+        "effort": "medium",  # Fixed-price effort; do not silently opt into metered auto/ultra.
+        "outputSchema": schema or _AUDIT_RESEARCH_SCHEMA,
+    }
 
     cache_key: str | None = None
     if os.environ.get("PSAT_EXA_CACHE"):
-        cache_key = _cache_key({"endpoint": "deep_research", **create_payload})
+        cache_key = _cache_key({"endpoint": "agent_research", **create_payload})
         cached = _cache_read(cache_key)
         if isinstance(cached, dict) and cached.get("data") is not None:
             logger.info(
@@ -288,7 +293,7 @@ def deep_research(
     if resp.status_code >= 400:
         raise ExaError(
             normalize_error(
-                f"Exa /research create HTTP {resp.status_code}",
+                f"Exa /agent/runs create HTTP {resp.status_code}",
                 status_code=resp.status_code,
                 detail=resp.text[:400],
             )
@@ -309,7 +314,7 @@ def deep_research(
         if poll.status_code >= 400:
             raise ExaError(
                 normalize_error(
-                    f"Exa /research poll HTTP {poll.status_code}",
+                    f"Exa /agent/runs poll HTTP {poll.status_code}",
                     status_code=poll.status_code,
                     detail=poll.text[:400],
                 )
@@ -317,7 +322,17 @@ def deep_research(
         resp_data = poll.json()
         status = str(resp_data.get("status") or "").lower()
         if status in ("completed", "done", "success"):
-            result = {"data": resp_data.get("data") or {}, "task_id": task_id, "status": status}
+            output = resp_data.get("output") or {}
+            structured = output.get("structured")
+            if not isinstance(structured, dict):
+                raise ExaError(normalize_error("Exa Agent completed without a structured object", retryable=False))
+            result = {
+                "data": structured,
+                "task_id": task_id,
+                "status": status,
+                "stop_reason": resp_data.get("stopReason"),
+                "grounding": output.get("grounding") or [],
+            }
             if cache_key is not None and result["data"]:
                 _cache_write(cache_key, result)
             return result
@@ -328,4 +343,10 @@ def deep_research(
                     detail=str(resp_data.get("error") or resp_data)[:400],
                 )
             )
-    raise ExaError(normalize_error(f"Exa /research task {task_id} timed out after {timeout_seconds}s"))
+    try:
+        requests.post(
+            EXA_RESEARCH_GET_URL.format(task_id=task_id) + "/cancel", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS
+        )
+    except requests.RequestException:
+        logger.warning("Could not cancel timed-out Exa Agent run %s", task_id)
+    raise ExaError(normalize_error(f"Exa Agent task {task_id} timed out after {timeout_seconds}s"))

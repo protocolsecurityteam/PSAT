@@ -64,7 +64,23 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
     raise AssertionError(f"Tracked controller {label} not found")
 
 
-def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timelock_name_guessing(tmp_path):
+@pytest.mark.parametrize("failing_matcher", [False, True])
+def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timelock_name_guessing(
+    tmp_path, monkeypatch, failing_matcher
+):
+    if failing_matcher:
+        from dataclasses import replace
+
+        from services.static.claims import builder
+
+        builder.discover()
+        registry = builder.registry
+
+        def fail(_ctx, _signature):
+            raise RuntimeError("injected matcher failure")
+
+        entry = replace(registry()["contract_deployment"], claim_id="test.failure", trigger=fail)
+        monkeypatch.setattr(builder, "registry", lambda: {**registry(), entry.claim_id: entry})
     project_dir = _write_project(
         tmp_path,
         "UpgradeFactory",
@@ -72,6 +88,9 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
     )
 
     analysis = collect_contract_analysis(project_dir)
+    assert bool(analysis["analysis_status"]["errors"]) is failing_matcher
+    if failing_matcher:
+        assert any("test.failure" in message for message in analysis["analysis_status"]["errors"])
 
     # Recovered from the UUPS standard via ``implementation_update``, not the ``upgradeTo`` name.
     assert analysis["summary"]["is_upgradeable"] is True

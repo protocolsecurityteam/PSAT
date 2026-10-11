@@ -187,7 +187,7 @@ class TestFetchGithubRaw:
         assert got.content == expected_content
         assert got.status == expected_status
 
-    def test_authorization_header_set_when_token_provided(self, monkeypatch):
+    def test_public_source_omits_optional_authorization_header(self, monkeypatch):
         captured = {}
 
         def capture(url, headers=None, timeout=None):
@@ -196,7 +196,7 @@ class TestFetchGithubRaw:
 
         monkeypatch.setattr("services.audits.source_equivalence.requests.get", capture)
         _fetch_github_raw("https://example/file.sol", "secret-token")
-        assert captured["headers"].get("Authorization") == "token secret-token"
+        assert "Authorization" not in captured["headers"]
 
 
 # Prod saw bursts of ConnectionResetError(104) from raw.githubusercontent.com. Retry runs before the hash cache
@@ -418,11 +418,11 @@ class TestVerifyAuditCoversImplStatuses:
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail=f"{path} 404")
 
-        def fake_raw(url, token):
-            return source_equivalence.GithubFetch(content=None, status="http_404", detail="no such commit")
+        def fake_raw(repo, commit, *, token=None):
+            return source_equivalence.GithubHashResult(None, "http_404", "no such commit")
 
         monkeypatch.setattr("services.audits.source_equivalence.fetch_github_source_hash", fake_github)
-        monkeypatch.setattr("services.audits.source_equivalence._fetch_github_raw", fake_raw)
+        monkeypatch.setattr("services.audits.source_equivalence._commit_exists_in_repo", fake_raw)
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],
             scope_name="Pool",
@@ -437,11 +437,11 @@ class TestVerifyAuditCoversImplStatuses:
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail=f"{path} 404")
 
-        def fake_raw(url, token):
-            return source_equivalence.GithubFetch(content="# readme", status="ok", detail="")
+        def fake_raw(repo, commit, *, token=None):
+            return source_equivalence.GithubHashResult(None, "ok", "")
 
         monkeypatch.setattr("services.audits.source_equivalence.fetch_github_source_hash", fake_github)
-        monkeypatch.setattr("services.audits.source_equivalence._fetch_github_raw", fake_raw)
+        monkeypatch.setattr("services.audits.source_equivalence._commit_exists_in_repo", fake_raw)
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],
             scope_name="Pool",
@@ -548,13 +548,13 @@ class TestFallbackReposBehavior:
                 return source_equivalence.GithubHashResult(sha256="matching", status="ok", detail="")
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail="nope")
 
-        def fake_raw(url, token):
-            if "etherfi-protocol/smart-contracts" in url:
+        def fake_raw(repo, commit, *, token=None):
+            if "etherfi-protocol/smart-contracts" in repo:
                 return source_equivalence.GithubFetch(content="readme", status="ok", detail="")
             return source_equivalence.GithubFetch(content=None, status="http_404", detail="nope")
 
         monkeypatch.setattr("services.audits.source_equivalence.fetch_github_source_hash", fake_github)
-        monkeypatch.setattr("services.audits.source_equivalence._fetch_github_raw", fake_raw)
+        monkeypatch.setattr("services.audits.source_equivalence._commit_exists_in_repo", fake_raw)
 
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],
@@ -575,13 +575,13 @@ class TestFallbackReposBehavior:
                 return source_equivalence.GithubHashResult(sha256="different", status="ok", detail="")
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail="nope")
 
-        def fake_raw(url, token):
-            if "repo-with-code" in url:
+        def fake_raw(repo, commit, *, token=None):
+            if "repo-with-code" in repo:
                 return source_equivalence.GithubFetch(content="readme", status="ok", detail="")
             return source_equivalence.GithubFetch(content=None, status="http_404", detail="nope")
 
         monkeypatch.setattr("services.audits.source_equivalence.fetch_github_source_hash", fake_github)
-        monkeypatch.setattr("services.audits.source_equivalence._fetch_github_raw", fake_raw)
+        monkeypatch.setattr("services.audits.source_equivalence._commit_exists_in_repo", fake_raw)
 
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],

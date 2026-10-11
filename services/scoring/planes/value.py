@@ -20,12 +20,14 @@ from services.scoring.planes._shared import (
     typed_receipt_is_resolved,
 )
 from services.scoring.schema import coalesce_chain, entity_key
+from utils.address_evidence import special_address_reason
 from utils.balance_status import (
     ASSET_SET_SOURCE_CHAIN_LOG_SWEEP,
     ASSET_SET_STATUS_AT_PAGE_CAP,
     STATUS_UNATTEMPTED,
     SWEEP_STATUS_COMPLETED,
 )
+from utils.quote_validation import quote_refusal
 
 # ``usd_value`` is a scaled decimal, so 0.00 may be its storage floor rather than zero. Only a proven-zero quantity
 # makes a 0.00 reading a real zero; otherwise it is below resolution.
@@ -345,6 +347,10 @@ def _is_proven_zero_quantity(row: Any) -> bool:
 
 
 def _asset_reading(row: Any) -> tuple[float | None, str]:
+    if _float(row.usd_value) == 0 and _is_proven_zero_quantity(row):
+        return 0.0, ASSET_PROVEN_ZERO
+    if quote_refusal(getattr(row, "price_usd", None), row.usd_value):
+        return None, ASSET_UNPRICED
     usd = _float(row.usd_value)
     if usd is None:
         # NULL is not determined, never 0.
@@ -368,6 +374,7 @@ def _reduce_observations(
     per_asset: dict[str, dict[str, float]] = defaultdict(dict)
     per_asset_state: dict[str, dict[str, str]] = defaultdict(dict)
     counters: dict[str, int] = dict.fromkeys(_REDUCTION_COUNTERS, 0)
+    counters["quote_outliers_refused"] = 0
     for state in (ASSET_PRICED, ASSET_BELOW_RESOLUTION, ASSET_PROVEN_ZERO, ASSET_UNPRICED):
         counters[f"assets_{state}"] = 0
     stale_usd = 0.0
@@ -382,6 +389,8 @@ def _reduce_observations(
             competing = len(rows) > 1
             counters["multi_observation_accounts" if competing else "single_reading_accounts"] += 1
             row, height_witnessed = _latest_observation(rows)
+            if quote_refusal(getattr(row, "price_usd", None), row.usd_value):
+                counters["quote_outliers_refused"] += 1
             counters["height_witnessed_accounts" if height_witnessed else "write_order_accounts"] += 1
             readings.append(_asset_reading(row))
             priced = [value for value in (_float(candidate.usd_value) for candidate in rows) if value is not None]
@@ -978,4 +987,4 @@ def load_proven_eoa_entities(session: Session, protocol_id: int) -> set[str]:
         .order_by(ControlGraphNode.id)
         .all()
     )
-    return {entity_key(chain, address) for address, chain in rows}
+    return {entity_key(chain, address) for address, chain in rows if special_address_reason(address) is None}

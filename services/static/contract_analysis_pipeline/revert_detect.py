@@ -9,7 +9,7 @@ unresolvable assembly reverts, which become one ``opaque`` gate the builder turn
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from .slither_compat import (
@@ -60,6 +60,16 @@ class RevertGate:
     basis: list[str] = field(default_factory=list)
     # For ``opaque`` gates.
     unsupported_reason: str | None = None
+
+    def negated(self, condition_value: Any) -> RevertGate:
+        """Flip the condition without losing the helper scope or its argument bindings."""
+        return replace(
+            self,
+            condition_value=condition_value,
+            polarity="allowed_when_true" if self.polarity == "allowed_when_false" else "allowed_when_false",
+            call_chain=list(self.call_chain),
+            basis=list(self.basis),
+        )
 
 
 def _ir_class(ir: Any) -> str:

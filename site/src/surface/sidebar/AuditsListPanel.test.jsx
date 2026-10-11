@@ -61,6 +61,22 @@ function renderPanel(activeAuditId = null) {
 }
 
 describe("AuditsListPanel", () => {
+  it("shows discovered reports when no deployment coverage has been proven", () => {
+    const data = {
+      audit_count: 2,
+      audit_reports: [
+        { id: 7, auditor: "Reviewer", title: "Review one", text_extraction_status: "success", scope_extraction_status: "success" },
+        { id: 8, auditor: "Reviewer", title: "Review two", text_extraction_status: "failed" },
+      ],
+      coverage: [{ address: PROXY, audits: [{ audit_id: 7, equivalence_status: "hash_mismatch" }] }],
+    };
+    render(<AuditsListPanel coverageData={data} machines={MACHINES} onPickAudit={() => {}} />);
+    expect(screen.getByText("Review one")).toBeInTheDocument();
+    expect(screen.getByText("Review two")).toBeInTheDocument();
+    expect(screen.getByText("Reviewed source differs from deployed source")).toBeInTheDocument();
+    expect(screen.getByText("Report could not be retrieved")).toBeInTheDocument();
+    expect(screen.queryByText("Running audited code")).not.toBeInTheDocument();
+  });
   it("reports the audit covers one logical contract, not three", () => {
     renderPanel();
     // Audit row meta reads "covers N contract(s)" — without the dedup

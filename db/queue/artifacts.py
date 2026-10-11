@@ -163,9 +163,9 @@ def failed_semantic_artifact(name: str, value: Any) -> bool:
 
 
 def analysis_reports_failure(analysis: Any) -> bool:
-    """Whether a ``contract_analysis`` says one of its semantic builds failed."""
+    """Whether a ``contract_analysis`` says one of its semantic builds failed, by flag or by a recorded error."""
     status = analysis.get("analysis_status") if isinstance(analysis, dict) else None
-    return isinstance(status, dict) and status.get("static_analysis_completed") is False
+    return isinstance(status, dict) and (status.get("static_analysis_completed") is False or bool(status.get("errors")))
 
 
 def usable_semantic_artifact(name: str, value: Any) -> dict | None:

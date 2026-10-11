@@ -55,6 +55,7 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
 
     zero = "0x" + "00" * 20
+    simulate = MagicMock()
 
     def mint_log():
         return SimLog(
@@ -73,8 +74,9 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
                 SimCallResult(True, "0x" + (105).to_bytes(32, "big").hex(), None),
             )
         )
+        simulate.return_value = res
         return recipes.supply(
-            simulate=lambda calls, tag, ov: res,
+            simulate=ctx.simulate,
             store=ctx.transcript_store,
             ctx=ctx.sim_context(),
             token_address=c.contract_address,
@@ -88,7 +90,7 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     worker = EffectsWorker(
         prober=prober,
         hash_resolver=lambda s, c: ("kernel_hash_A", "surface_A"),
-        seams=_seams(session, job),
+        seams=_seams(session, job, simulate=simulate),
     )
     errors, metrics = _run(worker, session, job)
 
@@ -118,6 +120,8 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
 
     assert metrics["verdicts_written"] == 1
     assert metrics["cache_misses"] == 1
+    assert simulate.call_count > 0
+    assert "upstream_requests" not in metrics, "an unmeasured request count must not be published as zero"
     # A new-idiom candidate is a benign metric, not a degraded error.
     assert metrics["new_idiom_candidates"] == 1
     assert not any(e.context and e.context.get("discrepancy_kind", "").startswith("static_silent") for e in errors)
@@ -140,6 +144,7 @@ def test_zero_candidate_touches_no_wire(clean_effects, monkeypatch):
     assert session.query(EffectVerdict).count() == 0
     assert metrics["verdicts_written"] == 0
     assert metrics["candidates_in"] == 0
+    assert "upstream_requests" not in metrics
 
 
 def _twin_jobs(session, monkeypatch, addresses):

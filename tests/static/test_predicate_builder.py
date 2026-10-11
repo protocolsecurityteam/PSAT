@@ -83,7 +83,22 @@ def test_confidence_low_for_unsupported(tmp_path):
     assert leaves[0]["confidence"] == "low"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
-def test_caller_equals_constant_address_classifies_caller_authority(tmp_path):
+@pytest.mark.parametrize("via_helper", [False, True])
+def test_caller_equals_constant_address_classifies_caller_authority(tmp_path, monkeypatch, via_helper):
+    from services.static.contract_analysis_pipeline.predicates import leaves as leaf_builders
+
+    make_leaf = leaf_builders._make_leaf
+    scopes = []
+
+    def checked_leaf(*args, **kwargs):
+        gate = kwargs["gate"]
+        assert gate.containing_function is not None, "leaf construction lost its declaring scope"
+        if via_helper:
+            assert gate.call_chain, "helper gate lost its entry-point bindings"
+        scopes.append(gate.containing_function)
+        return make_leaf(*args, **kwargs)
+
+    monkeypatch.setattr(leaf_builders, "_make_leaf", checked_leaf)
     sl = _compile(
         tmp_path,
         """
@@ -91,15 +106,32 @@ def test_caller_equals_constant_address_classifies_caller_authority(tmp_path):
         contract C {
             uint256 public x;
             function f() external {
-                require(msg.sender == 0x1111111111111111111111111111111111111111);
+                GATE
                 x = 1;
             }
+            function _enforce(address who) internal { require(_guard(who)); }
+            function _guard(address who) internal returns (bool) {
+                x++;
+                return _check(who);
+            }
+            function _check(address who) internal pure returns (bool) {
+                return !(who != 0x1111111111111111111111111111111111111111);
+            }
         }
-    """,
+    """.replace(
+            "GATE",
+            "_enforce(msg.sender);"
+            if via_helper
+            else "require(msg.sender == 0x1111111111111111111111111111111111111111);",
+        ),
     )
     fn = _function(sl, "f")
     leaves = _all_leaves(build_predicate_tree(fn))
+    assert scopes
     assert leaves[0]["authority_role"] == "caller_authority"
+    assert leaves[0]["kind"] == "equality"
+    assert leaves[0]["operator"] == "eq"
+    assert any(op["source"] == "msg_sender" for op in leaves[0]["operands"])
 
 
 # #120: a tail ``return true`` must carry the negation of every dominating deny-IF, or fail closed.

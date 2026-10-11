@@ -52,6 +52,7 @@ class Subject(TypedDict):
     # Three states: ``None`` means the fetch fact didn't reach this run, which differs from ``False``. Flows to
     # ``contract_summaries.source_verified`` and the company API.
     source_verified: bool | None
+    kind: NotRequired[Literal["contract", "library", "interface"]]
 
 
 class AnalysisStatus(TypedDict):

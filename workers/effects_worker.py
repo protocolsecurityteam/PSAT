@@ -292,7 +292,6 @@ class _Seams:
     transcript_store: Any
     capability_store: CapabilityStore
     chain_id: int
-    call_batch: Any = None
     anvil_factory: Any = None
     # ``() -> int | None``: the head, pinned once at preflight for every Tier-1 probe. ``None`` in tests.
     block_number: Any = None
@@ -327,7 +326,6 @@ class _Counters:
     verdicts_written: int = 0
     discrepancies_filed: int = 0
     new_idiom_candidates: int = 0
-    upstream_requests: int = 0
     # ``None`` until a sample succeeds, never a fake 0 MB.
     peak_anvil_rss_mb: int | None = None
     # Candidate units: candidates that never reached the worklist.
@@ -367,6 +365,7 @@ class EffectsWorker(BaseWorker):
         # One anvil per job, created on the first Tier-2 plan and closed in ``process()``.
         self._anvil: Any = None
         self._anvil_error: Exception | None = None
+        self._fork_gateway: Any = None
         # The preflight height the fork spawns at, set in ``_probe_context`` (the factory is built before the head is
         # pinned) and cleared with the fork.
         self._fork_block_pin: int | None = None
@@ -379,7 +378,7 @@ class EffectsWorker(BaseWorker):
         if self._injected_seams is not None:
             return self._injected_seams
 
-        from services.clients.rpc import eth_call_batch, require_rpc_url
+        from services.clients.rpc import require_rpc_url
         from services.effects.simulate import eth_simulate_v1
 
         chain_id = _chain_id_for_job(job)
@@ -394,9 +393,6 @@ class EffectsWorker(BaseWorker):
         def simulate(calls, block_tag, overrides):
             return eth_simulate_v1(rpc_url, calls, block_tag, overrides, chain_id=chain_id)
 
-        def call_batch(calls, block_tag="latest"):
-            return eth_call_batch(rpc_url, calls, block_tag, chain_id=chain_id)
-
         def block_number() -> int | None:
             from services.clients.rpc import rpc_request
 
@@ -410,7 +406,6 @@ class EffectsWorker(BaseWorker):
             transcript_store=self._make_transcript_store(session, job),
             capability_store=self._capability_store,
             chain_id=chain_id,
-            call_batch=call_batch,
             anvil_factory=self._anvil_factory(chain_id, rpc_url),
             block_number=block_number,
         )
@@ -426,6 +421,7 @@ class EffectsWorker(BaseWorker):
         """
         if not _fork_enabled():
             return None
+        from services.clients.fork_gateway import ForkGateway
         from services.clients.rpc import rpc_headers
         from services.effects.anvil import SubprocessAnvil
         from services.effects.exceptions import AnvilSpawnError
@@ -440,11 +436,11 @@ class EffectsWorker(BaseWorker):
                 return self._anvil
             try:
                 # ``rpc_headers`` is the source of eRPC auth; local/explicit fork URLs get no secret.
+                self._fork_gateway = ForkGateway(rpc_url, rpc_headers(rpc_url))
                 self._anvil = SubprocessAnvil(
                     port=port,
                     hardfork_name=hardfork,
-                    fork_url=rpc_url,
-                    fork_headers=rpc_headers(rpc_url),
+                    fork_url=self._fork_gateway.url,
                     # Same height as Tier 1; unpinned forks observe an unrecorded, unreplayable state.
                     fork_block_number=self._fork_block_pin,
                 )
@@ -472,12 +468,19 @@ class EffectsWorker(BaseWorker):
         self._anvil_error = None
         self._fork_block_pin = None
         self._rss_sample_failed = False
+        gateway = getattr(self, "_fork_gateway", None)
+        self._fork_gateway = None
         if anvil is None:
+            if gateway is not None:
+                gateway.close()
             return
         try:
             anvil.close()
         except Exception:
             logger.warning("effects fork close failed", exc_info=True)
+        finally:
+            if gateway is not None:
+                gateway.close()
 
     def _make_transcript_store(self, session: Session, job: Job):
         """Persist each transcript as a job artifact, returning a pointer resolvable via ``get_artifact(job_id,
@@ -699,9 +702,6 @@ class EffectsWorker(BaseWorker):
         except UnknownChainError:
             hardfork = "prague"
 
-        def on_requests(n: int) -> None:
-            counters.upstream_requests += max(0, n)
-
         # Built here so the job owns its cost ceiling and can report spend; the same conditions as the lazy path.
         self._seeder = None
         if supported and input_seeding_enabled():
@@ -717,9 +717,7 @@ class EffectsWorker(BaseWorker):
             simulate=seams.simulate,
             simulate_supported=supported,
             transcript_store=seams.transcript_store,
-            call_batch=seams.call_batch,
             anvil_factory=seams.anvil_factory,
-            on_requests=on_requests,
             seeder=self._seeder,
         )
 
@@ -1394,7 +1392,6 @@ class EffectsWorker(BaseWorker):
         record_stage_metric("verdicts_written", counters.verdicts_written)
         record_stage_metric("discrepancies_filed", counters.discrepancies_filed)
         record_stage_metric("new_idiom_candidates", counters.new_idiom_candidates)
-        record_stage_metric("upstream_requests", counters.upstream_requests)
         # Only when a sample succeeded.
         record_stage_metric("peak_anvil_rss_measured", counters.peak_anvil_rss_mb is not None)
         if counters.peak_anvil_rss_mb is not None:

@@ -123,6 +123,7 @@ def test_role_grant_node_spawns_exactly_one_child_with_inherited_scope(db_sessio
         "name": manager,
         "rpc_url": "https://rpc.example",
         "parent_job_id": str(parent.id),
+        "root_job_id": (parent.request or {}).get("root_job_id") or str(parent.id),
         "discovered_by": "policy_refresh",
         "chain": "ethereum",
         PERIMETER_DEPTH_KEY: 1,

@@ -32,9 +32,31 @@ def enqueue_selection_pass(session: Session, protocol_id: int, *, reason: str) -
     ).first()
     if pending is not None:
         return False
+    # Continuations belong to the original analysis budget and RPC run, not a new five-contract run.
+    parent = session.scalar(
+        select(Job)
+        .where(
+            Job.protocol_id == protocol_id,
+            Job.company.is_not(None),
+            Job.address.is_(None),
+        )
+        .order_by(Job.created_at.desc())
+        .limit(1)
+    )
+    request = {"protocol_id": protocol_id, "name": f"{reason}_selection_{protocol_id}"}
+    if parent is not None:
+        previous = parent.request or {}
+        request.update(
+            {key: previous[key] for key in ("company", "chain", "analyze_limit", "rpc_url", "force") if key in previous}
+        )
+        request.update(
+            company=parent.company,
+            parent_job_id=str(parent.id),
+            root_job_id=previous.get("root_job_id") or str(parent.id),
+        )
     create_job(
         session,
-        {"protocol_id": protocol_id, "name": f"{reason}_selection_{protocol_id}"},
+        request,
         initial_stage=JobStage.selection,
     )
     logger.info("selection pass enqueued", extra={"protocol_id": protocol_id, "reason": reason})

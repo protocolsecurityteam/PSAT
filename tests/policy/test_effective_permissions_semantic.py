@@ -230,6 +230,8 @@ def test_finite_set_rows_typed_via_resolver(db_session) -> None:
     }
 
     def _resolver(addr: str):
+        # Slow network classification must run before the policy writer takes write locks.
+        assert db_session.query(_TEffectiveFunction).count() == 0
         return classified.get(addr.lower(), (None, None))
 
     write_effective_function_rows(

@@ -17,6 +17,10 @@ set +a
 # worker fleet; here it also covers the API, monitors, and dapp worker below.
 export PYTHONUNBUFFERED=1
 
+# The effects worker also produces the score's input rows. A full local run needs
+# this stage even when the browser can render static analysis without it.
+export PSAT_EFFECTS_STAGE="${PSAT_EFFECTS_STAGE:-1}"
+
 # Guardrail only — `error` is already env_logger's default with RUST_LOG unset,
 # so hypersync's Rust 429 retry lines still reach the JSONL file below as
 # plaintext (see deploy/start_workers.sh; fd-level capture is deferred).
@@ -82,15 +86,35 @@ fi
 if [ -n "$ARTIFACT_STORAGE_ENDPOINT" ] && [ -n "$ARTIFACT_STORAGE_BUCKET" ] \
    && [ -n "$ARTIFACT_STORAGE_ACCESS_KEY" ] && [ -n "$ARTIFACT_STORAGE_SECRET_KEY" ]; then
   echo "Artifact storage: minio ($ARTIFACT_STORAGE_ENDPOINT → $ARTIFACT_STORAGE_BUCKET)"
-  echo "  Console: http://localhost:9001 (login: $ARTIFACT_STORAGE_ACCESS_KEY)"
+  echo "  Console: http://localhost:9001"
 else
-  echo "WARNING: ARTIFACT_STORAGE_* not fully set in .env — app will use inline Postgres fallback."
-  echo "  To use minio, add to .env:"
-  echo "    ARTIFACT_STORAGE_ENDPOINT=http://localhost:9000"
-  echo "    ARTIFACT_STORAGE_BUCKET=psat-artifacts"
-  echo "    ARTIFACT_STORAGE_ACCESS_KEY=psat-minio"
-  echo "    ARTIFACT_STORAGE_SECRET_KEY=psat-minio-secret"
+  echo "ERROR: Full local pipeline requires ARTIFACT_STORAGE_* configuration; audit extraction has no inline fallback."
+  exit 1
 fi
+
+# A healthy bucket can still refuse writes when its disk is full. Exercise the
+# storage path before starting workers, using a unique object owned by this check.
+uv run python - <<'PY'
+import uuid
+
+from db.storage import get_storage_client
+from services.effects.config import effects_stage_enabled
+
+if not effects_stage_enabled():
+    raise SystemExit("PSAT_EFFECTS_STAGE must be enabled for a full local run with score inputs.")
+client = get_storage_client()
+if client is None:
+    raise SystemExit("Object storage is required for the full local pipeline.")
+key = f"healthchecks/local-start-{uuid.uuid4().hex}"
+try:
+    client.put(key, b"psat-local-preflight", "text/plain")
+    body = client.get(key)
+    if body != b"psat-local-preflight":
+        raise RuntimeError("Object storage read-back did not match the preflight write.")
+finally:
+    client.delete(key)
+print("Artifact storage write/read/delete check passed; effects stage enabled.")
+PY
 
 cleanup_stale_workers() {
   local stale

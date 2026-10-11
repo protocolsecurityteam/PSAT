@@ -43,6 +43,7 @@ logger = logging.getLogger("db.queue")
 _STATIC_ARTIFACT_NAMES = frozenset(
     {
         "contract_analysis",
+        "compiler_settings",
         "control_tracking_plan",
         "predicate_trees",
         "effects",
@@ -225,6 +226,9 @@ def _semantic_bundle_complete(session: Session, job_id: Any) -> bool:
             )
             return False
         if not isinstance(value, dict) or failed_semantic_artifact(name, value):
+            return False
+        # Empty maps are valid for unguarded/no-effect contracts; a missing or mistyped map is not.
+        if name in SEMANTIC_PAYLOAD_KEYS and not isinstance(value.get(SEMANTIC_PAYLOAD_KEYS[name]), dict):
             return False
         # A failed claim matcher leaves complete-shaped effects; only the analysis says its claims are missing.
         if name == "contract_analysis" and analysis_reports_failure(value):
@@ -561,7 +565,9 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 # Code-plane artifacts safe to reuse across chains. Excludes ``static_dependencies``, ``enrichment_cache`` and the seed
 # artifacts (chain-specific or merged). ``contract_analysis``/``control_tracking_plan`` have their address re-stamped on
 # copy.
-_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
+_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset(
+    {"contract_analysis", "compiler_settings", "control_tracking_plan", "predicate_trees", "effects"}
+)
 
 
 def copy_static_cache_cross_chain(

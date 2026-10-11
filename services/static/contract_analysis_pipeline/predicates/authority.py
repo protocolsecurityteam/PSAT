@@ -73,5 +73,9 @@ def _classify_authority_membership(leaf: LeafPredicate, descriptor: SetDescripto
         return "business"
     if len(keys) >= 2:
         return "caller_authority"
+    if (descriptor.get("value_predicate") or {}).get("value_type", "").startswith("address"):
+        # A caller's registry pointer is admission evidence. Until its writers
+        # prove public registration, preserve the gate even if the set is unknown.
+        return "caller_authority"
     # Single caller key: business until the writer-gate pass promotes it.
     return "business"

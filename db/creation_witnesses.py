@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import case, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -19,17 +20,24 @@ def upsert_creation_witness(
 ) -> None:
     """Insert the ``(chain_id, address)`` row or overwrite only the given columns on it. With *keep_existing*, a row
     another writer created first is left untouched.
+
+    A ``None`` value never erases a fact another writer recorded, and an older ``code_probe_block`` reading never
+    replaces a newer one.
     """
     unknown = set(fields) - _WRITABLE
     if unknown:
         raise ValueError(f"not creation-witness columns: {sorted(unknown)}")
     address = address.lower()
+    fields = {name: value for name, value in fields.items() if value is not None}
     stmt = pg_insert(ContractCreationWitness).values(chain_id=chain_id, address=address, **fields)
     if fields and not keep_existing:
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["chain_id", "address"],
-            set_={name: stmt.excluded[name] for name in fields},
-        )
+        updates: dict[str, Any] = {name: stmt.excluded[name] for name in fields}
+        if "code_probe_block" in fields:
+            newer = stmt.excluded.code_probe_block >= func.coalesce(ContractCreationWitness.code_probe_block, -1)
+            for name in ("code_probe_block", "code_absent_at_probe"):
+                if name in fields:
+                    updates[name] = case((newer, stmt.excluded[name]), else_=getattr(ContractCreationWitness, name))
+        stmt = stmt.on_conflict_do_update(index_elements=["chain_id", "address"], set_=updates)
     else:
         stmt = stmt.on_conflict_do_nothing(index_elements=["chain_id", "address"])
     session.execute(stmt)

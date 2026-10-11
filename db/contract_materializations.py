@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # tracking-plan or predicate-tree output shape changes; not tied to a git SHA, which would rebuild every multi-MB bundle
 # on unrelated deploys. If the change also moves an effects probe input, consider ``EFFECT_CACHE_SCHEMA_VERSION``
 # (db/effect_cache.py). Bump reasons are in the commit history.
-ANALYSIS_SCHEMA_VERSION = 11
+ANALYSIS_SCHEMA_VERSION = 13
 
 
 # Who produced a row and from which job; provenance requires the source job for anything monitoring enrolls from.
@@ -488,6 +488,9 @@ def materialize_or_wait(
     # Phase 2: build and upload, no DB connection held.
     try:
         bundle = builder()
+        analysis = bundle.get("analysis")
+        if not isinstance(analysis, dict) or "error" in analysis or analysis_reports_failure(analysis):
+            raise ValueError("Cannot cache incomplete static analysis")
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"[:4000]
         with SessionLocal() as session:
@@ -679,7 +682,7 @@ def publish_materialization(
     ``address_bound_to_other_keccak``
         Another row holds ``(chain, address)`` under a different keccak; we didn't witness which is current.
     """
-    if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
+    if not isinstance(analysis, dict) or "error" in analysis or not isinstance(tracking_plan, dict):
         return PUBLISH_INCOMPLETE_BUNDLE
     if analysis_reports_failure(analysis) or failed_semantic_artifact("predicate_trees", predicate_trees):
         return PUBLISH_INCOMPLETE_BUNDLE

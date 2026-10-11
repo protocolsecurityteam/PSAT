@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from services.scoring.planes._shared import _chain_name, _float, _lower
 from services.scoring.schema import coalesce_chain, entity_key
+from utils.address_evidence import special_address_reason
 
 # Only the I/O-edge loaders log: compute paths publish refusals into the document. No ``record_degraded``: nothing binds
 # an accumulator here.
@@ -50,17 +51,18 @@ def load_principal_plane(session: Session, refs: list[Any]) -> dict[int, Princip
     for row in rows:
         details = row.details if isinstance(row.details, dict) else {}
         withheld, basis = _safe_protection_verdict(details)
+        special = special_address_reason(row.address)
         out[row.id] = PrincipalFacts(
             function_principal_id=row.id,
             chain=coalesce_chain(chain_by_id.get(row.id)),
             address=_lower(row.address),
-            resolved_type=row.resolved_type,
+            resolved_type="unknown" if special else row.resolved_type,
             owners=frozenset(_lower(o) for o in (details.get("owners") or []) if o),
             threshold=_int(details.get("threshold")),
             delay_seconds=_float(details.get("delay")),
             protection_credit_withheld=withheld,
             protection_basis=basis,
-            resolver_bases=_resolver_bases(details),
+            resolver_bases=(*_resolver_bases(details), special) if special else _resolver_bases(details),
             role_bindings=_role_bindings(details),
         )
     return out

@@ -122,7 +122,18 @@ def test_publish_refuses_a_bundle_without_an_analysis(cm_db):
     """``None`` would read as "no analysis", which a missing artifact never claimed."""
     assert _publish(analysis=None) == PUBLISH_INCOMPLETE_BUNDLE
     assert _publish(tracking_plan=None) == PUBLISH_INCOMPLETE_BUNDLE
+    incomplete = {**ANALYSIS, "analysis_status": {"static_analysis_completed": True, "errors": ["matcher failed"]}}
+    assert _publish(analysis=incomplete) == PUBLISH_INCOMPLETE_BUNDLE
     assert _row(cm_db) is None
+    with pytest.raises(ValueError, match="incomplete"):
+        cm.materialize_or_wait(
+            chain="ethereum",
+            address=ADDR,
+            bytecode_keccak=KECCAK,
+            builder=lambda: {"analysis": incomplete, "tracking_plan": PLAN},
+        )
+    row = _row(cm_db)
+    assert row is not None and row.status == "failed"
 
 
 @requires_postgres

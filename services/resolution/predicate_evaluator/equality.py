@@ -9,6 +9,7 @@ from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import (
     LeafPredicate,
 )
+from utils.address_evidence import special_address_reason
 
 from ..capabilities import (
     CapabilityExpr,
@@ -67,6 +68,8 @@ def _resolve_equality_principal(
         if isinstance(val, str) and val.startswith("0x") and len(val) == 42:
             if _is_zero_address(val):
                 return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+            if reason := special_address_reason(val):
+                return CapabilityExpr.unsupported(reason)
             return CapabilityExpr.finite_set([val])
         return CapabilityExpr.unsupported(f"equality_constant_non_address_{val}")
 
@@ -77,6 +80,8 @@ def _resolve_equality_principal(
             if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
                 if _is_zero_address(value):
                     return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+                if reason := special_address_reason(value):
+                    return CapabilityExpr.unsupported(reason)
                 return CapabilityExpr.finite_set(
                     [value],
                     quality="exact",

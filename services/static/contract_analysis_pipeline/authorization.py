@@ -889,7 +889,8 @@ def attach_membership_inventories(contract, trees):
         if found is not None and leaf.get("kind") == "membership" and leaf.get("operator") == "truthy":
             if len(keys) == 1 and keys[0].get("source") in ("msg_sender", "tx_origin"):
                 descriptor["membership_inventory"] = found
-                leaf["authority_role"] = "caller_authority"
+                if "unconditional public address registration" not in (leaf.get("basis") or []):
+                    leaf["authority_role"] = "caller_authority"
         for child in tree.get("children") or []:
             attach(child)
 

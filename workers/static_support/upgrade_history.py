@@ -74,7 +74,7 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
             if not any(_same_upgrade_log(event, kept) for kept in merged_events):
                 merged_events.append(event)
 
-        merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
+        merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index") or 0))
 
         current_impl = new_proxy.get("current_implementation") or prev_proxy.get("current_implementation")
         implementations = _build_implementation_timeline(merged_events, current_impl)

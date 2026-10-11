@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Sequence, cast
 
 from services.clients.rpc import RpcClientTimeout, rpc_request
+from services.clients.rpc_limits import RpcBackpressure, RpcBudgetExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +351,7 @@ class RpcEventLogFetcher:
                 # hundreds of slow leaves, so retry once first.
                 time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
                 return self._request_logs(params)
-        except RpcScanCancelled:
+        except (RpcScanCancelled, RpcBackpressure, RpcBudgetExceeded):
             raise
         except RuntimeError as exc:
             # Upstream cap or timeout: halve; at the floor it's a real error.
@@ -431,7 +432,7 @@ class RpcEventLogFetcher:
                     except RpcClientTimeout:
                         time.sleep(TIMEOUT_RETRY_BACKOFF_SECONDS)
                         page = self._request_logs([query])
-                except RpcScanCancelled:
+                except (RpcScanCancelled, RpcBackpressure, RpcBudgetExceeded):
                     raise
                 except RuntimeError:
                     if hi - lo + 1 <= self.min_bisect_span:

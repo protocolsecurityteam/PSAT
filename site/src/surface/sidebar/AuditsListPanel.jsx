@@ -101,6 +101,8 @@ function AuditRow({ audit, contracts, open, onToggle, onRead }) {
 
 function ProtocolAuditsView({
   auditEntries,
+  otherReports,
+  reportCount,
   provenContracts,
   provenList,
   trackedContracts,
@@ -132,7 +134,7 @@ function ProtocolAuditsView({
             </span>{" "}
             <span className="ps-audits-summary-rest">
               contract{trackedContracts === 1 ? "" : "s"} have a source proof · {auditEntries.length}{" "}
-              audit{auditEntries.length === 1 ? "" : "s"}
+              verified report{auditEntries.length === 1 ? "" : "s"}
             </span>
           </span>
           {canExpand && (
@@ -149,7 +151,7 @@ function ProtocolAuditsView({
       </section>
 
       <div className="ps-audits-panel-hint">
-        We only show coverage we can cryptographically verify. Nothing else is asserted.
+        {reportCount} reports on file. A report is not proof that the currently deployed code matches its reviewed version.
       </div>
 
       {auditEntries.length === 0 ? (
@@ -177,6 +179,28 @@ function ProtocolAuditsView({
                 }
                 onRead={() => onRead(audit)}
               />
+            ))}
+          </div>
+        </section>
+      )}
+      {otherReports.length > 0 && (
+        <section className="ps-audits-tier" aria-label="Reports without verified deployment coverage">
+          <div className="ps-audits-tier-hdr">
+            <span className="ps-audits-tier-name">Reports on file</span>
+            <span className="ps-audits-tier-count">{otherReports.length}</span>
+          </div>
+          <div className="ps-audits-tier-rows">
+            {otherReports.map((report) => (
+              <div className="ps-audits-arow" key={report.audit_id}>
+                <div className="ps-audits-arow-head">
+                  <button type="button" className="ps-audits-arow-btn" onClick={() => onRead(report)}>
+                    <div className="ps-audits-arow-aud">{report.auditor || "Unknown auditor"}</div>
+                    <div className="ps-audits-arow-title">{report.title || "Audit report"}</div>
+                    <div className="ps-audits-report-status">{report.coverageLabel}</div>
+                    <span className="ps-audits-arow-date">{formatAuditDate(report.date)}</span>
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         </section>
@@ -339,6 +363,25 @@ export function AuditsListPanel({
     return (y.audit.audit_id || 0) - (x.audit.audit_id || 0);
   });
 
+  const statuses = new Map();
+  for (const entry of coverageData.coverage || []) {
+    for (const audit of entry.audits || []) {
+      if (!statuses.has(audit.audit_id)) statuses.set(audit.audit_id, new Set());
+      statuses.get(audit.audit_id).add(audit.equivalence_status);
+    }
+  }
+  const otherReports = (coverageData.audit_reports || []).filter((r) => !byAudit.has(r.id)).map((r) => {
+    const states = statuses.get(r.id) || new Set();
+    const coverageLabel = r.text_extraction_status === "failed" ? "Report could not be retrieved"
+      : r.scope_extraction_status !== "success" ? "Reviewed scope not yet extracted"
+      : states.has("hash_mismatch") ? "Reviewed source differs from deployed source"
+      : states.has("github_fetch_failed") ? "Source verification unavailable"
+      : states.has("commit_not_found_in_repo") ? "Reviewed commit could not be located"
+      : states.has("no_reviewed_commit") ? "Reviewed commit not identified"
+      : "Deployment coverage not verified";
+    return { ...r, audit_id: r.id, coverageLabel };
+  });
+
   const provenList = [...provenKeys]
     .map((key) => {
       const m = contractByKey.get(key);
@@ -358,6 +401,8 @@ export function AuditsListPanel({
   const protocolView = (
     <ProtocolAuditsView
       auditEntries={auditEntries}
+      otherReports={otherReports}
+      reportCount={coverageData.audit_count ?? auditEntries.length}
       provenContracts={provenKeys.size}
       provenList={provenList}
       trackedContracts={trackedContracts}

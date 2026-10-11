@@ -77,6 +77,7 @@ SetKind = Literal[
 
 class AuthorityContract(TypedDict):
     address_source: Operand
+    address: NotRequired[str]
     abi_hint: NotRequired[str | None]
 
 
@@ -121,7 +122,7 @@ class ValuePredicate(TypedDict):
     checks.
     """
 
-    op: Literal["eq", "ne", "lt", "lte", "gt", "gte", "in", "any_nonzero"]
+    op: Literal["eq", "ne", "lt", "lte", "gt", "gte", "in", "not_in", "any_nonzero"]
     rhs_values: list[str]
     value_type: str  # solidity type, e.g. "uint256", "address", "bytes32"
     mask: NotRequired[str | None]  # optional bit-mask for flag patterns
@@ -130,6 +131,7 @@ class ValuePredicate(TypedDict):
 class SetDescriptor(TypedDict):
     kind: SetKind
     storage_var: NotRequired[str | None]
+    storage_var_declaration: NotRequired[str]
     storage_slot: NotRequired[str | None]
     key_sources: list[Operand]
     truthy_value: NotRequired[str | None]

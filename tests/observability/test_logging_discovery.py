@@ -7,6 +7,8 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 
+import pytest
+
 from utils.logging import (
     bind_trace_context,
     degraded_errors_var,
@@ -99,7 +101,7 @@ def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, ca
 
     monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
 
-    def _boom(_url, _addresses):
+    def _boom(_url, _addresses, **_kwargs):
         raise TimeoutError("probe timed out")
 
     monkeypatch.setattr(chain_resolver, "_batch_get_code", _boom)
@@ -124,19 +126,20 @@ def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, ca
 
 def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, caplog):
     """``_batch_get_code`` answers ``"0x"`` on transport errors, so a chain outage returns successfully."""
-    import urllib.error
-
     from services.discovery import chain_resolver, static_dependencies
 
     monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
 
     def _no_batch(*_a, **_kw):
-        raise urllib.error.URLError("connection refused")
+        assert _kw["chain_id"] == 8453
+        raise RuntimeError("connection refused")
 
     def _no_code(*_a, **_kw):
+        assert _kw["chain_id"] == 8453
         raise RuntimeError("rpc 500")
 
-    monkeypatch.setattr(chain_resolver.urllib.request, "urlopen", _no_batch)
+    monkeypatch.setattr("services.clients.rpc.get_code_batch", _no_batch)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: pytest.fail("raw RPC bypassed shared client"))
     monkeypatch.setattr(static_dependencies, "get_code", _no_code)
 
     addresses = ["0x" + "11" * 20, "0x" + "22" * 20]
@@ -156,40 +159,35 @@ def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, c
     assert degraded[0].context["probe_failed"] == 2
 
 
-def test_chain_probe_counts_per_item_rpc_errors(monkeypatch, caplog):
+@pytest.mark.parametrize("failed", [False, True])
+def test_chain_probe_counts_per_item_rpc_errors(monkeypatch, caplog, failed):
     """An errored item lands as ``"0x"``, the same shape as real no-code."""
-    import json
-
     from services.discovery import chain_resolver
 
     monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
 
-    class _Response:
-        def __enter__(self):
-            return self
+    addresses = ["0x" + "11" * 20, "0x" + "22" * 20]
+    calls = []
 
-        def __exit__(self, *_exc):
-            return False
+    def shared_batch(url, asked, *, chain_id):
+        assert chain_id == 8453
+        calls.append((url, asked))
+        return {addresses[1]: "0x"} if failed else {addresses[0]: "0x6001", addresses[1]: "0x"}
 
-        def read(self) -> bytes:
-            return json.dumps(
-                [
-                    {"jsonrpc": "2.0", "id": 0, "error": {"code": -32000, "message": "execution reverted"}},
-                    {"jsonrpc": "2.0", "id": 1, "result": "0x"},
-                ]
-            ).encode("utf-8")
-
-    monkeypatch.setattr(chain_resolver.urllib.request, "urlopen", lambda *_a, **_kw: _Response())
+    monkeypatch.setattr("services.clients.rpc.get_code_batch", shared_batch)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: pytest.fail("raw RPC bypassed shared client"))
 
     with _job_context() as (_metrics, errors):
         with caplog.at_level(logging.WARNING, logger="services.discovery.chain_resolver"):
-            hits = chain_resolver._probe_chain_batch(["0x" + "11" * 20, "0x" + "22" * 20], "base")
+            hits = chain_resolver._probe_chain_batch(addresses, "base")
 
-    assert hits == set()
+    assert hits == (set() if failed else {addresses[0]})
+    assert calls == [("http://stub", addresses)]
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert warnings[0].probe_failed == 1
-    assert warnings[0].exc_type is None
+    assert len(warnings) == int(failed)
+    if failed:
+        assert warnings[0].probe_failed == 1
+        assert warnings[0].exc_type is None
     assert [e for e in errors if e.phase == "chain_probe"] == []
 
 

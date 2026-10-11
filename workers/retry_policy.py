@@ -13,6 +13,7 @@ from typing import Literal
 
 import requests
 import urllib3.exceptions
+from sqlalchemy.exc import DBAPIError
 
 from db.storage import (
     StorageContentAbsent,
@@ -20,6 +21,7 @@ from db.storage import (
     StorageKeyAbsent,
     StorageUnavailable,
 )
+from services.clients.rpc_limits import RpcBackpressure
 from services.discovery.classifier import ClassificationIncompleteError
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
 
@@ -64,6 +66,7 @@ _TRANSIENT_HTTP: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504, 
 
 # ``HTTPError`` is excluded: its status code drives the verdict.
 _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
+    RpcBackpressure,
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ChunkedEncodingError,
@@ -104,6 +107,14 @@ def classify(exc: BaseException) -> Kind:
 
     ``HTTPError`` is checked first (status decides); transient beats terminal on overlap.
     """
+    if isinstance(exc, DBAPIError):
+        # SQLAlchemy wraps the driver exception; checking only psycopg2's bare
+        # OperationalError incorrectly made connection loss terminal.
+        if exc.connection_invalidated or isinstance(exc.orig, _PSYCOPG2_OPERATIONAL):
+            return "transient"
+        if getattr(exc.orig, "pgcode", None) in {"40001", "40P01", "55P03"}:
+            return "transient"  # serialization failure, deadlock, lock timeout
+        return "terminal"
     if isinstance(exc, requests.exceptions.HTTPError):
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None) if response is not None else None

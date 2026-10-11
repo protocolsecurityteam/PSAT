@@ -16,7 +16,7 @@ def test_rpc_request_retries_on_retryable_status():
     _reset_thread_session()
 
     failing = MagicMock()
-    failing.status_code = 503
+    failing.status_code = 502
     failing.json.return_value = {}
 
     succeeding = MagicMock()

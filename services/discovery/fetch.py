@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -26,6 +27,7 @@ _ALLOWED_EVM_VERSIONS = (
     "shanghai",
     "cancun",
     "prague",
+    "osaka",
 )
 _EVM_VERSION_BY_KEY = {v.lower(): v for v in _ALLOWED_EVM_VERSIONS}
 _DEFAULT_EVM_VERSION = "shanghai"
@@ -100,8 +102,8 @@ def source_content_hash(result: dict) -> str:
 
     Covers the source file set (``parse_sources``), the selected ``ContractName`` (one bundle can verify several
     contracts), and the compiler settings that change the IR: language, EVM version, optimizer on/off and runs, and
-    remappings. Excludes address, constructor args, immutable values and chain id. The solc version comes from the
-    hashed pragmas.
+    remappings. Excludes address, constructor args, immutable values and chain id. The verified compiler version and
+    standard-JSON settings are part of the key.
 
     Returns a ``0x``-prefixed sha256 (66 chars).
     """
@@ -114,6 +116,8 @@ def source_content_hash(result: dict) -> str:
         "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
         "optimizer": str(result.get("OptimizationUsed", "") or ""),
         "runs": str(result.get("Runs", "") or ""),
+        "compiler_version": str(result.get("CompilerVersion", "")),
+        "compiler_settings": parse_compiler_settings(result),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "0x" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -137,9 +141,20 @@ def _parse_source_code(raw: str) -> dict | None:
 
 def parse_verification_bundle(result: dict) -> dict | None:
     parsed = _parse_source_code(result.get("SourceCode", ""))
-    if not parsed or "sources" not in parsed:
+    if not parsed:
         return None
-    return parsed
+    if "sources" in parsed:
+        return parsed
+    # Explorers also return a bare filename -> source map without the standard
+    # JSON envelope. Preserve the files rather than compiling the JSON as Solidity.
+    if all(
+        isinstance(name, str)
+        and name.endswith((".sol", ".vy"))
+        and isinstance(value.get("content") if isinstance(value, dict) else value, str)
+        for name, value in parsed.items()
+    ):
+        return {"sources": parsed}
+    return None
 
 
 def is_vyper_result(result: dict) -> bool:
@@ -180,169 +195,83 @@ def parse_remappings(result: dict) -> list[str]:
     ]
 
 
-_MIN_SOLC = "0.8.24"  # 0.8.21-0.8.23 have Natspec.cpp internal compiler errors on some OZ contracts
-
-_Version = tuple[int, int, int]
-# (version, inclusive); ``None`` is unbounded.
-_Bound = tuple[_Version, bool] | None
-
-# The body may span lines but holds only version-expression characters, so prose after a commented
-# ``pragma solidity`` never reaches code further down.
-_SOLIDITY_PRAGMA_RE = re.compile(r"(pragma\s+solidity\s+)([0-9xX*.^~<>=|\s-]*)(?=;)")
-_VERSION_PATTERN = r"\d+\.\d+\.\d+"
-_PRAGMA_TOKEN_RE = re.compile(
-    rf"(?P<hyphen>(?P<hyphen_lo>{_VERSION_PATTERN})\s+-\s+(?P<hyphen_hi>{_VERSION_PATTERN}))"
-    rf"|(?:(?P<op>\^|~|>=|<=|>|<|=)\s*)?(?P<version>{_VERSION_PATTERN})"
-    r"|(?P<alt>\|\|)"
-)
-
-
-def _parse_version(raw: str) -> _Version:
-    major, minor, patch = (int(x) for x in raw.split("."))
-    return major, minor, patch
-
-
-def _format_version(version: _Version) -> str:
-    return ".".join(str(x) for x in version)
+def parse_compiler_settings(result: dict) -> dict:
+    """Carry verified settings without replacing compiler defaults with host-tool defaults."""
+    bundle = parse_verification_bundle(result)
+    settings = copy.deepcopy(bundle.get("settings", {})) if bundle else {}
+    settings.pop("outputSelection", None)  # Analysis requests its own AST/bytecode outputs.
+    if not is_vyper_result(result):
+        settings["remappings"] = parse_remappings(result)
+    if not is_vyper_result(result) and "optimizer" not in settings:
+        settings["optimizer"] = {
+            "enabled": str(result.get("OptimizationUsed", "0")) == "1",
+            "runs": int(result.get("Runs", "200") or 200),
+        }
+    evm = str(settings.get("evmVersion", result.get("EVMVersion", "")) or "").strip()
+    if evm.lower() in ("", "default"):
+        settings.pop("evmVersion", None)
+    elif evm.lower() in _EVM_VERSION_BY_KEY:
+        settings["evmVersion"] = _EVM_VERSION_BY_KEY[evm.lower()]
+    else:
+        raise ValueError(f"Unsupported verified EVM target: {evm!r}")
+    return settings
 
 
-def _comparator_bounds(op: str, version: _Version) -> tuple[_Bound, _Bound]:
-    """``(lower, upper)`` for one comparator, reading an exact pin as the ``^`` it is relaxed to."""
-    major, minor, patch = version
-    if op in ("", "=", "^"):
-        if major > 0:
-            ceiling = (major + 1, 0, 0)
-        elif minor > 0:
-            ceiling = (0, minor + 1, 0)
-        else:
-            ceiling = (0, 0, patch + 1)
-        return (version, True), (ceiling, False)
-    if op == "~":
-        return (version, True), ((major, minor + 1, 0), False)
-    if op == ">=":
-        return (version, True), None
-    if op == ">":
-        return (version, False), None
-    if op == "<=":
-        return None, (version, True)
-    return None, (version, False)
+def verified_solc_version(raw: object, sources: dict[str, str]) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return _detect_solc_version(sources)
+    match = re.fullmatch(r"v?(0\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", value)
+    if match is None:
+        raise ValueError(f"Unsupported verified Solidity compiler version: {value!r}")
+    return match.group(1)
 
 
-class _Range:
-    """One ``||`` alternative of a pragma: the intersection of its comparators."""
-
-    def __init__(self) -> None:
-        self.lower: _Bound = None
-        self.upper: _Bound = None
-
-    def constrain(self, lower: _Bound, upper: _Bound) -> None:
-        if lower is not None and (
-            self.lower is None or lower[0] > self.lower[0] or (lower[0] == self.lower[0] and not lower[1])
-        ):
-            self.lower = lower
-        if upper is not None and (
-            self.upper is None or upper[0] < self.upper[0] or (upper[0] == self.upper[0] and not upper[1])
-        ):
-            self.upper = upper
-
-    def admits(self, version: _Version) -> bool:
-        if self.lower is not None:
-            bound, inclusive = self.lower
-            if version < bound or (version == bound and not inclusive):
-                return False
-        if self.upper is not None:
-            bound, inclusive = self.upper
-            if version > bound or (version == bound and not inclusive):
-                return False
-        return True
-
-    def least(self) -> _Version | None:
-        if self.lower is None:
-            return None
-        (major, minor, patch), inclusive = self.lower
-        return (major, minor, patch) if inclusive else (major, minor, patch + 1)
-
-    def greatest_nameable(self) -> _Version | None:
-        """The highest version known to exist under the ceiling: ``<0.8.20`` names 0.8.19, ``<0.9.0`` names none."""
-        if self.upper is None:
-            return None
-        (major, minor, patch), inclusive = self.upper
-        if inclusive:
-            return major, minor, patch
-        return (major, minor, patch - 1) if patch > 0 else None
+def write_compiler_input(project_dir: Path, sources: dict[str, str], settings: dict, *, language: str) -> None:
+    """Persist confined, inline sources so analysis never re-fetches compiler imports."""
+    for filename in sources:
+        _confine(project_dir, filename)
+    normalized = copy.deepcopy(settings)
+    if language.lower() != "vyper":
+        normalized["remappings"] = [r for r in normalized.get("remappings", []) if _remapping_target_is_safe(r)]
+    payload = {
+        "language": "Vyper" if language.lower() == "vyper" else "Solidity",
+        "sources": {name: {"content": content} for name, content in sources.items()},
+        "settings": normalized,
+    }
+    (project_dir / "analysis_standard_input.json").write_text(json.dumps(payload))
 
 
-def _pragma_ranges(body: str) -> list[_Range]:
-    ranges = [_Range()]
-    for match in _PRAGMA_TOKEN_RE.finditer(body):
-        if match.group("alt"):
-            ranges.append(_Range())
-        elif match.group("hyphen"):
-            low = _parse_version(match.group("hyphen_lo"))
-            high = _parse_version(match.group("hyphen_hi"))
-            ranges[-1].constrain((low, True), (high, True))
-        else:
-            ranges[-1].constrain(*_comparator_bounds(match.group("op") or "", _parse_version(match.group("version"))))
-    return [r for r in ranges if r.lower is not None or r.upper is not None]
-
-
-def _solidity_pragmas(sources: dict[str, str]) -> list[list[_Range]]:
-    pragmas = []
-    for content in sources.values():
-        for match in _SOLIDITY_PRAGMA_RE.finditer(content):
-            ranges = _pragma_ranges(match.group(2))
-            if ranges:
-                pragmas.append(ranges)
-    return pragmas
+_MIN_SOLC = "0.8.24"  # Preferred fallback when the source constraints permit it.
 
 
 def _detect_solc_version(sources: dict[str, str]) -> str:
-    """One solc that satisfies every ``pragma solidity`` in the bundle as ``_relax_pragmas`` rewrites it.
+    from semantic_version import NpmSpec, Version
 
-    Prefers the highest lower bound (of the newest ``||`` alternative), floored to ``_MIN_SOLC`` on its minor line.
-    When a ceiling rules that out, the newest admissible version named by some bound is used; if nothing is admissible
-    the preference stands and the compile reports the conflict.
-    """
-    pragmas = _solidity_pragmas(sources)
-    floor = _parse_version(_MIN_SOLC)
-    lowers = []
-    for ranges in pragmas:
-        bounded = [v for v in (r.least() for r in ranges) if v is not None]
-        if bounded:
-            lowers.append(max(bounded))
-    preferred = max(lowers) if lowers else floor
-    if preferred[:2] == floor[:2] and preferred < floor:
-        preferred = floor
-
-    def admitted(version: _Version) -> bool:
-        return all(any(r.admits(version) for r in ranges) for ranges in pragmas)
-
-    if admitted(preferred):
-        return _format_version(preferred)
-    candidates = {v for ranges in pragmas for r in ranges for v in (r.least(), r.greatest_nameable()) if v is not None}
-    viable = sorted(v for v in candidates if admitted(v))
-    below = [v for v in viable if v <= preferred]
-    if below:
-        return _format_version(below[-1])
-    if viable:
-        return _format_version(viable[0])
-    return _format_version(preferred)
-
-
-def _relax_pragmas(sources: dict[str, str]) -> dict[str, str]:
-    """Rewrite every exact constraint in each ``pragma solidity`` to ``^X.Y.Z``: Foundry checks pragmas against
-    solc_version even with auto-detect off, which would block the newer patch compiler ``_detect_solc_version`` picks.
-    """
-
-    def relax_token(match: re.Match[str]) -> str:
-        if match.group("version") and (match.group("op") or "=") == "=":
-            return "^" + match.group("version")
-        return match.group(0)
-
-    def relax_pragma(match: re.Match[str]) -> str:
-        return match.group(1) + _PRAGMA_TOKEN_RE.sub(relax_token, match.group(2))
-
-    return {path: _SOLIDITY_PRAGMA_RE.sub(relax_pragma, content) for path, content in sources.items()}
+    preferred = Version(_MIN_SOLC)
+    candidates = {preferred}
+    constraints = []
+    for content in sources.values():
+        # Pragma-shaped text inside comments or literals is not a compiler constraint.
+        code = re.sub(r"""//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""", " ", content)
+        for expression in re.findall(r"\bpragma\s+solidity\s+([^;]+);", code):
+            expression = re.sub(r"\s+", " ", expression)
+            expression = re.sub(r"([<>=~^]+)\s+(?=\d)", r"\1", expression).strip()
+            try:
+                constraints.append(NpmSpec(expression))
+            except ValueError as exc:
+                raise ValueError("Cannot infer Solidity version; exact compiler metadata is required") from exc
+            for op, version in re.findall(r"([<>]=?|[=~^]?)\s*(\d+\.\d+\.\d+)", expression):
+                parsed = Version(version)
+                candidates.add(parsed)
+                if op == ">":
+                    candidates.add(parsed.next_patch())
+                elif op == "<" and parsed.patch:
+                    candidates.add(Version(major=parsed.major, minor=parsed.minor, patch=parsed.patch - 1))
+    eligible = [version for version in candidates if all(spec.match(version) for spec in constraints)]
+    if not eligible:
+        raise ValueError("No inferred compiler satisfies all Solidity pragmas; exact compiler metadata is required")
+    return str(preferred if preferred in eligible else max(eligible))
 
 
 def _project_src_dir(sources: dict[str, str]) -> str:
@@ -357,9 +286,13 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     remappings = parse_remappings(result)
     bundle = parse_verification_bundle(result)
     language = "vyper" if is_vyper_result(result) else "solidity"
-    solc_version = _detect_solc_version(sources)
+    solc_version = (
+        verified_solc_version(result.get("CompilerVersion"), sources) if language == "solidity" else _MIN_SOLC
+    )
     src_dir = _project_src_dir(sources)
-    evm_version = sanitize_evm_version(result.get("EVMVersion", ""))
+    compiler_settings = parse_compiler_settings(result)
+    evm_version = compiler_settings.get("evmVersion")
+    evm_line = f'evm_version = "{evm_version}"' if evm_version else ""
 
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -371,7 +304,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
             out = "out"
             libs = ["lib"]
             solc_version = "{solc_version}"
-            evm_version = "{evm_version}"
+            {evm_line}
             optimizer = {str(result.get("OptimizationUsed", "1") == "1").lower()}
             optimizer_runs = {int(result.get("Runs", "200") or 200)}
             auto_detect_solc = false
@@ -385,12 +318,13 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     if bundle:
         (project_dir / "etherscan_standard_input.json").write_text(json.dumps(bundle, indent=2) + "\n")
 
-    # Relax exact pragmas so one solc_version satisfies all files.
-    sources = _relax_pragmas(sources)
+    # Verified source and compiler version are an inseparable pair; do not rewrite pragmas.
     for filename, content in sources.items():
         filepath = _confine(project_dir, filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)
+
+    write_compiler_input(project_dir, sources, compiler_settings, language=language)
 
     meta = {
         "address": address,

@@ -197,6 +197,35 @@ def write_effective_function_rows(
     """
     capability_by_function = capability_by_function or {}
 
+    # Resolve slow external classifications before deleting/flushing any policy rows.
+    # Otherwise those RPC calls hold the protocol's write locks for the whole scan.
+    type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+    classify_failures: list[BaseException] = []
+    principal_rows_by_signature: dict[str, list[dict[str, Any]]] = {}
+    for fn in function_records:
+        signature = str(fn.get("function") or fn.get("abi_signature") or "")
+        cap_dict = _to_dict(capability_by_function.get(signature))
+        if cap_dict is None:
+            continue
+        rows = project_capability_surface(
+            cap_dict, safe_address_lookup=safe_address_lookup, function_signature=signature
+        ).principal_rows
+        for scope in cap_dict.get("effect_capabilities") or []:
+            rows.extend(
+                _principal_rows_for_capability(
+                    scope["capability"], safe_address_lookup=safe_address_lookup, function_signature=signature
+                )
+            )
+        principal_rows_by_signature[signature] = rows
+        if resolve_principal_type is not None:
+            for row in rows:
+                if row.get("principal_type") != "signature_witness" and row.get("resolved_type") in (
+                    None,
+                    "",
+                    "unknown",
+                ):
+                    _classify_principal(row["address"], resolve_principal_type, type_memo, failures=classify_failures)
+
     observed_before = _capture_observed_before(session, contract_id, deployment_address)
 
     # Principals go via ON DELETE CASCADE.
@@ -207,8 +236,6 @@ def write_effective_function_rows(
     session.flush()
 
     added_principals = 0
-    type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
-    classify_failures: list[BaseException] = []
     for fn in function_records:
         fn_signature = str(fn.get("function") or fn.get("abi_signature") or "")
         function_name = fn_signature.split("(")[0] if "(" in fn_signature else fn_signature
@@ -299,17 +326,7 @@ def write_effective_function_rows(
         from .effect_authority import principal_identity
 
         if cap_dict is not None:
-            semantic_rows = _principal_rows_for_capability(
-                cap_dict,
-                safe_address_lookup=safe_address_lookup,
-                function_signature=fn_signature,
-            )
-            for scope in cap_dict.get("effect_capabilities") or []:
-                semantic_rows.extend(
-                    _principal_rows_for_capability(
-                        scope["capability"], safe_address_lookup=safe_address_lookup, function_signature=fn_signature
-                    )
-                )
+            semantic_rows = principal_rows_by_signature[fn_signature]
             for row in semantic_rows:
                 key = (
                     ef.id,

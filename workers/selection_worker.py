@@ -10,13 +10,15 @@ import logging
 import os
 import uuid
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Job, JobStage, JobStatus
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+from db.models import Contract, ContractMembershipWitness, Job, JobStage, JobStatus
 from db.queue import (
     DEFAULT_JOB_LEASE_TTL_S,
+    advance_job,
     complete_job,
     count_analysis_children,
     create_job,
@@ -24,6 +26,9 @@ from db.queue import (
     is_known_proxy,
     store_artifact,
 )
+from db.queue.static_cache import proven_analysis_schema_version
+from services.clients.rpc_limits import RpcBackpressure, RpcBudgetExceeded
+from services.discovery.membership_gate import resolve_membership_state
 from services.discovery.ranking import (
     MIN_CONFIDENCE_THRESHOLD,
     effective_confidence,
@@ -135,6 +140,8 @@ class SelectionWorker(BaseWorker):
         request = job.request if isinstance(job.request, dict) else {}
         analyze_limit = int(request.get("analyze_limit", 5))
         root_job_id = request.get("root_job_id", str(job.id))
+        force = bool(request.get("force"))
+        retryable_statuses = [JobStatus.failed, JobStatus.failed_terminal, JobStatus.completed]
 
         self.update_detail(session, job, f"Preparing selection for {job.company or 'protocol'}")
         logger.info(
@@ -147,9 +154,28 @@ class SelectionWorker(BaseWorker):
         # existing membership.
         try:
             with log_timed_phase(logger, "membership_probe_pass") as probe_ph:
-                probe_result = run_probe_pass(session, job.protocol_id, heartbeat=lambda: self._heartbeat(session, job))
+                probe_result = run_probe_pass(
+                    session,
+                    job.protocol_id,
+                    heartbeat=lambda: self._heartbeat(session, job),
+                    skip_contract_ids=request.get("selection_probed_ids", []),
+                )
                 probe_ph["targeted"] = len(probe_result.targeted_contract_ids)
                 probe_ph["promoted"] = len(probe_result.promoted_contract_ids)
+                if getattr(probe_result, "deferred_contract_ids", ()):
+                    seen = set(request.get("selection_probed_ids", []))
+                    seen.update(probe_result.probed_contract_ids)
+                    job.request = {**request, "selection_probed_ids": sorted(seen)}
+                    advance_job(
+                        session,
+                        job.id,
+                        JobStage.selection,
+                        f"Membership probing continues: {len(probe_result.deferred_contract_ids)} candidates pending",
+                        lease_id=job.lease_id,
+                    )
+                    raise JobHandledDirectly()
+        except (JobHandledDirectly, RpcBackpressure, RpcBudgetExceeded):
+            raise
         except Exception as exc:
             session.rollback()
             record_degraded(
@@ -164,8 +190,14 @@ class SelectionWorker(BaseWorker):
         all_rows = (
             session.execute(
                 select(Contract).where(
-                    Contract.protocol_id == job.protocol_id,
-                    Contract.job_id.is_(None),
+                    or_(
+                        Contract.protocol_id == job.protocol_id,
+                        (Contract.protocol_id.is_(None)) & (Contract.nominated_protocol_id == job.protocol_id),
+                    ),
+                    or_(
+                        Contract.job_id.is_(None),
+                        Contract.job_id.in_(select(Job.id).where(Job.status.in_(retryable_statuses))),
+                    ),
                 )
             )
             .scalars()
@@ -174,7 +206,31 @@ class SelectionWorker(BaseWorker):
 
         pre_rank_excluded: list[dict] = []
         candidates: list[Contract] = []
+        code_proven = set(
+            session.scalars(
+                select(ContractMembershipWitness.contract_id).where(
+                    ContractMembershipWitness.protocol_id == job.protocol_id,
+                    ContractMembershipWitness.rule == "w1_code",
+                    ContractMembershipWitness.revoked_at.is_(None),
+                )
+            )
+        )
         for row in all_rows:
+            prior = session.get(Job, row.job_id) if row.job_id is not None else None
+            if (
+                prior is not None
+                and prior.status == JobStatus.completed
+                and not force
+                and not row.is_proxy
+                and proven_analysis_schema_version(session, prior) == ANALYSIS_SCHEMA_VERSION
+            ):
+                pre_rank_excluded.append(_excluded_record(row, reason="current_analysis"))
+                continue
+            if row.protocol_id is None and (
+                row.id not in code_proven or resolve_membership_state(session, row) == "pruned"
+            ):
+                pre_rank_excluded.append(_excluded_record(row, reason="candidate_code_not_proven"))
+                continue
             # Superseded historical impls are audit-coverage anchors only; the live impl is kept.
             if is_superseded_impl(list(row.discovery_sources or [])):
                 pre_rank_excluded.append(
@@ -238,6 +294,7 @@ class SelectionWorker(BaseWorker):
             entry = by_key.get((row.address, row.chain))
             if entry is None:
                 continue
+            entry["analysis_membership_state"] = "member" if row.protocol_id is not None else "candidate"
             rank = entry.get("rank_score")
             if rank is not None:
                 row.rank_score = rank
@@ -314,19 +371,22 @@ class SelectionWorker(BaseWorker):
                 continue
             existing = find_existing_job_for_address(session, addr, chain=chain)
             if existing is not None:
-                if not is_known_proxy(session, addr, chain=chain):
+                refresh = existing.status == JobStatus.completed and (
+                    force or proven_analysis_schema_version(session, existing) != ANALYSIS_SCHEMA_VERSION
+                )
+                if not refresh and not is_known_proxy(session, addr, chain=chain):
                     _drop(entry, "existing_job", existing_job_id=str(existing.id))
                     continue
-                if force and _existing_in_same_cascade(session, addr, chain, root_job_id):
+                if (force or refresh) and _existing_in_same_cascade(session, addr, chain, root_job_id):
                     _drop(entry, "in_cascade_dedupe", existing_job_id=str(existing.id))
                     continue
                 logger.info(
-                    "Re-queuing proxy for upgrade check",
+                    "Re-queuing contract for analysis refresh",
                     extra={
                         "address": addr,
                         "chain": chain,
                         "existing_job_id": str(existing.id),
-                        "reason": "proxy_upgrade_recheck",
+                        "reason": "analysis_refresh" if refresh else "proxy_upgrade_recheck",
                     },
                 )
             # Budget last so each rejected candidate reports the reason that actually applies.
@@ -355,9 +415,12 @@ class SelectionWorker(BaseWorker):
                 "discovery_sources": list(sources),
                 "chains": entry.get("chains"),
                 "protocol_id": job.protocol_id,
+                "analysis_membership_state": entry.get("analysis_membership_state", "member"),
             }
             if company:
                 child_request["company"] = company
+            if force:
+                child_request["force"] = True
             child_job = create_job(session, child_request)
             child_ids.append(
                 {

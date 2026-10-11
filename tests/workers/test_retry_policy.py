@@ -60,6 +60,13 @@ def test_classify(make_exc, expected):
     assert classify(make_exc()) == expected
 
 
+def test_sqlalchemy_wrapped_disconnect_remains_transient():
+    from sqlalchemy.exc import IntegrityError, OperationalError
+
+    assert classify(OperationalError("SELECT 1", {}, _psycopg2_operational())) == "transient"
+    assert classify(IntegrityError("INSERT", {}, ValueError("duplicate"))) == "terminal"
+
+
 _NOW = datetime(2026, 5, 2, 12, 0, 0, tzinfo=timezone.utc)
 
 

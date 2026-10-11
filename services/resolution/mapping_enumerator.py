@@ -306,6 +306,8 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool |
         return None
     if op == "in":
         return actual in rhs
+    if op == "not_in":
+        return actual not in rhs
     if len(rhs) != 1:
         return None
     rhs_int = rhs[0]

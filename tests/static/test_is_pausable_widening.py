@@ -180,3 +180,4 @@ def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, mon
     )
 
     assert degraded["pausability"]["is_pausable"] is None, degraded["pausability"]
+    assert degraded["analysis_status"]["static_analysis_completed"] is False
