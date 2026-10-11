@@ -77,6 +77,7 @@ from utils.scoring_status import (
     MODEL_VERSION,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_OPEN,
+    PRINCIPAL_SET_NOT_EXACT_NOTE,
     PRINCIPAL_STATE_ENUMERATED,
     SCORE_TRIGGER_MANUAL,
     SEVERITY_STATE_PROVEN,
@@ -116,6 +117,7 @@ def compute_protocol_score(
     refs = [ref for signal in signals for ref in signal.principal_refs]
     refs.extend(_recovery_refs(signals))
     principal_facts = P.load_principal_plane(session, refs)
+    stale_inputs = _stale_principal_inputs(signals, principal_facts)
 
     warnings: list[dict[str, Any]] = [
         {
@@ -238,6 +240,7 @@ def compute_protocol_score(
         P.discovery_relation_entities(session, protocol_id),
         composed_signals,
         ceiling_signals,
+        unanswered_signals={_signal_identity(signal) for signal in stale_inputs},
     )
 
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
@@ -261,6 +264,7 @@ def compute_protocol_score(
         "closure_admission": {
             "refusals": closure.refusal_counts(),
             "renounced": closure.renounced_counts(),
+            "controller_enumeration_not_determined": dict(closure.controllers_not_determined),
             "reading": (
                 "refusals are EDGES this closure declined to admit, by rule: the zero address "
                 "is a burn sentinel and not an assessable entity, so it is refused as principal "
@@ -354,9 +358,19 @@ def compute_protocol_score(
         ),
     }
 
-    # The grade figures stand or fall together: with findings but no priced denominator, derived numbers go to
-    # provenance instead of beside a withheld grade.
-    scored = bool(findings) and grade_exposure is not None
+    # The grade figures stand or fall together: with findings but no priced denominator, or with signals whose
+    # principal set is gone or not proven whole, derived numbers go to provenance instead of beside a withheld grade.
+    partial_inputs = _partial_principal_inputs(signals)
+    withheld_basis: str | None = None
+    withheld_signals: list[FunctionSignal] = []
+    if stale_inputs:
+        warnings.append(_stale_inputs_warning(stale_inputs))
+        withheld_basis, withheld_signals = GRADE_WITHHELD_STALE_INPUTS, stale_inputs
+    elif partial_inputs:
+        withheld_basis, withheld_signals = GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS, partial_inputs
+    elif findings and grade_exposure is None:
+        withheld_basis = GRADE_WITHHELD_EXPOSURE_UNPRICED
+    scored = bool(findings) and withheld_basis is None
     if not scored:
         withheld_rows = [
             {
@@ -367,14 +381,24 @@ def compute_protocol_score(
             }
             for finding in findings
         ]
-        if findings:
+        if withheld_basis is not None:
             provenance["grade_withheld"] = {
                 "grade_lambda_computed": grade_lambda,
                 "confidence_pct_computed": confidence.pop("pct", None),
                 "exposure_usd_computed": exposure_usd,
                 "per_finding": withheld_rows,
-                "reason": "no priced value in the perimeter, so the exposure denominator is not_determined",
+                "basis": withheld_basis,
+                "reason": _WITHHELD_REASONS[withheld_basis].format(signals=len(withheld_signals)),
             }
+            if withheld_signals:
+                provenance["grade_withheld"]["withheld_by_signals"] = [
+                    {
+                        "entity": entity_key(s.chain, s.deployment_address),
+                        "function": s.function_name,
+                        "capability": s.claim_id,
+                    }
+                    for s in withheld_signals
+                ]
         else:
             confidence.pop("pct", None)
 
@@ -447,6 +471,10 @@ class _UnitResolver:
         self._parent = {key: key for key in self._safe_by_key}
         self.overlaps: list[dict[str, Any]] = []
         self._union_overlapping_safes()
+        self.proposers_not_determined: dict[str, list[str]] = {}
+        # The weakest proven proposer-executor of a timelock whose entry is withheld: its price is a floor, never
+        # undercut by the undetermined rung.
+        self._proposer_floors: dict[str, dict[str, Any]] = {}
         self._proposers = self._timelock_proposer_executors(signals)
         self._members: dict[str, set[str]] = defaultdict(set)
 
@@ -503,11 +531,15 @@ class _UnitResolver:
         self.overlaps.sort(key=lambda o: (o["a"], o["b"]))
 
     def _timelock_proposer_executors(self, signals: list[FunctionSignal]) -> dict[str, dict[str, Any]]:
-        """The weakest Safe proven able to both propose and execute on a timelock; propose-only doesn't let it act as
-        the timelock.
+        """The weakest principal proven able to both propose and execute on each timelock; propose-only doesn't let it
+        act as the timelock.
+
+        A proposer-executor whose own weakness isn't proven (no row, an unread Safe owner set, a contract or an unknown
+        type) could be the weakest path, so its timelock gets no entry and is recorded in
+        ``proposers_not_determined``.
         """
         by_role: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"schedule": set(), "execute": set()})
-        facts_by_key: dict[str, P.PrincipalFacts] = {}
+        facts_by_key: dict[str, P.PrincipalFacts | None] = {}
         for signal in sorted(signals, key=lambda s: (s.chain, s.deployment_address, s.selector, s.claim_id)):
             role = {C.TIMELOCK_SCHEDULE: "schedule", C.TIMELOCK_EXECUTE: "execute"}.get(signal.claim_id)
             if role is None:
@@ -515,29 +547,30 @@ class _UnitResolver:
             timelock_key = entity_key(signal.chain, signal.deployment_address)
             for ref in signal.principal_refs:
                 facts = self._facts.get(int(ref.function_principal_id))
-                if facts is None or facts.resolved_type != "safe" or not facts.owners:
-                    continue
-                by_role[timelock_key][role].add(facts.key)
-                facts_by_key[facts.key] = facts
+                key = facts.key if facts is not None else entity_key(ref.chain, ref.address)
+                by_role[timelock_key][role].add(key)
+                if facts is not None or key not in facts_by_key:
+                    facts_by_key[key] = facts
 
         out: dict[str, dict[str, Any]] = {}
         for timelock_key in sorted(by_role):
             both = sorted(by_role[timelock_key]["schedule"] & by_role[timelock_key]["execute"])
-            best: dict[str, Any] | None = None
-            for safe_key in both:
-                facts = facts_by_key[safe_key]
-                # Weakest path: an unread threshold sorts first and is priced at the uncredited rung.
-                rank = (0, 0.0) if facts.threshold is None else (1, facts.threshold / len(facts.owners))
-                candidate = {
-                    "key": safe_key,
-                    "k": facts.threshold,
-                    "n": len(facts.owners),
-                    "rank": rank,
-                }
-                if best is None or candidate["rank"] < best["rank"]:
-                    best = candidate
-            if best is not None:
-                out[timelock_key] = best
+            entries: list[dict[str, Any]] = []
+            unpriced: list[str] = []
+            for key in both:
+                entry = _proposer_entry(facts_by_key.get(key))
+                if entry is None:
+                    unpriced.append(key)
+                else:
+                    entries.append(entry)
+            if unpriced:
+                self.proposers_not_determined[timelock_key] = unpriced
+                if entries:
+                    self._proposer_floors[timelock_key] = min(entries, key=_proposer_rank)
+            elif entries:
+                # Weakest path. Within one weakness rung an unread threshold sorts first, then the smaller k/n, then the
+                # key, so the published proposer is stable.
+                out[timelock_key] = min(entries, key=_proposer_rank)
         return out
 
     def unit_for(self, facts: P.PrincipalFacts) -> str:
@@ -563,10 +596,24 @@ class _UnitResolver:
             "timelock_collapses": {
                 timelock: {
                     "into": entry["key"],
-                    "proposer_k_of_n": (f"{entry['k']}/{entry['n']}" if entry["k"] is not None else "not_determined"),
+                    "proposer_kind": entry["kind"],
+                    "proposer_k_of_n": (
+                        "not_applicable"
+                        if entry["kind"] == "eoa"
+                        else f"{entry['k']}/{entry['n']}"
+                        if entry["k"] is not None
+                        else "not_determined"
+                    ),
                     "basis": "proven proposer AND executor",
                 }
                 for timelock, entry in sorted(self._proposers.items())
+            },
+            "timelock_proposers_not_determined": {
+                timelock: {
+                    "principals": keys,
+                    "basis": "a proposer-executor whose own weakness is not proven could be the weakest path",
+                }
+                for timelock, keys in sorted(self.proposers_not_determined.items())
             },
             "owner_set_contradictions": self.owner_set_contradictions,
         }
@@ -611,26 +658,53 @@ class _UnitResolver:
     def _timelock_weakness(self, facts: P.PrincipalFacts, notes: list[str]) -> tuple[float, str, list[str]]:
         discount = K.delay_discount(facts.delay_seconds)
         proposer = self.proposer_for(facts)
+        unpriced = self.proposers_not_determined.get(facts.key)
+        if unpriced:
+            notes.append("timelock_proposer_weakness_not_determined:" + ",".join(unpriced))
+        if proposer is not None and proposer["credit_withheld"]:
+            notes.append(f"safe_kn_credit_withheld:{proposer['protection_basis']}")
+        floor = proposer or self._proposer_floors.get(facts.key)
         if discount is None:
             notes.append("timelock_delay_not_determined")
-            return K.WEAKNESS_TIMELOCK_UNDETERMINED, "timelock(delay not_determined)", notes
+            return (
+                self._floored(K.WEAKNESS_TIMELOCK_UNDETERMINED, floor, 1.0, notes),
+                "timelock(delay not_determined)",
+                notes,
+            )
         delay_seconds = float(facts.delay_seconds) if facts.delay_seconds is not None else 0.0
         days = int(delay_seconds // 86400)
         if delay_seconds == 0:
             # A proven zero delay is proven-absent protection.
             notes.append("timelock_delay_proven_zero:no_protection")
             if proposer is None:
-                return K.WEAKNESS_SAFE_UNCREDITED, "timelock(0d, proposer not_determined)", notes
-            base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
+                return (
+                    self._floored(K.WEAKNESS_SAFE_UNCREDITED, floor, 1.0, notes),
+                    "timelock(0d, proposer not_determined)",
+                    notes,
+                )
             notes.append(f"proposer={_kn(proposer)}")
-            return base, f"timelock 0d via {_kn(proposer)}", notes
+            return proposer["weakness"], f"timelock 0d via {_kn(proposer)}", notes
         if proposer is None:
             # Undetermined proposer-executors earn no delay credit.
             notes.append("timelock_proposer_not_determined:no_delay_credit")
-            return K.WEAKNESS_TIMELOCK_UNDETERMINED, f"timelock {days}d(proposer not_determined)", notes
-        base = K.quorum_weakness(proposer["k"], proposer["n"], credit_withheld=False)
+            return (
+                self._floored(K.WEAKNESS_TIMELOCK_UNDETERMINED, floor, discount, notes),
+                f"timelock {days}d(proposer not_determined)",
+                notes,
+            )
         notes.append(f"delay_discount={discount};proposer={_kn(proposer)}")
-        return round(base * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
+        return round(proposer["weakness"] * discount, 4), f"timelock {days}d via {_kn(proposer)}", notes
+
+    @staticmethod
+    def _floored(weakness: float, floor: dict[str, Any] | None, discount: float, notes: list[str]) -> float:
+        """An undetermined rung never reads safer than a proposer-executor proven to be there."""
+        if floor is None:
+            return weakness
+        proven = round(floor["weakness"] * discount, 4)
+        if proven <= weakness:
+            return weakness
+        notes.append(f"proven_proposer_floor={_kn(floor)}:{proven}")
+        return proven
 
     def _role_breadth(self, facts: P.PrincipalFacts) -> float | None:
         """A proven holder floor above one is breadth; it only raises."""
@@ -643,7 +717,43 @@ class _UnitResolver:
 
 def _kn(proposer: dict[str, Any]) -> str:
     """A proposer's k/n, or a refusal; never a fabricated ratio."""
+    if proposer["kind"] == "eoa":
+        return "EOA"
     return f"{proposer['k']}/{proposer['n']}" if proposer["k"] is not None else "k not_determined"
+
+
+def _proposer_rank(entry: dict[str, Any]) -> tuple[float, int, float, str]:
+    k, n = entry["k"], entry["n"]
+    ratio = 0.0 if k is None or not n else k / n
+    return (-entry["weakness"], 0 if k is None else 1, ratio, entry["key"])
+
+
+def _proposer_entry(facts: P.PrincipalFacts | None) -> dict[str, Any] | None:
+    """A timelock proposer-executor priced as itself, or ``None`` where its own weakness isn't proven."""
+    if facts is None:
+        return None
+    if facts.resolved_type == "eoa":
+        return {
+            "key": facts.key,
+            "kind": "eoa",
+            "k": None,
+            "n": None,
+            "weakness": K.WEAKNESS_EOA,
+            "credit_withheld": False,
+        }
+    if facts.resolved_type == "safe" and facts.owners:
+        return {
+            "key": facts.key,
+            "kind": "safe",
+            "k": facts.threshold,
+            "n": len(facts.owners),
+            "weakness": K.quorum_weakness(
+                facts.threshold, len(facts.owners), credit_withheld=facts.protection_credit_withheld
+            ),
+            "credit_withheld": facts.protection_credit_withheld,
+            "protection_basis": facts.protection_basis,
+        }
+    return None
 
 
 def _safe_weakness(
@@ -1649,4 +1759,57 @@ def _execution_fault_warning(census: dict[str, Any]) -> dict[str, Any]:
         ),
         "records_faulted": census["records_faulted"],
         "faulted_by_reason": dict(census["faulted_by_reason"]),
+    }
+
+
+GRADE_WITHHELD_STALE_INPUTS = "stale_scoring_inputs"
+GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS = "partial_principal_sets"
+GRADE_WITHHELD_EXPOSURE_UNPRICED = "exposure_denominator_not_determined"
+_WITHHELD_REASONS = {
+    GRADE_WITHHELD_STALE_INPUTS: (
+        "stale scoring inputs: {signals} enumerated signal(s) name principal rows that no longer exist, so the "
+        "findings they would produce are not_determined"
+    ),
+    GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS: (
+        "partial principal sets: {signals} grade-bearing signal(s) rest on a role set not proven whole, so who can "
+        "call them, and the findings that would follow, are not_determined"
+    ),
+    GRADE_WITHHELD_EXPOSURE_UNPRICED: "no priced value in the perimeter, so the exposure denominator is not_determined",
+}
+
+
+def _stale_principal_inputs(
+    signals: list[FunctionSignal], principal_facts: dict[int, P.PrincipalFacts]
+) -> list[FunctionSignal]:
+    """Enumerated signals naming a principal row that is gone, in population order.
+
+    A policy re-run replaces principal rows under new ids; signals a failed distillation left behind still name the
+    old ones, and folding what survives would drop exactly the findings whose rows were replaced.
+    """
+    return [
+        signal
+        for signal in signals
+        if signal.principal_state == PRINCIPAL_STATE_ENUMERATED
+        and any(int(ref.function_principal_id) not in principal_facts for ref in signal.principal_refs)
+    ]
+
+
+def _partial_principal_inputs(signals: list[FunctionSignal]) -> list[FunctionSignal]:
+    """Grade-bearing signals whose principal set distillation found short of ``exact``: folding without them would
+    drop findings their unfound members carry.
+    """
+    return [
+        signal
+        for signal in signals
+        if signal.enters_grade
+        and signal.principal_state != PRINCIPAL_STATE_ENUMERATED
+        and any(note.startswith(PRINCIPAL_SET_NOT_EXACT_NOTE) for note in signal.witness_notes)
+    ]
+
+
+def _stale_inputs_warning(stale: list[FunctionSignal]) -> dict[str, Any]:
+    return {
+        "kind": "stale_scoring_inputs",
+        "signals": len(stale),
+        "note": "enumerated signals name principal rows that no longer exist; the grade is withheld",
     }

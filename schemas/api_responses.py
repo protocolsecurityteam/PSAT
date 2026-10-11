@@ -77,6 +77,16 @@ class ReachBlock(TypedDict):
     entities: dict[str, dict[str, Any]]
 
 
+class MemberAnalysis(TypedDict):
+    """Member contracts and how many have a completed analysis; the rest are listed, each with its witness token."""
+
+    members: int
+    analyzed: int
+    not_determined: int
+    by_state: dict[str, int]
+    not_analyzed: list[dict[str, Any]]
+
+
 class CompanyOverviewResponse(TypedDict):
     """The four governance lists are dynamic and stay untyped."""
 
@@ -91,6 +101,7 @@ class CompanyOverviewResponse(TypedDict):
     fund_flows: list[dict[str, Any]]
     reach: ReachBlock
     all_addresses_count: int
+    member_analysis: MemberAnalysis
 
 
 class CompanyAddressesResponse(TypedDict):

@@ -9,6 +9,7 @@ import { letterFor } from "../../score/gradeBands.js";
 import { useResource } from "../../shared/useResource.js";
 import { formatUsd } from "../format.js";
 import { buildSearchResults } from "../layout/search.js";
+import { memberAnalysisNote } from "../../vocab/memberAnalysis.js";
 
 // Promises cached per company so remounts and concurrent mounts share one
 // request.
@@ -248,6 +249,7 @@ export function DetailEmptyState({
   const tvlUsd = tvl ? (tvl.total_usd ?? tvl.defillama_tvl ?? null) : null;
   const tvlSource = tvl && tvl.total_usd == null && tvl.defillama_tvl != null ? "DefiLlama" : "tracked";
   const reports = projection?.posture?.reportsOnFile ?? null;
+  const unreadMembers = memberAnalysisNote(companyData);
 
   return (
     <section className="ps-detail-empty ps-glance">
@@ -262,6 +264,13 @@ export function DetailEmptyState({
             .join(" · ")}
         </span>
       </div>
+
+      {unreadMembers && (
+        <div className="ps-glance-card" role="status" aria-label="Member contracts not determined">
+          {unreadMembers.notDetermined} of {unreadMembers.members} member contracts not determined
+          {unreadMembers.states.map((state) => ` · ${state.count} ${state.word}`).join("")}
+        </div>
+      )}
 
       {companyData.analysis_pending_balance_effects?.incomplete > 0 && (
         <div className="ps-glance-card" role="status">

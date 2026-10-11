@@ -20,7 +20,7 @@ from db.models import (
     Protocol,
     TvlSnapshot,
 )
-from schemas.api_responses import CompanyOverviewResponse, ReachBlock, TvlSummary
+from schemas.api_responses import CompanyOverviewResponse, MemberAnalysis, ReachBlock, TvlSummary
 from schemas.control_tracking import MonitoredContractType
 from services.clients.rpc import chain_id_for_chain_name
 from services.discovery.membership_gate import membership_state, witness_is_heuristic
@@ -30,9 +30,12 @@ from services.scoring.reach import REACH_MODEL, load_protocol_reach, merge_reach
 from .entity_keys import _coalesce_chain, _entity_key
 from .governance_view import build_governance_view
 from .jobs import (
+    MEMBER_ANALYSIS_FAILED,
+    MEMBER_ANALYSIS_NOT_COMPLETED,
     CompanyNotFound,
     GovernanceView,
     _time_phase,
+    members_without_analysis,
     prefetch_contracts,
     resolve_company_jobs,
     resolve_implementation_contracts,
@@ -240,6 +243,21 @@ def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -
     }
 
 
+def _member_analysis(session: Session, protocol: Protocol) -> MemberAnalysis:
+    """Members whose analysis never completed, listed with a witness token rather than left out of the page."""
+    members, missing = members_without_analysis(session, protocol.id)
+    by_state = {MEMBER_ANALYSIS_FAILED: 0, MEMBER_ANALYSIS_NOT_COMPLETED: 0}
+    for member in missing:
+        by_state[member["analysis_state"]] += 1
+    return {
+        "members": members,
+        "analyzed": members - len(missing),
+        "not_determined": len(missing),
+        "by_state": by_state,
+        "not_analyzed": missing,
+    }
+
+
 def _balance_effects_coverage(session: Session, protocol: Protocol) -> dict[str, int]:
     states: dict[str, int] = {
         state: count
@@ -272,6 +290,7 @@ def assemble_company_payload(
         "reach": reach,
         # The full inventory (~167 KB) is served lazily by /api/company/{name}/addresses.
         "all_addresses_count": _all_addresses_count(session, protocol_row),
+        "member_analysis": _member_analysis(session, protocol_row),
     }
 
     if include_summary:

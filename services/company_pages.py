@@ -36,7 +36,7 @@ MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_GZIP_BYTES = 4 * 1024 * 1024
 # Bump a section when its response shape or field meaning changes; regenerate
 # tests/fixtures/company_pages/schema_<section>.json alongside.
-PAYLOAD_SCHEMA = {"overview": 1, "functions": 1, "summary": 1}
+PAYLOAD_SCHEMA = {"overview": 2, "functions": 1, "summary": 1}
 # Bump when a fix withdraws previously published facts: a hard cutover, never stale.
 SEMANTIC_EPOCH = 1
 

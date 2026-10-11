@@ -101,3 +101,35 @@ export function sharedDeployerNote(principal) {
     heuristic: sd.heuristic !== false,
   };
 }
+
+// Mapping-member replay statuses, as the resolver writes them. An unlisted
+// token renders raw, never as a guessed word.
+const ENUMERATION_STATUS_WORD = {
+  error: "enumeration errored",
+  skipped: "enumeration not run",
+  incomplete_timeout: "enumeration timed out",
+  incomplete_max_pages: "enumeration hit its page cap",
+  incomplete_stalled: "enumeration stalled",
+  incomplete_unpinned: "enumeration not pinned to a block",
+  incomplete_no_writer_specs: "no writer events to replay",
+  incomplete_no_hypersync_coverage: "no log coverage for this chain",
+  incomplete_ambiguous_writer_event: "an ambiguous writer event was dropped",
+  incomplete_undecodable_event: "a writer event could not be decoded",
+  incomplete_unfoldable_writer_event: "a writer event could not be folded",
+  deferred_no_floor: "deferred: no deploy block to scan from",
+};
+
+// The entity's controller set when its member replay never completed: a
+// missing controller is unread, not absent. Null when the set is complete or
+// no replay ran. Shape: {statuses: [{token, word}]}.
+export function controllerEnumerationNote(entity) {
+  const enumeration = entity && entity.controller_enumeration;
+  if (!enumeration || enumeration.state !== "not_determined") return null;
+  const tokens = String(enumeration.status || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return {
+    statuses: tokens.map((token) => ({ token, word: ENUMERATION_STATUS_WORD[token] || token })),
+  };
+}
