@@ -92,7 +92,7 @@ export async function api(path, options = {}) {
 }
 
 // Matches PAYLOAD_SCHEMA in services/company_pages.py.
-export const SUPPORTED_PAYLOAD_SCHEMA = { overview: 2, functions: 1, summary: 1 };
+export const SUPPORTED_PAYLOAD_SCHEMA = { overview: 3, functions: 1, summary: 1 };
 
 function companyMeta(headers) {
   const schema = headers.get("X-PSAT-Payload-Schema");

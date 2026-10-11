@@ -17,14 +17,14 @@ import math
 import os
 import time
 from dataclasses import asdict, dataclass, is_dataclass, replace
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
-from db.queue import get_artifact
+from db.queue import get_artifact, job_artifacts_are_current, job_stands_for_current_analyzer
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
 from utils.chains import UnknownChainError, chain_by_id, require_chain
@@ -177,10 +177,15 @@ def find_analysis_job_for_address(
     required_artifact: str = "predicate_trees",
     chain: str | None = None,
     completed_only: bool = True,
+    eras: dict[str, int | None] | None = None,
 ) -> AnalysisJobLookup | None:
     """Find the job whose artifacts apply to a runtime address: a direct artifact if present, else the proxy's
     implementation job.
+
+    Only artifacts proven to come from the current analyzer are served; a stale job reads as no analysis, never as a
+    fallback. A caller looking up many addresses passes one *eras* memo.
     """
+    eras = {} if eras is None else eras
     for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=completed_only):
         lookup = _analysis_lookup_for_runtime_job(
             session,
@@ -188,6 +193,7 @@ def find_analysis_job_for_address(
             required_artifact=required_artifact,
             chain=chain,
             completed_only=completed_only,
+            eras=eras,
         )
         if lookup is not None:
             return lookup
@@ -199,13 +205,30 @@ def find_dependency_provider_job_for_address(
     address: str,
     *,
     chain: str | None = None,
+    eras: dict[str, int | None] | None = None,
 ) -> AnalysisJobLookup | None:
-    """The job that should satisfy a policy dependency for *address*.
+    """The job that should satisfy a policy dependency for *address*, or ``None`` when a fresh one must be spawned.
 
-    For a proxy that's the implementation job, since the proxy job may be done without policy artifacts.
+    For a proxy that's the implementation job, since the proxy job may be done without policy artifacts. Only jobs
+    that stand for the current analyzer (``job_stands_for_current_analyzer``) count, so a stale provider reads as
+    missing while a terminal failure with no era stands rather than being re-spawned on every lookup. Live jobs are
+    preferred over a standing terminal failure.
     """
-    for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=False):
-        impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=False)
+    eras = {} if eras is None else eras
+
+    def stands(job: Job) -> bool:
+        return job_stands_for_current_analyzer(session, job, eras)
+
+    runtime_jobs = [
+        job
+        for job in _jobs_for_address(session, address, chain=chain, completed_only=False, include_terminal=True)
+        if stands(job)
+    ]
+    runtime_jobs.sort(key=lambda job: job.status == JobStatus.failed_terminal)
+    for runtime_job in runtime_jobs:
+        impl_job = _implementation_child_job(
+            session, runtime_job, chain=chain, completed_only=False, include_terminal=True, keep=stands
+        )
         if impl_job is not None:
             return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
@@ -694,15 +717,23 @@ def _analysis_lookup_for_runtime_job(
     required_artifact: str,
     chain: str | None,
     completed_only: bool,
+    eras: dict[str, int | None] | None = None,
 ) -> AnalysisJobLookup | None:
     # A proxy's own predicate_trees artifact exists but is empty; preferring it would shadow the implementation's trees
     # and break cross-contract inlining. Prefer a substantive artifact; fall back to an empty one only if neither has
-    # content.
-    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
+    # content. The era gates the job whose artifact is read; a proxy's runtime job only points at its implementation.
+    eras = {} if eras is None else eras
+
+    def current(job: Job) -> bool:
+        return job_artifacts_are_current(session, job, eras)
+
+    runtime_artifact = get_artifact(session, runtime_job.id, required_artifact) if current(runtime_job) else None
     if _artifact_is_substantive(required_artifact, runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
 
-    impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=completed_only)
+    impl_job = _implementation_child_job(
+        session, runtime_job, chain=chain, completed_only=completed_only, keep=current
+    )
     impl_artifact = get_artifact(session, impl_job.id, required_artifact) if impl_job is not None else None
     if impl_job is not None and _artifact_is_substantive(required_artifact, impl_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
@@ -720,12 +751,14 @@ def _jobs_for_address(
     *,
     chain: str | None = None,
     completed_only: bool = True,
+    include_terminal: bool = False,
 ) -> list[Job]:
+    excluded = (JobStatus.failed,) if include_terminal else (JobStatus.failed, JobStatus.failed_terminal)
     stmt = (
         select(Job)
         .where(func.lower(Job.address) == address.lower())
         .where(Job.request["effects_resume_work_id"].astext.is_(None))
-        .where(~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)))
+        .where(~Job.status.in_(excluded))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
     )
     if completed_only:
@@ -742,13 +775,22 @@ def _implementation_child_job(
     *,
     chain: str | None,
     completed_only: bool,
+    keep: Callable[[Job], bool],
+    include_terminal: bool = False,
 ) -> Job | None:
     contract = _contract_for_job(session, runtime_job, chain=chain)
     impl_addr = (contract.implementation if contract is not None else None) or None
     if not isinstance(impl_addr, str) or not impl_addr.startswith("0x") or len(impl_addr) != 42:
         return None
 
-    candidates = _jobs_for_address(session, impl_addr, chain=chain, completed_only=completed_only)
+    candidates = [
+        candidate
+        for candidate in _jobs_for_address(
+            session, impl_addr, chain=chain, completed_only=completed_only, include_terminal=include_terminal
+        )
+        if keep(candidate)
+    ]
+    candidates.sort(key=lambda job: job.status == JobStatus.failed_terminal)
     runtime_addr = (runtime_job.address or "").lower()
     parent_id = str(runtime_job.id)
 

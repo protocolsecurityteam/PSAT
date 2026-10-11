@@ -69,6 +69,8 @@ from .static_cache import (
     find_existing_job_for_address,
     find_previous_company_inventory,
     is_known_proxy,
+    job_artifacts_are_current,
+    job_stands_for_current_analyzer,
     proven_analysis_schema_version,
 )
 
@@ -120,6 +122,8 @@ __all__ = [
     "get_source_files",
     "heartbeat_job",
     "is_known_proxy",
+    "job_artifacts_are_current",
+    "job_stands_for_current_analyzer",
     "proven_analysis_schema_version",
     "reclaim_stuck_jobs",
     "reconcile_impl_job_for_proxy",

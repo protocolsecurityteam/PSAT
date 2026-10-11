@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import FunctionPrincipal
 from db.queue import create_job, store_artifact
 from services.effects import calldata as cd
@@ -73,6 +74,7 @@ def _seed(session) -> tuple[int, int]:
     proto = _protocol(session, "static-pause-proto")
     address = "0x" + "5e" * 20
     job = create_job(session, {"address": address, "name": "PausableUntilLike"})
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     contract = _contract(session, proto.id, address, chain="ethereum", job_id=job.id)
     latch_write = {
         "var": LATCH,

@@ -1,5 +1,5 @@
 {
-  "payload_schema": 2,
+  "payload_schema": 3,
   "skeleton": {
     "all_addresses_count": "int",
     "company": "str",

@@ -7,6 +7,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import Contract, Job, JobStage, JobStatus, Protocol
 
 
@@ -33,6 +34,7 @@ def _add_job(
     status: JobStatus = JobStatus.completed,
     request: dict | None = None,
     is_proxy: bool = False,
+    analysis_schema_version: int | None = ANALYSIS_SCHEMA_VERSION,
 ) -> Job:
     job = Job(
         id=uuid.uuid4(),
@@ -44,6 +46,7 @@ def _add_job(
         stage=JobStage.done,
         request=request or {"address": address},
         is_proxy=is_proxy,
+        analysis_schema_version=analysis_schema_version,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )

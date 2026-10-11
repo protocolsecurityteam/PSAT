@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import CompanyPageRevision as Revision
 from db.models import EffectiveFunction, Job, JobStatus
 from services.aggregations.company_overview import build_company_overview
@@ -81,6 +82,8 @@ def test_overview_lists_unanalyzed_members_as_not_determined(db_session):
         "analysis_state": "analysis_not_completed",
         "last_failed_job_id": None,
         "last_failed_job_status": None,
+        "stale_analysis_job_id": None,
+        "stale_analysis_version": None,
     }
     assert listed[("ethereum", mainnet_twin.address.lower())]["analysis_state"] == "analysis_failed"
 
@@ -216,3 +219,111 @@ def test_a_queued_retry_leaves_the_published_failed_attempt_and_the_page_fresh(p
     ]
     assert member["analysis_state"] == "analysis_failed"
     assert (member["last_failed_job_id"], member["last_failed_job_status"]) == (str(failed_job.id), "failed_terminal")
+
+
+STALE_ERA = 6
+
+
+def _attempt(session, protocol, contract, status: JobStatus, version: int | None, *, age_s: int = 0, donor=None):
+    request = {"address": contract.address, "chain": "ethereum"}
+    if donor is not None:
+        request["cache_source_job_id"] = str(donor.id)
+    job = _add_job(
+        session,
+        address=contract.address,
+        protocol_id=protocol.id,
+        status=status,
+        request=request,
+        analysis_schema_version=version,
+    )
+    job.chain_id = 1
+    job.updated_at = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    session.commit()
+    return job
+
+
+def _listed(session, protocol):
+    payload = build_company_overview(session, protocol.name)
+    return payload["member_analysis"], {m["address"]: m for m in payload["member_analysis"]["not_analyzed"]}
+
+
+def test_a_stale_analysis_with_a_newer_failure_is_not_determined_and_names_the_stale_era(db_session):
+    protocol = _add_protocol(db_session, f"members-stale-{uuid.uuid4().hex[:8]}")
+    member = _member(db_session, protocol, "reanalysed", JobStatus.completed)
+    db_session.execute(update(Job).where(Job.address == member.address).values(analysis_schema_version=STALE_ERA))
+    db_session.commit()
+    stale = db_session.execute(select(Job).where(Job.address == member.address)).scalar_one()
+    stale.updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    db_session.commit()
+    retry = _attempt(db_session, protocol, member, JobStatus.failed_terminal, None)
+
+    block, listed = _listed(db_session, protocol)
+    assert (block["analyzed"], block["not_determined"]) == (0, 1)
+    entry = listed[member.address.lower()]
+    assert entry["analysis_state"] == "analysis_failed"
+    assert (entry["last_failed_job_id"], entry["last_failed_job_status"]) == (str(retry.id), "failed_terminal")
+    assert (entry["stale_analysis_job_id"], entry["stale_analysis_version"]) == (str(stale.id), STALE_ERA)
+
+    state, detail = perimeter_state(db_session, protocol.id)
+    assert state == PERIMETER_NOT_DETERMINED
+    assert detail["members_stale_analysis_versions"] == {str(STALE_ERA): 1}
+
+
+def test_a_stale_analysis_alone_is_not_completed_and_an_older_failure_is_not_named(db_session):
+    protocol = _add_protocol(db_session, f"members-stale-only-{uuid.uuid4().hex[:8]}")
+    member = _member(db_session, protocol, "stale-only", JobStatus.failed_terminal)
+    db_session.execute(
+        update(Job)
+        .where(Job.address == member.address)
+        .values(updated_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    )
+    db_session.commit()
+    stale = _attempt(db_session, protocol, member, JobStatus.completed, STALE_ERA)
+    unprovable = _member(db_session, protocol, "unprovable", JobStatus.completed)
+    db_session.execute(update(Job).where(Job.address == unprovable.address).values(analysis_schema_version=None))
+    db_session.commit()
+
+    _, listed = _listed(db_session, protocol)
+    entry = listed[member.address.lower()]
+    assert entry["analysis_state"] == "analysis_not_completed"
+    assert entry["last_failed_job_id"] is None
+    assert (entry["stale_analysis_job_id"], entry["stale_analysis_version"]) == (str(stale.id), STALE_ERA)
+    # A completed job whose era can't be proven is stale too, with its era not determined.
+    other = listed[unprovable.address.lower()]
+    assert (other["analysis_state"], other["stale_analysis_version"]) == ("analysis_not_completed", None)
+    assert other["stale_analysis_job_id"] is not None
+    assert perimeter_state(db_session, protocol.id)[1]["members_stale_analysis_versions"] == {
+        str(STALE_ERA): 1,
+        "not_determined": 1,
+    }
+
+
+def test_a_current_analysis_counts_beside_stale_and_failed_attempts(db_session):
+    protocol = _add_protocol(db_session, f"members-current-{uuid.uuid4().hex[:8]}")
+    member = _member(db_session, protocol, "current", JobStatus.completed)
+    _attempt(db_session, protocol, member, JobStatus.completed, STALE_ERA, age_s=3600)
+    _attempt(db_session, protocol, member, JobStatus.failed_terminal, None)
+    donor = _attempt(
+        db_session,
+        protocol,
+        _member(db_session, protocol, "donor", JobStatus.completed),
+        JobStatus.completed,
+        ANALYSIS_SCHEMA_VERSION,
+    )
+    cache_hit = _member(db_session, protocol, "cache-hit", JobStatus.completed)
+    # A cache hit carries no stamp of its own; its donor's era is what was analysed.
+    db_session.execute(
+        update(Job)
+        .where(Job.address == cache_hit.address)
+        .values(
+            analysis_schema_version=None,
+            request={"address": cache_hit.address, "chain": "ethereum", "cache_source_job_id": str(donor.id)},
+        )
+    )
+    db_session.commit()
+
+    block, listed = _listed(db_session, protocol)
+    assert member.address.lower() not in listed
+    assert cache_hit.address.lower() not in listed
+    assert (block["members"], block["analyzed"], block["not_determined"]) == (3, 3, 0)
+    assert perimeter_state(db_session, protocol.id)[0] == PERIMETER_SETTLED

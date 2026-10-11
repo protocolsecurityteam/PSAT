@@ -16,6 +16,7 @@ from services.scoring.planes._shared import CONTROL_RELATIONS, NATIVE_ASSET
 from services.scoring.planes.value import ValuePlane, load_proven_eoa_entities
 from services.scoring.schema import Tri, entity_key
 from utils.scoring_status import (
+    NOT_DETERMINED,
     PERIMETER_NOT_DETERMINED,
     PERIMETER_SETTLED,
     PERIMETER_UNSETTLED,
@@ -267,13 +268,18 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
     if pending is None or pending_effects is None:
         return PERIMETER_NOT_DETERMINED, {"pending_jobs": pending, "pending_balance_effects": pending_effects}
     by_state: dict[str, int] = defaultdict(int)
+    stale_versions: dict[str, int] = defaultdict(int)
     for member in unanalyzed:
         by_state[member["analysis_state"]] += 1
+        if member["stale_analysis_job_id"] is not None:
+            version = member["stale_analysis_version"]
+            stale_versions[str(version) if version is not None else NOT_DETERMINED] += 1
     detail = {
         "pending_jobs": int(pending),
         "pending_balance_effects": int(pending_effects),
         "members": members,
         "members_not_analyzed": dict(sorted(by_state.items())),
+        "members_stale_analysis_versions": dict(sorted(stale_versions.items())),
         "members_not_analyzed_entities": [entity_key(m["chain"], m["address"]) for m in unanalyzed],
     }
     if pending or pending_effects:

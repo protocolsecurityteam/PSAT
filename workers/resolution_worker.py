@@ -20,6 +20,7 @@ from db.models import (
     ControllerValue,
     Job,
     JobStage,
+    JobStatus,
     SessionLocal,
     derive_job_chain_id,
 )
@@ -671,6 +672,8 @@ class ResolutionWorker(BaseWorker):
         n_satisfied = 0
         n_pending = 0
         n_cycle = 0
+        n_degraded = 0
+        eras: dict[str, int | None] = {}
         for target_addr in target_addresses:
             # Self-references aren't dependencies.
             if target_addr == (job.address or "").lower():
@@ -679,7 +682,7 @@ class ResolutionWorker(BaseWorker):
             lock_key = _stable_lock_key(chain, target_addr)
             session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
-            provider_lookup = find_dependency_provider_job_for_address(session, target_addr, chain=chain)
+            provider_lookup = find_dependency_provider_job_for_address(session, target_addr, chain=chain, eras=eras)
             provider_job = provider_lookup.analysis_job if provider_lookup is not None else None
             dependency_provider_addr = (
                 (provider_job.address or target_addr).lower() if provider_job is not None else target_addr
@@ -710,23 +713,32 @@ class ResolutionWorker(BaseWorker):
                 required_artifact="effective_permissions",
                 chain=chain,
                 completed_only=False,
+                eras=eras,
             )
             already_satisfied = False
             if satisfied_lookup is not None:
                 provider_job = satisfied_lookup.analysis_job
                 dependency_provider_addr = (provider_job.address or dependency_provider_addr).lower()
                 already_satisfied = True
+            # A standing terminal failure already degraded its dependents and won't run again; a pending edge on it
+            # would block this job forever.
+            provider_failed = not already_satisfied and provider_job.status == JobStatus.failed_terminal
 
             # An edge closing a cycle would deadlock the claim gate; insert it as ``cycle_degraded`` so it doesn't block
             # and the leaf resolves to external_check_only.
             cycle_path = None
-            if not already_satisfied:
+            if not already_satisfied and not provider_failed:
                 cycle_path = _detect_dep_cycle(
                     session,
                     proposed_depender_id=job.id,
                     proposed_provider_id=provider_job.id,
                 )
-            edge_status = "satisfied" if already_satisfied else ("cycle_degraded" if cycle_path else "pending")
+            if already_satisfied:
+                edge_status = "satisfied"
+            elif provider_failed:
+                edge_status = "degraded"
+            else:
+                edge_status = "cycle_degraded" if cycle_path else "pending"
             values = {
                 "depender_job_id": job.id,
                 "provider_chain": chain,
@@ -735,7 +747,7 @@ class ResolutionWorker(BaseWorker):
                 "status": edge_status,
                 "cycle_path": cycle_path,
             }
-            if already_satisfied:
+            if already_satisfied or provider_failed:
                 values["satisfied_at"] = datetime.now(timezone.utc)
             stmt = (
                 _pg_insert(JobDependency)
@@ -755,6 +767,8 @@ class ResolutionWorker(BaseWorker):
                 edges_inserted += 1
                 if edge_status == "satisfied":
                     n_satisfied += 1
+                elif edge_status == "degraded":
+                    n_degraded += 1
                 elif edge_status == "cycle_degraded":
                     n_cycle += 1
                     # A cycle is a degraded outcome; surface it.
@@ -772,21 +786,24 @@ class ResolutionWorker(BaseWorker):
             session.commit()
             logger.info(
                 "Job %s: emitted %d dependency edge(s) on external authority contracts "
-                "(satisfied=%d pending=%d cycle_degraded=%d)",
+                "(satisfied=%d pending=%d degraded=%d cycle_degraded=%d)",
                 job.id,
                 edges_inserted,
                 n_satisfied,
                 n_pending,
+                n_degraded,
                 n_cycle,
                 extra={
                     "dep_edges_inserted": edges_inserted,
                     "dep_satisfied": n_satisfied,
                     "dep_pending": n_pending,
+                    "dep_degraded": n_degraded,
                     "dep_cycle_degraded": n_cycle,
                 },
             )
             record_stage_metric("dep_edges_inserted", edges_inserted)
             record_stage_metric("dep_edges_pending", n_pending)
+            record_stage_metric("dep_edges_degraded", n_degraded)
             record_stage_metric("dep_edges_cycle_degraded", n_cycle)
 
 

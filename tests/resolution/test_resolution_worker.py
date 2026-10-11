@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import select
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import Contract, ContractBalance, ContractBalanceFetch
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
@@ -199,6 +200,7 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
         initial_stage=JobStage.coverage,
     )
     provider_job.status = JobStatus.queued
+    provider_job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     session.commit()
     store_artifact(session, provider_job.id, "effective_permissions", data={"functions": []})
 
