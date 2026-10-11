@@ -146,7 +146,15 @@ def test_enrollment_gates_off_allowlist_chain_within_one_protocol(db_session, mo
     op_addr = "0x" + "0" * 39 + "a"  # distinct, valid optimism address
     for a, chain in ((base_addr, "base"), (op_addr, "optimism")):
         db_session.add(Contract(address=a, chain=chain, protocol_id=proto.id, contract_name=f"C_{chain}"))
-        db_session.add(Job(address=a, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
+        db_session.add(
+            Job(
+                address=a,
+                protocol_id=proto.id,
+                status=JobStatus.completed,
+                stage=JobStage.done,
+                request={"address": a, "chain": chain},
+            )
+        )
     db_session.commit()
 
     enroll_protocol_contracts(db_session, proto.id, "http://seed", "ethereum")

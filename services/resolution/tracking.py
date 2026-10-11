@@ -393,8 +393,8 @@ def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, ch
 
 # Safe module/guard probe (C1). Modules head: Safe's ``modules`` mapping is at slot 1 seeded with
 # ``modules[address(0x1)] = address(0x1)``, so the head is ``keccak256(abi.encode(address(0x1), uint256(1)))``. Guard:
-# ``keccak256("guard_manager.guard.address")`` (Safe 1.3.0 and 1.4.1). Canonical values live in ``utils.evm``; tests
-# recompute them from the preimages.
+# ``keccak256("guard_manager.guard.address")`` (Safe 1.3.0, 1.4.1 and 1.5.0). Canonical values live in ``utils.evm``;
+# tests recompute them from the preimages.
 _SAFE_MODULES_HEAD_SLOT = SAFE_MODULES_HEAD_SLOT
 _SAFE_GUARD_SLOT = SAFE_GUARD_SLOT
 _SAFE_SENTINEL_ADDRESS = "0x" + "0" * 39 + "1"
@@ -403,7 +403,7 @@ _ADDRESS_WORD_MAX = (1 << 160) - 1
 
 # Releases whose singleton source was checked for ``GUARD_STORAGE_SLOT``. A zero word means "no guard" only on releases
 # with the feature; unread variants (e.g. ``1.3.0+L2``) are not_determined.
-_SAFE_VERSIONS_WITH_GUARD = frozenset({"1.3.0", "1.4.1"})
+_SAFE_VERSIONS_WITH_GUARD = frozenset({"1.3.0", "1.4.1", "1.5.0"})
 _SAFE_VERSIONS_WITHOUT_GUARD = frozenset({"1.1.1"})
 
 _BLOCK_TAG_ALIASES = frozenset({"latest", "pending", "earliest", "safe", "finalized"})
@@ -459,12 +459,15 @@ def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str,
     return NOT_DETERMINED, None
 
 
-def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> dict:
-    """The Safe module/guard protection witness at a pinned height.
+def _probe_safe_protection(
+    rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None
+) -> tuple[dict, bool]:
+    """The Safe module/guard protection witness at a pinned height, and whether a read failed.
 
     Two storage words plus ``VERSION()``. The module list isn't walked, so the head only proves emptiness; a
     non-sentinel head proves at least one module (k/n becomes an upper bound on protection) but the set stays
-    ``not_determined``. Never raises.
+    ``not_determined``. A failed read leaves its fields ``not_determined`` and is reported, so the classification
+    isn't cached as if the Safe had answered. Never raises.
     """
     out: dict[str, object] = {
         "probe_block": NOT_DETERMINED,
@@ -477,12 +480,20 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
     }
     probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
     if probe_block is None:
-        return out
+        return out, True
     out["probe_block"] = probe_block
     pinned = hex(probe_block)
 
-    decoded_version = _try_eth_call_decoded(rpc_url, address, "VERSION()", "string", pinned, chain_id=chain_id)
-    version = decoded_version if isinstance(decoded_version, str) else None
+    # A revert is an answer (a Safe-shaped contract without ``VERSION()``); only an unread call is a failure.
+    raw_version, version_state = _eth_call_tristate(rpc_url, address, "VERSION()", pinned, chain_id=chain_id)
+    read_failed = version_state == "error"
+    version: str | None = None
+    if raw_version is not None:
+        try:
+            decoded_version = _decode_abi_value(raw_version, "string")
+        except Exception:
+            decoded_version = None
+        version = decoded_version if isinstance(decoded_version, str) else None
     if version is not None:
         out["safe_version"] = version
 
@@ -492,11 +503,14 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
         Nothing is padded: a short or odd reply isn't a word, and padding it would mint a sentinel or zero from a
         non-observation.
         """
+        nonlocal read_failed
         try:
             raw = _get_storage_at(rpc_url, address, slot, pinned, chain_id=chain_id)
         except Exception:
+            read_failed = True
             return None
         if not isinstance(raw, str) or _decode_word(raw) is None:
+            read_failed = True
             return None
         return "0x" + raw[2:].lower()
 
@@ -515,7 +529,7 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
     out["guard"], guard_address = _safe_guard_state(_word(_SAFE_GUARD_SLOT), version)
     if guard_address is not None:
         out["guard_address"] = guard_address
-    return out
+    return out, read_failed
 
 
 # Read by selector with a negative control, not by name. The published fact is address equality at a pinned height.
@@ -765,6 +779,7 @@ def _classify_uncached_batched(
     safe_owners = _ok(safe_owners_raw)
     safe_threshold = _ok(safe_threshold_raw)
     if safe_owners is not None and safe_threshold is not None and _duck_type_permitted():
+        protection, protection_failed = _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id)
         return (
             "safe",
             {
@@ -772,9 +787,9 @@ def _classify_uncached_batched(
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
                 # Nested so module_set is never read without its probe_block.
-                "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
+                "safe_protection": protection,
             },
-            had_error,
+            had_error or protection_failed,
         )
 
     min_delay = _ok(min_delay_a)
@@ -862,15 +877,16 @@ def _classify_uncached(
     safe_owners = _probe("getOwners()", "address[]")
     safe_threshold = _probe("getThreshold()", "uint256")
     if safe_owners is not None and safe_threshold is not None and _duck_type_permitted():
+        protection, protection_failed = _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id)
         return (
             "safe",
             {
                 "address": normalized,
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
-                "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
+                "safe_protection": protection,
             },
-            had_error,
+            had_error or protection_failed,
         )
 
     min_delay = _probe("getMinDelay()", "uint256")

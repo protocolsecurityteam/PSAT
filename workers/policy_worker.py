@@ -392,7 +392,9 @@ def _load_nested_artifacts(
                 )
                 trees = None
             if isinstance(trees, dict) and not failed_semantic_artifact("predicate_trees", trees):
-                bundle["predicate_trees"] = {k: trees[k] for k in ("trees", "check_trees") if k in trees}
+                bundle["predicate_trees"] = {
+                    k: trees[k] for k in ("trees", "check_trees", "guard_extraction_uncertain") if k in trees
+                }
 
     return {
         addr: cast(LoadedArtifacts, bundle)

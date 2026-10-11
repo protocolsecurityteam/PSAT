@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 
@@ -54,6 +55,7 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
         request={"address": address, "name": "T"},
         status=JobStatus.completed,
         stage=JobStage.done,
+        analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )

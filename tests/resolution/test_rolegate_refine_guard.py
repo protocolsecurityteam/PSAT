@@ -30,6 +30,8 @@ from typing import Any, cast
 
 import pytest
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
@@ -223,6 +225,7 @@ def _seed_two_hop(
             request={"address": addr, "name": "T"},
             status=JobStatus.completed,
             stage=JobStage.done,
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )

@@ -152,6 +152,17 @@ def proven_analysis_schema_version(session: Session, job: Job, memo: dict[str, i
             return _settle(version)
 
 
+def job_artifacts_are_current(session: Session, job: Job, memo: dict[str, int | None] | None = None) -> bool:
+    """Whether *job*'s static artifacts are proven to come from the current analyzer, whatever the job's status.
+
+    Readers of another job's artifacts use this: an artifact from another era, or one whose era can't be proven, is
+    never read in place of a current one.
+    """
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    return proven_analysis_schema_version(session, job, memo) == ANALYSIS_SCHEMA_VERSION
+
+
 def job_stands_for_current_analyzer(session: Session, job: Job, memo: dict[str, int | None] | None = None) -> bool:
     """Whether an existing job for an address stands in for a new one under the current analyzer.
 

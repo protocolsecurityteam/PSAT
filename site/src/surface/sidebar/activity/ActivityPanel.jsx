@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../../api/client.js";
 import { useSession } from "../../../api/session.js";
-import { coalesceChain, entityKey } from "../../entityKey.js";
+import { coalesceChain, entityKey, principalOnChain } from "../../entityKey.js";
 import { principalLabel } from "../../format.js";
 import { EntityActivity } from "./EntityActivity.jsx";
 import { ProtocolActivity } from "./ProtocolActivity.jsx";
@@ -72,7 +72,9 @@ export function ActivityPanel({
     const byAddr = new Map();
     // Unfiltered: machines drop zero-function contracts, which are still call
     // targets.
+    // Names are per (chain, address): the same address on another chain is another entity.
     for (const c of companyData?.contracts || []) {
+      if (coalesceChain(c?.chain) !== activeChain) continue;
       if (c?.address && c?.name) byAddr.set(String(c.address).toLowerCase(), c.name);
     }
     for (const m of machines || []) {
@@ -81,6 +83,7 @@ export function ActivityPanel({
       }
     }
     for (const p of companyData?.principals || []) {
+      if (!principalOnChain(p, activeChain)) continue;
       const label = principalLabel(p?.label, p?.type, p?.address);
       if (p?.address && label && !label.startsWith("0x")) {
         const key = String(p.address).toLowerCase();
@@ -88,7 +91,7 @@ export function ActivityPanel({
       }
     }
     return (addr) => byAddr.get(String(addr || "").toLowerCase()) || null;
-  }, [machines, companyData]);
+  }, [machines, companyData, activeChain]);
 
   const refresh = useCallback(async () => {
     if (!protocolId) return;

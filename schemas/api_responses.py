@@ -85,6 +85,8 @@ class MemberAnalysis(TypedDict):
     not_determined: int
     by_state: dict[str, int]
     not_analyzed: list[dict[str, Any]]
+    # Counted in ``analyzed``; each names the older analyzer version its analysis came from.
+    analyzed_at_older_version: list[dict[str, Any]]
 
 
 class CompanyOverviewResponse(TypedDict):

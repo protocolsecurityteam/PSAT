@@ -244,8 +244,10 @@ def _company_reach(session: Session, contracts_by_job_id: dict[Any, Contract]) -
 
 
 def _member_analysis(session: Session, protocol: Protocol) -> MemberAnalysis:
-    """Members whose analysis never completed, listed with a witness token rather than left out of the page."""
-    members, missing = members_without_analysis(session, protocol.id)
+    """Members whose analysis never completed, listed with a witness token rather than left out of the page; members
+    analysed only under an older analyzer count as analysed and are listed with that analyzer's version.
+    """
+    members, missing, stale_analyzed = members_without_analysis(session, protocol.id)
     by_state = {MEMBER_ANALYSIS_FAILED: 0, MEMBER_ANALYSIS_NOT_COMPLETED: 0}
     for member in missing:
         by_state[member["analysis_state"]] += 1
@@ -255,6 +257,7 @@ def _member_analysis(session: Session, protocol: Protocol) -> MemberAnalysis:
         "not_determined": len(missing),
         "by_state": by_state,
         "not_analyzed": missing,
+        "analyzed_at_older_version": stale_analyzed,
     }
 
 

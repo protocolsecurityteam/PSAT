@@ -26,6 +26,7 @@ from services.aggregations.company_overview import (
     build_functions_for_protocol,
     resolve_company_jobs,
 )
+from services.aggregations.company_overview.entity_keys import _entity_key
 from services.aggregations.company_overview.jobs import eligible_company_names
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
 from services.company_pages import cache_tag, enabled, prepared_or_pending
@@ -220,7 +221,11 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
             )
             raise HTTPException(status_code=404, detail="Company not found")
 
-        contracts = session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id)).scalars().all()
+        contracts = (
+            session.execute(select(Contract).where(Contract.protocol_id == protocol_row.id).order_by(Contract.id))
+            .scalars()
+            .all()
+        )
 
         total_audit_count = session.execute(
             select(func.count(AuditReport.id)).where(AuditReport.protocol_id == protocol_row.id)
@@ -241,9 +246,11 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
 
         coverage_rows = (
             session.execute(
-                select(AuditContractCoverage).where(
+                select(AuditContractCoverage)
+                .where(
                     AuditContractCoverage.protocol_id == protocol_row.id,
                 )
+                .order_by(AuditContractCoverage.id)
             )
             .scalars()
             .all()
@@ -279,6 +286,7 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
                     ),
                     CoveredContract.address.in_({addr for _chain, addr in target_contract_ids_by_key}),
                 )
+                .order_by(AuditContractCoverage.id)
             ).all()
             inherited_rows = _inherit_verified_dependency_coverage(
                 inherited_pairs=inherited_pairs,
@@ -292,15 +300,15 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
             date = (audit.date if audit else None) or ""
             return (date, row.audit_report_id)
 
-        # Coverage rows sit on the impl; union the proxy's with its current impl's.
-        contracts_by_addr = {c.address.lower(): c for c in contracts if c.address}
+        # Coverage rows sit on the impl; union the proxy's with its current impl's, on the proxy's own chain.
+        contracts_by_entity = {_entity_key(c.chain, c.address): c for c in contracts if c.address}
 
         coverage: list[AuditCoverageEntry] = []
         for c in contracts:
             entries = list(coverage_by_contract.get(c.id, []))
             seen_audit_ids = {e.audit_report_id for e in entries}
             if c.is_proxy and c.implementation:
-                impl = contracts_by_addr.get(c.implementation.lower())
+                impl = contracts_by_entity.get(_entity_key(c.chain, c.implementation))
                 if impl:
                     for e in coverage_by_contract.get(impl.id, []):
                         if e.audit_report_id not in seen_audit_ids:

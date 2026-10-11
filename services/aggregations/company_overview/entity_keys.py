@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import functools
+
 
 def _coalesce_chain(chain: str | None) -> str:
     """Mirrors the frontend ``coalesceChain``: NULL/empty/``mainnet`` -> ``ethereum``, else lowercase.
@@ -19,6 +21,12 @@ def _coalesce_chain(chain: str | None) -> str:
 def _entity_key(chain: str | None, address: str | None) -> str:
     """``::`` appears in neither chain names nor addresses, so the key is collision-free."""
     return f"{_coalesce_chain(chain)}::{str(address or '').lower()}"
+
+
+@functools.lru_cache(maxsize=64)
+def _entity_prefix(chain: str | None) -> str:
+    """``_entity_key(chain, "")``, cached for loops that key many addresses on one chain."""
+    return _entity_key(chain, "")
 
 
 def _entity_addr(entity: str) -> str:

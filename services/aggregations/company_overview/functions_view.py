@@ -9,11 +9,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from db.jsonb import jsonb_has_payload
-from db.models import ControlGraphNode, ControllerValue, EffectiveFunction, PrincipalLabel
+from db.models import ControlGraphNode, ControllerValue, EffectiveFunction
 from services.governance.principals import _build_company_function_entry
 
-from .entity_keys import _entity_key
+from .entity_keys import _entity_chain, _entity_key
 from .jobs import (
     CompanyNotFound,
     _secondary_impl_contracts,
@@ -22,7 +21,8 @@ from .jobs import (
     resolve_company_jobs,
     resolve_implementation_contracts,
 )
-from .principals import _build_principal_lookup
+from .prefetch import terminal_walk_by_entity
+from .principals import _build_principal_lookup, _principal_lookup_for_chain
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -96,7 +96,7 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
     relevant_contract_ids: set[int] = {c.id for c in contracts_by_job_id.values() if c is not None}
     controller_values_by_cid: dict[int, list[ControllerValue]] = {}
     cgn_by_cid: dict[int, list[ControlGraphNode]] = {}
-    terminal_walk_by_address: dict[str, dict[str, Any]] = {}
+    terminal_walk: dict[str, dict[str, Any]] = {}
     if relevant_contract_ids:
         id_list = list(relevant_contract_ids)
         with _time_phase(timings_ms, "principal_lookup_inputs"):
@@ -110,26 +110,20 @@ def build_functions_for_protocol(session: Session, name: str) -> dict[str, list[
                 cgn_by_cid.setdefault(n.contract_id, []).append(n)
             # ``InspectorCard`` renders ``terminalControllerNote`` from this payload, so wire it here as well as in
             # ``build_governance_view``.
-            for address, details in session.execute(
-                select(PrincipalLabel.address, PrincipalLabel.details).where(
-                    PrincipalLabel.contract_id.in_(id_list),
-                    jsonb_has_payload(PrincipalLabel.details),
-                    PrincipalLabel.details.has_key("terminal_principal"),
-                )
-            ).all():
-                record = (details or {}).get("terminal_principal")
-                if isinstance(record, dict) and address:
-                    terminal_walk_by_address.setdefault(address.lower(), record)
-    principal_lookup = _build_principal_lookup(
-        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_address
-    )
+            terminal_walk, _rows = terminal_walk_by_entity(session, id_list)
+    principal_lookup = _build_principal_lookup(contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk)
+    # A function's principals are on its contract's chain.
+    lookup_by_chain: dict[str, dict[str, dict[str, Any]]] = {}
 
     out: dict[str, list[dict[str, Any]]] = {}
     with _time_phase(timings_ms, "serialize"):
         for key, ef_cids in entity_key_to_ef_cids.items():
+            chain = _entity_chain(key)
+            if chain not in lookup_by_chain:
+                lookup_by_chain[chain] = _principal_lookup_for_chain(principal_lookup, chain)
             ef_rows = [ef for cid in ef_cids for ef in ef_rows_by_cid.get(cid, [])]
             out[key] = [
-                _build_company_function_entry(ef, ef.principals or [], principal_lookup=principal_lookup)
+                _build_company_function_entry(ef, ef.principals or [], principal_lookup=lookup_by_chain[chain])
                 for ef in ef_rows
             ]
 

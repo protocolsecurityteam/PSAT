@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from eth_utils.crypto import keccak
+from typing_extensions import NotRequired
 
 from services.clients.rpc import normalize_hex as _normalize_hex
 from services.static.contract_analysis_pipeline.mapping_events import WriterEventSpec
@@ -58,6 +59,8 @@ class EnumeratedPrincipal(TypedDict):
     mapping_name: str
     direction_history: list[str]
     last_seen_block: int
+    # The other key words (e.g. roles) the member currently holds; only on a spec with a ``key_filter``.
+    keys: NotRequired[list[str]]
 
 
 class EnumerationResult(TypedDict):
@@ -408,11 +411,8 @@ def fold_allowlist_logs(
         if not matching_specs:
             continue
         for spec in matching_specs:
-            key_address = _extract_key_address(
-                raw_log,
-                spec["key_position"],
-                indexed_positions=list(spec.get("indexed_positions") or []),
-            )
+            indexed_positions = list(spec.get("indexed_positions") or [])
+            key_address = _extract_key_address(raw_log, spec["key_position"], indexed_positions=indexed_positions)
             if not key_address.startswith("0x") or len(key_address) != 42:
                 continue
             block = int(getattr(raw_log, "block_number", 0) or 0)
@@ -420,22 +420,34 @@ def fold_allowlist_logs(
                 (spec["mapping_name"], key_address),
                 {"present": False, "history": [], "last_block": 0},
             )
-            entry["present"] = spec["direction"] == "add"
+            key_filter = spec.get("key_filter")
+            if key_filter is not None:
+                # Per other key: revoking one role leaves the member holding the rest.
+                word = _extract_value_word(raw_log, key_filter["position"], indexed_positions=indexed_positions)
+                keys = entry.setdefault("keys", {})
+                keys[word] = spec["direction"] == "add"
+                entry["present"] = any(keys.values())
+            else:
+                entry["present"] = spec["direction"] == "add"
             entry["history"].append(spec["direction"])
             entry["last_block"] = max(entry["last_block"], block)
 
 
 def allowlist_principals(state: AllowlistState) -> list[EnumeratedPrincipal]:
-    return [
-        {
+    out: list[EnumeratedPrincipal] = []
+    for (mapping_name, addr), entry in state.items():
+        if not entry["present"]:
+            continue
+        principal: EnumeratedPrincipal = {
             "address": addr,
             "mapping_name": mapping_name,
             "direction_history": list(entry["history"]),
             "last_seen_block": int(entry["last_block"]),
         }
-        for (mapping_name, addr), entry in state.items()
-        if entry["present"]
-    ]
+        if "keys" in entry:
+            principal["keys"] = sorted(word for word, held in entry["keys"].items() if held)
+        out.append(principal)
+    return out
 
 
 @dataclass(frozen=True)

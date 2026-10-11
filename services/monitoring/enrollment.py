@@ -22,6 +22,7 @@ from db.models import (
     MonitoredContract,
     MonitoringEnrollmentQueue,
     WatchedProxy,
+    derive_job_chain_id,
 )
 from db.storage import StorageContentAbsent, StorageContentIncomplete
 from schemas.control_tracking import MonitoredContractType
@@ -42,7 +43,7 @@ from services.monitoring.tracking_plan_state import (
     merge_stale_tracking_plan,
     preserve_scan_plane_facts,
 )
-from utils.chains import chain_enabled
+from utils.chains import UnknownChainError, chain_by_id, chain_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -153,30 +154,31 @@ def enroll_protocol_contracts(
     *enroll_controllers*, enrolls controllers via ``build_governance_view`` (the expensive part, skipped by the fast
     path). *calling_job_id* is the still-processing triggering job.
     """
-    # Only analyzed contracts, not the whole inventory.
-    analyzed_addrs = set(
-        addr
-        for (addr,) in session.execute(
-            select(Job.address).where(
+    # Only analyzed contracts, not the whole inventory; an analysis is of one (chain, address), never its twin.
+    analyzed = {
+        _job_entity(addr, chain_id, request_chain)
+        for addr, chain_id, request_chain in session.execute(
+            select(Job.address, Job.chain_id, Job.request["chain"].astext).where(
                 Job.protocol_id == protocol_id,
                 Job.status == JobStatus.completed,
                 Job.address.isnot(None),
             )
         ).all()
-    )
+    }
     if calling_job_id is not None:
         calling_job = session.get(Job, calling_job_id)
         if calling_job and calling_job.address:
-            analyzed_addrs.add(calling_job.address)
+            request = calling_job.request if isinstance(calling_job.request, dict) else {}
+            analyzed.add(_job_entity(calling_job.address, calling_job.chain_id, request.get("chain")))
 
     # One global row order across enrollers so concurrent UPDATEs can't form an AB/BA deadlock.
     contracts = sorted(
         (
             c
             for c in session.execute(select(Contract).where(Contract.protocol_id == protocol_id)).scalars().all()
-            if c.address.lower() in {a.lower() for a in analyzed_addrs if a}
+            if (c.address.lower(), _chain_token(c.chain)) in analyzed
         ),
-        key=lambda c: c.address.lower(),
+        key=lambda c: (c.address.lower(), _chain_token(c.chain)),
     )
 
     if not contracts:
@@ -737,6 +739,16 @@ def _bridge_to_watched_proxy(
 
 # Controller contract_types; demotion scans all of them.
 _CONTROLLER_MONITORED_TYPES: tuple[MonitoredContractType, ...] = ("safe", "timelock", "proxy")
+
+
+def _job_entity(address: str, chain_id: int | None, request_chain: str | None) -> tuple[str, str]:
+    """A job's ``(address, chain token)``: its ``chain_id``, else its request's chain (legacy rows are mainnet)."""
+    job_chain_id = chain_id if isinstance(chain_id, int) else derive_job_chain_id(request_chain, address) or 1
+    try:
+        chain = chain_by_id(job_chain_id).name
+    except UnknownChainError:
+        chain = request_chain
+    return address.lower(), _chain_token(chain)
 
 
 def _chain_token(chain: str | None) -> str:

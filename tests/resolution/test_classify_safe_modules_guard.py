@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
+
 from services.resolution import tracking
 from services.resolution.tracking import (
     _classify_uncached,
@@ -60,6 +62,7 @@ def _wire(
     threshold: int = 4,
     storage_raises: bool = False,
     pinned_block: int | None = PROBE_BLOCK,
+    version_raises: str | None = None,
 ):
     """Both classify paths route through the same three helpers."""
     calls: list[tuple[str, str]] = []
@@ -73,6 +76,8 @@ def _wire(
 
     def _fake_eth_call_raw(_rpc_url, addr, signature, block, chain_id=None):
         calls.append((signature, block))
+        if signature == "VERSION()" and version_raises is not None:
+            raise RuntimeError(version_raises)
         return responses.get(signature, "0x")
 
     def _fake_batch(_rpc_url, batch_calls, chain_id=None):
@@ -141,7 +146,7 @@ def test_module_bearing_safe_111_publishes_upper_bound_not_a_list(monkeypatch):
 
 def test_unknown_version_leaves_guard_not_determined(monkeypatch):
     """A version whose source was never read can't tell "no guard" from "no guard feature"."""
-    for version in ("1.3.0+L2", "1.5.0", "9.9.9"):
+    for version in ("1.3.0+L2", "9.9.9"):
         tracking.clear_classify_cache()
         _, details, _ = _both_paths(
             monkeypatch,
@@ -246,3 +251,99 @@ def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
     assert protection["module_set_basis"] != "storage_linked_list_terminated"
     for key, value in _ALL_NOT_DETERMINED.items():
         assert protection[key] == value
+
+
+GUARD = "0x" + "9a" * 20
+
+
+def test_safe_150_reads_its_guard_slot(monkeypatch):
+    """safe-smart-account v1.5.0 GuardManager.GUARD_STORAGE_SLOT is the 1.3.0/1.4.1 slot."""
+    for guard_word, expected in (
+        (ZERO_WORD, ("proven_zero", None)),
+        ("0x" + GUARD[2:].rjust(64, "0"), ("proven_address", GUARD)),
+    ):
+        tracking.clear_classify_cache()
+        _, details, failed = _both_paths(
+            monkeypatch, MODULE_FREE_SAFE, version="1.5.0", head_word=SENTINEL_WORD, guard_word=guard_word
+        )
+        protection = _protection(details)
+        assert (protection["guard"], protection.get("guard_address")) == expected
+        assert failed is False
+
+
+@pytest.mark.parametrize(
+    ("head_word", "guard_word", "storage_raises", "pinned_block"),
+    [
+        pytest.param(None, ZERO_WORD, False, PROBE_BLOCK, id="module-head-read-failed"),
+        pytest.param(SENTINEL_WORD, None, False, PROBE_BLOCK, id="guard-read-failed"),
+        pytest.param(SENTINEL_WORD, ZERO_WORD, True, PROBE_BLOCK, id="every-storage-read-failed"),
+        pytest.param("0x1", ZERO_WORD, False, PROBE_BLOCK, id="malformed-head-reply"),
+        pytest.param(SENTINEL_WORD, ZERO_WORD, False, None, id="head-block-unread"),
+    ],
+)
+def test_a_failed_protection_read_is_reported_and_not_cached(
+    monkeypatch, head_word, guard_word, storage_raises, pinned_block
+):
+    _, details, failed = _both_paths(
+        monkeypatch,
+        MODULE_FREE_SAFE,
+        version="1.4.1",
+        head_word=head_word,
+        guard_word=guard_word,
+        storage_raises=storage_raises,
+        pinned_block=pinned_block,
+    )
+    assert failed is True
+    protection = _protection(details)
+    assert "not_determined" in (protection["module_set"], protection["guard"])
+
+    tracking.clear_classify_cache()
+    _wire(
+        monkeypatch,
+        version="1.4.1",
+        head_word=head_word,
+        guard_word=guard_word,
+        storage_raises=storage_raises,
+        pinned_block=pinned_block,
+    )
+    _kind, _details, cacheable = tracking.classify_resolved_address_with_status("https://rpc", MODULE_FREE_SAFE)
+    assert cacheable is False
+    assert not tracking._CLASSIFY_CACHE
+
+
+def test_a_clean_protection_read_is_still_cached(monkeypatch):
+    _wire(monkeypatch, version="1.4.1", head_word=SENTINEL_WORD, guard_word=ZERO_WORD)
+    _kind, details, cacheable = tracking.classify_resolved_address_with_status("https://rpc", MODULE_FREE_SAFE)
+
+    assert cacheable is True
+    assert _protection(details)["guard"] == "proven_zero"
+    assert _protection(details)["module_set"] == []
+    assert tracking._CLASSIFY_CACHE
+
+
+@pytest.mark.parametrize(
+    ("error", "failed"),
+    [
+        pytest.param("execution reverted", False, id="revert-is-an-answer"),
+        pytest.param("ConnectionResetError: connection reset by peer", True, id="transport-is-not"),
+    ],
+)
+def test_a_version_revert_is_cached_and_a_version_transport_failure_is_not(monkeypatch, error, failed):
+    _, details, reported = _both_paths(
+        monkeypatch,
+        MODULE_FREE_SAFE,
+        version="1.4.1",
+        head_word=SENTINEL_WORD,
+        guard_word=ZERO_WORD,
+        version_raises=error,
+    )
+    protection = _protection(details)
+    assert (protection["safe_version"], protection["guard"]) == ("not_determined", "not_determined")
+    assert protection["module_set"] == []
+    assert reported is failed
+
+    tracking.clear_classify_cache()
+    _wire(monkeypatch, version=None, head_word=SENTINEL_WORD, guard_word=ZERO_WORD, version_raises=error)
+    _kind, _details, cacheable = tracking.classify_resolved_address_with_status("https://rpc", MODULE_FREE_SAFE)
+    assert cacheable is not failed
+    assert bool(tracking._CLASSIFY_CACHE) is not failed

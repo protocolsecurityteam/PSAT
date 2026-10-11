@@ -28,7 +28,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
 )
 
-from .entity_keys import _coalesce_chain, _entity_addr, _entity_chain, _entity_key
+from .entity_keys import _coalesce_chain, _entity_addr, _entity_chain, _entity_key, _entity_prefix
 from .jobs import GovernanceView, _secondary_impl_contracts
 from .prefetch import _prefetch_child_tables
 from .principals import (
@@ -67,8 +67,7 @@ def build_governance_view(
     fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
     fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
     fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
-    # Keyed by address: the walk is a fact about the address, not the recording contract.
-    terminal_walk_by_address: dict[str, dict[str, Any]] = children["terminal_walk"]  # pyright: ignore[reportAssignmentType]
+    terminal_walk_by_entity: dict[str, dict[str, Any]] = children["terminal_walk"]  # pyright: ignore[reportAssignmentType]
 
     def _fetch_for(balance_row: Any) -> Any | None:
         fetch_id = getattr(balance_row, "fetch_id", None)
@@ -108,7 +107,7 @@ def build_governance_view(
                 fp_all_addrs_by_cid[primary_cid] = set(fp_all_addrs_by_cid.get(primary_cid) or set()) | set(extra_all)
 
     principal_lookup = _build_principal_lookup(
-        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_address
+        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_entity
     )
 
     contracts: list[dict[str, Any]] = []
@@ -340,7 +339,10 @@ def build_governance_view(
         if graph_contract:
             cg_nodes = cgn_by_cid.get(graph_contract.id, [])
             cg_edges = cge_by_cid.get(graph_contract.id, [])
-            node_meta = {n.address: _principal_lookup_meta(principal_lookup, n.address, n.details) for n in cg_nodes}
+            node_meta = {
+                n.address: _principal_lookup_meta(principal_lookup, graph_contract.chain, n.address, n.details)
+                for n in cg_nodes
+            }
             nodes_payload = [
                 {
                     "address": n.address,
@@ -362,7 +364,7 @@ def build_governance_view(
         contracts.append(entry)
 
         if owner:
-            owner_groups.setdefault(owner, []).append(entry)
+            owner_groups.setdefault(_entity_key(entry["chain"], owner), []).append(entry)
 
     # Drop standalone impls already represented under a proxy; composite keys so another chain's twin isn't collapsed.
     impl_entities = {_entity_key(c.get("chain"), c["implementation"]) for c in contracts if c.get("implementation")}
@@ -375,11 +377,13 @@ def build_governance_view(
         if not c["address"] or _entity_key(c.get("chain"), c["address"]) not in impl_entities or c["is_proxy"]
     ]
 
-    remaining_addrs = {c["address"] for c in contracts if c["address"]}
-    for owner_addr in list(owner_groups):
-        owner_groups[owner_addr] = [e for e in owner_groups[owner_addr] if e["address"] in remaining_addrs]
-        if not owner_groups[owner_addr]:
-            del owner_groups[owner_addr]
+    remaining = {_entity_key(c.get("chain"), c["address"]) for c in contracts if c["address"]}
+    for owner_key in list(owner_groups):
+        owner_groups[owner_key] = [
+            e for e in owner_groups[owner_key] if _entity_key(e.get("chain"), e["address"]) in remaining
+        ]
+        if not owner_groups[owner_key]:
+            del owner_groups[owner_key]
 
     controller_enumeration = _controller_enumeration(contracts_by_job_id, cgn_by_cid)
     for entry in contracts:
@@ -446,9 +450,8 @@ def build_governance_view(
     governance_passthrough = {
         entity
         for entity in fp_addrs_by_contract_entity
-        if principal_lookup.get(_entity_addr(entity), {}).get("resolved_type") in _PASSTHROUGH_CONTROLLER_TYPES
+        if principal_lookup.get(entity, {}).get("resolved_type") in _PASSTHROUGH_CONTROLLER_TYPES
     }
-    governance_passthrough_addrs = {_entity_addr(e) for e in governance_passthrough}
 
     # Feeds the primary contest, the co-controller rule and capability detail.
     fp_function_detail_by_entity: dict[str, list[dict[str, Any]]] = {}
@@ -481,9 +484,11 @@ def build_governance_view(
         for entry in contracts:
             gw = render_groups.get(_entity_key(entry.get("chain"), entry.get("address") or ""))
             if gw:
-                entry["grouped_with"] = gw
+                # Same chain as the contract, so the bare address is unambiguous on the canvas.
+                entry["grouped_with"] = _entity_addr(gw)
 
-    principal_meta = {(p.get("address") or "").lower(): p for p in principals if p.get("address")}
+    # Principals are per (chain, address); callers below are bare addresses on their contract's chain.
+    principal_meta = {_entity_key(p.get("chain"), p["address"]): p for p in principals if p.get("address")}
 
     # Per-(controller, contract) functions and capability tags from FunctionPrincipal, so the canvas shows "pause ·
     # recover". Keeps every FP caller, including governance contracts needed for passthrough; non-principals are
@@ -514,17 +519,21 @@ def build_governance_view(
         slot["capabilities"].update(src.get("capabilities", ()))
 
     for caddr, callers_map in caller_detail.items():
+        caddr_chain = _entity_chain(caddr)
         for la, detail in callers_map.items():
-            if la in principal_meta:  # direct rights belong to principals, not contract callers
-                _accumulate(la, caddr, detail)
-    for la, owned in primary_for.items():
+            principal_key = _entity_key(caddr_chain, la)
+            if principal_key in principal_meta:  # direct rights belong to principals, not contract callers
+                _accumulate(principal_key, caddr, detail)
+    for principal_key, owned in primary_for.items():
         for caddr in owned:
             # Control is intra-chain.
             caddr_chain = _entity_chain(caddr)
             for gov_addr, gov_detail in caller_detail.get(caddr, {}).items():
                 gov_entity = _entity_key(caddr_chain, gov_addr)
-                if gov_addr in governance_passthrough_addrs and la in caller_detail.get(gov_entity, {}):
-                    _accumulate(la, caddr, gov_detail)
+                if gov_entity in governance_passthrough and _entity_addr(principal_key) in caller_detail.get(
+                    gov_entity, {}
+                ):
+                    _accumulate(principal_key, caddr, gov_detail)
 
     detail_by_principal: dict[str, list[dict[str, Any]]] = {}
     for la, by_contract in detail_acc.items():
@@ -542,15 +551,16 @@ def build_governance_view(
 
     for p in principals:
         p_addr_lc = (p.get("address") or "").lower()
+        p_key = _entity_key(p.get("chain"), p_addr_lc)
         # Serialized as bare addresses; the frontend re-composes with the active chain.
-        p["primary_for"] = sorted({_entity_addr(e) for e in primary_for.get(p_addr_lc, [])})
-        p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_addr_lc, [])})
+        p["primary_for"] = sorted({_entity_addr(e) for e in primary_for.get(p_key, [])})
+        p["co_controls"] = sorted({_entity_addr(e) for e in co_controls.get(p_key, [])})
         # Enrollment needs the chains a principal controls on, rather than a caller default.
         p["controls_chains"] = sorted(
-            {_entity_chain(e) for e in primary_for.get(p_addr_lc, [])}
-            | {_entity_chain(e) for e in co_controls.get(p_addr_lc, [])}
+            {_entity_chain(e) for e in primary_for.get(p_key, [])}
+            | {_entity_chain(e) for e in co_controls.get(p_key, [])}
         )
-        p["controls_detail"] = detail_by_principal.get(p_addr_lc, [])
+        p["controls_detail"] = detail_by_principal.get(p_key, [])
         states = [controller_enumeration.get(_entity_key(chain, p_addr_lc)) for chain in p.get("chains") or []]
         unread = [state for state in states if state and state["state"] == "not_determined"]
         if unread:
@@ -566,7 +576,7 @@ def build_governance_view(
     for flow in fund_flows:
         src_lc = (flow.get("from") or "").lower()
         target_entity = _entity_key(flow.get("to_chain"), flow.get("to"))
-        detail = detail_acc.get(src_lc, {}).get(target_entity)
+        detail = detail_acc.get(_entity_key(flow.get("from_chain"), src_lc), {}).get(target_entity)
         if detail is None:
             detail = caller_detail.get(target_entity, {}).get(src_lc)
         flow["capabilities"] = sorted(detail["capabilities"]) if detail else []
@@ -580,17 +590,19 @@ def build_governance_view(
             co_by_contract.setdefault(c, set()).add(paddr)
     for entry in contracts:
         addr = (entry.get("address") or "").lower()
-        entity = _entity_key(entry.get("chain"), addr)
+        chain = entry.get("chain")
+        entity = _entity_key(chain, addr)
         cd = caller_detail.get(entity, {})
-        callers = {a for a in cd if a in principal_meta}  # contract callers aren't "other callers"
+        # Contract callers aren't "other callers".
+        callers = {a for a in cd if _entity_key(chain, a) in principal_meta}
         callers.discard(addr)
-        callers.discard(primary_by_contract.get(entity, ""))
-        callers -= co_by_contract.get(entity, set())
+        callers.discard(_entity_addr(primary_by_contract.get(entity, "")))
+        callers -= {_entity_addr(key) for key in co_by_contract.get(entity, set())}
         entry["other_callers"] = [
             {
                 "address": a,
-                "type": (principal_meta.get(a) or {}).get("type"),
-                "label": (principal_meta.get(a) or {}).get("label"),
+                "type": (principal_meta.get(_entity_key(chain, a)) or {}).get("type"),
+                "label": (principal_meta.get(_entity_key(chain, a)) or {}).get("label"),
                 "functions": sorted(cd[a]["functions"]),
                 "capabilities": sorted(cd[a]["capabilities"]),
             }
@@ -608,21 +620,24 @@ def build_governance_view(
 def _build_ownership_hierarchy(
     contracts: list[dict[str, Any]], owner_groups: dict[str, list[dict]]
 ) -> list[dict[str, Any]]:
+    """Contracts grouped by owner per chain; *owner_groups* is keyed by the owner's entity."""
+    contracts_by_entity = {_entity_key(c.get("chain"), c["address"]): c for c in contracts if c["address"]}
     hierarchy: list[dict[str, Any]] = []
-    assigned: set[str | None] = set()
-    for owner_addr, owned in sorted(owner_groups.items(), key=lambda x: -len(x[1])):
-        owner_contract = next((c for c in contracts if c["address"] and c["address"].lower() == owner_addr), None)
+    assigned: set[str] = set()
+    for owner_key, owned in sorted(owner_groups.items(), key=lambda x: (-len(x[1]), x[0])):
+        owner_contract = contracts_by_entity.get(owner_key)
         hierarchy.append(
             {
-                "owner": owner_addr,
+                "owner": _entity_addr(owner_key),
+                "chain": _entity_chain(owner_key),
                 "owner_name": owner_contract["name"] if owner_contract else None,
                 "owner_is_contract": owner_contract is not None,
                 "contracts": [{"address": c["address"], "name": c["name"]} for c in owned],
             }
         )
-        assigned.update(c["address"] for c in owned)
+        assigned.update(_entity_key(c.get("chain"), c["address"]) for c in owned)
 
-    unowned = [c for c in contracts if c["address"] not in assigned]
+    unowned = [c for c in contracts if _entity_key(c.get("chain"), c["address"]) not in assigned]
     if unowned:
         hierarchy.append(
             {
@@ -732,7 +747,8 @@ def _build_flows_and_principals(
     principal_lookup: dict[str, dict[str, Any]],
     reach_edges: list[tuple[str, str, str, str | None, str | None]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    contract_addrs = {c["address"].lower() for c in contracts if c["address"]}
+    # Composite keys throughout: an address that is a contract on one chain can be a Safe or an EOA on another.
+    contract_entities = {_entity_key(c.get("chain"), c["address"]) for c in contracts if c["address"]}
     # Dedup per chain so a twin keeps its own edge.
     flow_seen: set[tuple[str, str, str]] = set()
     fund_flows: list[dict[str, Any]] = []
@@ -770,7 +786,6 @@ def _build_flows_and_principals(
             key_id = lookup_job_id
         return contracts_by_job_id.get(key_id)
 
-    # Composite keys: a bare address would merge twins onto one chain's row.
     lookup_contract_by_entity: dict[str, Contract | None] = {}
     for entry in contracts:
         if entry.get("address"):
@@ -783,10 +798,11 @@ def _build_flows_and_principals(
             continue
         target = c["address"].lower()
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + target)
         fp_principals: set[str] = fp_in_contract_by_cid.get(lookup_c.id, set()) if lookup_c else set()
 
-        if c.get("owner") and c["owner"] in contract_addrs:
+        if c.get("owner") and prefix + c["owner"].lower() in contract_entities:
             flow_type = (
                 "controls_value"
                 if any(e in c.get("value_effects", []) for e in ("asset_pull", "asset_send"))
@@ -799,67 +815,95 @@ def _build_flows_and_principals(
         for cid, val in c.get("controllers", {}).items():
             if isinstance(val, str) and val.startswith("0x"):
                 val_lower = val.lower()
-                if val_lower in contract_addrs and val_lower != (c.get("owner") or "") and val_lower in fp_principals:
+                if (
+                    prefix + val_lower in contract_entities
+                    and val_lower != (c.get("owner") or "")
+                    and val_lower in fp_principals
+                ):
                     add_flow(val_lower, target, "controller", chain)
 
         # FunctionPrincipal, not bare CGN matches: CGN over-reported transitive lineage (tokens mid-chain flagged as
         # principals).
         if lookup_c:
-            for node_addr in fp_principals:
+            for node_addr in sorted(fp_principals):
                 if not node_addr or node_addr == target:
                     continue
-                if node_addr not in contract_addrs:
+                if prefix + node_addr not in contract_entities:
                     continue
                 add_flow(node_addr, target, "principal", chain)
 
-    # First pass: safe_owner edges, so Safe owners nest.
+    # First pass: safe_owner edges, so Safe owners nest. A Safe's owners are read on its own chain.
     principal_map: dict[str, dict[str, Any]] = {}
     safe_owners_map: dict[str, list[str]] = {}
     owner_of_safe: set[str] = set()
 
-    for c in contracts:
+    for c in sorted(contracts, key=_contract_order):
         if not c["address"]:
             continue
-        lookup_c = lookup_contract_by_entity.get(_entity_key(c.get("chain"), c["address"]))
+        chain = c.get("chain")
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + c["address"].lower())
         if not lookup_c:
             continue
-        for edge in cge_by_cid.get(lookup_c.id, []):
-            if edge.relation != "safe_owner":
-                continue
-            safe_addr = edge.from_node_id.replace("address:", "").lower()
+        safe_owner_edges = [e for e in cge_by_cid.get(lookup_c.id, []) if e.relation == "safe_owner"]
+        for edge in sorted(safe_owner_edges, key=_edge_order):
+            safe_key = prefix + edge.from_node_id.replace("address:", "").lower()
             owner_addr = edge.to_node_id.replace("address:", "").lower()
-            safe_owners_map.setdefault(safe_addr, [])
-            if owner_addr not in safe_owners_map[safe_addr]:
-                safe_owners_map[safe_addr].append(owner_addr)
-            owner_of_safe.add(owner_addr)
+            owners = safe_owners_map.setdefault(safe_key, [])
+            if owner_addr not in owners:
+                owners.append(owner_addr)
+            owner_of_safe.add(prefix + owner_addr)
 
-    for c in contracts:
+    def _principal_entry(principal_key: str, resolved_type: str, label: str, details: dict[str, Any]) -> dict:
+        if resolved_type == "safe":
+            if not details.get("owners"):
+                details["owners"] = safe_owners_map.get(principal_key, [])
+            if "threshold" not in details and details.get("owners"):
+                details["threshold"] = len(details["owners"])
+        return {
+            "address": _entity_addr(principal_key),
+            "chain": _entity_chain(principal_key),
+            "type": resolved_type,
+            "label": label,
+            "details": details,
+            "controls": [],
+            "chains": {_entity_chain(principal_key)},
+        }
+
+    for c in sorted(contracts, key=_contract_order):
         if not c["address"]:
             continue
         target = c["address"].lower()
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + target)
         if not lookup_c:
             continue
+        fp_addrs = fp_all_addrs_by_cid.get(lookup_c.id, set())
 
+        accepted: list[tuple[Any, str, str, dict[str, Any], str]] = []
         for cgn in cgn_by_cid.get(lookup_c.id, []):
             node_addr = (cgn.address or "").lower()
-            if not node_addr or node_addr in contract_addrs:
+            principal_key = prefix + node_addr
+            if not node_addr or principal_key in contract_entities:
                 continue
-            if node_addr in owner_of_safe:
-                continue
-            lookup_meta = principal_lookup.get(node_addr, {})
-            resolved_type = lookup_meta.get("resolved_type") or cgn.resolved_type
-            if resolved_type not in _SETTLED_CONTROLLER_TYPES:
-                continue
-            if node_addr == "0x0000000000000000000000000000000000000000":
+            if principal_key in owner_of_safe:
                 continue
             # Only CGN nodes with FP authority become principals; otherwise beneficiary state vars (treasury,
             # feeRecipient) claim control they don't hold.
-            if node_addr not in fp_all_addrs_by_cid.get(lookup_c.id, set()):
+            if node_addr not in fp_addrs or node_addr == "0x0000000000000000000000000000000000000000":
                 continue
+            lookup_meta = principal_lookup.get(principal_key, {})
+            resolved_type = lookup_meta.get("resolved_type") or cgn.resolved_type
+            if resolved_type not in _SETTLED_CONTROLLER_TYPES:
+                continue
+            accepted.append((cgn, node_addr, principal_key, lookup_meta, resolved_type))
 
-            if node_addr not in principal_map:
+        # The first row for a principal supplies its label and details, so take rows in a fixed order.
+        for cgn, node_addr, principal_key, lookup_meta, resolved_type in sorted(
+            accepted, key=lambda row: _node_order(row[0])
+        ):
+            if principal_key not in principal_map:
                 # The CGN's own introspection (getOwners/getThreshold, getMinDelay) is authoritative for the principal's
                 # config; CV rows describe the consumer side.
                 details: dict[str, Any] = dict(lookup_meta.get("details") or {})
@@ -871,72 +915,55 @@ def _build_flows_and_principals(
                     if cv.details and isinstance(cv.details, dict):
                         for k, v in cv.details.items():
                             details.setdefault(k, v)
+                principal_map[principal_key] = _principal_entry(
+                    principal_key,
+                    resolved_type,
+                    lookup_meta.get("label") or cgn.contract_name or cgn.label or resolved_type,
+                    details,
+                )
 
-                if resolved_type == "safe":
-                    if not details.get("owners"):
-                        details["owners"] = safe_owners_map.get(node_addr, [])
-                    if "threshold" not in details and details.get("owners"):
-                        details["threshold"] = len(details["owners"])
-
-                principal_map[node_addr] = {
-                    "address": node_addr,
-                    "type": resolved_type,
-                    "label": lookup_meta.get("label") or cgn.contract_name or cgn.label or resolved_type,
-                    "details": details,
-                    "controls": [],
-                    "chains": set(),
-                }
-
-            principal_map[node_addr]["controls"].append(target)
-            principal_map[node_addr]["chains"].add(_coalesce_chain(chain))
+            principal_map[principal_key]["controls"].append(target)
             add_flow(node_addr, target, "principal", chain)
 
     # Third pass: some Safes appear only on per-function FP rows (e.g. EtherFiTimelock.cancel) with no CGN entry.
-    for c in contracts:
+    for c in sorted(contracts, key=_contract_order):
         if not c["address"]:
             continue
         target = c["address"].lower()
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + target)
         if not lookup_c:
             continue
+        accepted_fp: list[tuple[dict[str, Any], str, str, dict[str, Any], str]] = []
         for fp in fp_governance_by_cid.get(lookup_c.id, []):
             pa = (fp.get("address") or "").lower()
             if not pa or pa == target:
                 continue
             if pa == "0x0000000000000000000000000000000000000000":
                 continue
-            if pa in owner_of_safe:
+            principal_key = prefix + pa
+            if principal_key in owner_of_safe or principal_key in contract_entities:
                 continue
-            lookup_meta = principal_lookup.get(pa, {})
+            lookup_meta = principal_lookup.get(principal_key, {})
             resolved_type = fp.get("resolved_type")
             if lookup_meta.get("resolved_type") and resolved_type in (None, "", "unknown", "contract"):
                 resolved_type = lookup_meta["resolved_type"]
             if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
-            if pa in contract_addrs:
-                continue
-            if pa not in principal_map:
+            accepted_fp.append((fp, pa, principal_key, lookup_meta, resolved_type))
+        # Rows arrive ordered from the prefetch, so the first one for a principal is fixed.
+        for fp, pa, principal_key, lookup_meta, resolved_type in accepted_fp:
+            if principal_key not in principal_map:
                 fp_details = dict(lookup_meta.get("details") or {})
                 fp_raw_details = fp.get("details")
                 if isinstance(fp_raw_details, dict):
                     fp_details.update(fp_raw_details)
-                if resolved_type == "safe":
-                    if not fp_details.get("owners"):
-                        fp_details["owners"] = safe_owners_map.get(pa, [])
-                    if "threshold" not in fp_details and fp_details.get("owners"):
-                        fp_details["threshold"] = len(fp_details["owners"])
-                principal_map[pa] = {
-                    "address": pa,
-                    "type": resolved_type,
-                    "label": lookup_meta.get("label") or resolved_type,
-                    "details": fp_details,
-                    "controls": [],
-                    "chains": set(),
-                }
-            if target not in principal_map[pa]["controls"]:
-                principal_map[pa]["controls"].append(target)
-            principal_map[pa]["chains"].add(_coalesce_chain(chain))
+                principal_map[principal_key] = _principal_entry(
+                    principal_key, resolved_type, lookup_meta.get("label") or resolved_type, fp_details
+                )
+            if target not in principal_map[principal_key]["controls"]:
+                principal_map[principal_key]["controls"].append(target)
             add_flow(pa, target, "principal", chain)
 
     # Scorer reach edges carried verbatim so every route the score document publishes is drawable. No holder gate (the
@@ -945,10 +972,22 @@ def _build_flows_and_principals(
     for chain_tok, holder, subject, _relation, _label in reach_edges:
         add_flow(holder, subject, "controller", chain_tok)
 
-    principals_out = list(principal_map.values())
+    principals_out = [principal_map[key] for key in sorted(principal_map)]
     for pr in principals_out:
         pr["chains"] = sorted(pr["chains"])
     return fund_flows, principals_out
+
+
+def _contract_order(entry: dict[str, Any]) -> tuple[str, str]:
+    return (_coalesce_chain(entry.get("chain")), (entry.get("address") or "").lower())
+
+
+def _node_order(node: Any) -> tuple[str, int]:
+    return ((node.address or "").lower(), getattr(node, "id", None) or 0)
+
+
+def _edge_order(edge: Any) -> tuple[str, str, int]:
+    return (edge.from_node_id or "", edge.to_node_id or "", getattr(edge, "id", None) or 0)
 
 
 def _controller_enumeration(

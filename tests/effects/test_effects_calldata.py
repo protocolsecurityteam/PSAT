@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
 from db.queue import create_job, store_artifact
 from services.effects import calldata as cd
@@ -750,6 +751,7 @@ def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_se
 def test_load_contract_facts_indexes_the_canonical_selector(db_session):
     address = "0x" + "cd" * 20
     job = create_job(db_session, {"address": address, "name": "T"})
+    job.analysis_schema_version = ANALYSIS_SCHEMA_VERSION
     # Only the canonical map recovers the real selector for a contract-typed param.
     full_name = "sweep(IERC20,uint256)"
     canonical = "sweep(address,uint256)"

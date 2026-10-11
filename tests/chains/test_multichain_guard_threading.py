@@ -71,7 +71,16 @@ def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
             implementation=_addr("f"),
         )
     )
-    db_session.add(Job(address=proxy_addr, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
+    db_session.add(
+        Job(
+            address=proxy_addr,
+            protocol_id=proto.id,
+            status=JobStatus.completed,
+            stage=JobStage.done,
+            request={"address": proxy_addr, "chain": "base"},
+            chain_id=8453,
+        )
+    )
     db_session.commit()
 
     seen: list[int | None] = []

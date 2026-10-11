@@ -483,7 +483,8 @@ def _reference_trim_for_contract(
         session.execute(select(ControlGraphEdge).where(ControlGraphEdge.contract_id == contract_id)).scalars().all()
     )
     lookup = _build_principal_lookup(contracts_by_job_id, cv_by_cid_full, cgn_by_cid_full)
-    node_meta = {n.address: _principal_lookup_meta(lookup, n.address, n.details) for n in all_cgn}
+    chain = next(c.chain for c in contracts_by_job_id.values() if c is not None and c.id == contract_id)
+    node_meta = {n.address: _principal_lookup_meta(lookup, chain, n.address, n.details) for n in all_cgn}
     nodes_payload = [
         {
             "address": n.address,
@@ -1788,16 +1789,15 @@ def test_controls_detail_rows_carry_chain_for_twins(db_session):
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
-    principals = {(pr.get("address") or "").lower(): pr for pr in payload["principals"]}
-    assert safe_addr in principals, f"the FP-backed Safe must surface as a principal; got {sorted(principals)}"
+    # The same address on two chains is two principals, each governing its own chain's twin.
+    principals = {(pr["chain"], (pr.get("address") or "").lower()): pr for pr in payload["principals"]}
+    assert set(principals) >= {("ethereum", safe_addr), ("base", safe_addr)}
 
-    detail = principals[safe_addr].get("controls_detail") or []
-    rows_for_vault = [r for r in detail if (r.get("address") or "").lower() == vault_addr.lower()]
-    chains = sorted(r.get("chain") for r in rows_for_vault)
-    assert chains == ["base", "ethereum"], (
-        "the Safe must have one controls_detail row per governed twin, each tagged with its own "
-        f"chain; got rows={rows_for_vault}"
-    )
+    for chain in ("ethereum", "base"):
+        detail = principals[(chain, safe_addr)].get("controls_detail") or []
+        rows_for_vault = [r for r in detail if (r.get("address") or "").lower() == vault_addr.lower()]
+        assert [r.get("chain") for r in rows_for_vault] == [chain], rows_for_vault
+        assert principals[(chain, safe_addr)]["chains"] == [chain]
 
 
 def test_summary_flags_are_three_state_through_the_payload(db_session):
@@ -1880,8 +1880,8 @@ def test_principal_lookup_promotes_only_a_proven_timelock(db_session):
     db_session.commit()
 
     lookup = _build_principal_lookup({job_p.id: c_p, job_u.id: c_u}, {}, {})
-    assert lookup[proven_addr.lower()]["resolved_type"] == "timelock"
-    assert lookup[unknown_addr.lower()]["resolved_type"] == "contract"
+    assert lookup[_entity_key("ethereum", proven_addr)]["resolved_type"] == "timelock"
+    assert lookup[_entity_key("ethereum", unknown_addr)]["resolved_type"] == "contract"
 
 
 def test_balance_payload_splits_unpriced_from_a_measured_zero(db_session):

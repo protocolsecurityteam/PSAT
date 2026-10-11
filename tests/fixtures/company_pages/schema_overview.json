@@ -1,5 +1,5 @@
 {
-  "payload_schema": 2,
+  "payload_schema": 3,
   "skeleton": {
     "all_addresses_count": "int",
     "company": "str",
@@ -54,6 +54,7 @@
     "fund_flows": [],
     "member_analysis": {
       "analyzed": "int",
+      "analyzed_at_older_version": [],
       "by_state": {
         "analysis_failed": "int",
         "analysis_not_completed": "int"

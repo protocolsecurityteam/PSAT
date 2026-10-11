@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 from eth_utils.crypto import keccak
 
+from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
@@ -190,6 +192,7 @@ def _resolve_two_hop(session, caller_trees: dict[str, Any], callee_artifact: dic
             request={"address": addr, "name": "T"},
             status=JobStatus.completed,
             stage=JobStage.done,
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             created_at=now,
             updated_at=now,
         )
