@@ -45,7 +45,8 @@ def specs_fingerprint(
 
     Includes the fields that affect enumeration (event_signature, mapping_name, direction, key_position, sorted
     indexed_positions) and, since D.1, ``value_position`` and ``value_predicate``, so passes with different predicates
-    don't share rows. When those are None the fingerprint equals the legacy one.
+    don't share rows, and a two-key mapping's ``key_filter``. When those are None the fingerprint equals the legacy
+    one.
     """
     legacy_specs = [
         {
@@ -57,7 +58,11 @@ def specs_fingerprint(
         }
         for s in writer_specs
     ]
-    has_new_fields = value_predicate is not None or any(s.get("value_position") is not None for s in writer_specs)
+    has_new_fields = (
+        value_predicate is not None
+        or any(s.get("value_position") is not None for s in writer_specs)
+        or any(s.get("key_filter") is not None for s in writer_specs)
+    )
     if not has_new_fields:
         # Must stay byte-identical to pre-D.1 so existing rows remain valid.
         canonical = json.dumps(legacy_specs, sort_keys=True, separators=(",", ":"))
@@ -67,6 +72,9 @@ def specs_fingerprint(
         out = dict(legacy)
         if original.get("value_position") is not None:
             out["value_position"] = int(original["value_position"])
+        # The member set is folded and filtered per role, so rows from another filter must not be served.
+        if original.get("key_filter") is not None:
+            out["key_filter"] = original["key_filter"]
         extended_specs.append(out)
     payload: dict[str, Any] = {"specs": extended_specs}
     if value_predicate is not None:

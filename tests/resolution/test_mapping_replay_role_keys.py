@@ -397,3 +397,18 @@ def test_an_uncertain_guard_filters_nothing():
     assert {f["words"] if f else "missing" for f in _filters(trees)} == {None}
     # The checked roles alone still filter without one.
     assert {tuple(f["words"]) for f in _filters(_trees()) if f} == {(PROPOSER_ROLE,)}
+
+
+def test_the_cache_fingerprint_follows_the_key_filter():
+    from db.mapping_enumeration_cache import specs_fingerprint
+
+    specs = [
+        dict(spec)
+        for spec in recursive._mapping_writer_specs_from_predicate_trees(
+            _trees(), key_words=recursive._snapshot_key_words(_bundle()["snapshot"]), address=ANCHOR
+        )
+    ]
+    unfiltered = [{k: v for k, v in spec.items() if k != "key_filter"} for spec in specs]
+    other = [{**spec, "key_filter": {**spec["key_filter"], "words": None}} for spec in specs]
+
+    assert len({specs_fingerprint(specs), specs_fingerprint(unfiltered), specs_fingerprint(other)}) == 3
