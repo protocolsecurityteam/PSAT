@@ -998,9 +998,10 @@ _AUTHORITY_READ_RELATIONS = frozenset({EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELA
 
 def _authority_contract_vars(predicate_trees: Any) -> frozenset[str] | None:
     """State variables the contract's leaves call as an authority contract (``registry.hasRole(role, msg.sender)``),
-    or ``None`` when that can't be read (no trees, or an authority contract not named by a state variable).
+    or ``None`` when that can't be read: no trees, an authority contract not named by a state variable, or a function
+    whose guard couldn't be extracted (it may call one with no leaf to show it).
     """
-    if not isinstance(predicate_trees, Mapping):
+    if not isinstance(predicate_trees, Mapping) or predicate_trees.get("guard_extraction_uncertain"):
         return None
     names: set[str] = set()
     unread = False
