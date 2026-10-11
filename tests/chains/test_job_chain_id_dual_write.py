@@ -67,12 +67,12 @@ def test_check_constraint_rejects_address_without_chain_id(session):
         (None, "ethereum", 1),
         ("", "ethereum", 1),
         ("base", "base", 8453),
-        ("mainnet", "mainnet", 1),
+        ("mainnet", "ethereum", 1),
+        ("Base Mainnet", "base", 8453),
+        ("nonsense-l2", "nonsense-l2", 1),
     ],
 )
-def test_create_job_stamps_the_resolved_chain_on_a_chainless_address_job(
-    session, request_chain, stored_chain, chain_id
-):
+def test_create_job_stamps_the_canonical_chain_on_an_address_job(session, request_chain, stored_chain, chain_id):
     from db.queue import create_job
 
     request = {"address": ADDR} if request_chain is None else {"address": ADDR, "chain": request_chain}

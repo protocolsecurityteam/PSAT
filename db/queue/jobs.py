@@ -13,7 +13,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from db.models import Job, JobDependency, JobStage, JobStatus, derive_job_chain_id
-from utils.chains import canonical_chain, chain_by_id
+from utils.chains import UnknownChainError, canonical_chain, chain_by_id, chain_by_name
 
 from .heartbeats import DEFAULT_JOB_LEASE_TTL_S, DEFAULT_JOB_STALE_TIMEOUT, LeaseLost
 from .static_cache import _not_stamped_with_other_era, _stands_without_walk_first, job_stands_for_current_analyzer
@@ -63,6 +63,23 @@ def reclaim_stuck_jobs(session: Session, stale_timeout_seconds: int = DEFAULT_JO
     return rescued
 
 
+def _stamped_chain(raw: Any, chain_id: int | None) -> str | None:
+    """The canonical name to store in an address job's request, so request readers can't disagree with ``chain_id``.
+
+    A missing chain or an alias of a known chain becomes the canonical name; an unrecognized name is kept as given (it
+    is not evidence of the chain ``chain_id`` defaulted to).
+    """
+    if chain_id is None:
+        return None
+    if not canonical_chain(raw):
+        return chain_by_id(chain_id).name
+    try:
+        named = chain_by_name(raw)
+    except UnknownChainError:
+        return None
+    return named.name if named.chain_id == chain_id else None
+
+
 def create_job(
     session: Session,
     request_dict: dict[str, Any],
@@ -75,9 +92,9 @@ def create_job(
     address = request_dict.get("address")
     # Enqueue-path dual-write, sharing the model default's derivation.
     chain_id = derive_job_chain_id(request_dict.get("chain"), address)
-    if chain_id is not None and not canonical_chain(request_dict.get("chain")):
-        # Stamped so request readers can't disagree with ``chain_id`` on a chain-less submission.
-        request_dict = {**request_dict, "chain": chain_by_id(chain_id).name}
+    stamped = _stamped_chain(request_dict.get("chain"), chain_id)
+    if stamped is not None and stamped != request_dict.get("chain"):
+        request_dict = {**request_dict, "chain": stamped}
     job = Job(
         address=address,
         chain_id=chain_id,
