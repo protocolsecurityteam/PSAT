@@ -29,6 +29,10 @@ def _stub_batch_probe_rpc(monkeypatch):
     )
     monkeypatch.setattr(tracking, "_eth_call_raw", lambda *a, **k: "0x")
 
+    # A Safe's protection probe reads cleanly: a head, and zero storage words.
+    monkeypatch.setattr(tracking, "_resolve_pinned_block", lambda *_a, **_k: 0x100)
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: "0x" + "0" * 64)
+
 
 # ---------------------------------------------------------------------------
 # Split TTL: immutable classifications keep the long TTL; entries whose

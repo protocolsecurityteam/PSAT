@@ -16,6 +16,12 @@ from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fix
 ADDR_OWNER = "0x" + "11" * 20  # an "owner" address used in several mocks
 
 
+@pytest.fixture(autouse=True)
+def _pinned_head(monkeypatch):
+    """A readable head for the Safe protection probe; the suite-wide stub fails it, which makes a Safe uncacheable."""
+    monkeypatch.setattr(tracking, "_resolve_pinned_block", lambda *_a, **_k: 0x100)
+
+
 def _abi_encode_address(addr: str) -> str:
     return "0x" + addr.lower().replace("0x", "").rjust(64, "0")
 
@@ -384,6 +390,7 @@ def test_multicall_failure_falls_back_to_batch(monkeypatch):
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     monkeypatch.setattr(tracking, "_eth_call_raw", lambda *_a, **_k: "0x")
     monkeypatch.setattr(rpc_mod, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no multicall")))
+    monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: "0x" + "0" * 64)
 
     def _safe_batch(_rpc_url, _calls, chain_id=None):
         return [
