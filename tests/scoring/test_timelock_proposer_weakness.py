@@ -277,3 +277,32 @@ def test_a_restricted_executor_still_needs_the_proposer_to_execute(fold):
     assert finding["principal_unit"] == KEY_TIMELOCK
     assert finding["weakness"] == K.WEAKNESS_TIMELOCK_UNDETERMINED
     assert KEY_TIMELOCK not in document.provenance["principal_units"]["timelock_collapses"]
+
+
+def test_an_open_execute_credits_even_beside_an_undetermined_execute_batch(fold):
+    signals = _open_executor_population((SAFE_REF,))
+    execute = next(s for s in signals if s.claim_id == "timelock.execute")
+    # ``executeBatch`` carries the same claim; its gate wasn't read.
+    signals.append(
+        replace(
+            execute,
+            function_name="executeBatch",
+            selector="0xe38335e5",
+            authority_openness="not_determined",
+            principal_state="not_determined",
+            principal_refs=(),
+        )
+    )
+    document = fold(
+        signals,
+        principals=_principals({4: facts(4, OTHER, "eoa")}),
+        value=value_plane({KEY_V: {"usdc": 100_000_000.0}}, contracts=(KEY_V, KEY_TIMELOCK)),
+    )
+    (finding,) = [f for f in document.findings if f["capability"].startswith("upgrade")]
+
+    # One proven-open execute path is enough for any proven proposer to act as the timelock.
+    assert finding["principal_unit"] == KEY_SAFE
+    assert finding["weakness"] == 0.136
+    assert document.provenance["principal_units"]["timelock_collapses"][KEY_TIMELOCK]["basis"] == (
+        "proven proposer, execute open"
+    )
