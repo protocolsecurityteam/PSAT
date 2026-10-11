@@ -229,13 +229,12 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
         return []
 
     address = (job.address or "").lower()
-    chain = request.get("chain", "ethereum")
 
     contract = (
         session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == address,
-                Contract.chain == chain,
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(job)),
             )
         )
         .scalars()

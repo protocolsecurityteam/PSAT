@@ -777,7 +777,9 @@ def synthesize_from_events(session, contract) -> UpgradeHistoryOutput | None:
     impl_addrs = {impl["address"] for impl in implementations}
     if impl_addrs:
         name_rows = session.execute(
-            select(Contract.address, Contract.contract_name).where(Contract.address.in_(list(impl_addrs)))
+            select(Contract.address, Contract.contract_name).where(
+                Contract.address.in_(list(impl_addrs)), _contract_chain_filter(contract.chain)
+            )
         ).all()
         names = {addr.lower(): name for addr, name in name_rows if name}
         for impl in implementations:

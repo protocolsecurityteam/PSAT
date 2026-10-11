@@ -191,7 +191,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     if proxy_address:
         proxy_stmt = (
             select(Job)
-            .where(Job.address == proxy_address, Job.request["effects_resume_work_id"].astext.is_(None))
+            .where(
+                Job.address == proxy_address,
+                Job.chain_id == job.chain_id,
+                Job.request["effects_resume_work_id"].astext.is_(None),
+            )
             .order_by(Job.updated_at.desc())
             .limit(1)
         )
@@ -211,7 +215,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     if is_proxy and impl_addr:
         impl_stmt = (
             select(Job)
-            .where(Job.address == impl_addr, Job.request["effects_resume_work_id"].astext.is_(None))
+            .where(
+                Job.address == impl_addr,
+                Job.chain_id == job.chain_id,
+                Job.request["effects_resume_work_id"].astext.is_(None),
+            )
             .order_by(Job.updated_at.desc())
             .limit(1)
         )

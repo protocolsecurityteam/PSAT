@@ -148,3 +148,24 @@ def test_analysis_detail_of_a_legacy_chainless_job_never_shows_the_base_row(db_s
     assert payload is not None
     assert payload["contract_id"] != base_contract.id
     assert "effective_permissions" not in payload
+
+
+def test_analysis_detail_inherits_only_its_own_chains_implementation(db_session):
+    from services.aggregations.analysis_detail import build_analysis_detail
+
+    impl = "0x" + "1e" * 20
+    proxy_job = create_job(db_session, {"address": ADDR, "name": "teller-proxy"})
+    proxy_job.status = JobStatus.completed
+    proxy_job.stage = JobStage.done
+    db_session.add(Contract(job_id=proxy_job.id, address=ADDR, chain="ethereum", is_proxy=True, implementation=impl))
+    base_impl_job = create_job(db_session, {"address": impl, "chain": "base", "name": "teller-impl-base"})
+    base_impl_job.status = JobStatus.completed
+    base_impl_job.stage = JobStage.done
+    db_session.commit()
+    store_artifact(db_session, base_impl_job.id, "contract_analysis", data={"summary": {"control_model": "roles"}})
+    db_session.commit()
+
+    payload = build_analysis_detail(db_session, "teller-proxy")
+
+    assert payload is not None
+    assert "contract_analysis" not in payload
