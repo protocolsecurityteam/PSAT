@@ -25,6 +25,7 @@ from services.scoring.planes import load_control_closure
 from services.scoring.schema import entity_key
 from tests.conftest import SessionFactory, requires_postgres
 from tests.support.hypersync_fakes import _FakeHypersyncModule
+from tests.support.materializations import cm_db  # noqa: F401  (fixture, registered by import)
 from tests.support.overview_builders import _add_contract, _add_job, _add_protocol
 
 pytestmark = requires_postgres
@@ -521,3 +522,66 @@ def test_an_authority_call_to_itself_reads_no_other_contract():
     unnamed["leaf"]["set_descriptor"]["authority_contract"]["address_source"] = {"source": "parameter"}
     assert recursive._authority_contract_vars({"trees": {"c()": unnamed}}) is None
     assert recursive._authority_contract_vars(None) is None
+
+
+def _uncertain_timelock_trees() -> dict[str, Any]:
+    """``schedule`` on a constant PROPOSER_ROLE, and a function whose guard couldn't be extracted."""
+    leaf = _role_leaf({"source": "constant", "constant_value": PROPOSER_ROLE})
+    return {
+        "schema_version": "semantic",
+        "trees": {"schedule(address,uint256,bytes,bytes32,bytes32,uint256)": leaf},
+        "check_trees": json.loads(json.dumps(OZ_CHECK_TREES)),
+        "guard_extraction_uncertain": ["setOperatorThing(address)"],
+    }
+
+
+@pytest.mark.parametrize("uncertain", [True, False], ids=["uncertain-guard", "every-guard-read"])
+def test_a_nested_contract_from_the_materialization_cache_keeps_its_uncertain_guards(
+    db_session, monkeypatch, cm_db, uncertain
+):
+    from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+    from db.models import ContractMaterialization
+
+    keccak = "0x" + "4d" * 32
+    trees = _uncertain_timelock_trees()
+    if not uncertain:
+        trees.pop("guard_extraction_uncertain")
+    cm_db.add(
+        ContractMaterialization(
+            chain="1",
+            bytecode_keccak=keccak,
+            address=ANCHOR,
+            contract_name="Timelock",
+            analysis={"subject": {"address": ANCHOR, "name": "Timelock"}},
+            tracking_plan={
+                "schema_version": "0.1",
+                "contract_address": ANCHOR,
+                "contract_name": "Timelock",
+                "tracked_controllers": [],
+            },
+            predicate_trees=trees,
+            status="ready",
+            analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
+        )
+    )
+    cm_db.commit()
+    monkeypatch.setattr(
+        "services.discovery.classifier.classify_single", lambda *_a, **_k: {"type": "contract", "address": ANCHOR}
+    )
+    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", lambda *_a, **_k: ("0x60", keccak))
+
+    def _head(_url, method, _params, **_kw):
+        assert method == "eth_blockNumber"
+        return hex(PIN)
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", _head)
+    _history(db_session)
+    protocol = _add_protocol(db_session, f"role-keys-cache-{uncertain}")
+
+    # The vault names the timelock as its owner (no role read); the timelock is materialized, not overridden.
+    _member_with_graph(db_session, protocol, _vault(_owner_check(), "state_variable:owner"), VAULT)
+
+    scorer, surface = _anchor_controllers(db_session, protocol)
+    # A role checked only in the unread guard could be any of them, so no holder is dropped.
+    expected = ALL_HOLDERS if uncertain else {PROPOSER, OPERATOR_REVOKED_PROPOSER_KEPT}
+    assert scorer == surface == expected

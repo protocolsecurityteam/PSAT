@@ -342,13 +342,17 @@ def _materialize_with_cross_process_cache(
     analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
     plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
     # ``None`` on rows before c1d2e3f4a5b6; the mapping-writer extraction short-circuits. That extraction is the only
-    # reader and never mutates, so the two maps it reads are projected out without copying the ORM-cached blob.
+    # reader and never mutates, so the keys it reads are projected out without copying the ORM-cached blob.
     predicate_trees_cached = cm.hydrate_predicate_trees(row)
     if failed_semantic_artifact("predicate_trees", predicate_trees_cached):
         # A row published before failed builds were refused: its analysis rests on the failed trees too.
         raise DegradedStaticAnalysisError(f"materialization for {effective_address} holds a failed predicate build")
     predicate_trees = (
-        {k: predicate_trees_cached[k] for k in ("trees", "check_trees") if k in predicate_trees_cached}
+        {
+            k: predicate_trees_cached[k]
+            for k in ("trees", "check_trees", "guard_extraction_uncertain")
+            if k in predicate_trees_cached
+        }
         if predicate_trees_cached
         else None
     )
