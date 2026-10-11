@@ -330,3 +330,70 @@ def test_a_proxy_reads_only_a_current_implementation(session):
     lookup = find_analysis_job_for_address(session, proxy, chain="ethereum")
     assert lookup is not None
     assert (lookup.runtime_job.id, lookup.analysis_job.id) == (proxy_job.id, fresh.id)
+
+
+def _proxy_over(session: Session, proxy: str, impl: str, *, proxy_version: int | None, impl_version: int | None):
+    proxy_job = _job(session, proxy, status=JobStatus.completed, version=proxy_version)
+    session.add(Contract(address=proxy, chain="ethereum", job_id=proxy_job.id, is_proxy=True, implementation=impl))
+    session.commit()
+    impl_job = _job(
+        session,
+        impl,
+        status=JobStatus.completed,
+        version=impl_version,
+        artifacts={"effective_permissions": {"functions": []}, "predicate_trees": _UNSUPPORTED_TREES},
+        proxy_address=proxy,
+        parent_job_id=str(proxy_job.id),
+    )
+    return proxy_job, impl_job
+
+
+_UNSUPPORTED_TREES = {
+    "schema_version": "semantic",
+    "contract_name": "Impl",
+    "trees": {
+        "tryFn()": {
+            "op": "LEAF",
+            "leaf": {
+                "kind": "unsupported",
+                "operator": "truthy",
+                "authority_role": "business",
+                "operands": [],
+                "unsupported_reason": "opaque_try_catch",
+                "references_msg_sender": False,
+                "parameter_indices": [],
+                "expression": "h.helper()",
+                "basis": ["opaque_try_catch"],
+            },
+        }
+    },
+}
+
+
+def test_a_current_proxy_over_a_stale_implementation_spawns_one_provider(session):
+    proxy, impl = _address("d1"), _address("d2")
+    proxy_job, _stale_impl = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=STALE)
+    first, second = _depender(session), _depender(session)
+
+    _emit(session, first, proxy)
+    _emit(session, second, proxy)
+    _emit(session, first, proxy)
+
+    jobs = _provider_jobs(session, proxy)
+    # The completed proxy job never writes policy artifacts, so waiting on it would block the depender forever.
+    assert [job.id for job in jobs][0] == proxy_job.id and len(jobs) == 2
+    assert jobs[1].status == JobStatus.queued
+    assert {_edge(session, d).status for d in (first, second)} == {"pending"}
+    assert {_edge(session, d).provider_address for d in (first, second)} == {proxy}
+
+
+def test_a_current_proxy_over_a_current_implementation_still_satisfies(session):
+    proxy, impl = _address("d3"), _address("d4")
+    proxy_job, impl_job = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=CURRENT)
+    depender = _depender(session)
+
+    _emit(session, depender, proxy)
+
+    assert [job.id for job in _provider_jobs(session, proxy)] == [proxy_job.id]
+    edge = _edge(session, depender)
+    assert (edge.status, edge.provider_address) == ("satisfied", impl)

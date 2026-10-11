@@ -24,7 +24,11 @@ from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
-from db.queue import get_artifact, job_artifacts_are_current, job_stands_for_current_analyzer
+from db.queue import (
+    get_artifact,
+    job_artifacts_are_current,
+    job_stands_for_current_analyzer,
+)
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
 from utils.chains import UnknownChainError, chain_by_id, require_chain
@@ -212,7 +216,9 @@ def find_dependency_provider_job_for_address(
     For a proxy that's the implementation job, since the proxy job may be done without policy artifacts. Only jobs
     that stand for the current analyzer (``job_stands_for_current_analyzer``) count, so a stale provider reads as
     missing while a terminal failure with no era stands rather than being re-spawned on every lookup. Live jobs are
-    preferred over a standing terminal failure.
+    preferred over a standing terminal failure. A completed proxy job with no implementation job that stands can't
+    satisfy anything (proxy jobs never write policy artifacts), so a fresh provider is spawned; its static stage
+    reconciles the implementation and moves the edge onto it.
     """
     eras = {} if eras is None else eras
 
@@ -226,11 +232,24 @@ def find_dependency_provider_job_for_address(
     ]
     runtime_jobs.sort(key=lambda job: job.status == JobStatus.failed_terminal)
     for runtime_job in runtime_jobs:
-        impl_job = _implementation_child_job(
-            session, runtime_job, chain=chain, completed_only=False, include_terminal=True, keep=stands
+        impl_addr = _implementation_address(session, runtime_job, chain)
+        impl_job = (
+            _implementation_child_job(
+                session,
+                runtime_job,
+                chain=chain,
+                completed_only=False,
+                include_terminal=True,
+                keep=stands,
+                impl_addr=impl_addr,
+            )
+            if impl_addr is not None
+            else None
         )
         if impl_job is not None:
             return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
+        if runtime_job.status == JobStatus.completed and impl_addr is not None:
+            return None
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
     return None
 
@@ -767,6 +786,14 @@ def _jobs_for_address(
     return [job for job in candidates if _job_chain(job) == chain]
 
 
+def _implementation_address(session: Session, runtime_job: Job, chain: str | None) -> str | None:
+    contract = _contract_for_job(session, runtime_job, chain=chain)
+    impl_addr = (contract.implementation if contract is not None else None) or None
+    if not isinstance(impl_addr, str) or not impl_addr.startswith("0x") or len(impl_addr) != 42:
+        return None
+    return impl_addr
+
+
 def _implementation_child_job(
     session: Session,
     runtime_job: Job,
@@ -775,10 +802,10 @@ def _implementation_child_job(
     completed_only: bool,
     keep: Callable[[Job], bool],
     include_terminal: bool = False,
+    impl_addr: str | None = None,
 ) -> Job | None:
-    contract = _contract_for_job(session, runtime_job, chain=chain)
-    impl_addr = (contract.implementation if contract is not None else None) or None
-    if not isinstance(impl_addr, str) or not impl_addr.startswith("0x") or len(impl_addr) != 42:
+    impl_addr = impl_addr or _implementation_address(session, runtime_job, chain)
+    if impl_addr is None:
         return None
 
     candidates = [
