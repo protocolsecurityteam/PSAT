@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -281,16 +282,26 @@ class _MemberJob:
     era: int | None
 
 
-def _completed_job_eras(session: Session, rows: list[tuple[Any, int | None]]) -> dict[Any, int | None]:
-    """Each completed job's proven analyzer era; unstamped (cache-hit) jobs follow their donor chain with one memo."""
+def _completed_job_eras(session: Session, rows: list[tuple[Any, int | None, str | None]]) -> dict[Any, int | None]:
+    """Each completed job's proven analyzer era. An unstamped (cache-hit) job follows its donor chain; it and its
+    donor load in one query so a one-hop chain needs no more.
+    """
     from db.queue import proven_analysis_schema_version
 
-    eras: dict[Any, int | None] = {job_id: version for job_id, version in rows if isinstance(version, int)}
-    unstamped = [job_id for job_id, version in rows if not isinstance(version, int)]
+    eras: dict[Any, int | None] = {job_id: version for job_id, version, _donor in rows if isinstance(version, int)}
+    unstamped = [(job_id, donor) for job_id, version, donor in rows if not isinstance(version, int)]
     if unstamped:
+        wanted: set[Any] = {job_id for job_id, _donor in unstamped}
+        for _job_id, donor in unstamped:
+            try:
+                wanted.add(uuid.UUID(str(donor)))
+            except ValueError:
+                continue
+        loaded = {job.id: job for job in session.execute(select(Job).where(Job.id.in_(wanted))).scalars()}
         memo: dict[str, int | None] = {}
-        for job in session.execute(select(Job).where(Job.id.in_(unstamped))).scalars():
-            eras[job.id] = proven_analysis_schema_version(session, job, memo)
+        for job_id, _donor in unstamped:
+            job = loaded.get(job_id)
+            eras[job_id] = proven_analysis_schema_version(session, job, memo) if job is not None else None
     return eras
 
 
@@ -319,16 +330,15 @@ def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, l
             Job.updated_at,
             Job.created_at,
             Job.analysis_schema_version,
+            Job.request["cache_source_job_id"].astext,
         ).where(
             func.lower(Job.address).in_(addresses),
             Job.request["effects_resume_work_id"].astext.is_(None),
         )
     ).all()
-    eras = _completed_job_eras(
-        session, [(row.id, row.analysis_schema_version) for row in rows if row.status == JobStatus.completed]
-    )
+    eras = _completed_job_eras(session, [(row[0], row[7], row[8]) for row in rows if row[2] == JobStatus.completed])
     jobs_by_entity: dict[str, list[_MemberJob]] = {}
-    for job_id, address, status, chain_id, request_chain, updated_at, created_at, _version in rows:
+    for job_id, address, status, chain_id, request_chain, updated_at, created_at, _version, _donor in rows:
         job_chain_id = chain_id if isinstance(chain_id, int) else derive_job_chain_id(request_chain, address) or 1
         try:
             chain_name = chain_by_id(job_chain_id).name

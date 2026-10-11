@@ -202,6 +202,8 @@ def _prefetch_child_tables(
                 EffectiveFunction.contract_id.in_(id_list),
                 FunctionPrincipal.resolved_type.in_(sorted(_SETTLED_CONTROLLER_TYPES)),
             )
+            # The governance view takes a principal's details from its first row.
+            .order_by(EffectiveFunction.contract_id, func.lower(FunctionPrincipal.address), FunctionPrincipal.id)
         ).all():
             cid, address, resolved_type, details = row
             local.setdefault(cid, []).append(

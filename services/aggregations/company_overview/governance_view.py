@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from typing import Any
 
@@ -29,7 +28,7 @@ from utils.balance_status import (
     ASSET_SET_STATUS_AT_PAGE_CAP,
 )
 
-from .entity_keys import _coalesce_chain, _entity_addr, _entity_chain, _entity_key
+from .entity_keys import _coalesce_chain, _entity_addr, _entity_chain, _entity_key, _entity_prefix
 from .jobs import GovernanceView, _secondary_impl_contracts
 from .prefetch import _prefetch_child_tables
 from .principals import (
@@ -799,10 +798,11 @@ def _build_flows_and_principals(
             continue
         target = c["address"].lower()
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + target)
         fp_principals: set[str] = fp_in_contract_by_cid.get(lookup_c.id, set()) if lookup_c else set()
 
-        if c.get("owner") and _entity_key(chain, c["owner"]) in contract_entities:
+        if c.get("owner") and prefix + c["owner"].lower() in contract_entities:
             flow_type = (
                 "controls_value"
                 if any(e in c.get("value_effects", []) for e in ("asset_pull", "asset_send"))
@@ -816,7 +816,7 @@ def _build_flows_and_principals(
             if isinstance(val, str) and val.startswith("0x"):
                 val_lower = val.lower()
                 if (
-                    _entity_key(chain, val_lower) in contract_entities
+                    prefix + val_lower in contract_entities
                     and val_lower != (c.get("owner") or "")
                     and val_lower in fp_principals
                 ):
@@ -828,7 +828,7 @@ def _build_flows_and_principals(
             for node_addr in sorted(fp_principals):
                 if not node_addr or node_addr == target:
                     continue
-                if _entity_key(chain, node_addr) not in contract_entities:
+                if prefix + node_addr not in contract_entities:
                     continue
                 add_flow(node_addr, target, "principal", chain)
 
@@ -841,18 +841,18 @@ def _build_flows_and_principals(
         if not c["address"]:
             continue
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, c["address"]))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + c["address"].lower())
         if not lookup_c:
             continue
-        for edge in sorted(cge_by_cid.get(lookup_c.id, []), key=_edge_order):
-            if edge.relation != "safe_owner":
-                continue
-            safe_key = _entity_key(chain, edge.from_node_id.replace("address:", ""))
+        safe_owner_edges = [e for e in cge_by_cid.get(lookup_c.id, []) if e.relation == "safe_owner"]
+        for edge in sorted(safe_owner_edges, key=_edge_order):
+            safe_key = prefix + edge.from_node_id.replace("address:", "").lower()
             owner_addr = edge.to_node_id.replace("address:", "").lower()
             owners = safe_owners_map.setdefault(safe_key, [])
             if owner_addr not in owners:
                 owners.append(owner_addr)
-            owner_of_safe.add(_entity_key(chain, owner_addr))
+            owner_of_safe.add(prefix + owner_addr)
 
     def _principal_entry(principal_key: str, resolved_type: str, label: str, details: dict[str, Any]) -> dict:
         if resolved_type == "safe":
@@ -875,28 +875,34 @@ def _build_flows_and_principals(
             continue
         target = c["address"].lower()
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + target)
         if not lookup_c:
             continue
+        fp_addrs = fp_all_addrs_by_cid.get(lookup_c.id, set())
 
-        for cgn in sorted(cgn_by_cid.get(lookup_c.id, []), key=_node_order):
+        accepted: list[tuple[Any, str, str, dict[str, Any], str]] = []
+        for cgn in cgn_by_cid.get(lookup_c.id, []):
             node_addr = (cgn.address or "").lower()
-            principal_key = _entity_key(chain, node_addr)
+            principal_key = prefix + node_addr
             if not node_addr or principal_key in contract_entities:
                 continue
             if principal_key in owner_of_safe:
+                continue
+            # Only CGN nodes with FP authority become principals; otherwise beneficiary state vars (treasury,
+            # feeRecipient) claim control they don't hold.
+            if node_addr not in fp_addrs or node_addr == "0x0000000000000000000000000000000000000000":
                 continue
             lookup_meta = principal_lookup.get(principal_key, {})
             resolved_type = lookup_meta.get("resolved_type") or cgn.resolved_type
             if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
-            if node_addr == "0x0000000000000000000000000000000000000000":
-                continue
-            # Only CGN nodes with FP authority become principals; otherwise beneficiary state vars (treasury,
-            # feeRecipient) claim control they don't hold.
-            if node_addr not in fp_all_addrs_by_cid.get(lookup_c.id, set()):
-                continue
+            accepted.append((cgn, node_addr, principal_key, lookup_meta, resolved_type))
 
+        # The first row for a principal supplies its label and details, so take rows in a fixed order.
+        for cgn, node_addr, principal_key, lookup_meta, resolved_type in sorted(
+            accepted, key=lambda row: _node_order(row[0])
+        ):
             if principal_key not in principal_map:
                 # The CGN's own introspection (getOwners/getThreshold, getMinDelay) is authoritative for the principal's
                 # config; CV rows describe the consumer side.
@@ -925,17 +931,19 @@ def _build_flows_and_principals(
             continue
         target = c["address"].lower()
         chain = c.get("chain")
-        lookup_c = lookup_contract_by_entity.get(_entity_key(chain, target))
+        prefix = _entity_prefix(chain)
+        lookup_c = lookup_contract_by_entity.get(prefix + target)
         if not lookup_c:
             continue
-        for fp in sorted(fp_governance_by_cid.get(lookup_c.id, []), key=_fp_order):
+        accepted_fp: list[tuple[dict[str, Any], str, str, dict[str, Any], str]] = []
+        for fp in fp_governance_by_cid.get(lookup_c.id, []):
             pa = (fp.get("address") or "").lower()
             if not pa or pa == target:
                 continue
             if pa == "0x0000000000000000000000000000000000000000":
                 continue
-            principal_key = _entity_key(chain, pa)
-            if principal_key in owner_of_safe:
+            principal_key = prefix + pa
+            if principal_key in owner_of_safe or principal_key in contract_entities:
                 continue
             lookup_meta = principal_lookup.get(principal_key, {})
             resolved_type = fp.get("resolved_type")
@@ -943,8 +951,9 @@ def _build_flows_and_principals(
                 resolved_type = lookup_meta["resolved_type"]
             if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
-            if principal_key in contract_entities:
-                continue
+            accepted_fp.append((fp, pa, principal_key, lookup_meta, resolved_type))
+        # Rows arrive ordered from the prefetch, so the first one for a principal is fixed.
+        for fp, pa, principal_key, lookup_meta, resolved_type in accepted_fp:
             if principal_key not in principal_map:
                 fp_details = dict(lookup_meta.get("details") or {})
                 fp_raw_details = fp.get("details")
@@ -979,14 +988,6 @@ def _node_order(node: Any) -> tuple[str, int]:
 
 def _edge_order(edge: Any) -> tuple[str, str, int]:
     return (edge.from_node_id or "", edge.to_node_id or "", getattr(edge, "id", None) or 0)
-
-
-def _fp_order(fp: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        (fp.get("address") or "").lower(),
-        str(fp.get("resolved_type") or ""),
-        json.dumps(fp.get("details"), sort_keys=True, default=str),
-    )
 
 
 def _controller_enumeration(

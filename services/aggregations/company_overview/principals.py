@@ -5,7 +5,7 @@ from typing import Any
 from db.models import Contract, ControlGraphNode, ControllerValue
 from schemas.control_tracking import MonitoredContractType, ResolvedControllerType
 
-from .entity_keys import _entity_key
+from .entity_keys import _entity_key, _entity_prefix
 
 _PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset({"contract", "safe", "timelock", "eoa", "proxy_admin"})
 _PRINCIPAL_TYPES_SQL = tuple(sorted(_PRINCIPAL_TYPES))
@@ -113,7 +113,7 @@ def _record_principal_lookup(
         return
 
     addr = address.lower()
-    current = lookup.setdefault(_entity_key(chain, addr), {"resolved_type": principal_type, "details": {}})
+    current = lookup.setdefault(_entity_prefix(chain) + addr, {"resolved_type": principal_type, "details": {}})
     current_priority = _principal_type_priority(current.get("resolved_type"))
     principal_priority = _principal_type_priority(principal_type)
     if principal_priority > current_priority:
@@ -220,7 +220,7 @@ def _principal_lookup_meta(
     address: str | None,
     details: Any = None,
 ) -> dict[str, Any]:
-    lookup = principal_lookup.get(_entity_key(chain, address), {})
+    lookup = principal_lookup.get(_entity_prefix(chain) + (address or "").lower(), {})
     merged_details = dict(lookup.get("details") or {})
     if isinstance(details, dict):
         merged_details.update(details)
