@@ -58,6 +58,8 @@ class Contract(Base):
     evm_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     optimization: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     optimization_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # NULL = not recorded (rows before the column).
+    via_ir: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     source_format: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source_file_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     license: Mapped[str | None] = mapped_column(String(100), nullable=True)

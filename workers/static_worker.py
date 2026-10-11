@@ -7,7 +7,6 @@ import json
 import logging
 import shutil
 import tempfile
-import textwrap
 from pathlib import Path
 from typing import Any, cast
 
@@ -35,7 +34,7 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, _detect_solc_version, _relax_pragmas, sanitize_evm_version
+from services.discovery.fetch import _confine, _relax_pragmas, compile_settings, render_foundry_toml
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -585,9 +584,12 @@ class StaticWorker(BaseWorker):
             "source_verified": contract_row.source_verified,
         }
         build_settings = {
-            "evm_version": contract_row.evm_version or "shanghai",
-            "optimization_used": contract_row.optimization or False,
-            "runs": contract_row.optimization_runs or 200,
+            "language": contract_row.language or "solidity",
+            "compiler_version": contract_row.compiler_version,
+            "evm_version": contract_row.evm_version,
+            "optimization_used": contract_row.optimization,
+            "runs": contract_row.optimization_runs,
+            "via_ir": contract_row.via_ir,
         }
         remappings = meta.get("remappings", [])
 
@@ -1031,27 +1033,16 @@ class StaticWorker(BaseWorker):
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
 
-        solc_version = _detect_solc_version(sources)
-        src_dir = _detect_src_dir(sources)
-        evm_version = sanitize_evm_version(build_settings.get("evm_version", "shanghai"))
-        optimizer = str(bool(build_settings.get("optimization_used", True))).lower()
-        optimizer_runs = int(build_settings.get("runs", 200) or 200)
-
-        (project_dir / "foundry.toml").write_text(
-            textwrap.dedent(
-                f"""\
-                [profile.default]
-                src = "{src_dir}"
-                out = "out"
-                libs = ["lib"]
-                solc_version = "{solc_version}"
-                evm_version = "{evm_version}"
-                optimizer = {optimizer}
-                optimizer_runs = {optimizer_runs}
-                auto_detect_solc = false
-            """
-            )
+        settings = compile_settings(
+            sources,
+            language=str(build_settings.get("language") or "solidity"),
+            compiler_version=build_settings.get("compiler_version"),
+            evm_version=build_settings.get("evm_version"),
+            optimizer=build_settings.get("optimization_used"),
+            optimizer_runs=build_settings.get("runs"),
+            via_ir=build_settings.get("via_ir"),
         )
+        (project_dir / "foundry.toml").write_text(render_foundry_toml(_detect_src_dir(sources), settings))
 
         # Keep only remappings whose targets contain sources.
         pruned = _prune_remappings(remappings, set(sources.keys()))

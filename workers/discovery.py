@@ -49,7 +49,14 @@ from services.discovery.deployer_enumeration import (
     enumerate_with_coverage,
     session_deployer_enumerator,
 )
-from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
+from services.discovery.fetch import (
+    fetch,
+    is_vyper_result,
+    parse_remappings,
+    parse_sources,
+    source_content_hash,
+    verified_compile_settings,
+)
 from services.discovery.inventory import inventory_entries, merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import (
     needs_probe,
@@ -1027,8 +1034,7 @@ class DiscoveryWorker(BaseWorker):
             store_source_files(session, job.id, sources)
         self.update_detail(session, job, "Evaluating membership")
 
-        raw_evm = result.get("EVMVersion", "") or ""
-        evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
+        build = verified_compile_settings(result, sources)
 
         deployer = None
         creators_or_exc = fan_out.get("creators")
@@ -1059,9 +1065,10 @@ class DiscoveryWorker(BaseWorker):
             existing.contract_name = contract_name
             existing.compiler_version = result.get("CompilerVersion", "")
             existing.language = "vyper" if is_vyper_result(result) else "solidity"
-            existing.evm_version = evm_version
-            existing.optimization = result.get("OptimizationUsed", "1") == "1"
-            existing.optimization_runs = int(result.get("Runs", "200") or 200)
+            existing.evm_version = build.evm_version
+            existing.optimization = build.optimizer
+            existing.optimization_runs = build.optimizer_runs
+            existing.via_ir = build.via_ir
             existing.source_format = "standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
@@ -1081,9 +1088,10 @@ class DiscoveryWorker(BaseWorker):
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),
                 language="vyper" if is_vyper_result(result) else "solidity",
-                evm_version=evm_version,
-                optimization=result.get("OptimizationUsed", "1") == "1",
-                optimization_runs=int(result.get("Runs", "200") or 200),
+                evm_version=build.evm_version,
+                optimization=build.optimizer,
+                optimization_runs=build.optimizer_runs,
+                via_ir=build.via_ir,
                 source_format="standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat",
                 source_file_count=len(sources),
                 license=result.get("LicenseType", ""),

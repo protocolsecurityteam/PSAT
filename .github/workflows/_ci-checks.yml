@@ -193,6 +193,8 @@ jobs:
       # 0.8.25 is a SECOND pinned version, not a replacement: the timelock
       # producer-parity test compiles a real verified source pinned to it and
       # must FAIL rather than skip when it is missing, so CI has to carry it.
+      # 0.7.0 and 0.7.1 likewise: the verified-compiler test shows a bundle
+      # that fails on its pragma's 0.7.0 and compiles on its verified 0.7.1.
       # Only `use` sets the shared global version — installing an extra artifact
       # cannot flip it, and the pinned-version tests drive their binary by
       # absolute path (FOUNDRY_SOLC / crytic `solc=`), never via the global.
@@ -200,6 +202,7 @@ jobs:
         run: |
           uv run solc-select install 0.8.27
           uv run solc-select install 0.8.25
+          uv run solc-select install 0.7.0 0.7.1
           uv run solc-select use 0.8.27
       # The browser download (Playwright CDN) and the --with-deps apt run both
       # stall intermittently on hosted runners, and a stalled connection has no
