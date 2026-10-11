@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from typing_extensions import NotRequired
 
+from db.contract_materializations import DeterministicBuildFailure
 from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE,
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
@@ -72,9 +74,15 @@ class UnresolvedProxyError(RuntimeError):
     """
 
 
-class DegradedStaticAnalysisError(RuntimeError):
+class DegradedStaticAnalysisError(DeterministicBuildFailure):
     """A nested contract whose predicate or effects build failed; its guards are not determined, so the BFS records a
     degraded node instead of resolving from them.
+    """
+
+
+class NestedCompileError(DeterministicBuildFailure):
+    """A nested contract whose compile or Slither parse failed with its compiler installed; its guards are not
+    determined.
     """
 
 
@@ -223,16 +231,45 @@ def _build_static_artifacts(
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
-        analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
+        try:
+            analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
+        except (MemoryError, OSError):
+            raise
+        except Exception as exc:
+            # Without the compiler on disk the failure may be its download, which a later build can get past.
+            if _solc_installed(_scaffolded_solc_version(project_dir)):
+                raise NestedCompileError(f"build of {effective_address} failed: {type(exc).__name__}: {exc}") from exc
+            raise
     if analysis_reports_failure(analysis):
-        # Raised so the cache records ``failed`` (rebuilt on the next request) and the node stays undetermined, rather
-        # than a ready row built on failed semantics.
+        # Raised so the cache records ``failed`` (served until the source or analyzer changes) and the node stays
+        # undetermined, rather than a ready row built on failed semantics.
         raise DegradedStaticAnalysisError(
             f"static analysis of {effective_address} failed: {'; '.join(analysis['analysis_status']['errors'])}"
         )
 
     plan = build_control_tracking_plan(analysis)
     return contract_name, analysis, plan, predicate_trees
+
+
+def _scaffolded_solc_version(project_dir: Path) -> str | None:
+    meta = project_dir / "contract_meta.json"
+    try:
+        value = json.loads(meta.read_text()).get("solc_version")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _solc_installed(version: str | None) -> bool:
+    """Whether Foundry has ``version`` on disk (``FOUNDRY_SOLC``, else the svm store it installs into)."""
+    if not version:
+        return False
+    override = os.environ.get("FOUNDRY_SOLC")
+    if override:
+        return Path(override).is_file()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    roots = (Path.home() / ".svm", Path(xdg) / "svm" if xdg else Path.home() / ".local" / "share" / "svm")
+    return any((root / version / f"solc-{version}").is_file() for root in roots)
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:
@@ -319,6 +356,8 @@ def _materialize_with_cross_process_cache(
     except Exception as exc:
         # Builder failures propagate for the stage's own retry classification; DB-layer failures fall back to a direct
         # build.
+        if isinstance(exc, cm.RememberedBuildFailure):
+            _bump_materialize_metric("materialize_failures_remembered")
         if _is_builder_exception(exc):
             raise
         record_degraded(
