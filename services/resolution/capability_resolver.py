@@ -28,6 +28,7 @@ from db.queue import (
     get_artifact,
     job_artifacts_are_current,
     job_stands_for_current_analyzer,
+    proven_analysis_schema_version,
 )
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
 from services.static.contract_analysis_pipeline.effect_scope_codec import expand_effect_scopes
@@ -312,12 +313,15 @@ def resolve_contract_capabilities(
 
     artifact = get_artifact(session, analysis_job.id, "predicate_trees")
     if not isinstance(artifact, dict) or "trees" not in artifact:
+        # A job's own view reads its implementation from the same analyzer era, so an older proxy keeps showing the
+        # older analysis it was published with; readers resolving another contract's authority require the current one.
         lookup = _analysis_lookup_for_runtime_job(
             session,
             runtime_job,
             required_artifact="predicate_trees",
             chain=chain,
             completed_only=True,
+            era_of=runtime_job if job_id is not None else None,
         )
         if lookup is None:
             return None
@@ -737,14 +741,19 @@ def _analysis_lookup_for_runtime_job(
     chain: str | None,
     completed_only: bool,
     eras: dict[str, int | None] | None = None,
+    era_of: Job | None = None,
 ) -> AnalysisJobLookup | None:
     # A proxy's own predicate_trees artifact exists but is empty; preferring it would shadow the implementation's trees
     # and break cross-contract inlining. Prefer a substantive artifact; fall back to an empty one only if neither has
     # content. The era gates the job whose artifact is read; a proxy's runtime job only points at its implementation.
+    # With *era_of*, the artifact must come from that job's era (any, when its era isn't proven) instead of the current.
     eras = {} if eras is None else eras
+    anchor_era = proven_analysis_schema_version(session, era_of, eras) if era_of is not None else None
 
     def current(job: Job) -> bool:
-        return job_artifacts_are_current(session, job, eras)
+        if era_of is None:
+            return job_artifacts_are_current(session, job, eras)
+        return anchor_era is None or proven_analysis_schema_version(session, job, eras) == anchor_era
 
     runtime_artifact = get_artifact(session, runtime_job.id, required_artifact) if current(runtime_job) else None
     if _artifact_is_substantive(required_artifact, runtime_artifact):

@@ -397,3 +397,24 @@ def test_a_current_proxy_over_a_current_implementation_still_satisfies(session):
     assert [job.id for job in _provider_jobs(session, proxy)] == [proxy_job.id]
     edge = _edge(session, depender)
     assert (edge.status, edge.provider_address) == ("satisfied", impl)
+
+
+def test_an_older_proxy_shows_its_own_eras_implementation_by_job_id(session):
+    from services.resolution.capability_resolver import resolve_contract_capabilities
+
+    proxy, impl = _address("d5"), _address("d6")
+    proxy_job, impl_job = _proxy_over(session, proxy, impl, proxy_version=STALE, impl_version=STALE)
+
+    out = resolve_contract_capabilities(session, address=proxy, chain_id=1, job_id=proxy_job.id, chain="ethereum")
+    assert out is not None and out["tryFn()"]["kind"] == "unsupported"
+    # Another contract's authority read refuses the same stale implementation.
+    assert find_analysis_job_for_address(session, proxy, chain="ethereum", completed_only=False) is None
+
+
+def test_a_current_proxy_never_shows_a_stale_implementation_by_job_id(session):
+    from services.resolution.capability_resolver import resolve_contract_capabilities
+
+    proxy, impl = _address("d7"), _address("d8")
+    proxy_job, _impl_job = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=STALE)
+
+    assert resolve_contract_capabilities(session, address=proxy, chain_id=1, job_id=proxy_job.id) is None
