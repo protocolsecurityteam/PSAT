@@ -131,3 +131,20 @@ def test_copy_static_cache_refuses_a_donor_on_another_chain(db_session):
     base_row = db_session.get(Contract, base_contract.id)
     assert base_row is not None and base_row.job_id == base_job.id
     assert _base_rows(db_session, base_contract.id) == (["deposit(address,uint256)"], [BASE_SAFE])
+
+
+def test_analysis_detail_of_a_legacy_chainless_job_never_shows_the_base_row(db_session):
+    from services.aggregations.analysis_detail import build_analysis_detail
+
+    _base_job, base_contract = _analysed_on_base(db_session)
+    legacy = create_job(db_session, {"address": ADDR, "name": "legacy-teller"})
+    legacy.request = {"address": ADDR, "name": "legacy-teller"}
+    legacy.status = JobStatus.completed
+    legacy.stage = JobStage.done
+    db_session.commit()
+
+    payload = build_analysis_detail(db_session, "legacy-teller")
+
+    assert payload is not None
+    assert payload["contract_id"] != base_contract.id
+    assert "effective_permissions" not in payload
