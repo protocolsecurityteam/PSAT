@@ -418,3 +418,25 @@ def test_a_current_proxy_never_shows_a_stale_implementation_by_job_id(session):
     proxy_job, _impl_job = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=STALE)
 
     assert resolve_contract_capabilities(session, address=proxy, chain_id=1, job_id=proxy_job.id) is None
+
+
+def test_a_beacon_over_a_stale_implementation_satisfies_without_spawning(session):
+    beacon, impl = _address("e1"), _address("e2")
+    beacon_job = _job(
+        session,
+        beacon,
+        status=JobStatus.completed,
+        version=CURRENT,
+        artifacts={"effective_permissions": {"functions": []}},
+    )
+    # A beacon names an implementation but isn't a proxy, and runs policy itself.
+    session.add(Contract(address=beacon, chain="ethereum", job_id=beacon_job.id, is_proxy=False, implementation=impl))
+    session.commit()
+    _job(session, impl, status=JobStatus.completed, version=STALE)
+    depender = _depender(session)
+
+    _emit(session, depender, beacon)
+    _emit(session, _depender(session), beacon)
+
+    assert [job.id for job in _provider_jobs(session, beacon)] == [beacon_job.id]
+    assert _edge(session, depender).status == "satisfied"

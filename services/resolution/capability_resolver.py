@@ -233,7 +233,8 @@ def find_dependency_provider_job_for_address(
     ]
     runtime_jobs.sort(key=lambda job: job.status == JobStatus.failed_terminal)
     for runtime_job in runtime_jobs:
-        impl_addr = _implementation_address(session, runtime_job, chain)
+        contract = _contract_for_job(session, runtime_job, chain=chain)
+        impl_addr = _implementation_of(contract)
         impl_job = (
             _implementation_child_job(
                 session,
@@ -249,7 +250,13 @@ def find_dependency_provider_job_for_address(
         )
         if impl_job is not None:
             return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=impl_job)
-        if runtime_job.status == JobStatus.completed and impl_addr is not None:
+        # A beacon carries an implementation too, but runs policy itself.
+        if (
+            runtime_job.status == JobStatus.completed
+            and impl_addr is not None
+            and contract is not None
+            and contract.is_proxy
+        ):
             return None
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
     return None
@@ -796,7 +803,10 @@ def _jobs_for_address(
 
 
 def _implementation_address(session: Session, runtime_job: Job, chain: str | None) -> str | None:
-    contract = _contract_for_job(session, runtime_job, chain=chain)
+    return _implementation_of(_contract_for_job(session, runtime_job, chain=chain))
+
+
+def _implementation_of(contract: Contract | None) -> str | None:
     impl_addr = (contract.implementation if contract is not None else None) or None
     if not isinstance(impl_addr, str) or not impl_addr.startswith("0x") or len(impl_addr) != 42:
         return None
