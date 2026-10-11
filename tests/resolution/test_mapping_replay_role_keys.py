@@ -402,7 +402,7 @@ def test_an_uncertain_guard_filters_nothing():
 def test_the_cache_fingerprint_follows_the_key_filter():
     from db.mapping_enumeration_cache import specs_fingerprint
 
-    specs = [
+    specs: list[dict[str, Any]] = [
         dict(spec)
         for spec in recursive._mapping_writer_specs_from_predicate_trees(
             _trees(), key_words=recursive._snapshot_key_words(_bundle()["snapshot"]), address=ANCHOR
