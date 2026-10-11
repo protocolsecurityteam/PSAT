@@ -1,6 +1,7 @@
 """A two-key mapping replay (``_roles[role][account]``) harvests only the roles the contract's own leaves check, and the
 roles that administer them through ``getRoleAdmin``: a holder of any other role is not a controller in the scorer's
-closure or on Surface, while a holder of a checked or administering role still is.
+closure or on Surface, while a holder of a checked or administering role still is. A contract another contract gates
+on by reading its roles (``registry.hasRole(role, msg.sender)``) keeps every holder, decided after the walk.
 
 The wires are stubbed (``eth_call`` batch for ``getRoleAdmin``, the resolution pin, classification); the event rows and
 cursors are real test-DB rows, and the readers are the scorer's ``load_control_closure`` and the company overview.
@@ -134,13 +135,40 @@ ROLE_ADMIN_KEY = {
 }
 
 
+HAS_ROLE_CHECK = {
+    "op": "LEAF",
+    "leaf": {
+        "kind": "membership",
+        "operator": "truthy",
+        "authority_role": "business",
+        "operands": [{"source": "parameter", "parameter_index": 0}, {"source": "parameter", "parameter_index": 1}],
+        "set_descriptor": {
+            "kind": "mapping_membership",
+            "key_sources": [
+                {"source": "parameter", "parameter_index": 0, "parameter_name": "role"},
+                {"source": "parameter", "parameter_index": 1, "parameter_name": "account"},
+            ],
+            "storage_var": "_roles",
+            "enumeration_hint": [_hint(GRANTED, "add"), _hint(REVOKED, "remove")],
+        },
+    },
+}
+
+# Every OZ AccessControl contract exposes this check, with a caller-chosen role.
+OZ_CHECK_TREES = {"hasRole(bytes32,address)": HAS_ROLE_CHECK}
+
+
 def _trees() -> dict[str, Any]:
+    """An OZ TimelockController's shape: ``schedule`` on PROPOSER_ROLE, ``grantRole`` on the role's admin, and the
+    public ``hasRole`` check.
+    """
     return {
         "schema_version": "semantic",
         "trees": {
             "schedule(address,uint256,bytes,bytes32,bytes32,uint256)": _role_leaf(PROPOSER_KEY),
             "grantRole(bytes32,address)": _role_leaf(ROLE_ADMIN_KEY),
         },
+        "check_trees": json.loads(json.dumps(OZ_CHECK_TREES)),
     }
 
 
@@ -223,28 +251,7 @@ def _member_with_graph(session, protocol, root: LoadedArtifacts, address: str, o
     session.commit()
 
 
-def _controllers_read_by_scorer_and_surface(
-    session, bundle: LoadedArtifacts | None = None, *, consumer: bool = False
-) -> tuple[set[str], set[str]]:
-    protocol = _add_protocol(session, "role-keys")
-    anchor_bundle = bundle or _bundle()
-    _member_with_graph(session, protocol, anchor_bundle, ANCHOR)
-    if consumer:
-        # The consumer gates on ``registry.hasRole(PAUSER_ROLE, msg.sender)``; its graph walks into the registry.
-        consumer_bundle = _bundle(
-            address=CONSUMER,
-            trees={"schema_version": "semantic", "trees": {}},
-            controllers={
-                "external_contract:roleRegistry": {
-                    "source": "roleRegistry",
-                    "value": ANCHOR,
-                    "resolved_type": "contract",
-                    "authority_provenance": "caller_gate",
-                }
-            },
-        )
-        _member_with_graph(session, protocol, consumer_bundle, CONSUMER, override={ANCHOR: anchor_bundle})
-
+def _anchor_controllers(session, protocol) -> tuple[set[str], set[str]]:
     anchor_key = entity_key("ethereum", ANCHOR)
     closure = load_control_closure(session, protocol.id)
     scorer = {edge.principal.split("::")[-1] for edge in closure.edges if edge.anchor == anchor_key}
@@ -255,6 +262,14 @@ def _controllers_read_by_scorer_and_surface(
         if flow["to"].lower() == ANCHOR and flow["type"] == "controller"
     }
     return scorer, surface
+
+
+def _controllers_read_by_scorer_and_surface(
+    session, bundle: LoadedArtifacts | None = None
+) -> tuple[set[str], set[str]]:
+    protocol = _add_protocol(session, "role-keys")
+    _member_with_graph(session, protocol, bundle or _bundle(), ANCHOR)
+    return _anchor_controllers(session, protocol)
 
 
 def test_only_holders_of_checked_or_administering_roles_are_controllers(db_session, monkeypatch):
@@ -324,10 +339,77 @@ def test_a_one_key_mapping_gets_no_filter():
 
 
 ALL_HOLDERS = {PROPOSER, ADMIN, OPERATOR_ONLY, PROPOSER_REVOKED_OPERATOR_KEPT, OPERATOR_REVOKED_PROPOSER_KEPT}
-REGISTRY_TREES = {"schema_version": "semantic", "trees": {"grantRole(bytes32,address)": _role_leaf(ROLE_ADMIN_KEY)}}
+REGISTRY_TREES = {
+    "schema_version": "semantic",
+    "trees": {"grantRole(bytes32,address)": _role_leaf(ROLE_ADMIN_KEY)},
+    "check_trees": OZ_CHECK_TREES,
+}
+VAULT = "0x" + "c1" * 20
+MIDDLE = "0x" + "c2" * 20
+ROOT = "0x" + "c3" * 20
+PAUSER_ROLE = "0x" + "65" * 32
 
 
-def test_a_registry_alone_keeps_only_its_own_checked_roles(db_session, monkeypatch):
+def _external_role_check(state_variable: str) -> dict[str, Any]:
+    """``require(registry.hasRole(PAUSER_ROLE, msg.sender))``, as the static stage writes it."""
+    return {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "external_bool",
+            "operator": "truthy",
+            "authority_role": "delegated_authority",
+            "operands": [{"source": "constant", "constant_value": PAUSER_ROLE}, {"source": "msg_sender"}],
+            "set_descriptor": {
+                "kind": "external_set",
+                "authority_contract": {
+                    "address_source": {"source": "state_variable", "state_variable_name": state_variable}
+                },
+                "callee_signature": "hasRole(bytes32,address)",
+                "callee_selector": "0x91d14854",
+            },
+        },
+    }
+
+
+def _owner_check() -> dict[str, Any]:
+    """``require(msg.sender == owner)``: the timelock is named as an address, its roles aren't read."""
+    return {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "eq",
+            "authority_role": "caller_authority",
+            "operands": [{"source": "msg_sender"}, {"source": "state_variable", "state_variable_name": "owner"}],
+        },
+    }
+
+
+def _controller(value: str, provenance: str) -> dict[str, Any]:
+    return {"source": "x", "value": value, "resolved_type": "contract", "authority_provenance": provenance}
+
+
+def _vault(gate: dict[str, Any], controller_id: str) -> LoadedArtifacts:
+    return _bundle(
+        address=VAULT,
+        trees={"schema_version": "semantic", "trees": {"pause()": gate}},
+        controllers={controller_id: _controller(ANCHOR, "caller_gate")},
+    )
+
+
+def test_a_timelock_reached_as_an_owner_still_filters(db_session, monkeypatch):
+    _history(db_session)
+    _role_admin_wire(monkeypatch)
+    protocol = _add_protocol(db_session, "role-keys-owner")
+
+    _member_with_graph(
+        db_session, protocol, _vault(_owner_check(), "state_variable:owner"), VAULT, override={ANCHOR: _bundle()}
+    )
+
+    # Naming the timelock as ``owner`` reads none of its roles, so an unchecked-role holder isn't a controller.
+    assert _anchor_controllers(db_session, protocol) == ({PROPOSER, ADMIN, OPERATOR_REVOKED_PROPOSER_KEPT},) * 2
+
+
+def test_a_registry_alone_filters(db_session, monkeypatch):
     _history(db_session)
     _role_admin_wire(monkeypatch)
 
@@ -336,34 +418,52 @@ def test_a_registry_alone_keeps_only_its_own_checked_roles(db_session, monkeypat
     assert scorer == surface == {ADMIN}
 
 
-def test_a_registry_another_contract_gates_on_keeps_every_role_holder(db_session, monkeypatch):
+@pytest.mark.parametrize(
+    "shape",
+    ["registry-first", "vault-first", "vault-a-level-deeper"],
+)
+def test_a_registry_another_contract_reads_keeps_every_holder_in_any_walk_order(db_session, monkeypatch, shape):
     _history(db_session)
     _role_admin_wire(monkeypatch)
+    protocol = _add_protocol(db_session, f"role-keys-{shape}")
+    registry = _bundle(trees=REGISTRY_TREES)
+    vault = _vault(_external_role_check("roleRegistry"), "external_contract:roleRegistry")
+    targets = {
+        "registry-first": {"state_variable:registry": ANCHOR, "state_variable:vault": VAULT},
+        "vault-first": {"state_variable:vault": VAULT, "state_variable:registry": ANCHOR},
+        "vault-a-level-deeper": {"state_variable:registry": ANCHOR, "state_variable:middle": MIDDLE},
+    }[shape]
+    root = _bundle(
+        address=ROOT,
+        trees={"schema_version": "semantic", "trees": {}},
+        controllers={cid: _controller(value, "call_target") for cid, value in targets.items()},
+    )
+    middle = _bundle(
+        address=MIDDLE,
+        trees={"schema_version": "semantic", "trees": {}},
+        controllers={"state_variable:vault": _controller(VAULT, "call_target")},
+    )
 
-    scorer, surface = _controllers_read_by_scorer_and_surface(db_session, _bundle(trees=REGISTRY_TREES), consumer=True)
+    _member_with_graph(db_session, protocol, root, ROOT, override={ANCHOR: registry, VAULT: vault, MIDDLE: middle})
 
-    # The consumer checks a role the registry's own leaves never name, so every holder may be its controller.
-    assert scorer == surface == ALL_HOLDERS
+    # The vault checks a role the registry's own leaves never name, so every holder may be its controller.
+    assert _anchor_controllers(db_session, protocol) == (ALL_HOLDERS, ALL_HOLDERS)
 
 
-HAS_ROLE_CHECK = {
-    "op": "LEAF",
-    "leaf": {
-        "kind": "membership",
-        "operator": "truthy",
-        "authority_role": "business",
-        "operands": [{"source": "parameter", "parameter_index": 0}, {"source": "parameter", "parameter_index": 1}],
-        "set_descriptor": {
-            "kind": "mapping_membership",
-            "key_sources": [
-                {"source": "parameter", "parameter_index": 0, "parameter_name": "role"},
-                {"source": "parameter", "parameter_index": 1, "parameter_name": "account"},
-            ],
-            "storage_var": "_roles",
-            "enumeration_hint": [_hint(GRANTED, "add"), _hint(REVOKED, "remove")],
-        },
-    },
-}
+def test_a_role_read_whose_gating_leaves_are_unknown_keeps_every_holder(db_session, monkeypatch):
+    _history(db_session)
+    _role_admin_wire(monkeypatch)
+    protocol = _add_protocol(db_session, "role-keys-unattributed")
+    vault = _bundle(
+        address=VAULT,
+        trees={"schema_version": "semantic", "trees": {}},
+        controllers={"state_variable:registry": {**_controller(ANCHOR, "caller_gate"), "authority_provenance": None}},
+    )
+
+    _member_with_graph(db_session, protocol, vault, VAULT, override={ANCHOR: _bundle(trees=REGISTRY_TREES)})
+
+    # No provenance: whether the vault reads the registry's roles can't be told.
+    assert _anchor_controllers(db_session, protocol)[0] == ALL_HOLDERS
 
 
 def _filters(trees: dict[str, Any]) -> list[Any]:
@@ -373,20 +473,15 @@ def _filters(trees: dict[str, Any]) -> list[Any]:
     return [spec.get("key_filter") for spec in specs]
 
 
-def test_a_role_check_other_contracts_can_call_with_any_role_filters_nothing(db_session, monkeypatch):
-    trees = {**_trees(), "check_trees": {"hasRole(bytes32,address)": HAS_ROLE_CHECK}}
-    assert {f["words"] if f else "missing" for f in _filters(trees)} == {None}
-
-    _history(db_session)
-    _role_admin_wire(monkeypatch)
-    scorer, surface = _controllers_read_by_scorer_and_surface(db_session, _bundle(trees=trees))
-    assert scorer == surface == ALL_HOLDERS
+def test_a_check_on_a_caller_chosen_role_names_no_role():
+    # ``_trees()`` already carries OZ's public ``hasRole(bytes32,address)``.
+    assert {tuple(f["words"]) for f in _filters(_trees()) if f} == {(PROPOSER_ROLE,)}
 
 
 def test_a_role_check_on_a_constant_role_adds_that_role():
     operator_check = json.loads(json.dumps(HAS_ROLE_CHECK))
     operator_check["leaf"]["set_descriptor"]["key_sources"][0] = {"source": "constant", "constant_value": OPERATOR_ROLE}
-    trees = {**_trees(), "check_trees": {"isOperator(address)": operator_check}}
+    trees = {**_trees(), "check_trees": {**OZ_CHECK_TREES, "isOperator(address)": operator_check}}
 
     (first, *_rest) = _filters(trees)
     assert first is not None and first["words"] == sorted([PROPOSER_ROLE, OPERATOR_ROLE])

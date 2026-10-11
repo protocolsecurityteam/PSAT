@@ -860,9 +860,9 @@ def _mapping_writer_specs_from_predicate_trees(
     """Writer-event specs for every mapping an authority leaf reads. On a two-key mapping each spec carries the other
     key the leaves check (``key_filter``), so the replay harvests ``_roles[PROPOSER_ROLE]``, not every role's holders.
 
-    Another contract can gate on this one's mapping through its check functions (``hasRole(role, account)``), so the
-    keys those read count as checked, and one taking a caller-chosen key leaves the mapping unfiltered. So does any
-    function whose guard couldn't be extracted, since a role checked only there would read as unchecked.
+    A check function on a constant role (``isPauser(account)``) adds that role. Any function whose guard couldn't be
+    extracted leaves the mapping unfiltered, since a role checked only there would read as unchecked. Roles another
+    contract checks are settled after the walk (``_publish_role_read_members``).
     """
     if not isinstance(predicate_trees, Mapping):
         return []
@@ -972,14 +972,14 @@ def _mapping_writer_specs_from_predicate_trees(
     guards_uncertain = bool(predicate_trees.get("guard_extraction_uncertain"))
     for mapping_name, key_filter in filters.items():
         entries = exposed.get(mapping_name, [])
-        if guards_uncertain or any(
-            e is None or e.words is None or e.position != key_filter["position"] for e in entries
-        ):
+        if guards_uncertain:
             key_filter["words"] = None
             continue
+        # A check on a caller-chosen role names nothing here; who calls it is read from the walk's edges.
+        constant = [e for e in entries if e and e.words is not None and e.position == key_filter["position"]]
         if key_filter["words"] is not None:
-            key_filter["words"] = sorted(set(key_filter["words"]).union(*(e.words or () for e in entries if e)))
-            key_filter["views"] = sorted(set(key_filter["views"]).union(*(e.views for e in entries if e)))
+            key_filter["words"] = sorted(set(key_filter["words"]).union(*(e.words or () for e in constant)))
+            key_filter["views"] = sorted(set(key_filter["views"]).union(*(e.views for e in constant)))
     for spec in specs:
         if spec["mapping_name"] in filters:
             spec["key_filter"] = filters[spec["mapping_name"]]
@@ -992,20 +992,91 @@ def _mapping_writer_specs_from_predicate_trees(
 _AUTHORITY_READ_RELATIONS = frozenset({EDGE_RELATION_CONTROLLER_VALUE, EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED})
 
 
-def _read_as_authority(edges: Mapping[tuple, ResolvedGraphEdge], node_id: str) -> bool:
-    """Whether another contract in the walk names this one as an authority (``registry.hasRole(...)``)."""
-    return any(
-        edge["to_id"] == node_id and edge["from_id"] != node_id and edge["relation"] in _AUTHORITY_READ_RELATIONS
-        for edge in edges.values()
-    )
+def _authority_contract_vars(predicate_trees: Any) -> frozenset[str] | None:
+    """State variables the contract's leaves call as an authority contract (``registry.hasRole(role, msg.sender)``),
+    or ``None`` when that can't be read (no trees, or an authority contract not named by a state variable).
+    """
+    if not isinstance(predicate_trees, Mapping):
+        return None
+    names: set[str] = set()
+    unread = False
+
+    def visit(node: Any) -> None:
+        nonlocal unread
+        if not isinstance(node, dict):
+            return
+        if node.get("op") != "LEAF":
+            for child in node.get("children") or []:
+                visit(child)
+            return
+        leaf = node.get("leaf")
+        descriptor = leaf.get("set_descriptor") if isinstance(leaf, dict) else None
+        authority = descriptor.get("authority_contract") if isinstance(descriptor, dict) else None
+        if not isinstance(authority, dict):
+            return
+        source = authority.get("address_source")
+        name = source.get("state_variable_name") if isinstance(source, dict) else None
+        if isinstance(source, dict) and source.get("source") == "state_variable" and isinstance(name, str) and name:
+            names.add(name)
+        else:
+            unread = True
+
+    for key in ("trees", "check_trees"):
+        tree_map = predicate_trees.get(key)
+        for tree in (tree_map if isinstance(tree_map, Mapping) else {}).values():
+            visit(tree)
+    return None if unread else frozenset(names)
 
 
-def _keep_every_key(specs: list[WriterEventSpec]) -> list[WriterEventSpec]:
-    out: list[WriterEventSpec] = []
-    for spec in specs:
-        key_filter = spec.get("key_filter")
-        out.append(cast(WriterEventSpec, {**spec, "key_filter": {**key_filter, "words": None}}) if key_filter else spec)
-    return out
+def _role_read_targets(
+    edges: Mapping[tuple, ResolvedGraphEdge], authority_vars_by_node: Mapping[str, frozenset[str] | None]
+) -> set[str]:
+    """Contracts another contract gates on by reading their state (``registry.hasRole(...)``) rather than by naming
+    them as an address (``msg.sender == owner``). An edge whose kind can't be told (no provenance, or the gating
+    contract's leaves weren't read in this walk) counts as reading.
+    """
+    targets: set[str] = set()
+    for edge in edges.values():
+        if edge["relation"] not in _AUTHORITY_READ_RELATIONS or edge["from_id"] == edge["to_id"]:
+            continue
+        reads = authority_vars_by_node.get(edge["from_id"])
+        name = str(edge.get("source_controller_id") or "").rsplit(":", 1)[-1]
+        if edge["relation"] != EDGE_RELATION_CONTROLLER_VALUE or reads is None or name in reads:
+            targets.add(edge["to_id"])
+    return targets
+
+
+class _Withheld(NamedTuple):
+    address: str
+    depth: int
+    principals: list[EnumeratedPrincipal]
+
+
+def _publish_role_read_members(
+    nodes: dict[str, ResolvedGraphNode],
+    edges: dict[tuple, ResolvedGraphEdge],
+    withheld: Mapping[str, _Withheld],
+    authority_vars_by_node: Mapping[str, frozenset[str] | None],
+) -> None:
+    """After the walk, give back the members the role filter withheld from any contract another contract reads as an
+    authority: that contract may check any of its roles. Decided on the final edge set, so walk order can't matter.
+    """
+    if not withheld:
+        return
+    targets = _role_read_targets(edges, authority_vars_by_node)
+    for node_id in sorted(withheld):
+        if node_id not in targets:
+            continue
+        held = withheld[node_id]
+        _publish_mapping_principals(
+            address=held.address,
+            principals=held.principals,
+            complete=False,
+            contract_node_id=node_id,
+            depth=held.depth,
+            nodes=nodes,
+            edges=edges,
+        )
 
 
 # Bound on following a key view to its fixed point (an admin of an admin of a checked role).
@@ -1211,8 +1282,10 @@ def _replay_mapping_principals(
     chain_id: int,
     rpc_url: str | None = None,
     resolution_block: int | None = None,
+    withheld: dict[str, _Withheld] | None = None,
 ) -> MappingReplay:
-    """Replay mapping-writer events for *address* into principal nodes and edges.
+    """Replay mapping-writer events for *address* into principal nodes and edges. Members the role filter drops go to
+    *withheld* for the post-walk decision.
 
     The durable event index answers first; HyperSync runs only when the index can't prove the member set. A HyperSync
     replay is floored at the deploy block, and with no known floor defers (``deferred_no_floor``) instead of scanning
@@ -1227,9 +1300,17 @@ def _replay_mapping_principals(
     )
 
     def checked(principals: list[EnumeratedPrincipal]) -> list[EnumeratedPrincipal]:
-        return _members_holding_checked_keys(
+        kept = _members_holding_checked_keys(
             principals, mapping_specs, address=address, rpc_url=rpc_url, block=resolution_block
         )
+        if withheld is not None:
+            kept_ids = {id(principal) for principal in kept}
+            dropped = [principal for principal in principals if id(principal) not in kept_ids]
+            if dropped:
+                withheld[contract_node_id] = _Withheld(address, depth, dropped)
+            else:
+                withheld.pop(contract_node_id, None)
+        return kept
 
     if indexed is not None and indexed.complete:
         logger.info(
@@ -1538,6 +1619,9 @@ def resolve_control_graph(
 
     nodes: dict[str, ResolvedGraphNode] = {}
     edges: dict[tuple, ResolvedGraphEdge] = {}
+    # Members the role filter dropped, per contract node, and each processed contract's authority-contract reads.
+    withheld: dict[str, _Withheld] = {}
+    authority_vars_by_node: dict[str, frozenset[str] | None] = {}
 
     # Pre-seed from a prior walk so the policy refresh skips already-processed nested contracts.
     if initial_graph is not None:
@@ -1733,9 +1817,7 @@ def resolve_control_graph(
             mapping_specs = _mapping_writer_specs_from_predicate_trees(
                 artifacts.get("predicate_trees"), key_words=_snapshot_key_words(snapshot), address=address
             )
-            if _read_as_authority(edges, contract_node_id):
-                # Another contract gates on this one's state, and may check any of its keys.
-                mapping_specs = _keep_every_key(mapping_specs)
+            authority_vars_by_node[contract_node_id] = _authority_contract_vars(artifacts.get("predicate_trees"))
             if mapping_specs:
                 replay = _replay_mapping_principals(
                     address=address,
@@ -1747,6 +1829,7 @@ def resolve_control_graph(
                     chain_id=chain_id,
                     rpc_url=rpc_url,
                     resolution_block=_resolution_block(),
+                    withheld=withheld,
                 )
                 # So downstream can flag incomplete allowlists, and the reconciler can re-run an unsettled one.
                 if contract_node_id in nodes:
@@ -1917,6 +2000,8 @@ def resolve_control_graph(
     record_stage_metric("recursive_levels", _levels)
     record_stage_metric("recursive_classify_hits", classify_stats["hits"])
     record_stage_metric("recursive_classify_misses", classify_stats["misses"])
+
+    _publish_role_read_members(nodes, edges, withheld, authority_vars_by_node)
 
     for _node in nodes.values():
         _node["analysis_state"] = _analysis_state(_node, max_depth)
