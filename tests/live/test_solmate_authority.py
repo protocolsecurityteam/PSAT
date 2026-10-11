@@ -6,7 +6,6 @@ The async reconciler heal is pinned offline in ``tests/resolution/test_deferred_
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 
@@ -37,26 +36,11 @@ def analyzed_veda_teller(live_client: LiveClient) -> dict:
     return job
 
 
-def _has_solmate_trace(node: Any) -> bool:
-    """A resolved RolesAuthority read consumes the canCall selector; its trace step is what remains."""
-    if isinstance(node, dict):
-        trace = node.get("trace")
-        if isinstance(trace, list) and any(
-            isinstance(step, dict) and step.get("step") == "solmate_roles_authority" for step in trace
-        ):
-            return True
-        return any(_has_solmate_trace(value) for value in node.values())
-    if isinstance(node, list):
-        return any(_has_solmate_trace(item) for item in node)
-    return False
-
-
 def _cancall_functions(ep: dict) -> list[dict]:
     return [
         f
         for f in (ep.get("functions") or [])
-        if _has_solmate_trace(f.get("capability_expr"))
-        or any(marker in json.dumps(f.get("capability_expr") or {}) for marker in _CANCALL_MARKERS)
+        if any(marker in json.dumps(f.get("capability_expr") or {}) for marker in _CANCALL_MARKERS)
     ]
 
 
