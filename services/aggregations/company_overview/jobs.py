@@ -5,7 +5,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -305,9 +305,20 @@ def _completed_job_eras(session: Session, rows: list[tuple[Any, int | None, str 
     return eras
 
 
-def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, list[dict[str, Any]]]:
-    """``(member_count, members with no current completed analysis)``, each with its witness token, its last failed
-    job, and the stale analysis it still has, if any.
+class MemberAnalysisRead(NamedTuple):
+    members: int
+    # Members with no analysis that stands, each with its witness token and last failed job.
+    not_analyzed: list[dict[str, Any]]
+    # Members analysed only under an older analyzer with no newer failure: still analysed, the era named as a hedge.
+    stale_analyzed: list[dict[str, Any]]
+
+
+def members_without_analysis(session: Session, protocol_id: int) -> MemberAnalysisRead:
+    """The protocol's members by analysis state.
+
+    A completed job of the current analyzer, or an older one with no failed attempt after it, counts as analysed. An
+    older analysis followed by a failed attempt doesn't: the re-analysis failed, so the page would be showing a
+    superseded reading.
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
@@ -317,7 +328,7 @@ def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, l
         .order_by(Contract.id)
     ).all()
     if not members:
-        return 0, []
+        return MemberAnalysisRead(0, [], [])
     addresses = sorted({address.lower() for _, address, _, _ in members})
     track(session, "address", addresses)
     rows = session.execute(
@@ -350,6 +361,7 @@ def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, l
         )
 
     out: list[dict[str, Any]] = []
+    stale_analyzed: list[dict[str, Any]] = []
     for contract_id, address, chain, name in members:
         jobs = jobs_by_entity.get(_entity_key(_canonical_chain_name(chain), address), [])
         completed = [job for job in jobs if job.status == JobStatus.completed]
@@ -360,6 +372,18 @@ def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, l
         failed = [
             job for job in jobs if job.status in _FAILED_STATUSES and (stale is None or job.recency > stale.recency)
         ]
+        if stale is not None and not failed:
+            stale_analyzed.append(
+                {
+                    "contract_id": contract_id,
+                    "address": address.lower(),
+                    "chain": chain,
+                    "name": name,
+                    "stale_analysis_job_id": str(stale.id),
+                    "stale_analysis_version": stale.era,
+                }
+            )
+            continue
         last_failed = max(failed, key=lambda job: (job.recency, str(job.id))) if failed else None
         out.append(
             {
@@ -374,7 +398,11 @@ def members_without_analysis(session: Session, protocol_id: int) -> tuple[int, l
                 "stale_analysis_version": stale.era if stale else None,
             }
         )
-    return len(members), sorted(out, key=lambda m: (m["analysis_state"], m["chain"] or "", m["address"]))
+    return MemberAnalysisRead(
+        len(members),
+        sorted(out, key=lambda m: (m["analysis_state"], m["chain"] or "", m["address"])),
+        sorted(stale_analyzed, key=lambda m: (m["chain"] or "", m["address"])),
+    )
 
 
 def _canonical_chain_name(contract_chain: str | None) -> str:

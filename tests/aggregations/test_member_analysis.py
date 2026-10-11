@@ -105,6 +105,7 @@ def test_a_fully_analyzed_protocol_reports_no_gap(db_session):
         "not_determined": 0,
         "by_state": {"analysis_failed": 0, "analysis_not_completed": 0},
         "not_analyzed": [],
+        "analyzed_at_older_version": [],
     }
     assert perimeter_state(db_session, protocol.id)[0] == PERIMETER_SETTLED
 
@@ -269,7 +270,37 @@ def test_a_stale_analysis_with_a_newer_failure_is_not_determined_and_names_the_s
     assert detail["members_stale_analysis_versions"] == {str(STALE_ERA): 1}
 
 
-def test_a_stale_analysis_alone_is_not_completed_and_an_older_failure_is_not_named(db_session):
+def _scored(session, protocol, contract) -> None:
+    session.add(
+        EffectiveFunction(
+            contract_id=contract.id,
+            deployment_address=contract.address,
+            function_name="pause",
+            selector="0x8456cb59",
+            abi_signature="pause()",
+            authority_public=True,
+            authority_openness="open",
+            claims=[{"claim_id": "pause.set", "tier": "standard_exact", "witness": {"kind": "pause_latch"}}],
+        )
+    )
+    session.commit()
+
+
+def _score(session, protocol):
+    document = compute_protocol_score(session, protocol.id, signals=distill_protocol_in_memory(session, protocol.id))
+    return (
+        document.grade_state,
+        document.grade_lambda,
+        document.perimeter_state,
+        document.model_parameters["confidence_detail"]["reachability_answered_pct"],
+    )
+
+
+def test_an_older_analysis_with_no_failed_retry_stays_analysed_and_names_its_version(db_session):
+    current = _add_protocol(db_session, f"members-current-only-{uuid.uuid4().hex[:8]}")
+    _scored(db_session, current, _member(db_session, current, "current", JobStatus.completed))
+    _member(db_session, current, "current-unscored", JobStatus.completed)
+
     protocol = _add_protocol(db_session, f"members-stale-only-{uuid.uuid4().hex[:8]}")
     member = _member(db_session, protocol, "stale-only", JobStatus.failed_terminal)
     db_session.execute(
@@ -278,24 +309,47 @@ def test_a_stale_analysis_alone_is_not_completed_and_an_older_failure_is_not_nam
         .values(updated_at=datetime.now(timezone.utc) - timedelta(hours=1))
     )
     db_session.commit()
-    stale = _attempt(db_session, protocol, member, JobStatus.completed, STALE_ERA)
+    # An older failure, then the older analysis, then a retry still in flight: nothing newer has failed.
+    stale = _attempt(db_session, protocol, member, JobStatus.completed, STALE_ERA, age_s=60)
+    _attempt(db_session, protocol, member, JobStatus.queued, None)
     unprovable = _member(db_session, protocol, "unprovable", JobStatus.completed)
     db_session.execute(update(Job).where(Job.address == unprovable.address).values(analysis_schema_version=None))
     db_session.commit()
+    _scored(db_session, protocol, member)
 
-    _, listed = _listed(db_session, protocol)
-    entry = listed[member.address.lower()]
-    assert entry["analysis_state"] == "analysis_not_completed"
-    assert entry["last_failed_job_id"] is None
-    assert (entry["stale_analysis_job_id"], entry["stale_analysis_version"]) == (str(stale.id), STALE_ERA)
-    # A completed job whose era can't be proven is stale too, with its era not determined.
-    other = listed[unprovable.address.lower()]
-    assert (other["analysis_state"], other["stale_analysis_version"]) == ("analysis_not_completed", None)
-    assert other["stale_analysis_job_id"] is not None
-    assert perimeter_state(db_session, protocol.id)[1]["members_stale_analysis_versions"] == {
-        str(STALE_ERA): 1,
-        "not_determined": 1,
-    }
+    block, listed = _listed(db_session, protocol)
+    assert listed == {}
+    assert (block["members"], block["analyzed"], block["not_determined"]) == (2, 2, 0)
+    hedges = {m["address"]: m for m in block["analyzed_at_older_version"]}
+    assert (
+        hedges[member.address.lower()]["stale_analysis_job_id"],
+        hedges[member.address.lower()]["stale_analysis_version"],
+    ) == (
+        str(stale.id),
+        STALE_ERA,
+    )
+    # A completed job whose era can't be proven is older too, with its era not determined.
+    assert hedges[unprovable.address.lower()]["stale_analysis_version"] is None
+
+    state, detail = perimeter_state(db_session, protocol.id)
+    assert detail["members_not_analyzed_entities"] == []
+    assert detail["members_stale_analysis_versions"] == {str(STALE_ERA): 1, "not_determined": 1}
+    # The pending retry makes the perimeter unsettled, as for any protocol with work in flight.
+    assert state == PERIMETER_UNSETTLED
+
+    db_session.execute(
+        update(Job)
+        .where(Job.status == JobStatus.queued, Job.protocol_id == protocol.id)
+        .values(
+            status=JobStatus.completed,
+            analysis_schema_version=STALE_ERA,
+            updated_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+    )
+    db_session.commit()
+    assert perimeter_state(db_session, protocol.id)[0] == PERIMETER_SETTLED
+    # The hedge charges nothing: the score reads as if the analysis were current.
+    assert _score(db_session, protocol) == _score(db_session, current)
 
 
 def test_a_current_analysis_counts_beside_stale_and_failed_attempts(db_session):

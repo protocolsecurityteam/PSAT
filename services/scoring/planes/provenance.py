@@ -262,7 +262,7 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
             )
             .scalar()
         )
-        members, unanalyzed = members_without_analysis(session, protocol_id)
+        members, unanalyzed, stale_analyzed = members_without_analysis(session, protocol_id)
     except Exception as exc:  # pragma: no cover - a failed read is a real third state
         return PERIMETER_NOT_DETERMINED, {"error": type(exc).__name__}
     if pending is None or pending_effects is None:
@@ -271,6 +271,8 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
     stale_versions: dict[str, int] = defaultdict(int)
     for member in unanalyzed:
         by_state[member["analysis_state"]] += 1
+    # Information only: an older analysis with no failed retry still reads, so it settles nothing either way.
+    for member in [*unanalyzed, *stale_analyzed]:
         if member["stale_analysis_job_id"] is not None:
             version = member["stale_analysis_version"]
             stale_versions[str(version) if version is not None else NOT_DETERMINED] += 1
