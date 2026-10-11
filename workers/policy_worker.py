@@ -59,7 +59,7 @@ from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph, unsettled_replay_addresses
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim
-from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
+from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 from workers.retry_policy import classify
@@ -621,13 +621,12 @@ class PolicyWorker(BaseWorker):
         # doesn't skip the in-progress job.
         capability_resolver_output: dict[str, dict[str, Any]] | None = None
         if isinstance(predicate_trees, dict) and job.address:
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             with log_timed_phase(logger, "semantic_capabilities", durations_ms=durations_ms) as ph:
                 capability_resolver_output = _resolve_semantic_capabilities(
                     session,
                     contract_address=(job.address or "").lower(),
                     job_id=job.id,
-                    chain=job_chain if isinstance(job_chain, str) else None,
+                    chain=chain_name,
                     chain_id=chain_id,
                 )
                 ph["function_count"] = len(capability_resolver_output or {})
@@ -704,19 +703,13 @@ class PolicyWorker(BaseWorker):
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
         if contract_row and isinstance(predicate_trees, dict):
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            # Registry-derived chain id; unknown chains fall back to mainnet.
-            try:
-                chain_id = chain_by_name(job_chain).chain_id if job_chain else 1
-            except UnknownChainError:
-                chain_id = 1
             with log_timed_phase(logger, "principal_history", durations_ms=durations_ms):
                 try:
                     state_var_values = _load_state_var_values(
                         session,
                         contract_row.address,
                         job_id=job.id,
-                        chain=job_chain if isinstance(job_chain, str) else None,
+                        chain=chain_name,
                     )
                     principal_history = build_principal_history(
                         contract_address=contract_row.address,

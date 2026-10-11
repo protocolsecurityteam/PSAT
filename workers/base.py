@@ -835,14 +835,19 @@ class BaseWorker:
 
     @staticmethod
     def _provider_chain_for(job: Job) -> str | None:
-        """The provider's chain from the job request (as ``_queue_discovered_contracts`` stamps it); ``getattr``
-        tolerates test doubles.
+        """The provider's canonical chain, as dependency edges record it: the name of the job's ``chain_id``, else the
+        request's chain. ``getattr`` tolerates test doubles.
         """
+        from utils.chains import UnknownChainError, canonical_chain, chain_by_id
+
+        chain_id = getattr(job, "chain_id", None)
+        if isinstance(chain_id, int):
+            try:
+                return chain_by_id(chain_id).name
+            except UnknownChainError:
+                return None
         request = getattr(job, "request", None)
-        if not isinstance(request, dict):
-            return None
-        chain = request.get("chain")
-        return chain if isinstance(chain, str) and chain else None
+        return canonical_chain(request.get("chain")) if isinstance(request, dict) else None
 
     def _persist_stage_errors(self, job: Job, errors: list[StageError]) -> None:
         """Write ``stage_errors`` via a fresh session, merged with the existing artifact so retries accumulate.

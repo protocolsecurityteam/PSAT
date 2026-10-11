@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -59,7 +60,7 @@ from services.resolution.role_holder_plane import (
 )
 from services.resolution.tracking import build_control_snapshot
 from utils.balance_status import BALANCE_WRITER_RESOLUTION
-from utils.chains import UnknownChainError, chain_by_id, chain_enabled
+from utils.chains import UnknownChainError, chain_by_id, chain_enabled, chain_name_to_id_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -835,7 +836,7 @@ def _detect_dep_cycle(
     ``None``.
 
     A recursive CTE walks forward from the provider, joining via ``Job.address`` (dependency rows store only
-    chain+address for the provider), with path-based cycle elimination.
+    chain+address for the provider; the provider job is matched on ``chain_id``), with path-based cycle elimination.
     """
     from sqlalchemy import text as _sa_text
 
@@ -851,7 +852,7 @@ def _detect_dep_cycle(
             FROM job_dependencies jd
             JOIN jobs provider_job
               ON LOWER(provider_job.address) = LOWER(jd.provider_address)
-             AND COALESCE(provider_job.request->>'chain', '') = COALESCE(jd.provider_chain, '')
+             AND provider_job.chain_id = (CAST(:chain_ids AS jsonb) ->> COALESCE(jd.provider_chain, 'ethereum'))::int
             WHERE jd.depender_job_id = :start_provider
               AND jd.status IN ('pending', 'satisfied')
 
@@ -866,7 +867,7 @@ def _detect_dep_cycle(
             FROM job_dependencies jd
             JOIN jobs provider_job
               ON LOWER(provider_job.address) = LOWER(jd.provider_address)
-             AND COALESCE(provider_job.request->>'chain', '') = COALESCE(jd.provider_chain, '')
+             AND provider_job.chain_id = (CAST(:chain_ids AS jsonb) ->> COALESCE(jd.provider_chain, 'ethereum'))::int
             JOIN chain ON jd.depender_job_id = chain.to_job
             WHERE jd.status IN ('pending', 'satisfied')
               AND NOT (jd.depender_job_id::text = ANY(chain.path))
@@ -879,6 +880,7 @@ def _detect_dep_cycle(
         {
             "start_provider": str(proposed_provider_id),
             "target_depender": str(proposed_depender_id),
+            "chain_ids": json.dumps(chain_name_to_id_map()),
         },
     ).first()
     if row is None:

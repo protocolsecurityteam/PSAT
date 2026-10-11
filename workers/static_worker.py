@@ -848,9 +848,9 @@ class StaticWorker(BaseWorker):
         force = bool(request.get("force"))
         # Under --force, the same impl reached via several proxies spawns once per cascade.
         root_job_id = request.get("root_job_id") or str(job.id)
-        # Coalesce a chainless request via the job's chain: with chain=None the reconcile has no chain filter, and
-        # CREATE2 impls share addresses across chains.
-        chain = request.get("chain") or _parent_chain_name(job)
+        # The job's own chain, never None: with chain=None the reconcile has no chain filter, and CREATE2 impls share
+        # addresses across chains.
+        chain = _parent_chain_name(job)
         from sqlalchemy import text as _sa_text
 
         for impl_addr, label in impl_entries:
@@ -903,7 +903,7 @@ class StaticWorker(BaseWorker):
                 "parent_is_member": parent_is_member,
             }
             # Always stamp the parent's chain so the child can't default elsewhere.
-            impl_chain = request.get("chain") or _parent_chain_name(job)
+            impl_chain = chain
             child_request["chain"] = impl_chain
             # Defence in depth: a disabled chain spawns nothing.
             if not chain_enabled(impl_chain):
