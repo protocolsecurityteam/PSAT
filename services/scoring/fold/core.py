@@ -532,19 +532,23 @@ class _UnitResolver:
 
     def _timelock_proposer_executors(self, signals: list[FunctionSignal]) -> dict[str, dict[str, Any]]:
         """The weakest principal proven able to both propose and execute on each timelock; propose-only doesn't let it
-        act as the timelock.
+        act as the timelock. An execute proven open (the executor role held by ``address(0)``) is satisfied for every
+        proven proposer.
 
         A proposer-executor whose own weakness isn't proven (no row, an unread Safe owner set, a contract or an unknown
         type) could be the weakest path, so its timelock gets no entry and is recorded in
         ``proposers_not_determined``.
         """
         by_role: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"schedule": set(), "execute": set()})
+        open_execute: set[str] = set()
         facts_by_key: dict[str, P.PrincipalFacts | None] = {}
         for signal in sorted(signals, key=lambda s: (s.chain, s.deployment_address, s.selector, s.claim_id)):
             role = {C.TIMELOCK_SCHEDULE: "schedule", C.TIMELOCK_EXECUTE: "execute"}.get(signal.claim_id)
             if role is None:
                 continue
             timelock_key = entity_key(signal.chain, signal.deployment_address)
+            if role == "execute" and signal.authority_openness == OPENNESS_OPEN:
+                open_execute.add(timelock_key)
             for ref in signal.principal_refs:
                 facts = self._facts.get(int(ref.function_principal_id))
                 key = facts.key if facts is not None else entity_key(ref.chain, ref.address)
@@ -554,7 +558,9 @@ class _UnitResolver:
 
         out: dict[str, dict[str, Any]] = {}
         for timelock_key in sorted(by_role):
-            both = sorted(by_role[timelock_key]["schedule"] & by_role[timelock_key]["execute"])
+            proposers = by_role[timelock_key]["schedule"]
+            execute_open = timelock_key in open_execute
+            both = sorted(proposers if execute_open else proposers & by_role[timelock_key]["execute"])
             entries: list[dict[str, Any]] = []
             unpriced: list[str] = []
             for key in both:
@@ -562,7 +568,7 @@ class _UnitResolver:
                 if entry is None:
                     unpriced.append(key)
                 else:
-                    entries.append(entry)
+                    entries.append({**entry, "execute_open": execute_open})
             if unpriced:
                 self.proposers_not_determined[timelock_key] = unpriced
                 if entries:
@@ -604,7 +610,9 @@ class _UnitResolver:
                         if entry["k"] is not None
                         else "not_determined"
                     ),
-                    "basis": "proven proposer AND executor",
+                    "basis": "proven proposer, execute open"
+                    if entry["execute_open"]
+                    else "proven proposer AND executor",
                 }
                 for timelock, entry in sorted(self._proposers.items())
             },

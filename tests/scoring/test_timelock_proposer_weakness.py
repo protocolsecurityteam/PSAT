@@ -214,3 +214,66 @@ def test_a_stronger_proven_proposer_leaves_the_undetermined_rung_as_it_was(fold)
     _, finding = _run(fold, (SAFE_REF, PrincipalRef(4, "ethereum", OTHER)), principals=principals)
     assert finding["weakness"] == K.WEAKNESS_TIMELOCK_UNDETERMINED
     assert not any(n.startswith("proven_proposer_floor") for n in finding["witness_notes"])
+
+
+def _open_executor_population(proposer_refs, *, execute_open=True):
+    signals = _population(proposer_refs)
+    execute = next(s for s in signals if s.claim_id == "timelock.execute")
+    if execute_open:
+        # An OZ timelock whose EXECUTOR_ROLE is held by address(0): anyone executes a ready operation.
+        replacement = replace(execute, authority_openness="open", principal_state="none_required", principal_refs=())
+    else:
+        replacement = replace(execute, principal_refs=(PrincipalRef(4, "ethereum", OTHER),))
+    return [replacement if s is execute else s for s in signals]
+
+
+def _run_open(fold, proposer_refs, principals=None, **kwargs):
+    document = fold(
+        _open_executor_population(proposer_refs, **kwargs),
+        principals=principals or _principals({4: facts(4, OTHER, "eoa")}),
+        value=value_plane({KEY_V: {"usdc": 100_000_000.0}}, contracts=(KEY_V, KEY_TIMELOCK)),
+    )
+    (finding,) = [f for f in document.findings if f["capability"].startswith("upgrade")]
+    return document, finding
+
+
+def test_an_open_executor_credits_a_proven_safe_proposer(fold):
+    document, finding = _run_open(fold, (SAFE_REF,))
+
+    # Before: 0.55, lambda 70.3, "timelock 2d(proposer not_determined)".
+    assert finding["principal_unit"] == KEY_SAFE
+    assert finding["weakness"] == 0.136
+    assert document.grade_lambda == 92.656
+    collapse = document.provenance["principal_units"]["timelock_collapses"][KEY_TIMELOCK]
+    assert collapse["basis"] == "proven proposer, execute open"
+    assert collapse["proposer_k_of_n"] == "3/4"
+
+
+def test_an_open_executor_prices_a_proven_eoa_proposer_as_an_eoa(fold):
+    discount = K.delay_discount(TWO_DAYS)
+    assert discount is not None
+    document, finding = _run_open(fold, (EOA_REF,))
+
+    # Before: 0.55 (below a proven EOA), lambda 70.3.
+    assert finding["principal_unit"] == KEY_EOA
+    assert finding["weakness"] == round(K.WEAKNESS_EOA * discount, 4) == 0.6121
+    assert document.grade_lambda == 66.9466
+
+
+def test_an_open_executor_leaves_an_unproven_proposer_not_determined(fold):
+    other_ref = PrincipalRef(4, "ethereum", OTHER)
+    document, finding = _run_open(fold, (SAFE_REF, other_ref), principals=_principals({4: facts(4, OTHER, "contract")}))
+
+    assert finding["principal_unit"] == KEY_TIMELOCK
+    assert finding["weakness"] == K.WEAKNESS_TIMELOCK_UNDETERMINED
+    assert "proposer not_determined" in str(finding["weakest_gate"])
+    assert KEY_TIMELOCK not in document.provenance["principal_units"]["timelock_collapses"]
+
+
+def test_a_restricted_executor_still_needs_the_proposer_to_execute(fold):
+    document, finding = _run_open(fold, (SAFE_REF,), execute_open=False)
+
+    # The Safe proposes but only OTHER executes, so no principal is both.
+    assert finding["principal_unit"] == KEY_TIMELOCK
+    assert finding["weakness"] == K.WEAKNESS_TIMELOCK_UNDETERMINED
+    assert KEY_TIMELOCK not in document.provenance["principal_units"]["timelock_collapses"]
