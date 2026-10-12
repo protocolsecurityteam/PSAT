@@ -372,6 +372,9 @@ class ContractCreationWitness(Base):
     creation_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # The factory contract whose CREATE/CREATE2 minted this address. NULL = not recorded, not "EOA-created".
     creation_factory: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # True = allocated in the chain's genesis state (no creation tx, no deployer); False = created by a tx; NULL = no
+    # answer.
+    creation_genesis: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Written together with the result, so "probed and code present" differs from "never probed".
     code_probe_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     code_absent_at_probe: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

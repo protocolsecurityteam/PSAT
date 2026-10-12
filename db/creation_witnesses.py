@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session
 from db.models import ContractCreationWitness
 
 _WRITABLE = frozenset(
-    {"creation_tx_hash", "creation_block", "creation_factory", "code_probe_block", "code_absent_at_probe"}
+    {
+        "creation_tx_hash",
+        "creation_block",
+        "creation_factory",
+        "creation_genesis",
+        "code_probe_block",
+        "code_absent_at_probe",
+    }
 )
 
 

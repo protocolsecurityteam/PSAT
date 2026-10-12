@@ -8,6 +8,7 @@ import json as _json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -376,6 +377,66 @@ def get(
     )
     record_degraded(phase="etherscan_rate_limit", exc=exhausted, context={"module": module, "action": action})
     raise exhausted
+
+
+_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+# Etherscan's stand-in for both creator and tx of a contract in the chain's genesis state (e.g. L2 predeploys).
+_GENESIS_MARKER = "GENESIS"
+
+
+@dataclass(frozen=True)
+class CreationRecord:
+    """One ``getcontractcreation`` entry.
+
+    ``genesis``: the contract was allocated in the chain's genesis state, so there is no creation tx and no deployer.
+    ``tx_hash``, ``creator`` and ``factory`` are None unless the field is a well-formed hash or address.
+    """
+
+    address: str
+    tx_hash: str | None
+    block: int | None
+    creator: str | None
+    factory: str | None
+    genesis: bool
+
+
+def _creation_block(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip():
+        raw = value.strip()
+        try:
+            block = int(raw, 16) if raw.startswith("0x") else int(raw)
+        except ValueError:
+            return None
+        return block if block >= 0 else None
+    return None
+
+
+def parse_creation_record(item: object) -> CreationRecord | None:
+    """Typed view of one ``getcontractcreation`` entry, or None when it names no contract address."""
+    if not isinstance(item, dict):
+        return None
+    address = item.get("contractAddress")
+    if not isinstance(address, str) or not _ADDRESS_RE.match(address):
+        return None
+    creator = item.get("contractCreator")
+    tx = item.get("txHash")
+    factory = item.get("contractFactory")
+    genesis = (isinstance(creator, str) and creator.strip().upper() == _GENESIS_MARKER) or (
+        isinstance(tx, str) and tx.strip().upper().startswith(_GENESIS_MARKER)
+    )
+    return CreationRecord(
+        address=address.lower(),
+        tx_hash=tx.lower() if not genesis and isinstance(tx, str) and _TX_HASH_RE.match(tx) else None,
+        block=_creation_block(item.get("blockNumber")),
+        creator=creator.lower() if not genesis and isinstance(creator, str) and _ADDRESS_RE.match(creator) else None,
+        factory=factory.lower() if not genesis and isinstance(factory, str) and _ADDRESS_RE.match(factory) else None,
+        genesis=genesis,
+    )
 
 
 def get_contract_creation_block(address: str, *, chain_id: int, rpc_url: str | None = None) -> int | None:

@@ -1152,11 +1152,12 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
     """
     from db.creation_witnesses import upsert_creation_witness
     from services.clients.etherscan import get as etherscan_get
+    from services.clients.etherscan import parse_creation_record
     from services.clients.rpc import rpc_request
 
     addresses = sorted(candidates)
     written = 0
-    creation: dict[str, tuple[str | None, int | None]] = {}
+    creation: dict[str, tuple[str | None, int | None, bool]] = {}
     for start in range(0, len(addresses), _CREATION_BATCH):
         batch = addresses[start : start + _CREATION_BATCH]
         try:
@@ -1173,16 +1174,13 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
         if not isinstance(result, list):
             continue
         for item in result:
-            if not isinstance(item, dict):
+            record = parse_creation_record(item)
+            if record is None or (record.tx_hash is None and not record.genesis):
                 continue
-            addr = item.get("contractAddress")
-            tx = item.get("txHash")
-            if not isinstance(addr, str) or not isinstance(tx, str):
-                continue
-            creation[addr.lower()] = (tx.lower(), _coerce_block(item.get("blockNumber")))
+            creation[record.address] = (record.tx_hash, record.block, record.genesis)
 
     for address in addresses:
-        creation_tx, creation_block = creation.get(address, (None, None))
+        creation_tx, creation_block, genesis = creation.get(address, (None, None, None))
         probe_block: int | None = None
         code_absent: bool | None = None
         # Only probe where the indexer names this proxy's earliest ``Upgraded`` tx; elsewhere it can't change a verdict.
@@ -1214,25 +1212,12 @@ def _fetch_creation_witnesses(session, *, chain_id: int, candidates: dict[str, t
             keep_existing=True,
             creation_tx_hash=creation_tx,
             creation_block=creation_block,
+            creation_genesis=genesis,
             code_probe_block=probe_block,
             code_absent_at_probe=code_absent,
         )
         written += 1
     return written
-
-
-def _coerce_block(value) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip():
-        raw = value.strip()
-        try:
-            return int(raw, 16) if raw.startswith("0x") else int(raw)
-        except ValueError:
-            return None
-    return None
 
 
 def fold_upgrade_transactions(
