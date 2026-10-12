@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import contextvars as _contextvars
 import os
+from collections.abc import Callable
 from typing import Any, cast
 
 from ..predicate_types import (
-    HELPER_RETURN_NOT_NEGATED,
     LeafPredicate,
     PredicateTree,
     make_and_node,
@@ -46,6 +46,7 @@ from .confidence import apply_confidence_to_tree
 from .control_flow import (
     _build_if_else_returns_or_children,
     _detect_assembly_combinator_op,
+    _helper_exits,
     _resolve_internal_call_return,
 )
 from .leaves import (
@@ -58,12 +59,15 @@ from .leaves import (
     _self_gate_or_truthy_leaf,
 )
 from .operands import _operand_for_value, _published_source_key, _source_to_operand
+from .reach import modifiers_before, placeholders, render, unreached_formula
 
 # ``(callee_id, bindings) -> ProvenanceMap`` for helpers shared across a contract's functions (``_checkRole`` behind
 # grant/revoke/renounce). Set by ``build_predicate_artifacts``; ``None`` in direct test calls. Pure performance.
 _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
     "psat_predicate_helper_engine_cache", default=None
 )
+
+_HELPER_NEVER_RETURNS = "helper_never_returns_allowed_value"
 
 # Callees being gate-inlined, breaking mutual recursion and bounding depth.
 _inline_gate_callee_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
@@ -116,7 +120,7 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
         subtree = _build_subtree_from_gate(gate, prov, function)
         if subtree is not None:
             _stamp_gate_scope(subtree, gate, function)
-            subtrees.append(subtree)
+            subtrees.append(_where_reached(subtree, gate, prov, function))
         elif uncertain_out is not None and _gate_condition_is_caller_eq_neq(gate, prov, function):
             caller_eq_unmodeled = True
 
@@ -129,6 +133,91 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
     tree = make_and_node(subtrees)
     apply_confidence_to_tree(tree)
     return tree
+
+
+def _where_reached(
+    subtree: PredicateTree, gate: RevertGate, prov: ProvenanceMap, function: Any, *, first_level: int = 0
+) -> PredicateTree:
+    """``subtree`` as an alternative to every condition under which ``gate`` isn't reached.
+
+    Levels run from ``function`` down ``gate.call_chain`` to the gate's node; a level's modifiers that run before its
+    anchor add the condition their ``_`` is reached under. ``first_level`` skips outer levels whose control flow the
+    caller already accounts for. The alternatives' leaves carry the gate's scope, so whatever consumes the gate consumes
+    them too.
+    """
+    if gate.node is None:
+        return subtree
+    chain = list(gate.call_chain or [])
+    frames = [function, *(getattr(ir, "function", None) for ir in chain)]
+    anchors = [*(getattr(ir, "node", None) for ir in chain), gate.node]
+    alternatives: list[PredicateTree] = []
+    for level in range(first_level, len(frames)):
+        frame, anchor = frames[level], anchors[level]
+        if frame is None:
+            alternatives.append(make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text)))
+            continue
+        level_chain = chain[:level]
+        level_prov: ProvenanceMap | None = prov
+        if level_chain:
+            _, level_prov, chain_end = _build_chain_bindings(level_chain, frame, function, top_prov=prov)
+            if chain_end is not frame or level_prov is None:
+                alternatives.append(
+                    make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text))
+                )
+                continue
+        targets: list[tuple[Any, list[Any], list[Any], ProvenanceMap | None]] = [
+            (frame, [anchor], level_chain, level_prov)
+        ]
+        for call in modifiers_before(frame, anchor) if anchor is not None else []:
+            modifier = call.function
+            _, modifier_prov, _ = _build_chain_bindings([*level_chain, call], modifier, function, top_prov=prov)
+            targets.append((modifier, placeholders(modifier), [*level_chain, call], modifier_prov))
+        for target_fn, target_anchors, target_chain, target_prov in targets:
+            formula = unreached_formula(target_fn, target_anchors)
+            if formula is None:
+                continue
+            alternative = render(formula, target_fn, _branch_tree_builder(target_fn, target_chain, target_prov or prov))
+            if alternative is not None:
+                alternatives.append(alternative)
+    if not alternatives:
+        return subtree
+    for alternative in alternatives:
+        _restamp_scope(alternative, gate, function)
+    children: list[PredicateTree] = []
+    for tree in [*alternatives, subtree]:
+        children.extend(tree.get("children") or [] if tree.get("op") == "OR" else [tree])
+    return make_or_node(children)
+
+
+def _branch_tree_builder(
+    frame: Any, chain: list[Any], prov: ProvenanceMap
+) -> Callable[[Any, Any, bool], PredicateTree | None]:
+    def build(node: Any, condition: Any, holds: bool) -> PredicateTree | None:
+        gate = RevertGate(
+            kind="if_revert",
+            condition_value=condition,
+            polarity="allowed_when_true" if holds else "allowed_when_false",
+            node=node,
+            containing_function=frame,
+            call_chain=list(chain),
+            expression_text=str(getattr(node, "expression", None) or condition),
+            basis=["revert_path_condition"],
+        )
+        tree = _build_subtree_from_value(condition, prov, gate, frame)
+        leaf = tree.get("leaf") or {}
+        # A bool helper that never returns the value this outcome needs makes the outcome impossible.
+        return None if leaf.get("unsupported_reason") == _HELPER_NEVER_RETURNS else tree
+
+    return build
+
+
+def _restamp_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
+    leaf = tree.get("leaf")
+    if leaf is not None:
+        leaf["source_function"] = (gate.containing_function or function).canonical_name
+        leaf["source_node_id"] = gate.node.node_id
+    for child in tree.get("children") or []:
+        _restamp_scope(child, gate, function)
 
 
 def _stamp_gate_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
@@ -526,12 +615,16 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
 
     Shapes: a direct Binary AND/OR return; a return of an assembly combinator call (Maker ``return either(...)``); the
     helper itself being an assembly ``or``/``and`` combinator (below Slither's IR, so detected structurally with the
-    call-site args as children); and an if/else chain of bool returns (see ``_build_if_else_returns_or_children``).
+    call-site args as children); and any helper with several returns or a non-connective one, read path by path (see
+    ``_build_if_else_returns_or_children``).
     """
     resolved = _resolve_internal_call_return(ir, prov)
     if resolved is None:
         return None
     callee, sub_prov, _return_value, inner = resolved
+    if len(_helper_exits(callee)) > 1:
+        # The shapes below read the first return only.
+        return _helper_return_paths_subtree(ir, prov, callee, sub_prov, gate)
     op_name: str | None = None
     children: list[PredicateTree] = []
     if isinstance(inner, Binary):
@@ -560,24 +653,13 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
     else:
         # The helper is the assembly combinator; the call-site args are the children.
         asm_op = _detect_assembly_combinator_op(callee)
-        if asm_op is not None:
-            op_name = asm_op
-            call_args = list(getattr(ir, "arguments", []) or [])
-            if not call_args:
-                return None
-            children = [
-                _build_subtree_from_value(arg, prov, gate, gate.containing_function or callee) for arg in call_args
-            ]
-        else:
-            # If/else chain of bool returns: OR of each return-true path's conditions.
-            children = _build_if_else_returns_or_children(callee, sub_prov, gate)
-            if children:
-                op_name = "or"
-                if gate.polarity == "allowed_when_false":
-                    for child in children:
-                        _tag_tree_leaves_basis(child, HELPER_RETURN_NOT_NEGATED)
-        if op_name is None or not children:
+        if asm_op is None:
+            return _helper_return_paths_subtree(ir, prov, callee, sub_prov, gate)
+        op_name = asm_op
+        call_args = list(getattr(ir, "arguments", []) or [])
+        if not call_args:
             return None
+        children = [_build_subtree_from_value(arg, prov, gate, gate.containing_function or callee) for arg in call_args]
     if op_name is None or not children:
         return None
     # Re-attach call-site argument origins lost in the callee's frame.
@@ -585,6 +667,17 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
     if gate.polarity == "allowed_when_true":
         return make_and_node(children) if op_name == "and" else make_or_node(children)
     return make_or_node(children) if op_name == "and" else make_and_node(children)
+
+
+def _helper_return_paths_subtree(
+    ir: Any, prov: ProvenanceMap, callee: Any, sub_prov: ProvenanceMap, gate: RevertGate
+) -> PredicateTree:
+    """The OR over a helper's return paths that yield the value ``gate`` allows on, each already in ``gate``'s
+    polarity."""
+    children = _build_if_else_returns_or_children(callee, sub_prov, gate)
+    if not children:
+        return make_leaf_node(_unsupported_leaf(reason=_HELPER_NEVER_RETURNS, expression=gate.expression_text))
+    return make_or_node([_attach_call_site_arg_origins_to_tree(child, ir, prov) for child in children])
 
 
 # Explicit conditional reverts only: opaque fail-safes would add ``unsupported`` leaves, and external-call/try-catch
@@ -649,6 +742,7 @@ def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[Pr
             subtree = _build_subtree_from_gate(inner_gate, sub_prov, callee)
             if subtree is None or not _tree_has_caller_tainted_leaf(subtree):
                 continue
+            subtree = _where_reached(subtree, inner_gate, sub_prov, callee)
             _tag_tree_leaves_basis(subtree, f"inlined_internal_gate:{_callee_label(callee)}")
             subtrees.append(subtree)
         return subtrees

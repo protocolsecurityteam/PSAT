@@ -85,6 +85,13 @@
       "detection_patterns": ["pause_gate_polarity"]
     },
     {
+      "path": "predicates/control_flow_fidelity.sol",
+      "category": "predicates",
+      "contract_name": "ConditionalGates",
+      "description": "Gate conditions under control flow: getter and helper returns read under a negated call, OpenZeppelin v4 and v5 pause helpers, helpers with guarded and implicit returns, and reverts reached only under a branch, an early return, a conditional modifier placeholder, a loop or a try block.",
+      "detection_patterns": ["helper_return_polarity", "conditional_revert_gate"]
+    },
+    {
       "path": "upgrade/direct_admin_upgrade.sol",
       "category": "upgrade",
       "contract_name": "DirectAdminUpgrade",

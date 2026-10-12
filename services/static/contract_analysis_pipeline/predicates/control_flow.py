@@ -151,11 +151,10 @@ def _forward_reachable_node_ids(start: Any) -> set[int]:
     return seen
 
 
-def _branch_value_is_only_true(start: Any) -> bool:
-    """True iff every terminating outcome reachable from ``start`` is ``return true`` and one is reached, i.e.
+def _branch_value_is_only(start: Any, literal: str) -> bool:
+    """True iff every terminating outcome reachable from ``start`` is ``return <literal>`` and one is reached.
 
-    an allow branch. Terminators are sinks, else a bare ``if(!auth) revert;`` would read as reaching a later ``return
-    true``.
+    Terminators are sinks, else a bare ``if(!auth) revert;`` would read as reaching a later return.
     """
     if start is None:
         return False
@@ -170,14 +169,18 @@ def _branch_value_is_only_true(start: Any) -> bool:
         seen.add(nid)
         if _node_is_type(node, "NodeType.RETURN"):
             saw_return = True
-            if _return_literal(node) != "True":
+            if _return_literal(node) != literal:
                 return False
             continue
         if _node_terminates_control(node):
             return False
-        for son in getattr(node, "sons", []) or []:
-            if son is not None:
-                work.append(son)
+        sons = [son for son in getattr(node, "sons", []) or [] if son is not None]
+        if not sons:
+            # Falling off the end returns the default ``false``.
+            saw_return = True
+            if literal != "False":
+                return False
+        work.extend(sons)
     return saw_return
 
 
@@ -214,21 +217,50 @@ def _guards_contain_opening(guards: list[PredicateTree]) -> bool:
     return False
 
 
+def _helper_exits(callee: Any) -> list[tuple[Any, Any | None]]:
+    """``(node, returned value)`` for every way a bool helper returns: its ``return`` nodes, and falling off the end
+    (value ``None``, the default ``false``). Exits reached only through a revert aren't exits.
+    """
+    nodes = list(getattr(callee, "nodes", []) or [])
+    if not nodes:
+        return []
+    live = _forward_reachable_node_ids(getattr(callee, "entry_point", None) or nodes[0])
+    exits: list[tuple[Any, Any | None]] = []
+    for node in nodes:
+        if id(node) not in live:
+            continue
+        if _node_is_type(node, "NodeType.RETURN"):
+            for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
+                if isinstance(ir, Return):
+                    values = getattr(ir, "values", ()) or ()
+                    if values:
+                        exits.append((node, values[0]))
+                        break
+        elif not [son for son in getattr(node, "sons", []) or [] if son is not None] and not _node_terminates_control(
+            node
+        ):
+            exits.append((node, None))
+    return exits
+
+
 def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gate: RevertGate) -> list[PredicateTree]:
-    """OR-children for a bool helper written as an if/else chain of returns: one child per non-``false`` return path.
+    """OR-children for a bool helper: one child per return path that can yield the value ``gate`` allows on (``true``
+    under ``allowed_when_true``, ``false`` under a negated call).
 
-    For each ``return true``, AND the guards reaching it: a condition reachable only from ``IF.son_true`` is a positive
-    guard. From ``son_false`` only: skip if the true branch is an allow (it's its own child), otherwise AND ``!cond``.
-    Post-join or off-path IFs don't guard it.
+    A literal return of that value is the AND of the guards reaching it; a non-literal return also ANDs its value, built
+    under ``gate``'s polarity. Guards keep their own polarity whichever value is wanted: a condition reachable only from
+    ``IF.son_true`` is a positive guard; from ``son_false`` only, skip it if the true branch only returns the wanted
+    value (it's its own child), otherwise AND ``!cond``. Post-join or off-path IFs don't guard it. Falling off the end
+    returns the default ``false``.
 
-    ``require``/``assert`` are linear expressions, not IFs, so they're collected separately and ANDed onto every return
-    they dominate (else ``require(wl[src]); if(bl[src]) return false; return true;`` would publish public-minus-``bl``).
-    Helper denies that always revert are sinks; unproven calls on a path whose guards already opened cofinite fail the
-    child closed.
+    ``require``/``assert`` are linear expressions, not IFs, so they're collected separately and ANDed as written onto
+    every return they dominate: they revert whichever value the caller wants (else ``require(wl[src]); if(bl[src])
+    return false; return true;`` would publish public-minus-``bl``). Helper denies that always revert are sinks;
+    unproven calls on a path whose guards already opened cofinite fail the child closed.
 
-    A ``return true`` with no guard, or an unattributable guard beside a cofinite opening, becomes a fail-closed
+    A literal return with no guard, or an unattributable guard beside a cofinite opening, becomes a fail-closed
     ``unsupported`` leaf, never an always-true one. ANDing every dominating deny's negation keeps multi-deny chains from
-    dropping a guard. A non-literal tail return is walked as its own subtree.
+    dropping a guard.
     """
     from .tree import _build_subtree_from_value
 
@@ -236,9 +268,10 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
     nodes = list(getattr(callee, "nodes", []) or [])
     if not nodes:
         return []
+    wanted = "True" if gate.polarity == "allowed_when_true" else "False"
 
     # Per-IF facts: condition (``None`` if unmodelable, still detectable as an unattributable guard), reach sets per
-    # son, and whether the true son allows.
+    # son, and whether the true son only returns the wanted value.
     if_facts: list[tuple[Any, set[int], set[int], bool, Any]] = []
     for if_node in nodes:
         if not _node_is_type(if_node, "NodeType.IF"):
@@ -252,7 +285,7 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
                 _if_condition_value(if_node),
                 _forward_reachable_node_ids(son_true),
                 _forward_reachable_node_ids(son_false),
-                _branch_value_is_only_true(son_true),
+                _branch_value_is_only(son_true, wanted),
                 if_node,
             )
         )
@@ -273,96 +306,94 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
             require_guards.append((cond, guard_node))
             break
 
-    # Reach sets of unclassified mid-body calls: a ``return true`` reachable from one may have lost a guard.
+    # Reach sets of unclassified mid-body calls: a return reachable from one may have lost a guard.
     unclassified_reach: list[set[int]] = [
         _forward_reachable_node_ids(guard_node) for guard_node in nodes if _node_has_unclassified_call(guard_node)
     ]
 
-    for node in nodes:
-        if not _node_is_type(node, "NodeType.RETURN"):
+    for node, return_value in _helper_exits(callee):
+        literal = "False" if return_value is None else str(getattr(return_value, "value", return_value))
+        if literal not in ("True", "False"):
+            literal = None
+        if literal is not None and literal != wanted:
             continue
-        return_value = None
-        for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
-            if isinstance(ir, Return):
-                values = getattr(ir, "values", ()) or ()
-                if values:
-                    return_value = values[0]
-                    break
-        if return_value is None:
-            continue
-        rv_str = str(getattr(return_value, "value", return_value))
-        if rv_str == "False":
-            continue  # denied path
-        if rv_str == "True":
-            rid = id(node)
-            guards: list[PredicateTree] = []
-            unmodeled_guard = False
+        rid = id(node)
+        guards: list[PredicateTree] = []
+        unmodeled_guard = False
 
-            dom_ids = {id(d) for d in getattr(node, "dominators", None) or []}
-            for req_cond, req_node in require_guards:
-                if id(req_node) not in dom_ids:
-                    continue
-                guards.append(
-                    _build_subtree_from_value(
-                        req_cond,
-                        sub_prov,
-                        _return_guard_gate(gate, req_cond, "allowed_when_true", req_node, callee),
-                        callee,
-                    )
+        dom_ids = {id(d) for d in getattr(node, "dominators", None) or []}
+        for req_cond, req_node in require_guards:
+            if id(req_node) not in dom_ids:
+                continue
+            guards.append(
+                _build_subtree_from_value(
+                    req_cond,
+                    sub_prov,
+                    _return_guard_gate(gate, req_cond, "allowed_when_true", req_node, callee),
+                    callee,
                 )
-            if require_guards and not dom_ids:
-                # No dominators but require guards exist: can't rule out a dropped guard.
+            )
+        if require_guards and not dom_ids:
+            # No dominators but require guards exist: can't rule out a dropped guard.
+            unmodeled_guard = True
+
+        for cond_value, t_ids, f_ids, t_only_wanted, condition_node in if_facts:
+            t_reach = rid in t_ids
+            f_reach = rid in f_ids
+            if t_reach == f_reach:
+                continue  # both (post-join) or neither (off-path)
+            if f_reach and t_only_wanted:
+                continue  # else of an IF whose true branch is its own child
+            if cond_value is None:
+                # An unmodelable discriminating IF.
                 unmodeled_guard = True
+                continue
+            polarity: Polarity = "allowed_when_true" if t_reach else "allowed_when_false"
+            guards.append(
+                _build_subtree_from_value(
+                    cond_value,
+                    sub_prov,
+                    _return_guard_gate(gate, cond_value, polarity, condition_node, callee),
+                    callee,
+                )
+            )
 
-            for cond_value, t_ids, f_ids, t_is_allow, condition_node in if_facts:
-                t_reach = rid in t_ids
-                f_reach = rid in f_ids
-                if t_reach == f_reach:
-                    continue  # both (post-join) or neither (off-path)
-                if f_reach and t_is_allow:
-                    continue  # else of an allow-IF — OR-covered elsewhere
-                if cond_value is None:
-                    # An unmodelable discriminating IF.
-                    unmodeled_guard = True
-                    continue
-                polarity: Polarity = "allowed_when_true" if t_reach else "allowed_when_false"
-                guards.append(
-                    _build_subtree_from_value(
-                        cond_value,
-                        sub_prov,
-                        _return_guard_gate(gate, cond_value, polarity, condition_node, callee),
-                        callee,
+        # An unclassified call on the path may have leaked a guard (fails closed only with a cofinite opening among the
+        # path's guards).
+        if any(rid in reach for reach in unclassified_reach):
+            unmodeled_guard = True
+        opening = _guards_contain_opening(guards)
+
+        if literal is None:
+            guards.append(
+                _build_subtree_from_value(
+                    return_value,
+                    sub_prov,
+                    RevertGate(
+                        kind=gate.kind,
+                        condition_value=return_value,
+                        polarity=gate.polarity,
+                        node=node,
+                        containing_function=callee,
+                        call_chain=list(gate.call_chain),
+                        expression_text=f"return {return_value}",
+                        basis=list(gate.basis),
+                    ),
+                    callee,
+                )
+            )
+        if not guards or (unmodeled_guard and opening):
+            # No attributed guard, or an unattributable one with a cofinite opening: fail closed.
+            children.append(
+                make_leaf_node(
+                    _unsupported_leaf(
+                        reason=f"unattributable_return_{(literal or 'value').lower()}",
+                        expression=f"literal {(literal or 'value').lower()}",
                     )
                 )
-
-            # An unclassified call on the path may have leaked a guard (fails closed only with a cofinite opening).
-            if any(rid in reach for reach in unclassified_reach):
-                unmodeled_guard = True
-
-            if not guards or (unmodeled_guard and _guards_contain_opening(guards)):
-                # No attributed guard, or an unattributable one with a cofinite opening: fail closed.
-                children.append(
-                    make_leaf_node(
-                        _unsupported_leaf(
-                            reason="unattributable_return_true",
-                            expression="literal true",
-                        )
-                    )
-                )
-            else:
-                children.append(make_and_node(guards))
-            continue
-        branch_gate = RevertGate(
-            kind=gate.kind,
-            condition_value=return_value,
-            polarity="allowed_when_true",
-            node=node,
-            containing_function=callee,
-            call_chain=list(gate.call_chain),
-            expression_text=f"return {return_value}",
-            basis=list(gate.basis),
-        )
-        children.append(_build_subtree_from_value(return_value, sub_prov, branch_gate, callee))
+            )
+        else:
+            children.append(make_and_node(guards))
     return children
 
 

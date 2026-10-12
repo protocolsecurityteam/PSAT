@@ -41,7 +41,7 @@ from .confidence import (
 )
 from .control_flow import (
     _ALWAYS_REVERTS_MAX_DEPTH,
-    _branch_value_is_only_true,
+    _branch_value_is_only,
     _build_if_else_returns_or_children,
     _callee_always_reverts,
     _detect_assembly_combinator_op,
@@ -166,7 +166,7 @@ __all__ = [
     "_attach_state_constant_value",
     "_attach_value_type",
     "_binary_op",
-    "_branch_value_is_only_true",
+    "_branch_value_is_only",
     "_build_binary_leaf",
     "_build_chain_bindings",
     "_build_external_bool_leaf",

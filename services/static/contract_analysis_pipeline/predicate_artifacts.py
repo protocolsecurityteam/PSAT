@@ -24,6 +24,7 @@ from .mapping_events import WriterEventSpec, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
 from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
+from .predicates.reach import _cfg_cache as _reach_cfg_cache
 from .reentrancy_pause import PauseInfo, apply_reentrancy_pause_pass
 from .structural_evidence import structural_scope
 from .writer_gate import apply_writer_gate_pass
@@ -288,8 +289,9 @@ def _build_predicate_artifacts_with_pause_info(
     fns_attempted = 0
 
     started = time.monotonic()
-    # Per-contract helper-engine cache; functions share helper guards.
+    # Per-contract helper-engine and control-flow caches; functions share helper guards.
     cache_token = _helper_engine_cache.set({})
+    cfg_token = _reach_cfg_cache.set({})
     try:
         trees: dict[str, PredicateTree] = {}
         check_trees: dict[str, PredicateTree] = {}
@@ -333,6 +335,7 @@ def _build_predicate_artifacts_with_pause_info(
                     },
                 )
     finally:
+        _reach_cfg_cache.reset(cfg_token)
         _helper_engine_cache.reset(cache_token)
     per_function_total_ms = int((time.monotonic() - started) * 1000)
 

@@ -305,8 +305,7 @@ contract GetterGatedFlag is Owned {
     }
 }
 
-// OpenZeppelin v5 Pausable: ``if (paused()) revert`` through the getter. The predicate leaf lifted from the getter's
-// return doesn't carry the revert's polarity, so the reverting value isn't determined.
+// OpenZeppelin v5 Pausable: ``if (paused()) revert`` through the getter, which reverts while ``_paused`` is true.
 contract GetterPausable is Owned {
     error EnforcedPause();
 

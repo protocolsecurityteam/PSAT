@@ -18,7 +18,7 @@ from utils.scoring_status import (
     W2_BASIS_CLEAR_DOMINATES_CALLS,
 )
 
-from ...contract_analysis_pipeline.predicate_types import HELPER_RETURN_NOT_NEGATED, INLINE_ASM_REVERT_BASIS
+from ...contract_analysis_pipeline.predicate_types import INLINE_ASM_REVERT_BASIS
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Keyed by the per-contract ClaimContext.
@@ -83,7 +83,7 @@ def _mandatory_leaves(tree: Any) -> list[dict[str, Any]]:
     return out
 
 
-_UNPOLARIZED_BASES = frozenset({HELPER_RETURN_NOT_NEGATED, INLINE_ASM_REVERT_BASIS})
+_UNPOLARIZED_BASES = frozenset({INLINE_ASM_REVERT_BASIS})
 
 
 def _bool_literal(operand: dict[str, Any]) -> bool | None:
@@ -97,8 +97,8 @@ def _flag_reverting_value(leaf: dict[str, Any], flag: dict[str, Any], operands: 
 
     Leaves state the allowed condition (``if (x) revert`` is ``falsy``), so ``truthy`` reverts on false. The only other
     shape read is ``eq``/``ne`` against a bool literal. A nested member path names a field below the ``(var, member)``
-    pair writes are keyed by, so it fixes nothing. Neither does a leaf whose operator the builder didn't derive from the
-    revert: an inline-assembly gate, or a bool helper's return under a negated call.
+    pair writes are keyed by, so it fixes nothing. Neither does an inline-assembly gate, whose operator the builder
+    didn't derive from the revert.
     """
     if leaf.get("kind") != "equality" or len(flag.get("member_path") or []) > 1:
         return None

@@ -72,17 +72,20 @@ def test_a_getter_negated_at_the_call_keeps_its_reverting_value():
     assert _minted("GetterGatedFlag") == {"closePool()": {"pause.set"}, "openPool()": {"pause.unset"}}
 
 
+def test_a_getter_gate_under_a_negated_call_reads_its_reverting_value():
+    assert _minted("GetterPausable") == {"pause()": {"pause.set"}, "unpause()": {"pause.unset"}}
+
+
 @pytest.mark.parametrize(
     ("contract", "setter", "unsetter"),
     [
         ("ParameterComparedFlag", "lock()", "unlock()"),
         ("TwoSidedFlag", "pause()", "unpause()"),
-        ("GetterPausable", "pause()", "unpause()"),
     ],
 )
 def test_an_undetermined_blocking_value_keeps_the_written_value_reading(contract, setter, unsetter):
-    """A gate against a parameter, entry points blocked on either value, or a getter's return lifted under a negated
-    call don't fix which value pauses; the claim falls back to reading ``true`` as the pause."""
+    """A gate against a parameter, or entry points blocked on either value, don't fix which value pauses; the claim
+    falls back to reading ``true`` as the pause."""
     assert _minted(contract) == {setter: {"pause.set"}, unsetter: {"pause.unset"}}
 
 
@@ -101,7 +104,7 @@ def test_gate_reads_carry_the_reverting_value():
 
     subject, effects, trees, _claims = _artifacts(FIXTURE, "GetterPausable")
     reads = _facts.gate_read_reverting_values(ClaimContext(subject, effects, trees))
-    assert reads[("_paused", None)] == {"transfer(address,uint256)": frozenset({None})}
+    assert reads[("_paused", None)] == {"transfer(address,uint256)": frozenset({True})}
 
     subject, effects, trees, _claims = _artifacts(FIXTURE, "GetterGatedFlag")
     reads = _facts.gate_read_reverting_values(ClaimContext(subject, effects, trees))
