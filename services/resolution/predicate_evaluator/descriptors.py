@@ -121,14 +121,6 @@ def _external_check_from_descriptor(
 
 
 def _target_address_from_descriptor(descriptor: SetDescriptor, ctx: EvaluationContext) -> str | None:
-    target = _stated_call_target(descriptor, ctx)
-    if target is not None:
-        return target
-    return ctx.contract_address.lower() if ctx.contract_address else None
-
-
-def _stated_call_target(descriptor: SetDescriptor, ctx: EvaluationContext) -> str | None:
-    """The address the descriptor's call goes to when a literal or a read state variable states it, else ``None``."""
     authority = descriptor.get("authority_contract") or {}
     raw = authority.get("address")
     if isinstance(raw, str) and raw.startswith("0x") and len(raw) == 42:
@@ -139,22 +131,7 @@ def _stated_call_target(descriptor: SetDescriptor, ctx: EvaluationContext) -> st
         value = ctx.state_var_values.get(name) if isinstance(name, str) else None
         if isinstance(value, str) and value.startswith("0x") and len(value) == 42:
             return value.lower()
-    return None
-
-
-def _call_to_zero_address(descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr | None:
-    """Nobody, when the call's target is stated as the zero address: a high-level call to an address without code
-    reverts, so the gate admits nobody whichever way it reads the result. ``None`` when the target isn't stated zero.
-    """
-    target = _stated_call_target(descriptor, ctx)
-    if target is None or not _is_zero_address(target):
-        return None
-    return CapabilityExpr.finite_set(
-        [],
-        quality="exact",
-        confidence="enumerable",
-        trace=[{"step": "call_target_zero", "callee_signature": descriptor.get("callee_signature")}],
-    )
+    return ctx.contract_address.lower() if ctx.contract_address else None
 
 
 def _first_hint_value(descriptor: SetDescriptor, key: str) -> Any:

@@ -261,7 +261,41 @@ def _build_subtree_from_gate(
             helper_engine.run()
             prov = helper_engine.provenance
 
-    return _build_subtree_from_value(cond, prov, gate, operating_fn)
+    tree = _build_subtree_from_value(cond, prov, gate, operating_fn)
+    _drop_comparisons_on_written_state(tree, function)
+    return tree
+
+
+def _drop_comparisons_on_written_state(tree: PredicateTree, function: Any) -> None:
+    """Unstamp ``state_constant_comparison`` where the entry function writes the variable: the check may then read the
+    written value, not the one stored before the call.
+    """
+    leaves = [leaf for leaf in _tree_leaves(tree) if leaf.get("state_constant_comparison")]
+    if not leaves:
+        return
+    written: set[Any] | None
+    try:
+        written = {getattr(sv, "name", None) for sv in function.all_state_variables_written()}
+    except Exception:
+        written = None
+    for leaf in leaves:
+        name = next(
+            (
+                op.get("state_variable_name")
+                for op in leaf.get("operands") or []
+                if op.get("source") == "state_variable"
+            ),
+            None,
+        )
+        if written is None or name in written:
+            del leaf["state_constant_comparison"]
+
+
+def _tree_leaves(tree: PredicateTree) -> list[LeafPredicate]:
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf")
+        return [leaf] if leaf is not None else []
+    return [leaf for child in tree.get("children") or [] for leaf in _tree_leaves(child)]
 
 
 def _build_chain_bindings(
@@ -379,9 +413,12 @@ def _build_subtree_from_value(
             right_tree = _build_subtree_from_value(defining_ir.variable_right, prov, gate, function)
             children = [left_tree, right_tree]
             if gate.polarity == "allowed_when_true":
-                return make_and_node(children) if op_name == "and" else make_or_node(children)
-            # If-revert polarity flips AND/OR (De Morgan).
-            return make_or_node(children) if op_name == "and" else make_and_node(children)
+                node = make_and_node(children) if op_name == "and" else make_or_node(children)
+            else:
+                # If-revert polarity flips AND/OR (De Morgan).
+                node = make_or_node(children) if op_name == "and" else make_and_node(children)
+            node["short_circuit"] = True
+            return node
 
     # A helper whose return is AND/OR (Solmate Auth, DSAuth, Maker ``wish``, USDT): recurse into its bindings so it
     # doesn't bottom out as unsupported business.
@@ -583,8 +620,13 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
     # Re-attach call-site argument origins lost in the callee's frame.
     children = [_attach_call_site_arg_origins_to_tree(child, ir, prov) for child in children]
     if gate.polarity == "allowed_when_true":
-        return make_and_node(children) if op_name == "and" else make_or_node(children)
-    return make_or_node(children) if op_name == "and" else make_and_node(children)
+        node = make_and_node(children) if op_name == "and" else make_or_node(children)
+    else:
+        node = make_or_node(children) if op_name == "and" else make_and_node(children)
+    # Only a returned ``&&``/``||`` short-circuits; assembly combinators evaluate every argument.
+    if isinstance(inner, Binary) and node.get("op") in ("AND", "OR"):
+        node["short_circuit"] = True
+    return node
 
 
 # Explicit conditional reverts only: opaque fail-safes would add ``unsupported`` leaves, and external-call/try-catch

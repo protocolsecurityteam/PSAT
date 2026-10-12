@@ -101,12 +101,35 @@ def _build_binary_leaf(ir: Any, prov: ProvenanceMap, gate: RevertGate, function:
             gate=gate,
         )
         leaf["authority_role"] = _classify_authority_equality(leaf, kind)
+        if kind == "equality" and _is_state_constant_comparison(ir, prov, operands):
+            leaf["state_constant_comparison"] = True
         if kind == "equality" and function is not None:
             _stamp_param_keyed_authority_mapping(ir, prov, function, leaf)
         _stamp_absorbed_operands(ir, prov, gate, function, leaf)
         return leaf
     # Binary AND/OR here is unsupported; the tree layer splits connectives into nodes.
     return _unsupported_leaf(reason=f"binary_op_{op_name}_unsupported", expression=str(ir))
+
+
+def _is_state_constant_comparison(ir: Any, prov: ProvenanceMap, operands: list[Operand]) -> bool:
+    """One side a literal, the other a whole state variable that is its value's only source."""
+    for value, other, operand in (
+        (ir.variable_left, ir.variable_right, operands[0]),
+        (ir.variable_right, ir.variable_left, operands[1]),
+    ):
+        literal = list(_sources_for_value(other, prov))
+        if len(literal) != 1 or literal[0].kind != "constant":
+            continue
+        sources = list(_sources_for_value(value, prov))
+        if (
+            len(sources) == 1
+            and sources[0].kind == "state_variable"
+            and not sources[0].member_path
+            and operand.get("source") == "state_variable"
+            and "element_base_variable" not in operand
+        ):
+            return True
+    return False
 
 
 # Additive ops make one operand an offset of the other; products and shifts aren't read as windows (``pausedUntil * 2``

@@ -1,6 +1,8 @@
-"""An unset Solmate-style ``authority`` is proven by the controller read at the snapshot block: no dependency job is
-spawned for the zero address, and the ``canCall`` branch admits nobody, so ``requiresAuth`` publishes owner-only. A
-failed ``authority`` read proves nothing and stays undetermined.
+"""An unset Solmate-style ``authority`` reaches owner-only through the ``authority != address(0)`` guard the source
+already has: the guard is decided from the value read at the subject, so the ``canCall`` branch it short-circuits admits
+nobody. No dependency job is spawned for the zero address. Anything short of a read at the subject (a failed read, an
+implementation's storage, a guard on a value with more than one source, a call made before any guard) stays
+undetermined.
 
 Real compile, real tracking plan, real snapshot, real dependency emission and real resolver; only the JSON-RPC HTTP wire
 is stubbed.
@@ -24,10 +26,47 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "comp
 SUBJECT = "0x" + "5a" * 20
 OWNER = "0x" + "0e" * 20
 IMPL = "0x" + "1d" * 20
+OVERRIDE = "0x" + "a8" * 20
 ZERO = "0x" + "0" * 40
 BLOCK = 21_000_000
 RPC_URL = "http://rpc.unset-authority.test"
 REQUIRES_AUTH = ("setHook(address)", "manage(PingTarget,uint256)", "transferOwnership(address)")
+
+# The value the guard compares isn't only ``authority``: a set ``zOverride`` replaces it.
+_OVERRIDE_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+interface AuthorityLike { function canCall(address user, address target, bytes4 sig) external view returns (bool); }
+contract OverrideAuth {
+    address public owner;
+    AuthorityLike public authority;
+    AuthorityLike public zOverride;
+    uint256 public hook;
+    modifier requiresAuth() { require(isAuthorized(msg.sender, msg.sig), "UNAUTHORIZED"); _; }
+    function isAuthorized(address user, bytes4 sig) internal view returns (bool) {
+        AuthorityLike a = authority;
+        if (address(zOverride) != address(0)) a = zOverride;
+        return (address(a) != address(0) && a.canCall(user, address(this), sig)) || user == owner;
+    }
+    function setHook(uint256 v) external requiresAuth { hook = v; }
+}
+"""
+
+# The call runs before the owner check and reverts on a zero authority, so nobody passes.
+_CALL_FIRST_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+interface AuthorityLike { function canCall(address user, address target, bytes4 sig) external view returns (bool); }
+contract CallFirst {
+    address public owner;
+    AuthorityLike public authority;
+    uint256 public hook;
+    function setHook(uint256 v) external {
+        require(authority.canCall(msg.sender, address(this), msg.sig) || msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+}
+"""
 
 
 def _selector(signature: str) -> str:
@@ -84,28 +123,34 @@ class _Response:
 
 
 @pytest.fixture(scope="module")
-def compiled(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
+def compile_contract(tmp_path_factory):
     from services.resolution.tracking_plan import build_control_tracking_plan
     from services.static.contract_analysis_pipeline.core import collect_contract_analysis_with_artifacts
 
-    project = tmp_path_factory.mktemp("unset_authority") / "AuthModifierController"
-    (project / "src").mkdir(parents=True)
-    (project / "foundry.toml").write_text(
-        '[profile.default]\nsrc = "src"\nout = "out"\nlibs = ["lib"]\nsolc_version = "0.8.19"\n'
-    )
-    (project / "src" / "AuthModifierController.sol").write_text(FIXTURE.read_text())
-    (project / "contract_meta.json").write_text(
-        json.dumps(
-            {
-                "address": SUBJECT,
-                "contract_name": "AuthModifierController",
-                "compiler_version": "v0.8.19+commit.7dd6d404",
-            }
-        )
-    )
-    analysis, trees, _effects = collect_contract_analysis_with_artifacts(project)
-    assert isinstance(trees, dict)
-    return cast(dict[str, Any], build_control_tracking_plan(analysis)), trees
+    built: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+
+    def compile_(name: str, source: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        if name not in built:
+            project = tmp_path_factory.mktemp(name) / name
+            (project / "src").mkdir(parents=True)
+            (project / "foundry.toml").write_text(
+                '[profile.default]\nsrc = "src"\nout = "out"\nlibs = ["lib"]\nsolc_version = "0.8.19"\n'
+            )
+            (project / "src" / f"{name}.sol").write_text(source)
+            (project / "contract_meta.json").write_text(
+                json.dumps({"address": SUBJECT, "contract_name": name, "compiler_version": "v0.8.19+commit.7dd6d404"})
+            )
+            analysis, trees, _effects = collect_contract_analysis_with_artifacts(project)
+            assert isinstance(trees, dict)
+            built[name] = (cast(dict[str, Any], build_control_tracking_plan(analysis)), trees)
+        return built[name]
+
+    return compile_
+
+
+@pytest.fixture(scope="module")
+def compiled(compile_contract) -> tuple[dict[str, Any], dict[str, Any]]:
+    return compile_contract("AuthModifierController", FIXTURE.read_text())
 
 
 def _run(
@@ -116,6 +161,7 @@ def _run(
     authority: str | None,
     owner: str | None = OWNER,
     implementation: dict[str, str | None] | None = None,
+    extra_getters: dict[str, str | None] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Snapshot, dependency emission and controller rows as the resolution stage writes them, then the resolver."""
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
@@ -126,7 +172,9 @@ def _run(
     from workers.resolution_worker import ResolutionWorker
 
     plan, trees = compiled
-    getters: dict[str, dict[str, str | None]] = {SUBJECT: {"owner()": owner, "authority()": authority}}
+    getters: dict[str, dict[str, str | None]] = {
+        SUBJECT: {"owner()": owner, "authority()": authority, **(extra_getters or {})}
+    }
     if implementation is not None:
         getters[IMPL] = implementation
     monkeypatch.setattr("services.clients.rpc._get_session", lambda: _Wire(getters))
@@ -193,6 +241,17 @@ def test_an_unset_authority_spawns_no_job_and_publishes_owner_only(db_session, m
         surface = project_capability_surface(cap)
         assert not surface.authority_public, signature
         assert [row["address"] for row in surface.principal_rows] == [OWNER], signature
+        decided = [step for step in cap["trace"] if step.get("step") == "state_comparison_decided"]
+        assert decided == [
+            {
+                "step": "state_comparison_decided",
+                "state_variable": "authority",
+                "operator": "ne",
+                "constant": "0",
+                "value": ZERO,
+                "holds": False,
+            }
+        ], signature
 
 
 def test_a_failed_authority_read_is_not_published_as_owner_only(db_session, monkeypatch, compiled):
@@ -235,60 +294,38 @@ def test_a_proxy_whose_owner_read_fails_is_not_published_as_owned_by_nobody(db_s
         assert not (cap["kind"] == "finite_set" and cap.get("membership_quality") == "exact"), (signature, cap)
 
 
-def test_a_set_authority_still_spawns_its_provider(db_session, monkeypatch, compiled):
+def _undetermined_beside_owner(cap: dict[str, Any]) -> bool:
+    return cap["kind"] == "OR" and any(child["kind"] == "external_check_only" for child in cap["children"])
+
+
+def test_a_set_authority_keeps_todays_path_and_spawns_its_provider(db_session, monkeypatch, compiled):
     authority = "0x" + "a7" * 20
-    job, _out = _run(db_session, monkeypatch, compiled, authority=authority)
+    job, out = _run(db_session, monkeypatch, compiled, authority=authority)
 
     assert _spawned(db_session, job) == ([authority], [authority])
+    for signature in REQUIRES_AUTH:
+        assert _undetermined_beside_owner(out[signature]), signature
 
 
-def _gate_leaf(operator: str, authority_contract: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "op": "LEAF",
-        "leaf": {
-            "kind": "external_bool",
-            "operator": operator,
-            "authority_role": "delegated_authority",
-            "operands": [{"source": "msg_sender"}],
-            "references_msg_sender": True,
-            "callee_state_mutability": "view",
-            "gate_kind": "require",
-            "callee_signature": "isAllowed(address)",
-            "set_descriptor": {
-                "kind": "external_set",
-                "key_sources": [{"source": "msg_sender"}],
-                "authority_contract": authority_contract,
-                "callee_signature": "isAllowed(address)",
-            },
-        },
-    }
-
-
-@pytest.mark.parametrize("operator", ["truthy", "falsy"])
-@pytest.mark.parametrize(
-    "authority_contract",
-    [
-        pytest.param({"address_source": {"source": "state_variable", "state_variable_name": "gate"}}, id="read-zero"),
-        pytest.param({"address": ZERO}, id="literal-zero"),
-    ],
-)
-def test_a_call_to_the_zero_address_admits_nobody_whichever_way_the_result_is_read(operator, authority_contract):
-    from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
-
-    cap = evaluate_tree(
-        cast(Any, _gate_leaf(operator, authority_contract)),
-        EvaluationContext(contract_address=SUBJECT, state_var_values={"gate": ZERO}),
+def test_a_guard_on_a_value_with_another_source_is_not_decided(db_session, monkeypatch, compile_contract):
+    job, out = _run(
+        db_session,
+        monkeypatch,
+        compile_contract("OverrideAuth", _OVERRIDE_SOURCE),
+        authority=ZERO,
+        extra_getters={"zOverride()": OVERRIDE},
     )
 
-    assert (cap.kind, cap.members, cap.membership_quality) == ("finite_set", [], "exact")
+    assert ZERO not in _spawned(db_session, job)[0]
+    cap = out["setHook(uint256)"]
+    assert not (cap["kind"] == "finite_set" and cap.get("membership_quality") == "exact"), cap
+    assert _undetermined_beside_owner(cap), cap
 
 
-def test_an_unread_call_target_is_not_taken_as_zero():
-    from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
+def test_a_call_made_before_the_owner_check_is_not_dropped(db_session, monkeypatch, compile_contract):
+    job, out = _run(db_session, monkeypatch, compile_contract("CallFirst", _CALL_FIRST_SOURCE), authority=ZERO)
 
-    unread = {"address_source": {"source": "state_variable", "state_variable_name": "gate"}}
-    cap = evaluate_tree(
-        cast(Any, _gate_leaf("truthy", unread)), EvaluationContext(contract_address=SUBJECT, state_var_values={})
-    )
-
-    assert cap.kind == "external_check_only"
+    assert _spawned(db_session, job) == ([], [])
+    cap = out["setHook(uint256)"]
+    assert not (cap["kind"] == "finite_set" and cap.get("membership_quality") == "exact"), cap
+    assert _undetermined_beside_owner(cap), cap
