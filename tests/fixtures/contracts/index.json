@@ -78,6 +78,13 @@
       "detection_patterns": ["timestamp_latch_negative"]
     },
     {
+      "path": "pause/gate_polarity.sol",
+      "category": "pause",
+      "contract_name": "OpenCloseFlag",
+      "description": "Bool flags read as revert gates on either value: unblocking one-way flags, self-checked writers, open/close pairs, literal comparisons, getter-read flags, a one-way kill switch and an OpenZeppelin v4 pause pair.",
+      "detection_patterns": ["pause_gate_polarity"]
+    },
+    {
       "path": "upgrade/direct_admin_upgrade.sol",
       "category": "upgrade",
       "contract_name": "DirectAdminUpgrade",
