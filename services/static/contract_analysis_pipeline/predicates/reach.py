@@ -41,6 +41,8 @@ class _Cfg:
     modifier_calls: list[tuple[Any, Any]]
     # node_id -> the negated reach formula, memoized per function.
     unreached: dict[int, Formula | None] = field(default_factory=dict)
+    # Rendered alternatives, shared by the gates under one branch; the key's objects are held so ids stay unique.
+    rendered: dict[tuple, tuple[Any, PredicateTree | None]] = field(default_factory=dict)
 
 
 def _sons(node: Any) -> list[Any]:
@@ -245,12 +247,12 @@ def _flatten(op: str, items: Sequence[Formula | None]) -> list[Formula]:
 
 def _or(items: Sequence[Formula | None]) -> Formula:
     parts = _flatten("or", items)
-    return parts[0] if len(parts) == 1 else ("or", parts)
+    return parts[0] if len(parts) == 1 else ("or", tuple(parts))
 
 
 def _and(items: Sequence[Formula | None]) -> Formula:
     parts = _flatten("and", items)
-    return parts[0] if len(parts) == 1 else ("and", parts)
+    return parts[0] if len(parts) == 1 else ("and", tuple(parts))
 
 
 def _leaf_count(formula: Formula) -> int:
@@ -297,6 +299,10 @@ def render(
         return None if any(child is None for child in children) else make_and_node(cast(list, children))
     possible = [child for child in children if child is not None]
     return make_or_node(possible) if possible else None
+
+
+def rendered_cache(function: Any) -> dict[tuple, tuple[Any, PredicateTree | None]]:
+    return _cfg(function).rendered
 
 
 def placeholders(modifier: Any) -> list[Any]:

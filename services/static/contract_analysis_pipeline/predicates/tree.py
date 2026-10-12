@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextvars as _contextvars
 import os
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any, cast
 
 from ..predicate_types import (
@@ -59,12 +60,18 @@ from .leaves import (
     _self_gate_or_truthy_leaf,
 )
 from .operands import _operand_for_value, _published_source_key, _source_to_operand
-from .reach import modifiers_before, placeholders, render, unreached_formula
+from .reach import modifiers_before, placeholders, render, rendered_cache, unreached_formula
 
 # ``(callee_id, bindings) -> ProvenanceMap`` for helpers shared across a contract's functions (``_checkRole`` behind
 # grant/revoke/renounce). Set by ``build_predicate_artifacts``; ``None`` in direct test calls. Pure performance.
 _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
     "psat_predicate_helper_engine_cache", default=None
+)
+
+# ``id(callee) -> (callee, revert gates)`` for helpers whose gates are inlined at their call sites; set alongside
+# ``_helper_engine_cache``. Pure performance.
+_helper_gate_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
+    "psat_predicate_helper_gate_cache", default=None
 )
 
 _HELPER_NEVER_RETURNS = "helper_never_returns_allowed_value"
@@ -153,32 +160,36 @@ def _where_reached(
     alternatives: list[PredicateTree] = []
     for level in range(first_level, len(frames)):
         frame, anchor = frames[level], anchors[level]
-        if frame is None:
+        if frame is None or anchor is None:
             alternatives.append(make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text)))
             continue
         level_chain = chain[:level]
-        level_prov: ProvenanceMap | None = prov
-        if level_chain:
-            _, level_prov, chain_end = _build_chain_bindings(level_chain, frame, function, top_prov=prov)
-            if chain_end is not frame or level_prov is None:
-                alternatives.append(
-                    make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text))
-                )
-                continue
-        targets: list[tuple[Any, list[Any], list[Any], ProvenanceMap | None]] = [
-            (frame, [anchor], level_chain, level_prov)
+        targets = [(frame, [anchor], level_chain)]
+        targets += [
+            (call.function, placeholders(call.function), [*level_chain, call])
+            for call in modifiers_before(frame, anchor)
         ]
-        for call in modifiers_before(frame, anchor) if anchor is not None else []:
-            modifier = call.function
-            _, modifier_prov, _ = _build_chain_bindings([*level_chain, call], modifier, function, top_prov=prov)
-            targets.append((modifier, placeholders(modifier), [*level_chain, call], modifier_prov))
-        for target_fn, target_anchors, target_chain, target_prov in targets:
+        for target_fn, target_anchors, target_chain in targets:
             formula = unreached_formula(target_fn, target_anchors)
             if formula is None:
                 continue
-            alternative = render(formula, target_fn, _branch_tree_builder(target_fn, target_chain, target_prov or prov))
+            # Provenance only for a frame whose reach depends on a branch; most gates are reached unconditionally.
+            target_prov: ProvenanceMap | None = prov
+            if target_chain:
+                _, target_prov, chain_end = _build_chain_bindings(target_chain, target_fn, function, top_prov=prov)
+                if chain_end is not target_fn or target_prov is None:
+                    alternatives.append(
+                        make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text))
+                    )
+                    continue
+            memo = rendered_cache(target_fn)
+            key = (formula, tuple(id(call) for call in target_chain), id(target_prov))
+            if key not in memo:
+                rendered = render(formula, target_fn, _branch_tree_builder(target_fn, target_chain, target_prov))
+                memo[key] = ((target_chain, target_prov), rendered)
+            alternative = memo[key][1]
             if alternative is not None:
-                alternatives.append(alternative)
+                alternatives.append(deepcopy(alternative))
     if not alternatives:
         return subtree
     for alternative in alternatives:
@@ -708,10 +719,17 @@ def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[Pr
     if callee_id in stack or len(stack) >= DEFAULT_INTERNAL_CALL_DEPTH:
         return []
 
-    try:
-        inner_gates = RevertDetector(callee).run()
-    except Exception:
-        return []
+    cache = _helper_gate_cache.get()
+    hit = cache.get(callee_id) if cache is not None else None
+    if hit is not None:
+        inner_gates = hit[1]
+    else:
+        try:
+            inner_gates = RevertDetector(callee).run()
+        except Exception:
+            return []
+        if cache is not None:
+            cache[callee_id] = (callee, inner_gates)
     inner_gates = [g for g in inner_gates if g.kind in _INLINED_GATE_KINDS]
     if not inner_gates:
         return []

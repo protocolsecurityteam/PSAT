@@ -220,6 +220,8 @@ class StructuralEvidence:
     def __init__(self, contract):
         self.contract = contract
         self.summaries = {}
+        # Unpublished evidence for other declaring contracts (libraries, bases) read during the scope.
+        self.foreign = {}
 
     def summary(self, function):
         key = id(function)
@@ -245,7 +247,14 @@ _active_evidence: ContextVar[StructuralEvidence | None] = ContextVar("structural
 
 def evidence_for(contract):
     active = _active_evidence.get()
-    return active if active is not None and active.contract is contract else StructuralEvidence(contract)
+    if active is None:
+        return StructuralEvidence(contract)
+    if active.contract is contract:
+        return active
+    entry = active.foreign.get(id(contract))
+    if entry is None:
+        entry = active.foreign[id(contract)] = (contract, StructuralEvidence(contract))
+    return entry[1]
 
 
 @contextmanager

@@ -50,20 +50,22 @@ def apply_writer_gate_pass(
 
 
 def _snapshot_authority_roles(trees: dict[str, PredicateTree]) -> tuple:
-    """Hashable snapshot of every leaf's ``authority_role``, for convergence."""
-    out: list[tuple] = []
-    for name in sorted(trees):
-        out.append((name, _tree_role_signature(trees[name])))
-    return tuple(out)
-
-
-def _tree_role_signature(tree: PredicateTree | None) -> tuple:
-    if tree is None:
-        return ()
-    if tree.get("op") == "LEAF":
-        leaf = tree.get("leaf") or {}
-        return ("LEAF", leaf.get("authority_role"))
-    return tuple(("BR", _tree_role_signature(c)) for c in tree.get("children") or [])
+    """Every distinct leaf's ``authority_role`` in a fixed walk order, for convergence. Site trees share guard
+    subtrees, so each node is visited once.
+    """
+    roles: list[Any] = []
+    seen: set[int] = set()
+    stack: list[Any] = [trees[name] for name in sorted(trees, reverse=True)]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.get("op") == "LEAF":
+            roles.append((node.get("leaf") or {}).get("authority_role"))
+            continue
+        stack.extend(reversed(node.get("children") or []))
+    return tuple(roles)
 
 
 def _walk_and_promote(

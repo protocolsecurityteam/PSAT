@@ -423,7 +423,7 @@ def _resolve_internal_call_return(ir: Any, prov: ProvenanceMap) -> tuple[Any, Pr
     """Bind arguments, run the sub-engine, and find the return value's defining IR: ``(callee, sub_prov,
     return_value, inner_ir)`` or None.
     """
-    from .tree import _operand_value_provenance
+    from .tree import _cache_key_for, _helper_engine_cache, _operand_value_provenance
 
     callee = getattr(ir, "function", None)
     if callee is None:
@@ -435,9 +435,16 @@ def _resolve_internal_call_return(ir: Any, prov: ProvenanceMap) -> tuple[Any, Pr
         name = getattr(param, "name", None)
         if name:
             bindings[name] = _operand_value_provenance(arg, prov)
-    sub_engine = ProvenanceEngine(callee, parameter_bindings=bindings)
-    sub_engine.run()
-    sub_prov = sub_engine.provenance
+    cache = _helper_engine_cache.get()
+    cache_key = _cache_key_for(callee, bindings) if cache is not None else None
+    if cache is not None and cache_key is not None and cache_key in cache:
+        sub_prov = cache[cache_key]
+    else:
+        sub_engine = ProvenanceEngine(callee, parameter_bindings=bindings)
+        sub_engine.run()
+        sub_prov = sub_engine.provenance
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = sub_prov
     return_value = _find_callee_return_value(callee)
     if return_value is None:
         return None

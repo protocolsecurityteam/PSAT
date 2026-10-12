@@ -21,6 +21,7 @@ from .predicates.tree import (
     _build_chain_bindings,
     _build_subtree_from_gate,
     _helper_engine_cache,
+    _helper_gate_cache,
     _stamp_gate_scope,
     _where_reached,
 )
@@ -190,9 +191,11 @@ def attach_effect_scopes(contract, predicates, effects):
     reachable_token = _reachable_cache.set({})
     lowered_token = _lowered_cache.set({})
     cfg_token = _reach_cfg_cache.set({})
+    gate_token = _helper_gate_cache.set({})
     try:
         _attach_effect_scopes(contract, predicates, effects)
     finally:
+        _helper_gate_cache.reset(gate_token)
         _reach_cfg_cache.reset(cfg_token)
         _lowered_cache.reset(lowered_token)
         _reachable_cache.reset(reachable_token)
@@ -247,7 +250,8 @@ def _attach_effect_scopes(contract, predicates, effects):
                         gate_cache[id(unit)] = RevertDetector(unit).run()
                     local = _guard_trees(unit, node, chain, entry, engine.provenance, gate_cache[id(unit)])
                     required = [*inherited, *local]
-                    if any(predicate_truth(t) is False for t in required):
+                    # ``inherited`` was checked at the call site that led here.
+                    if any(predicate_truth(t) is False for t in local):
                         continue
                     for kind, target, selector, _, library_signature in candidates:
                         paths = [str(getattr(getattr(c, "node", None), "node_id", "unknown")) for c in chain]
