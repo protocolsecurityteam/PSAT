@@ -108,22 +108,65 @@ def test_a_getter_through_a_storage_pointer_keeps_the_negation():
 
 
 def test_a_negated_helper_keeps_its_require_and_negates_each_return_path():
-    halted_clear = ("equality", "falsy", "halted")
+    halted_clear = HALTED_CLEAR
     assert _tree("HelperPaths", "nonOperatorOnly(uint256)") == (
         "AND",
         halted_clear,
         ("equality", "ne", "msg_sender", "owner"),
         NOT_MEMBER,
     )
-    assert _tree("HelperPaths", "operatorOnly(uint256)") == (
-        "OR",
-        ("AND", halted_clear, OWNER),
-        ("AND", halted_clear, MEMBER),
-    )
+    assert _tree("HelperPaths", "operatorOnly(uint256)") == ("AND", halted_clear, ("OR", OWNER, MEMBER))
 
 
 def test_a_missing_return_is_the_default_false():
     assert _tree("HelperPaths", "unflaggedOnly(uint256)") == NOT_MEMBER
+
+
+def _eq(variable: str, value: str, operator: str = "eq") -> tuple:
+    return ("equality", operator, variable, value)
+
+
+def test_returns_after_a_join_carry_every_branch_that_reaches_them():
+    """Each mode checks only its own list, and the open mode passes anyone."""
+    member, nonmember = ("membership", "truthy", "msg_sender"), ("membership", "falsy", "msg_sender")
+    assert _tree("HelperJoins", "send(uint256)") == (
+        "OR",
+        ("AND", _eq("mode", "1"), member),
+        ("AND", _eq("mode", "1", "ne"), _eq("mode", "2", "ne")),
+        ("AND", _eq("mode", "1", "ne"), _eq("mode", "2"), nonmember),
+    )
+    assert _tree("HelperJoins", "act(uint256)") == (
+        "OR",
+        ("AND", ("equality", "falsy", "globalPause"), ("equality", "falsy", "localMode")),
+        ("AND", ("equality", "falsy", "globalPause"), ("equality", "truthy", "localMode"), nonmember),
+    )
+
+
+def test_a_revert_in_a_helper_gates_only_where_it_is_reached():
+    unless_strict = ("equality", "falsy", "strict")
+    not_paused = ("equality", "falsy", "paused")
+    flag_set, flag_clear = ("equality", "truthy", "flag"), ("equality", "falsy", "flag")
+    assert _tree("HelperJoins", "requireUnderBranch(uint256)") == (
+        "AND",
+        ("OR", unless_strict, not_paused),
+        flag_set,
+    )
+    assert _tree("HelperJoins", "revertUnderBranch(uint256)") == ("AND", ("OR", unless_strict, not_paused), flag_set)
+    assert _tree("HelperJoins", "revertUnderBranchNegated(uint256)") == (
+        "AND",
+        ("OR", unless_strict, not_paused),
+        flag_clear,
+    )
+    assert _tree("HelperJoins", "ownerUnderBranch(uint256)") == (
+        "AND",
+        ("OR", unless_strict, OWNER),
+        ("membership", "truthy", "msg_sender"),
+    )
+
+
+@pytest.mark.parametrize("signature", ["notListed(uint256)", "listedOnly(uint256)"])
+def test_a_helper_return_inside_a_loop_is_not_determined(signature):
+    assert _tree("HelperJoins", signature) == ("unsupported", "loop_iteration_not_determined")
 
 
 def test_every_return_path_of_a_helper_is_read_with_its_guard():
@@ -134,6 +177,7 @@ def test_every_return_path_of_a_helper_is_read_with_its_guard():
     )
 
 
+HALTED_CLEAR = ("equality", "falsy", "halted")
 OPEN_MODE = ("equality", "truthy", "openMode")
 LARGE = ("comparison", "lte", "v", "10")
 
@@ -155,6 +199,45 @@ LARGE = ("comparison", "lte", "v", "10")
 )
 def test_a_revert_under_a_path_condition_gates_only_under_it(signature, expected):
     assert _tree("ConditionalGates", signature) == expected
+
+
+@pytest.mark.parametrize("signature", ["writeThenBranch(uint256)", "writeInCallThenBranch(uint256)"])
+def test_a_branch_on_storage_written_before_it_is_not_determined(signature):
+    assert _tree("ConditionalGates", signature) == (
+        "OR",
+        ("unsupported", "branch_reads_state_written_before"),
+        OWNER,
+    )
+
+
+def test_a_write_to_other_storage_keeps_the_branch():
+    assert _tree("ConditionalGates", "unrelatedWriteThenBranch(uint256)") == ("OR", OPEN_MODE, OWNER)
+
+
+def test_a_modifier_running_the_body_on_both_branches_reaches_it_always():
+    assert _tree("ConditionalGates", "bothPlaceholders(uint256)") == (
+        "AND",
+        OWNER,
+        ("OR", OPEN_MODE, ("equality", "eq", "msg_sender", "guardian")),
+    )
+
+
+def test_reach_conditions_are_not_labelled_as_gates():
+    trees = _artifacts("ConditionalGates")[0]
+    reach_leaves = [
+        leaf
+        for tree in trees.values()
+        for leaf in _leaves(tree)
+        if "revert_path_condition" in (leaf.get("basis") or [])
+    ]
+    assert reach_leaves
+    assert not [leaf for leaf in reach_leaves if leaf["authority_role"] in ("pause", "reentrancy", "one_shot")]
+
+
+def _leaves(tree: Any) -> list[dict[str, Any]]:
+    if tree.get("op") == "LEAF":
+        return [tree["leaf"]]
+    return [leaf for child in tree.get("children") or [] for leaf in _leaves(child)]
 
 
 def test_a_gate_in_a_loop_body_is_not_stated_as_unconditional():

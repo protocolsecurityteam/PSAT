@@ -241,6 +241,14 @@ class PredicateTree(TypedDict, total=False):
 OperandAbsorption = Literal["recorded"]
 OPERAND_ABSORPTION_RECORDED: Final[OperandAbsorption] = "recorded"
 
+# Basis on leaves stating where a gate is reached: alternatives to a gate, never gates themselves.
+REACH_CONDITION_BASIS: Final = "revert_path_condition"
+
+
+def is_reach_condition(leaf: Any) -> bool:
+    return isinstance(leaf, dict) and REACH_CONDITION_BASIS in (leaf.get("basis") or [])
+
+
 # An inline-assembly revert's gate is recorded as ``allowed_when_true`` whichever way it reverts.
 INLINE_ASM_REVERT_BASIS: Final = "inline assembly conditional revert"
 

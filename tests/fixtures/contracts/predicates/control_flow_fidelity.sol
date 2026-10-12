@@ -218,6 +218,113 @@ contract HelperPaths {
     }
 }
 
+// Helper return paths that join after branches, run in a loop, or pass a revert reached under a branch.
+contract HelperJoins {
+    enum Mode {
+        Open,
+        Whitelist,
+        Blacklist
+    }
+
+    address public owner;
+    Mode public mode;
+    bool public globalPause;
+    bool public localMode;
+    bool public strict;
+    bool public paused;
+    bool public flag;
+    mapping(address => bool) public whitelist;
+    mapping(address => bool) public blacklist;
+    mapping(address => bool) public localPaused;
+    address[] public listed;
+    mapping(address => uint256) public bal;
+
+    function _isRestricted(address a) internal view returns (bool) {
+        if (mode == Mode.Whitelist) {
+            if (!whitelist[a]) return true;
+        } else if (mode == Mode.Blacklist) {
+            if (blacklist[a]) return true;
+        }
+        return false;
+    }
+
+    function _isPaused(address a) internal view returns (bool) {
+        if (globalPause) return true;
+        if (localMode) {
+            if (localPaused[a]) return true;
+        }
+        return false;
+    }
+
+    function _requireUnderBranch() internal view returns (bool) {
+        if (strict) {
+            require(!paused, "paused");
+        }
+        return flag;
+    }
+
+    function _revertUnderBranch() internal view returns (bool) {
+        if (strict) {
+            if (paused) revert();
+        }
+        return flag;
+    }
+
+    function _ownerUnderBranch(address a) internal view returns (bool) {
+        if (strict) {
+            if (a != owner) revert();
+        }
+        return whitelist[a];
+    }
+
+    function _isListed(address a) internal view returns (bool) {
+        for (uint256 i = 0; i < listed.length; i++) {
+            if (listed[i] == a) return true;
+        }
+        return false;
+    }
+
+    function send(uint256 x) external {
+        require(!_isRestricted(msg.sender), "restricted");
+        bal[msg.sender] = x;
+    }
+
+    function act(uint256 x) external {
+        require(!_isPaused(msg.sender), "paused");
+        bal[msg.sender] = x;
+    }
+
+    function requireUnderBranch(uint256 x) external {
+        require(_requireUnderBranch(), "no");
+        bal[msg.sender] = x;
+    }
+
+    function revertUnderBranch(uint256 x) external {
+        require(_revertUnderBranch(), "no");
+        bal[msg.sender] = x;
+    }
+
+    function revertUnderBranchNegated(uint256 x) external {
+        require(!_revertUnderBranch(), "no");
+        bal[msg.sender] = x;
+    }
+
+    function ownerUnderBranch(uint256 x) external {
+        require(_ownerUnderBranch(msg.sender), "no");
+        bal[msg.sender] = x;
+    }
+
+    function notListed(uint256 x) external {
+        require(!_isListed(msg.sender), "listed");
+        bal[msg.sender] = x;
+    }
+
+    function listedOnly(uint256 x) external {
+        require(_isListed(msg.sender), "not listed");
+        bal[msg.sender] = x;
+    }
+}
+
 // Reverts reached only under a path condition gate the function only under that condition.
 contract ConditionalGates {
     error Unauthorized();
@@ -225,6 +332,7 @@ contract ConditionalGates {
     event E(uint256 v);
 
     address public owner;
+    address public guardian;
     bool public openMode;
     bool public live;
     uint256 public hook;
@@ -234,6 +342,15 @@ contract ConditionalGates {
         if (!openMode) {
             require(msg.sender == owner, "UNAUTHORIZED");
         }
+        _;
+    }
+
+    modifier twoPlaceholders() {
+        if (openMode) {
+            _;
+            return;
+        }
+        require(msg.sender == guardian, "UNAUTHORIZED");
         _;
     }
 
@@ -327,6 +444,35 @@ contract ConditionalGates {
             require(msg.sender == owner, Unauthorized());
             hook = v;
         }
+    }
+
+    function writeThenBranch(uint256 v) external {
+        openMode = false;
+        if (openMode) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+
+    function writeInCallThenBranch(uint256 v) external {
+        _closeOpenMode();
+        if (openMode) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+
+    function unrelatedWriteThenBranch(uint256 v) external {
+        hook = v;
+        if (openMode) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+    }
+
+    function bothPlaceholders(uint256 v) external twoPlaceholders {
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+
+    function _closeOpenMode() internal {
+        openMode = false;
     }
 
     function constantBranch(uint256 v) external {

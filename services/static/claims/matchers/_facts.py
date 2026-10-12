@@ -18,7 +18,7 @@ from utils.scoring_status import (
     W2_BASIS_CLEAR_DOMINATES_CALLS,
 )
 
-from ...contract_analysis_pipeline.predicate_types import INLINE_ASM_REVERT_BASIS
+from ...contract_analysis_pipeline.predicate_types import INLINE_ASM_REVERT_BASIS, is_reach_condition
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Keyed by the per-contract ClaimContext.
@@ -36,11 +36,12 @@ _TOTAL_SUPPLY_VARS: WeakKeyDictionary[ClaimContext, set[str]] = WeakKeyDictionar
 
 
 def _iter_leaves(tree: Any) -> Any:
+    """The gate leaves of a tree; a leaf saying where a gate is reached is not a gate."""
     if not isinstance(tree, dict):
         return
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if isinstance(leaf, dict):
+        if isinstance(leaf, dict) and not is_reach_condition(leaf):
             yield leaf
         return
     for child in tree.get("children") or []:

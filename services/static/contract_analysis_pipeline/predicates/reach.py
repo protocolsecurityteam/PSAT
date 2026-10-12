@@ -15,6 +15,21 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from ..predicate_types import PredicateTree, make_and_node, make_leaf_node, make_or_node
+from ..slither_compat import (
+    Delete,
+    HighLevelCall,
+    Index,
+    InternalCall,
+    Length,
+    LibraryCall,
+    LocalVariable,
+    LowLevelCall,
+    Member,
+    NewContract,
+    ReferenceVariable,
+    SolidityCall,
+)
+from ..structural_evidence import storage_cell
 from ._helpers import _unsupported_leaf
 from .control_flow import _if_condition_value, _node_is_type, _node_terminates_control
 
@@ -22,7 +37,8 @@ from .control_flow import _if_condition_value, _node_is_type, _node_terminates_c
 # ``("unsupported", reason)``, ``("and" | "or", children)``.
 Formula = tuple
 
-# ``id(function) -> (function, _Cfg)`` for one contract pass; the function is held so its id can't be reused.
+# ``id(function) -> (function, _Cfg)``, and ``(kind, id(x)) -> (x, result)`` for the storage-effect summaries, for one
+# contract pass; the keyed object is held so its id can't be reused.
 _cfg_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar("psat_predicate_reach_cfg_cache", default=None)
 
 # Larger reach conditions are published as not determined rather than expanded.
@@ -32,6 +48,8 @@ _REACH_DEPTH_LIMIT = 64
 
 @dataclass
 class _Cfg:
+    # Declared first so the factory fields below can default.
+    preds: dict[int, list[int]]
     nodes: dict[int, Any]
     # node_id -> [(branch node, son)] it is control dependent on.
     control_parents: dict[int, list[tuple[Any, Any]]]
@@ -41,6 +59,8 @@ class _Cfg:
     modifier_calls: list[tuple[Any, Any]]
     # node_id -> the negated reach formula, memoized per function.
     unreached: dict[int, Formula | None] = field(default_factory=dict)
+    # node_id -> ids of the nodes some successful path runs before it (itself included).
+    preceding: dict[int, set[int]] = field(default_factory=dict)
     # Rendered alternatives, shared by the gates under one branch; the key's objects are held so ids stay unique.
     rendered: dict[tuple, tuple[Any, PredicateTree | None]] = field(default_factory=dict)
 
@@ -125,6 +145,7 @@ def _build_cfg(function: Any) -> _Cfg:
                 control_parents.setdefault(nodes[n].node_id, []).append((nodes[b], nodes[s]))
 
     return _Cfg(
+        preds={nodes[i].node_id: [nodes[p].node_id for p in preds[i]] for i in range(count)},
         nodes={n.node_id: n for n in nodes},
         control_parents=control_parents,
         cyclic=_cyclic_node_ids(nodes, succ),
@@ -193,23 +214,50 @@ def _cfg(function: Any) -> _Cfg:
     return hit[1]
 
 
-def _unreached(cfg: _Cfg, node: Any, depth: int = 0) -> Formula | None:
-    """The condition under which ``node`` is not reached, or ``None`` when every exit's path passes it."""
+TRUE: Formula = ("true",)
+FALSE: Formula = ("false",)
+REACHED_ALWAYS = TRUE
+
+
+def _unreached(cfg: _Cfg, node: Any, depth: int = 0) -> Formula:
+    """The condition under which ``node`` is not reached (``FALSE`` when every exit's path passes it)."""
     key = node.node_id
     if key in cfg.unreached:
-        return cfg.unreached[key]
+        return cast(Formula, cfg.unreached[key])
     if key not in cfg.exits_reachable:
-        result: Formula | None = ("unsupported", "gate_on_reverting_path")
+        result: Formula = ("unsupported", "gate_on_reverting_path")
     elif depth > _REACH_DEPTH_LIMIT:
         return ("unsupported", "gate_reach_condition_budget")
     else:
         conjuncts: list[Formula] = []
         for branch, son in cfg.control_parents.get(key, []):
             outcome = _branch_outcome(cfg, branch, son)
-            above = _unreached(cfg, branch, depth + 1) if outcome[0] == "branch" else None
+            above = _unreached(cfg, branch, depth + 1) if outcome[0] == "branch" else FALSE
             conjuncts.append(_or([above, _negate_outcome(outcome)]))
-        result = _and(conjuncts) if conjuncts else None
+        result = _and(conjuncts) if conjuncts else FALSE
     cfg.unreached[key] = result
+    return result
+
+
+def _reached(cfg: _Cfg, node: Any, assume: frozenset, memo: dict, depth: int = 0) -> Formula:
+    """The condition under which ``node`` is reached on a successful call (``TRUE`` when always), with the branch
+    outcomes in ``assume`` taken as holding.
+    """
+    key = node.node_id
+    if key in memo:
+        return memo[key]
+    if key not in cfg.exits_reachable:
+        result: Formula = FALSE
+    elif depth > _REACH_DEPTH_LIMIT:
+        return ("unsupported", "gate_reach_condition_budget")
+    else:
+        disjuncts: list[Formula] = []
+        for branch, son in cfg.control_parents.get(key, []):
+            outcome = _branch_outcome(cfg, branch, son)
+            above = _reached(cfg, branch, assume, memo, depth + 1) if outcome[0] == "branch" else TRUE
+            disjuncts.append(_and([above, TRUE if outcome in assume else outcome]))
+        result = _or(disjuncts) if disjuncts else TRUE
+    memo[key] = result
     return result
 
 
@@ -233,25 +281,34 @@ def _negate_outcome(outcome: Formula) -> Formula:
     return outcome
 
 
-def _flatten(op: str, items: Sequence[Formula | None]) -> list[Formula]:
+def _flatten(op: str, items: Sequence[Formula]) -> list[Formula]:
     out: list[Formula] = []
     for item in items:
-        if item is None:
-            continue
-        parts = item[1] if item[0] == op else [item]
-        for part in parts:
+        for part in item[1] if item[0] == op else [item]:
             if part not in out:
                 out.append(part)
     return out
 
 
-def _or(items: Sequence[Formula | None]) -> Formula:
-    parts = _flatten("or", items)
+def _or(items: Sequence[Formula]) -> Formula:
+    if TRUE in items:
+        return TRUE
+    parts = [part for part in _flatten("or", items) if part != FALSE]
+    if not parts:
+        return FALSE
     return parts[0] if len(parts) == 1 else ("or", tuple(parts))
 
 
-def _and(items: Sequence[Formula | None]) -> Formula:
-    parts = _flatten("and", items)
+def _and(items: Sequence[Formula]) -> Formula:
+    if FALSE in items:
+        return FALSE
+    parts = [part for part in _flatten("and", items) if part != TRUE]
+    # A branch node runs at most once outside a loop, so its two outcomes exclude each other.
+    outcomes = {(part[1], part[2]) for part in parts if part[0] == "branch"}
+    if any((node_id, not holds) in outcomes for node_id, holds in outcomes):
+        return FALSE
+    if not parts:
+        return TRUE
     return parts[0] if len(parts) == 1 else ("and", tuple(parts))
 
 
@@ -261,6 +318,12 @@ def _leaf_count(formula: Formula) -> int:
     return 1
 
 
+def _within_budget(formula: Formula) -> Formula:
+    if _leaf_count(formula) > _REACH_LEAF_BUDGET:
+        return ("unsupported", "gate_reach_condition_budget")
+    return formula
+
+
 def unreached_formula(function: Any, anchors: list[Any]) -> Formula | None:
     """The condition under which none of ``anchors`` is reached in ``function``, or ``None`` when one always is."""
     cfg = _cfg(function)
@@ -268,16 +331,20 @@ def unreached_formula(function: Any, anchors: list[Any]) -> Formula | None:
     for anchor in anchors:
         if anchor is None or getattr(anchor, "node_id", None) not in cfg.nodes:
             return ("unsupported", "gate_location_not_determined")
-        formula = _unreached(cfg, anchor)
-        if formula is None:
-            return None
-        formulas.append(formula)
-    if not formulas:
-        return None
-    combined = _and(formulas)
-    if _leaf_count(combined) > _REACH_LEAF_BUDGET:
-        return ("unsupported", "gate_reach_condition_budget")
-    return combined
+        formulas.append(_unreached(cfg, anchor))
+    combined = _and(formulas) if formulas else FALSE
+    return None if combined == FALSE else _within_budget(combined)
+
+
+def reached_formula(function: Any, node: Any, assume: frozenset = frozenset()) -> Formula:
+    """The condition under which ``node`` is reached on a successful call: ``TRUE``, ``FALSE`` or a formula. Outcomes
+    in ``assume`` are taken as holding.
+    """
+    cfg = _cfg(function)
+    if getattr(node, "node_id", None) not in cfg.nodes:
+        return ("unsupported", "gate_location_not_determined")
+    formula = _reached(cfg, node, assume, {})
+    return formula if formula in (TRUE, FALSE) else _within_budget(formula)
 
 
 def render(
@@ -289,6 +356,10 @@ def render(
     ``None`` when that outcome is impossible.
     """
     kind = formula[0]
+    if kind == "false":
+        return None
+    if kind == "true":
+        return make_leaf_node(_unsupported_leaf(reason="gate_never_reached", expression="gate_never_reached"))
     if kind == "unsupported":
         return make_leaf_node(_unsupported_leaf(reason=formula[1], expression=formula[1]))
     if kind == "branch":
@@ -313,3 +384,158 @@ def modifiers_before(function: Any, anchor: Any) -> list[Any]:
     """The modifier invocations in ``function`` that run before ``anchor``: the anchor runs inside their ``_``."""
     dominators = getattr(anchor, "dominators", None) or ()
     return [ir for node, ir in _cfg(function).modifier_calls if node is not anchor and node in dominators]
+
+
+# A storage effect: the declared state variables written, and whether anything else may be (a storage pointer,
+# assembly, or an external call that can re-enter).
+Effect = tuple[frozenset, bool]
+_NO_EFFECT: Effect = (frozenset(), False)
+
+
+def _preceding(cfg: _Cfg, node_id: int) -> set[int]:
+    hit = cfg.preceding.get(node_id)
+    if hit is None:
+        hit = {node_id}
+        work = [node_id]
+        while work:
+            for pred in cfg.preds.get(work.pop(), []):
+                if pred not in hit:
+                    hit.add(pred)
+                    work.append(pred)
+        cfg.preceding[node_id] = hit
+    return hit
+
+
+def _ir_effect(ir: Any, active: tuple) -> Effect:
+    if isinstance(ir, (InternalCall, LibraryCall)):
+        callee = getattr(ir, "function", None)
+        if callee is None or not getattr(callee, "nodes", None):
+            return (frozenset(), True)
+        names, opaque = _function_effect(callee, active)
+        written_params = _writes_storage_parameters(callee)
+        for arg in (getattr(ir, "arguments", None) or []) if written_params else []:
+            origin = getattr(arg, "points_to_origin", arg)
+            if type(origin).__name__ == "StateVariable":
+                names = names | {origin.name}
+            elif isinstance(origin, LocalVariable) and str(getattr(origin, "location", "")) == "storage":
+                opaque = True
+        return (names, opaque)
+    if isinstance(ir, HighLevelCall):
+        function = getattr(ir, "function", None)
+        read_only = getattr(function, "view", False) or getattr(function, "pure", False)
+        return _NO_EFFECT if read_only or type(function).__name__ == "StateVariable" else (frozenset(), True)
+    if isinstance(ir, LowLevelCall):
+        return _NO_EFFECT if str(getattr(ir, "function_name", "")) == "staticcall" else (frozenset(), True)
+    if isinstance(ir, SolidityCall):
+        name = str(getattr(getattr(ir, "function", None), "name", "") or "")
+        return (
+            (frozenset(), True)
+            if name.startswith(("sstore(", "call(", "callcode(", "delegatecall(", "create"))
+            else _NO_EFFECT
+        )
+    if isinstance(ir, NewContract):
+        return (frozenset(), True)
+    if type(ir).__name__ == "InlineAssemblyOperation":
+        code = str(getattr(ir, "inline_asm", "") or "")
+        return (frozenset(), True) if "sstore" in code or "call(" in code else _NO_EFFECT
+    target = getattr(ir, "variable", None) if isinstance(ir, Delete) else getattr(ir, "lvalue", None)
+    if isinstance(target, ReferenceVariable) and not isinstance(ir, (Index, Member, Length)):
+        origin = getattr(target, "points_to_origin", None)
+        if isinstance(origin, LocalVariable) and str(getattr(origin, "location", "")) == "storage":
+            function = getattr(origin, "function", None)
+            if origin in (getattr(function, "parameters", None) or []):
+                # Charged at each call site, to the storage passed in.
+                return _NO_EFFECT
+            cell = storage_cell(origin, function) if function is not None else None
+            return (frozenset({cell.variable.name}), False) if cell is not None else (frozenset(), True)
+    return _NO_EFFECT
+
+
+def _writes_storage_parameters(function: Any) -> bool:
+    cache = _cfg_cache.get()
+    key = ("writes_parameters", id(function))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    result = _scan_storage_parameter_writes(function)
+    if cache is not None:
+        cache[key] = (function, result)
+    return result
+
+
+def _scan_storage_parameter_writes(function: Any) -> bool:
+    for node in getattr(function, "nodes", []) or []:
+        for ir in getattr(node, "irs", []) or []:
+            target = getattr(ir, "variable", None) if isinstance(ir, Delete) else getattr(ir, "lvalue", None)
+            if isinstance(target, ReferenceVariable) and not isinstance(ir, (Index, Member, Length)):
+                if getattr(target, "points_to_origin", None) in (getattr(function, "parameters", None) or []):
+                    return True
+    return False
+
+
+def _node_effect(node: Any, active: tuple, skip: Any = None) -> Effect:
+    if skip is not None:
+        return _scan_node_effect(node, active, skip)
+    cache = _cfg_cache.get()
+    key = ("node_effect", id(node))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    effect = _scan_node_effect(node, active, None)
+    if cache is not None and not active:
+        cache[key] = (node, effect)
+    return effect
+
+
+def _scan_node_effect(node: Any, active: tuple, skip: Any) -> Effect:
+    names = {getattr(v, "name", "") for v in getattr(node, "state_variables_written", []) or []}
+    opaque = False
+    callee = getattr(skip, "function", None) if skip is not None else None
+    for ir in getattr(node, "irs", []) or []:
+        # ``skip`` may be the SSA twin of the call in ``node.irs``.
+        if ir is skip or (callee is not None and getattr(ir, "function", None) is callee):
+            continue
+        more, more_opaque = _ir_effect(ir, active)
+        names |= more
+        opaque = opaque or more_opaque
+    return (frozenset(names), opaque)
+
+
+def _function_effect(function: Any, active: tuple = ()) -> Effect:
+    """Everything ``function`` may write, through its callees too; a recursive cycle counts as opaque."""
+    if id(function) in active:
+        return (frozenset(), True)
+    cache = _cfg_cache.get()
+    key = ("effect", id(function))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    names: set = set()
+    opaque = False
+    for node in getattr(function, "nodes", []) or []:
+        more, more_opaque = _node_effect(node, (*active, id(function)))
+        names |= more
+        opaque = opaque or more_opaque
+    effect: Effect = (frozenset(names), opaque)
+    if cache is not None:
+        cache[key] = (function, effect)
+    return effect
+
+
+def effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effect:
+    """What a successful call may write before ``node`` in ``frame`` runs: earlier nodes in ``frame`` (and ``node``
+    itself), and at each outer level of ``chain`` the nodes before the call that leads in, from ``entry`` down.
+    """
+    frames = [entry, *(getattr(call, "function", None) for call in chain)]
+    targets = [(frames[i], getattr(call, "node", None), call) for i, call in enumerate(chain)]
+    targets.append((frame, node, None))
+    names: set = set()
+    opaque = False
+    for function, anchor, call in targets:
+        if function is None or anchor is None:
+            return (frozenset(), True)
+        cfg = _cfg(function)
+        if anchor.node_id not in cfg.nodes:
+            return (frozenset(), True)
+        for node_id in _preceding(cfg, anchor.node_id):
+            more, more_opaque = _node_effect(cfg.nodes[node_id], (), skip=call if node_id == anchor.node_id else None)
+            names |= more
+            opaque = opaque or more_opaque
+    return (frozenset(names), opaque)
