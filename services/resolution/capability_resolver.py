@@ -389,14 +389,14 @@ def resolve_contract_capabilities(
     # Lets adapters tell standards apart by bytecode, e.g. Solmate RolesAuthority vs OZ AccessManager (same canCall
     # selector).
     bytecode_repo = BytecodeSelectorRepo(rpc_url, chain_id)
-    state_var_values, read_state_vars = _load_state_var_reads(
+    state_var_values = _load_state_var_values(
         session,
         analysis_job.address or addr,
         job_id=analysis_job.id,
         chain=chain,
     )
     if not state_var_values and runtime_job.id != analysis_job.id:
-        state_var_values, read_state_vars = _load_state_var_reads(session, addr, job_id=runtime_job.id, chain=chain)
+        state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain=chain)
     canonical_signatures = artifact.get("canonical_signatures") if isinstance(artifact, dict) else None
     out: dict[str, dict[str, Any]] = {}
     # Resolver-side twin of ``build_predicate_artifacts``' profiling, so runaway functions in the policy stage are
@@ -440,7 +440,6 @@ def resolve_contract_capabilities(
             bytecode=bytecode_repo,
             rpc_url=rpc_url,
             state_var_values=state_var_values,
-            read_state_vars=read_state_vars,
             session=session,
             call_frame=CallFrame.root(
                 contract_address=runtime_addr,
@@ -932,17 +931,6 @@ def _load_state_var_values(
     given ``chain``, else the job's). Empty dict when nothing matches or the chain can't be determined: a same-address
     row on another chain never answers.
     """
-    return _load_state_var_reads(session, address, job_id=job_id, chain=chain)[0]
-
-
-def _load_state_var_reads(
-    session: Session,
-    address: str,
-    *,
-    job_id: Any = None,
-    chain: str | None = None,
-) -> tuple[dict[str, str], frozenset[str]]:
-    """:func:`_load_state_var_values`, plus the names whose value was read by a call to the contract itself."""
     chain = canonical_chain(chain)
     if job_id is not None:
         job = session.get(Job, job_id)
@@ -973,7 +961,7 @@ def _load_state_var_reads(
         )
 
     if chain is None:
-        return {}, frozenset()
+        return {}
     stmt = (
         select(Contract)
         .where(func.lower(Contract.address) == address.lower(), _contract_on_chain(chain))
@@ -982,7 +970,7 @@ def _load_state_var_reads(
     )
     contract = session.execute(stmt).scalar_one_or_none()
     if contract is None:
-        return {}, frozenset()
+        return {}
     return _controller_values_for_contract(session, contract)
 
 
@@ -992,17 +980,18 @@ def _controller_values_for_contract(
     deployment_address: str | None = None,
     *,
     scope_deployment: bool = False,
-) -> tuple[dict[str, str], frozenset[str]]:
+) -> dict[str, str]:
     stmt = select(ControllerValue).where(ControllerValue.contract_id == contract.id)
     if scope_deployment:
         # Only this deployment's rows (plus legacy NULL). No-op for 1:1.
         stmt = stmt.where(deployment_scope(ControllerValue.deployment_address, deployment_address))
     rows = session.execute(stmt).scalars()
-    state_var: dict[str, ControllerValue] = {}
-    other: dict[str, ControllerValue] = {}
+    state_var: dict[str, str] = {}
+    other: dict[str, str] = {}
     for row in rows:
         cid = row.controller_id or ""
-        if not cid or not row.value:
+        value = row.value
+        if not cid or not value:
             continue
         if ":" in cid:
             kind, _, name = cid.partition(":")
@@ -1011,14 +1000,11 @@ def _controller_values_for_contract(
         if not name:
             continue
         if kind == "state_variable":
-            state_var[name] = row
+            state_var[name] = value
         else:
-            other.setdefault(name, row)
+            other.setdefault(name, value)
     # state_variable rows win.
-    winners = {**other, **state_var}
-    values = {name: str(row.value) for name, row in winners.items()}
-    read = frozenset(name for name, row in winners.items() if row.observed_via == "eth_call")
-    return values, read
+    return {**other, **state_var}
 
 
 def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:

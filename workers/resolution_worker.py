@@ -638,8 +638,8 @@ class ResolutionWorker(BaseWorker):
             value = payload.get("value")
             if not isinstance(value, str) or not value.startswith("0x") or len(value) != 42:
                 continue
-            # A zero read is an unset authority, which the evaluator resolves without a provider; a job for it can only
-            # fail.
+            # A zero read is an unset authority: there's no contract to analyse, so a provider job for it can only fail
+            # and would hold this job's policy stage until it did.
             if value.lower() == _ZERO_ADDRESS:
                 continue
             name = cid.split(":", 1)[1] if ":" in cid else cid

@@ -1,8 +1,7 @@
-"""An unset Solmate-style ``authority`` reaches owner-only through the ``authority != address(0)`` guard the source
-already has: the guard is decided from the value read at the subject, so the ``canCall`` branch it short-circuits admits
-nobody. No dependency job is spawned for the zero address. Anything short of a read at the subject (a failed read, an
-implementation's storage, a guard on a value with more than one source, a call made before any guard) stays
-undetermined.
+"""An unset (read-zero) Solmate-style ``authority`` spawns no dependency job for the zero address, so nothing holds the
+contract's policy stage; its ``requiresAuth`` capability is the honest undetermined result, the owner beside an
+unresolved ``canCall`` check. Nothing short of a read at the subject (a failed read, an implementation's storage) is
+taken as that read.
 
 Real compile, real tracking plan, real snapshot, real dependency emission and real resolver; only the JSON-RPC HTTP wire
 is stubbed.
@@ -228,30 +227,17 @@ def _spawned(db_session, depender) -> tuple[list[str], list[str]]:
     return jobs, edges
 
 
-def test_an_unset_authority_spawns_no_job_and_publishes_owner_only(db_session, monkeypatch, compiled):
-    from services.policy.capability_surface import project_capability_surface
-
+def test_an_unset_authority_spawns_no_job_and_stays_undetermined_beside_the_owner(db_session, monkeypatch, compiled):
     job, out = _run(db_session, monkeypatch, compiled, authority=ZERO)
 
+    # No job and no edge, so nothing pending or degraded on a dependency.
     assert _spawned(db_session, job) == ([], [])
     for signature in REQUIRES_AUTH:
         cap = out[signature]
-        owner_only = ("finite_set", [OWNER], "exact")
-        assert (cap["kind"], cap.get("members"), cap.get("membership_quality")) == owner_only, signature
-        surface = project_capability_surface(cap)
-        assert not surface.authority_public, signature
-        assert [row["address"] for row in surface.principal_rows] == [OWNER], signature
-        decided = [step for step in cap["trace"] if step.get("step") == "state_comparison_decided"]
-        assert decided == [
-            {
-                "step": "state_comparison_decided",
-                "state_variable": "authority",
-                "operator": "ne",
-                "constant": "0",
-                "value": ZERO,
-                "holds": False,
-            }
-        ], signature
+        assert not (cap["kind"] == "finite_set" and cap.get("membership_quality") == "exact"), signature
+        assert _undetermined_beside_owner(cap), signature
+        owners = [child for child in cap["children"] if child["kind"] == "finite_set"]
+        assert [child["members"] for child in owners] == [[OWNER]], signature
 
 
 def test_a_failed_authority_read_is_not_published_as_owner_only(db_session, monkeypatch, compiled):
@@ -307,7 +293,7 @@ def test_a_set_authority_keeps_todays_path_and_spawns_its_provider(db_session, m
         assert _undetermined_beside_owner(out[signature]), signature
 
 
-def test_a_guard_on_a_value_with_another_source_is_not_decided(db_session, monkeypatch, compile_contract):
+def test_an_overridable_zero_authority_is_not_exact_and_spawns_no_zero_job(db_session, monkeypatch, compile_contract):
     job, out = _run(
         db_session,
         monkeypatch,
@@ -322,7 +308,7 @@ def test_a_guard_on_a_value_with_another_source_is_not_decided(db_session, monke
     assert _undetermined_beside_owner(cap), cap
 
 
-def test_a_call_made_before_the_owner_check_is_not_dropped(db_session, monkeypatch, compile_contract):
+def test_a_zero_authority_called_before_the_owner_check_is_not_exact(db_session, monkeypatch, compile_contract):
     job, out = _run(db_session, monkeypatch, compile_contract("CallFirst", _CALL_FIRST_SOURCE), authority=ZERO)
 
     assert _spawned(db_session, job) == ([], [])

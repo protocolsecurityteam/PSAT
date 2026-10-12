@@ -219,9 +219,6 @@ class LeafPredicate(TypedDict):
     # (``_stamp_absorbed_operands``). A sibling list; consumers needing the whole expression take the union. An opaque
     # ``computed`` member is not determined.
     absorbed_operands: NotRequired[list[Operand]]
-    # An ``eq``/``ne`` whose operands are one state variable, its value's only source and never written by the entry
-    # function, and a literal; resolution may decide it from that variable's value read at the subject.
-    state_constant_comparison: NotRequired[bool]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]
@@ -238,8 +235,6 @@ class PredicateTree(TypedDict, total=False):
     # Root-only: a latch candidate found on a require-bearing modifier whose guard saturated, so it can't ride a leaf.
     # Read by the one-shot probe.
     one_shot_candidate_latch: NotRequired[dict[str, Any]]
-    # A ``&&``/``||`` node: children in source order, evaluated left to right until one decides.
-    short_circuit: NotRequired[bool]
 
 
 # The only question is whether the recorder ran; absence is the other answer.

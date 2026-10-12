@@ -113,8 +113,6 @@ class EvaluationContext:
     # Persisted ``controller_values`` by var name, so ``state_variable`` operands resolve without the chain. ``None``
     # gives the lower_bound placeholder.
     state_var_values: dict[str, str] | None = None
-    # Names in ``state_var_values`` read by a call to this contract itself (not a fallback, not a failed read).
-    read_state_vars: frozenset[str] | None = None
     # For cross-contract inlining (loading the registry's predicate_trees). Optional for DB-less call sites.
     session: Any = None
     # Recursion guard for inlining, keyed ``(chain_id, address, function_signature)``; a revisit short-circuits to

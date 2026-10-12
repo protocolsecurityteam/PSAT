@@ -10,8 +10,6 @@ from typing import Any, cast
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import (
-    HELPER_RETURN_NOT_NEGATED,
-    INLINE_ASM_REVERT_BASIS,
     LeafPredicate,
     PredicateTree,
     SetDescriptor,
@@ -91,7 +89,6 @@ class EvaluationContext:
         block: int | None = None,
         state_var_values: dict[str, str] | None = None,
         call_frame: Any = None,
-        read_state_vars: frozenset[str] | None = None,
     ) -> None:
         self.contract_address = contract_address
         self.adapter: SetAdapter = adapter or _NullAdapter()
@@ -99,8 +96,6 @@ class EvaluationContext:
         # Persisted state-variable values by name, for ``_resolve_equality_principal``.
         self.state_var_values = state_var_values or {}
         self.call_frame = call_frame
-        # Names in ``state_var_values`` whose value was read from this contract itself (no fallback, no failed read).
-        self.read_state_vars = read_state_vars or frozenset()
 
 
 def evaluate_tree_with_registry(
@@ -125,7 +120,6 @@ def evaluate_tree_with_registry(
         block=getattr(ctx, "block", None),
         state_var_values=getattr(ctx, "state_var_values", None),
         call_frame=getattr(ctx, "call_frame", None),
-        read_state_vars=getattr(ctx, "read_state_vars", None),
     )
     return evaluate_tree(tree, eval_ctx)
 
@@ -144,13 +138,6 @@ def evaluate_tree(
         return CapabilityExpr.conditional_universal(
             Condition(kind="business", description="no gating"),
         )
-    return _evaluate_node(tree, ctx, under_or=False)
-
-
-def _evaluate_node(tree: PredicateTree, ctx: EvaluationContext, *, under_or: bool) -> CapabilityExpr:
-    """``under_or``: an enclosing OR keeps another branch, so a decided-false comparison only removes this branch and
-    never makes the whole gate admit nobody (a gate's tree doesn't record the branch conditions it ran under).
-    """
     op = tree.get("op")
     if op == "LEAF":
         leaf = tree.get("leaf")
@@ -171,26 +158,10 @@ def _evaluate_node(tree: PredicateTree, ctx: EvaluationContext, *, under_or: boo
     children = tree.get("children") or []
     if not children:
         return CapabilityExpr.unsupported("empty_branch")
-    decisions = [_decided_comparison(child, ctx) for child in children]
-    if op == "AND" and under_or and tree.get("short_circuit"):
-        # ``&&`` stops at its first false operand, so a false comparison reached before anything else runs (only
-        # decided-true comparisons ahead of it) means this branch admits nobody and calls nothing that could revert.
-        for decision in decisions:
-            if decision is None:
-                break
-            if decision[0] is False:
-                return _admits_nobody(decision[1], ctx)
-    if op == "OR":
-        # A comparison can't revert, so dropping a false one leaves the other branches exactly as they were.
-        kept = [child for child, decision in zip(children, decisions) if decision is None or decision[0] is True]
-        if len(kept) == 1:
-            return _evaluate_node(kept[0], ctx, under_or=under_or)
-        if kept:
-            children = kept
     evaluated = []
     for child in children:
         side_condition = _side_condition_capability(child) if op == "AND" and len(children) > 1 else None
-        evaluated.append(side_condition or _evaluate_node(child, ctx, under_or=under_or or op == "OR"))
+        evaluated.append(side_condition or evaluate_tree(child, ctx))
     if op == "AND":
         result = evaluated[0]
         for child in evaluated[1:]:
@@ -202,58 +173,6 @@ def _evaluate_node(tree: PredicateTree, ctx: EvaluationContext, *, under_or: boo
             result = union(result, child)
         return result
     return CapabilityExpr.unsupported(f"unknown_op_{op}")
-
-
-def _decided_comparison(tree: PredicateTree, ctx: EvaluationContext) -> tuple[bool, dict[str, Any]] | None:
-    """A ``state_constant_comparison`` leaf's truth from its variable's value read at the subject, with the facts it
-    rests on; ``None`` when anything is unread or unparseable.
-    """
-    if tree.get("op") != "LEAF":
-        return None
-    leaf = tree.get("leaf")
-    if not isinstance(leaf, dict) or not leaf.get("state_constant_comparison") or leaf.get("kind") != "equality":
-        return None
-    operator = leaf.get("operator")
-    basis = leaf.get("basis") or []
-    if operator not in ("eq", "ne") or HELPER_RETURN_NOT_NEGATED in basis or INLINE_ASM_REVERT_BASIS in basis:
-        return None
-    operands = leaf.get("operands") or []
-    state = next((op for op in operands if op.get("source") == "state_variable"), None)
-    constant = next((op for op in operands if op.get("source") == "constant"), None)
-    if state is None or constant is None:
-        return None
-    name = _state_var_lookup_key(cast(dict[str, Any], state))
-    if name is None or name not in ctx.read_state_vars:
-        return None
-    value = _word_int(ctx.state_var_values.get(name))
-    literal = _word_int(constant.get("constant_value"))
-    if value is None or literal is None:
-        return None
-    holds = (value == literal) == (operator == "eq")
-    return holds, {
-        "step": "state_comparison_decided",
-        "state_variable": name,
-        "operator": operator,
-        "constant": constant.get("constant_value"),
-        "value": ctx.state_var_values.get(name),
-        "holds": holds,
-    }
-
-
-def _word_int(value: Any) -> int | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return int(value, 16) if value.lower().startswith("0x") else int(value, 10)
-    except ValueError:
-        return None
-
-
-def _admits_nobody(step: dict[str, Any], ctx: EvaluationContext) -> CapabilityExpr:
-    return _tag_caller_subject(
-        CapabilityExpr.finite_set([], quality="exact", confidence="enumerable", trace=[step]),
-        ctx,
-    )
 
 
 def _has_caller_keyed_value_predicate(leaf: LeafPredicate) -> bool:
@@ -714,16 +633,16 @@ def _maybe_inline_cross_contract_call(
     )
 
     # Child frame: msg.sender is the caller contract, address(this) the registry, msg.sig the callee selector.
-    from services.resolution.capability_resolver import _load_state_var_reads
+    from services.resolution.capability_resolver import _load_state_var_values
 
-    state_var_values, read_state_vars = _load_state_var_reads(
+    state_var_values = _load_state_var_values(
         session,
         lookup.analysis_job.address or registry_addr,
         job_id=lookup.analysis_job.id,
         chain=registry_chain,
     )
     if not state_var_values and lookup.runtime_job.id != lookup.analysis_job.id:
-        state_var_values, read_state_vars = _load_state_var_reads(
+        state_var_values = _load_state_var_values(
             session, registry_addr, job_id=lookup.runtime_job.id, chain=registry_chain
         )
 
@@ -752,7 +671,6 @@ def _maybe_inline_cross_contract_call(
         bytecode=outer_ctx.bytecode,
         recursive_resolver=outer_ctx.recursive_resolver,
         state_var_values=state_var_values,
-        read_state_vars=read_state_vars,
         session=session,
         evaluation_stack=stack | {key},
         call_frame=child_frame,

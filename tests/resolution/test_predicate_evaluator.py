@@ -258,7 +258,7 @@ def test_inlined_callee_msg_sender_equality_is_call_edge_condition(monkeypatch):
         lambda *_args, **_kwargs: SimpleNamespace(analysis_job=job, runtime_job=job),
     )
     monkeypatch.setattr(
-        resolver_mod, "_load_state_var_reads", lambda *_args, **_kwargs: ({"liquidityPool": target_addr}, frozenset())
+        resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {"liquidityPool": target_addr}
     )
     monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
     monkeypatch.setattr(
@@ -425,7 +425,7 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
         "find_analysis_job_for_address",
         lambda *_args, **_kwargs: SimpleNamespace(analysis_job=job, runtime_job=job),
     )
-    monkeypatch.setattr(resolver_mod, "_load_state_var_reads", lambda *_args, **_kwargs: ({}, frozenset()))
+    monkeypatch.setattr(resolver_mod, "_load_state_var_values", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(queue_mod, "get_artifact", lambda *_args, **_kwargs: authority_artifact)
 
     rpc_calls = []
