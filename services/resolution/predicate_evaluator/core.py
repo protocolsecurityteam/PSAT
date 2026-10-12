@@ -45,6 +45,7 @@ from .binding import (
     _stored_dispatch_selector,
 )
 from .descriptors import (
+    _call_to_zero_address,
     _condition_from_leaf,
     _external_check_from_descriptor,
     _normalize_membership_decline_for_negation,
@@ -344,6 +345,9 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 )
             )
         descriptor = leaf.get("set_descriptor")
+        zero_target = _call_to_zero_address(descriptor, ctx) if descriptor is not None else None
+        if zero_target is not None:
+            return _tag_caller_subject(zero_target, ctx)
         if descriptor is not None:
             if descriptor.get("kind") == "external_set":
                 # Prefer a standard-aware adapter (e.g. Solmate RolesAuthority from role events) before inlining: the
