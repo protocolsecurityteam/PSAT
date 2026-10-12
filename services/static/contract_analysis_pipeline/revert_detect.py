@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .predicate_types import INLINE_ASM_REVERT_BASIS
 from .slither_compat import (
     SLITHER_AVAILABLE,
     Condition,
@@ -353,7 +354,7 @@ class RevertDetector:
                     containing_function=container,
                     call_chain=list(self._call_chain_irs),
                     expression_text=self._expression_text(node) or "<asm>",
-                    basis=["inline assembly conditional revert"],
+                    basis=[INLINE_ASM_REVERT_BASIS],
                     unsupported_reason=None,  # captured but limited
                 )
             )

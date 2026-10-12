@@ -9,6 +9,7 @@ import os
 from typing import Any, cast
 
 from ..predicate_types import (
+    HELPER_RETURN_NOT_NEGATED,
     LeafPredicate,
     PredicateTree,
     make_and_node,
@@ -572,6 +573,9 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
             children = _build_if_else_returns_or_children(callee, sub_prov, gate)
             if children:
                 op_name = "or"
+                if gate.polarity == "allowed_when_false":
+                    for child in children:
+                        _tag_tree_leaves_basis(child, HELPER_RETURN_NOT_NEGATED)
         if op_name is None or not children:
             return None
     if op_name is None or not children:

@@ -241,6 +241,13 @@ class PredicateTree(TypedDict, total=False):
 OperandAbsorption = Literal["recorded"]
 OPERAND_ABSORPTION_RECORDED: Final[OperandAbsorption] = "recorded"
 
+# Basis tag on leaves lifted from a bool helper's return paths under a negated call (``if (helper()) revert``). Only the
+# connective is flipped there, so each leaf's operator states when the helper returns true, not the gate's allowed
+# condition.
+HELPER_RETURN_NOT_NEGATED: Final = "helper return condition, not negated"
+# An inline-assembly revert's gate is recorded as ``allowed_when_true`` whichever way it reverts.
+INLINE_ASM_REVERT_BASIS: Final = "inline assembly conditional revert"
+
 # Minted by the effects pass, matched by scoring and the calldata prober.
 StateVarTargetKind = Literal["constant", "immutable", "storage_setter", "storage_no_setter"]
 TARGET_KIND_STORAGE_SETTER: Final[StateVarTargetKind] = "storage_setter"
