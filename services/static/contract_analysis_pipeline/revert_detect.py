@@ -93,6 +93,20 @@ def _ir_is_assert(ir: Any) -> bool:
     return name == "assert(bool)"
 
 
+def is_error_argument(ir: Any, node: Any) -> bool:
+    """A ``revert Error()`` that is the error argument of ``require(cond, Error())`` in the same node, so it reverts
+    only when the require fails, not as a statement.
+    """
+    lvalue = getattr(ir, "lvalue", None)
+    if lvalue is None:
+        return False
+    for other in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
+        if _ir_is_require(other) or _ir_is_assert(other):
+            if any(arg is lvalue or str(arg) == str(lvalue) for arg in list(getattr(other, "arguments", []) or [])[1:]):
+                return True
+    return False
+
+
 def _ir_is_revert(ir: Any) -> bool:
     """Any ``revert`` form, to tell message operands on the revert path from guard operands
     (``_lvalue_already_lifted``).
@@ -415,7 +429,7 @@ class RevertDetector:
         ``None``. ``require``/``assert`` aren't sinks: they revert only conditionally.
         """
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
-            if _ir_is_solidity_revert(ir):
+            if _ir_is_solidity_revert(ir) and not is_error_argument(ir, node):
                 return ir
             if isinstance(ir, (InternalCall, LibraryCall)) and self._callee_always_reverts(
                 getattr(ir, "function", None), depth + 1

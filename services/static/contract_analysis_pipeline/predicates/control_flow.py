@@ -6,7 +6,7 @@ from typing import Any
 
 from ..predicate_types import PredicateTree, make_and_node, make_leaf_node
 from ..provenance import ProvenanceEngine, ProvenanceMap
-from ..revert_detect import Polarity, RevertGate
+from ..revert_detect import Polarity, RevertGate, is_error_argument
 from ..slither_compat import (
     Condition,
     Constant,
@@ -63,7 +63,7 @@ def _node_terminates_control(node: Any, _depth: int = 0) -> bool:
     for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
         if isinstance(ir, SolidityCall):
             name = str(getattr(getattr(ir, "function", None), "name", "") or "")
-            if name.startswith("revert"):
+            if name.startswith("revert") and not is_error_argument(ir, node):
                 return True
             if name.startswith(("require", "assert")):
                 args = list(getattr(ir, "arguments", []) or [])
