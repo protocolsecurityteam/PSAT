@@ -378,6 +378,8 @@ class ContractCreationWitness(Base):
     # Written together with the result, so "probed and code present" differs from "never probed".
     code_probe_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     code_absent_at_probe: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Etherscan answered "no creation record" while ``eth_getCode`` was empty at this block; NULL = not observed.
+    no_creation_record_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (

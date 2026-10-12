@@ -17,6 +17,7 @@ _WRITABLE = frozenset(
         "creation_genesis",
         "code_probe_block",
         "code_absent_at_probe",
+        "no_creation_record_block",
     }
 )
 
