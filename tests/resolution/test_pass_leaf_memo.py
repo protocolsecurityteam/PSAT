@@ -172,7 +172,7 @@ def calls(monkeypatch):
 
     def role_admin(**_kwargs):
         counts["role_admin"] += 1
-        return [DEFAULT_ADMIN_ROLE]
+        return membership.ViewWords(words=[DEFAULT_ADMIN_ROLE], complete=True)
 
     def counted_fold(self, descriptor, ctx):
         counts["fold"] += 1
