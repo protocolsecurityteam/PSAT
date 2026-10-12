@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import requests
+import sqlalchemy.exc
 import urllib3.exceptions
 
 from db.storage import (
@@ -107,6 +108,13 @@ def classify(exc: BaseException) -> Kind:
 
     ``HTTPError`` is checked first (status decides); transient beats terminal on overlap.
     """
+    if isinstance(exc, sqlalchemy.exc.DBAPIError):
+        # SQLAlchemy wraps the driver's exception without subclassing it; a connection it invalidated is a disconnect
+        # whatever the driver called it, and otherwise the driver's type decides.
+        if exc.connection_invalidated:
+            return "transient"
+        if isinstance(exc.orig, BaseException):
+            return classify(exc.orig)
     if isinstance(exc, requests.exceptions.HTTPError):
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None) if response is not None else None
