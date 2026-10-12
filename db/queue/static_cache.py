@@ -7,7 +7,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import bindparam, case, func, or_, select
+from sqlalchemy import and_, bindparam, case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -167,14 +167,17 @@ def job_stands_for_current_analyzer(session: Session, job: Job, memo: dict[str, 
     """Whether an existing job for an address stands in for a new one under the current analyzer.
 
     A completed job counts only when its era is proven to be ``ANALYSIS_SCHEMA_VERSION``; an unstamped or unprovable era
-    doesn't. Queued, running and retrying jobs stand while their outcome is still being produced; once completed they
-    are judged by their era like any other. A terminal failure counts unless its era is proven to be another one: a
-    failure that never reached the analyzer has no era, and setting it aside would re-spawn it on every lookup.
+    doesn't. Queued and running jobs stand while their outcome is still being produced, a retry waiting on its backoff
+    included; once completed they are judged by their era like any other. A terminal failure counts unless its era is
+    proven to be another one: a failure that never reached the analyzer has no era, and setting it aside would re-spawn
+    it on every lookup. A ``failed`` job never stands: nothing claims or retries it, so waiting on it never ends.
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
-    if job.status in (JobStatus.queued, JobStatus.processing, JobStatus.failed):
+    if job.status in (JobStatus.queued, JobStatus.processing):
         return True
+    if job.status == JobStatus.failed:
+        return False
     era = proven_analysis_schema_version(session, job, memo)
     if job.status == JobStatus.completed:
         return era == ANALYSIS_SCHEMA_VERSION
@@ -183,11 +186,14 @@ def job_stands_for_current_analyzer(session: Session, job: Job, memo: dict[str, 
 
 @functools.cache
 def _not_stamped_with_other_era(version: int):
-    """SQL prefilter for ``job_stands_for_current_analyzer``: drops rows whose own stamp already rules them out."""
-    return or_(
-        Job.status.in_((JobStatus.queued, JobStatus.processing, JobStatus.failed)),
-        Job.analysis_schema_version.is_(None),
-        Job.analysis_schema_version == version,
+    """SQL prefilter for ``job_stands_for_current_analyzer``: drops rows whose own columns already rule them out."""
+    return and_(
+        Job.status != JobStatus.failed,
+        or_(
+            Job.status.in_((JobStatus.queued, JobStatus.processing)),
+            Job.analysis_schema_version.is_(None),
+            Job.analysis_schema_version == version,
+        ),
     )
 
 
@@ -197,7 +203,7 @@ def _stands_without_walk_first(version: int):
     walks a donor chain.
     """
     accepted = or_(
-        Job.status.in_((JobStatus.queued, JobStatus.processing, JobStatus.failed)),
+        Job.status.in_((JobStatus.queued, JobStatus.processing)),
         Job.analysis_schema_version == version,
     )
     return case((accepted, 0), else_=1)
@@ -400,7 +406,6 @@ def _existing_job_stmt(chain_scoped: bool, version: int, first_only: bool):
         select(Job)
         .where(
             func.lower(Job.address) == bindparam("address"),
-            Job.status != JobStatus.failed,
             Job.request["effects_resume_work_id"].astext.is_(None),
             _not_stamped_with_other_era(version),
         )

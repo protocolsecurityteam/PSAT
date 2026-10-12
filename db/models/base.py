@@ -27,7 +27,8 @@ class JobStatus(str, enum.Enum):
     queued = "queued"
     processing = "processing"
     completed = "completed"
-    # Transient; ``BaseWorker`` requeues with backoff until retries run out.
+    # Written only by ``fail_job`` (callers outside ``BaseWorker``) and by rows from before retries existed; nothing
+    # claims or retries it. ``BaseWorker`` requeues a transient failure as ``queued`` with ``next_attempt_at``.
     failed = "failed"
     # Deterministic failure or exhausted retries; the stale-job sweep never resurrects these.
     failed_terminal = "failed_terminal"

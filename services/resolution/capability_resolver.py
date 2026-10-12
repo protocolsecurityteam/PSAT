@@ -805,14 +805,15 @@ def _jobs_for_address(
     completed_only: bool = True,
     include_terminal: bool = False,
 ) -> list[Job]:
-    excluded = (JobStatus.failed,) if include_terminal else (JobStatus.failed, JobStatus.failed_terminal)
     stmt = (
         select(Job)
         .where(func.lower(Job.address) == address.lower())
         .where(Job.request["effects_resume_work_id"].astext.is_(None))
-        .where(~Job.status.in_(excluded))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
     )
+    # With failures included, whether one stands is the caller's ``job_stands_for_current_analyzer`` decision.
+    if not include_terminal:
+        stmt = stmt.where(~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)))
     if completed_only:
         stmt = stmt.where(Job.status == JobStatus.completed)
     candidates = list(session.execute(stmt).scalars().all())
