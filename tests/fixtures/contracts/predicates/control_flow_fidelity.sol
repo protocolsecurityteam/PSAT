@@ -325,6 +325,110 @@ contract HelperJoins {
     }
 }
 
+library FlagLib {
+    struct Flag {
+        bool on;
+    }
+
+    function clear(Flag storage f) internal {
+        f.on = false;
+    }
+}
+
+// Branches on storage the call writes before they run: through a mapping or struct element, a library storage pointer,
+// a modifier's code after ``_`` reading what the body or an inner modifier wrote, and a body run twice.
+contract WriteBeforeBranch {
+    struct Per {
+        bool open;
+    }
+
+    struct Item {
+        uint256 n;
+    }
+
+    address public owner;
+    bool public open;
+    uint256 public count;
+    uint256 public hook;
+    mapping(uint256 => uint256) public deadline;
+    mapping(address => Per) public per;
+    mapping(uint256 => Item) public items;
+    FlagLib.Flag internal flag;
+
+    modifier afterCheck() {
+        _;
+        if (open) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+    }
+
+    modifier afterCount() {
+        _;
+        if (count > 1) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+    }
+
+    modifier closeFirst() {
+        open = false;
+        _;
+    }
+
+    modifier twice() {
+        _;
+        _;
+    }
+
+    function elementWrite(uint256 id) external {
+        deadline[id] = 0;
+        if (deadline[id] > block.timestamp) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = id;
+    }
+
+    function structWrite(uint256 v) external {
+        per[msg.sender].open = false;
+        if (per[msg.sender].open) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+
+    function itemWrite(uint256 id) external {
+        items[id].n = 0;
+        if (items[id].n > 0) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = id;
+    }
+
+    function pointerWrite(uint256 v) external {
+        FlagLib.clear(flag);
+        if (flag.on) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+
+    function bodyWritesBeforeModifierBranch(uint256 v) external afterCheck {
+        open = false;
+        hook = v;
+    }
+
+    function bodyIncrements(uint256 v) external afterCount {
+        count += 1;
+        hook = v;
+    }
+
+    function innerModifierWrites(uint256 v) external afterCheck closeFirst {
+        hook = v;
+    }
+
+    function bodyRunsTwice(uint256 v) external twice {
+        if (open) {
+            open = false;
+            return;
+        }
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+}
+
 // Reverts reached only under a path condition gate the function only under that condition.
 contract ConditionalGates {
     error Unauthorized();

@@ -26,7 +26,6 @@ from ..provenance import (
     arg_origins,
 )
 from ..revert_detect import DEFAULT_INTERNAL_CALL_DEPTH, RevertDetector, RevertGate
-from ..shared import _all_state_variables
 from ..slither_compat import (
     SLITHER_AVAILABLE,
     Binary,
@@ -69,12 +68,14 @@ from .leaves import (
 from .operands import _operand_for_value, _published_source_key, _source_to_operand
 from .reach import (
     REACHED_ALWAYS,
+    branch_reads,
     effect_before,
     modifiers_before,
     placeholders,
     reached_formula,
     render,
     rendered_cache,
+    runs_body_repeatedly,
     unreached_formula,
 )
 
@@ -186,6 +187,10 @@ def _where_reached(
     frames = [function, *(getattr(ir, "function", None) for ir in chain)]
     anchors = [*(getattr(ir, "node", None) for ir in chain), gate.node]
     alternatives: list[PredicateTree] = []
+    # Reach is read for one run of a body; a body a modifier runs again sees the first run's writes and returns.
+    repeated = next(
+        (level for level, frame in enumerate(frames) if frame is not None and runs_body_repeatedly(frame)), None
+    )
     for level in range(first_level, len(frames)):
         frame, anchor = frames[level], anchors[level]
         if frame is None or anchor is None:
@@ -200,6 +205,9 @@ def _where_reached(
         for target_fn, target_anchors, target_chain in targets:
             formula = unreached_formula(target_fn, target_anchors)
             if formula is None:
+                continue
+            if repeated is not None and level >= repeated:
+                alternatives.append(make_leaf_node(_unsupported_leaf("body_runs_repeatedly", gate.expression_text)))
                 continue
             # Provenance only for a frame whose reach depends on a branch; most gates are reached unconditionally.
             target_prov: ProvenanceMap | None = prov
@@ -259,7 +267,9 @@ def _branch_tree_builder(
         # A bool helper that never returns the value this outcome needs makes the outcome impossible.
         if leaf.get("unsupported_reason") == _HELPER_NEVER_RETURNS:
             return None
-        names, reads_other, reads_external = _storage_reads(tree, entry) if check_writes else (set(), False, False)
+        names, reads_other, reads_external = (
+            branch_reads(entry, entry_chain, frame, node) if check_writes else (frozenset(), False, False)
+        )
         if names or reads_other or reads_external:
             written, writes_other = effect_before(entry, entry_chain, frame, node)
             if writes_other or (names & written) or (reads_other and written):
@@ -267,81 +277,6 @@ def _branch_tree_builder(
         return tree
 
     return build
-
-
-# Operand sources that no write during the call can change.
-_FIXED_SOURCES = frozenset(
-    {"msg_sender", "tx_origin", "parameter", "constant", "block_context", "self_address", "signature_recovery"}
-)
-
-
-def _storage_reads(tree: PredicateTree, entry: Any) -> tuple[set[str], bool, bool]:
-    """The declared state variables a tree's leaves read, whether they read other storage of this contract (through a
-    pointer, a helper, an unresolved value), and whether they read another contract (which only a call out can
-    change).
-    """
-    storage: set[str] = set()
-    fixed: set[str] = set()
-    constants: set[str] = set()
-    for variable in _all_state_variables(getattr(entry, "contract", None)):
-        if getattr(variable, "is_immutable", False):
-            fixed.add(variable.name)
-        elif getattr(variable, "is_constant", False):
-            constants.add(variable.name)
-        else:
-            storage.add(variable.name)
-    names: set[str] = set()
-    other = False
-    external = False
-
-    def read(operand: Any) -> None:
-        nonlocal other, external
-        if not isinstance(operand, dict):
-            return
-        source = operand.get("source")
-        if source in _FIXED_SOURCES:
-            return
-        name = operand.get("state_variable_name")
-        if source == "state_variable" and name in storage:
-            names.add(name)
-        elif source == "state_variable" and (name in fixed or (name in constants and not operand.get("member_path"))):
-            # A constant read through member fields names a namespaced storage slot, which writes can change.
-            return
-        elif source == "computed" and operand.get("derived_from"):
-            for origin in operand.get("derived_from") or []:
-                read(origin)
-        elif source == "external_call":
-            external = True
-            for origin in operand.get("derived_from") or []:
-                read(origin)
-        else:
-            other = True
-
-    stack: list[Any] = [tree]
-    while stack:
-        node = stack.pop()
-        if not isinstance(node, dict):
-            continue
-        if node.get("op") != "LEAF":
-            stack.extend(node.get("children") or [])
-            continue
-        leaf = node.get("leaf") or {}
-        if leaf.get("kind") == "unsupported":
-            continue
-        for operand in [*(leaf.get("operands") or []), *(leaf.get("absorbed_operands") or [])]:
-            read(operand)
-        descriptor = leaf.get("set_descriptor") or {}
-        if descriptor:
-            variable = descriptor.get("storage_var")
-            if variable in storage:
-                names.add(variable)
-            elif descriptor.get("kind") == "external_set":
-                external = True
-            elif variable not in fixed:
-                other = True
-            for operand in descriptor.get("key_sources") or []:
-                read(operand)
-    return names, other, external
 
 
 def _restamp_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
@@ -833,6 +768,8 @@ def _helper_value_tree(
     path whose condition opens cofinite, is ``unsupported``.
     """
     wanted = "True" if gate.polarity == "allowed_when_true" else "False"
+    if runs_body_repeatedly(callee):
+        return make_leaf_node(_unsupported_leaf("body_runs_repeatedly", gate.expression_text))
     gates = _helper_gate_subtrees(callee, sub_prov, chain, entry, caller_tainted_only=False)
     cfg_nodes = list(getattr(callee, "nodes", []) or [])
     assume = frozenset(

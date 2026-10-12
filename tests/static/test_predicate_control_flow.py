@@ -210,6 +210,35 @@ def test_a_branch_on_storage_written_before_it_is_not_determined(signature):
     )
 
 
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "elementWrite(uint256)",
+        "structWrite(uint256)",
+        "itemWrite(uint256)",
+        "pointerWrite(uint256)",
+        "bodyWritesBeforeModifierBranch(uint256)",
+        "bodyIncrements(uint256)",
+        "innerModifierWrites(uint256)",
+    ],
+)
+def test_a_branch_on_storage_written_before_it_runs_is_not_determined(signature):
+    """Element and pointer writes, and a modifier's code after ``_`` reading what the body or an inner modifier
+    wrote."""
+    reach_or_owner = ("OR", ("unsupported", "branch_reads_state_written_before"), OWNER)
+    tree = _tree("WriteBeforeBranch", signature)
+    # A library call on storage also publishes its own leaf beside the gate.
+    assert tree == reach_or_owner or (tree[0] == "AND" and reach_or_owner in tree[1:]), tree
+
+
+def test_a_branch_in_a_body_run_more_than_once_is_not_determined():
+    assert _tree("WriteBeforeBranch", "bodyRunsTwice(uint256)") == (
+        "OR",
+        ("unsupported", "body_runs_repeatedly"),
+        OWNER,
+    )
+
+
 def test_a_write_to_other_storage_keeps_the_branch():
     assert _tree("ConditionalGates", "unrelatedWriteThenBranch(uint256)") == ("OR", OPEN_MODE, OWNER)
 

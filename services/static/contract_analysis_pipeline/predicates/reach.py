@@ -16,6 +16,8 @@ from typing import Any, cast
 
 from ..predicate_types import PredicateTree, make_and_node, make_leaf_node, make_or_node
 from ..slither_compat import (
+    Condition,
+    Constant,
     Delete,
     HighLevelCall,
     Index,
@@ -28,6 +30,7 @@ from ..slither_compat import (
     NewContract,
     ReferenceVariable,
     SolidityCall,
+    StateVariable,
 )
 from ..structural_evidence import storage_cell
 from ._helpers import _unsupported_leaf
@@ -521,21 +524,172 @@ def _function_effect(function: Any, active: tuple = ()) -> Effect:
 
 def effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effect:
     """What a successful call may write before ``node`` in ``frame`` runs: earlier nodes in ``frame`` (and ``node``
-    itself), and at each outer level of ``chain`` the nodes before the call that leads in, from ``entry`` down.
+    itself), and at each outer level of ``chain`` the nodes before the call that leads in, from ``entry`` down. A
+    modifier's code after ``_`` runs after the body it wraps, so a ``_`` before the anchor adds everything the wrapped
+    function may write.
     """
     frames = [entry, *(getattr(call, "function", None) for call in chain)]
     targets = [(frames[i], getattr(call, "node", None), call) for i, call in enumerate(chain)]
     targets.append((frame, node, None))
     names: set = set()
     opaque = False
-    for function, anchor, call in targets:
+    for level, (function, anchor, call) in enumerate(targets):
         if function is None or anchor is None:
             return (frozenset(), True)
         cfg = _cfg(function)
         if anchor.node_id not in cfg.nodes:
             return (frozenset(), True)
+        effects = []
         for node_id in _preceding(cfg, anchor.node_id):
-            more, more_opaque = _node_effect(cfg.nodes[node_id], (), skip=call if node_id == anchor.node_id else None)
+            effects.append(_node_effect(cfg.nodes[node_id], (), skip=call if node_id == anchor.node_id else None))
+            if level and _node_is_type(cfg.nodes[node_id], "NodeType.PLACEHOLDER"):
+                effects.append(
+                    _function_effect(frames[level - 1]) if frames[level - 1] is not None else (frozenset(), True)
+                )
+        for more, more_opaque in effects:
             names |= more
             opaque = opaque or more_opaque
     return (frozenset(names), opaque)
+
+
+def runs_body_repeatedly(function: Any) -> bool:
+    """Whether a modifier ``function`` invokes may run its body more than once in a call: a ``_`` that can reach
+    another ``_``, or one in a loop."""
+    for _, call in _cfg(function).modifier_calls:
+        modifier = getattr(call, "function", None)
+        cfg = _cfg(modifier)
+        marks = [node.node_id for node in placeholders(modifier) if node.node_id in cfg.nodes]
+        if any(mark in cfg.cyclic for mark in marks):
+            return True
+        if any(first != second and first in _preceding(cfg, second) for first in marks for second in marks):
+            return True
+    return False
+
+
+# What a branch condition reads: declared state variables (elements and pointers resolved to their variable), whether
+# it reads storage of this contract it can't attribute, and whether it reads another contract.
+Reads = tuple[frozenset, bool, bool]
+
+
+def _storage_variable(value: Any, function: Any) -> tuple[str | None, bool]:
+    """The state variable a storage reference resolves to, or whether it is unattributable storage."""
+    origin = getattr(value, "points_to_origin", None) if isinstance(value, ReferenceVariable) else value
+    if isinstance(origin, StateVariable):
+        return (None, False) if origin.is_constant or getattr(origin, "is_immutable", False) else (origin.name, False)
+    if isinstance(origin, LocalVariable) and str(getattr(origin, "location", "")) == "storage":
+        cell = storage_cell(origin, getattr(origin, "function", None) or function)
+        return (cell.variable.name, False) if cell is not None else (None, True)
+    return (None, False)
+
+
+# Builtins reading another account's state, which a call out can change.
+_ACCOUNT_READS = ("balance(", "selfbalance(", "code(", "codehash(", "extcodesize(", "extcodehash(", "extcodecopy(")
+
+
+def _read_kind(ir: Any) -> tuple[bool, bool]:
+    """Whether ``ir`` reads this contract's storage unattributed, and whether it reads another account."""
+    if isinstance(ir, LowLevelCall) or (isinstance(ir, HighLevelCall) and not isinstance(ir, LibraryCall)):
+        return False, True
+    if isinstance(ir, SolidityCall):
+        name = str(getattr(ir.function, "name", ""))
+        return name.startswith(("sload(", "tload(")), name.startswith(_ACCOUNT_READS)
+    if type(ir).__name__ == "InlineAssemblyOperation":
+        code = str(getattr(ir, "inline_asm", "") or "")
+        return "sload" in code or "tload" in code, any(word in code for word in ("call(", "balance(", "extcode"))
+    return False, False
+
+
+def _function_reads(function: Any) -> Reads:
+    cache = _cfg_cache.get()
+    key = ("reads", id(function))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    names: set = set()
+    other = external = False
+    try:
+        variables = function.all_state_variables_read()
+        nodes = function.all_nodes()
+    except Exception:
+        return (frozenset(), True, True)
+    for variable in variables:
+        if not variable.is_constant and not getattr(variable, "is_immutable", False):
+            names.add(variable.name)
+    for node in nodes:
+        for ir in getattr(node, "irs", []) or []:
+            more_other, more_external = _read_kind(ir)
+            other = other or more_other
+            external = external or more_external
+            for value in getattr(ir, "read", None) or []:
+                name, unattributed = _storage_variable(value, function)
+                if name is not None:
+                    names.add(name)
+                other = other or unattributed
+    reads: Reads = (frozenset(names), other, external)
+    if cache is not None:
+        cache[key] = (function, reads)
+    return reads
+
+
+def _definitions(function: Any) -> dict[str, list[Any]]:
+    cache = _cfg_cache.get()
+    key = ("definitions", id(function))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    defs: dict[str, list[Any]] = {}
+    for node in getattr(function, "nodes", []) or []:
+        for ir in getattr(node, "irs", []) or []:
+            lvalue = getattr(ir, "lvalue", None)
+            if lvalue is not None:
+                defs.setdefault(str(lvalue), []).append(ir)
+    if cache is not None:
+        cache[key] = (function, defs)
+    return defs
+
+
+def branch_reads(entry: Any, chain: list[Any], frame: Any, node: Any) -> Reads:
+    """What the condition of ``node`` in ``frame`` reads, followed through the locals and helpers that feed it and,
+    for a parameter of an inner frame, through the argument passed in from the frame above."""
+    frames = [entry, *(getattr(call, "function", None) for call in chain)]
+    names: set = set()
+    other = external = False
+    work: list[tuple[int, Any]] = [
+        (len(chain), value)
+        for ir in getattr(node, "irs", []) or []
+        if isinstance(ir, Condition)
+        for value in getattr(ir, "read", None) or []
+    ]
+    seen: set = set()
+    while work:
+        level, value = work.pop()
+        value = getattr(value, "non_ssa_version", None) or value
+        if value is None or isinstance(value, Constant) or (level, id(value)) in seen:
+            continue
+        seen.add((level, id(value)))
+        function = frames[level]
+        if function is None:
+            return (frozenset(), True, True)
+        name, unattributed = _storage_variable(value, function)
+        if name is not None:
+            names.add(name)
+        other = other or unattributed
+        parameters = list(getattr(function, "parameters", None) or [])
+        if value in parameters:
+            if level:
+                arguments = list(getattr(chain[level - 1], "arguments", None) or [])
+                index = parameters.index(value)
+                if index < len(arguments):
+                    work.append((level - 1, arguments[index]))
+            continue
+        for ir in _definitions(function).get(str(value), []):
+            if isinstance(ir, (InternalCall, LibraryCall)):
+                callee = getattr(ir, "function", None)
+                more, more_other, more_external = _function_reads(callee) if callee is not None else (set(), True, True)
+                names |= more
+                other = other or more_other
+                external = external or more_external
+            else:
+                more_other, more_external = _read_kind(ir)
+                other = other or more_other
+                external = external or more_external
+            work.extend((level, read) for read in getattr(ir, "read", None) or [])
+    return (frozenset(names), other, external)
