@@ -226,6 +226,8 @@ class ControllerReadSpec(ControllerReadSpecRequired, total=False):
     parent_type: str
     member_path: list[str]
     components: list[ControllerTypeComponent]
+    # Set only when the compiler declares the variable ``immutable`` or ``constant``.
+    value_in_code: bool
 
 
 class ControllerWriterFunction(TypedDict):

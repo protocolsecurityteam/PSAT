@@ -23,6 +23,7 @@ pytestmark = [requires_postgres, pytest.mark.compile]
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "composed" / "auth_modifier_controller.sol"
 SUBJECT = "0x" + "5a" * 20
 OWNER = "0x" + "0e" * 20
+IMPL = "0x" + "1d" * 20
 ZERO = "0x" + "0" * 40
 BLOCK = 21_000_000
 RPC_URL = "http://rpc.unset-authority.test"
@@ -38,10 +39,14 @@ def _word(address: str) -> str:
 
 
 class _Wire:
-    """The JSON-RPC HTTP session. ``authority()`` answers with ``authority``, or an RPC error when it is ``None``."""
+    """The JSON-RPC HTTP session. Each address answers its getters from its own map; a getter mapped to ``None`` (or
+    absent) answers with an RPC error.
+    """
 
-    def __init__(self, authority: str | None):
-        self.getters = {_selector("owner()"): OWNER, _selector("authority()"): authority}
+    def __init__(self, getters: dict[str, dict[str, str | None]]):
+        self.getters = {
+            address: {_selector(sig): value for sig, value in by_sig.items()} for address, by_sig in getters.items()
+        }
 
     def post(self, _url, *, json, **_kwargs):
         if isinstance(json, list):
@@ -57,8 +62,8 @@ class _Wire:
             result = "0x1"
         elif method == "eth_getCode":
             result = "0x"
-        elif method == "eth_call" and params[0]["to"].lower() == SUBJECT:
-            value = self.getters.get(params[0]["data"][:10])
+        elif method == "eth_call":
+            value = self.getters.get(params[0]["to"].lower(), {}).get(params[0]["data"][:10])
             result = _word(value) if value is not None else None
         if result is None:
             return {"jsonrpc": "2.0", "id": item.get("id"), "error": {"code": -32000, "message": "header not found"}}
@@ -103,7 +108,15 @@ def compiled(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
     return cast(dict[str, Any], build_control_tracking_plan(analysis)), trees
 
 
-def _run(db_session, monkeypatch, compiled, *, authority: str | None) -> tuple[Any, dict[str, Any]]:
+def _run(
+    db_session,
+    monkeypatch,
+    compiled,
+    *,
+    authority: str | None,
+    owner: str | None = OWNER,
+    implementation: dict[str, str | None] | None = None,
+) -> tuple[Any, dict[str, Any]]:
     """Snapshot, dependency emission and controller rows as the resolution stage writes them, then the resolver."""
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import Contract, ControllerValue, JobStage, JobStatus
@@ -113,7 +126,10 @@ def _run(db_session, monkeypatch, compiled, *, authority: str | None) -> tuple[A
     from workers.resolution_worker import ResolutionWorker
 
     plan, trees = compiled
-    monkeypatch.setattr("services.clients.rpc._get_session", lambda: _Wire(authority))
+    getters: dict[str, dict[str, str | None]] = {SUBJECT: {"owner()": owner, "authority()": authority}}
+    if implementation is not None:
+        getters[IMPL] = implementation
+    monkeypatch.setattr("services.clients.rpc._get_session", lambda: _Wire(getters))
 
     job = create_job(db_session, {"address": SUBJECT, "chain": "ethereum", "name": "AuthModifierController"})
     job.status = JobStatus.processing
@@ -125,7 +141,9 @@ def _run(db_session, monkeypatch, compiled, *, authority: str | None) -> tuple[A
     db_session.add(contract)
     db_session.commit()
 
-    snapshot = build_control_snapshot(cast(Any, plan), RPC_URL, chain_id=1)
+    snapshot = build_control_snapshot(
+        cast(Any, plan), RPC_URL, chain_id=1, getter_fallback_address=IMPL if implementation is not None else None
+    )
     ResolutionWorker()._emit_dependency_edges_from_predicate_trees(db_session, job, snapshot, RPC_URL)
     for cid, entry in snapshot["controller_values"].items():
         db_session.add(
@@ -186,6 +204,35 @@ def test_a_failed_authority_read_is_not_published_as_owner_only(db_session, monk
         # The owner branch stands beside an unresolved authority check, never folded into an exact owner-only set.
         assert cap["kind"] == "OR", signature
         assert any(child["kind"] == "external_check_only" for child in cap["children"]), signature
+
+
+def test_a_proxy_whose_authority_read_fails_is_not_answered_by_the_implementations_zero(
+    db_session, monkeypatch, compiled
+):
+    job, out = _run(
+        db_session, monkeypatch, compiled, authority=None, implementation={"owner()": ZERO, "authority()": ZERO}
+    )
+
+    assert _spawned(db_session, job) == ([], [])
+    for signature in REQUIRES_AUTH:
+        cap = out[signature]
+        assert cap["kind"] == "OR", signature
+        assert any(child["kind"] == "external_check_only" for child in cap["children"]), signature
+
+
+def test_a_proxy_whose_owner_read_fails_is_not_published_as_owned_by_nobody(db_session, monkeypatch, compiled):
+    _job, out = _run(
+        db_session,
+        monkeypatch,
+        compiled,
+        authority=ZERO,
+        owner=None,
+        implementation={"owner()": ZERO, "authority()": ZERO},
+    )
+
+    for signature in REQUIRES_AUTH:
+        cap = out[signature]
+        assert not (cap["kind"] == "finite_set" and cap.get("membership_quality") == "exact"), (signature, cap)
 
 
 def test_a_set_authority_still_spawns_its_provider(db_session, monkeypatch, compiled):

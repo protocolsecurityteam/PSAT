@@ -1012,8 +1012,9 @@ def build_control_snapshot(
 ) -> ControlSnapshot:
     """Resolve every tracked controller's value at the given block.
 
-    ``getter_fallback_address`` is the implementation to retry a reverting getter against: ``immutable`` authority
-    addresses live in implementation bytecode and revert on beacon/per-instance runtimes.
+    ``getter_fallback_address`` is the implementation to retry a reverting getter against, only for a controller whose
+    read spec proves its value lives in code (``value_in_code``): ``immutable`` authority addresses live in
+    implementation bytecode and revert on beacon/per-instance runtimes.
 
     ``beacon_address`` is the governing UpgradeableBeacon, whose ``owner()`` is the instance's upgrade authority; it's
     recorded as a ``beacon_owner`` controller.
@@ -1094,8 +1095,14 @@ def build_control_snapshot(
             return controller_id, _read_entry(plan["contract_address"], "eth_call")
         except Exception as exc:
             # Immutable authority addresses live in implementation bytecode and revert on beacon/per-instance runtimes
-            # (e.g. EtherFiNode). Retrying on the impl recovers them; storage getters just read zero there.
-            if getter_fallback_address and getter_fallback_address.lower() != str(plan["contract_address"]).lower():
+            # (e.g. EtherFiNode), so the impl answers for them. For a storage variable the impl's storage isn't this
+            # contract's, so its answer (usually zero) is no witness and the read stays failed.
+            if (
+                getter_fallback_address
+                and getter_fallback_address.lower() != str(plan["contract_address"]).lower()
+                and spec is not None
+                and spec.get("value_in_code") is True
+            ):
                 try:
                     entry = _read_entry(getter_fallback_address, "eth_call_impl_fallback")
                 except Exception:
