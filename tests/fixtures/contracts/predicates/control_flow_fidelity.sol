@@ -429,6 +429,83 @@ contract WriteBeforeBranch {
     }
 }
 
+// A helper whose own revert is reached under a branch on storage it writes, read from a body a modifier runs twice,
+// called twice in one condition, or after a transient store.
+contract HelperRunTwice {
+    address public owner;
+    bool public open;
+    uint256 public hook;
+    bytes32 private constant FLAG_SLOT = keccak256("flag");
+
+    modifier twice() {
+        _;
+        _;
+    }
+
+    function _ok() internal returns (bool) {
+        if (open) {
+            open = false;
+            return true;
+        }
+        require(msg.sender == owner, "UNAUTHORIZED");
+        return true;
+    }
+
+    function _okView() internal view returns (bool) {
+        if (open) return true;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        return true;
+    }
+
+    function _transientFlag() internal view returns (bool r) {
+        bytes32 slot = FLAG_SLOT;
+        assembly {
+            r := tload(slot)
+        }
+    }
+
+    function viaOnce(uint256 v) external {
+        require(_ok(), "x");
+        hook = v;
+    }
+
+    function viaTwice(uint256 v) external twice {
+        require(_ok(), "x");
+        hook = v;
+    }
+
+    function viaTwiceIf(uint256 v) external twice {
+        if (!_ok()) revert("x");
+        hook = v;
+    }
+
+    function viewTwiceBody(uint256 v) external twice {
+        require(_okView(), "x");
+        open = false;
+        hook = v;
+    }
+
+    function viaDouble(uint256 v) external {
+        require(_ok() && _ok(), "x");
+        hook = v;
+    }
+
+    function sameIf(uint256 v) external {
+        if (!(_ok() && _ok())) revert("x");
+        hook = v;
+    }
+
+    function transientWriteThenBranch(uint256 v) external {
+        bytes32 slot = FLAG_SLOT;
+        assembly {
+            tstore(slot, 0)
+        }
+        if (_transientFlag()) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        hook = v;
+    }
+}
+
 // Reverts reached only under a path condition gate the function only under that condition.
 contract ConditionalGates {
     error Unauthorized();

@@ -381,6 +381,18 @@ def rendered_cache(function: Any) -> dict[tuple, tuple[Any, PredicateTree | None
     return _cfg(function).rendered
 
 
+def node_text(node: Any, fallback: Any) -> str:
+    """A node's source expression text, rendered once per contract pass."""
+    cache = _cfg_cache.get()
+    key = ("text", id(node))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    text = str(getattr(node, "expression", None) or fallback)
+    if cache is not None:
+        cache[key] = (node, text)
+    return text
+
+
 def placeholders(modifier: Any) -> list[Any]:
     return [n for n in getattr(modifier, "nodes", []) or [] if _node_is_type(n, "NodeType.PLACEHOLDER")]
 
@@ -433,6 +445,8 @@ def _ir_effect(ir: Any, active: tuple) -> Effect:
         return _NO_EFFECT if str(getattr(ir, "function_name", "")) == "staticcall" else (frozenset(), True)
     if isinstance(ir, SolidityCall):
         name = str(getattr(getattr(ir, "function", None), "name", "") or "")
+        if name.startswith("tstore("):
+            return (frozenset({TRANSIENT_STORAGE}), False)
         return (
             (frozenset(), True)
             if name.startswith(("sstore(", "call(", "callcode(", "delegatecall(", "create"))
@@ -442,7 +456,9 @@ def _ir_effect(ir: Any, active: tuple) -> Effect:
         return (frozenset(), True)
     if type(ir).__name__ == "InlineAssemblyOperation":
         code = str(getattr(ir, "inline_asm", "") or "")
-        return (frozenset(), True) if "sstore" in code or "call(" in code else _NO_EFFECT
+        if "sstore" in code or "call(" in code:
+            return (frozenset(), True)
+        return (frozenset({TRANSIENT_STORAGE}), False) if "tstore" in code else _NO_EFFECT
     target = getattr(ir, "variable", None) if isinstance(ir, Delete) else getattr(ir, "lvalue", None)
     if isinstance(target, ReferenceVariable) and not isinstance(ir, (Index, Member, Length)):
         origin = getattr(target, "points_to_origin", None)
@@ -493,11 +509,16 @@ def _node_effect(node: Any, active: tuple, skip: Any = None) -> Effect:
 def _scan_node_effect(node: Any, active: tuple, skip: Any) -> Effect:
     names = {getattr(v, "name", "") for v in getattr(node, "state_variables_written", []) or []}
     opaque = False
-    callee = getattr(skip, "function", None) if skip is not None else None
-    for ir in getattr(node, "irs", []) or []:
-        # ``skip`` may be the SSA twin of the call in ``node.irs``.
-        if ir is skip or (callee is not None and getattr(ir, "function", None) is callee):
-            continue
+    irs = list(getattr(node, "irs", []) or [])
+    ssa = list(getattr(node, "irs_ssa", []) or [])
+    # ``skip`` is the call that leads into the next frame, possibly as its SSA twin. Operations run in IR order, so
+    # only those before it in the node run first; another call to the same function still counts.
+    position = None
+    if skip is not None:
+        position = next((index for index, ir in enumerate(irs) if ir is skip), None)
+        if position is None and len(ssa) == len(irs):
+            position = next((index for index, ir in enumerate(ssa) if ir is skip), None)
+    for ir in irs if position is None else irs[:position]:
         more, more_opaque = _ir_effect(ir, active)
         names |= more
         opaque = opaque or more_opaque
@@ -607,21 +628,35 @@ def _storage_variable(value: Any, function: Any) -> tuple[str | None, bool]:
     return (None, False)
 
 
+_YUL_CALLS = ("call(", "staticcall(", "delegatecall(", "callcode(")
+# Transient storage as one cell: ``tstore`` changes only what ``tload`` reads.
+TRANSIENT_STORAGE = "<transient storage>"
 # Builtins reading another account's state, which a call out can change.
 _ACCOUNT_READS = ("balance(", "selfbalance(", "code(", "codehash(", "extcodesize(", "extcodehash(", "extcodecopy(")
 
 
-def _read_kind(ir: Any) -> tuple[bool, bool]:
-    """Whether ``ir`` reads this contract's storage unattributed, and whether it reads another account."""
+def _read_kind(ir: Any) -> tuple[bool, bool, bool]:
+    """Whether ``ir`` reads this contract's storage unattributed, another account, or transient storage."""
     if isinstance(ir, LowLevelCall) or (isinstance(ir, HighLevelCall) and not isinstance(ir, LibraryCall)):
-        return False, True
+        return False, True, False
     if isinstance(ir, SolidityCall):
         name = str(getattr(ir.function, "name", ""))
-        return name.startswith(("sload(", "tload(")), name.startswith(_ACCOUNT_READS)
+        return name.startswith("sload("), name.startswith((*_ACCOUNT_READS, *_YUL_CALLS)), name.startswith("tload(")
     if type(ir).__name__ == "InlineAssemblyOperation":
         code = str(getattr(ir, "inline_asm", "") or "")
-        return "sload" in code or "tload" in code, any(word in code for word in ("call(", "balance(", "extcode"))
-    return False, False
+        return "sload" in code, any(word in code for word in ("call(", "balance(", "extcode")), "tload" in code
+    return False, False, False
+
+
+def reads_conflict(reads: Reads, effect: Effect) -> bool:
+    """Whether storage a branch reads may have been written: a variable it reads, any persistent storage when it reads
+    some it can't attribute, or anything at all after a call that could write anywhere.
+    """
+    names, other, external = reads
+    written, written_other = effect
+    if written_other:
+        return bool(names or other or external)
+    return bool(names & written) or (other and bool(written - {TRANSIENT_STORAGE}))
 
 
 def _function_reads(function: Any) -> Reads:
@@ -641,9 +676,11 @@ def _function_reads(function: Any) -> Reads:
             names.add(variable.name)
     for node in nodes:
         for ir in getattr(node, "irs", []) or []:
-            more_other, more_external = _read_kind(ir)
+            more_other, more_external, transient = _read_kind(ir)
             other = other or more_other
             external = external or more_external
+            if transient:
+                names.add(TRANSIENT_STORAGE)
             for value in getattr(ir, "read", None) or []:
                 name, unattributed = _storage_variable(value, function)
                 if name is not None:
@@ -718,8 +755,10 @@ def _branch_reads(entry: Any, chain: list[Any], frame: Any, node: Any) -> Reads:
                 other = other or more_other
                 external = external or more_external
             else:
-                more_other, more_external = _read_kind(ir)
+                more_other, more_external, transient = _read_kind(ir)
                 other = other or more_other
                 external = external or more_external
+                if transient:
+                    names.add(TRANSIENT_STORAGE)
             work.extend((level, read) for read in getattr(ir, "read", None) or [])
     return (frozenset(names), other, external)

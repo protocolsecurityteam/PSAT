@@ -239,6 +239,28 @@ def test_a_branch_in_a_body_run_more_than_once_is_not_determined():
     )
 
 
+WRITTEN_BEFORE = ("unsupported", "branch_reads_state_written_before")
+OPEN_FLAG = ("equality", "truthy", "open")
+
+
+def test_a_helper_called_once_keeps_its_reach():
+    assert _tree("HelperRunTwice", "viaOnce(uint256)") == ("OR", OPEN_FLAG, OWNER)
+
+
+@pytest.mark.parametrize("signature", ["viaTwice(uint256)", "viaTwiceIf(uint256)", "viewTwiceBody(uint256)"])
+def test_a_helper_read_from_a_body_run_twice_is_not_determined(signature):
+    assert _tree("HelperRunTwice", signature) == ("unsupported", "body_runs_repeatedly")
+
+
+@pytest.mark.parametrize("signature", ["viaDouble(uint256)", "sameIf(uint256)"])
+def test_a_second_call_in_one_condition_sees_the_first_calls_writes(signature):
+    assert _tree("HelperRunTwice", signature) == ("AND", ("OR", OPEN_FLAG, OWNER), ("OR", WRITTEN_BEFORE, OWNER))
+
+
+def test_a_transient_store_counts_as_a_write():
+    assert _tree("HelperRunTwice", "transientWriteThenBranch(uint256)") == ("OR", WRITTEN_BEFORE, OWNER)
+
+
 def test_a_write_to_other_storage_keeps_the_branch():
     assert _tree("ConditionalGates", "unrelatedWriteThenBranch(uint256)") == ("OR", OPEN_MODE, OWNER)
 

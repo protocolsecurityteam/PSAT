@@ -71,8 +71,10 @@ from .reach import (
     branch_reads,
     effect_before,
     modifiers_before,
+    node_text,
     placeholders,
     reached_formula,
+    reads_conflict,
     render,
     rendered_cache,
     runs_body_repeatedly,
@@ -191,6 +193,8 @@ def _where_reached(
     repeated = next(
         (level for level, frame in enumerate(frames) if frame is not None and runs_body_repeatedly(frame)), None
     )
+    if _runs_repeatedly_above(entry, prefix):
+        repeated = 0
     for level in range(first_level, len(frames)):
         frame, anchor = frames[level], anchors[level]
         if frame is None or anchor is None:
@@ -259,7 +263,7 @@ def _branch_tree_builder(
             node=node,
             containing_function=frame,
             call_chain=list(entry_chain),
-            expression_text=str(getattr(node, "expression", None) or condition),
+            expression_text=node_text(node, condition),
             basis=list(basis) if basis is not None else [REACH_CONDITION_BASIS],
         )
         tree = _build_subtree_from_value(condition, prov, gate, frame)
@@ -269,16 +273,17 @@ def _branch_tree_builder(
             return None
         written, writes_other = effect_before(entry, entry_chain, frame, node) if check_writes else (frozenset(), False)
         if written or writes_other:
-            names, reads_other, reads_external = branch_reads(entry, entry_chain, frame, node)
-            if (
-                (writes_other and (names or reads_other or reads_external))
-                or (names & written)
-                or (reads_other and written)
-            ):
+            if reads_conflict(branch_reads(entry, entry_chain, frame, node), (written, writes_other)):
                 return make_leaf_node(_unsupported_leaf("branch_reads_state_written_before", gate.expression_text))
         return tree
 
     return build
+
+
+def _runs_repeatedly_above(entry: Any, chain: list[Any]) -> bool:
+    """Whether the entry point or a frame on the way into this one runs a body more than once."""
+    frames = [entry, *(getattr(call, "function", None) for call in chain)]
+    return any(frame is not None and runs_body_repeatedly(frame) for frame in frames)
 
 
 def _restamp_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
@@ -770,7 +775,7 @@ def _helper_value_tree(
     path whose condition opens cofinite, is ``unsupported``.
     """
     wanted = "True" if gate.polarity == "allowed_when_true" else "False"
-    if runs_body_repeatedly(callee):
+    if runs_body_repeatedly(callee) or _runs_repeatedly_above(entry, chain):
         return make_leaf_node(_unsupported_leaf("body_runs_repeatedly", gate.expression_text))
     gates = _helper_gate_subtrees(callee, sub_prov, chain, entry, caller_tainted_only=False)
     cfg_nodes = list(getattr(callee, "nodes", []) or [])
