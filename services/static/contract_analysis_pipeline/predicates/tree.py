@@ -267,12 +267,14 @@ def _branch_tree_builder(
         # A bool helper that never returns the value this outcome needs makes the outcome impossible.
         if leaf.get("unsupported_reason") == _HELPER_NEVER_RETURNS:
             return None
-        names, reads_other, reads_external = (
-            branch_reads(entry, entry_chain, frame, node) if check_writes else (frozenset(), False, False)
-        )
-        if names or reads_other or reads_external:
-            written, writes_other = effect_before(entry, entry_chain, frame, node)
-            if writes_other or (names & written) or (reads_other and written):
+        written, writes_other = effect_before(entry, entry_chain, frame, node) if check_writes else (frozenset(), False)
+        if written or writes_other:
+            names, reads_other, reads_external = branch_reads(entry, entry_chain, frame, node)
+            if (
+                (writes_other and (names or reads_other or reads_external))
+                or (names & written)
+                or (reads_other and written)
+            ):
                 return make_leaf_node(_unsupported_leaf("branch_reads_state_written_before", gate.expression_text))
         return tree
 

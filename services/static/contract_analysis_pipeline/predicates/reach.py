@@ -64,6 +64,8 @@ class _Cfg:
     unreached: dict[int, Formula | None] = field(default_factory=dict)
     # node_id -> ids of the nodes some successful path runs before it (itself included).
     preceding: dict[int, set[int]] = field(default_factory=dict)
+    # Whether a modifier the function invokes may run its body more than once.
+    repeats: bool | None = None
     # Rendered alternatives, shared by the gates under one branch; the key's objects are held so ids stay unique.
     rendered: dict[tuple, tuple[Any, PredicateTree | None]] = field(default_factory=dict)
 
@@ -522,7 +524,22 @@ def _function_effect(function: Any, active: tuple = ()) -> Effect:
     return effect
 
 
+def _memo(kind: str, entry: Any, chain: list[Any], node: Any, compute: Callable[[], Any]) -> Any:
+    cache = _cfg_cache.get()
+    if cache is None:
+        return compute()
+    key = (kind, id(entry), tuple(id(call) for call in chain), id(node))
+    hit = cache.get(key)
+    if hit is None:
+        hit = cache[key] = ((entry, list(chain), node), compute())
+    return hit[1]
+
+
 def effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effect:
+    return _memo("effect_before", entry, chain, node, lambda: _effect_before(entry, chain, frame, node))
+
+
+def _effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effect:
     """What a successful call may write before ``node`` in ``frame`` runs: earlier nodes in ``frame`` (and ``node``
     itself), and at each outer level of ``chain`` the nodes before the call that leads in, from ``entry`` down. A
     modifier's code after ``_`` runs after the body it wraps, so a ``_`` before the anchor adds everything the wrapped
@@ -554,8 +571,16 @@ def effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effect
 
 def runs_body_repeatedly(function: Any) -> bool:
     """Whether a modifier ``function`` invokes may run its body more than once in a call: a ``_`` that can reach
-    another ``_``, or one in a loop."""
-    for _, call in _cfg(function).modifier_calls:
+    another ``_``, or one in a loop.
+    """
+    cfg = _cfg(function)
+    if cfg.repeats is None:
+        cfg.repeats = _modifier_repeats_body(cfg)
+    return cfg.repeats
+
+
+def _modifier_repeats_body(function_cfg: _Cfg) -> bool:
+    for _, call in function_cfg.modifier_calls:
         modifier = getattr(call, "function", None)
         cfg = _cfg(modifier)
         marks = [node.node_id for node in placeholders(modifier) if node.node_id in cfg.nodes]
@@ -647,8 +672,13 @@ def _definitions(function: Any) -> dict[str, list[Any]]:
 
 
 def branch_reads(entry: Any, chain: list[Any], frame: Any, node: Any) -> Reads:
+    return _memo("branch_reads", entry, chain, node, lambda: _branch_reads(entry, chain, frame, node))
+
+
+def _branch_reads(entry: Any, chain: list[Any], frame: Any, node: Any) -> Reads:
     """What the condition of ``node`` in ``frame`` reads, followed through the locals and helpers that feed it and,
-    for a parameter of an inner frame, through the argument passed in from the frame above."""
+    for a parameter of an inner frame, through the argument passed in from the frame above.
+    """
     frames = [entry, *(getattr(call, "function", None) for call in chain)]
     names: set = set()
     other = external = False
