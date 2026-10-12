@@ -43,6 +43,7 @@ from db.models import (  # noqa: E402
     ContractBalanceFetch,
     ContractCreationWitness,
     DaemonLease,
+    DeployerChainEnumeration,
     EffectVerdict,
     IndexedEventCursor,
     IndexedEventLog,
@@ -590,6 +591,8 @@ def db_session():
             # Only reachable once Contract is gone.
             UpgradeTransaction,
             ContractCreationWitness,
+            # Keyed by (chain, EOA) with no FK; a leftover would stand in for the next test's enumeration.
+            DeployerChainEnumeration,
             # Leases carry a live TTL; clear them so warm-DB reruns don't couple.
             DaemonLease,
             # Entity-keyed balance rows (no contract FK) are reachable by no cascade, and a leftover reading would read

@@ -1131,3 +1131,302 @@ def test_boot_sweep_dedupes_pending_selection_pass(db_session, monkeypatch, erpc
         select(Job.id).where(Job.stage == JobStage.selection, Job.protocol_id == protocol.id)
     ).all()
     assert len(selection) == 1
+
+
+# ---------------------------------------------------------------------------
+# ladder wire: kept enumerations and the time budget
+# ---------------------------------------------------------------------------
+
+
+def _counting_wire(monkeypatch, txs_by_deployer_chain: dict[tuple[str, int], list], creations: dict[str, dict]):
+    """One Etherscan stub for enumeration (``txlist``/``txlistinternal``) and creation lookups. Returns the per
+    ``(deployer, chain)`` ``txlist`` call counter."""
+    txlist_calls: dict[tuple[str, int], int] = {}
+
+    def fake_get(module, action, chain_id, empty_result_ok=False, **params):
+        if action == "txlist":
+            key = (params["address"].lower(), chain_id)
+            txlist_calls[key] = txlist_calls.get(key, 0) + 1
+            return {"result": txs_by_deployer_chain.get(key, [])}
+        if action == "txlistinternal":
+            return {"result": []}
+        assert action == "getcontractcreation"
+        wanted = params["contractaddresses"].split(",")
+        return {"result": [creations[a] for a in wanted if a in creations]}
+
+    monkeypatch.setattr(deployer_enumeration.etherscan, "get", fake_get)
+    return txlist_calls
+
+
+def _block_tx(tx: dict, block: int, *, confirmations: int = 10_000) -> dict:
+    return {**tx, "blockNumber": str(block), "confirmations": str(confirmations)}
+
+
+def _anchored_members(session, protocol, eoa: str, base: int) -> list[Contract]:
+    members = []
+    for n in (base, base + 1):
+        anchor = _contract(session, ADDR(n + 0x100), protocol_id=protocol.id)
+        member = _contract(session, ADDR(n), protocol_id=protocol.id, deployer=eoa)
+        _seed_w2(session, member, anchor, protocol.id)
+        members.append(member)
+    return members
+
+
+def _probed_candidate(session, protocol, eoa: str, n: int, *, chain: str = "ethereum") -> Contract:
+    """A probed, code-present candidate deployed by *eoa*, holding a stale W2 so a Class-B row maps it and W4 admits."""
+    chain_id = 1 if chain == "ethereum" else 8453
+    candidate = _contract(session, ADDR(n), chain=chain, nominated_protocol_id=protocol.id, deployer=eoa)
+    session.add(
+        ContractProbeAttempt(contract_id=candidate.id, chain_id=chain_id, block_number=90, results={"status": "probed"})
+    )
+    session.add(
+        ContractCreationWitness(
+            chain_id=chain_id,
+            address=candidate.address,
+            creation_tx_hash="0x" + f"{n:064x}",
+            creation_block=50,
+            code_probe_block=90,
+            code_absent_at_probe=False,
+        )
+    )
+    _seed_w1(session, candidate, protocol.id, chain_id=chain_id)
+    _seed_stale_w2(session, candidate, _contract(session, ADDR(n + 0x100), protocol_id=protocol.id), protocol.id)
+    return candidate
+
+
+def _sent_txs(eoa: str, count: int) -> list[dict]:
+    return [_call_tx(eoa, tx_hash="0x" + f"{0x7000 + n:064x}", confirmations="10000") for n in range(count)]
+
+
+def _forget_kept_enumerations(session) -> None:
+    from db.models import DeployerChainEnumeration
+
+    session.query(DeployerChainEnumeration).delete()
+    session.commit()
+
+
+@pytest.mark.parametrize("arm", ["kept", "not_kept", "kept_unbounded_time"])
+def test_kept_enumerations_admit_and_refuse_exactly_as_fresh_ones(db_session, monkeypatch, arm):
+    """Same members admitted and refused with or without kept enumerations (and with a time budget that never fires);
+    with them, one ``txlist`` per deployer and chain however many contracts arrive."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
+    if arm == "kept_unbounded_time":
+        monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "1e9")
+    protocol = _protocol(db_session)
+    complete_eoa, storm_eoa = ADDR(0x5A0), ADDR(0x5B0)
+    complete_members = _anchored_members(db_session, protocol, complete_eoa, 0x5A1)
+    storm_members = _anchored_members(db_session, protocol, storm_eoa, 0x5B1)
+    admitted = [_probed_candidate(db_session, protocol, complete_eoa, 0x5C0 + n) for n in range(4)]
+    refused = [_probed_candidate(db_session, protocol, storm_eoa, 0x5D0 + n) for n in range(3)]
+    refused += [_probed_candidate(db_session, protocol, storm_eoa, 0x5E0 + n, chain="base") for n in range(3)]
+    db_session.commit()
+    txlist_calls = _counting_wire(
+        monkeypatch,
+        {
+            (complete_eoa, 1): [_creation_tx(c.address) for c in (*complete_members, *admitted)],
+            (storm_eoa, 1): [_creation_tx(c.address) for c in (*storm_members, *refused[:3])]
+            + _sent_txs(storm_eoa, deployer_enumeration.INTERNAL_RESOLUTION_TX_BUDGET + 1),
+            (storm_eoa, 8453): [_creation_tx(c.address) for c in refused[3:]],
+        },
+        creations={},
+    )
+
+    for candidate in (*admitted, *refused):
+        if arm == "not_kept":
+            _forget_kept_enumerations(db_session)
+        job = _job(db_session, protocol_id=protocol.id, address=candidate.address)
+        _gate_intake(db_session, job, candidate, {})
+
+    for row in (*admitted, *refused):
+        db_session.refresh(row)
+    assert [c.protocol_id for c in admitted] == [protocol.id] * 4
+    assert [c.protocol_id for c in refused] == [None] * 6
+    registry = {
+        (r.address, r.trust_class)
+        for r in db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.protocol_id == protocol.id))
+        .scalars()
+        .all()
+    }
+    assert registry == {(complete_eoa, "B")}
+    if arm == "not_kept":
+        assert txlist_calls[(storm_eoa, 1)] >= len(refused)
+    else:
+        assert txlist_calls == {(complete_eoa, 1): 1, (complete_eoa, 8453): 1, (storm_eoa, 1): 1, (storm_eoa, 8453): 1}
+
+
+def _kept(session, eoa: str, chain_id: int):
+    from db.models import DeployerChainEnumeration
+
+    session.expire_all()
+    return session.get(DeployerChainEnumeration, (chain_id, eoa))
+
+
+def test_internal_budget_outcome_is_kept_incomplete_until_the_budget_covers_it(db_session, monkeypatch):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x600)
+    created = ADDR(0x601)
+    _contract(db_session, created, deployer=eoa)
+    db_session.commit()
+    sent = deployer_enumeration.INTERNAL_RESOLUTION_TX_BUDGET + 1
+    calls = _counting_wire(monkeypatch, {(eoa, 1): [_creation_tx(created), *_sent_txs(eoa, sent)]}, creations={})
+
+    for _ in range(3):
+        creations, scope, complete, gap = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+        assert (creations, scope, complete, gap) == ([], [], False, None)
+    assert calls == {(eoa, 1): 1}
+    kept = _kept(db_session, eoa, 1)
+    assert kept is not None and (kept.outcome, kept.observed_count, kept.creations) == (
+        "internal_budget_exceeded",
+        sent,
+        None,
+    )
+
+    monkeypatch.setattr(deployer_enumeration, "INTERNAL_RESOLUTION_TX_BUDGET", sent)
+    _creations, scope, complete, _gap = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    assert calls == {(eoa, 1): 2}
+    assert (scope, complete) == ([1], True)
+
+
+def test_a_failed_enumeration_is_never_kept(db_session, monkeypatch):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x610)
+    calls = _stub_txlist(monkeypatch, {1: RuntimeError("etherscan down")})
+
+    for _ in range(2):
+        assert deployer_enumeration.enumerate_with_coverage(db_session, eoa) == ([], [], False, None)
+
+    assert len(calls) == 2
+    assert _kept(db_session, eoa, 1) is None
+
+
+def test_complete_enumeration_stands_until_a_newer_creation_claims_the_deployer(db_session, monkeypatch):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x620)
+    first, inside, newer, unplaced = ADDR(0x621), ADDR(0x622), ADDR(0x623), ADDR(0x624)
+    _contract(db_session, first, deployer=eoa)
+    db_session.commit()
+    window = [_block_tx(_creation_tx(first), 100), _block_tx(_call_tx(eoa, tx_hash="0x" + "61" * 32), 200)]
+    calls = _counting_wire(monkeypatch, {(eoa, 1): window}, creations={})
+
+    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[1:] == ([1], True, None)
+    kept = _kept(db_session, eoa, 1)
+    assert kept is not None and (kept.outcome, kept.settled_through_block) == ("complete", 200)
+
+    # A listed contract, or one created inside the settled range (an attribution gap, not new history), changes
+    # nothing a fresh enumeration would say.
+    _contract(db_session, inside, deployer=eoa)
+    db_session.add(ContractCreationWitness(chain_id=1, address=inside, creation_tx_hash=_TX, creation_block=150))
+    db_session.commit()
+    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[2:] == (
+        False,
+        f"known_creation_missing_from_enumeration:{inside}",
+    )
+    assert calls == {(eoa, 1): 1}
+
+    _contract(db_session, newer, deployer=eoa)
+    db_session.add(ContractCreationWitness(chain_id=1, address=newer, creation_tx_hash=_TX, creation_block=201))
+    db_session.commit()
+    deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    assert calls == {(eoa, 1): 2}
+
+    db_session.query(Contract).filter(Contract.address.in_([inside, newer])).delete()
+    _contract(db_session, unplaced, deployer=eoa)
+    db_session.commit()
+    deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    assert calls == {(eoa, 1): 4}
+
+
+def test_an_immature_internal_trace_ends_the_settled_range_before_it(db_session, monkeypatch):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x630)
+    window = [
+        _block_tx(_creation_tx(ADDR(0x631)), 100),
+        _block_tx(_call_tx(eoa, tx_hash="0x" + "62" * 32), 300, confirmations=2),
+        _block_tx(_call_tx(eoa, tx_hash="0x" + "63" * 32), 400),
+    ]
+    _counting_wire(monkeypatch, {(eoa, 1): window}, creations={})
+
+    deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+
+    kept = _kept(db_session, eoa, 1)
+    assert kept is not None and kept.settled_through_block == 299
+
+
+def test_time_budget_ends_in_a_kept_incomplete_outcome_retried_later(db_session, monkeypatch):
+    from sqlalchemy import func, update
+
+    from db.models import DeployerChainEnumeration
+
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
+    monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "100")
+    eoa = ADDR(0x640)
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(deployer_enumeration.time, "monotonic", lambda: clock["now"])
+    internal_calls: list[str] = []
+
+    def slow_get(module, action, chain_id, empty_result_ok=False, **params):
+        if action == "txlist":
+            return {"result": [_creation_tx(ADDR(0x641)), *_sent_txs(eoa, 5)] if chain_id == 1 else []}
+        internal_calls.append(params["txhash"])
+        clock["now"] += 30
+        return {"result": []}
+
+    monkeypatch.setattr(deployer_enumeration.etherscan, "get", slow_get)
+
+    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa) == ([], [], False, None)
+    assert len(internal_calls) == 4
+    for chain_id in (1, 8453):
+        kept = _kept(db_session, eoa, chain_id)
+        assert kept is not None and kept.outcome == "time_budget_exceeded"
+
+    deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    assert len(internal_calls) == 4
+
+    db_session.execute(
+        update(DeployerChainEnumeration)
+        .where(DeployerChainEnumeration.deployer == eoa)
+        .values(enumerated_at=func.now() - text(f"interval '{deployer_enumeration.TIME_BUDGET_RETRY_S + 1} seconds'"))
+    )
+    db_session.commit()
+    monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "1000")
+    _creations, scope, complete, _gap = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    assert len(internal_calls) == 9
+    assert (scope, complete) == ([1, 8453], True)
+
+
+def test_concurrent_enumerations_of_one_deployer_keep_one_row(db_session, monkeypatch):
+    from db.models import DeployerChainEnumeration
+
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    eoa = ADDR(0x650)
+    barrier = Barrier(2)
+
+    def get(module, action, chain_id, empty_result_ok=False, **params):
+        barrier.wait(timeout=5)
+        return {"result": [_creation_tx(ADDR(0x651))]}
+
+    monkeypatch.setattr(deployer_enumeration.etherscan, "get", get)
+    engine = create_engine(DATABASE_URL)
+    errors: list[BaseException] = []
+    results: list[tuple] = []
+
+    def enumerate_once() -> None:
+        try:
+            with Session(engine) as session:
+                results.append(deployer_enumeration.enumerate_with_coverage(session, eoa)[1:3])
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        threads = [Thread(target=enumerate_once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not errors
+        assert results == [([1], True), ([1], True)]
+        rows = db_session.execute(select(DeployerChainEnumeration).where(DeployerChainEnumeration.deployer == eoa))
+        assert [(r.chain_id, r.outcome) for r in rows.scalars()] == [(1, "complete")]
+    finally:
+        engine.dispose()
