@@ -23,6 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 if not os.environ.get("ERPC_BASE_URL"):
     os.environ["ERPC_BASE_URL"] = "http://erpc.invalid"
 
+# Tests stub the wire inside this process, which a fork-server child never sees, so heavy compute runs inline here. The
+# isolation tests turn it back on and stub the wire across processes.
+os.environ["PSAT_COMPUTE_ISOLATION"] = "0"
+
 _STORAGE_ENV_KEYS = (
     "ARTIFACT_STORAGE_ENDPOINT",
     "ARTIFACT_STORAGE_BUCKET",

@@ -32,6 +32,7 @@ from db.queue import (
     update_job_detail,
 )
 from schemas.stage_errors import StageError, StageErrors
+from services.compute_isolation import compute_cancel_var
 from utils.logging import (
     bind_trace_context,
     configure_logging,
@@ -259,6 +260,8 @@ class BaseWorker:
                 inflight_registered = True
             heartbeat_stop = threading.Event()
             heartbeat_thread: threading.Thread | None = None
+            lease_lost = threading.Event()
+            cancel_token = compute_cancel_var.set(lease_lost)
             rss_span = None
 
             def _background_heartbeat() -> None:
@@ -273,6 +276,7 @@ class BaseWorker:
                             lease_exc,
                             extra={"phase": "job", "outcome": "lease_lost"},
                         )
+                        lease_lost.set()
                         return
                     except Exception:
                         logger.warning(
@@ -566,6 +570,7 @@ class BaseWorker:
                     heartbeat_thread.join(timeout=1)
                 degraded_errors_var.reset(accumulator_token)
                 stage_metrics_var.reset(metrics_token)
+                compute_cancel_var.reset(cancel_token)
                 if inflight_registered:
                     with self._inflight_lock:
                         self._inflight_jobs.pop(claim_job_id, None)

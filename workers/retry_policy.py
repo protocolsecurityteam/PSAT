@@ -21,6 +21,7 @@ from db.storage import (
     StorageKeyAbsent,
     StorageUnavailable,
 )
+from services.compute_isolation import ChildProcessKilled, ResourceExhausted
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import CompilerUnavailableError
 from services.effects.exceptions import AnvilSpawnError, ForkRpcTimeoutError
@@ -34,7 +35,7 @@ except Exception:  # pragma: no cover — psycopg2 is a hard dep in production
     _PSYCOPG2_OPERATIONAL = ()
 
 
-Kind = Literal["transient", "terminal"]
+Kind = Literal["transient", "terminal", "resource_exhausted"]
 
 _DEFAULT_MAX_RETRIES = 5
 _DEFAULT_RETRY_BASE_S = 30.0
@@ -81,6 +82,8 @@ _TRANSIENT_TYPES: tuple[type[BaseException], ...] = (
     # Infra blips; the effects stage degrades-and-advances on exhaustion regardless.
     AnvilSpawnError,
     ForkRpcTimeoutError,
+    # Killed from outside the worker, so nothing about the job itself; its budget is enforced separately.
+    ChildProcessKilled,
     # "We did not find out": only a re-run can turn that into a fact. ``StorageKeyAbsent`` is written by the inline path
     # when the backend is unconfigured.
     #
@@ -106,8 +109,11 @@ _TERMINAL_TYPES: tuple[type[BaseException], ...] = (
 def classify(exc: BaseException) -> Kind:
     """Decide whether *exc* warrants a retry.
 
-    ``HTTPError`` is checked first (status decides); transient beats terminal on overlap.
+    A budget overrun is its own terminal kind. ``HTTPError`` is checked next (status decides); transient beats terminal
+    on overlap.
     """
+    if isinstance(exc, ResourceExhausted):
+        return "resource_exhausted"
     if isinstance(exc, sqlalchemy.exc.DBAPIError):
         # SQLAlchemy wraps the driver's exception without subclassing it; a connection it invalidated is a disconnect
         # whatever the driver called it, and otherwise the driver's type decides.
