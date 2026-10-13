@@ -268,3 +268,100 @@ def test_conjuncts_on_calldata_hold_together_only_on_one_assignment():
         evaluate_tree_with_registry(cast(Any, {"op": "OR", "children": [impossible, owner]}), AdapterRegistry(), ctx)
     )
     assert not [child for child in cap.get("children") or [] if child["kind"] == "conditional_universal"], cap
+
+
+def _stated(tree: Any) -> dict[str, Any]:
+    from services.resolution.adapters import AdapterRegistry
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
+
+    ctx = EvaluationContext(chain_id=1, contract_address=SUBJECT, meta={PASS_MEMO: {}})
+    return capability_to_dict(evaluate_tree_with_registry(cast(Any, tree), AdapterRegistry(), ctx))
+
+
+def _outcome(expression: dict[str, Any], holds: bool, text: str) -> dict[str, Any]:
+    node = _reach_leaf(expression, text)
+    node["leaf"]["reach_read"] = _stamp(expression, holds)
+    return node
+
+
+def _unread_text(cap: dict[str, Any]) -> str:
+    [reach] = [cap] if cap.get("trace") else [child for child in cap["children"] if child.get("trace")]
+    [step] = reach["trace"]
+    assert step["step"] == "reach_condition_read" and step["holds"] is None
+    assert reach["check"]["extra"]["expression"] == step["expression"]
+    return step["expression"]
+
+
+def _beside_owner(tree: dict[str, Any]) -> dict[str, Any]:
+    owner = {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "eq",
+            "authority_role": "caller_authority",
+            "operands": [{"source": "msg_sender"}, {"source": "constant", "constant_value": "0x" + "0e" * 20}],
+            "references_msg_sender": True,
+            "parameter_indices": [],
+            "expression": "msg.sender == owner",
+            "basis": [],
+        },
+    }
+    return {"op": "OR", "children": [tree, owner]}
+
+
+_ZERO_ADDRESS = {"op": "convert", "type": "address", "value": _literal(0)}
+
+
+def test_a_condition_required_false_is_published_as_it_must_hold():
+    delegatee = {"op": "param", "type": "address", "index": 0, "name": "delegatee"}
+    # ``to != address(0)`` must be false for the path: the witness calldata is the zero address, and the text says so.
+    cap = _stated(_outcome(_compare("ne", delegatee, _ZERO_ADDRESS), False, "to != address(0)"))
+    [condition] = cap["conditions"]
+    zero = "0x" + "00" * 20
+    assert condition["description"] == f"holds with calldata delegatee={zero}: delegatee == address(0)"
+    [step] = cap["trace"]
+    assert step["expression"] == "delegatee == address(0)" and step["holds"] is True
+    assert step["calldata"] == {"delegatee": zero}
+
+    hook = {"op": "storage", "type": "address", "variable": "hook", "getter": _selector("hook()")}
+    unread = _stated(
+        _outcome(_compare("ne", {"op": "convert", "type": "address", "value": hook}, _ZERO_ADDRESS), False, "x")
+    )
+    assert _unread_text(unread) == "hook == address(0)"
+    flag = _storage("paused", "bool")
+    assert _unread_text(_stated(_outcome(flag, False, "paused"))) == "!paused"
+    assert _unread_text(_stated(_outcome(_compare("gt", flag, flag), False, "x"))) == "paused <= paused"
+
+
+def test_a_negation_required_false_cancels_and_a_negated_connective_stays_whole():
+    flag = _storage("executorRequired", "bool")
+    negated = {"op": "not", "type": "bool", "value": flag}
+    assert _unread_text(_stated(_outcome(negated, False, "!executorRequired"))) == "executorRequired"
+    assert _unread_text(_stated(_outcome(negated, True, "!executorRequired"))) == "!executorRequired"
+    twice = {"op": "not", "type": "bool", "value": negated}
+    assert _unread_text(_stated(_outcome(twice, False, "!!executorRequired"))) == "!executorRequired"
+    both = {"op": "and", "type": "bool", "left": flag, "right": _storage("paused", "bool")}
+    assert _unread_text(_stated(_outcome(both, False, "x"))) == "!(executorRequired && paused)"
+    either = {"op": "or", "type": "bool", "left": both, "right": negated}
+    assert _unread_text(_stated(_outcome(either, True, "x"))) == "(executorRequired && paused) || !executorRequired"
+
+
+def test_outcomes_under_a_connective_keep_it_and_an_unstated_outcome_says_so():
+    a = _storage("a", "uint256")
+    paused = _storage("paused", "bool")
+    mode = _compare("eq", _storage("mode", "uint8"), _literal(1, "uint8"))
+    # One outcome stamped on every leaf of a compound condition is that outcome, said once.
+    shared = {"op": "OR", "children": [_outcome(paused, False, "paused"), _outcome(paused, False, "paused")]}
+    tree = {
+        "op": "AND",
+        "children": [
+            _outcome(_compare("gt", a, _literal(5)), False, "a > 5"),
+            {"op": "OR", "children": [shared, _outcome(mode, True, "mode == 1")]},
+        ],
+    }
+    assert _unread_text(_stated(_beside_owner(tree))) == "a <= 5 && (!paused || mode == 1)"
+    unstated = _reach_leaf(_compare("gt", a, _literal(5)), "a > 5")
+    del unstated["leaf"]["reach_read"]
+    either = {"op": "AND", "children": [unstated, _outcome(paused, True, "paused")]}
+    assert _unread_text(_stated(_beside_owner(either))) == "(a > 5 [required outcome not recorded]) && paused"

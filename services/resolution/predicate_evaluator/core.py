@@ -38,7 +38,7 @@ from ..permissionless_shapes import (
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
-from ..reach_reads import ReachTruth, read_reach
+from ..reach_reads import ReachTruth, describe_reach, read_reach
 from .adapters import SetAdapter, _NullAdapter
 from .binding import (
     _bind_callee_parameters,
@@ -230,23 +230,48 @@ def _reach_truth(tree: PredicateTree, ctx: EvaluationContext) -> ReachTruth:
 
 
 def _reach_expression(tree: PredicateTree) -> str:
-    texts: list[str] = []
-
-    def visit(node: PredicateTree) -> None:
-        leaf = node.get("leaf")
-        if isinstance(leaf, dict) and leaf.get("expression") and leaf["expression"] not in texts:
-            texts.append(leaf["expression"])
-        for child in node.get("children") or []:
-            visit(child)
-
-    visit(tree)
-    return " ; ".join(texts)
+    """The reach condition as it must hold: each outcome its leaves state, under the tree's connectives."""
+    return _reach_text(tree)[0]
 
 
-def _reach_step(truth: ReachTruth, tree: PredicateTree) -> dict[str, Any]:
+def _reach_text(node: PredicateTree) -> tuple[str, bool]:
+    """``node``'s condition and whether its text is a connective."""
+    leaves = _leaves(node)
+    stamps = [leaf.get(REACH_READ) for leaf in leaves]
+    # Every leaf of one outcome carries the whole outcome, so a subtree whose leaves share one is that outcome.
+    if stamps and all(stamp == stamps[0] for stamp in stamps):
+        described = describe_reach(stamps[0])
+        if described is not None:
+            return described
+    if node.get("op") == "LEAF":
+        leaf = node.get("leaf") or {}
+        text = leaf.get("expression")
+        if not text or text == leaf.get("unsupported_reason"):
+            return text or "", False
+        # The source text alone doesn't say which way the condition must go.
+        return f"{text} [required outcome not recorded]", True
+    parts: list[tuple[str, bool]] = []
+    for child in node.get("children") or []:
+        part = _reach_text(child)
+        if part[0] and part not in parts:
+            parts.append(part)
+    if len(parts) == 1:
+        return parts[0]
+    joiner = " && " if node.get("op") == "AND" else " || "
+    return joiner.join(f"({text})" if compound else text for text, compound in parts), len(parts) > 1
+
+
+def _leaves(node: PredicateTree) -> list[dict[str, Any]]:
+    leaf = node.get("leaf")
+    if isinstance(leaf, dict):
+        return [cast(dict[str, Any], leaf)]
+    return [found for child in node.get("children") or [] for found in _leaves(child)]
+
+
+def _reach_step(truth: ReachTruth, tree: PredicateTree, expression: str | None = None) -> dict[str, Any]:
     step: dict[str, Any] = {
         "step": "reach_condition_read",
-        "expression": _reach_expression(tree),
+        "expression": _reach_expression(tree) if expression is None else expression,
         "holds": truth.holds,
         "reads": truth.reads,
     }
@@ -259,12 +284,12 @@ def _reach_step(truth: ReachTruth, tree: PredicateTree) -> dict[str, Any]:
 
 def _reach_capability(truth: ReachTruth, tree: PredicateTree) -> CapabilityExpr:
     """A reach condition read true is an open path with the read as its witness; unread, it is not determined."""
+    expression = _reach_expression(tree)
     if truth.holds is True:
         sent = ", ".join(f"{name}={value}" for name, value in (truth.calldata or {}).items())
         when = f"with calldata {sent}" if sent else "at the analysis block"
-        cap = CapabilityExpr.conditional_universal(
-            Condition(kind="business", description=f"holds {when}: {_reach_expression(tree)}")
-        )
+        condition = Condition(kind="business", description=f"holds {when}: {expression}")
+        cap = CapabilityExpr.conditional_universal(condition)
     elif truth.holds is False:
         cap = CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
     else:
@@ -274,11 +299,11 @@ def _reach_capability(truth: ReachTruth, tree: PredicateTree) -> CapabilityExpr:
                 target_call_selector=None,
                 extra={
                     "basis": [REACH_NOT_DETERMINED, truth.reason or "reach_condition_unread"],
-                    "expression": _reach_expression(tree),
+                    "expression": expression,
                 },
             )
         )
-    cap.trace = [_reach_step(truth, tree)]
+    cap.trace = [_reach_step(truth, tree, expression)]
     return cap
 
 

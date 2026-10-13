@@ -49,6 +49,80 @@ def read_reach(stamp: Any, ctx: Any) -> ReachTruth:
     )
 
 
+def describe_reach(stamp: Any) -> tuple[str, bool] | None:
+    """The condition one reach outcome (``{"expression", "holds"}``) states, as it must hold, and whether its text is a
+    connective; ``None`` for operations this module doesn't read.
+    """
+    if not isinstance(stamp, dict) or not isinstance(stamp.get("holds"), bool):
+        return None
+    try:
+        text, rank = _text(stamp.get("expression"), 0) if stamp["holds"] else _negated(stamp.get("expression"), 0)
+    except _Unread:
+        return None
+    return text, rank <= _AND_RANK
+
+
+_OR_RANK, _AND_RANK, _COMPARE_RANK, _NOT_RANK, _ATOM_RANK = range(5)
+_SYMBOLS = {"eq": "==", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">", "gte": ">="}
+_FLIPPED = {"eq": "ne", "ne": "eq", "lt": "gte", "lte": "gt", "gt": "lte", "gte": "lt"}
+
+
+def _text(node: Any, depth: int) -> tuple[str, int]:
+    if depth > 32 or not isinstance(node, dict):
+        raise _Unread("reach_condition_malformed")
+    op = node.get("op")
+    if op in _SYMBOLS:
+        left = _wrapped(node.get("left"), depth, _COMPARE_RANK)
+        right = _wrapped(node.get("right"), depth, _COMPARE_RANK)
+        return f"{left} {_SYMBOLS[op]} {right}", _COMPARE_RANK
+    if op in ("and", "or"):
+        rank = _AND_RANK if op == "and" else _OR_RANK
+        sides = []
+        for side in (node.get("left"), node.get("right")):
+            text, inner = _text(side, depth + 1)
+            sides.append(f"({text})" if inner <= _AND_RANK and inner != rank else text)
+        return (" && " if op == "and" else " || ").join(sides), rank
+    if op == "not":
+        return _negated(node.get("value"), depth + 1)
+    if op == "convert":
+        inner = node.get("value")
+        if isinstance(inner, dict) and inner.get("type") == node.get("type") and not inner.get("literal"):
+            return _text(inner, depth + 1)
+        return f"{node.get('type')}({_text(inner, depth + 1)[0]})", _ATOM_RANK
+    if op == "call":
+        signature = node.get("signature")
+        if not isinstance(signature, str):
+            raise _Unread("reach_condition_malformed")
+        arguments = ", ".join(_text(argument, depth + 1)[0] for argument in node.get("arguments") or [])
+        return f"{signature.split('(')[0]}({arguments})", _ATOM_RANK
+    name = {"self": "address(this)", "chainid": "block.chainid"}.get(op) if isinstance(op, str) else None
+    if op == "param":
+        name = node.get("name")
+    elif op == "storage":
+        name = node.get("variable")
+    elif op == "const":
+        name = _render(_parse_int(node.get("value")), str(node.get("type")))
+        if node.get("type") == "bool":
+            name = "false" if name == "0" else "true"
+    if not isinstance(name, str) or not name:
+        raise _Unread("reach_condition_operation_unsupported")
+    return name, _ATOM_RANK
+
+
+def _negated(node: Any, depth: int) -> tuple[str, int]:
+    """``node`` required false: a comparison flips, a negation cancels, anything else is negated whole."""
+    if isinstance(node, dict) and node.get("op") in _FLIPPED:
+        return _text({**node, "op": _FLIPPED[node["op"]]}, depth)
+    if isinstance(node, dict) and node.get("op") == "not":
+        return _text(node.get("value"), depth + 1)
+    return f"!{_wrapped(node, depth, _NOT_RANK)}", _NOT_RANK
+
+
+def _wrapped(node: Any, depth: int, rank: int) -> str:
+    text, inner = _text(node, depth + 1)
+    return f"({text})" if inner <= rank else text
+
+
 class _Reader:
     """Reads at one subject and block; with no RPC, contract or pinned block every read is unread."""
 
