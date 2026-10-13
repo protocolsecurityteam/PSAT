@@ -36,6 +36,17 @@ def _isolated(monkeypatch):
     monkeypatch.setenv("PSAT_COMPUTE_ISOLATION", "1")
 
 
+@pytest.fixture(autouse=True)
+def _accumulators():
+    """Fresh per-test accumulators, reset afterwards so they never leak into another test's job context."""
+    degraded: list = []
+    metrics: dict = {}
+    tokens = (degraded_errors_var.set(degraded), stage_metrics_var.set(metrics))
+    yield degraded, metrics
+    degraded_errors_var.reset(tokens[0])
+    stage_metrics_var.reset(tokens[1])
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _fork_server():
     yield
@@ -50,11 +61,8 @@ def _gone(pid: int) -> bool:
     return state == "Z"
 
 
-def test_the_result_comes_back_with_the_childs_degraded_records_and_metrics():
-    degraded: list = []
-    metrics: dict = {}
-    degraded_errors_var.set(degraded)
-    stage_metrics_var.set(metrics)
+def test_the_result_comes_back_with_the_childs_degraded_records_and_metrics(_accumulators):
+    degraded, metrics = _accumulators
     with bind_trace_context(job_id="job-7", stage="policy"):
         result = run_isolated(children.report, 5, budget=ROOMY, label="unit")
     assert result["value"] == 5
@@ -65,9 +73,8 @@ def test_the_result_comes_back_with_the_childs_degraded_records_and_metrics():
     assert metrics["isolated_unit_subprocess_cpu_s"] == 0
 
 
-def test_the_cpu_of_what_the_child_spawned_is_reported():
-    metrics: dict = {}
-    stage_metrics_var.set(metrics)
+def test_the_cpu_of_what_the_child_spawned_is_reported(_accumulators):
+    _degraded, metrics = _accumulators
     run_isolated(children.spawn_and_wait, budget=ROOMY, label="unit")
     assert metrics["isolated_unit_subprocess_cpu_s"] > 0.1
 
