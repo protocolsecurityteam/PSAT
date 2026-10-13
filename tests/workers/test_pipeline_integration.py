@@ -734,7 +734,7 @@ def test_discovery_reads_and_writes_protocol_declared_chains(monkeypatch):
     )
     prev_job = SimpleNamespace(id="prev-1", protocol_id=7)
     prev_protocol = SimpleNamespace(id=7, chains=["base"])
-    protocol_row = SimpleNamespace(id=7, chains=["base"])
+    protocol_row = SimpleNamespace(id=7, chains=["base"], canonical_slug=None)
 
     monkeypatch.setattr(
         "workers.discovery.find_previous_company_inventory",

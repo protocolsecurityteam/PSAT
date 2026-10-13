@@ -296,7 +296,7 @@ def _extract_name_from_line(line: str) -> str | None:
 
     if not candidates:
         return None
-    return max(set(candidates), key=_label_score)
+    return max(set(candidates), key=lambda value: (*_label_score(value), value))
 
 
 def _unresolved_chains(requested_chain: str | None) -> list[tuple[str, bool]]:

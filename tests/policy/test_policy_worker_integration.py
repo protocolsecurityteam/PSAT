@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.conftest import requires_postgres
 from tests.support.policy_builders import (
     AUTH_ADDRESS,
     TARGET_ADDRESS,
@@ -19,6 +20,29 @@ from tests.support.policy_builders import (
 from workers.policy_worker import PolicyWorker
 
 _AUTH_BUNDLE = _authority_bundle()
+
+
+@requires_postgres
+@pytest.mark.parametrize("chain", ["ethereum", "base"])
+def test_contract_identity_survives_shared_impl_job_reassignment(db_session, chain) -> None:
+    from db.models import Contract
+    from db.queue import create_job
+    from workers.policy_worker import _contract_for_job
+
+    proxy = "0x" + "77" * 20
+    job = create_job(db_session, {"address": TARGET_ADDRESS.upper(), "chain": chain, "proxy_address": proxy})
+    other = create_job(db_session, {"address": TARGET_ADDRESS, "chain": chain, "proxy_address": "0x" + "88" * 20})
+    wrong_chain = "base" if chain == "ethereum" else "ethereum"
+    unrelated = Contract(address=TARGET_ADDRESS, chain=wrong_chain, contract_name="OtherChain")
+    proxy_row = Contract(address=proxy, chain=chain, job_id=job.id, contract_name="Proxy")
+    canonical = Contract(address=TARGET_ADDRESS, chain=chain, job_id=other.id, contract_name="SharedImplementation")
+    db_session.add_all([unrelated, proxy_row, canonical])
+    db_session.flush()
+
+    assert _contract_for_job(db_session, job) is canonical
+    assert canonical.job_id == other.id
+    assert job.request is not None
+    assert job.request["proxy_address"] == proxy
 
 
 @pytest.mark.parametrize(

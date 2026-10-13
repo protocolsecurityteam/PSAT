@@ -11,9 +11,9 @@ everything. Any adapter setting the marker gets this for free.
 * Fail-safe: re-resolution only upgrades deferrals; still-cold ones re-defer.
 * Thrash-free: re-enqueued only when all its authorities are warm (monotonic); the re-run clears the marker.
 * No double work: skipped if a job for the address is already in flight.
-* Orphans: ``contracts.job_id`` is ``ON DELETE SET NULL``, so deleting a job strands its rows. Orphans are selected by
-``(address, chain)`` and relinked before re-enqueueing (the policy stage writes by ``Contract.job_id``). Orphans with no
-job at all can't be converged here and are counted.
+* Shared implementations: markers select jobs by code address, chain and proxy deployment, not the mutable
+``contracts.job_id`` pointer. Orphans retain a legacy link after matching the same deployment; those with no matching
+job cannot converge here and are counted.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterator
 
-from sqlalchemy import Text, and_, cast, exists, func, select
+from sqlalchemy import Text, and_, case, cast, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from db.jsonb import jsonb_has_payload
@@ -104,6 +104,44 @@ def _chain_name_for(chain_id: int) -> str | None:
         return None
 
 
+def _job_reads_function_deployment(job: Any = Job):
+    """A shared implementation's marker belongs to the proxy whose policy wrote it."""
+    proxy = job.request["proxy_address"].astext
+    deployment = func.lower(case((and_(proxy.startswith("0x"), func.length(proxy) == 42), proxy), else_=job.address))
+    return or_(
+        func.lower(EffectiveFunction.deployment_address) == deployment,
+        and_(EffectiveFunction.deployment_address.is_(None), or_(Contract.job_id == job.id, Contract.job_id.is_(None))),
+    )
+
+
+def _completed_marker_rows(session: Session, chain_id: int, marker: str) -> list[Any]:
+    chain_name = _chain_name_for(chain_id)
+    if chain_name is None:
+        return []
+    return list(
+        session.execute(
+            select(Job.id, Job.address, EffectiveFunction.capability_expr)
+            .select_from(Contract)
+            .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
+            .join(
+                Job,
+                and_(
+                    func.lower(Job.address) == func.lower(Contract.address),
+                    Job.chain_id == chain_id,
+                    _job_reads_function_deployment(),
+                ),
+            )
+            .where(Contract.job_id.is_not(None))
+            .where(func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
+            .where(Job.status == JobStatus.completed, Job.stage == JobStage.done)
+            .where(Job.request["effects_resume_work_id"].astext.is_(None))
+            .where(jsonb_has_payload(EffectiveFunction.capability_expr))
+            .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{marker}%"))
+            .order_by(Job.created_at.desc(), Job.id)
+        ).all()
+    )
+
+
 def _orphaned_marker_rows(session: Session, chain_id: int) -> list[Any]:
     """Marker-bearing ``effective_functions`` rows on orphaned contracts (``job_id IS NULL``), paired with a job that
     can rewrite them.
@@ -127,12 +165,14 @@ def _orphaned_marker_rows(session: Session, chain_id: int) -> list[Any]:
                     Job.address.isnot(None),
                     func.lower(Job.address) == func.lower(Contract.address),
                     Job.chain_id == chain_id,
+                    _job_reads_function_deployment(),
                 ),
             )
             .where(Contract.job_id.is_(None))
             .where(func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
             .where(Job.status == JobStatus.completed)
             .where(Job.stage == JobStage.done)
+            .where(Job.request["effects_resume_work_id"].astext.is_(None))
             .where(jsonb_has_payload(EffectiveFunction.capability_expr))
             .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
             .where(~exists(select(owned.id).where(owned.job_id == Job.id)))
@@ -168,6 +208,8 @@ def _unreachable_orphan_contracts(session: Session, chain_id: int) -> int:
                     .where(candidate.chain_id == chain_id)
                     .where(candidate.status == JobStatus.completed)
                     .where(candidate.stage == JobStage.done)
+                    .where(candidate.request["effects_resume_work_id"].astext.is_(None))
+                    .where(_job_reads_function_deployment(candidate))
                     .where(~exists(select(owned.id).where(owned.job_id == candidate.id)))
                 )
             )
@@ -243,16 +285,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
     """
     # Pre-filter on the marker via a text cast (catches nested leaves); the precise walk is below. ``jsonb_has_payload``
     # because a Python ``None`` is stored as jsonb null, which passes a SQL null test.
-    rows = session.execute(
-        select(Job.id, Job.address, EffectiveFunction.capability_expr)
-        .join(Contract, Contract.job_id == Job.id)
-        .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
-        .where(Job.status == JobStatus.completed)
-        .where(Job.stage == JobStage.done)
-        .where(Job.chain_id == chain_id)
-        .where(jsonb_has_payload(EffectiveFunction.capability_expr))
-        .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{DEFERRED_MARKER}%"))
-    ).all()
+    rows = _completed_marker_rows(session, chain_id, DEFERRED_MARKER)
 
     # job_id -> (address, deferrals)
     by_job: dict[Any, tuple[str | None, set[Deferral]]] = {}
@@ -305,8 +338,7 @@ def reconcile_deferred_resolutions(session: Session, *, chain_id: int, limit: in
                 continue
             if session.execute(select(Contract.id).where(Contract.job_id == job.id).limit(1)).first() is not None:
                 continue
-            # Repair the linkage: the policy stage writes for ``Contract.job_id == job.id``, so re-enqueueing without it
-            # writes nothing, leaves the marker, and re-enqueues forever.
+            # Keep a useful canonical link for legacy readers; policy writes use code and chain identity.
             contract.job_id = job.id
             logger.info(
                 "deferred-resolution reconciler re-linked orphaned contract %s (%s) to job %s before "
@@ -484,16 +516,7 @@ def reconcile_role_set_drift(session: Session, *, chain_id: int, limit: int = 20
     Re-enqueues the policy stage of jobs whose role-store enumeration has a grant/revoke indexed past its fold frontier;
     returns the count. The re-run stamps a higher frontier, so it doesn't re-select. Gated on ``backfill_complete``.
     """
-    rows = session.execute(
-        select(Job.id, Job.address, EffectiveFunction.capability_expr)
-        .join(Contract, Contract.job_id == Job.id)
-        .join(EffectiveFunction, EffectiveFunction.contract_id == Contract.id)
-        .where(Job.status == JobStatus.completed)
-        .where(Job.stage == JobStage.done)
-        .where(Job.chain_id == chain_id)
-        .where(jsonb_has_payload(EffectiveFunction.capability_expr))
-        .where(cast(EffectiveFunction.capability_expr, Text).ilike(f"%{TRACE_STEP_ENUMERABLE_ROLE_STORE}%"))
-    ).all()
+    rows = _completed_marker_rows(session, chain_id, TRACE_STEP_ENUMERABLE_ROLE_STORE)
 
     # job_id -> (address, {authority: lowest frontier})
     by_job: dict[Any, tuple[str | None, dict[str, int]]] = {}

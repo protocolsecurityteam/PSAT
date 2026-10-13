@@ -346,12 +346,12 @@ class TestCandidatePathsForName:
             pytest.param(
                 "MyPool",
                 ["contracts/pool/MyPool.sol", "contracts/utils/Other.sol"],
-                ["contracts/pool/MyPool.sol"],
+                ["contracts/pool/MyPool.sol", "src/MyPool.sol", "contracts/MyPool.sol"],
                 id="prefers-matching-etherscan-paths",
             ),
             # Flattened verifications don't carry the real tree.
             pytest.param("Vault", [], ["src/Vault.sol", "contracts/Vault.sol"], id="conventional-fallback"),
-            pytest.param("pool", ["src/pool.vy"], ["src/pool.vy"], id="matches-vyper-files"),
+            pytest.param("pool", ["src/pool.vy"], ["src/pool.vy", "contracts/pool.vy"], id="matches-vyper-files"),
         ],
     )
     def test_candidate_paths(self, name, paths, expected):
@@ -363,6 +363,53 @@ class TestVerifyAuditCoversImplStatuses:
 
     def _src(self, files: dict[str, str]) -> VerifiedSource:
         return VerifiedSource(contract_name="X", compiler_version="v0.8", files=files)
+
+    @pytest.mark.parametrize(
+        "deployed,reviewed,match",
+        [
+            ("src/Pool.sol", "contracts/Pool.sol", True),
+            ("lib/pkg/contracts/Pool.sol", "contracts/Pool.sol", True),
+            ("lib/pkg/src/Pool.vy", "src/Pool.vy", True),
+            ("src/Pool.sol", "contracts/Pool.sol", False),
+        ],
+    )
+    def test_alternate_repository_path_keeps_verified_path_and_hash(self, monkeypatch, deployed, reviewed, match):
+        seen = []
+
+        def fetch(repo, commit, path, **kwargs):
+            seen.append(path)
+            if path == reviewed:
+                return source_equivalence.GithubHashResult(
+                    sha256="verified" if match else "different", status="ok", detail=""
+                )
+            return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail="missing")
+
+        monkeypatch.setattr(source_equivalence, "fetch_github_source_hash", fetch)
+        out = source_equivalence.verify_audit_covers_impl(
+            reviewed_commits=["abc1234"],
+            scope_name="Pool",
+            source_repo="publisher/core",
+            impl_source=self._src({deployed: "verified", "other/Other.sol": "unrelated"}),
+        )
+        assert deployed in seen and reviewed in seen
+        assert out.status == ("proven" if match else "hash_mismatch")
+        if match:
+            assert len(out.matches) == 1
+            assert out.matches[0].etherscan_path == deployed
+            assert out.matches[0].github_path == reviewed
+            assert out.matches[0].source_repo == "publisher/core"
+
+    def test_duplicate_basename_cannot_substitute_dependency_for_target(self, monkeypatch):
+        monkeypatch.setattr(
+            source_equivalence, "fetch_github_source_hash", lambda *a, **k: pytest.fail("ambiguous target")
+        )
+        out = source_equivalence.verify_audit_covers_impl(
+            reviewed_commits=["abc1234"],
+            scope_name="Pool",
+            source_repo="publisher/core",
+            impl_source=self._src({"src/Pool.sol": "actual", "lib/other/Pool.sol": "dependency"}),
+        )
+        assert out.status == "source_identity_ambiguous" and not out.matches
 
     def test_proven_on_matching_hash(self, monkeypatch):
         monkeypatch.setattr(

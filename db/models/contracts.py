@@ -392,6 +392,7 @@ WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
 WITNESS_RULE_W4_FACTORY = "w4_factory"
 WITNESS_RULE_W5_HUMAN = "w5_human"
 WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
+WITNESS_RULE_W7_PUBLISHER_REGISTRY = "w7_publisher_registry"
 # W4-H: admitted on measured deployer affinity, not proof. The distinct rule string is
 # how nothing presents it as proven.
 WITNESS_RULE_W4H_DEPLOYER_AFFINITY = "w4h_deployer_affinity"
@@ -405,6 +406,7 @@ WITNESS_RULES = frozenset(
         WITNESS_RULE_W4H_DEPLOYER_AFFINITY,
         WITNESS_RULE_W5_HUMAN,
         WITNESS_RULE_W6_LLAMA_SEED,
+        WITNESS_RULE_W7_PUBLISHER_REGISTRY,
     }
 )
 # W1 is the code precondition for every promotion and admits nothing alone.
@@ -434,7 +436,7 @@ class ContractMembershipWitness(Base):
     __table_args__ = (
         CheckConstraint(
             "rule IN ('w1_code', 'w2_structural', 'w3_control', 'w4_deployer', 'w4_factory', "
-            "'w4h_deployer_affinity', 'w5_human', 'w6_llama_seed')",
+            "'w4h_deployer_affinity', 'w5_human', 'w6_llama_seed', 'w7_publisher_registry')",
             name="ck_contract_membership_witnesses_rule",
         ),
         Index("ix_contract_membership_witnesses_contract_id", "contract_id"),

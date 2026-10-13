@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Job, JobStage, JobStatus
+from db.models import Contract, ContractMembershipWitness, Job, JobStage, JobStatus
 from db.queue import (
     DEFAULT_JOB_LEASE_TTL_S,
     complete_job,
@@ -196,13 +196,25 @@ class SelectionWorker(BaseWorker):
         )
 
         # Threshold filter and ranker must see the same effective confidence.
+        registry_keys = set(
+            session.execute(
+                select(Contract.address, Contract.chain)
+                .join(ContractMembershipWitness, ContractMembershipWitness.contract_id == Contract.id)
+                .where(
+                    Contract.protocol_id == job.protocol_id,
+                    ContractMembershipWitness.protocol_id == job.protocol_id,
+                    ContractMembershipWitness.rule == "w7_publisher_registry",
+                    ContractMembershipWitness.revoked_at.is_(None),
+                )
+            ).all()
+        )
         eligible_rows: list[Contract] = []
         for row in candidates:
             score = effective_confidence(
                 float(row.confidence) if row.confidence is not None else None,
                 list(row.discovery_sources or []),
             )
-            if score >= MIN_CONFIDENCE_THRESHOLD:
+            if score >= MIN_CONFIDENCE_THRESHOLD or (row.address, row.chain) in registry_keys:
                 eligible_rows.append(row)
             else:
                 pre_rank_excluded.append(
@@ -227,6 +239,12 @@ class SelectionWorker(BaseWorker):
         with log_timed_phase(logger, "ranking") as ph:
             ranked_dicts = rank_contract_rows(eligible_rows)
             ph["count"] = len(eligible_rows)
+
+        # Spend the bounded analysis budget on publisher-declared core before expansion
+        # candidates. Only persisted admission evidence counts, never a research source tag.
+        for entry in ranked_dicts:
+            entry["publisher_core_priority"] = (entry["__row_address"], entry["__row_chain"]) in registry_keys
+        ranked_dicts.sort(key=lambda entry: entry["publisher_core_priority"], reverse=True)
 
         # Rows without last_active ranked on the neutral 0.5; the split count surfaces that.
         activity_fetched = sum(1 for d in ranked_dicts if (d.get("activity") or {}).get("last_active") is not None)

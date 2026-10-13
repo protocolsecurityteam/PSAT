@@ -28,6 +28,49 @@ def _all_leaves(tree):
     return out
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if (n == 0) return false; return who == owner && allowed(who, n - 1);",
+        "return who == owner || (n > 0 && allowed(who, n - 1));",
+    ],
+    ids=["conditional-return", "binary-return"],
+)
+def test_recursive_authorization_helper_preserves_unknown_gate(tmp_path, body):
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            function f(uint256 n) external view { require(allowed(msg.sender, n)); }
+            function allowed(address who, uint256 n) internal view returns (bool) {
+        """
+        + body
+        + "}}",
+    )
+    tree = build_predicate_tree(_function(sl, "f"))
+    leaves = _all_leaves(tree)
+    assert tree is not None
+    assert any(leaf.get("unsupported_reason") == "internal_return_recursion_limit" for leaf in leaves), repr(tree)
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import evaluate_tree
+    from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+    from services.static.contract_analysis_pipeline.predicates._helpers import _unsupported_leaf
+
+    limit = next(leaf for leaf in leaves if leaf.get("unsupported_reason") == "internal_return_recursion_limit")
+    combined = {
+        "op": "AND",
+        "children": [
+            {"op": "LEAF", "leaf": _unsupported_leaf("business_note", "business condition")},
+            {"op": "LEAF", "leaf": limit},
+        ],
+    }
+    capability = capability_to_dict(evaluate_tree(cast(PredicateTree, combined)))
+    assert capability_surface_openness(capability, project_capability_surface(capability)) == "not_determined"
+
+
 def test_try_catch_external_bool_call_builds_delegated_authority(tmp_path):
     sl = _compile(
         tmp_path,

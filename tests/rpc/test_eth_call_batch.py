@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from eth_abi.abi import encode as abi_encode
 
 import services.clients.rpc as rpc
@@ -32,11 +33,12 @@ def _error_string(msg: str) -> str:
     return "0x08c379a0" + abi_encode(["string"], [msg]).hex()
 
 
-def test_eth_call_batch_preserves_success_revert_and_node_error(monkeypatch):
+@pytest.mark.parametrize("message", ["execution reverted", "execution reverted: by\x13\x02\x00"])
+def test_eth_call_batch_preserves_success_revert_and_node_error(monkeypatch, message):
     revert_hex = _error_string("Ownable: caller is not the owner")
     payload = [
         {"jsonrpc": "2.0", "id": 0, "result": "0x" + "0" * 63 + "1"},
-        {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted", "data": revert_hex}},
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": message, "data": revert_hex}},
         {"jsonrpc": "2.0", "id": 2, "error": {"code": 3, "message": "execution reverted"}},  # no data
     ]
     session = _FakeSession(payload)
@@ -55,7 +57,7 @@ def test_eth_call_batch_preserves_success_revert_and_node_error(monkeypatch):
 
     assert out[1].success is False
     assert out[1].revert_data == revert_hex.lower()  # revert DATA preserved for attribution
-    assert out[1].error_message == "execution reverted"
+    assert out[1].error_message == message.replace("\x00", r"\u0000")
 
     assert out[2].success is False
     assert out[2].revert_data is None  # no data → indeterminate, never attributable

@@ -267,3 +267,101 @@ def test_missing_effect_predicate_is_not_a_public_path():
     assert cap is not None
     data = capability_to_dict(cap)
     assert capability_surface_openness(data, project_capability_surface(data)) == "not_determined"
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        "uint256 observed = source.value(); require(observed > 0);",
+        '(bool ok,) = address(source).staticcall(abi.encodeWithSignature("value()")); require(ok);',
+    ],
+)
+def test_read_only_call_does_not_make_a_guarded_write_permissionless(tmp_path, read):
+    source = (
+        """pragma solidity ^0.8.19;
+    interface ISource { function value() external view returns (uint256); }
+    contract C {
+        address public owner;
+        uint256 public value;
+        function set(ISource source, uint256 next) external {
+    """
+        + read
+        + "require(msg.sender == owner); value = next; }}"
+    )
+    project = write_foundry_project(tmp_path, "C", source)
+    _, trees, _ = collect_contract_analysis_with_artifacts(project)
+    aggregate, sites = _resolve(
+        trees, "set(ISource,uint256)", EvaluationContext(chain_id=1, state_var_values={"owner": OWNER})
+    )
+    assert aggregate is not None
+    data = capability_to_dict(aggregate)
+    assert capability_surface_openness(data, project_capability_surface(data)) == "restricted", sites
+    assert any(site["read_only"] for site in sites)
+    assert any(site["kind"] == "state_write" and not site["read_only"] for site in sites)
+
+
+def test_only_read_sites_do_not_override_entry_authority():
+    sites = [
+        {
+            "id": "get",
+            "kind": "external_call",
+            "target": "source.value",
+            "sink_ids": [],
+            "origin": "body",
+            "read_only": True,
+            "predicate": None,
+        }
+    ]
+    aggregate, records = resolve_effect_scopes(sites, AdapterRegistry(), EvaluationContext(chain_id=1))
+    assert aggregate is None
+    assert records[0]["read_only"] is True and "capability" in records[0]
+
+
+def test_open_read_site_is_retained_but_does_not_open_restricted_write():
+    owner_check = {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "eq",
+            "authority_role": "caller_authority",
+            "operands": [{"source": "msg_sender"}, {"source": "state_variable", "state_variable_name": "owner"}],
+            "basis": ["caller must be owner"],
+        },
+    }
+    sites = [
+        {
+            "id": "read",
+            "kind": "external_call",
+            "target": "globals.value",
+            "sink_ids": [],
+            "origin": "body",
+            "read_only": True,
+            "predicate": None,
+        },
+        {
+            "id": "write",
+            "kind": "state_write",
+            "target": "implementation",
+            "sink_ids": [],
+            "origin": "body",
+            "predicate": owner_check,
+        },
+    ]
+    aggregate, records = resolve_effect_scopes(
+        sites, AdapterRegistry(), EvaluationContext(chain_id=1, state_var_values={"owner": OWNER})
+    )
+    assert aggregate is not None
+    data = capability_to_dict(aggregate)
+    assert capability_surface_openness(data, project_capability_surface(data)) == "restricted"
+    read = records[0]["capability"]
+    assert capability_surface_openness(read, project_capability_surface(read)) == "open"
+
+
+def test_unknown_and_library_calls_are_not_assumed_read_only():
+    from types import SimpleNamespace
+
+    from services.static.contract_analysis_pipeline.effects.sinks import _proven_read_only_call
+
+    library = type("LibraryCall", (), {"is_static_call": lambda self: True})()
+    assert not _proven_read_only_call(library)
+    assert not _proven_read_only_call(SimpleNamespace(function_name="value"))

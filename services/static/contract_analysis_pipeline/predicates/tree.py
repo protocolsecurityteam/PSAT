@@ -456,7 +456,32 @@ def _classify_leaf_from_ir(
     return None
 
 
+_return_helper_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
+    "predicate_return_helper_stack", default=()
+)
+
+
+def _recursive_return_unknown(gate: RevertGate) -> LeafPredicate:
+    leaf = _unsupported_leaf("internal_return_recursion_limit", gate.expression_text)
+    leaf["authority_proof"] = {"state": "not_determined", "requirements": ["internal_return_recursion_limit"]}
+    return leaf
+
+
 def _build_internal_call_leaf(
+    ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None
+) -> LeafPredicate | None:
+    key = id(getattr(ir, "function", ir))
+    stack = _return_helper_stack.get()
+    if key in stack or len(stack) >= 32:
+        return _recursive_return_unknown(gate)
+    token = _return_helper_stack.set((*stack, key))
+    try:
+        return _expand_internal_call_leaf(ir, prov, gate, function)
+    finally:
+        _return_helper_stack.reset(token)
+
+
+def _expand_internal_call_leaf(
     ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None
 ) -> LeafPredicate | None:
     """A bool InternalCall condition (``if (!check(role, account)) revert``): recurse into the callee with bound
@@ -520,6 +545,18 @@ def _attach_call_site_arg_origins(leaf: LeafPredicate, ir: Any, caller_prov: Pro
 
 
 def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> PredicateTree | None:
+    key = id(getattr(ir, "function", ir))
+    stack = _return_helper_stack.get()
+    if key in stack or len(stack) >= 32:
+        return make_leaf_node(_recursive_return_unknown(gate))
+    token = _return_helper_stack.set((*stack, key))
+    try:
+        return _expand_internal_call_or_and_subtree(ir, prov, gate)
+    finally:
+        _return_helper_stack.reset(token)
+
+
+def _expand_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> PredicateTree | None:
     """An AND/OR subtree for a helper whose return is a connective (Solmate ``isAuthorized``, DSAuth, Maker ``wish``,
     USDT), which ``_build_binary_leaf`` can't handle.
 

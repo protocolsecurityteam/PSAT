@@ -343,6 +343,12 @@ def test_process_row_proves_pending_to_proven(db_session, worker, seed_protocol,
     assert row.equivalence_status == "proven"
     assert row.match_type == "reviewed_commit"
     assert row.match_confidence == "high"
+    import json
+
+    proof = json.loads(row.equivalence_reason)
+    assert proof["matched_files"][0]["source_repo"] == "etherfi-protocol/smart-contracts"
+    assert proof["matched_files"][0]["github_path"] == "src/MyPool.sol"
+    assert proof["matched_files"][0]["commit"] == "abc1234"
 
 
 def test_process_row_records_crash_via_handle_crash(db_session, worker, seed_protocol, monkeypatch):

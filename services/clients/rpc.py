@@ -861,9 +861,11 @@ def _eth_call_result_from_rpc_item(item: Mapping[str, Any]) -> EthCallResult:
     if error:
         if isinstance(error, Mapping):
             raw_msg = error.get("message")
-            message = str(raw_msg) if raw_msg is not None else "error"
+            # PostgreSQL JSONB cannot store U+0000. Render diagnostics visibly without
+            # altering successful results or the hexadecimal revert payload.
+            message = (str(raw_msg) if raw_msg is not None else "error").replace("\x00", r"\u0000")
             return EthCallResult(False, "0x", _extract_revert_data(error.get("data")), message)
-        return EthCallResult(False, "0x", None, str(error))
+        return EthCallResult(False, "0x", None, str(error).replace("\x00", r"\u0000"))
     result = item.get("result")
     if isinstance(result, str) and result.startswith("0x"):
         return EthCallResult(True, result, None, None)

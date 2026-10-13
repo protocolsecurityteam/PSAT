@@ -40,6 +40,7 @@ EQUIVALENCE_STATUSES = frozenset(
     {
         "proven",  # ✓ files match byte-for-byte
         "hash_mismatch",  # ✗ files fetched on both sides, content differs
+        "source_identity_ambiguous",  # same contract name identifies different verified source files
         "commit_not_found_in_repo",  # audit's commit doesn't exist in source_repo
         "candidate_path_missing",  # commit exists; our path guess missed (may be flattened source)
         "etherscan_unverified",  # deployed contract has no verified source
@@ -430,12 +431,21 @@ def _commit_exists_in_repo(repo: str, commit: str, *, token: str | None = None) 
 
 
 def _candidate_paths_for_name(name: str, etherscan_paths: list[str]) -> list[str]:
-    """Etherscan paths verbatim (real layout), falling back to ``src/`` / ``contracts/`` for flattened verification."""
+    """Bounded repository-relative alternatives; every candidate still requires exact source equality."""
     name_lc = name.lower()
     matches = [p for p in etherscan_paths if p.rsplit("/", 1)[-1].lower() in (f"{name_lc}.sol", f"{name_lc}.vy")]
-    if matches:
-        return matches
-    return [f"src/{name}.sol", f"contracts/{name}.sol"]
+    candidates = list(matches)
+    for path in matches:
+        parts = path.split("/")
+        # Verified bundles may prefix a dependency with lib/package/ or node_modules/package/.
+        for index, part in enumerate(parts[:-1]):
+            if part in {"src", "contracts"}:
+                candidates.append("/".join(parts[index:]))
+        basename = parts[-1]
+        candidates.extend((f"src/{basename}", f"contracts/{basename}"))
+    if not matches:
+        candidates.extend((f"src/{name}.sol", f"contracts/{name}.sol"))
+    return list(dict.fromkeys(candidates))
 
 
 @dataclass(frozen=True)
@@ -444,6 +454,8 @@ class EquivalenceMatch:
     scope_name: str
     etherscan_path: str
     source_sha256: str
+    github_path: str | None = None
+    source_repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -503,6 +515,7 @@ def verify_audit_covers_impl(
     outcome_rank = {
         "proven": 5,
         "hash_mismatch": 4,
+        "source_identity_ambiguous": 4,
         "candidate_path_missing": 3,
         "github_fetch_failed": 2,
         "commit_not_found_in_repo": 1,
@@ -545,6 +558,18 @@ def _verify_single_repo(
 
     etherscan_paths = list(impl_source.files.keys())
     candidate_paths = _candidate_paths_for_name(scope_name, etherscan_paths)
+    # Keep the verified-bundle path separate from the repository path. A renamed directory
+    # must not discard its comparison hash or be reported as a different deployed file.
+    source_paths = [
+        path
+        for path in etherscan_paths
+        if path.rsplit("/", 1)[-1].lower() in (f"{scope_name.lower()}.sol", f"{scope_name.lower()}.vy")
+    ]
+    if len({impl_source.files[path] for path in source_paths}) > 1:
+        return EquivalenceOutcome(
+            status="source_identity_ambiguous",
+            reason=f"Different verified files share the name {scope_name}; target source identity is not established",
+        )
 
     matches: list[EquivalenceMatch] = []
     any_commit_resolved = False  # at least one commit had *anything* resolve → not commit_not_found_overall
@@ -552,14 +577,13 @@ def _verify_single_repo(
     any_transient = False  # saw a 5xx / transport err → retry later
     details: list[str] = []
 
-    # Parallel over (commit × path): serial fetching cost ~100 round-trips per scope name. Pairs without an Etherscan
-    # path are skipped so ``candidate_path_missing`` stays accurate.
+    # Parallel over unique (commit, repository path), independent of verified bundle layout.
     from services.concurrency import parallel_map
 
     fetch_pairs: list[tuple[str, str]] = []
     for commit in reviewed_commits:
-        for path in candidate_paths:
-            if not impl_source.files.get(path):
+        for path in source_paths:
+            if not source_paths:
                 continue
             fetch_pairs.append((commit, path))
 
@@ -572,14 +596,31 @@ def _verify_single_repo(
         for pair, outcome in results:
             fetch_results[pair] = outcome
 
+    # Alternate paths are fallbacks, not extra requests when the recorded layout matches.
+    expected_hashes = {impl_source.files[path] for path in source_paths}
+    fallback_pairs = []
+    for commit in reviewed_commits:
+        matched = any(
+            isinstance(result := fetch_results.get((commit, path)), GithubHashResult)
+            and result.status == "ok"
+            and result.sha256 in expected_hashes
+            for path in source_paths
+        )
+        if not matched and source_paths:
+            fallback_pairs.extend((commit, path) for path in candidate_paths if path not in source_paths)
+    if fallback_pairs:
+        for pair, outcome in parallel_map(
+            lambda pair: fetch_github_source_hash(source_repo, pair[0], pair[1], token=github_token), fallback_pairs
+        ):
+            fetch_results[pair] = outcome
+
     # Replayed per commit so classification matches the serial version.
     for commit in reviewed_commits:
         commit_hit_anything = False
         commit_had_transient = False
         commit_had_404 = False
         for path in candidate_paths:
-            etherscan_hash = impl_source.files.get(path)
-            if not etherscan_hash:
+            if (commit, path) not in fetch_results:
                 continue
             raw_outcome = fetch_results.get((commit, path))
             if isinstance(raw_outcome, BaseException):
@@ -591,18 +632,25 @@ def _verify_single_repo(
             gh = _coerce_github_hash_result(raw_outcome)
             if gh.status == "ok" and gh.sha256 is not None:
                 commit_hit_anything = True
-                if gh.sha256 == etherscan_hash:
+                equal_paths = [
+                    source_path for source_path in source_paths if impl_source.files[source_path] == gh.sha256
+                ]
+                for source_path in equal_paths:
+                    if any(match.commit == commit and match.etherscan_path == source_path for match in matches):
+                        continue
                     matches.append(
                         EquivalenceMatch(
                             commit=commit,
                             scope_name=scope_name,
-                            etherscan_path=path,
-                            source_sha256=etherscan_hash,
+                            etherscan_path=source_path,
+                            source_sha256=gh.sha256,
+                            github_path=path,
+                            source_repo=source_repo,
                         )
                     )
-                else:
+                if not equal_paths:
                     any_hash_mismatch = True
-                    details.append(f"{commit[:8]} {path}: github={gh.sha256[:8]} etherscan={etherscan_hash[:8]}")
+                    details.append(f"{commit[:8]} {path}: GitHub content differs from verified {scope_name} source")
             elif gh.status == "http_404":
                 commit_had_404 = True
             elif gh.status in ("http_5xx", "transport_error"):
@@ -619,9 +667,15 @@ def _verify_single_repo(
                 any_commit_resolved = True
 
     if matches:
+        import json
+        from dataclasses import asdict
+
         return EquivalenceOutcome(
             status="proven",
-            reason=f"{len(matches)} file(s) match across {len(set(m.commit for m in matches))} commit(s)",
+            reason=json.dumps(
+                {"matched_files": [asdict(match) for match in matches[:4]], "total_matches": len(matches)},
+                separators=(",", ":"),
+            ),
             matches=tuple(matches),
         )
 

@@ -385,6 +385,17 @@ def run_probe_pass(
     )
     probed: list[Contract] = []
     seeded: list[Contract] = []
+    from db.models import ContractMembershipWitness
+
+    publisher_candidates = set(
+        session.execute(
+            select(ContractMembershipWitness.contract_id).where(
+                ContractMembershipWitness.protocol_id == protocol_id,
+                ContractMembershipWitness.rule == "w7_publisher_registry",
+                ContractMembershipWitness.revoked_at.is_(None),
+            )
+        ).scalars()
+    )
     resolved: set[str] = set()
     deferred = 0
     for contract in candidates:
@@ -400,7 +411,7 @@ def run_probe_pass(
             if heartbeat is not None:
                 heartbeat()
         # W6 rides on the persisted code fact, so already-probed candidates get seeded too.
-        if gate.seed_llama_witness(session, contract=contract):
+        if gate.seed_llama_witness(session, contract=contract) or contract.id in publisher_candidates:
             seeded.append(contract)
     if deferred:
         record_degraded(
@@ -729,6 +740,31 @@ class DiscoveryWorker(BaseWorker):
             aliases=resolved.get("all_names") or [],
         )
         job.protocol_id = protocol_row.id
+
+        # Independent deterministic source path: research URLs/tags cannot manufacture
+        # publisher evidence. Keep the fetched content and failures available for review.
+        from services.discovery.publisher_membership import register_snapshots
+        from services.discovery.publisher_registry import fetch_registries
+
+        registry_snapshots, registry_failures = fetch_registries(protocol_row.canonical_slug or company, chain)
+        store_artifact(
+            session,
+            job.id,
+            "publisher_registries",
+            data={
+                "snapshots": registry_snapshots,
+                "failures": registry_failures,
+                "qualification": "Publisher declarations; on-chain code and analysis completeness are separate checks.",
+            },
+        )
+        register_snapshots(session, protocol_row, registry_snapshots)
+        record_stage_metric("publisher_registry_sources", len(registry_snapshots))
+        if registry_failures:
+            record_degraded(
+                phase="publisher_registry",
+                exc=RuntimeError("Publisher sources unavailable or invalid"),
+                context={"failures": registry_failures},
+            )
 
         # Persist the declared chains: prior, requested, and newly confirmed ones (not candidates). Never
         # shrinks.

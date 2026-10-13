@@ -119,6 +119,70 @@ def _mock_inventory(contracts, **extra):
     return inv
 
 
+@pytest.mark.parametrize(
+    "company,key,content",
+    [
+        (
+            "Maple",
+            "maple_eth",
+            f"contract MapleAddressRegistryETH {{ address public constant syrupUSDCPoolManager = {ADDR_A}; }}",
+        ),
+        ("Aave", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
+        (
+            "Lido",
+            "lido_eth",
+            f'<h2>DAO Contracts</h2><p>Admin Executor: <a href="https://etherscan.io/address/{ADDR_A}">{ADDR_A}</a></p>',
+        ),
+    ],
+)
+def test_company_discovery_admits_publisher_core_before_selection(db_session, monkeypatch, company, key, content):
+    from sqlalchemy import select
+
+    from db.models import Contract, ContractMembershipWitness
+    from db.queue import get_artifact
+    from services.clients.rpc import EthCallResult
+    from services.discovery import probes
+    from tests.discovery.test_publisher_registry import snapshot
+    from workers.base import JobHandledDirectly
+    from workers.discovery import DiscoveryWorker
+
+    monkeypatch.setattr(
+        "services.discovery.run_discovery.run_discovery",
+        lambda *a, **kw: {
+            "audits": {"reports": []},
+            "addresses": _mock_inventory([]),
+            "meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        "services.discovery.publisher_registry.fetch_registries", lambda *a, **kw: ([snapshot(key, content)], [])
+    )
+    monkeypatch.setattr("services.discovery.membership_gate.probe", probes.run_probe)
+    monkeypatch.setattr(
+        probes, "rpc_request", lambda url, method, params, **kw: "0x7b" if method == "eth_blockNumber" else "0x6000"
+    )
+    monkeypatch.setattr(probes, "eth_call_batch", lambda *a, **kw: [EthCallResult(False, "0x", None, "no getter")] * 2)
+    monkeypatch.setattr(probes, "rpc_batch_request", lambda *a, **kw: ["0x" + "0" * 64] * 3)
+    monkeypatch.setattr("services.discovery.probes.etherscan.get", lambda *a, **kw: {"result": []})
+    job = _make_company_job(db_session, company=company, chain="ethereum")
+    worker = DiscoveryWorker()
+    worker.update_detail = MagicMock()
+    monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *a, **kw: None)
+    with pytest.raises(JobHandledDirectly):
+        worker._process_company(db_session, job)
+    contract = db_session.execute(select(Contract).where(Contract.address == ADDR_A.lower())).scalar_one()
+    assert contract.protocol_id == job.protocol_id
+    rules = set(
+        db_session.execute(
+            select(ContractMembershipWitness.rule).where(ContractMembershipWitness.contract_id == contract.id)
+        ).scalars()
+    )
+    assert {"w1_code", "w7_publisher_registry"} <= rules
+    registry_artifact = get_artifact(db_session, job.id, "publisher_registries")
+    assert isinstance(registry_artifact, dict)
+    assert registry_artifact["snapshots"][0]["sha256"]
+
+
 def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
     from db.models import JobStage, JobStatus
     from db.queue import create_job, get_artifact, store_artifact
