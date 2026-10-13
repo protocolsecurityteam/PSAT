@@ -2,7 +2,7 @@
 under a branch.
 
 Real compile, real tracking plan, real snapshot and real resolver; only the JSON-RPC HTTP wire is stubbed (the harness
-in ``test_unset_authority_owner_only``).
+in ``test_unset_authority_undetermined_beside_owner``).
 """
 
 from __future__ import annotations
@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import requires_postgres
-from tests.resolution.test_unset_authority_owner_only import OWNER, ZERO, _run, compile_contract  # noqa: F401
+from tests.resolution.test_unset_authority_undetermined_beside_owner import (  # noqa: F401
+    OWNER,
+    ZERO,
+    _run,
+    compile_contract,
+)
 
 pytestmark = [requires_postgres, pytest.mark.compile]
 

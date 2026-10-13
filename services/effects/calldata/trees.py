@@ -12,7 +12,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 
 logger = logging.getLogger("services.effects.calldata")
 
-# Mirrors ``claims.matchers._facts._mandatory_operands``.
+# Mirrors ``claims.matchers._facts._mandatory_leaves``.
 
 
 def _mandatory_leaves(tree: Any) -> Iterator[dict[str, Any]]:
