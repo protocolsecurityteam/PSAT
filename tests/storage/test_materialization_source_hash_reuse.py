@@ -65,6 +65,17 @@ def test_source_hash_changes_with_source_and_compiler_inputs():
     assert source_content_hash(_flat_result(evm="cancun")) != base
     assert source_content_hash(_flat_result(opt="0")) != base
     assert source_content_hash(_flat_result(runs="999")) != base
+    assert source_content_hash({**_flat_result(), "CompilerVersion": "v0.7.1+commit.f4a555be"}) != base
+
+
+def test_source_hash_changes_with_via_ir():
+    import json
+
+    def result(settings: dict) -> dict:
+        bundle = {"language": "Solidity", "sources": {"src/C.sol": {"content": "contract C {}"}}, "settings": settings}
+        return {"ContractName": "C", "SourceCode": "{" + json.dumps(bundle) + "}"}
+
+    assert source_content_hash(result({"viaIR": True})) != source_content_hash(result({}))
 
 
 def _standard_json_result(name: str) -> dict[str, Any]:

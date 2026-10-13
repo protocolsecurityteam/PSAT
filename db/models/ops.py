@@ -118,6 +118,9 @@ class ContractMaterialization(Base):
     analysis_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A ``failed`` build that rebuilding the same source under the same analyzer would repeat; nested builds serve the
+    # failure instead of retrying it.
+    deterministic_failure: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     builder_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ``{produced_by, source_job_id, materialized_at}`` (see ``build_provenance``). NULL = pre-column, not an assumed
     # producer.

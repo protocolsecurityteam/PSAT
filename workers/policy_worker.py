@@ -26,6 +26,13 @@ from db.queue.artifacts import failed_semantic_artifact
 from schemas.control_tracking import ControlSnapshot
 from schemas.effective_permissions import PrincipalResolution
 from services.clients.rpc import require_rpc_url
+from services.compute_isolation import (
+    RESOURCE_EXHAUSTED,
+    ResourceExhausted,
+    isolation_enabled,
+    policy_budget,
+    run_isolated,
+)
 from services.discovery import membership_gate
 from services.discovery.perimeter import (
     PERIMETER_SPAWN_DEPTH_CAP,
@@ -37,6 +44,7 @@ from services.discovery.perimeter import (
 from services.effects.config import effects_stage_enabled
 from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT, materialize_fp_principal_nodes
 from services.policy import build_effective_permissions, build_principal_labels
+from services.policy.capability_surface import not_determined_capability
 from services.policy.cross_contract_enrichment import (
     apply_claims_to_payload,
     call_address,
@@ -59,7 +67,7 @@ from services.resolution.graph_tables import replace_control_graph_rows
 from services.resolution.recursive import LoadedArtifacts, resolve_control_graph, unsettled_replay_addresses
 from services.resolution.tracking import classify_resolved_address_with_status, read_contract_controllers
 from services.static.claims import Claim
-from utils.chains import UnknownChainError, chain_by_id, chain_by_name, require_chain
+from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 from workers.retry_policy import classify
@@ -454,6 +462,8 @@ def _resolve_semantic_capabilities(
                 extra={"chain": chain},
             )
         return result
+    except MemoryError:
+        raise
     except Exception as exc:
         record_degraded(
             phase="semantic_capability_resolution",
@@ -467,6 +477,68 @@ def _resolve_semantic_capabilities(
             extra={"exc_type": type(exc).__name__},
         )
         return None
+
+
+def _not_determined_capabilities(predicate_trees: Any, reason: str) -> dict[str, dict[str, Any]] | None:
+    """The capability the resolver would have published for each function it decides, as not determined."""
+    if not isinstance(predicate_trees, dict):
+        return None
+    signatures = set(predicate_trees.get("trees") or {}) | set(predicate_trees.get("effect_scopes") or {})
+    return {signature: not_determined_capability(reason) for signature in sorted(signatures)}
+
+
+def _semantic_permissions(
+    session: Session | None,
+    *,
+    contract_address: str | None,
+    job_id: Any,
+    chain: str,
+    chain_id: int,
+    contract_analysis: dict,
+    control_snapshot: dict,
+    authority_snapshot: dict | None,
+    principal_resolution: PrincipalResolution,
+    predicate_trees: dict | None,
+    effects: dict | None,
+) -> tuple[dict[str, dict[str, Any]] | None, dict, dict[str, int]]:
+    """The policy stage's analysis body: semantic capabilities, then the effective-permissions artifact.
+
+    Reads only, through *session* or, given none, one of its own. Returns the resolver output, the artifact and the
+    per-phase durations.
+    """
+    durations_ms: dict[str, int] = {}
+    own = session is None
+    active = SessionLocal() if session is None else session
+    try:
+        capability_resolver_output: dict[str, dict[str, Any]] | None = None
+        if contract_address:
+            with log_timed_phase(logger, "semantic_capabilities", durations_ms=durations_ms) as ph:
+                capability_resolver_output = _resolve_semantic_capabilities(
+                    active,
+                    contract_address=contract_address,
+                    job_id=job_id,
+                    chain=chain,
+                    chain_id=chain_id,
+                )
+                ph["function_count"] = len(capability_resolver_output or {})
+    finally:
+        if own:
+            active.close()
+    with log_timed_phase(logger, "effective_permissions", durations_ms=durations_ms) as ph:
+        ep_data: dict = cast(
+            dict,
+            build_effective_permissions(
+                contract_analysis,
+                target_snapshot=control_snapshot,
+                authority_snapshot=authority_snapshot,
+                principal_resolution=principal_resolution,
+                predicate_trees=predicate_trees,
+                capability_resolver_output=capability_resolver_output,
+                effects=effects,
+            ),
+        )
+        ph["function_count"] = len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0
+    return capability_resolver_output, ep_data, durations_ms
 
 
 def _safe_address_lookup_from_graph(
@@ -618,22 +690,34 @@ class PolicyWorker(BaseWorker):
         self.update_detail(session, job, "Computing effective permissions")
 
         # Resolve capabilities now so the artifact builder and writer share one source. Pass job.id so the resolver
-        # doesn't skip the in-progress job.
-        capability_resolver_output: dict[str, dict[str, Any]] | None = None
-        if isinstance(predicate_trees, dict) and job.address:
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            with log_timed_phase(logger, "semantic_capabilities", durations_ms=durations_ms) as ph:
-                capability_resolver_output = _resolve_semantic_capabilities(
-                    session,
-                    contract_address=(job.address or "").lower(),
-                    job_id=job.id,
-                    chain=job_chain if isinstance(job_chain, str) else None,
-                    chain_id=chain_id,
-                )
-                ph["function_count"] = len(capability_resolver_output or {})
-
-        with log_timed_phase(logger, "effective_permissions", durations_ms=durations_ms) as ph:
-            ep_data: dict = cast(
+        # doesn't skip the in-progress job. The compute runs in a budgeted child that reads through its own session.
+        semantic_address = (job.address or "").lower() if isinstance(predicate_trees, dict) and job.address else None
+        exhausted: ResourceExhausted | None = None
+        try:
+            capability_resolver_output, ep_data, phase_ms = run_isolated(
+                _semantic_permissions,
+                None if isolation_enabled() else session,
+                contract_address=semantic_address,
+                job_id=job.id,
+                chain=chain_name,
+                chain_id=chain_id,
+                contract_analysis=contract_analysis,
+                control_snapshot=control_snapshot,
+                authority_snapshot=authority_snapshot,
+                principal_resolution=principal_resolution,
+                predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
+                effects=effects_artifact if isinstance(effects_artifact, dict) else None,
+                budget=policy_budget(),
+                label="policy_semantic",
+            )
+            durations_ms.update(phase_ms)
+        except ResourceExhausted as exc:
+            # Published like a budget hit inside the analysis: every function the resolver decides is not determined.
+            exhausted = exc
+            capability_resolver_output = (
+                _not_determined_capabilities(predicate_trees, RESOURCE_EXHAUSTED) if semantic_address else None
+            )
+            ep_data = cast(
                 dict,
                 build_effective_permissions(
                     contract_analysis,
@@ -645,7 +729,7 @@ class PolicyWorker(BaseWorker):
                     effects=effects_artifact if isinstance(effects_artifact, dict) else None,
                 ),
             )
-            ph["function_count"] = len(ep_data.get("functions", [])) if isinstance(ep_data, dict) else 0
+            record_stage_metric(RESOURCE_EXHAUSTED, exc.detail())
 
         # Rows come from resolver capabilities only. An impl in proxy context is tagged with that deployment so a shared
         # impl can hold several sets.
@@ -703,20 +787,16 @@ class PolicyWorker(BaseWorker):
 
         store_artifact(session, job.id, "effective_permissions", data=ep_data)
         record_stage_metric("effective_functions", len(ep_data.get("functions", [])))
+        if exhausted is not None:
+            raise exhausted
         if contract_row and isinstance(predicate_trees, dict):
-            job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-            # Registry-derived chain id; unknown chains fall back to mainnet.
-            try:
-                chain_id = chain_by_name(job_chain).chain_id if job_chain else 1
-            except UnknownChainError:
-                chain_id = 1
             with log_timed_phase(logger, "principal_history", durations_ms=durations_ms):
                 try:
                     state_var_values = _load_state_var_values(
                         session,
                         contract_row.address,
                         job_id=job.id,
-                        chain=job_chain if isinstance(job_chain, str) else None,
+                        chain=chain_name,
                     )
                     principal_history = build_principal_history(
                         contract_address=contract_row.address,

@@ -94,3 +94,40 @@ describe("guardSummary open-path shapes", () => {
     expect(guardSummary(pub([{ kind: "one_shot" }]), {}).shape).toBe("one_shot_unread");
   });
 });
+
+describe("guardSummary with no direct callers", () => {
+  const pendingCeiling = {
+    kind: "finite_set",
+    members: [],
+    membership_quality: "exact",
+    confidence: "enumerable",
+    empty_reason: "empty_by_design",
+  };
+
+  it("shows an exact empty set the backend didn't prove empty as unresolved, never as nobody", () => {
+    const fn = {
+      function: "acceptOwnership()",
+      authority_public: false,
+      authority_openness: "not_determined",
+      capability_expr: pendingCeiling,
+    };
+    const guard = guardSummary(fn, {});
+    expect(guard.kind).toBe("unknown");
+    expect(guard.sublabel).toBe("unresolved");
+    const nested = { ...fn, capability_expr: { kind: "AND", children: [pendingCeiling] } };
+    expect(guardSummary(nested, {}).kind).toBe("unknown");
+  });
+
+  it("shows nobody when the backend published resolved_empty", () => {
+    const fn = {
+      function: "bridge()",
+      authority_public: false,
+      authority_openness: "restricted",
+      status: "resolved_empty",
+      capability_expr: { ...pendingCeiling, empty_reason: undefined },
+    };
+    const guard = guardSummary(fn, {});
+    expect(guard.kind).toBe("resolved_empty");
+    expect(guard.sublabel).toBe("no active principal");
+  });
+});

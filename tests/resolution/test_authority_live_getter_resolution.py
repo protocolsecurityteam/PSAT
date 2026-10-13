@@ -150,11 +150,12 @@ def test_oz_v5_namespaced_owner_resolves_via_owner_getter(monkeypatch: pytest.Mo
     assert recorder[-1][1][0]["data"] == OWNER_SELECTOR
 
 
-# Getter reads are deterministic at a fixed block, so one read serves the pass; only successes are cached.
+# Getter reads are deterministic at a fixed block, so one read serves the pass: successes, and reverts at a pinned
+# block. A transport failure is read again.
 
 
-def _ctx_with_memo(memo: dict, rpc_url: str = "http://rpc.test") -> EvaluationContext:
-    outer = _Outer(rpc_url, CONTRACT, meta={"live_read_memo": memo})
+def _ctx_with_memo(memo: dict, rpc_url: str = "http://rpc.test", block: int | None = None) -> EvaluationContext:
+    outer = _Outer(rpc_url, CONTRACT, block=block, meta={"live_read_memo": memo})
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(outer))
 
 
@@ -171,6 +172,35 @@ def test_live_getter_memo_zero_address_is_cached(monkeypatch: pytest.MonkeyPatch
     assert cap1.members == cap2.members == []
     assert cap1.membership_quality == cap2.membership_quality == "exact"
     assert len(recorder) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "block", "reads"),
+    [
+        ("{'code': 3, 'message': 'execution reverted'}", 19_000_000, 1),
+        ("{'code': 3, 'message': 'execution reverted'}", None, 2),
+        ("RPC request failed for http://rpc.test: connection reset", 19_000_000, 2),
+    ],
+)
+def test_a_revert_at_a_pinned_block_is_read_once_per_pass(
+    monkeypatch: pytest.MonkeyPatch, error: str, block: int | None, reads: int
+) -> None:
+    recorder: list = []
+
+    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
+        recorder.append(params)
+        raise RuntimeError(error)
+
+    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
+    tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})
+    ctx = _ctx_with_memo({}, block=block)
+
+    caps = [evaluate_tree(tree, ctx) for _ in range(2)]
+
+    for cap in caps:
+        assert (cap.kind, cap.members, cap.membership_quality) == ("finite_set", [], "lower_bound")
+        assert cap.empty_reason == "unreadable_revert"
+    assert len(recorder) == reads
 
 
 def test_static_external_operand_memo_dedups(monkeypatch: pytest.MonkeyPatch) -> None:

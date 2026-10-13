@@ -48,12 +48,15 @@ def test_guarded_bool_returning_checker_gets_tree_and_check_tree(tmp_path):
     assert "canCall(address)" in artifact["trees"]
     assert "canCall(address)" in artifact["check_trees"]
     guard_exprs = {leaf.get("expression") for leaf in _leaves(artifact["trees"]["canCall(address)"])}
+    check_leaves = _leaves(artifact["check_trees"]["canCall(address)"])
     return_storage_vars = {
-        leaf.get("set_descriptor", {}).get("storage_var")
-        for leaf in _leaves(artifact["check_trees"]["canCall(address)"])
+        leaf.get("set_descriptor", {}).get("storage_var") for leaf in check_leaves if leaf["kind"] == "membership"
     }
     assert any("owner" in str(expr) for expr in guard_exprs)
     assert return_storage_vars == {"users"}
+    # The return is reached only past the ``require``, so the check carries it too.
+    assert artifact["check_trees"]["canCall(address)"]["op"] == "AND"
+    assert [leaf["kind"] for leaf in check_leaves] == ["equality", "membership"]
 
 
 def test_void_external_guard_survives_non_caller_try_catch(tmp_path):

@@ -211,6 +211,55 @@ class ProtocolDeployer(Base):
     )
 
 
+# ``DeployerChainEnumeration.outcome`` vocabulary.
+DEPLOYER_ENUMERATION_COMPLETE = "complete"
+DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED = "internal_budget_exceeded"
+DEPLOYER_ENUMERATION_CAP_REACHED = "cap_reached"
+DEPLOYER_ENUMERATION_OUTCOMES = frozenset(
+    {
+        DEPLOYER_ENUMERATION_COMPLETE,
+        DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED,
+        DEPLOYER_ENUMERATION_CAP_REACHED,
+    }
+)
+
+
+class DeployerChainEnumeration(Base):
+    """The last Etherscan creation enumeration of one EOA on one chain.
+
+    A fact about the EOA, not a protocol, so it isn't keyed by one. Only ``complete`` carries ``creations``; every
+    other outcome is incomplete. A failed call is never kept.
+    """
+
+    __tablename__ = "deployer_chain_enumerations"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    deployer: Mapped[str] = mapped_column(String(42), primary_key=True)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    # ``[[address, factory | null], ...]``.
+    creations: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # The count that crossed a limit (sent txs over the internal budget, or entries at the cap).
+    observed_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Every creation by the EOA up to this block is in ``creations``; NULL = no such block is known.
+    settled_through_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    enumerated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('complete', 'internal_budget_exceeded', 'cap_reached')",
+            name="ck_deployer_chain_enumerations_outcome",
+        ),
+        CheckConstraint(
+            "(outcome = 'complete') = (creations IS NOT NULL)",
+            name="ck_deployer_chain_enumerations_creations_complete",
+        ),
+        CheckConstraint(
+            "outcome NOT IN ('internal_budget_exceeded', 'cap_reached') OR observed_count IS NOT NULL",
+            name="ck_deployer_chain_enumerations_limit_count",
+        ),
+    )
+
+
 class DeployerAffinityChallenge(Base):
     """One observed foreign anchor against a class-H row.
 

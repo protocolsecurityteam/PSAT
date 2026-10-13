@@ -117,6 +117,9 @@ def test_stale_job_on_another_chain_is_not_consulted(db_session, addr):
         pytest.param(JobStatus.queued, None, "skip", id="in_flight"),
         pytest.param(JobStatus.completed, STALE, "spawn", id="stale"),
         pytest.param(JobStatus.completed, None, "spawn", id="unprovable"),
+        # Nothing claims or retries a ``failed`` row, so it can't stand in for the proxy's implementation.
+        pytest.param(JobStatus.failed, None, "spawn", id="failed_never_runs"),
+        pytest.param(JobStatus.failed, CURRENT, "spawn", id="failed_current_never_runs"),
     ],
 )
 def test_impl_behind_same_proxy_is_respawned_only_when_stale(db_session, addr, status, version, decision):
@@ -125,10 +128,17 @@ def test_impl_behind_same_proxy_is_respawned_only_when_stale(db_session, addr, s
     assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum") == decision
 
 
-@pytest.mark.parametrize(("version", "decision"), [(CURRENT, "backpatched"), (STALE, "spawn")])
-def test_stale_standalone_impl_is_not_backpatched(db_session, addr, version, decision):
+@pytest.mark.parametrize(
+    ("status", "version", "decision"),
+    [
+        (JobStatus.completed, CURRENT, "backpatched"),
+        (JobStatus.completed, STALE, "spawn"),
+        (JobStatus.failed, None, "spawn"),
+    ],
+)
+def test_stale_standalone_impl_is_not_backpatched(db_session, addr, status, version, decision):
     impl, proxy = addr(), addr()
-    standalone = _job(db_session, impl, JobStatus.completed, version)
+    standalone = _job(db_session, impl, status, version)
     assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy, chain="ethereum") == decision
     db_session.refresh(standalone)
     assert ((standalone.request or {}).get("proxy_address") == proxy) == (decision == "backpatched")

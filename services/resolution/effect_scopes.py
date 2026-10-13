@@ -27,6 +27,7 @@ def resolve_effect_scopes(sites, registry, ctx, base_cap=None, effect_predicates
         ctx.meta["effect_predicates"] = effect_predicates
     records = []
     body_caps = []
+    body_dicts = []
     for site in sites:
         cap = (
             evaluate_tree_with_registry(site["predicate"], registry, ctx)
@@ -38,19 +39,17 @@ def resolve_effect_scopes(sites, registry, ctx, base_cap=None, effect_predicates
         records.append(record)
         if site.get("origin") == "body":
             body_caps.append(cap)
+            body_dicts.append(record["capability"])
     if not body_caps:
         return None, records
     if base_cap is not None:
         from services.policy.effect_authority import authority_identity
 
         identity = authority_identity(capability_to_dict(base_cap))
-        if all(authority_identity(capability_to_dict(c)) == identity for c in body_caps):
+        if all(authority_identity(d) == identity for d in body_dicts):
             return base_cap, records
     # Function openness is existential over effects; per-site records retain the independent restrictions.
-    if any(
-        capability_surface_openness(capability_to_dict(c), project_capability_surface(capability_to_dict(c))) == "open"
-        for c in body_caps
-    ):
+    if any(capability_surface_openness(d, project_capability_surface(d)) == "open" for d in body_dicts):
         aggregate = CapabilityExpr.conditional_universal(Condition(kind="business", description="public effect path"))
     else:
         aggregate = body_caps[0]

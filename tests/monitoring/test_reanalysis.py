@@ -236,6 +236,35 @@ class TestMaybeQueueReanalysis:
         jobs = db_session.execute(select(Job).where(func.lower(Job.address) == addr.lower())).scalars().all()
         assert len(jobs) == 1
 
+    @pytest.mark.parametrize(
+        ("in_flight_chain", "stored_request_chain", "mc_chain", "queued"),
+        [
+            pytest.param("ethereum", "ethereum", "base", True, id="other_chain_job_does_not_dedup"),
+            pytest.param("base", "base", "base", False, id="same_chain_job_dedups"),
+            pytest.param("ethereum", None, "ethereum", False, id="legacy_chainless_mainnet_job_dedups"),
+            pytest.param("ethereum", "mainnet", "ethereum", False, id="legacy_alias_mainnet_job_dedups"),
+        ],
+    )
+    def test_dedup_is_by_the_in_flight_jobs_chain_id(
+        self, db_session, monkeypatch, in_flight_chain, stored_request_chain, mc_chain, queued
+    ):
+        from db.queue import create_job
+
+        monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
+        addr = "0x" + "fe" * 20
+        mc = _make_monitored_contract(db_session, addr, "proxy")
+        mc.chain = mc_chain
+        db_session.commit()
+        in_flight = create_job(db_session, {"address": addr, "chain": in_flight_chain})
+        # Rows enqueued before requests carried their canonical chain.
+        legacy = {"address": addr} if stored_request_chain is None else {"address": addr, "chain": stored_request_chain}
+        in_flight.request = legacy
+        db_session.commit()
+
+        job = maybe_queue_reanalysis(db_session, mc, "upgraded")
+
+        assert (job is not None) is queued
+
     def test_protocol_id_propagates(self, db_session):
         proto = _make_protocol(db_session, "Aave")
         mc = _make_monitored_contract(

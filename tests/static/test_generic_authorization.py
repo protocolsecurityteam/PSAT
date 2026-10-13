@@ -110,7 +110,7 @@ def _assert_unresolved(tree, monkeypatch):
     surface = project_capability_surface(cap)
     assert capability_surface_openness(cap, surface) == "not_determined", cap
     assert not surface.principal_rows
-    assert not surface.public_paths
+    assert not surface.authority_public
 
 
 def test_unrecognized_signer_loop_never_publishes_individual_owners(tmp_path, monkeypatch):

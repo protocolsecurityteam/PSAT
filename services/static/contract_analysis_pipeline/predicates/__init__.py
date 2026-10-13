@@ -41,8 +41,7 @@ from .confidence import (
 )
 from .control_flow import (
     _ALWAYS_REVERTS_MAX_DEPTH,
-    _branch_value_is_only_true,
-    _build_if_else_returns_or_children,
+    _branch_value_is_only,
     _callee_always_reverts,
     _detect_assembly_combinator_op,
     _find_callee_return_value,
@@ -54,7 +53,6 @@ from .control_flow import (
     _node_is_type,
     _node_terminates_control,
     _resolve_internal_call_return,
-    _return_guard_gate,
     _return_literal,
 )
 from .leaves import (
@@ -166,12 +164,11 @@ __all__ = [
     "_attach_state_constant_value",
     "_attach_value_type",
     "_binary_op",
-    "_branch_value_is_only_true",
+    "_branch_value_is_only",
     "_build_binary_leaf",
     "_build_chain_bindings",
     "_build_external_bool_leaf",
     "_build_generic_external_set_descriptor",
-    "_build_if_else_returns_or_children",
     "_build_index_membership_leaf",
     "_build_internal_call_leaf",
     "_build_internal_call_or_and_subtree",
@@ -237,7 +234,6 @@ __all__ = [
     "_published_source_key",
     "_reconstruct_index_chain",
     "_resolve_internal_call_return",
-    "_return_guard_gate",
     "_return_literal",
     "_scan_node_for_lvalue",
     "_self_gate_or_truthy_leaf",

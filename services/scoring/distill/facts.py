@@ -17,7 +17,6 @@ from services.scoring.schema import (
     coalesce_chain,
     entity_key,
 )
-from utils import claim_ids as C
 from utils import execution_record as EX
 from utils.logging import record_degraded, record_stage_metric
 from utils.scoring_status import (
@@ -26,7 +25,6 @@ from utils.scoring_status import (
     WITNESS_TIER_STANDARD_EXACT,
 )
 
-from .claims import _claim_ids
 from .self_service import _PROVENANCE_CALLER_GATE
 
 logger = logging.getLogger("services.scoring.distill")
@@ -118,7 +116,6 @@ class _ContractFacts:
     verdicts: dict[int, list[Any]] = field(default_factory=dict)
     solmate_mutators: set[str] = field(default_factory=set)
     registry_owner: dict[str, Any] | None = None
-    pause_unset_principals: list[dict[str, Any]] = field(default_factory=list)
     licensed_reach_entities: list[dict[str, Any]] = field(default_factory=list)
     asset_identity: dict[str, Any] = field(default_factory=dict)
     # Reason from the vocabulary above.
@@ -324,7 +321,6 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         .order_by(ControllerValue.source, ControllerValue.id)
         .all()
     )
-    facts.pause_unset_principals = _pause_unset_principals(facts)
 
     from sqlalchemy import func as _sql_func
 
@@ -377,25 +373,6 @@ def _registry_owner(controller_values: list[Any]) -> dict[str, Any] | None:
             if value.startswith("0x") and len(value) == 42:
                 owner = {"address": value, "resolved_type": row.resolved_type, "block": row.block_number}
     return owner if (zero_authority and owner) else None
-
-
-def _pause_unset_principals(facts: _ContractFacts) -> list[dict[str, Any]]:
-    seen: dict[str, dict[str, Any]] = {}
-    for func in facts.functions:
-        if not _claim_ids(func).intersection({C.PAUSE_UNSET}):
-            continue
-        for principal in facts.principals.get(func.id, []):
-            address = _lower(principal.address)
-            seen.setdefault(
-                address,
-                {
-                    "address": address,
-                    "chain": facts.chain,
-                    "function_principal_id": principal.id,
-                    "resolved_type": principal.resolved_type,
-                },
-            )
-    return [seen[a] for a in sorted(seen)]
 
 
 def _function_is_self_gated(facts: _ContractFacts, func: Any) -> bool:

@@ -140,8 +140,9 @@ def test_issue120_maker_dsauth_allow_chain_unchanged(tmp_path):
     assert tree.get("op") == "OR", tree
     leaves = _all_leaves(tree)
     kinds = sorted(le["kind"] for le in leaves)
-    assert kinds == ["equality", "equality", "external_bool"], leaves
-    assert sorted(le["operator"] for le in leaves) == ["eq", "eq", "truthy"], leaves
+    assert kinds == ["equality", "equality", "equality", "external_bool"], leaves
+    # The authority call is read under the ``authority != address(0)`` branch that reaches it.
+    assert sorted(le["operator"] for le in leaves) == ["eq", "eq", "ne", "truthy"], leaves
     assert not any(le["operator"] == "falsy" for le in leaves), leaves
     assert not any(le["kind"] == "unsupported" for le in leaves), leaves
 

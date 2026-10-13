@@ -129,7 +129,9 @@ def test_contract_facts_lookup_failure_warns_and_records_degraded(monkeypatch, c
     token = degraded_errors_var.set(accumulator)
     try:
         with caplog.at_level(logging.WARNING, logger=CALLDATA_LOGGER):
-            assert calldata_mod._load_contract_facts_uncached(cast("Session", None), "0x" + "ab" * 20) is None
+            assert (
+                calldata_mod._load_contract_facts_uncached(cast("Session", None), "0x" + "ab" * 20, "ethereum") is None
+            )
     finally:
         degraded_errors_var.reset(token)
 
