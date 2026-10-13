@@ -472,7 +472,7 @@ def run_isolated(
             if child.conn.poll(_POLL_S):
                 try:
                     reply = child.conn.recv()
-                except EOFError:
+                except (EOFError, ConnectionResetError):
                     reply = None
                 break
             if not child.process.is_alive():

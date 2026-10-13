@@ -363,3 +363,9 @@ def test_a_burst_keeps_only_as_many_warm_children_as_allowed(monkeypatch):
     while time.monotonic() < deadline and sum(not _gone(pid) for pid in pids) > 1:
         time.sleep(0.05)
     assert sum(not _gone(pid) for pid in pids) == 1
+
+
+def test_a_child_that_dies_reading_its_job_is_a_failure():
+    with pytest.raises(ChildProcessFailed, match="exited with 1"):
+        run_isolated(children.echo, children.Unloadable(), budget=ROOMY, label="unit")
+    assert run_isolated(children.echo, 5, budget=ROOMY, label="unit") == 5

@@ -115,3 +115,14 @@ def fork_server_state() -> dict[str, Any]:
 def sleep_then_pid(seconds: float) -> int:
     time.sleep(seconds)
     return os.getpid()
+
+
+def _refuse_to_load() -> None:
+    raise RuntimeError("cannot be unpickled here")
+
+
+class Unloadable:
+    """Pickles fine and fails to load, so the child dies reading its job."""
+
+    def __reduce__(self):
+        return (_refuse_to_load, ())
