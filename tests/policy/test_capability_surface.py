@@ -341,3 +341,23 @@ def test_an_unread_reach_condition_folded_beside_callers_names_the_condition():
     [row] = project_capability_surface(cap).principal_rows
     descriptions = [c["description"] for c in row["details"]["conditions"]]
     assert "condition not read: ! executorRequired" in descriptions
+
+
+def test_an_unread_reach_condition_beside_an_unresolved_gate_earns_no_public_path():
+    from services.policy.capability_surface import capability_surface_openness
+
+    open_path = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "sendValue"}]}
+    gate = {
+        "kind": "external_check_only",
+        "check": {"target_address": None, "extra": {"basis": ["caller_tainted_authority_unresolved"]}},
+    }
+    cap = {
+        "kind": "AND",
+        "children": [
+            {"kind": "OR", "children": [_unread_reach(), open_path]},
+            {"kind": "OR", "children": [_unread_reach(), gate]},
+        ],
+    }
+    surface = project_capability_surface(cap)
+    assert not surface.authority_public
+    assert capability_surface_openness(cap, surface) == "not_determined"

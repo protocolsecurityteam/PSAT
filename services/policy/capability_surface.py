@@ -373,7 +373,7 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     Blocks:
       - ``external_check_only`` with a ``CALLER_GATE_BASIS_TAGS`` tag (untagged checks are downstream probes that fold
     as side-conditions, e.g. Veda teller->vault ``requiresAuth``).
-      - ``unsupported``.
+      - ``unsupported``, and an unread reach condition (a path that may be open is no earned one).
       - an empty non-exact ``finite_set`` (authority value unread); exact-empty / by-design sets are resolved.
       - an empty set enumerated from a Solmate ``RolesAuthority``: provably nobody.
       - AND if any child blocks; OR only if every disjunct blocks.
@@ -383,6 +383,8 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
     if cap_dict.get("subject", "root") != "root":
         return False
     kind = cap_dict.get("kind")
+    if is_reach_not_determined(cap_dict):
+        return True
     if kind == "finite_set":
         if cap_dict.get("members"):
             return False
