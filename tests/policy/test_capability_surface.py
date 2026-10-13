@@ -292,3 +292,42 @@ def test_resolver_path_is_recorded_on_every_principal_row_shape():
     assert project_capability_surface(witness).principal_rows[0]["details"]["resolver_path"] == [
         "live_getter_resolution"
     ]
+
+
+def _unread_reach() -> dict:
+    from services.static.contract_analysis_pipeline.predicate_types import REACH_NOT_DETERMINED
+
+    check = {"target_address": None, "target_call_selector": None, "extra": {"basis": [REACH_NOT_DETERMINED, "x"]}}
+    return {"kind": "external_check_only", "check": check}
+
+
+def _owner(address: str = ADDR_A) -> dict:
+    return {"kind": "finite_set", "members": [address], "membership_quality": "exact"}
+
+
+def test_an_unread_reach_condition_beside_a_gate_is_not_determined_never_restricted():
+    from services.policy.capability_surface import capability_surface_openness
+
+    cap = {"kind": "OR", "children": [_unread_reach(), _owner()]}
+    surface = project_capability_surface(cap)
+    assert not surface.authority_public
+    assert capability_surface_openness(cap, surface) == "not_determined"
+
+
+def test_an_unread_reach_condition_beside_an_open_path_is_open():
+    from services.policy.capability_surface import capability_surface_openness
+
+    open_path = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "amount > 0"}]}
+    cap = {"kind": "OR", "children": [_unread_reach(), open_path]}
+    assert capability_surface_openness(cap, project_capability_surface(cap)) == "open"
+
+
+def test_an_unread_reach_condition_is_bounded_by_a_gate_every_path_passes():
+    from services.policy.capability_surface import capability_surface_openness
+
+    either = {"kind": "OR", "children": [_unread_reach(), _owner()]}
+    bounded = {"kind": "AND", "children": [either, _owner(ADDR_B)]}
+    assert not project_capability_surface(bounded).open_not_determined
+    side = {"kind": "conditional_universal", "conditions": [{"kind": "pause", "description": "whenNotPaused"}]}
+    unbounded = {"kind": "AND", "children": [side, either]}
+    assert capability_surface_openness(unbounded, project_capability_surface(unbounded)) == "not_determined"

@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from services.resolution.capabilities import DEFERRED_MARKER
+from services.resolution.capabilities import DEFERRED_MARKER, is_reach_not_determined
 from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
 from utils.scoring_status import OPENNESS_STATES, TRACE_STEP_ENUMERABLE_ROLE_STORE, TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
@@ -17,6 +17,9 @@ class CapabilitySurface:
     principal_rows: list[dict[str, Any]] = field(default_factory=list)
     public_paths: list[list[dict[str, Any]]] = field(default_factory=list)
     residual: list[dict[str, Any]] = field(default_factory=list)
+    # A path whose callers aren't determined (an unread reach condition): it may be open, so the rows beside it are no
+    # proof of a restriction.
+    open_not_determined: bool = False
 
     @property
     def authority_public(self) -> bool:
@@ -42,15 +45,18 @@ def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySur
     """Three-state authority verdict for one capability.
 
     * ``open`` — a public path was earned; exactly ``authority_public``.
-    * ``restricted`` — a restriction was witnessed: caller rows, or a complete enumeration admitting nobody.
-    * ``not_determined`` — neither (unsupported, external_check_only, irreducible residual), all of which the bool
-    reported as ``False``.
+    * ``restricted`` — a restriction was witnessed: caller rows, or a complete enumeration admitting nobody, with no
+    path beside them that may be open.
+    * ``not_determined`` — neither (unsupported, external_check_only, irreducible residual, a path that may be open),
+    all of which the bool reported as ``False``.
 
     Never raises. ``restricted`` means a restriction exists, not that these are all the callers (that's
     ``membership_quality``).
     """
     if surface.authority_public:
         return "open"
+    if surface.open_not_determined:
+        return "not_determined"
     if surface.principal_rows:
         return "restricted"
     if _is_resolved_empty_capability(cap_dict):
@@ -292,6 +298,8 @@ def _project_node(
     kind = cap_dict.get("kind")
     node_conditions = _condition_dicts(cap_dict.get("conditions"))
 
+    if is_reach_not_determined(cap_dict):
+        return CapabilitySurface(residual=[dict(cap_dict)], open_not_determined=True)
     if kind == "finite_set":
         return CapabilitySurface(principal_rows=_rows_for_finite_set(cap_dict, node_conditions))
     if kind == "threshold_group":
@@ -338,6 +346,7 @@ def _project_node(
                 principal_rows=list(surface.principal_rows),
                 public_paths=[],
                 residual=list(surface.residual),
+                open_not_determined=surface.open_not_determined,
             )
         return surface
     if kind == "cofinite_blacklist":
@@ -426,6 +435,7 @@ def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str,
         principal_rows=[_row_with_conditions(row, conditions) for row in surface.principal_rows],
         public_paths=[_unique_conditions(path + conditions) for path in surface.public_paths],
         residual=list(surface.residual),
+        open_not_determined=surface.open_not_determined,
     )
 
 
@@ -449,10 +459,24 @@ def _or_surface(left: CapabilitySurface, right: CapabilitySurface) -> Capability
         principal_rows=left.principal_rows + right.principal_rows,
         public_paths=left.public_paths + right.public_paths,
         residual=left.residual + right.residual,
+        open_not_determined=left.open_not_determined or right.open_not_determined,
     )
 
 
 def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> CapabilitySurface:
+    surface = _and_paths(left, right)
+    # A path that may be open stays one beside anything but a conjunct that admits only its callers.
+    surface.open_not_determined = (left.open_not_determined and _may_admit_anyone(right)) or (
+        right.open_not_determined and _may_admit_anyone(left)
+    )
+    return surface
+
+
+def _may_admit_anyone(surface: CapabilitySurface) -> bool:
+    return bool(surface.public_paths) or surface.open_not_determined or not _has_valid_path(surface)
+
+
+def _and_paths(left: CapabilitySurface, right: CapabilitySurface) -> CapabilitySurface:
     left_valid = _has_valid_path(left)
     right_valid = _has_valid_path(right)
 

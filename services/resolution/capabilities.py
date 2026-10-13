@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from services.static.contract_analysis_pipeline.predicate_types import REACH_NOT_DETERMINED
+
 CapKind = Literal[
     "finite_set",
     "threshold_group",
@@ -664,6 +666,14 @@ def _intersect_cross_subject(a: CapabilityExpr, b: CapabilityExpr) -> Capability
 def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
     """A bound-subject capability as side conditions: its existing conditions plus one for the delegated check."""
     return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
+
+
+def is_reach_not_determined(cap_dict: Any) -> bool:
+    """A serialized capability for a reach condition resolution couldn't read: a path that may be open."""
+    if not isinstance(cap_dict, dict) or cap_dict.get("kind") != "external_check_only":
+        return False
+    extra = (cap_dict.get("check") or {}).get("extra") or {}
+    return REACH_NOT_DETERMINED in (extra.get("basis") or [])
 
 
 # Same value as ``deferred_reconciler.DEFERRED_MARKER``, shared by value to avoid an import dependency.
