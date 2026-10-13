@@ -14,7 +14,11 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, ParamSpec, TypeVar
 
-from services.resolution.capabilities import DEFERRED_MARKER, is_reach_not_determined
+from services.resolution.capabilities import (
+    DEFERRED_MARKER,
+    READ_CONFIRMED_EMPTY_REASONS,
+    is_reach_not_determined,
+)
 from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
 from utils.scoring_status import OPENNESS_STATES, TRACE_STEP_ENUMERABLE_ROLE_STORE, TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
@@ -136,10 +140,6 @@ _COVERAGE_PROVING_TRACE_STEPS = frozenset(
     {"solmate_roles_authority", "enumerable_role_store", "live_getter_resolution", "live_slot_resolution"}
 )
 
-# Only reasons reporting a completed read. ``empty_by_design`` rests on an accessor name; failure states never
-# license credit; ``owner_read_burn_address`` rests on a convention, not a read.
-_READ_CONFIRMED_EMPTY_REASONS = frozenset({"owner_read_zero", "slot_read_zero"})
-
 
 def exact_empty_credit(cap_dict: Any) -> dict[str, Any]:
     """Has this capability earned the "nobody can call this" credit?
@@ -169,7 +169,7 @@ def exact_empty_credit(cap_dict: Any) -> dict[str, Any]:
     if block is None:
         missing.append("observation_block")
     reason = cap_dict.get("empty_reason")
-    if reason not in _READ_CONFIRMED_EMPTY_REASONS:
+    if reason not in READ_CONFIRMED_EMPTY_REASONS:
         missing.append("read_confirmed_empty_reason")
     if missing:
         return {"verdict": "not_determined", "missing": missing}
@@ -864,7 +864,7 @@ def _is_proven_empty(cap_dict: dict[str, Any]) -> bool:
         and cap_dict.get("membership_quality") == "exact"
         and cap_dict.get("confidence") == "enumerable"
         and cap_dict.get("subject", "root") == "root"
-        and (cap_dict.get("empty_reason") is None or cap_dict.get("empty_reason") in _READ_CONFIRMED_EMPTY_REASONS)
+        and (cap_dict.get("empty_reason") is None or cap_dict.get("empty_reason") in READ_CONFIRMED_EMPTY_REASONS)
     )
 
 

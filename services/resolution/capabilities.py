@@ -52,6 +52,9 @@ EmptyReason = Literal[
     "owner_read_burn_address",
 ]
 
+# The reasons that report a completed read; every other reason names a gap or a classification, never proof of nobody.
+READ_CONFIRMED_EMPTY_REASONS: frozenset[EmptyReason] = frozenset({"owner_read_zero", "slot_read_zero"})
+
 # Which caller a capability constrains. ``root`` is the function's end-user caller; ``bound`` is the caller of an
 # inlined downstream call (e.g. a Teller calling ``vault.exit``). A bound guard is a runtime side condition;
 # intersecting it with root callers would wrongly zero them.
@@ -480,6 +483,20 @@ def _inherited_empty_reason(*operands: CapabilityExpr) -> EmptyReason | None:
     return None
 
 
+def _union_empty_reason(a: CapabilityExpr, b: CapabilityExpr) -> EmptyReason | None:
+    """Nobody passes a union only if nobody passes either operand, so an operand empty without proof keeps its reason
+    where disagreeing reasons would otherwise leave none.
+    """
+    unproven: list[EmptyReason] = sorted(
+        {
+            op.empty_reason
+            for op in (a, b)
+            if op.empty_reason is not None and op.empty_reason not in READ_CONFIRMED_EMPTY_REASONS
+        }
+    )
+    return unproven[0] if unproven else _inherited_empty_reason(a, b)
+
+
 def _intersect_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     am = set(a.members or [])
     bm = set(b.members or [])
@@ -523,7 +540,7 @@ def _union_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         confidence=confidence,
         conditions=conditions,
         subject=a.subject,
-        empty_reason=_inherited_empty_reason(a, b) if not merged else None,
+        empty_reason=_union_empty_reason(a, b) if not merged else None,
     )
     cap.trace = list(a.trace) + list(b.trace)
     # A union is empty only when both operands were.

@@ -101,3 +101,22 @@ def test_detector_fails_closed_for_non_authority_operand_sources() -> None:
 def test_detector_handles_missing_signature() -> None:
     assert _is_pending_authority_accessor_operand({"source": "view_call", "callee_signature": None}) is False
     assert _is_pending_authority_accessor_operand({"source": "view_call"}) is False
+
+
+def test_a_read_empty_owner_or_a_pending_ceiling_is_not_proven_empty() -> None:
+    from services.policy.capability_surface import capability_surface_status
+    from services.resolution.capabilities import union
+    from services.resolution.predicate_evaluator.authority import _pending_ceiling_capability
+
+    # ``msg.sender == owner() || msg.sender == pendingOwner()`` with owner() read as 0x0 and the pending read failed.
+    owner_zero = CapabilityExpr.finite_set([], quality="exact", empty_reason="owner_read_zero")
+    ceiling = _pending_ceiling_capability({"source": "view_call", "callee_signature": "pendingOwner()"}, None)
+    for cap in (union(owner_zero, ceiling), union(ceiling, owner_zero)):
+        cap_dict = capability_to_dict(cap)
+        surface = project_capability_surface(cap_dict)
+        assert capability_surface_openness(cap_dict, surface) == "not_determined", cap_dict
+        assert capability_surface_status(cap_dict, surface) is None, cap_dict
+    # Every operand read empty: the union is.
+    slot_zero = CapabilityExpr.finite_set([], quality="exact", empty_reason="slot_read_zero")
+    both = capability_to_dict(union(owner_zero, slot_zero))
+    assert capability_surface_openness(both, project_capability_surface(both)) == "restricted"
