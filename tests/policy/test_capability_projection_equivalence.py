@@ -173,7 +173,8 @@ def _ref_dedupe(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         existing = by_key[key]
         details = dict(existing.get("details") or {})
-        row_details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        raw = row.get("details")
+        row_details: dict[str, Any] = raw if isinstance(raw, dict) else {}
         details["conditions"] = cs._unique_conditions(
             cs._condition_dicts(details.get("conditions")) + cs._condition_dicts(row_details.get("conditions"))
         )
