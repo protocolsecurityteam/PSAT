@@ -673,3 +673,116 @@ contract ConditionalGates {
         }
     }
 }
+
+// Helpers called where the order of evaluation is left open, from a loop, and ahead of later reads in the statement.
+contract CallOrder {
+    address public owner;
+    bool public open;
+    uint256 public hook;
+    uint256 public count;
+    IPing public target;
+
+    function _gateU() internal returns (uint256) {
+        if (open) {
+            open = false;
+            return 1;
+        }
+        require(msg.sender == owner, "UNAUTHORIZED");
+        return 1;
+    }
+
+    function _closeU() internal returns (uint256) {
+        open = false;
+        return 1;
+    }
+
+    function _ok() internal returns (bool) {
+        if (open) {
+            open = false;
+            return true;
+        }
+        require(msg.sender == owner, "UNAUTHORIZED");
+        return true;
+    }
+
+    function _okView() internal view returns (bool) {
+        if (open) return true;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        return true;
+    }
+
+    function _gateOnly() internal {
+        if (open) {
+            open = false;
+            return;
+        }
+        require(msg.sender == owner, "UNAUTHORIZED");
+    }
+
+    function _set(bool b) internal {
+        open = !b;
+    }
+
+    function _gateThenPing() internal {
+        if (open) return;
+        require(msg.sender == owner, "UNAUTHORIZED");
+        target.ping(count);
+    }
+
+    function binRight(uint256 v) external {
+        hook = _gateU() + _closeU() + v;
+    }
+
+    function modPair(uint256 v) external {
+        hook = addmod(_gateU(), _closeU(), 7) + v;
+    }
+
+    function loopNested(uint256 v) external {
+        for (uint256 i; i < 2; i++) {
+            _set(_okView());
+        }
+        hook = v;
+    }
+
+    function whileNested(uint256 v) external {
+        uint256 i;
+        while (i < 2) {
+            _set(_okView());
+            i++;
+        }
+        hook = v;
+    }
+
+    function doNested(uint256 v) external {
+        uint256 i;
+        do {
+            _set(_okView());
+            i++;
+        } while (i < 2);
+        hook = v;
+    }
+
+    function straightNested(uint256 v) external {
+        _set(_okView());
+        hook = v;
+    }
+
+    function loopCall(uint256 v) external {
+        for (uint256 i; i < 2; i++) {
+            require(_ok(), "x");
+        }
+        hook = v;
+    }
+
+    function loopGate(uint256 v) external {
+        for (uint256 i; i < 2; i++) {
+            _gateOnly();
+        }
+        hook = v;
+    }
+
+    function readAfterCall(uint256 v) external {
+        _gateThenPing();
+        count += v;
+    }
+}

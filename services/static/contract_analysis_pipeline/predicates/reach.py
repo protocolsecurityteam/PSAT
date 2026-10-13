@@ -28,9 +28,11 @@ from ..slither_compat import (
     LowLevelCall,
     Member,
     NewContract,
+    Phi,
     ReferenceVariable,
     SolidityCall,
     StateVariable,
+    TemporaryVariable,
 )
 from ..structural_evidence import storage_cell
 from ._helpers import _unsupported_leaf
@@ -384,12 +386,12 @@ def rendered_cache(function: Any) -> dict[tuple, tuple[Any, PredicateTree | None
 def node_text(node: Any, fallback: Any) -> str:
     """A node's source expression text, rendered once per contract pass."""
     cache = _cfg_cache.get()
-    key = ("text", id(node))
+    key = ("text", id(node), id(fallback))
     if cache is not None and key in cache:
         return cache[key][1]
     text = str(getattr(node, "expression", None) or fallback)
     if cache is not None:
-        cache[key] = (node, text)
+        cache[key] = ((node, fallback), text)
     return text
 
 
@@ -401,6 +403,15 @@ def modifiers_before(function: Any, anchor: Any) -> list[Any]:
     """The modifier invocations in ``function`` that run before ``anchor``: the anchor runs inside their ``_``."""
     dominators = getattr(anchor, "dominators", None) or ()
     return [ir for node, ir in _cfg(function).modifier_calls if node is not anchor and node in dominators]
+
+
+# Transient storage as one cell: ``tstore`` and transient state variables change only what ``tload`` and transient
+# state variables read, whatever the slot.
+TRANSIENT_STORAGE = "<transient storage>"
+
+
+def _cell(variable: Any) -> str:
+    return TRANSIENT_STORAGE if getattr(variable, "is_transient", False) else variable.name
 
 
 # A storage effect: the declared state variables written, and whether anything else may be (a storage pointer,
@@ -433,7 +444,7 @@ def _ir_effect(ir: Any, active: tuple) -> Effect:
         for arg in (getattr(ir, "arguments", None) or []) if written_params else []:
             origin = getattr(arg, "points_to_origin", arg)
             if type(origin).__name__ == "StateVariable":
-                names = names | {origin.name}
+                names = names | {_cell(origin)}
             elif isinstance(origin, LocalVariable) and str(getattr(origin, "location", "")) == "storage":
                 opaque = True
         return (names, opaque)
@@ -468,7 +479,7 @@ def _ir_effect(ir: Any, active: tuple) -> Effect:
                 # Charged at each call site, to the storage passed in.
                 return _NO_EFFECT
             cell = storage_cell(origin, function) if function is not None else None
-            return (frozenset({cell.variable.name}), False) if cell is not None else (frozenset(), True)
+            return (frozenset({_cell(cell.variable)}), False) if cell is not None else (frozenset(), True)
     return _NO_EFFECT
 
 
@@ -507,22 +518,54 @@ def _node_effect(node: Any, active: tuple, skip: Any = None) -> Effect:
 
 
 def _scan_node_effect(node: Any, active: tuple, skip: Any) -> Effect:
-    names = {getattr(v, "name", "") for v in getattr(node, "state_variables_written", []) or []}
+    """What ``node`` may write. ``skip`` is the call that leads into the next frame: the language leaves the order of
+    a statement's operations open, so only the call itself and what consumes its result are known to run after it.
+    """
+    names = {_cell(v) for v in getattr(node, "state_variables_written", []) or []}
     opaque = False
     irs = list(getattr(node, "irs", []) or [])
-    ssa = list(getattr(node, "irs_ssa", []) or [])
-    # ``skip`` is the call that leads into the next frame, possibly as its SSA twin. Operations run in IR order, so
-    # only those before it in the node run first; another call to the same function still counts.
-    position = None
-    if skip is not None:
-        position = next((index for index, ir in enumerate(irs) if ir is skip), None)
-        if position is None and len(ssa) == len(irs):
-            position = next((index for index, ir in enumerate(ssa) if ir is skip), None)
-    for ir in irs if position is None else irs[:position]:
+    after = _runs_after(irs, _leading_index(node, irs, skip)) if skip is not None else set()
+    for index, ir in enumerate(irs):
+        if index in after:
+            continue
         more, more_opaque = _ir_effect(ir, active)
         names |= more
         opaque = opaque or more_opaque
     return (frozenset(names), opaque)
+
+
+def _leading_index(node: Any, irs: list[Any], call: Any) -> int | None:
+    """The position of ``call`` in ``irs``, found directly or through its SSA twin, or ``None``."""
+    for index, ir in enumerate(irs):
+        if ir is call:
+            return index
+    # SSA adds ``Phi`` and ``PhiCallback`` operations; every other one is a copy of the IR at the same position.
+    ssa = [ir for ir in getattr(node, "irs_ssa", []) or [] if not isinstance(ir, Phi)]
+    if len(ssa) != len(irs) or any(type(a) is not type(b) for a, b in zip(ssa, irs)):
+        return None
+    return next((index for index, ir in enumerate(ssa) if ir is call), None)
+
+
+def _runs_after(irs: list[Any], leading: int | None) -> set[int]:
+    """Positions of the leading call and the operations that consume its result, through temporaries and the
+    references indexed by them; these can only run once it has returned.
+    """
+    if leading is None:
+        return set()
+    after = {leading}
+    lvalue = getattr(irs[leading], "lvalue", None)
+    produced: list[Any] = [lvalue] if isinstance(lvalue, TemporaryVariable) else []
+    for index in range(leading + 1, len(irs)):
+        ir = irs[index]
+        if not any(value is made for value in getattr(ir, "read", None) or [] for made in produced):
+            continue
+        after.add(index)
+        lvalue = getattr(ir, "lvalue", None)
+        if isinstance(lvalue, TemporaryVariable) or (
+            isinstance(lvalue, ReferenceVariable) and isinstance(ir, (Index, Member))
+        ):
+            produced.append(lvalue)
+    return after
 
 
 def _function_effect(function: Any, active: tuple = ()) -> Effect:
@@ -577,9 +620,11 @@ def _effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effec
         cfg = _cfg(function)
         if anchor.node_id not in cfg.nodes:
             return (frozenset(), True)
+        # In a loop, a later iteration runs after the call, and so may an earlier one's operations after it.
+        lead = call if anchor.node_id not in cfg.cyclic else None
         effects = []
         for node_id in _preceding(cfg, anchor.node_id):
-            effects.append(_node_effect(cfg.nodes[node_id], (), skip=call if node_id == anchor.node_id else None))
+            effects.append(_node_effect(cfg.nodes[node_id], (), skip=lead if node_id == anchor.node_id else None))
             if level and _node_is_type(cfg.nodes[node_id], "NodeType.PLACEHOLDER"):
                 effects.append(
                     _function_effect(frames[level - 1]) if frames[level - 1] is not None else (frozenset(), True)
@@ -598,6 +643,19 @@ def runs_body_repeatedly(function: Any) -> bool:
     if cfg.repeats is None:
         cfg.repeats = _modifier_repeats_body(cfg)
     return cfg.repeats
+
+
+def call_site_unread(caller: Any, call: Any) -> str | None:
+    """Why reach can't be read for one run of the frame ``call`` enters from ``caller``: the call may run more than
+    once (it sits in a loop), or where it sits in ``caller`` isn't known. ``None`` when neither.
+    """
+    node = getattr(call, "node", None)
+    if caller is None or node is None:
+        return "gate_location_not_determined"
+    cfg = _cfg(caller)
+    if cfg.nodes.get(node.node_id) is not node:
+        return "gate_location_not_determined"
+    return "body_runs_repeatedly" if node.node_id in cfg.cyclic else None
 
 
 def _modifier_repeats_body(function_cfg: _Cfg) -> bool:
@@ -621,16 +679,14 @@ def _storage_variable(value: Any, function: Any) -> tuple[str | None, bool]:
     """The state variable a storage reference resolves to, or whether it is unattributable storage."""
     origin = getattr(value, "points_to_origin", None) if isinstance(value, ReferenceVariable) else value
     if isinstance(origin, StateVariable):
-        return (None, False) if origin.is_constant or getattr(origin, "is_immutable", False) else (origin.name, False)
+        return (None, False) if origin.is_constant or getattr(origin, "is_immutable", False) else (_cell(origin), False)
     if isinstance(origin, LocalVariable) and str(getattr(origin, "location", "")) == "storage":
         cell = storage_cell(origin, getattr(origin, "function", None) or function)
-        return (cell.variable.name, False) if cell is not None else (None, True)
+        return (_cell(cell.variable), False) if cell is not None else (None, True)
     return (None, False)
 
 
 _YUL_CALLS = ("call(", "staticcall(", "delegatecall(", "callcode(")
-# Transient storage as one cell: ``tstore`` changes only what ``tload`` reads.
-TRANSIENT_STORAGE = "<transient storage>"
 # Builtins reading another account's state, which a call out can change.
 _ACCOUNT_READS = ("balance(", "selfbalance(", "code(", "codehash(", "extcodesize(", "extcodehash(", "extcodecopy(")
 
@@ -673,7 +729,7 @@ def _function_reads(function: Any) -> Reads:
         return (frozenset(), True, True)
     for variable in variables:
         if not variable.is_constant and not getattr(variable, "is_immutable", False):
-            names.add(variable.name)
+            names.add(_cell(variable))
     for node in nodes:
         for ir in getattr(node, "irs", []) or []:
             more_other, more_external, transient = _read_kind(ir)

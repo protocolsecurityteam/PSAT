@@ -69,6 +69,7 @@ from .operands import _operand_for_value, _published_source_key, _source_to_oper
 from .reach import (
     REACHED_ALWAYS,
     branch_reads,
+    call_site_unread,
     effect_before,
     modifiers_before,
     node_text,
@@ -189,12 +190,20 @@ def _where_reached(
     frames = [function, *(getattr(ir, "function", None) for ir in chain)]
     anchors = [*(getattr(ir, "node", None) for ir in chain), gate.node]
     alternatives: list[PredicateTree] = []
-    # Reach is read for one run of a body; a body a modifier runs again sees the first run's writes and returns.
-    repeated = next(
-        (level for level, frame in enumerate(frames) if frame is not None and runs_body_repeatedly(frame)), None
-    )
-    if _runs_repeatedly_above(entry, prefix):
-        repeated = 0
+    # Reach is read for one run of a body; a body a modifier or a loop runs again sees the first run's writes and
+    # returns.
+    unread: tuple[int, str] | None = None
+    above = _unread_above(entry, prefix)
+    if above is not None:
+        unread = (0, above)
+    for level, frame in enumerate(frames):
+        if unread is not None:
+            break
+        reason = call_site_unread(frames[level - 1], chain[level - 1]) if level else None
+        if reason is None and frame is not None and runs_body_repeatedly(frame):
+            reason = "body_runs_repeatedly"
+        if reason is not None:
+            unread = (level, reason)
     for level in range(first_level, len(frames)):
         frame, anchor = frames[level], anchors[level]
         if frame is None or anchor is None:
@@ -210,8 +219,8 @@ def _where_reached(
             formula = unreached_formula(target_fn, target_anchors)
             if formula is None:
                 continue
-            if repeated is not None and level >= repeated:
-                alternatives.append(make_leaf_node(_unsupported_leaf("body_runs_repeatedly", gate.expression_text)))
+            if unread is not None and level >= unread[0]:
+                alternatives.append(make_leaf_node(_unsupported_leaf(unread[1], gate.expression_text)))
                 continue
             # Provenance only for a frame whose reach depends on a branch; most gates are reached unconditionally.
             target_prov: ProvenanceMap | None = prov
@@ -280,10 +289,18 @@ def _branch_tree_builder(
     return build
 
 
-def _runs_repeatedly_above(entry: Any, chain: list[Any]) -> bool:
-    """Whether the entry point or a frame on the way into this one runs a body more than once."""
+def _unread_above(entry: Any, chain: list[Any]) -> str | None:
+    """Why reach can't be read for one run of the frame ``chain`` leads into from ``entry``: a call on the way in isn't
+    located in its caller, or a frame on the way runs a body more than once, or a call on the way may run more than
+    once.
+    """
     frames = [entry, *(getattr(call, "function", None) for call in chain)]
-    return any(frame is not None and runs_body_repeatedly(frame) for frame in frames)
+    reasons = {call_site_unread(frames[level], call) for level, call in enumerate(chain)}
+    if "gate_location_not_determined" in reasons:
+        return "gate_location_not_determined"
+    if "body_runs_repeatedly" in reasons or any(frame is not None and runs_body_repeatedly(frame) for frame in frames):
+        return "body_runs_repeatedly"
+    return None
 
 
 def _restamp_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
@@ -775,8 +792,9 @@ def _helper_value_tree(
     path whose condition opens cofinite, is ``unsupported``.
     """
     wanted = "True" if gate.polarity == "allowed_when_true" else "False"
-    if runs_body_repeatedly(callee) or _runs_repeatedly_above(entry, chain):
-        return make_leaf_node(_unsupported_leaf("body_runs_repeatedly", gate.expression_text))
+    unread = "body_runs_repeatedly" if runs_body_repeatedly(callee) else _unread_above(entry, chain)
+    if unread is not None:
+        return make_leaf_node(_unsupported_leaf(unread, gate.expression_text))
     gates = _helper_gate_subtrees(callee, sub_prov, chain, entry, caller_tainted_only=False)
     cfg_nodes = list(getattr(callee, "nodes", []) or [])
     assume = frozenset(

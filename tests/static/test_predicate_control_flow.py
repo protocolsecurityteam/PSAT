@@ -18,12 +18,18 @@ pytest.importorskip("slither")
 
 pytestmark = pytest.mark.compile
 
-FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "predicates" / "control_flow_fidelity.sol"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "predicates"
+FIXTURE = FIXTURES / "control_flow_fidelity.sol"
 SOLC_VERSION = "0.8.27"
+# Transient state variables need solc 0.8.28 or later.
+TRANSIENT_FIXTURE = FIXTURES / "control_flow_transient.sol"
+TRANSIENT_SOLC_VERSION = "0.8.37"
 
 
 @cache
-def _artifacts(contract: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _artifacts(
+    contract: str, fixture: Path = FIXTURE, solc_version: str = SOLC_VERSION
+) -> tuple[dict[str, Any], dict[str, Any]]:
     from slither import Slither
 
     from services.static.claims import build_claims
@@ -32,10 +38,10 @@ def _artifacts(contract: str) -> tuple[dict[str, Any], dict[str, Any]]:
     from services.static.contract_analysis_pipeline.shared import _select_subject_contract
     from tests.support.label_corpus import _solc_select_binary
 
-    solc = _solc_select_binary(SOLC_VERSION)
+    solc = _solc_select_binary(solc_version)
     if not solc.exists():  # pragma: no cover - only when the pinned solc is absent
-        pytest.skip(f"solc {SOLC_VERSION} not installed via solc-select")
-    subject = _select_subject_contract(Slither(str(FIXTURE), solc=str(solc)), contract)
+        pytest.skip(f"solc {solc_version} not installed via solc-select")
+    subject = _select_subject_contract(Slither(str(fixture), solc=str(solc)), contract)
     assert subject is not None, contract
     trees = build_predicate_artifacts(subject)
     build_claims(subject, build_effects(subject), trees)
@@ -253,12 +259,70 @@ def test_a_helper_read_from_a_body_run_twice_is_not_determined(signature):
 
 
 @pytest.mark.parametrize("signature", ["viaDouble(uint256)", "sameIf(uint256)"])
-def test_a_second_call_in_one_condition_sees_the_first_calls_writes(signature):
-    assert _tree("HelperRunTwice", signature) == ("AND", ("OR", OPEN_FLAG, OWNER), ("OR", WRITTEN_BEFORE, OWNER))
+def test_two_calls_in_one_condition_each_may_see_the_others_writes(signature):
+    """Only a call's own result orders what else the statement runs, so each call's branch may follow the other call."""
+    assert _tree("HelperRunTwice", signature) == ("AND", ("OR", WRITTEN_BEFORE, OWNER), ("OR", WRITTEN_BEFORE, OWNER))
 
 
 def test_a_transient_store_counts_as_a_write():
     assert _tree("HelperRunTwice", "transientWriteThenBranch(uint256)") == ("OR", WRITTEN_BEFORE, OWNER)
+
+
+def _transient_tree(signature: str) -> Any:
+    return _shape(_artifacts("TransientAliasing", TRANSIENT_FIXTURE, TRANSIENT_SOLC_VERSION)[0][signature])
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "namedWriteRawRead(uint256)",
+        "helperNamedWriteRawRead(uint256)",
+        "rawWriteNamedRead(uint256)",
+        "slotWriteNamedRead(uint256)",
+        "libWriteNamedRead(uint256)",
+    ],
+)
+def test_a_transient_variable_and_raw_transient_storage_are_one_cell(signature):
+    tree = _transient_tree(signature)
+    # A library call also publishes its own leaf beside the gate.
+    assert tree == ("OR", WRITTEN_BEFORE, OWNER) or (tree[0] == "AND" and ("OR", WRITTEN_BEFORE, OWNER) in tree[1:]), (
+        tree
+    )
+
+
+@pytest.mark.parametrize("signature", ["rawWritePersistentRead(uint256)", "namedWritePersistentRead(uint256)"])
+def test_a_transient_write_keeps_a_branch_on_persistent_storage(signature):
+    assert _transient_tree(signature) == ("OR", OPEN_FLAG, OWNER)
+
+
+@pytest.mark.parametrize("signature", ["binRight(uint256)", "modPair(uint256)"])
+def test_a_call_beside_the_leading_call_may_run_before_it(signature):
+    """Solidity leaves the order of operands and arguments open; legacy codegen runs these right to left."""
+    assert _tree("CallOrder", signature) == ("OR", WRITTEN_BEFORE, OWNER)
+
+
+def test_a_call_on_the_leading_calls_result_runs_after_it():
+    assert _tree("CallOrder", "straightNested(uint256)") == ("OR", OPEN_FLAG, OWNER)
+
+
+def test_the_leading_call_is_found_beside_its_phi_callbacks():
+    assert _tree("CallOrder", "readAfterCall(uint256)") == ("OR", OPEN_FLAG, OWNER)
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "loopNested(uint256)",
+        "whileNested(uint256)",
+        "doNested(uint256)",
+        "loopCall(uint256)",
+        "loopGate(uint256)",
+    ],
+)
+def test_a_helper_called_from_a_loop_runs_more_than_once(signature):
+    tree = _tree("CallOrder", signature)
+    assert ("unsupported", "body_runs_repeatedly") in tree[1:], tree
+    assert OPEN_FLAG not in tree[1:], tree
 
 
 def test_a_write_to_other_storage_keeps_the_branch():
