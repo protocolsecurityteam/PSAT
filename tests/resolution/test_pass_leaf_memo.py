@@ -287,3 +287,25 @@ def test_memoized_capability_is_a_private_copy():
     second = registry.enumerate(descriptor, _ctx(memo))
     assert second.members == [SAFE]
     assert second.subject == "root"
+
+
+def test_a_capability_whose_projection_exceeds_its_budget_is_published_not_determined(
+    db_session, seeded, calls, monkeypatch
+):
+    import services.policy.capability_surface as surface
+    from services.resolution.capability_resolver import resolve_contract_capabilities
+
+    monkeypatch.setattr(surface, "PROJECTION_WORK_BUDGET", 1)
+    out = resolve_contract_capabilities(
+        db_session, address=PROXY, chain_id=1, block=BLOCK, job_id=seeded.id, chain="ethereum"
+    )
+
+    assert out is not None
+    cap = out["grantRole(bytes32,address)"]
+    budget_hit = {"kind": "unsupported", "unsupported_reason": "projection_budget_exceeded", "confidence": "check_only"}
+    assert {k: v for k, v in cap.items() if k != "effect_capabilities"} == budget_hit
+    assert [site["capability"] for site in cap["effect_capabilities"]] == [budget_hit] * 3
+    projected = surface.project_capability_surface(cap)
+    assert surface.capability_surface_openness(cap, projected) == "not_determined"
+    assert surface.capability_surface_status(cap, projected) == "unsupported"
+    assert surface._projection_memo.get() is None, "the pass's projections are dropped with it"
