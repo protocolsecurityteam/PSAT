@@ -117,6 +117,15 @@ def test_failed_fetch_does_not_create_a_declaration(monkeypatch):
     assert fetch_registries("unrecognized", "ethereum") == ([], [])
 
 
+@pytest.mark.parametrize("name", ["aave-v3-fork", "aave-v5", "not-aave"])
+def test_unreviewed_names_do_not_inherit_aave_publisher_sources(monkeypatch, name):
+    def unexpected_fetch(*args, **kwargs):
+        pytest.fail("An unreviewed protocol name must not select a trusted publisher")
+
+    monkeypatch.setattr("services.discovery.publisher_registry._get", unexpected_fetch)
+    assert fetch_registries(name, "ethereum") == ([], [])
+
+
 def test_redirect_is_not_a_trusted_registry(monkeypatch):
     from contextlib import nullcontext
     from types import SimpleNamespace

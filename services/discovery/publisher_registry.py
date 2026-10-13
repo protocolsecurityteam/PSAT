@@ -70,6 +70,14 @@ REGISTRIES = (
     Registry("lido_eth", "lido", "https://docs.lido.fi/deployed-contracts/"),
 )
 _BY_KEY = {source.key: source for source in REGISTRIES}
+# Reviewed publisher-family aliases, not a generic version/prefix match. DefiLlama's
+# family identity is a versioned slug; these all use the same Aave publisher registries.
+_PUBLISHER_FAMILIES = {
+    "aavev1": "aave",
+    "aavev2": "aave",
+    "aavev3": "aave",
+    "aavev4": "aave",
+}
 _MAPLE_ROOTS = {
     "daoMultisig",
     "governor",
@@ -110,7 +118,9 @@ _EXTERNAL = re.compile(r"external|integration|testnet|holesky|sepolia|hoodi|brid
 
 
 def protocol_key(name: str | None) -> str:
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    """Publisher identity shared by registry selection and membership validation."""
+    normalized = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    return _PUBLISHER_FAMILIES.get(normalized, normalized)
 
 
 def _get(url: str, *, token: str | None = None) -> bytes:

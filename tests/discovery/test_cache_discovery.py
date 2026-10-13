@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -128,6 +129,8 @@ def _mock_inventory(contracts, **extra):
             f"contract MapleAddressRegistryETH {{ address public constant syrupUSDCPoolManager = {ADDR_A}; }}",
         ),
         ("Aave", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
+        ("Aave V2", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
+        ("Aave V3", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
         (
             "Lido",
             "lido_eth",
@@ -142,7 +145,9 @@ def test_company_discovery_admits_publisher_core_before_selection(db_session, mo
     from db.queue import get_artifact
     from services.clients.rpc import EthCallResult
     from services.discovery import probes
-    from tests.discovery.test_publisher_registry import snapshot
+    from services.discovery.publisher_registry import REGISTRIES
+    from tests.discovery.test_protocol_resolver import AAVE, AAVE_V2
+    from tests.discovery.test_publisher_registry import REVISION, snapshot
     from workers.base import JobHandledDirectly
     from workers.discovery import DiscoveryWorker
 
@@ -154,9 +159,28 @@ def test_company_discovery_admits_publisher_core_before_selection(db_session, mo
             "meta": {},
         },
     )
-    monkeypatch.setattr(
-        "services.discovery.publisher_registry.fetch_registries", lambda *a, **kw: ([snapshot(key, content)], [])
-    )
+    # Exercise the actual family resolver, registry selection and admission together.
+    # Only external responses are stubbed: mocking fetch_registries hid the versioned-slug bug.
+    if key == "aave_v3_eth":
+        monkeypatch.setattr("services.discovery.protocol_resolver._fetch_protocols", lambda: [AAVE, AAVE_V2])
+    payloads = {snapshot(key, content)["url"]: content.encode()}
+    expected_registries = {key}
+    if key == "aave_v3_eth":
+        v4 = snapshot("aave_v4_eth", f"library AaveV4EthereumHubs {{ address constant CORE_HUB = {ADDR_B}; }}")
+        payloads[v4["url"]] = v4["content"].encode()
+        expected_registries.add("aave_v4_eth")
+    for source in REGISTRIES:
+        if source.key in expected_registries and source.repo:
+            payloads[f"https://api.github.com/repos/{source.repo}/commits/main"] = json.dumps(
+                {"sha": REVISION}
+            ).encode()
+    fetched = []
+
+    def get_bytes(url, **kwargs):
+        fetched.append(url)
+        return payloads[url]
+
+    monkeypatch.setattr("services.discovery.publisher_registry._get", get_bytes)
     monkeypatch.setattr("services.discovery.membership_gate.probe", probes.run_probe)
     monkeypatch.setattr(
         probes, "rpc_request", lambda url, method, params, **kw: "0x7b" if method == "eth_blockNumber" else "0x6000"
@@ -181,6 +205,14 @@ def test_company_discovery_admits_publisher_core_before_selection(db_session, mo
     registry_artifact = get_artifact(db_session, job.id, "publisher_registries")
     assert isinstance(registry_artifact, dict)
     assert registry_artifact["snapshots"][0]["sha256"]
+    assert registry_artifact["failures"] == []
+    assert {item["registry"] for item in registry_artifact["snapshots"]} == expected_registries
+    assert set(fetched) == set(payloads)
+    if key == "aave_v3_eth":
+        from db.models import Protocol
+
+        protocol = db_session.get(Protocol, job.protocol_id)
+        assert protocol is not None and protocol.canonical_slug == "aave-v2"
 
 
 def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
