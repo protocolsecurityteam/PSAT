@@ -413,3 +413,37 @@ def test_exit_codes_survive_children_starting_in_other_threads(monkeypatch):
         thread.join()
     assert sorted(set(outcomes)) == ["memory", "ok"]
     assert outcomes.count("memory") == 24
+
+
+def test_a_child_already_known_dead_gets_no_signal(monkeypatch):
+    import services.compute_isolation as ci
+
+    child = ci._pool.acquire()
+    os.kill(child.pid, signal.SIGKILL)
+    assert ci._pool.exitcode(child, wait_s=5) == -signal.SIGKILL
+    sent: list[tuple[str, int]] = []
+    monkeypatch.setattr(ci.os, "kill", lambda pid, sig: sent.append(("kill", pid)))
+    monkeypatch.setattr(ci.os, "killpg", lambda pid, sig: sent.append(("killpg", pid)))
+    assert ci._pool.forget(child) == -signal.SIGKILL
+    assert sent == []
+
+
+def test_a_child_seen_dying_just_now_has_only_its_group_cleaned(monkeypatch):
+    import services.compute_isolation as ci
+
+    child = ci._pool.acquire()
+    os.kill(child.pid, signal.SIGKILL)
+    assert ci._pool.exitcode(child, wait_s=5) is not None
+    sent: list[tuple[str, int]] = []
+    monkeypatch.setattr(ci.os, "kill", lambda pid, sig: sent.append(("kill", pid)))
+    monkeypatch.setattr(ci.os, "killpg", lambda pid, sig: sent.append(("killpg", pid)))
+    pid = child.pid
+    ci._pool.forget(child, just_died=True)
+    assert sent == [("killpg", pid)]
+
+
+def test_a_live_child_is_killed_with_its_group():
+    import services.compute_isolation as ci
+
+    child = ci._pool.acquire()
+    assert ci._pool.forget(child) == -signal.SIGKILL

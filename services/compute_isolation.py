@@ -293,6 +293,7 @@ def _sample(pid: int) -> tuple[float, int] | None:
 
 
 def _kill_group(pid: int) -> None:
+    """Kill a live child and its group: one whose exit status hasn't been read still owns its pid."""
     try:
         os.killpg(pid, signal.SIGKILL)
         return
@@ -302,6 +303,14 @@ def _kill_group(pid: int) -> None:
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
+        pass
+
+
+def _kill_leftovers(pid: int) -> None:
+    """Kill what a child that just died left in its group. While any of it runs, the group's id can't be reused."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -324,7 +333,7 @@ class _Pool:
         # start, status read and close happens under this lock.
         self._lock = threading.RLock()
         self._idle: list[_Child] = []
-        self._live: set[int] = set()
+        self._live: dict[int, _Child] = {}
         self._context: BaseContext | None = None
         self._exit_hook = False
 
@@ -369,8 +378,9 @@ class _Pool:
                 # Before multiprocessing's own exit hook, which would wait forever on a child idling for its next job.
                 atexit.register(self.shutdown)
                 self._exit_hook = True
-            self._live.add(process.pid)
-            return _Child(process, parent_end)
+            child = _Child(process, parent_end)
+            self._live[process.pid] = child
+            return child
 
     def release(self, child: _Child) -> None:
         sample = _sample(child.pid)
@@ -397,12 +407,21 @@ class _Pool:
                 return code
             time.sleep(0.01)
 
-    def forget(self, child: _Child) -> int | None:
-        """Kill the child and what it spawned, and return its exit code."""
-        _kill_group(child.pid)
-        code = self.exitcode(child, wait_s=10)
+    def forget(self, child: _Child, *, just_died: bool = False) -> int | None:
+        """Kill the child and what it spawned, and return its exit code.
+
+        A child whose exit status is already known may have had its pid reused, so it gets no signal; only one whose
+        death was observed just now (*just_died*) has its leftover group killed.
+        """
         with self._lock:
-            self._live.discard(child.pid)
+            code = child.process.exitcode
+        if code is None:
+            _kill_group(child.pid)
+            code = self.exitcode(child, wait_s=10)
+        elif just_died:
+            _kill_leftovers(child.pid)
+        with self._lock:
+            self._live.pop(child.pid, None)
             child.conn.close()
             if code is not None:
                 child.process.close()
@@ -411,11 +430,15 @@ class _Pool:
     def shutdown(self) -> None:
         with self._lock:
             idle, self._idle = self._idle, []
-            live, self._live = self._live, set()
         for child in idle:
             self.forget(child)
-        for pid in live:
-            _kill_group(pid)
+        with self._lock:
+            live, self._live = self._live, {}
+        for child in live.values():
+            with self._lock:
+                running = child.process.exitcode is None
+            if running:
+                _kill_group(child.pid)
         from multiprocessing import forkserver
 
         stop = getattr(forkserver._forkserver, "_stop", None)
@@ -519,7 +542,7 @@ def run_isolated(
     if reply is None:
         # A child that ended on its own reports its own exit code; one stopped here is killed first.
         exitcode = _pool.exitcode(child, wait_s=5) if overrun is None and not lease_lost else None
-        killed = _pool.forget(child)
+        killed = _pool.forget(child, just_died=exitcode is not None)
         exitcode = killed if exitcode is None else exitcode
         if overrun is not None:
             logger.warning(
