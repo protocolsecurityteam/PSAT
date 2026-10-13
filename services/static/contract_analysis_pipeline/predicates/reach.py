@@ -335,14 +335,25 @@ def _and(items: Sequence[Formula]) -> Formula:
     return parts[0] if len(parts) == 1 else ("and", tuple(parts))
 
 
-def _leaf_count(formula: Formula) -> int:
-    if formula[0] in ("and", "or"):
-        return sum(_leaf_count(child) for child in formula[1])
-    return 1
+def _leaf_count_exceeds(formula: Formula, budget: int) -> bool:
+    """Whether the formula, read as a tree, has more than ``budget`` leaves. Sub-formulas are shared, so the tree can
+    be exponentially larger than the formula; the count stops as soon as it passes the budget.
+    """
+    count = 0
+    stack = [formula]
+    while stack:
+        node = stack.pop()
+        if node[0] in ("and", "or"):
+            stack.extend(node[1])
+            continue
+        count += 1
+        if count > budget:
+            return True
+    return False
 
 
 def _within_budget(formula: Formula) -> Formula:
-    if _leaf_count(formula) > _REACH_LEAF_BUDGET:
+    if _leaf_count_exceeds(formula, _REACH_LEAF_BUDGET):
         return ("unsupported", "gate_reach_condition_budget")
     return formula
 
