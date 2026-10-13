@@ -150,6 +150,10 @@ class _Reader:
             if self.contract is None:
                 raise _Unread("reach_condition_subject_unknown")
             return _Value("address", int(self.contract, 16))
+        if op == "chainid":
+            if not isinstance(self.chain_id, int):
+                raise _Unread("reach_condition_chain_unknown")
+            return _Value("uint256", self.chain_id)
         if op == "param":
             index = node.get("index")
             if index not in self.calldata:

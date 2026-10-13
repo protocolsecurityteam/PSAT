@@ -89,7 +89,10 @@ def _expression(
     if isinstance(value, Constant):
         return _constant(value)
     if isinstance(value, SolidityVariable):
-        return {"op": "self", "type": "address"} if getattr(value, "name", None) == "this" else None
+        name = getattr(value, "name", None)
+        if name == "this":
+            return {"op": "self", "type": "address"}
+        return {"op": "chainid", "type": "uint256"} if name == "block.chainid" else None
     if isinstance(value, StateVariable):
         return _storage(value, contract)
     function = frames[level]

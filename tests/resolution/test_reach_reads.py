@@ -191,3 +191,10 @@ def test_calldata_is_never_refuted(wire):
     }
     truth = read_reach(_stamp(impossible), _ctx())
     assert truth.holds is None and truth.calldata is None
+
+
+def test_the_chain_id_is_the_pass_chain(wire):
+    stub = wire({})
+    on_mainnet = _compare("eq", {"op": "chainid", "type": "uint256"}, _literal(1))
+    assert read_reach(_stamp(on_mainnet), _ctx()).holds is True
+    assert stub.asked == []
