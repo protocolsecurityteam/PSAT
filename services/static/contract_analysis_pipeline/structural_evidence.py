@@ -370,6 +370,9 @@ def predicate_truth(tree):
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf") or {}
         operands = leaf.get("operands") or []
+        # A membership or call leaf's operands are its keys and arguments, not the value it tests.
+        if leaf.get("kind") not in ("equality", "comparison"):
+            return None
         if not operands or any(o.get("source") != "constant" for o in operands):
             return None
         values = []
