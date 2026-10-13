@@ -373,3 +373,59 @@ def test_callers_beside_a_path_that_may_be_open_keep_their_rows():
     surface = project_capability_surface(cap)
     assert [row["address"] for row in surface.principal_rows] == [ADDR_B]
     assert capability_surface_openness(cap, surface) == "restricted"
+
+
+def _empty(**fields) -> dict:
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    return {**capability_to_dict(CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")), **fields}
+
+
+def test_a_proven_empty_conjunct_closes_a_path_that_may_be_open():
+    from services.policy.capability_surface import capability_surface_openness
+
+    # A reach condition read false resolves to this set: no caller passes the conjunct, so nobody passes the AND.
+    for cap in (
+        {"kind": "AND", "children": [_empty(), _unread_reach()]},
+        {"kind": "AND", "children": [{"kind": "OR", "children": [_unread_reach(), _owner()]}, _empty()]},
+        {"kind": "AND", "children": [{"kind": "AND", "children": [_empty(), _unread_reach()]}, _unread_reach()]},
+        {"kind": "AND", "children": [{"kind": "OR", "children": [_empty(), _empty()]}, _unread_reach()]},
+    ):
+        surface = project_capability_surface(cap)
+        assert not surface.open_not_determined, cap
+        assert capability_surface_openness(cap, surface) == "restricted", cap
+        if not surface.principal_rows:
+            assert capability_surface_status(cap, surface) == "resolved_empty", cap
+
+
+def test_an_empty_that_proves_nothing_leaves_a_path_that_may_be_open_not_determined():
+    from services.policy.capability_surface import (
+        PROJECTION_BUDGET_EXCEEDED,
+        capability_surface_openness,
+        not_determined_capability,
+    )
+
+    unproven = {
+        "unsupported": {"kind": "unsupported", "unsupported_reason": "loop"},
+        "unresolved": {
+            "kind": "external_check_only",
+            "check": {"target_address": ADDR_A, "extra": {"basis": ["caller_tainted_authority_unresolved"]}},
+        },
+        "lower_bound": _empty(membership_quality="lower_bound", confidence="partial", empty_reason="not_read"),
+        "unknown_quality": _empty(membership_quality=None),
+        "exact_but_partial": _empty(confidence="partial"),
+        "empty_by_design": _empty(membership_quality="lower_bound", empty_reason="empty_by_design"),
+        "intermediate_callers": _empty(subject="bound"),
+        "budget_hit": not_determined_capability(PROJECTION_BUDGET_EXCEEDED),
+        "resource_exhausted": not_determined_capability("resource_exhausted"),
+        "one_disjunct_proven": {"kind": "OR", "children": [_empty(), _empty(membership_quality="lower_bound")]},
+    }
+    for name, empty in unproven.items():
+        for cap in (
+            {"kind": "AND", "children": [empty, _unread_reach()]},
+            {"kind": "AND", "children": [_unread_reach(), empty]},
+        ):
+            surface = project_capability_surface(cap)
+            assert surface.open_not_determined, name
+            assert capability_surface_openness(cap, surface) == "not_determined", name

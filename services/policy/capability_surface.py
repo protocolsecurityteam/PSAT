@@ -455,7 +455,7 @@ class _RowAcc:
 
 
 class _Summary:
-    __slots__ = ("rows", "residual", "ond", "count", "pfirst", "punion", "pexpr")
+    __slots__ = ("rows", "residual", "ond", "count", "pfirst", "punion", "pexpr", "nobody")
 
     def __init__(
         self,
@@ -466,6 +466,7 @@ class _Summary:
         pfirst: _Ids = (),
         punion: _Ids = (),
         pexpr: Any = None,
+        nobody: bool = False,
     ):
         self.rows = rows if rows is not None else {}
         self.residual = residual if residual is not None else []
@@ -477,13 +478,15 @@ class _Summary:
         self.punion = punion
         # How to enumerate the paths: ("leaf", ids) | ("or", a, b) | ("and", a, b) | ("app", a, ids).
         self.pexpr = pexpr
+        # Proven to admit no end user (``_is_proven_empty``), as opposed to having nothing to show for any other reason.
+        self.nobody = nobody
 
     @property
     def valid(self) -> bool:
         return bool(self.rows) or self.count > 0
 
     def may_admit_anyone(self) -> bool:
-        return self.count > 0 or self.ond or not self.valid
+        return self.count > 0 or self.ond or not (self.valid or self.nobody)
 
 
 _EMPTY = _Summary()
@@ -532,7 +535,9 @@ class _Projector:
         if is_reach_not_determined(cap_dict):
             return _Summary(residual=[dict(cap_dict)], ond=True)
         if kind == "finite_set":
-            return self.leaf_rows(_rows_for_finite_set(cap_dict, node_conditions))
+            surface = self.leaf_rows(_rows_for_finite_set(cap_dict, node_conditions))
+            surface.nobody = _is_proven_empty(cap_dict)
+            return surface
         if kind == "threshold_group":
             return self.leaf_rows(
                 _rows_for_threshold_group(
@@ -564,7 +569,7 @@ class _Projector:
             if blocked and surface.count:
                 # An unresolved root-caller authorization AND-ed in means the function is gated with principals unknown;
                 # sibling public paths aren't earned. See ``_is_root_authority_blocker``.
-                surface = _Summary(rows=surface.rows, residual=surface.residual, ond=surface.ond)
+                surface = _Summary(rows=surface.rows, residual=surface.residual, ond=surface.ond, nobody=surface.nobody)
             return surface
         if kind == "cofinite_blacklist":
             # A cofinite is a public path with the denylist as a side-condition. Quality doesn't change openness but
@@ -668,7 +673,7 @@ class _Projector:
         ids = self.intern(raw)
         rows = {key: self.with_conditions(acc, ids) for key, acc in surface.rows.items()}
         if not surface.count:
-            return _Summary(rows=rows, residual=surface.residual, ond=surface.ond)
+            return _Summary(rows=rows, residual=surface.residual, ond=surface.ond, nobody=surface.nobody)
         return _Summary(
             rows=rows,
             residual=surface.residual,
@@ -677,6 +682,7 @@ class _Projector:
             pfirst=self.unique(surface.pfirst, ids),
             punion=self.unique(surface.pfirst, ids, surface.punion),
             pexpr=("app", surface.pexpr, ids),
+            nobody=surface.nobody,
         )
 
     def or_(self, left: _Summary, right: _Summary) -> _Summary:
@@ -697,6 +703,7 @@ class _Projector:
             pfirst=pfirst,
             punion=punion,
             pexpr=pexpr,
+            nobody=left.nobody and right.nobody,
         )
 
     def and_(self, left: _Summary, right: _Summary) -> _Summary:
@@ -711,8 +718,9 @@ class _Projector:
             surface = self.with_side_checks(right, left.residual)
         else:
             surface = self.product(left, right)
-        # A path that may be open stays one beside anything but a conjunct that admits only its callers.
+        # A path that may be open stays one beside anything but a conjunct that admits only its callers, or nobody.
         surface.ond = (left.ond and right.may_admit_anyone()) or (right.ond and left.may_admit_anyone())
+        surface.nobody = left.nobody or right.nobody
         return surface
 
     def with_side_checks(self, valid: _Summary, side_residual: list[dict[str, Any]]) -> _Summary:
@@ -842,6 +850,19 @@ def _is_role_store_provably_empty(cap_dict: dict[str, Any]) -> bool:
     if not isinstance(trace, list):
         return False
     return any(isinstance(step, dict) and step.get("step") in _PROVABLY_EMPTY_TRACE_STEPS for step in trace)
+
+
+def _is_proven_empty(cap_dict: dict[str, Any]) -> bool:
+    """A complete enumeration of the end user's callers that found none. An empty set that is a lower bound, unread,
+    of unknown quality, or of an intermediate contract's callers proves nothing about who may pass.
+    """
+    return (
+        cap_dict.get("kind") == "finite_set"
+        and cap_dict.get("members") == []
+        and cap_dict.get("membership_quality") == "exact"
+        and cap_dict.get("confidence") == "enumerable"
+        and cap_dict.get("subject", "root") == "root"
+    )
 
 
 def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:

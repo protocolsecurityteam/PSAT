@@ -33,11 +33,12 @@ CONDS = [{"kind": "business", "description": f"c{i}"} for i in range(4)] + [
 
 
 # The expansion the projection replaced: every AND multiplies its children's paths and caller rows, and rows are merged
-# by (address, origin, principal_type) at the end.
+# by (address, origin, principal_type) at the end. ``nobody``: the subtree is proven to admit no end user, which an AND
+# inherits from any child and an OR only from every child.
 
 
 def _reference(cap: dict[str, Any]) -> dict[str, Any]:
-    rows, paths, residual, ond = _ref_node(cap)
+    rows, paths, residual, ond, _nobody = _ref_node(cap)
     rows = _ref_dedupe(rows)
     paths = [cs._unique_conditions(p) for p in paths]
     conditions: list[dict[str, Any]] = []
@@ -80,20 +81,29 @@ def _with(row: dict[str, Any], conditions: list[dict[str, Any]]) -> dict[str, An
     return out
 
 
-def _ref_node(cap: dict[str, Any]) -> tuple[list, list, list, bool]:
+def _proven_empty(cap: dict[str, Any]) -> bool:
+    return (
+        cap.get("members") == []
+        and cap.get("membership_quality") == "exact"
+        and cap.get("confidence") == "enumerable"
+        and cap.get("subject", "root") == "root"
+    )
+
+
+def _ref_node(cap: dict[str, Any]) -> tuple[list, list, list, bool, bool]:
     kind = cap.get("kind")
     nc = cs._condition_dicts(cap.get("conditions"))
     if cs.is_reach_not_determined(cap):
-        return [], [], [dict(cap)], True
+        return [], [], [dict(cap)], True, False
     if kind == "finite_set":
-        return cs._rows_for_finite_set(cap, nc), [], [], False
+        return cs._rows_for_finite_set(cap, nc), [], [], False, _proven_empty(cap)
     if kind == "threshold_group":
         rows = cs._rows_for_threshold_group(cap, conditions=nc, safe_address_lookup=None, function_signature=None)
-        return rows, [], [], False
+        return rows, [], [], False, False
     if kind == "signature_witness":
-        return cs._rows_for_signature_witness(cap, nc), [], [], False
+        return cs._rows_for_signature_witness(cap, nc), [], [], False, False
     if kind == "conditional_universal":
-        return [], [nc], [], False
+        return [], [nc], [], False, False
     if kind == "cofinite_blacklist":
         quality = cap.get("blacklist_quality")
         excluded = len(cap.get("blacklist") or [])
@@ -103,38 +113,44 @@ def _ref_node(cap: dict[str, Any]) -> tuple[list, list, list, bool]:
             description = f"denylist exclusion ({excluded} known excluded; completeness not recorded)"
         else:
             description = f"denylist exclusion (at least {excluded} excluded; not exhaustive)"
-        return [], [nc + [{"kind": "denylist", "description": description}]], [], False
+        return [], [nc + [{"kind": "denylist", "description": description}]], [], False, False
     if kind not in ("AND", "OR"):
-        return [], [], [dict(cap)], False
+        return [], [], [dict(cap)], False, False
     rows: list = []
     paths: list = []
     residual: list = []
     ond = False
+    nobodies = []
     blocked = False
     for child in cs._child_dicts(cap):
-        c_rows, c_paths, c_res, c_ond = _ref_node(child)
+        c_rows, c_paths, c_res, c_ond, c_nobody = _ref_node(child)
+        nobodies.append(c_nobody)
         if kind == "OR":
             rows, paths, residual, ond = rows + c_rows, paths + c_paths, residual + c_res, ond or c_ond
             continue
         if cs.earned_public_enabled() and not (c_rows or c_paths) and cs._is_root_authority_blocker(child):
             blocked = True
-        rows, paths, residual, ond = _ref_and((rows, paths, residual, ond), (c_rows, c_paths, c_res, c_ond))
+        nobody = any(nobodies[:-1])
+        rows, paths, residual, ond = _ref_and(
+            (rows, paths, residual, ond, nobody), (c_rows, c_paths, c_res, c_ond, c_nobody)
+        )
     if nc:
         rows = [_with(r, nc) for r in rows]
         paths = [cs._unique_conditions(p + nc) for p in paths]
     if blocked:
         paths = []
-    return rows, paths, residual, ond
+    nobody = bool(nobodies) and (all(nobodies) if kind == "OR" else any(nobodies))
+    return rows, paths, residual, ond, nobody
 
 
 def _ref_and(left: tuple, right: tuple) -> tuple:
-    l_rows, l_paths, l_res, l_ond = left
-    r_rows, r_paths, r_res, r_ond = right
+    l_rows, l_paths, l_res, l_ond, l_nobody = left
+    r_rows, r_paths, r_res, r_ond, r_nobody = right
 
-    def admits(rows, paths, ond):
-        return bool(paths) or ond or not (rows or paths)
+    def admits(rows, paths, ond, nobody):
+        return bool(paths) or ond or not (rows or paths or nobody)
 
-    ond = (l_ond and admits(r_rows, r_paths, r_ond)) or (r_ond and admits(l_rows, l_paths, l_ond))
+    ond = (l_ond and admits(r_rows, r_paths, r_ond, r_nobody)) or (r_ond and admits(l_rows, l_paths, l_ond, l_nobody))
     l_valid, r_valid = bool(l_rows or l_paths), bool(r_rows or r_paths)
     if not l_valid and not r_valid:
         return [], [], l_res + r_res, ond
