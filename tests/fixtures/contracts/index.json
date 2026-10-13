@@ -95,7 +95,7 @@
       "path": "predicates/reach_reads.sol",
       "category": "predicates",
       "contract_name": "ReachReads",
-      "description": "Reach conditions recorded as reads: an open-role check through a public view, a flag in a bool helper's connective return, a state condition beside a caller check, a reassigned parameter, a branch on storage written before it, a branch on the chain id, caller-referencing reach conditions (directly and through a library call), and a state variable only compared with calldata.",
+      "description": "Reach conditions recorded as reads: an open-role check through a public view, a flag in a bool helper's connective return, a state condition beside a caller check, a reassigned parameter, a branch on storage written before it, a branch on the chain id, a view that reads the clock, caller-referencing reach conditions (directly and through a library call), and a state variable only compared with calldata.",
       "detection_patterns": ["reach_condition_read"]
     },
     {

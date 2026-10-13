@@ -3,8 +3,8 @@ pragma solidity ^0.8.19;
 
 // Reach conditions as reads: an OpenZeppelin-style open role, a flag read in a bool helper's connective return, a
 // state condition beside a caller check, a parameter reassigned before its branch, a branch on storage written before
-// it, a branch on the chain id, caller-referencing reach conditions (directly and through a library call), and a state
-// variable only compared with calldata.
+// it, a branch on the chain id, a view that reads the clock, caller-referencing reach conditions (directly and through
+// a library call), and a state variable only compared with calldata.
 
 library AddressAliasHelper {
     function undoL1ToL2Alias(address account) internal pure returns (address) {
@@ -86,6 +86,15 @@ contract ReachReads {
 
     function relayMessage(uint256 v) external {
         if (_isOtherMessenger()) { require(v > 0, "REPLAY"); } else { require(v == 0, "VALUE"); }
+        hook = v;
+    }
+
+    uint256 public deadline;
+
+    function isLate() public view returns (bool) { return block.timestamp > deadline; }
+
+    function afterDeadline(uint256 v) external {
+        if (isLate()) { require(msg.sender == owner, "UNAUTHORIZED"); }
         hook = v;
     }
 

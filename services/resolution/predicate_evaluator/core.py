@@ -212,12 +212,20 @@ def _reach_truth(tree: PredicateTree, ctx: EvaluationContext) -> ReachTruth:
     decisive = tree.get("op") != "AND"
     for truth in truths:
         if truth.holds is decisive:
-            return ReachTruth(decisive, truth.reads)
+            return truth
     reads = [read for truth in truths for read in truth.reads]
     unread = next((truth for truth in truths if truth.holds is None), None)
-    if unread is None:
-        return ReachTruth(not decisive, reads)
-    return ReachTruth(None, reads, unread.reason)
+    if unread is not None:
+        return ReachTruth(None, reads, unread.reason)
+    if decisive:
+        return ReachTruth(False, reads)
+    # Every conjunct holds, each for the calldata it found; they hold together only on one assignment.
+    calldata: dict[str, str] = {}
+    for truth in truths:
+        for name, value in (truth.calldata or {}).items():
+            if calldata.setdefault(name, value) != value:
+                return ReachTruth(None, reads, "reach_condition_calldata_not_jointly_witnessed")
+    return ReachTruth(True, reads, calldata=calldata or None)
 
 
 def _reach_expression(tree: PredicateTree) -> str:

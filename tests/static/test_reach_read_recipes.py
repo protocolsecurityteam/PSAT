@@ -102,6 +102,10 @@ def test_the_chain_id_is_read_as_the_chain(artifacts):
     assert {"op": "chainid", "type": "uint256"} in (read["expression"]["left"], read["expression"]["right"])
 
 
+def test_a_view_that_reads_the_clock_is_not_read_at_a_block(artifacts):
+    assert _reads(artifacts, "afterDeadline(uint256)") == [None]
+
+
 def test_calldata_is_read_as_the_parameter_the_caller_sends(artifacts):
     [read] = _reads(artifacts, "rateFor(address)")
     assert read is not None

@@ -474,6 +474,9 @@ def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> Capabilit
     return surface
 
 
+_CONDITION_NOT_READ: dict[str, Any] = {"kind": "business", "description": "condition not read"}
+
+
 def _may_admit_anyone(surface: CapabilitySurface) -> bool:
     return bool(surface.public_paths) or surface.open_not_determined or not _has_valid_path(surface)
 
@@ -504,6 +507,11 @@ def _and_paths(left: CapabilitySurface, right: CapabilitySurface) -> CapabilityS
     for row in right.principal_rows:
         for path in left.public_paths:
             rows.append(_row_with_conditions(row, path))
+    # A side that may admit anyone passes the other side's callers through, as a public path would.
+    if right.open_not_determined:
+        rows.extend(_row_with_conditions(row, [_CONDITION_NOT_READ]) for row in left.principal_rows)
+    if left.open_not_determined:
+        rows.extend(_row_with_conditions(row, [_CONDITION_NOT_READ]) for row in right.principal_rows)
 
     residual = left.residual + right.residual
     if left.principal_rows and right.principal_rows:

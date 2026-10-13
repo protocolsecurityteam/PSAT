@@ -6,7 +6,7 @@ stubbed.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from eth_utils.crypto import keccak
@@ -49,9 +49,11 @@ class _Wire:
         return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: payload)
 
 
-def _ctx(*, rpc: str | None = RPC) -> Any:
-    outer = EvaluationContext(chain_id=1, rpc_url=rpc, block=BLOCK, contract_address=SUBJECT, meta={PASS_MEMO: {}})
-    return SimpleNamespace(adapter=SimpleNamespace(_outer_ctx=outer), contract_address=SUBJECT)
+def _ctx(*, rpc: str | None = RPC, frame: Any = None) -> Any:
+    outer = EvaluationContext(
+        chain_id=1, rpc_url=rpc, block=BLOCK, contract_address=SUBJECT, meta={PASS_MEMO: {}}, call_frame=frame
+    )
+    return SimpleNamespace(adapter=SimpleNamespace(_outer_ctx=outer), contract_address=SUBJECT, call_frame=frame)
 
 
 @pytest.fixture
@@ -155,13 +157,15 @@ def test_a_view_call_encodes_its_arguments_as_the_abi_does(wire):
     assert read_reach(_stamp(call), _ctx()).holds is False
 
 
-def test_a_connective_is_decided_by_one_read_side_when_that_side_decides_it(wire):
+def test_a_connective_is_decided_left_to_right_like_solidity(wire):
     wire({_selector("on()"): 1, _selector("off()"): 0})
     unread = _storage("missing", "bool")
     on, off = _storage("on", "bool"), _storage("off", "bool")
-    assert read_reach(_stamp({"op": "or", "type": "bool", "left": unread, "right": on}), _ctx()).holds is True
-    assert read_reach(_stamp({"op": "and", "type": "bool", "left": unread, "right": off}), _ctx()).holds is False
-    assert read_reach(_stamp({"op": "and", "type": "bool", "left": unread, "right": on}), _ctx()).holds is None
+    assert read_reach(_stamp({"op": "or", "type": "bool", "left": on, "right": unread}), _ctx()).holds is True
+    assert read_reach(_stamp({"op": "and", "type": "bool", "left": off, "right": unread}), _ctx()).holds is False
+    # The left operand runs first and may revert, so the right one deciding proves nothing.
+    assert read_reach(_stamp({"op": "or", "type": "bool", "left": unread, "right": on}), _ctx()).holds is None
+    assert read_reach(_stamp({"op": "and", "type": "bool", "left": unread, "right": off}), _ctx()).holds is None
 
 
 def test_nothing_is_read_without_a_pinned_block_or_rpc(wire):
@@ -198,3 +202,69 @@ def test_the_chain_id_is_the_pass_chain(wire):
     on_mainnet = _compare("eq", {"op": "chainid", "type": "uint256"}, _literal(1))
     assert read_reach(_stamp(on_mainnet), _ctx()).holds is True
     assert stub.asked == []
+
+
+def test_an_inlined_callees_parameter_is_what_its_caller_passed_not_calldata(wire):
+    from services.resolution.adapters import CallFrame
+
+    wire({})
+    token = {"op": "param", "type": "address", "index": 0, "name": "token"}
+    is_zero = _stamp(_compare("eq", token, {"op": "convert", "type": "address", "value": _literal(0)}))
+    root = CallFrame.root(contract_address=SUBJECT, function_signature="f(address)", function_selector=None)
+    assert read_reach(is_zero, _ctx(frame=root)).holds is True
+    inlined = CallFrame(
+        protected_contract_address="0x" + "11" * 20,
+        executing_contract_address=SUBJECT,
+        current_msg_sender="0x" + "11" * 20,
+        bound_parameters=({"name": "token", "value": "0x" + "22" * 20},),
+    )
+    truth = read_reach(is_zero, _ctx(frame=inlined))
+    assert truth.holds is None and truth.reason == "reach_condition_calldata_bound"
+
+
+def _reach_leaf(expression: dict[str, Any], text: str) -> dict[str, Any]:
+    leaf = {
+        "kind": "comparison",
+        "operator": "gt",
+        "authority_role": "business",
+        "operands": [{"source": "parameter", "parameter_index": 0, "parameter_name": "a"}],
+        "references_msg_sender": False,
+        "parameter_indices": [0],
+        "expression": text,
+        "basis": ["revert_path_condition"],
+        "reach_read": _stamp(expression),
+    }
+    return {"op": "LEAF", "leaf": leaf}
+
+
+def test_conjuncts_on_calldata_hold_together_only_on_one_assignment():
+    from services.resolution.adapters import AdapterRegistry
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
+
+    a = {"op": "param", "type": "uint256", "index": 0, "name": "a"}
+    owner = {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "eq",
+            "authority_role": "caller_authority",
+            "operands": [{"source": "msg_sender"}, {"source": "constant", "constant_value": "0x" + "0e" * 20}],
+            "references_msg_sender": True,
+            "parameter_indices": [],
+            "expression": "msg.sender == owner",
+            "basis": [],
+        },
+    }
+    impossible = {
+        "op": "AND",
+        "children": [
+            _reach_leaf(_compare("gt", a, _literal(5)), "a > 5"),
+            _reach_leaf(_compare("lt", a, _literal(3)), "a < 3"),
+        ],
+    }
+    ctx = EvaluationContext(chain_id=1, contract_address=SUBJECT, meta={PASS_MEMO: {}})
+    cap = capability_to_dict(
+        evaluate_tree_with_registry(cast(Any, {"op": "OR", "children": [impossible, owner]}), AdapterRegistry(), ctx)
+    )
+    assert not [child for child in cap.get("children") or [] if child["kind"] == "conditional_universal"], cap

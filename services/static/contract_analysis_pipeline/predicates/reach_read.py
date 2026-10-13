@@ -37,9 +37,29 @@ _MAX_DEPTH = 24
 
 _COMPARISONS = frozenset({"eq", "ne", "lt", "lte", "gt", "gte"})
 
-# What a call sees of the transaction rather than of storage; a view reading any of these answers differently for the
-# read than for the real caller.
-_CALL_CONTEXT = frozenset({"msg.sender", "tx.origin", "msg.value", "msg.data", "msg.sig", "msg.gas", "gasleft()"})
+# What a call sees of the transaction or block rather than of storage; a view reading any of these answers
+# differently for the read than for the real call, or changes with no transaction at all.
+_CALL_CONTEXT = frozenset(
+    {
+        "msg.sender",
+        "tx.origin",
+        "msg.value",
+        "msg.data",
+        "msg.sig",
+        "msg.gas",
+        "gasleft()",
+        "now",
+        "block.timestamp",
+        "block.number",
+        "block.basefee",
+        "block.blobbasefee",
+        "block.prevrandao",
+        "block.difficulty",
+        "block.coinbase",
+        "block.gaslimit",
+        "blockhash(uint256)",
+    }
+)
 
 
 def value_type(type_: Any) -> str | None:

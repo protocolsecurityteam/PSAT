@@ -361,3 +361,13 @@ def test_an_unread_reach_condition_beside_an_unresolved_gate_earns_no_public_pat
     surface = project_capability_surface(cap)
     assert not surface.authority_public
     assert capability_surface_openness(cap, surface) == "not_determined"
+
+
+def test_callers_beside_a_path_that_may_be_open_keep_their_rows():
+    from services.policy.capability_surface import capability_surface_openness
+
+    # ``AND(OR(unread reach, owner), liquidityPool)``: the conjunct every path passes still names its callers.
+    cap = {"kind": "AND", "children": [{"kind": "OR", "children": [_unread_reach(), _owner()]}, _owner(ADDR_B)]}
+    surface = project_capability_surface(cap)
+    assert [row["address"] for row in surface.principal_rows] == [ADDR_B]
+    assert capability_surface_openness(cap, surface) == "restricted"

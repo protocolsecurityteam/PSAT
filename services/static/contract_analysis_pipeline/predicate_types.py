@@ -259,7 +259,8 @@ def is_reach_condition(leaf: Any) -> bool:
     return isinstance(leaf, dict) and REACH_CONDITION_BASIS in (leaf.get("basis") or [])
 
 
-_CALLER_SOURCES: Final = frozenset({"msg_sender", "tx_origin", "signature_recovery"})
+# ``root_caller`` is the root ``msg.sender`` rewritten into an inlined callee's frame.
+_CALLER_SOURCES: Final = frozenset({"msg_sender", "tx_origin", "signature_recovery", "root_caller"})
 
 
 def _leaf_operands(leaf: dict[str, Any]) -> list[Any]:

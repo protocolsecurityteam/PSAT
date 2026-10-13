@@ -53,14 +53,21 @@ class _Reader:
     """Reads at one subject and block; with no RPC, contract or pinned block every read is unread."""
 
     def __init__(
-        self, outer: Any, rpc_url: str | None, contract: str | None, block: int | None, chain_id: int | None
+        self,
+        outer: Any,
+        rpc_url: str | None,
+        contract: str | None,
+        block: int | None,
+        chain_id: int | None,
+        calldata_free: bool,
     ) -> None:
         self.outer = outer
         self.rpc_url = rpc_url
         self.contract = contract
         self.block = block
         self.chain_id = chain_id
-        self.key = (chain_id, rpc_url, contract, block)
+        self.calldata_free = calldata_free
+        self.key = (chain_id, rpc_url, contract, block, calldata_free)
         self.reads: list[dict[str, Any]] = []
         self.calldata: dict[int, int] = {}
 
@@ -77,13 +84,23 @@ class _Reader:
         # A read at "latest" isn't a read at the pass's block.
         if not isinstance(block, int) or isinstance(block, bool) or block <= 0:
             block = None
-        return cls(outer, rpc_url, contract.lower() if contract else None, block, getattr(outer, "chain_id", None))
+        frame = getattr(ctx, "call_frame", None) or getattr(outer, "call_frame", None)
+        return cls(
+            outer,
+            rpc_url,
+            contract.lower() if contract else None,
+            block,
+            getattr(outer, "chain_id", None),
+            _entry_frame(frame),
+        )
 
     def truth(self, stamp: dict[str, Any]) -> ReachTruth:
         self.reads = []
         expression = stamp["expression"]
         wanted = bool(stamp.get("holds"))
         parameters = _parameters(expression)
+        if parameters and not self.calldata_free:
+            return ReachTruth(None, [], "reach_condition_calldata_bound")
         if not parameters:
             self.calldata = {}
             return self._decide(expression, wanted)
@@ -106,8 +123,6 @@ class _Reader:
             value = self._evaluate(expression, 0)
         except _Unread as unread:
             return ReachTruth(None, list(self.reads), unread.reason)
-        if value is None:
-            return ReachTruth(None, list(self.reads), "reach_condition_short_circuit_unread")
         if value.type != "bool":
             return ReachTruth(None, list(self.reads), "reach_condition_not_bool")
         return ReachTruth(bool(value.number) == wanted, list(self.reads))
@@ -127,17 +142,15 @@ class _Reader:
                     value = self._evaluate(other, 0)
                 except _Unread:
                     continue
-                if value is not None:
-                    for index in touched:
-                        found[index].update((value.number - 1, value.number, value.number + 1))
+                for index in touched:
+                    found[index].update((value.number - 1, value.number, value.number + 1))
         out: dict[int, list[int]] = {}
         for index, (type_, _name) in parameters.items():
             values = found[index] | _type_bounds(type_)
             out[index] = sorted(value for value in values if _fits(value, type_))
         return out
 
-    def _evaluate(self, node: Any, depth: int) -> _Value | None:
-        """``None`` only from a connective whose operands were unread but couldn't decide it either way."""
+    def _evaluate(self, node: Any, depth: int) -> _Value:
         if depth > 32 or not isinstance(node, dict):
             raise _Unread("reach_condition_malformed")
         op = node.get("op")
@@ -180,26 +193,17 @@ class _Reader:
         raise _Unread("reach_condition_operation_unsupported")
 
     def _required(self, node: Any, depth: int) -> _Value:
-        value = self._evaluate(node, depth + 1)
-        if value is None:
-            raise _Unread("reach_condition_short_circuit_unread")
-        return value
+        return self._evaluate(node, depth + 1)
 
-    def _connective(self, op: str, node: dict[str, Any], depth: int) -> _Value | None:
+    def _connective(self, op: str, node: dict[str, Any], depth: int) -> _Value:
+        """The left operand runs first and may revert, so an unread one leaves the whole connective unread."""
         decisive = 0 if op == "and" else 1
-        values: list[_Value | None] = []
         for side in (node.get("left"), node.get("right")):
-            try:
-                value = self._evaluate(side, depth + 1)
-            except _Unread:
-                value = None
-            if value is not None and value.type != "bool":
+            value = self._required(side, depth)
+            if value.type != "bool":
                 raise _Unread("reach_condition_type_mismatch")
-            if value is not None and value.number == decisive:
+            if value.number == decisive:
                 return _Value("bool", decisive)
-            values.append(value)
-        if any(value is None for value in values):
-            return None
         return _Value("bool", 1 - decisive)
 
     def _storage(self, node: dict[str, Any], type_: str) -> _Value:
@@ -262,6 +266,15 @@ def _rpc_word(rpc_url: str, method: str, params: list[Any], chain_id: int | None
 
 
 _MAX_CALLDATA_TRIES = 256
+
+
+def _entry_frame(frame: Any) -> bool:
+    """Whether the frame is the entry point's own: an inlined callee's parameters are what its caller passed."""
+    if frame is None:
+        return True
+    if getattr(frame, "bound_parameters", None) or getattr(frame, "current_msg_sender", None):
+        return False
+    return getattr(frame, "executing_contract_address", None) == getattr(frame, "protected_contract_address", None)
 
 
 def _nodes(node: Any) -> list[dict[str, Any]]:
