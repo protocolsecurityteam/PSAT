@@ -331,3 +331,13 @@ def test_an_unread_reach_condition_is_bounded_by_a_gate_every_path_passes():
     side = {"kind": "conditional_universal", "conditions": [{"kind": "pause", "description": "whenNotPaused"}]}
     unbounded = {"kind": "AND", "children": [side, either]}
     assert capability_surface_openness(unbounded, project_capability_surface(unbounded)) == "not_determined"
+
+
+def test_an_unread_reach_condition_folded_beside_callers_names_the_condition():
+    unread = _unread_reach()
+    unread["check"]["extra"]["expression"] = "! executorRequired"
+    either = {"kind": "OR", "children": [unread, {"kind": "unsupported", "unsupported_reason": "loop"}]}
+    cap = {"kind": "AND", "children": [_owner(), either]}
+    [row] = project_capability_surface(cap).principal_rows
+    descriptions = [c["description"] for c in row["details"]["conditions"]]
+    assert "condition not read: ! executorRequired" in descriptions

@@ -535,7 +535,10 @@ def _residual_as_conditions(residual: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     out = _condition_dicts(residual.get("conditions"))
     check = residual.get("check")
-    if isinstance(check, dict) and check.get("target_address"):
+    if is_reach_not_determined(residual):
+        expression = ((check or {}).get("extra") or {}).get("expression") or "reach condition"
+        out.append({"kind": "business", "description": f"condition not read: {expression}"})
+    elif isinstance(check, dict) and check.get("target_address"):
         selector = check.get("target_call_selector")
         suffix = f".{selector}" if selector else ""
         target = check["target_address"]

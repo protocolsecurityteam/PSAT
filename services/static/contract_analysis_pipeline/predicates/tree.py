@@ -358,20 +358,21 @@ def _is_business_state_tree(tree: PredicateTree) -> bool:
 
 
 def _state_disjuncts_as_reach(
-    children: list[PredicateTree], reads: list[dict[str, Any] | None], holds: bool
+    children: list[PredicateTree], read: Callable[[int], dict[str, Any] | None], holds: bool
 ) -> list[PredicateTree]:
     """A disjunct that only reads this contract's state, beside one that doesn't, is the condition under which the
     other isn't needed (``!flag || isExecutor(msg.sender)`` is ``if (flag) require(isExecutor(msg.sender))``), so it
-    is a reach condition with its read, not an open path.
+    is a reach condition with its read (``read(i)`` for the ``i``-th), not an open path.
     """
     state = [_is_business_state_tree(child) for child in children]
     if all(state) or not any(state):
         return children
     out: list[PredicateTree] = []
-    for child, is_state, expression in zip(children, state, reads):
+    for index, (child, is_state) in enumerate(zip(children, state)):
         if not is_state:
             out.append(child)
             continue
+        expression = read(index)
         child = _with_reach_read(child, expression, holds, reach_only=False)
         child = deepcopy(child) if expression is None or expression.get("type") != "bool" else child
         _mark_reach_leaves(child)
@@ -657,8 +658,10 @@ def _build_subtree_from_value(
             # If-revert polarity flips AND/OR (De Morgan).
             if (op_name == "or") == (gate.polarity == "allowed_when_true"):
                 holds = gate.polarity == "allowed_when_true"
-                reads = [_disjunct_read(value, gate, function) for value in values]
-                return make_or_node(_state_disjuncts_as_reach(children, reads, holds))
+                children = _state_disjuncts_as_reach(
+                    children, lambda index: _disjunct_read(values[index], gate, function), holds
+                )
+                return make_or_node(children)
             return make_and_node(children)
 
     # A helper whose return is AND/OR (Solmate Auth, DSAuth, Maker ``wish``, USDT): recurse into its bindings so it
@@ -834,8 +837,12 @@ def _build_internal_call_or_and_subtree(
         ]
         if (op_name == "or") == (gate.polarity == "allowed_when_true"):
             node = getattr(inner, "node", None)
-            reads = [_disjunct_read(value, inside, callee, node) for value in (left, right)]
-            children = _state_disjuncts_as_reach(children, reads, gate.polarity == "allowed_when_true")
+            values = (left, right)
+            children = _state_disjuncts_as_reach(
+                children,
+                lambda index: _disjunct_read(values[index], inside, callee, node),
+                gate.polarity == "allowed_when_true",
+            )
     elif isinstance(inner, (InternalCall, LibraryCall)):
         # The return is itself an assembly combinator call; its args are the children.
         inner_callee = getattr(inner, "function", None)
@@ -958,7 +965,7 @@ def _helper_value_tree(
             )
         return make_and_node(gates)
     if len(paths) > 1:
-        paths = _state_disjuncts_as_reach(paths, [None] * len(paths), True)
+        paths = _state_disjuncts_as_reach(paths, lambda _index: None, True)
     for path in paths:
         _drop_unmarked_reads(path)
     value = make_or_node(paths)
