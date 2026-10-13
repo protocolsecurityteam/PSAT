@@ -141,3 +141,47 @@ def test_a_chainless_mainnet_registry_job_is_found_on_mainnet(session):
     lookup = find_analysis_job_for_address(session, registry, chain="ethereum")
     assert lookup is not None and lookup.analysis_job.id == job.id
     assert find_analysis_job_for_address(session, registry, chain="base") is None
+
+
+def _evaluate_in_pass(session: Session, registry: str, chain_id: int, memo: dict, selector: str) -> Any:
+    from services.resolution.pass_memo import PASS_MEMO
+
+    ctx = ResolverContext(
+        chain_id=chain_id,
+        contract_address=CALLER,
+        state_var_values={"authority": registry},
+        session=session,
+        call_frame=CallFrame.root(contract_address=CALLER, function_signature="setX()", function_selector=selector),
+        meta={PASS_MEMO: memo},
+    )
+    return evaluate_tree_with_registry(_CALLER_TREE, AdapterRegistry(), ctx)  # pyright: ignore[reportArgumentType]
+
+
+def test_a_registry_is_looked_up_once_per_pass_and_chain(session, monkeypatch):
+    import services.resolution.capability_resolver as resolver
+
+    lookups: list[tuple[str, str | None]] = []
+    real = resolver.find_analysis_job_for_address
+
+    def counting(session, address, **kwargs):
+        lookups.append((address, kwargs.get("chain")))
+        return real(session, address, **kwargs)
+
+    monkeypatch.setattr(resolver, "find_analysis_job_for_address", counting)
+    registry = ("0x" + uuid.uuid4().hex[:8] + "ae" * 16).lower()
+    _registry_job(session, registry, chain="ethereum", version=STALE)
+    _registry_job(session, registry, chain="base", version=ANALYSIS_SCHEMA_VERSION)
+
+    one_pass: dict = {}
+    for selector in ("0x12345678", "0x87654321"):
+        cap = _evaluate_in_pass(session, registry, 8453, one_pass, selector)
+        assert (cap.kind, cap.members, cap.membership_quality) == ("finite_set", [], "exact")
+    assert lookups == [(registry, "base")]
+
+    # The same pass on another chain reads that chain's own (stale) analysis, never the memoized twin.
+    cap = _evaluate_in_pass(session, registry, 1, one_pass, "0x12345678")
+    assert cap.kind == "external_check_only"
+    assert lookups == [(registry, "base"), (registry, "ethereum")]
+
+    _evaluate_in_pass(session, registry, 8453, {}, "0x12345678")
+    assert lookups[-1] == (registry, "base") and len(lookups) == 3, "a new pass reads again"

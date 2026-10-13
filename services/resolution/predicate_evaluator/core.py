@@ -28,6 +28,7 @@ from ..capabilities import (
     negate,
     union,
 )
+from ..pass_memo import shared
 from ..permissionless_shapes import (
     caller_gate_basis,
     earned_public_enabled,
@@ -661,18 +662,32 @@ def _maybe_inline_cross_contract_call(
         registry_chain = chain_by_id(chain_id).name
     except UnknownChainError:
         return None
-    lookup = find_analysis_job_for_address(
-        session,
-        registry_addr,
-        required_artifact="predicate_trees",
-        chain=registry_chain,
-        completed_only=False,
+
+    def registry_analysis() -> tuple[Any, dict[str, Any] | None] | None:
+        found = find_analysis_job_for_address(
+            session,
+            registry_addr,
+            required_artifact="predicate_trees",
+            chain=registry_chain,
+            completed_only=False,
+        )
+        if found is None:
+            return None
+        trees = usable_semantic_artifact(
+            "predicate_trees", get_artifact(session, found.analysis_job.id, "predicate_trees")
+        )
+        return found, trees
+
+    # Read-only below (binding and frame normalization copy the tree first), so one read serves the whole pass.
+    analysis = shared(
+        outer_ctx,
+        ("inline_registry_analysis", id(session), registry_chain, registry_addr),
+        registry_analysis,
+        keep_alive=(session,),
     )
-    if lookup is None:
+    if analysis is None:
         return None
-    artifact = usable_semantic_artifact(
-        "predicate_trees", get_artifact(session, lookup.analysis_job.id, "predicate_trees")
-    )
+    lookup, artifact = analysis
     if artifact is None:
         return None
     from services.resolution.adapters import CallFrame
@@ -744,16 +759,23 @@ def _maybe_inline_cross_contract_call(
     # Child frame: msg.sender is the caller contract, address(this) the registry, msg.sig the callee selector.
     from services.resolution.capability_resolver import _load_state_var_values
 
-    state_var_values = _load_state_var_values(
-        session,
-        lookup.analysis_job.address or registry_addr,
-        job_id=lookup.analysis_job.id,
-        chain=registry_chain,
-    )
-    if not state_var_values and lookup.runtime_job.id != lookup.analysis_job.id:
-        state_var_values = _load_state_var_values(
-            session, registry_addr, job_id=lookup.runtime_job.id, chain=registry_chain
+    def registry_state_var_values() -> dict[str, str]:
+        values = _load_state_var_values(
+            session,
+            lookup.analysis_job.address or registry_addr,
+            job_id=lookup.analysis_job.id,
+            chain=registry_chain,
         )
+        if not values and lookup.runtime_job.id != lookup.analysis_job.id:
+            values = _load_state_var_values(session, registry_addr, job_id=lookup.runtime_job.id, chain=registry_chain)
+        return values
+
+    state_var_values = shared(
+        outer_ctx,
+        ("inline_registry_state_vars", id(session), registry_chain, registry_addr, str(lookup.analysis_job.id)),
+        registry_state_var_values,
+        keep_alive=(session,),
+    )
 
     parent_this = getattr(parent_frame, "current_address_this", None) or getattr(
         parent_frame, "executing_contract_address", None
