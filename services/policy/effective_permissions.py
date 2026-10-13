@@ -33,6 +33,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (
     has_no_selector,
     is_canonical_abi_signature,
 )
+from services.static.contract_analysis_pipeline.predicate_types import is_read_reach_condition
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -403,7 +404,8 @@ def _controller_refs_from_tree(tree: Mapping[str, Any] | None) -> list[str]:
             return
         if node.get("op") == "LEAF":
             leaf = node.get("leaf") or {}
-            if not isinstance(leaf, dict):
+            # A reach condition's state says when a gate applies, not who passes it.
+            if not isinstance(leaf, dict) or is_read_reach_condition(leaf):
                 return
             for operand in leaf.get("operands") or []:
                 if isinstance(operand, dict) and operand.get("source") == "state_variable":

@@ -102,3 +102,12 @@ def test_calldata_is_read_as_the_parameter_the_caller_sends(artifacts):
     operands = [read["expression"]["left"], read["expression"]["right"]]
     assert {"op": "param", "type": "address", "index": 0, "name": "quote"} in operands
 
+
+def test_only_a_reach_condition_on_the_caller_nominates_a_controller(artifacts):
+    from services.static.contract_analysis_pipeline.predicate_types import is_read_reach_condition
+
+    [caller_branch] = _reach_leaves(artifacts[1]["trees"]["callerBranch(uint256)"])
+    assert not is_read_reach_condition(caller_branch)
+    controllers = {target["controller_id"] for target in artifacts[0]["controller_tracking"]}
+    assert "state_variable:admin" in controllers
+    assert "state_variable:base" not in controllers

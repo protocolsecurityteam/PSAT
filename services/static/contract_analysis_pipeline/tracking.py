@@ -29,6 +29,7 @@ from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
 from .effects import _collect_reentrancy_guard_vars
 from .mapping_events import member_witness_records
+from .predicate_types import is_read_reach_condition
 from .shared import (
     _contract_functions,
     _declaring_contract_name,
@@ -387,11 +388,14 @@ def _functions_by_signature(contract) -> dict[str, object]:
 
 
 def _walk_leaves(node: Any, callback) -> None:
+    """The leaves that say who passes. A reach condition on state or calldata says when a gate applies, so the state
+    it reads nominates no controller (resolution reads it itself).
+    """
     if not isinstance(node, dict):
         return
     if node.get("op") == "LEAF":
         leaf = node.get("leaf")
-        if leaf is not None:
+        if leaf is not None and not is_read_reach_condition(leaf):
             callback(leaf)
         return
     for child in node.get("children") or []:

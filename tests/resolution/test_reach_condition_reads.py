@@ -21,6 +21,7 @@ from tests.resolution.test_unset_authority_undetermined_beside_owner import (  #
     ZERO,
     _run,
     _selector,
+    _spawned,
     compile_contract,
 )
 
@@ -97,6 +98,23 @@ contract FlagGatedExecutor {
 """
 )
 
+# Veda AccountantWithRateProviders' ``getRateInQuote``: ``base`` is only compared with the asked-for asset.
+_QUOTE_RATE = (
+    _HEADER
+    + """
+contract QuoteRate {
+    address public base;
+    mapping(address => bool) public pegged;
+    uint256 public rate;
+    function getRateInQuote(address quote) external view returns (uint256) {
+        if (quote == base) return rate;
+        require(pegged[quote], "UNPEGGED");
+        return rate * 2;
+    }
+}
+"""
+)
+
 # The gate under the branch is reached when the narrowed value is zero, whatever the full word says.
 _POLARITY = (
     _HEADER
@@ -119,6 +137,7 @@ contract ReachPolarity {
 )
 
 EXECUTOR = "0x" + "e7" * 20
+ASSET = "0x" + "a5" * 20
 EXECUTOR_ROLE = "0x" + keccak(text="EXECUTOR_ROLE").hex()
 GRANTED = "0x" + keccak(text="RoleGranted(bytes32,address,address)").hex()
 REVOKED = "0x" + keccak(text="RoleRevoked(bytes32,address,address)").hex()
@@ -258,6 +277,31 @@ def test_a_flag_gated_executor_whose_flag_read_fails_is_not_determined(db_sessio
     openness, surface = _surface(cap)
     assert openness == "not_determined", cap
     assert not surface.authority_public
+
+
+def test_a_state_variable_only_compared_with_a_parameter_is_not_a_controller(db_session, monkeypatch, compile_contract):
+    from services.policy.effective_permissions import _controller_refs_from_tree
+
+    plan, trees = compile_contract("QuoteRate", _QUOTE_RATE)
+    assert "base" not in {controller["label"] for controller in plan["tracked_controllers"]}
+    assert "base" not in _controller_refs_from_tree(trees["trees"]["getRateInQuote(address)"])
+    job, out = _run(
+        db_session,
+        monkeypatch,
+        (plan, trees),
+        authority=None,
+        owner=None,
+        extra_getters={"base()": ASSET},
+    )
+    from db.models import ControllerValue
+
+    assert not [row for row in db_session.query(ControllerValue).all() if "base" in (row.controller_id or "")]
+    assert _spawned(db_session, job) == ([], [])
+    # Read for the comparison, never as a controller: asking for ``base`` itself skips the peg check, so the path is
+    # open with that calldata as its witness.
+    [read] = [read for read in _reach_reads(out["getRateInQuote(address)"]) if "quote == base" in read["expression"]]
+    assert read["holds"] is True and read["calldata"] == {"quote": ASSET}, read
+    assert read["reads"][0]["params"][0]["data"] == _selector("base()")
 
 
 @pytest.mark.parametrize(("closed", "expected"), [(_TRUE, "restricted"), (_FALSE, "open"), (None, "not_determined")])
