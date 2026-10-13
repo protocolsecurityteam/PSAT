@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -148,6 +150,33 @@ def collect_contract_analysis(project_dir: Path) -> ContractAnalysis:
     return analysis
 
 
+# Slither's IR is a large object graph that lives for the whole analysis; at the default young-generation threshold the
+# collector rescans it often enough to cost a fifth of static CPU.
+_ANALYSIS_GC_THRESHOLD = 10_000
+_gc_lock = threading.Lock()
+_gc_holders = 0
+_gc_saved: tuple[int, int, int] | None = None
+
+
+@contextmanager
+def _analysis_gc() -> Iterator[None]:
+    """Collect the young generation less often while any analysis in this process runs (worker threads share it)."""
+    global _gc_holders, _gc_saved
+    with _gc_lock:
+        if _gc_holders == 0:
+            _gc_saved = gc.get_threshold()
+            gc.set_threshold(max(_ANALYSIS_GC_THRESHOLD, _gc_saved[0]), _gc_saved[1], _gc_saved[2])
+        _gc_holders += 1
+    try:
+        yield
+    finally:
+        with _gc_lock:
+            _gc_holders -= 1
+            if _gc_holders == 0 and _gc_saved is not None:
+                gc.set_threshold(*_gc_saved)
+                _gc_saved = None
+
+
 def collect_contract_analysis_with_artifacts(
     project_dir: Path,
 ) -> tuple[ContractAnalysis, dict[str, Any] | None, Mapping[str, Any] | None]:
@@ -155,6 +184,13 @@ def collect_contract_analysis_with_artifacts(
     per-phase durations (and ``pipeline_phase`` lines above the threshold) so slow phases on pathological
     contracts can be ranked in Loki. Vyper uses the same path.
     """
+    with _analysis_gc():
+        return _collect_contract_analysis_with_artifacts(project_dir)
+
+
+def _collect_contract_analysis_with_artifacts(
+    project_dir: Path,
+) -> tuple[ContractAnalysis, dict[str, Any] | None, Mapping[str, Any] | None]:
     durations_ms: dict[str, int] = {}
     pipeline_started = time.monotonic()
 
