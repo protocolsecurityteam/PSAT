@@ -325,6 +325,30 @@ def test_a_helper_called_from_a_loop_runs_more_than_once(signature):
     assert OPEN_FLAG not in tree[1:], tree
 
 
+def test_a_helper_called_from_a_connective_return_keeps_its_value():
+    tree = _tree("ApprovalChain", "transferFrom(address,address,uint256)")
+    leaves = _leaves(_artifacts("ApprovalChain")[0]["transferFrom(address,address,uint256)"])
+    assert ("unsupported", "gate_location_not_determined") not in [
+        _shape({"op": "LEAF", "leaf": leaf}) for leaf in leaves
+    ]
+    assert ("membership", "truthy", "view_call", "msg_sender") in tree[1][1], tree
+
+
+def test_a_helper_called_from_a_connective_return_sees_the_writes_before_its_caller():
+    admin = ("equality", "eq", "msg_sender", "admin")
+    tree = _tree("ApprovalChain", "closeThenCheck(uint256)")
+    assert tree[0] == "AND", tree
+    nested = [child for child in tree[1:] if child[0] == "OR" and ("OR", WRITTEN_BEFORE, admin) in child[1:]]
+    assert nested, tree
+    assert OPEN_FLAG not in [leaf for child in tree[1:] for leaf in _flat(child)], tree
+
+
+def _flat(shape: Any) -> list[Any]:
+    if shape[0] in ("AND", "OR"):
+        return [leaf for child in shape[1:] for leaf in _flat(child)]
+    return [shape]
+
+
 def test_a_write_to_other_storage_keeps_the_branch():
     assert _tree("ConditionalGates", "unrelatedWriteThenBranch(uint256)") == ("OR", OPEN_MODE, OWNER)
 

@@ -786,3 +786,53 @@ contract CallOrder {
         count += v;
     }
 }
+
+// Helpers whose return is a connective, calling further helpers from the callee's frame.
+contract ApprovalChain {
+    address public admin;
+    bool public open;
+    uint256 public hook;
+    mapping(uint256 => address) internal owners;
+    mapping(address => mapping(address => bool)) internal operators;
+    mapping(uint256 => address) internal approvals;
+
+    function ownerOf(uint256 id) public view returns (address) {
+        return owners[id];
+    }
+
+    function isApprovedForAll(address holder, address operator) public view returns (bool) {
+        return operators[holder][operator];
+    }
+
+    function getApproved(uint256 id) public view returns (address) {
+        return approvals[id];
+    }
+
+    function _isApprovedOrOwner(address spender, uint256 id) internal view returns (bool) {
+        address holder = ownerOf(id);
+        return (spender == holder || isApprovedForAll(holder, spender) || getApproved(id) == spender);
+    }
+
+    function _adminUnlessOpen() internal view returns (bool) {
+        if (open) return true;
+        require(msg.sender == admin, "UNAUTHORIZED");
+        return true;
+    }
+
+    function _holderOrAdmin(uint256 id) internal view returns (bool) {
+        return msg.sender == owners[id] || _adminUnlessOpen();
+    }
+
+    function transferFrom(address from, address to, uint256 id) external {
+        require(_isApprovedOrOwner(msg.sender, id), "NOT_APPROVED");
+        require(from != address(0), "FROM");
+        owners[id] = to;
+    }
+
+    function closeThenCheck(uint256 id) external {
+        uint256 next = id + 1;
+        open = false;
+        require(_holderOrAdmin(next), "NO");
+        hook = id;
+    }
+}

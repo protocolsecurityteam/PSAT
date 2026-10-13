@@ -719,6 +719,8 @@ def _build_internal_call_or_and_subtree(
         return _helper_return_paths_subtree(ir, prov, callee, sub_prov, gate), True
     op_name: str | None = None
     children: list[PredicateTree] = []
+    # Values read in the callee's frame are reached through this call, so helpers they call see the full chain.
+    inside = replace(gate, call_chain=[*(gate.call_chain or []), ir])
     if isinstance(inner, Binary):
         op_name = _binary_op(getattr(inner, "type", None))
         if op_name not in ("and", "or"):
@@ -728,8 +730,8 @@ def _build_internal_call_or_and_subtree(
         if left is None or right is None:
             return None, False
         children = [
-            _build_subtree_from_value(left, sub_prov, gate, callee),
-            _build_subtree_from_value(right, sub_prov, gate, callee),
+            _build_subtree_from_value(left, sub_prov, inside, callee),
+            _build_subtree_from_value(right, sub_prov, inside, callee),
         ]
     elif isinstance(inner, (InternalCall, LibraryCall)):
         # The return is itself an assembly combinator call; its args are the children.
@@ -741,7 +743,7 @@ def _build_internal_call_or_and_subtree(
         call_args = list(getattr(inner, "arguments", []) or [])
         if not call_args:
             return None, False
-        children = [_build_subtree_from_value(arg, sub_prov, gate, callee) for arg in call_args]
+        children = [_build_subtree_from_value(arg, sub_prov, inside, callee) for arg in call_args]
     else:
         # The helper is the assembly combinator; the call-site args are the children.
         asm_op = _detect_assembly_combinator_op(callee)
