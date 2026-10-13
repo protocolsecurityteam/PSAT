@@ -392,12 +392,17 @@ def project_capability_surface(
     )
 
 
+def not_determined_capability(reason: str) -> dict[str, Any]:
+    """The capability published in place of one whose computation hit a budget."""
+    return {"kind": "unsupported", "unsupported_reason": reason, "confidence": "check_only"}
+
+
 def bounded_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
     """``cap_dict``, or the unsupported capability naming the budget its projection exceeded."""
     surface = project_capability_surface(cap_dict)
     if surface.not_determined_reason is None:
         return cap_dict
-    return {"kind": "unsupported", "unsupported_reason": surface.not_determined_reason, "confidence": "check_only"}
+    return not_determined_capability(surface.not_determined_reason)
 
 
 def _projection_key(cap_dict: Any, safe_address_lookup: dict[str, str] | None, function_signature: str | None) -> bytes:
