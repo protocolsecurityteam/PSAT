@@ -253,6 +253,8 @@ def _reach_text(node: PredicateTree) -> tuple[str, bool]:
         if not _source_texts([leaf]):
             return leaf.get("expression") or "", False
         # The source text alone doesn't say which way the condition must go.
+        if isinstance(leaf.get(REACH_READ), dict):
+            return f"{leaf['expression']} [required outcome recorded, not renderable]", True
         return f"{leaf['expression']} [required outcome not recorded]", True
     parts: list[tuple[str, bool]] = []
     for child in node.get("children") or []:

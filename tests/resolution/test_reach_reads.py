@@ -377,6 +377,12 @@ def test_outcomes_under_a_connective_keep_it_and_an_unstated_outcome_says_so():
     del unstated["leaf"]["reach_read"]
     either = {"op": "AND", "children": [unstated, _outcome(paused, True, "paused")]}
     assert _unread_text(_stated(_beside_owner(either))) == "(a > 5 [required outcome not recorded]) && paused"
+    # A recorded outcome over an operation the text can't name is said to be recorded, just not rendered.
+    unnamed = _outcome({"op": "param", "type": "uint256", "index": 0}, True, "a > 5")
+    either = {"op": "AND", "children": [unnamed, _outcome(paused, True, "paused")]}
+    assert _unread_text(_stated(_beside_owner(either))) == (
+        "(a > 5 [required outcome recorded, not renderable]) && paused"
+    )
 
 
 def test_a_caller_pinned_to_the_contract_is_still_read_from_the_published_text():
