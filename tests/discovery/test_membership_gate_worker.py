@@ -1271,7 +1271,7 @@ def test_internal_budget_outcome_is_kept_incomplete_until_the_budget_covers_it(d
     calls = _counting_wire(monkeypatch, {(eoa, 1): [_creation_tx(created), *_sent_txs(eoa, sent)]}, creations={})
 
     for _ in range(3):
-        creations, scope, complete, gap = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+        creations, scope, complete, gap, _as_of = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
         assert (creations, scope, complete, gap) == ([], [], False, None)
     assert calls == {(eoa, 1): 1}
     kept = _kept(db_session, eoa, 1)
@@ -1282,7 +1282,7 @@ def test_internal_budget_outcome_is_kept_incomplete_until_the_budget_covers_it(d
     )
 
     monkeypatch.setattr(deployer_enumeration, "INTERNAL_RESOLUTION_TX_BUDGET", sent)
-    _creations, scope, complete, _gap = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    _creations, scope, complete, _gap, _as_of = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
     assert calls == {(eoa, 1): 2}
     assert (scope, complete) == ([1], True)
 
@@ -1293,7 +1293,7 @@ def test_a_failed_enumeration_is_never_kept(db_session, monkeypatch):
     calls = _stub_txlist(monkeypatch, {1: RuntimeError("etherscan down")})
 
     for _ in range(2):
-        assert deployer_enumeration.enumerate_with_coverage(db_session, eoa) == ([], [], False, None)
+        assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[:4] == ([], [], False, None)
 
     assert len(calls) == 2
     assert _kept(db_session, eoa, 1) is None
@@ -1308,7 +1308,7 @@ def test_complete_enumeration_stands_until_a_newer_creation_claims_the_deployer(
     window = [_block_tx(_creation_tx(first), 100), _block_tx(_call_tx(eoa, tx_hash="0x" + "61" * 32), 200)]
     calls = _counting_wire(monkeypatch, {(eoa, 1): window}, creations={})
 
-    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[1:] == ([1], True, None)
+    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[1:4] == ([1], True, None)
     kept = _kept(db_session, eoa, 1)
     assert kept is not None and (kept.outcome, kept.settled_through_block) == ("complete", 200)
 
@@ -1317,7 +1317,7 @@ def test_complete_enumeration_stands_until_a_newer_creation_claims_the_deployer(
     _contract(db_session, inside, deployer=eoa)
     db_session.add(ContractCreationWitness(chain_id=1, address=inside, creation_tx_hash=_TX, creation_block=150))
     db_session.commit()
-    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[2:] == (
+    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[2:4] == (
         False,
         f"known_creation_missing_from_enumeration:{inside}",
     )
@@ -1335,6 +1335,76 @@ def test_complete_enumeration_stands_until_a_newer_creation_claims_the_deployer(
     deployer_enumeration.enumerate_with_coverage(db_session, eoa)
     deployer_enumeration.enumerate_with_coverage(db_session, eoa)
     assert calls == {(eoa, 1): 4}
+
+
+def _class_b_then_a_foreign_creation(db_session, monkeypatch, eoa: str, base: int):
+    """A Class-B row for *eoa*, after which the EOA deploys a contract that never enters our DB."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    protocol = _protocol(db_session)
+    members = _anchored_members(db_session, protocol, eoa, base)
+    db_session.commit()
+    window = [_block_tx(_creation_tx(m.address), 100 + n) for n, m in enumerate(members)]
+    calls = _counting_wire(monkeypatch, {(eoa, 1): window}, creations={})
+    first = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    db_session.commit()
+    assert first is not None and first.trust_class == "B"
+    window.append(_block_tx(_creation_tx(ADDR(base + 0x80)), 300))
+    return protocol, calls, first
+
+
+def _age_kept_enumerations(session, eoa: str, seconds: int) -> None:
+    from sqlalchemy import func, update
+
+    from db.models import DeployerChainEnumeration
+
+    session.execute(
+        update(DeployerChainEnumeration)
+        .where(DeployerChainEnumeration.deployer == eoa)
+        .values(enumerated_at=func.now() - text(f"interval '{seconds} seconds'"))
+    )
+    session.commit()
+
+
+def test_a_complete_enumeration_past_the_reuse_window_is_redone_and_its_foreign_creation_revokes(
+    db_session, monkeypatch
+):
+    eoa = ADDR(0x7A0)
+    protocol, calls, _first = _class_b_then_a_foreign_creation(db_session, monkeypatch, eoa, 0x7A1)
+    _age_kept_enumerations(db_session, eoa, probes.CREATION_ABSENCE_REVALIDATE_S + 1)
+
+    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+    db_session.commit()
+
+    assert calls == {(eoa, 1): 2}
+    rows = (
+        db_session.execute(
+            select(ProtocolDeployer).where(ProtocolDeployer.protocol_id == protocol.id, ProtocolDeployer.address == eoa)
+        )
+        .scalars()
+        .all()
+    )
+    assert [(r.trust_class, r.revocation_reason) for r in rows] == [("B", "foreign_or_unknown_creations")]
+
+
+def test_a_reused_complete_enumeration_publishes_when_it_ran(db_session, monkeypatch):
+    from datetime import datetime
+
+    eoa = ADDR(0x7B0)
+    protocol, calls, first = _class_b_then_a_foreign_creation(db_session, monkeypatch, eoa, 0x7B1)
+    first_chains = first.evidence["enumeration"]["chains"]
+    _age_kept_enumerations(db_session, eoa, 60)
+    kept = _kept(db_session, eoa, 1)
+    assert kept is not None
+
+    second = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
+    db_session.commit()
+
+    assert calls == {(eoa, 1): 1}
+    assert second is not None and second.trust_class == "B"
+    (chain,) = second.evidence["enumeration"]["chains"]
+    assert (chain["chain_id"], chain["settled_through_block"]) == (1, 101)
+    assert datetime.fromisoformat(chain["enumerated_at"]) == kept.enumerated_at
+    assert datetime.fromisoformat(chain["enumerated_at"]) < datetime.fromisoformat(first_chains[0]["enumerated_at"])
 
 
 def test_an_immature_internal_trace_ends_the_settled_range_before_it(db_session, monkeypatch):
@@ -1374,7 +1444,7 @@ def test_time_budget_ends_in_a_kept_incomplete_outcome_retried_later(db_session,
 
     monkeypatch.setattr(deployer_enumeration.etherscan, "get", slow_get)
 
-    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa) == ([], [], False, None)
+    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[:4] == ([], [], False, None)
     assert len(internal_calls) == 4
     for chain_id in (1, 8453):
         kept = _kept(db_session, eoa, chain_id)
@@ -1390,7 +1460,7 @@ def test_time_budget_ends_in_a_kept_incomplete_outcome_retried_later(db_session,
     )
     db_session.commit()
     monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "1000")
-    _creations, scope, complete, _gap = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    _creations, scope, complete, _gap, _as_of = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
     assert len(internal_calls) == 9
     assert (scope, complete) == ([1, 8453], True)
 

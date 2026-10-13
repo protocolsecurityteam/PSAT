@@ -13,9 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -32,6 +32,7 @@ from db.models import (
 )
 from services.clients import etherscan
 from services.clients.rpc import chain_id_for_chain_name
+from services.discovery.probes import CREATION_ABSENCE_REVALIDATE_S
 from utils.chains import supported_chain_ids
 from utils.logging import record_degraded
 
@@ -163,6 +164,7 @@ class _ChainEnumeration:
     creations: tuple[DeployerCreation, ...] = ()
     observed_count: int | None = None
     settled_through_block: int | None = None
+    enumerated_at: datetime | None = None
 
 
 def _tx_block(tx: dict) -> int | None:
@@ -288,6 +290,7 @@ def _from_memo(row: DeployerChainEnumeration) -> _ChainEnumeration:
         creations=creations,
         observed_count=row.observed_count,
         settled_through_block=row.settled_through_block,
+        enumerated_at=row.enumerated_at,
     )
 
 
@@ -295,8 +298,9 @@ def _memo_stands(session: Session, row: DeployerChainEnumeration) -> bool:
     """Whether a kept enumeration still answers for its EOA and chain.
 
     The limit outcomes are monotone (an EOA's history only grows), so they stand while the current limit is still
-    crossed. A complete one stands until some row names the EOA as deployer of a contract on that chain that it
-    doesn't list and that wasn't created inside its settled range: only a newer creation can change it.
+    crossed. A complete one stands for at most ``CREATION_ABSENCE_REVALIDATE_S``, and within that only while no row
+    names the EOA as deployer of a contract on that chain that it doesn't list and that wasn't created inside its
+    settled range. A creation that never enters our DB is invisible to that check; only the age bound lets it in.
     """
     if row.outcome == DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED:
         return row.observed_count is not None and row.observed_count > INTERNAL_RESOLUTION_TX_BUDGET
@@ -306,6 +310,8 @@ def _memo_stands(session: Session, row: DeployerChainEnumeration) -> bool:
         age = datetime.now(timezone.utc) - row.enumerated_at
         return age.total_seconds() < TIME_BUDGET_RETRY_S
     if row.outcome != DEPLOYER_ENUMERATION_COMPLETE:
+        return False
+    if (datetime.now(timezone.utc) - row.enumerated_at).total_seconds() >= CREATION_ABSENCE_REVALIDATE_S:
         return False
     listed = {str(address) for address, _factory in (row.creations or [])}
     known = session.execute(
@@ -337,14 +343,12 @@ def _keep(session: Session, addr: str, chain_id: int, outcome: _ChainEnumeration
         ),
         "observed_count": outcome.observed_count,
         "settled_through_block": outcome.settled_through_block,
+        "enumerated_at": outcome.enumerated_at or func.now(),
     }
     stmt = pg_insert(DeployerChainEnumeration).values(**values)
     stmt = stmt.on_conflict_do_update(
         index_elements=["chain_id", "deployer"],
-        set_={
-            **{k: stmt.excluded[k] for k in values if k not in ("chain_id", "deployer")},
-            "enumerated_at": func.now(),
-        },
+        set_={k: stmt.excluded[k] for k in values if k not in ("chain_id", "deployer")},
     )
     try:
         with Session(bind=session.get_bind()) as writer:
@@ -363,10 +367,45 @@ def _chain_enumeration(session: Session | None, addr: str, chain_id: int, deadli
         row = session.get(DeployerChainEnumeration, (chain_id, addr), populate_existing=True)
         if row is not None and _memo_stands(session, row):
             return _from_memo(row)
-    outcome = _enumerate_chain(addr, chain_id, deadline)
+    # The start, not the end: a creation after the ``txlist`` read is not in it.
+    started = datetime.now(timezone.utc)
+    outcome = replace(_enumerate_chain(addr, chain_id, deadline), enumerated_at=started)
     if session is not None and outcome.outcome is not None:
         _keep(session, addr, chain_id, outcome)
     return outcome
+
+
+def _as_of(chain_id: int, outcome: _ChainEnumeration) -> dict[str, Any]:
+    enumerated_at = outcome.enumerated_at
+    return {
+        "chain_id": chain_id,
+        "enumerated_at": enumerated_at.astimezone(timezone.utc).isoformat() if enumerated_at is not None else None,
+        "settled_through_block": outcome.settled_through_block,
+    }
+
+
+def _enumerate_chains(
+    deployer: str, session: Session | None
+) -> tuple[list[DeployerCreation], list[int], bool, list[dict[str, Any]]]:
+    addr = deployer.lower()
+    created: dict[tuple[str, int], DeployerCreation] = {}
+    scope: list[int] = []
+    as_of: list[dict[str, Any]] = []
+    complete = True
+    deadline = time.monotonic() + enumeration_time_budget_s()
+    for chain_id in sorted(supported_chain_ids()):
+        outcome = _chain_enumeration(session, addr, chain_id, deadline)
+        if outcome.outcome != DEPLOYER_ENUMERATION_COMPLETE:
+            complete = False
+            continue
+        scope.append(chain_id)
+        as_of.append(_as_of(chain_id, outcome))
+        for creation in outcome.creations:
+            created.setdefault((creation.address, creation.chain_id), creation)
+    creations = sorted(created.values(), key=lambda c: (c.chain_id, c.address))
+    if not creations:
+        return [], scope, False, as_of
+    return creations, scope, complete, as_of
 
 
 def enumerate_deployer_creations(
@@ -380,22 +419,7 @@ def enumerate_deployer_creations(
     exclusivity (it's also what a factory looks like). With a *session*, each chain's kept outcome is reused while it
     stands (``_memo_stands``).
     """
-    addr = deployer.lower()
-    created: dict[tuple[str, int], DeployerCreation] = {}
-    scope: list[int] = []
-    complete = True
-    deadline = time.monotonic() + enumeration_time_budget_s()
-    for chain_id in sorted(supported_chain_ids()):
-        outcome = _chain_enumeration(session, addr, chain_id, deadline)
-        if outcome.outcome != DEPLOYER_ENUMERATION_COMPLETE:
-            complete = False
-            continue
-        scope.append(chain_id)
-        for creation in outcome.creations:
-            created.setdefault((creation.address, creation.chain_id), creation)
-    creations = sorted(created.values(), key=lambda c: (c.chain_id, c.address))
-    if not creations:
-        return [], scope, False
+    creations, scope, complete, _as_of_chains = _enumerate_chains(deployer, session)
     return creations, scope, complete
 
 
@@ -418,15 +442,16 @@ def enumeration_coverage_gap(
 
 def enumerate_with_coverage(
     session: Session, deployer: str
-) -> tuple[list[DeployerCreation], list[int], bool, str | None]:
+) -> tuple[list[DeployerCreation], list[int], bool, str | None, list[dict[str, Any]]]:
     """Enumeration with the coverage check folded into ``history_complete``; the one place a Class-B verdict is
     minted.
 
     The fourth element separates a coverage gap (complete windows but a known creation missing: positive
-    counterevidence, F3) from budget/cap/wire incompleteness (never revokes).
+    counterevidence, F3) from budget/cap/wire incompleteness (never revokes). The fifth says, per enumerated chain,
+    when its enumeration ran and the block it is settled through, which a reused one keeps.
     """
     addr = deployer.lower()
-    creations, scope, complete = enumerate_deployer_creations(addr, session)
+    creations, scope, complete, as_of = _enumerate_chains(addr, session)
     gap: str | None = None
     if complete:
         gap = enumeration_coverage_gap(
@@ -438,7 +463,7 @@ def enumerate_with_coverage(
                 extra={"deployer": addr, "gap": gap},
             )
             complete = False
-    return creations, scope, complete, gap
+    return creations, scope, complete, gap, as_of
 
 
 def creation_factories(creations: Sequence[DeployerCreation]) -> dict[str, str]:
@@ -448,8 +473,8 @@ def creation_factories(creations: Sequence[DeployerCreation]) -> dict[str, str]:
 
 def session_deployer_enumerator(session: Session) -> DeployerEnumerator:
     """Gate-facing adapter (``membership_gate.DeployerEnumerator``): returns only the creation set and whether it
-    licenses exclusivity. Coverage gaps go on ``coverage_gaps`` and full records on ``creations`` for the fixpoint
-    (F3 counterevidence and the member-factory rule).
+    licenses exclusivity. Coverage gaps go on ``coverage_gaps``, full records on ``creations`` and per-chain
+    enumeration times on ``as_of`` for the fixpoint (F3 counterevidence, the member-factory rule and Class-B evidence).
     """
     return _SessionEnumerator(session)
 
@@ -459,11 +484,13 @@ class _SessionEnumerator:
         self._session = session
         self.coverage_gaps: dict[str, str] = {}
         self.creations: dict[str, tuple[DeployerCreation, ...]] = {}
+        self.as_of: dict[str, list[dict[str, Any]]] = {}
 
     def __call__(self, deployer: str) -> tuple[Sequence[str], bool]:
-        creations, _scope, complete, gap = enumerate_with_coverage(self._session, deployer)
+        creations, _scope, complete, gap, as_of = enumerate_with_coverage(self._session, deployer)
         addr = deployer.lower()
         if gap is not None:
             self.coverage_gaps[addr] = gap
         self.creations[addr] = tuple(creations)
+        self.as_of[addr] = as_of
         return sorted({c.address for c in creations}), complete

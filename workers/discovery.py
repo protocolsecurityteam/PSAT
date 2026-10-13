@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from typing import Callable, Collection, Sequence, cast
+from typing import Any, Callable, Collection, Sequence, cast
 
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
@@ -226,6 +226,7 @@ def _register_protocol_deployer(
     factories: dict[str, str] = {}
     scope: list[int] = []
     coverage_gap: str | None = None
+    as_of: list[dict[str, Any]] | None = None
     if verdict.trust_class is None and verdict.evidence.get("reason") == "no_complete_enumeration":
         sibling_count = session.execute(
             select(func.count(Contract.id)).where(
@@ -234,7 +235,7 @@ def _register_protocol_deployer(
             )
         ).scalar_one()
         if existing is not None or sibling_count >= 2:
-            creations, scope, complete, coverage_gap = enumerate_with_coverage(session, addr)
+            creations, scope, complete, coverage_gap, as_of = enumerate_with_coverage(session, addr)
             history = sorted({c.address for c in creations})
             factories = creation_factories(creations)
             verdict = gate.classify_deployer(
@@ -244,6 +245,7 @@ def _register_protocol_deployer(
                 creation_history=history,
                 history_complete=complete,
                 creation_factories=factories,
+                enumeration_as_of=as_of,
             )
     if verdict.trust_class is None:
         reason = verdict.evidence.get("reason")
