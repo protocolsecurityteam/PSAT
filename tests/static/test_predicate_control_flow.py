@@ -404,6 +404,18 @@ def test_reach_conditions_are_not_labelled_as_gates():
     assert not [leaf for leaf in reach_leaves if leaf["authority_role"] in ("pause", "reentrancy", "one_shot")]
 
 
+@pytest.mark.parametrize("signature", ["act(uint256)", "actTrusted(uint256)"])
+def test_an_authority_check_reaching_a_gate_does_not_gate_the_mappings_writer(signature):
+    (leaf,) = _leaves(_artifacts("WriterGateReach")[0][signature])
+    assert leaf["authority_role"] == "business"
+    assert not [basis for basis in leaf.get("basis") or [] if "writer-gate" in basis]
+
+
+def test_a_writer_gated_on_every_reaching_path_still_promotes_its_mapping():
+    (leaf,) = _leaves(_artifacts("WriterGateReach")[0]["actStaff(uint256)"])
+    assert leaf["authority_role"] == "caller_authority"
+
+
 def _leaves(tree: Any) -> list[dict[str, Any]]:
     if tree.get("op") == "LEAF":
         return [tree["leaf"]]

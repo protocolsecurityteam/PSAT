@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from .predicate_types import LeafPredicate, PredicateTree
+from .predicate_types import LeafPredicate, PredicateTree, is_reach_condition
 from .slither_compat import SLITHER_AVAILABLE, Assignment, Binary, Constant, Index
 
 
@@ -241,7 +241,7 @@ def _writer_gating_kind(
 def _tree_has_self_admin(tree: PredicateTree, storage_var: str) -> bool:
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if leaf is None:
+        if leaf is None or is_reach_condition(leaf):
             return False
         if leaf.get("kind") == "membership":
             sd = leaf.get("set_descriptor") or {}
@@ -257,7 +257,7 @@ def _tree_has_self_admin(tree: PredicateTree, storage_var: str) -> bool:
 def _tree_has_other_authority(tree: PredicateTree) -> bool:
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if leaf is None:
+        if leaf is None or is_reach_condition(leaf):
             return False
         return leaf.get("authority_role") in ("caller_authority", "delegated_authority")
     for child in tree.get("children") or []:

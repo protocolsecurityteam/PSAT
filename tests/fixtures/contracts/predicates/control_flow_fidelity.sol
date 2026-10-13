@@ -934,3 +934,50 @@ contract HelperValueWrites {
         hook = v;
     }
 }
+
+// A mapping's writers are authority-gated only when an authority check is the gate, not a condition reaching it.
+contract WriterGateReach {
+    address public owner;
+    address public guardian;
+    uint256 public openAt;
+    uint256 public hook;
+    mapping(address => bool) public allowed;
+    mapping(address => bool) public trusted;
+    mapping(address => bool) public staff;
+
+    function register(address who) external {
+        if (msg.sender != owner) {
+            require(block.timestamp >= openAt, "closed");
+        }
+        allowed[who] = true;
+    }
+
+    function act(uint256 v) external {
+        require(allowed[msg.sender], "not allowed");
+        hook = v;
+    }
+
+    function addTrusted(address who) external {
+        if (!trusted[msg.sender]) {
+            require(block.timestamp >= openAt, "closed");
+        }
+        trusted[who] = true;
+    }
+
+    function actTrusted(uint256 v) external {
+        require(trusted[msg.sender], "not trusted");
+        hook = v;
+    }
+
+    function addStaff(address who) external {
+        if (msg.sender != owner) {
+            require(msg.sender == guardian, "not guardian");
+        }
+        staff[who] = true;
+    }
+
+    function actStaff(uint256 v) external {
+        require(staff[msg.sender], "not staff");
+        hook = v;
+    }
+}
