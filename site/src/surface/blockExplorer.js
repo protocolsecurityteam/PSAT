@@ -42,3 +42,10 @@ export function blockExplorerName(chain = "ethereum") {
   const info = infoFor(chain);
   return info ? info.name : "Explorer";
 }
+
+export function blockExplorerTxUrl(txHash, chain = "ethereum") {
+  if (!txHash) return null;
+  const info = infoFor(chain);
+  if (!info) return null;
+  return `${info.base}/tx/${txHash}`;
+}

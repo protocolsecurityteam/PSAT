@@ -217,6 +217,55 @@ test.describe("visual baselines", () => {
     await expect(page).toHaveScreenshot("account-page.png", SCREENSHOT_OPTS);
   });
 
+  test.describe("account events feed", () => {
+    // Rows show absolute and relative times.
+    test.use({ timezoneId: "UTC", locale: "en-US" });
+
+    test("account events feed (signed in)", async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2026-03-04T12:00:00Z"));
+      const json = (body) => (route) =>
+        route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+      const event = (id, event_type, detected_at, extra = {}) => ({
+        id,
+        event_type,
+        block_number: 21500000,
+        tx_hash: `0x${id.repeat(64).slice(0, 64)}`,
+        log_index: 0,
+        detected_at,
+        data: {},
+        contract: { address: ETHERFI_ADDR, chain: "ethereum", name: "Weeth" },
+        protocol: { id: 7, name: "etherfi" },
+        ...extra,
+      });
+      await page.route((url) => url.pathname === "/api/me", json({
+        id: "u1", email: "alice@example.com", display_name: "Alice", avatar_url: null, is_admin: false,
+      }));
+      await page.route((url) => url.pathname === "/api/me/events/filters", json({
+        protocols: [{ id: 7, name: "etherfi" }, { id: 8, name: "lido" }],
+        event_types: [{ event_type: "upgraded", count: 1 }, { event_type: "paused", count: 1 }],
+      }));
+      await page.route((url) => url.pathname === "/api/me/events", json({
+        events: [
+          event("a", "ownership_transferred", "2026-03-04T09:30:00Z", {
+            data: { salience: "alert", old_owner: ETHERFI_ADDR, new_owner: POOL_ADDR },
+          }),
+          event("b", "upgraded", "2026-03-03T18:05:00Z", { data: { salience: "notable", new_implementation: POOL_ADDR } }),
+          event("c", "state_changed_poll", "2026-03-01T07:00:00Z", {
+            tx_hash: null,
+            data: { salience: "routine", field: "paused", old: "false", new: "true" },
+            contract: { address: POOL_ADDR, chain: "base", name: null },
+            protocol: { id: 8, name: "lido" },
+          }),
+        ],
+        next_cursor: null,
+      }));
+      await page.goto("/account?tab=events", { waitUntil: "domcontentloaded" });
+      await page.getByText("Ownership transferred").waitFor({ state: "visible" });
+      await page.getByRole("option", { name: "lido" }).waitFor({ state: "attached" });
+      await expect(page).toHaveScreenshot("account-events.png", SCREENSHOT_OPTS);
+    });
+  });
+
   test("sign-in dialog", async ({ page }) => {
     await page.route((url) => url.pathname === "/api/auth/config", (route) =>
       route.fulfill({

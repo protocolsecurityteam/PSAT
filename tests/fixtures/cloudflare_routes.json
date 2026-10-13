@@ -38,6 +38,8 @@
   ["GET", "/api/jobs/{job_id}/errors"],
   ["GET", "/api/jobs/{job_id}/stage_timings"],
   ["GET", "/api/me"],
+  ["GET", "/api/me/events"],
+  ["GET", "/api/me/events/filters"],
   ["GET", "/api/me/protocols"],
   ["GET", "/api/me/subscriptions"],
   ["GET", "/api/me/webhooks"],

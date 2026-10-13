@@ -5,9 +5,11 @@ import { neonAuth, sitePath } from "../api/neonAuth.js";
 import { requestSignIn, signOut, useSession } from "../api/session.js";
 import { MONITOR_ALERT_GROUPS } from "../surface/meta.js";
 import { eventTypesFromGroupKeys } from "../surface/sidebar/activity/helpers.js";
+import EventsFeed from "./EventsFeed.jsx";
 
 const TABS = [
   { key: "alerts", label: "Alerts" },
+  { key: "events", label: "Events" },
   { key: "webhooks", label: "Webhooks" },
   { key: "settings", label: "Settings" },
 ];
@@ -495,6 +497,7 @@ export default function AccountPage({ onOpenCompany }) {
         {tab === "alerts" && (
           <AlertsTab subscriptions={subscriptions} webhooks={webhooks} onChanged={load} onOpenCompany={onOpenCompany} />
         )}
+        {tab === "events" && <EventsFeed onOpenCompany={onOpenCompany} />}
         {tab === "webhooks" && <WebhooksTab webhooks={webhooks} subscriptions={subscriptions} onChanged={load} />}
         {tab === "settings" && <SettingsTab user={user} />}
       </div>

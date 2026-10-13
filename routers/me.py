@@ -5,13 +5,23 @@ Every lookup is scoped by ``user_id``; another user's row is a 404, never a 403,
 
 from __future__ import annotations
 
+import base64
+import json
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, text
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, literal, select, text, tuple_
 
-from db.models import MonitoredContract, Protocol, ProtocolSubscription, User, UserWebhook
+from db.models import (
+    Contract,
+    MonitoredContract,
+    MonitoredEvent,
+    Protocol,
+    ProtocolSubscription,
+    User,
+    UserWebhook,
+)
 from schemas.api_requests import AccountSubscribeRequest, SaveWebhookRequest, UpdateWebhookRequest
 from services.auth.sessions import is_admin
 from utils.ratelimit import SlidingWindowRateLimiter
@@ -222,3 +232,122 @@ def unsubscribe(sub_id: str, user: User = Depends(deps.require_user)) -> dict[st
         session.delete(sub)
         session.commit()
         return {"status": "removed"}
+
+
+EVENTS_PAGE_DEFAULT = 25
+EVENTS_PAGE_MAX = 100
+
+
+def _subscribed_protocol_ids(user: User):
+    return select(ProtocolSubscription.protocol_id).where(ProtocolSubscription.user_id == user.id)
+
+
+def _encode_cursor(detected_at: datetime, block_number: int, event_id: uuid.UUID) -> str:
+    raw = json.dumps([detected_at.isoformat(), block_number, str(event_id)]).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, int, uuid.UUID]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        ts, block, event_id = json.loads(raw)
+        return datetime.fromisoformat(ts), int(block), uuid.UUID(event_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="Invalid cursor") from None
+
+
+@router.get("/api/me/events")
+def list_events(
+    user: User = Depends(deps.require_user),
+    protocol_id: list[int] | None = Query(default=None),
+    event_type: list[str] | None = Query(default=None),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=EVENTS_PAGE_DEFAULT, ge=1, le=EVENTS_PAGE_MAX),
+) -> dict:
+    """Monitoring events on the protocols the user subscribes to, newest first.
+
+    Filters combine with AND; repeated values of one filter combine with OR. ``since`` is inclusive and ``until``
+    exclusive. Keyset-paged on ``(detected_at, block_number, id)`` so rows landing mid-scroll never shift a page into
+    duplicates or gaps; ``next_cursor`` is ``None`` on the last page.
+    """
+    key = (MonitoredEvent.detected_at, MonitoredEvent.block_number, MonitoredEvent.id)
+    stmt = (
+        select(
+            MonitoredEvent.id,
+            MonitoredEvent.event_type,
+            MonitoredEvent.block_number,
+            MonitoredEvent.tx_hash,
+            MonitoredEvent.log_index,
+            MonitoredEvent.detected_at,
+            MonitoredEvent.data,
+            MonitoredContract.address,
+            MonitoredContract.chain,
+            MonitoredContract.protocol_id,
+            Protocol.name.label("protocol_name"),
+            Contract.contract_name,
+        )
+        .join(MonitoredContract, MonitoredContract.id == MonitoredEvent.monitored_contract_id)
+        .join(Protocol, Protocol.id == MonitoredContract.protocol_id)
+        .outerjoin(Contract, Contract.id == MonitoredContract.contract_id)
+        .where(MonitoredContract.protocol_id.in_(_subscribed_protocol_ids(user)))
+        .order_by(*(col.desc() for col in key))
+        .limit(limit + 1)
+    )
+    if protocol_id:
+        stmt = stmt.where(MonitoredContract.protocol_id.in_(protocol_id))
+    if event_type:
+        stmt = stmt.where(MonitoredEvent.event_type.in_(event_type))
+    if since is not None:
+        stmt = stmt.where(MonitoredEvent.detected_at >= since)
+    if until is not None:
+        stmt = stmt.where(MonitoredEvent.detected_at < until)
+    if cursor:
+        bound = (literal(value, col.type) for col, value in zip(key, _decode_cursor(cursor)))
+        stmt = stmt.where(tuple_(*key) < tuple_(*bound))
+
+    with deps.SessionLocal() as session:
+        rows = session.execute(stmt).all()
+    page = rows[:limit]
+    last = page[-1] if len(rows) > limit else None
+    return {
+        "events": [
+            {
+                "id": str(r.id),
+                "event_type": r.event_type,
+                "block_number": r.block_number,
+                # Poll-path rows have no transaction: "" or NULL.
+                "tx_hash": r.tx_hash or None,
+                "log_index": r.log_index,
+                "detected_at": r.detected_at.isoformat(),
+                "data": r.data,
+                "contract": {"address": r.address, "chain": r.chain, "name": r.contract_name},
+                "protocol": {"id": r.protocol_id, "name": r.protocol_name},
+            }
+            for r in page
+        ],
+        "next_cursor": _encode_cursor(last.detected_at, last.block_number, last.id) if last else None,
+    }
+
+
+@router.get("/api/me/events/filters")
+def list_event_filters(user: User = Depends(deps.require_user)) -> dict:
+    """Filter options for the feed: every subscribed protocol, and the event types that occur on them."""
+    with deps.SessionLocal() as session:
+        protocols = session.execute(
+            select(Protocol.id, Protocol.name)
+            .where(Protocol.id.in_(_subscribed_protocol_ids(user)))
+            .order_by(func.lower(Protocol.name))
+        ).all()
+        types = session.execute(
+            select(MonitoredEvent.event_type, func.count())
+            .join(MonitoredContract, MonitoredContract.id == MonitoredEvent.monitored_contract_id)
+            .where(MonitoredContract.protocol_id.in_(_subscribed_protocol_ids(user)))
+            .group_by(MonitoredEvent.event_type)
+            .order_by(func.count().desc(), MonitoredEvent.event_type)
+        ).all()
+    return {
+        "protocols": [{"id": pid, "name": name} for pid, name in protocols],
+        "event_types": [{"event_type": t, "count": n} for t, n in types],
+    }

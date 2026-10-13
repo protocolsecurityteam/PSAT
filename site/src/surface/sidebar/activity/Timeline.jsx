@@ -2,17 +2,10 @@ import { useState } from "react";
 
 import { TargetRef } from "./TargetRef.jsx";
 
-import { blockExplorerAddressUrl } from "../../blockExplorer.js";
+import { blockExplorerTxUrl } from "../../blockExplorer.js";
 import { shortenAddress } from "../../../shared/format.js";
 import { SALIENCE_ROUTINE } from "./eventClass.js";
 import { relativeTime } from "./format.js";
-
-function txUrl(txHash, chain = "ethereum") {
-  if (!txHash) return null;
-  const addrUrl = blockExplorerAddressUrl("0x", chain);
-  if (!addrUrl) return null;
-  return `${addrUrl.replace("/address/0x", "/tx/")}${txHash}`;
-}
 
 function timeLabel(ms, now) {
   if (!ms) return "—";
@@ -21,7 +14,7 @@ function timeLabel(ms, now) {
 }
 
 function EventRow({ row, chain, now, onPreview, onNavigate }) {
-  const link = txUrl(row.txHash, chain);
+  const link = blockExplorerTxUrl(row.txHash, chain);
   const dotClass = [
     "ps-activity-dot",
     row.backfill ? `d-${row.kind}` : "",

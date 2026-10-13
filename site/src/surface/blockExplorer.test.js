@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { blockExplorerAddressUrl, blockExplorerName } from "./blockExplorer.js";
+import { blockExplorerAddressUrl, blockExplorerName, blockExplorerTxUrl } from "./blockExplorer.js";
 
 const ADDR = "0x1111111111111111111111111111111111111111";
 
@@ -42,5 +42,19 @@ describe("blockExplorerName (derived from explorer hostname)", () => {
   it("keeps the mainnet alias and a graceful default", () => {
     expect(blockExplorerName("mainnet")).toBe("Etherscan");
     expect(blockExplorerName("nonexistent-chain")).toBe("Etherscan");
+  });
+});
+
+describe("blockExplorerTxUrl", () => {
+  const TX = `0x${"ab".repeat(32)}`;
+
+  it("builds the transaction URL on the event's chain", () => {
+    expect(blockExplorerTxUrl(TX, "ethereum")).toBe(`https://etherscan.io/tx/${TX}`);
+    expect(blockExplorerTxUrl(TX, "base")).toBe(`https://basescan.org/tx/${TX}`);
+  });
+
+  it("returns null without a transaction hash", () => {
+    expect(blockExplorerTxUrl(null, "base")).toBeNull();
+    expect(blockExplorerTxUrl("", "base")).toBeNull();
   });
 });

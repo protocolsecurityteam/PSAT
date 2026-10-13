@@ -103,6 +103,8 @@ class MonitoredEvent(Base):
         Index("ix_monitored_events_contract_id", "monitored_contract_id"),
         Index("ix_monitored_events_event_type", "event_type"),
         Index("ix_monitored_events_detected_at", "detected_at"),
+        # Keyset paging for ``GET /api/me/events``.
+        Index("ix_monitored_events_feed", "detected_at", "block_number", "id"),
         Index(
             "uq_monitored_events_identity",
             "monitored_contract_id",
