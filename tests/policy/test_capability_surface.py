@@ -74,7 +74,19 @@ def test_openness_is_total_and_three_valued():
         "open": {"kind": "conditional_universal", "conditions": [], "membership_quality": "exact"},
         "open_cofinite": {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "membership_quality": "exact"},
         "restricted_set": {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"},
-        "restricted_empty": {"kind": "finite_set", "members": [], "membership_quality": "exact"},
+        "restricted_empty": {
+            "kind": "finite_set",
+            "members": [],
+            "membership_quality": "exact",
+            "confidence": "enumerable",
+        },
+        "nd_named_empty": _pending_ceiling(),
+        "nd_partial_empty": {
+            "kind": "finite_set",
+            "members": [],
+            "membership_quality": "exact",
+            "confidence": "partial",
+        },
         "nd_unsupported": {"kind": "unsupported", "unsupported_reason": "guard_extraction_uncertain"},
         "nd_check": {"kind": "external_check_only", "check": {"target_address": ADDR_B}},
         "nd_lower_bound_empty": {"kind": "finite_set", "members": [], "membership_quality": "lower_bound"},
@@ -94,6 +106,8 @@ def test_openness_is_total_and_three_valued():
         "restricted_empty": "restricted",
         "nd_unsupported": "not_determined",
         "nd_check": "not_determined",
+        "nd_named_empty": "not_determined",
+        "nd_partial_empty": "not_determined",
         "nd_lower_bound_empty": "not_determined",
         "nd_unknown_kind": "not_determined",
     }
@@ -455,3 +469,21 @@ def test_a_proven_empty_conjunct_closes_the_and_whatever_its_siblings_open_and_i
             assert not surface.authority_public and not surface.open_not_determined, cap
             assert capability_surface_openness(cap, surface) == "restricted", cap
             assert capability_surface_status(cap, surface) == "resolved_empty", cap
+
+
+def test_an_empty_that_proves_nothing_never_closes_a_sibling_public_path_nor_reads_as_resolved_empty():
+    import itertools
+
+    from services.policy.capability_surface import capability_surface_openness
+
+    universal = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "amount > 0"}]}
+    ceiling = _pending_ceiling()
+    surface = project_capability_surface(ceiling)
+    assert capability_surface_openness(ceiling, surface) == "not_determined"
+    assert capability_surface_status(ceiling, surface) is None
+    # An unread caller authorization beside a public path earns no public path either.
+    for children in itertools.permutations([ceiling, universal]):
+        cap = {"kind": "AND", "children": list(children)}
+        surface = project_capability_surface(cap)
+        assert not surface.authority_public, cap
+        assert capability_surface_openness(cap, surface) == "not_determined", cap

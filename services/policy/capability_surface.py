@@ -795,7 +795,8 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any], projector: _Projector |
       - ``external_check_only`` with a ``CALLER_GATE_BASIS_TAGS`` tag (untagged checks are downstream probes that fold
     as side-conditions, e.g. Veda teller->vault ``requiresAuth``).
       - ``unsupported``, and an unread reach condition (a path that may be open is no earned one).
-      - an empty non-exact ``finite_set`` (authority value unread); exact-empty / by-design sets are resolved.
+      - an empty ``finite_set`` not proven empty (``_is_proven_empty``): the authority value is unread or empty only by
+    an accessor's name.
       - an empty set enumerated from a Solmate ``RolesAuthority``: provably nobody.
       - AND if any child blocks; OR only if every disjunct blocks.
 
@@ -812,9 +813,7 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any], projector: _Projector |
         if _is_role_store_provably_empty(cap_dict):
             return True
         # Resolved, not unresolved; mirrors ``_is_resolved_empty_capability``.
-        if cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design":
-            return False
-        return True
+        return not _is_proven_empty(cap_dict)
     if kind == "unsupported":
         return True
     if kind == "external_check_only":
@@ -872,10 +871,7 @@ def _is_proven_empty(cap_dict: dict[str, Any]) -> bool:
 def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:
     kind = cap_dict.get("kind")
     if kind == "finite_set":
-        if cap_dict.get("members") != []:
-            return False
-        # An empty-by-design ceiling is provably nobody even when only inferred lower_bound.
-        return cap_dict.get("membership_quality") == "exact" or cap_dict.get("empty_reason") == "empty_by_design"
+        return _is_proven_empty(cap_dict)
     if kind == "AND":
         return any(_is_resolved_empty_capability(child) for child in _child_dicts(cap_dict))
     if kind == "OR":
