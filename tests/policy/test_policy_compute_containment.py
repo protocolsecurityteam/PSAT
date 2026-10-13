@@ -71,7 +71,7 @@ def rpc_url():
 def isolated(monkeypatch):
     """Children reach the test database through the environment their fork server starts with."""
     from db.models import SessionLocal
-    from services.compute_isolation import shutdown_fork_server
+    from services.compute_isolation import shutdown_children
 
     monkeypatch.setenv("PSAT_COMPUTE_ISOLATION", "1")
     monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
@@ -81,9 +81,9 @@ def isolated(monkeypatch):
     engine = create_engine(DATABASE_URL)
     previous = SessionLocal.kw["bind"]
     SessionLocal.configure(bind=engine)
-    shutdown_fork_server()
+    shutdown_children()
     yield
-    shutdown_fork_server()
+    shutdown_children()
     SessionLocal.configure(bind=previous)
     engine.dispose()
 

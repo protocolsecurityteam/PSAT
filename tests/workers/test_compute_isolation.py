@@ -21,7 +21,7 @@ from services.compute_isolation import (
     compute_cancel_var,
     policy_budget,
     run_isolated,
-    shutdown_fork_server,
+    shutdown_children,
     static_budget,
 )
 from tests.support import compute_children as children
@@ -39,7 +39,7 @@ def _isolated(monkeypatch):
 @pytest.fixture(scope="module", autouse=True)
 def _fork_server():
     yield
-    shutdown_fork_server()
+    shutdown_children()
 
 
 def _gone(pid: int) -> bool:
@@ -59,7 +59,6 @@ def test_the_result_comes_back_with_the_childs_degraded_records_and_metrics():
         result = run_isolated(children.report, 5, budget=ROOMY, label="unit")
     assert result["value"] == 5
     assert result["pid"] != os.getpid()
-    assert _gone(result["pid"])
     assert [(e.phase, e.job_id, e.stage) for e in degraded] == [("child_phase", "job-7", "policy")]
     assert metrics["child_metric"] == 5
     assert metrics["isolated_unit_peak_rss_bytes"] > 0
@@ -71,6 +70,52 @@ def test_the_cpu_of_what_the_child_spawned_is_reported():
     stage_metrics_var.set(metrics)
     run_isolated(children.spawn_and_wait, budget=ROOMY, label="unit")
     assert metrics["isolated_unit_subprocess_cpu_s"] > 0.1
+
+
+def test_a_child_stays_warm_for_the_next_job_and_an_overrun_replaces_it():
+    first = run_isolated(children.report, 1, budget=ROOMY, label="unit")["pid"]
+    assert run_isolated(children.report, 2, budget=ROOMY, label="unit")["pid"] == first
+    with pytest.raises(ResourceExhausted):
+        run_isolated(children.burn_cpu, 30, budget=ComputeBudget(ROOMY.memory_bytes, 0.5), label="unit")
+    replacement = run_isolated(children.report, 3, budget=ROOMY, label="unit")["pid"]
+    assert replacement != first
+    assert _gone(first)
+
+
+def test_the_cpu_budget_counts_only_the_current_job():
+    budget = ComputeBudget(ROOMY.memory_bytes, 0.8)
+    for _ in range(3):
+        assert run_isolated(children.burn_cpu, 0.4, budget=budget, label="unit") > 0
+
+
+def test_a_child_that_kept_a_large_heap_is_retired(monkeypatch):
+    monkeypatch.setenv("PSAT_COMPUTE_RETIRE_RSS_MB", "200")
+    pid = run_isolated(children.allocate_and_keep, 300, budget=ROOMY, label="unit")
+    assert _gone(pid)
+
+
+def test_an_idle_child_past_its_idle_time_is_retired(monkeypatch):
+    pid = run_isolated(children.report, 1, budget=ROOMY, label="unit")["pid"]
+    monkeypatch.setenv("PSAT_COMPUTE_IDLE_S", "0.01")
+    time.sleep(0.05)
+    assert run_isolated(children.report, 2, budget=ROOMY, label="unit")["pid"] != pid
+    assert _gone(pid)
+
+
+def test_shutdown_leaves_no_child_behind():
+    pid = run_isolated(children.report, 1, budget=ROOMY, label="unit")["pid"]
+    shutdown_children()
+    assert _gone(pid)
+
+
+def test_a_system_exit_in_the_child_is_a_failure_not_the_workers_exit():
+    with pytest.raises(ChildProcessFailed, match="SystemExit"):
+        run_isolated(children.exit_now, budget=ROOMY, label="unit")
+
+
+def test_a_result_that_does_not_pickle_is_a_failure():
+    with pytest.raises(ChildProcessFailed, match="does not pickle"):
+        run_isolated(children.unpicklable, budget=ROOMY, label="unit")
 
 
 def test_the_childs_own_error_is_raised_as_itself():

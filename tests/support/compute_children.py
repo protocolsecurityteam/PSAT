@@ -76,3 +76,21 @@ def spawn_and_wait() -> None:
         [sys.executable, "-c", "import time\nt = time.process_time()\nwhile time.process_time() - t < 0.3: pass"],
         check=True,
     )
+
+
+_kept: list[bytearray] = []
+
+
+def allocate_and_keep(megabytes: int) -> int:
+    _kept.extend(bytearray(1024 * 1024) for _ in range(megabytes))
+    for block in _kept:
+        block[0] = 1
+    return os.getpid()
+
+
+def exit_now() -> None:
+    raise SystemExit(0)
+
+
+def unpicklable() -> Any:
+    return lambda: None

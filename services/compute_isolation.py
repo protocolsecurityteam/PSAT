@@ -1,9 +1,11 @@
 """Heavy per-job compute in a child process with a memory and CPU-time budget.
 
-The child is forked from a single-threaded fork server that never opened a DB connection, HTTP pool or thread, so it
-inherits none of the worker's. The worker watches the child from outside: one that grows past its memory budget or
-burns past its CPU budget is killed, with its descendants, and surfaces as :class:`ResourceExhausted`; no partial result
-is ever returned. The child writes nothing to the database; it returns its result to the worker, which writes.
+Children are forked from a single-threaded fork server that never opened a DB connection, HTTP pool or thread, so
+they inherit none of the worker's. Each child serves one job at a time and stays warm for the worker's next job, as
+the worker process itself used to: its connections, clients and caches are its own. The worker watches the child from
+outside while a job runs: one that grows past the memory budget or spends past the job's CPU budget is killed with its
+descendants and replaced, and the job surfaces :class:`ResourceExhausted`; no partial result is ever returned. The child
+writes nothing to the database; it returns its result to the worker, which writes.
 """
 
 from __future__ import annotations
@@ -14,16 +16,15 @@ import importlib
 import logging
 import multiprocessing
 import os
-import pickle
 import resource
 import signal
 import sys
-import tempfile
 import threading
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from multiprocessing.connection import Connection
 from multiprocessing.context import BaseContext
 from pathlib import Path
 from typing import Any, TypeVar
@@ -46,7 +47,8 @@ T = TypeVar("T")
 
 RESOURCE_EXHAUSTED = "resource_exhausted"
 
-# Imported once by the fork server so a job's child starts without paying for them.
+# Imported once by the fork server (from the worker's working directory, the repository root) so a new child starts
+# without paying for them.
 _PRELOAD = (
     "db.models",
     "db.queue",
@@ -137,30 +139,6 @@ class RemoteTraceback(Exception):
         return self.text
 
 
-_context_lock = threading.Lock()
-_context: BaseContext | None = None
-_start_lock = threading.Lock()
-
-
-def _get_context() -> BaseContext:
-    global _context
-    with _context_lock:
-        if _context is None:
-            ctx = multiprocessing.get_context("forkserver")
-            ctx.set_forkserver_preload(list(_PRELOAD))
-            _context = ctx
-        return _context
-
-
-def shutdown_fork_server() -> None:
-    """Stop this process's fork server, so the next child starts from one that reads the current environment."""
-    from multiprocessing import forkserver
-
-    stop = getattr(forkserver._forkserver, "_stop", None)
-    if stop is not None:
-        stop()
-
-
 def _reference(fn: Callable[..., Any]) -> tuple[str, str]:
     module = fn.__module__
     if module == "__main__":
@@ -188,14 +166,14 @@ _CONTEXT_VARS = {
 }
 
 
-def _child_setup(parent_pid: int) -> None:
+def _child_setup(server_pid: int) -> None:
     # Its own process group, so a kill reaches the compilers it spawns; and dead with the fork server.
     os.setpgid(0, 0)
     try:
         ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
     except (AttributeError, OSError):
         pass
-    if os.getppid() != parent_pid:
+    if os.getppid() != server_pid:
         os._exit(1)
     # The worker drains in-flight jobs on SIGTERM and decides this child's fate itself.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -210,51 +188,72 @@ def _child_setup(parent_pid: int) -> None:
     configure_logging()
 
 
-def _child_main(
-    reference: tuple[str, str],
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    result_path: str,
-    log_context: dict[str, str | None],
-    parent_pid: int,
-) -> None:
-    _child_setup(parent_pid)
+def _reset_peak_rss() -> bool:
+    try:
+        Path("/proc/self/clear_refs").write_text("5")
+    except OSError:
+        return False
+    return True
+
+
+def _peak_rss() -> int:
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
+def _cpu(who: int) -> float:
+    usage = resource.getrusage(who)
+    return usage.ru_utime + usage.ru_stime
+
+
+def _child_loop(conn: Connection, server_pid: int) -> None:
+    _child_setup(server_pid)
     from utils.logging import bind_trace_context
 
-    degraded: list[Any] = []
-    metrics: dict[str, Any] = {}
-    degraded_errors_var.set(degraded)
-    stage_metrics_var.set(metrics)
-    try:
-        with bind_trace_context(**log_context):
-            value = _resolve(reference)(*args, **kwargs)
-        envelope: tuple[Any, ...] = ("ok", value)
-    except MemoryError:
-        os._exit(_EXIT_MEMORY)
-    except BaseException as exc:  # noqa: BLE001 — every failure goes back to the worker
-        envelope = ("err", exc, traceback.format_exc())
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    spawned = resource.getrusage(resource.RUSAGE_CHILDREN)
-    payload = (
-        envelope,
-        degraded,
-        metrics,
-        (usage.ru_utime + usage.ru_stime, usage.ru_maxrss * 1024, spawned.ru_utime + spawned.ru_stime),
-    )
-    tmp = result_path + ".tmp"
-    try:
-        with open(tmp, "wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
-    except MemoryError:
-        os._exit(_EXIT_MEMORY)
-    except Exception:
-        if envelope[0] != "err":
-            raise
-        # An exception that doesn't pickle still reaches the worker, as text.
-        fallback = ChildProcessFailed(f"{type(envelope[1]).__name__}: {envelope[1]}")
-        with open(tmp, "wb") as fh:
-            pickle.dump((("err", fallback, envelope[2]), *payload[1:]), fh, protocol=pickle.HIGHEST_PROTOCOL)
-    os.replace(tmp, result_path)
+    while True:
+        try:
+            reference, args, kwargs, log_context = conn.recv()
+        except EOFError:
+            return
+        degraded: list[Any] = []
+        metrics: dict[str, Any] = {}
+        degraded_token = degraded_errors_var.set(degraded)
+        metrics_token = stage_metrics_var.set(metrics)
+        peak_known = _reset_peak_rss()
+        cpu0, spawned0 = _cpu(resource.RUSAGE_SELF), _cpu(resource.RUSAGE_CHILDREN)
+        try:
+            with bind_trace_context(**log_context):
+                envelope: tuple[Any, ...] = ("ok", _resolve(reference)(*args, **kwargs))
+        except MemoryError:
+            os._exit(_EXIT_MEMORY)
+        except Exception as exc:
+            envelope = ("err", exc, traceback.format_exc())
+        except BaseException as exc:  # noqa: BLE001 — never re-raise a SystemExit inside the worker
+            envelope = ("err", ChildProcessFailed(f"{type(exc).__name__}: {exc}"), traceback.format_exc())
+        finally:
+            degraded_errors_var.reset(degraded_token)
+            stage_metrics_var.reset(metrics_token)
+        usage = (
+            _cpu(resource.RUSAGE_SELF) - cpu0,
+            _peak_rss() if peak_known else 0,
+            _cpu(resource.RUSAGE_CHILDREN) - spawned0,
+        )
+        try:
+            conn.send((envelope, degraded, metrics, usage))
+        except MemoryError:
+            os._exit(_EXIT_MEMORY)
+        except Exception as exc:
+            # A result or exception that doesn't pickle still reaches the worker, as a failure.
+            text = envelope[2] if envelope[0] == "err" else ""
+            message = f"{reference[1]} returned a result that does not pickle: {type(exc).__name__}: {exc}"
+            if envelope[0] == "err":
+                message = f"{type(envelope[1]).__name__}: {envelope[1]}"
+            conn.send((("err", ChildProcessFailed(message), text), degraded, metrics, usage))
 
 
 _CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
@@ -283,6 +282,101 @@ def _kill_group(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+@dataclass
+class _Child:
+    process: Any
+    conn: Connection
+    idle_since: float = field(default_factory=time.monotonic)
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    def discard(self) -> None:
+        _kill_group(self.pid)
+        self.process.join()
+        self.conn.close()
+        self.process.close()
+
+
+class _Pool:
+    """Idle warm children of this worker process; one per job running at once, never shared between jobs."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._idle: list[_Child] = []
+        self._context: BaseContext | None = None
+
+    def _ctx(self) -> BaseContext:
+        if self._context is None:
+            ctx = multiprocessing.get_context("forkserver")
+            ctx.set_forkserver_preload(list(_PRELOAD))
+            self._context = ctx
+        return self._context
+
+    def acquire(self) -> _Child:
+        stale: list[_Child] = []
+        chosen: _Child | None = None
+        now = time.monotonic()
+        with self._lock:
+            while self._idle:
+                child = self._idle.pop()
+                if not child.process.is_alive() or now - child.idle_since > _env_number("PSAT_COMPUTE_IDLE_S", 300):
+                    stale.append(child)
+                    continue
+                chosen = child
+                break
+            for child in stale:
+                child.discard()
+            if chosen is not None:
+                return chosen
+            from multiprocessing import forkserver
+
+            ctx = self._ctx()
+            forkserver.ensure_running()
+            server_pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
+            if not isinstance(server_pid, int):
+                raise ChildProcessFailed("fork server did not start")
+            parent_end, child_end = ctx.Pipe()  # pyright: ignore[reportAttributeAccessIssue]
+            process = ctx.Process(  # pyright: ignore[reportAttributeAccessIssue]
+                target=_child_loop, args=(child_end, server_pid), name="psat-compute", daemon=False
+            )
+            process.start()
+            child_end.close()
+            return _Child(process, parent_end)
+
+    def release(self, child: _Child) -> None:
+        sample = _sample(child.pid)
+        retire_bytes = _env_number("PSAT_COMPUTE_RETIRE_RSS_MB", 1024) * 1024 * 1024
+        if sample is None or sample[1] > retire_bytes:
+            # A child that kept a large heap would carry it into every later job.
+            child.discard()
+            return
+        child.idle_since = time.monotonic()
+        with self._lock:
+            self._idle.append(child)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            idle, self._idle = self._idle, []
+        for child in idle:
+            child.discard()
+        from multiprocessing import forkserver
+
+        stop = getattr(forkserver._forkserver, "_stop", None)
+        if stop is not None:
+            stop()
+        self._context = None
+
+
+_pool = _Pool()
+
+
+def shutdown_children() -> None:
+    """Retire every idle child and stop the fork server, so the next child starts from the current environment."""
+    _pool.shutdown()
+
+
 def run_isolated(
     fn: Callable[..., T],
     /,
@@ -302,55 +396,47 @@ def run_isolated(
     from db.queue import LeaseLost
 
     reference = _reference(fn)
-    ctx = _get_context()
     cancel = compute_cancel_var.get()
     log_context = {name: var.get() for name, var in _CONTEXT_VARS.items()}
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="psat_compute_") as tmp:
-        result_path = os.path.join(tmp, "result.pickle")
-        with _start_lock:
-            from multiprocessing import forkserver
-
-            forkserver.ensure_running()
-            # The child checks it is still the fork server's before it runs anything.
-            process = ctx.Process(  # pyright: ignore[reportAttributeAccessIssue]
-                target=_child_main,
-                args=(reference, args, kwargs, result_path, log_context, _fork_server_pid()),
-                name=f"psat-compute-{label}",
-            )
-            process.start()
-        pid = process.pid
-        assert pid is not None
-        overrun: ResourceExhausted | None = None
-        lease_lost = False
-        cpu_used, peak_rss = 0.0, 0
-        try:
-            while True:
-                process.join(_POLL_S)
-                if process.exitcode is not None:
-                    break
-                sample = _sample(pid)
-                if sample is not None:
-                    cpu_used = sample[0]
-                    peak_rss = max(peak_rss, sample[1])
-                    if sample[1] > budget.memory_bytes:
-                        overrun = ResourceExhausted(label, "memory", sample[1], budget.memory_bytes)
-                    elif sample[0] > budget.cpu_seconds:
-                        overrun = ResourceExhausted(label, "cpu", sample[0], budget.cpu_seconds)
-                if cancel is not None and cancel.is_set():
-                    lease_lost = True
-                if overrun is not None or lease_lost:
-                    _kill_group(pid)
-                    process.join()
-                    break
-        except BaseException:
-            _kill_group(pid)
-            process.join()
-            raise
-        finally:
-            exitcode = process.exitcode
-            process.close()
-        wall = time.monotonic() - started
+    child = _pool.acquire()
+    pid = child.pid
+    baseline = _sample(pid)
+    cpu0 = baseline[0] if baseline is not None else 0.0
+    peak_rss = baseline[1] if baseline is not None else 0
+    overrun: ResourceExhausted | None = None
+    lease_lost = False
+    reply: Any = None
+    try:
+        child.conn.send((reference, args, kwargs, log_context))
+        while True:
+            if child.conn.poll(_POLL_S):
+                try:
+                    reply = child.conn.recv()
+                except EOFError:
+                    reply = None
+                break
+            if not child.process.is_alive():
+                break
+            sample = _sample(pid)
+            if sample is not None:
+                peak_rss = max(peak_rss, sample[1])
+                if sample[1] > budget.memory_bytes:
+                    overrun = ResourceExhausted(label, "memory", sample[1], budget.memory_bytes)
+                elif sample[0] - cpu0 > budget.cpu_seconds:
+                    overrun = ResourceExhausted(label, "cpu", sample[0] - cpu0, budget.cpu_seconds)
+            if cancel is not None and cancel.is_set():
+                lease_lost = True
+            if overrun is not None or lease_lost:
+                break
+    except BaseException:
+        child.discard()
+        raise
+    if reply is None:
+        if overrun is None and not lease_lost:
+            child.process.join(5)
+        exitcode = child.process.exitcode
+        child.discard()
         if overrun is not None:
             logger.warning(
                 "isolated compute %s exceeded its %s budget",
@@ -363,7 +449,7 @@ def run_isolated(
                     "resource": overrun.resource,
                     "used": overrun.used,
                     "limit": overrun.limit,
-                    "duration_ms": int(wall * 1000),
+                    "duration_ms": int((time.monotonic() - started) * 1000),
                 },
             )
             raise overrun
@@ -372,21 +458,19 @@ def run_isolated(
         if exitcode == _EXIT_MEMORY:
             # The address-space cap the child inherited refused an allocation before the resident budget was reached.
             raise ResourceExhausted(label, "memory", peak_rss, _address_space_limit() or budget.memory_bytes)
-        if exitcode != 0 or not os.path.exists(result_path):
-            message = f"{label} child exited with {exitcode} and no result"
-            if exitcode == -signal.SIGKILL:
-                raise ChildProcessKilled(message)
-            raise ChildProcessFailed(message)
-        with open(result_path, "rb") as fh:
-            envelope, degraded, metrics, (cpu_used, child_peak_rss, spawned_cpu) = pickle.load(fh)
-            peak_rss = max(peak_rss, child_peak_rss)
+        message = f"{label} child exited with {exitcode} and no result"
+        if exitcode == -signal.SIGKILL:
+            raise ChildProcessKilled(message)
+        raise ChildProcessFailed(message)
+    _pool.release(child)
+    envelope, degraded, metrics, (cpu_used, child_peak_rss, spawned_cpu) = reply
     accumulator = degraded_errors_var.get()
     if accumulator is not None:
         accumulator.extend(degraded)
     for key, value in metrics.items():
         record_stage_metric(key, value)
     record_stage_metric(f"isolated_{label}_cpu_s", round(cpu_used, 3))
-    record_stage_metric(f"isolated_{label}_peak_rss_bytes", peak_rss)
+    record_stage_metric(f"isolated_{label}_peak_rss_bytes", child_peak_rss or peak_rss)
     record_stage_metric(f"isolated_{label}_subprocess_cpu_s", round(spawned_cpu, 3))
     if envelope[0] == "err":
         raise envelope[1] from RemoteTraceback(envelope[2])
@@ -396,12 +480,3 @@ def run_isolated(
 def _address_space_limit() -> int | None:
     soft, _hard = resource.getrlimit(resource.RLIMIT_AS)
     return None if soft == resource.RLIM_INFINITY else soft
-
-
-def _fork_server_pid() -> int:
-    from multiprocessing import forkserver
-
-    pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
-    if not isinstance(pid, int):
-        raise ChildProcessFailed("fork server did not start")
-    return pid
