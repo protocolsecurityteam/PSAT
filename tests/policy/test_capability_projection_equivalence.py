@@ -431,6 +431,14 @@ def test_projections_are_shared_within_a_pass_and_never_outlive_it(monkeypatch):
     project_capability_surface(cap)
     assert len(calls) == 3, "the pass's memo is gone once it ends"
 
+    calls.clear()
+    with_sites = {**cap, "effect_capabilities": [{"id": "s", "capability": cap}]}
+    with projection_pass():
+        first = project_capability_surface(with_sites)
+        again = project_capability_surface(with_sites)
+    assert len(calls) == 6, "a function's capability, sites and all, is projected without the memo"
+    assert first.principal_rows == again.principal_rows == project_capability_surface(cap).principal_rows
+
 
 def test_the_memo_key_covers_the_safe_lookup_and_the_function():
     group = {"kind": "threshold_group", "threshold": {"m": 1, "signers": [ADDRS[0]]}}

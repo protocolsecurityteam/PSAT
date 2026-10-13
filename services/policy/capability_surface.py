@@ -355,7 +355,9 @@ def project_capability_surface(
     memo = _projection_memo.get()
     key = None
     result = None
-    if memo is not None:
+    # A function's capability carries every effect site's capability beside it: keying it costs more than projecting
+    # it, and it is projected only a few times. The site capabilities are the ones projected again and again.
+    if memo is not None and "effect_capabilities" not in cap_dict:
         key = _projection_key(cap_dict, safe_address_lookup, function_signature)
         result = memo.get(key)
     if result is None:
