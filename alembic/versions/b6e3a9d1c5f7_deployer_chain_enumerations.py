@@ -30,7 +30,7 @@ def upgrade() -> None:
         sa.Column("settled_through_block", sa.BigInteger(), nullable=True),
         sa.Column("enumerated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(
-            "outcome IN ('complete', 'internal_budget_exceeded', 'cap_reached', 'time_budget_exceeded')",
+            "outcome IN ('complete', 'internal_budget_exceeded', 'cap_reached')",
             name="ck_deployer_chain_enumerations_outcome",
         ),
         sa.CheckConstraint(

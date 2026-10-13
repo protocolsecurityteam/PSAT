@@ -215,13 +215,11 @@ class ProtocolDeployer(Base):
 DEPLOYER_ENUMERATION_COMPLETE = "complete"
 DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED = "internal_budget_exceeded"
 DEPLOYER_ENUMERATION_CAP_REACHED = "cap_reached"
-DEPLOYER_ENUMERATION_TIME_BUDGET_EXCEEDED = "time_budget_exceeded"
 DEPLOYER_ENUMERATION_OUTCOMES = frozenset(
     {
         DEPLOYER_ENUMERATION_COMPLETE,
         DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED,
         DEPLOYER_ENUMERATION_CAP_REACHED,
-        DEPLOYER_ENUMERATION_TIME_BUDGET_EXCEEDED,
     }
 )
 
@@ -248,7 +246,7 @@ class DeployerChainEnumeration(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "outcome IN ('complete', 'internal_budget_exceeded', 'cap_reached', 'time_budget_exceeded')",
+            "outcome IN ('complete', 'internal_budget_exceeded', 'cap_reached')",
             name="ck_deployer_chain_enumerations_outcome",
         ),
         CheckConstraint(

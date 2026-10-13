@@ -11,8 +11,6 @@ the by-address form indexes frames under the factory and must not be used).
 from __future__ import annotations
 
 import logging
-import os
-import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Sequence
@@ -25,7 +23,6 @@ from db.models import (
     DEPLOYER_ENUMERATION_CAP_REACHED,
     DEPLOYER_ENUMERATION_COMPLETE,
     DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED,
-    DEPLOYER_ENUMERATION_TIME_BUDGET_EXCEEDED,
     Contract,
     ContractCreationWitness,
     DeployerChainEnumeration,
@@ -49,22 +46,6 @@ DEPLOYER_ENUMERATION_CAP = 10_000
 # incomplete.
 INTERNAL_RESOLUTION_TX_BUDGET = 1_000
 
-
-# Wall-clock budget for one EOA's enumeration across chains. A chain unfinished at the deadline is incomplete, like one
-# past the internal-resolution budget. Mature internal traces are PG-cached, so a retry resumes faster.
-def enumeration_time_budget_s() -> float:
-    raw = os.getenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "120")
-    try:
-        budget = float(raw)
-    except ValueError as exc:
-        raise ValueError(f"PSAT_DEPLOYER_ENUMERATION_BUDGET_S must be a positive number, got {raw!r}") from exc
-    if budget <= 0:
-        raise ValueError(f"PSAT_DEPLOYER_ENUMERATION_BUDGET_S must be a positive number, got {budget}")
-    return budget
-
-
-# A chain that ran out of time is retried after this long; nothing about the EOA says when a retry would finish.
-TIME_BUDGET_RETRY_S = 3_600
 
 # Confirmations required before caching an empty internal-trace answer: Etherscan's trace index lags the head, and a
 # cached false-empty would permanently erase a CREATE frame. Non-empty answers cache immediately.
@@ -98,25 +79,15 @@ class DeployerCreation:
     factory: str | None = None
 
 
-class _TimeBudgetExceeded(Exception):
-    pass
-
-
-def _check_deadline(deadline: float | None) -> None:
-    if deadline is not None and time.monotonic() >= deadline:
-        raise _TimeBudgetExceeded
-
-
 def _internal_creations(
-    addr: str, chain_id: int, sent_calls: Sequence[tuple[str, bool]], deadline: float | None = None
+    addr: str, chain_id: int, sent_calls: Sequence[tuple[str, bool]]
 ) -> list[DeployerCreation] | None:
     """CREATE/CREATE2 frames in the EOA's own txs, or ``None`` if any lookup fails (then the chain can't claim
-    completeness). Empty answers are cached only for mature txs. Raises ``_TimeBudgetExceeded`` past *deadline*.
+    completeness). Empty answers are cached only for mature txs.
     """
     found: list[DeployerCreation] = []
 
     for tx_hash, mature in sent_calls:
-        _check_deadline(deadline)
         try:
             data = etherscan.get(
                 "account",
@@ -197,73 +168,59 @@ def _settled_through_block(txs: Sequence[dict], sent: Sequence[dict]) -> int | N
     return settled if settled >= 0 else None
 
 
-def _enumerate_chain(addr: str, chain_id: int, deadline: float | None) -> _ChainEnumeration:
+def _enumerate_chain(addr: str, chain_id: int) -> _ChainEnumeration:
     try:
-        _check_deadline(deadline)
-        try:
-            data = etherscan.get(
-                "account",
-                "txlist",
-                chain_id=chain_id,
-                empty_result_ok=True,
-                address=addr,
-                startblock="0",
-                endblock="99999999",
-                sort="asc",
-            )
-        except Exception as exc:
-            logger.warning(
-                "deployer txlist enumeration failed",
-                extra={"deployer": addr, "chain_id": chain_id, "exc_type": type(exc).__name__},
-            )
-            record_degraded(
-                phase="deployer_enumeration",
-                exc=exc,
-                context={"deployer": addr, "chain_id": chain_id},
-            )
-            return _ChainEnumeration(outcome=None)
-        result = data.get("result") if isinstance(data, dict) else None
-        if not isinstance(result, list):
-            return _ChainEnumeration(outcome=None)
-        if len(result) >= DEPLOYER_ENUMERATION_CAP:
-            return _ChainEnumeration(outcome=DEPLOYER_ENUMERATION_CAP_REACHED, observed_count=len(result))
-        txs = [tx for tx in result if isinstance(tx, dict)]
-        chain_created: list[DeployerCreation] = []
-        sent: list[dict] = []
-        for tx in txs:
-            target = tx.get("contractAddress")
-            if not tx.get("to") and isinstance(target, str) and target:
-                chain_created.append(DeployerCreation(address=target.lower(), chain_id=chain_id))
-                continue
-            # Only EOA-sent successful txs can hold its internal creations; ``txlist`` also lists received txs.
-            tx_hash = tx.get("hash")
-            if (
-                (tx.get("from") or "").lower() == addr
-                and tx.get("to")
-                and tx.get("isError") != "1"
-                and isinstance(tx_hash, str)
-                and tx_hash
-            ):
-                sent.append(tx)
-        if len(sent) > INTERNAL_RESOLUTION_TX_BUDGET:
-            logger.warning(
-                "deployer internal-resolution budget exceeded",
-                extra={"deployer": addr, "chain_id": chain_id, "sent_calls": len(sent)},
-            )
-            return _ChainEnumeration(outcome=DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED, observed_count=len(sent))
-        internal = _internal_creations(addr, chain_id, [(tx["hash"], _tx_mature(tx)) for tx in sent], deadline)
-    except _TimeBudgetExceeded as exc:
-        budget_s = enumeration_time_budget_s()
+        data = etherscan.get(
+            "account",
+            "txlist",
+            chain_id=chain_id,
+            empty_result_ok=True,
+            address=addr,
+            startblock="0",
+            endblock="99999999",
+            sort="asc",
+        )
+    except Exception as exc:
         logger.warning(
-            "deployer enumeration time budget exceeded",
-            extra={"deployer": addr, "chain_id": chain_id, "budget_s": budget_s},
+            "deployer txlist enumeration failed",
+            extra={"deployer": addr, "chain_id": chain_id, "exc_type": type(exc).__name__},
         )
         record_degraded(
-            phase="deployer_enumeration_time_budget",
+            phase="deployer_enumeration",
             exc=exc,
-            context={"deployer": addr, "chain_id": chain_id, "budget_s": budget_s},
+            context={"deployer": addr, "chain_id": chain_id},
         )
-        return _ChainEnumeration(outcome=DEPLOYER_ENUMERATION_TIME_BUDGET_EXCEEDED)
+        return _ChainEnumeration(outcome=None)
+    result = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(result, list):
+        return _ChainEnumeration(outcome=None)
+    if len(result) >= DEPLOYER_ENUMERATION_CAP:
+        return _ChainEnumeration(outcome=DEPLOYER_ENUMERATION_CAP_REACHED, observed_count=len(result))
+    txs = [tx for tx in result if isinstance(tx, dict)]
+    chain_created: list[DeployerCreation] = []
+    sent: list[dict] = []
+    for tx in txs:
+        target = tx.get("contractAddress")
+        if not tx.get("to") and isinstance(target, str) and target:
+            chain_created.append(DeployerCreation(address=target.lower(), chain_id=chain_id))
+            continue
+        # Only EOA-sent successful txs can hold its internal creations; ``txlist`` also lists received txs.
+        tx_hash = tx.get("hash")
+        if (
+            (tx.get("from") or "").lower() == addr
+            and tx.get("to")
+            and tx.get("isError") != "1"
+            and isinstance(tx_hash, str)
+            and tx_hash
+        ):
+            sent.append(tx)
+    if len(sent) > INTERNAL_RESOLUTION_TX_BUDGET:
+        logger.warning(
+            "deployer internal-resolution budget exceeded",
+            extra={"deployer": addr, "chain_id": chain_id, "sent_calls": len(sent)},
+        )
+        return _ChainEnumeration(outcome=DEPLOYER_ENUMERATION_INTERNAL_BUDGET_EXCEEDED, observed_count=len(sent))
+    internal = _internal_creations(addr, chain_id, [(tx["hash"], _tx_mature(tx)) for tx in sent])
     if internal is None:
         return _ChainEnumeration(outcome=None)
     chain_created.extend(internal)
@@ -306,9 +263,6 @@ def _memo_stands(session: Session, row: DeployerChainEnumeration) -> bool:
         return row.observed_count is not None and row.observed_count > INTERNAL_RESOLUTION_TX_BUDGET
     if row.outcome == DEPLOYER_ENUMERATION_CAP_REACHED:
         return row.observed_count is not None and row.observed_count >= DEPLOYER_ENUMERATION_CAP
-    if row.outcome == DEPLOYER_ENUMERATION_TIME_BUDGET_EXCEEDED:
-        age = datetime.now(timezone.utc) - row.enumerated_at
-        return age.total_seconds() < TIME_BUDGET_RETRY_S
     if row.outcome != DEPLOYER_ENUMERATION_COMPLETE:
         return False
     if (datetime.now(timezone.utc) - row.enumerated_at).total_seconds() >= CREATION_ABSENCE_REVALIDATE_S:
@@ -362,14 +316,14 @@ def _keep(session: Session, addr: str, chain_id: int, outcome: _ChainEnumeration
         )
 
 
-def _chain_enumeration(session: Session | None, addr: str, chain_id: int, deadline: float | None) -> _ChainEnumeration:
+def _chain_enumeration(session: Session | None, addr: str, chain_id: int) -> _ChainEnumeration:
     if session is not None:
         row = session.get(DeployerChainEnumeration, (chain_id, addr), populate_existing=True)
         if row is not None and _memo_stands(session, row):
             return _from_memo(row)
     # The start, not the end: a creation after the ``txlist`` read is not in it.
     started = datetime.now(timezone.utc)
-    outcome = replace(_enumerate_chain(addr, chain_id, deadline), enumerated_at=started)
+    outcome = replace(_enumerate_chain(addr, chain_id), enumerated_at=started)
     if session is not None and outcome.outcome is not None:
         _keep(session, addr, chain_id, outcome)
     return outcome
@@ -392,9 +346,8 @@ def _enumerate_chains(
     scope: list[int] = []
     as_of: list[dict[str, Any]] = []
     complete = True
-    deadline = time.monotonic() + enumeration_time_budget_s()
     for chain_id in sorted(supported_chain_ids()):
-        outcome = _chain_enumeration(session, addr, chain_id, deadline)
+        outcome = _chain_enumeration(session, addr, chain_id)
         if outcome.outcome != DEPLOYER_ENUMERATION_COMPLETE:
             complete = False
             continue
@@ -414,7 +367,7 @@ def enumerate_deployer_creations(
     """``(creations, enumerated chain scope, history_complete)`` for one EOA across enabled chains (EOAs are
     chain-agnostic). The scope is recorded so evidence says what was enumerated.
 
-    Completeness must be positive: a failed ``txlist``, a cap hit, an exceeded internal or time budget, or a failed
+    Completeness must be positive: a failed ``txlist``, a cap hit, an exceeded internal budget, or a failed
     internal lookup drops that chain and sets ``history_complete=False``. An empty enumeration never licenses
     exclusivity (it's also what a factory looks like). With a *session*, each chain's kept outcome is reused while it
     stands (``_memo_stands``).

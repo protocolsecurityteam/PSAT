@@ -8,6 +8,7 @@ real network.
 
 from __future__ import annotations
 
+import time
 import uuid
 from threading import Barrier, Thread
 
@@ -1134,7 +1135,7 @@ def test_boot_sweep_dedupes_pending_selection_pass(db_session, monkeypatch, erpc
 
 
 # ---------------------------------------------------------------------------
-# ladder wire: kept enumerations and the time budget
+# ladder wire: kept enumerations
 # ---------------------------------------------------------------------------
 
 
@@ -1205,13 +1206,11 @@ def _forget_kept_enumerations(session) -> None:
     session.commit()
 
 
-@pytest.mark.parametrize("arm", ["kept", "not_kept", "kept_unbounded_time"])
+@pytest.mark.parametrize("arm", ["kept", "not_kept"])
 def test_kept_enumerations_admit_and_refuse_exactly_as_fresh_ones(db_session, monkeypatch, arm):
-    """Same members admitted and refused with or without kept enumerations (and with a time budget that never fires);
-    with them, one ``txlist`` per deployer and chain however many contracts arrive."""
+    """Same members admitted and refused with or without kept enumerations; with them, one ``txlist`` per deployer
+    and chain however many contracts arrive."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-    if arm == "kept_unbounded_time":
-        monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "1e9")
     protocol = _protocol(db_session)
     complete_eoa, storm_eoa = ADDR(0x5A0), ADDR(0x5B0)
     complete_members = _anchored_members(db_session, protocol, complete_eoa, 0x5A1)
@@ -1423,46 +1422,25 @@ def test_an_immature_internal_trace_ends_the_settled_range_before_it(db_session,
     assert kept is not None and kept.settled_through_block == 299
 
 
-def test_time_budget_ends_in_a_kept_incomplete_outcome_retried_later(db_session, monkeypatch):
-    from sqlalchemy import func, update
-
-    from db.models import DeployerChainEnumeration
-
+def test_a_slow_enumeration_runs_to_completion(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-    monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "100")
     eoa = ADDR(0x640)
-    clock = {"now": 1_000.0}
-    monkeypatch.setattr(deployer_enumeration.time, "monotonic", lambda: clock["now"])
     internal_calls: list[str] = []
 
     def slow_get(module, action, chain_id, empty_result_ok=False, **params):
         if action == "txlist":
             return {"result": [_creation_tx(ADDR(0x641)), *_sent_txs(eoa, 5)] if chain_id == 1 else []}
         internal_calls.append(params["txhash"])
-        clock["now"] += 30
+        time.sleep(0.05)
         return {"result": []}
 
     monkeypatch.setattr(deployer_enumeration.etherscan, "get", slow_get)
 
-    assert deployer_enumeration.enumerate_with_coverage(db_session, eoa)[:4] == ([], [], False, None)
-    assert len(internal_calls) == 4
-    for chain_id in (1, 8453):
-        kept = _kept(db_session, eoa, chain_id)
-        assert kept is not None and kept.outcome == "time_budget_exceeded"
-
-    deployer_enumeration.enumerate_with_coverage(db_session, eoa)
-    assert len(internal_calls) == 4
-
-    db_session.execute(
-        update(DeployerChainEnumeration)
-        .where(DeployerChainEnumeration.deployer == eoa)
-        .values(enumerated_at=func.now() - text(f"interval '{deployer_enumeration.TIME_BUDGET_RETRY_S + 1} seconds'"))
-    )
-    db_session.commit()
-    monkeypatch.setenv("PSAT_DEPLOYER_ENUMERATION_BUDGET_S", "1000")
-    _creations, scope, complete, _gap, _as_of = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
-    assert len(internal_calls) == 9
+    creations, scope, complete, _gap, _as_of = deployer_enumeration.enumerate_with_coverage(db_session, eoa)
+    assert len(internal_calls) == 5
     assert (scope, complete) == ([1, 8453], True)
+    assert [c.address for c in creations] == [ADDR(0x641)]
+    assert _kept(db_session, eoa, 1).outcome == "complete"
 
 
 def test_concurrent_enumerations_of_one_deployer_keep_one_row(db_session, monkeypatch):
