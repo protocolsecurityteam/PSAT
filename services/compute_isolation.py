@@ -359,7 +359,7 @@ class _Pool:
             server_pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
             if not isinstance(server_pid, int):
                 raise ChildProcessFailed("fork server did not start")
-            parent_end, child_end = ctx.Pipe()  # pyright: ignore[reportAttributeAccessIssue]
+            parent_end, child_end = ctx.Pipe()
             process = ctx.Process(  # pyright: ignore[reportAttributeAccessIssue]
                 target=_child_loop, args=(child_end, server_pid), name="psat-compute", daemon=False
             )
@@ -412,6 +412,28 @@ def shutdown_children() -> None:
     _pool.shutdown()
 
 
+def _dispatch(request: tuple[Any, ...]) -> tuple[_Child, tuple[float, int] | None]:
+    """Hand *request* to a warm child, replacing one that died while idle; its usage sampled just before."""
+    child = _pool.acquire()
+    baseline = _sample(child.pid)
+    try:
+        child.conn.send(request)
+        return child, baseline
+    except (BrokenPipeError, ConnectionResetError):
+        _pool.forget(child)
+    except BaseException:
+        _pool.forget(child)
+        raise
+    child = _pool.acquire()
+    baseline = _sample(child.pid)
+    try:
+        child.conn.send(request)
+    except BaseException:
+        _pool.forget(child)
+        raise
+    return child, baseline
+
+
 def run_isolated(
     fn: Callable[..., T],
     /,
@@ -434,16 +456,14 @@ def run_isolated(
     cancel = compute_cancel_var.get()
     log_context = {name: var.get() for name, var in _CONTEXT_VARS.items()}
     started = time.monotonic()
-    child = _pool.acquire()
+    child, baseline = _dispatch((reference, args, kwargs, log_context))
     pid = child.pid
-    baseline = _sample(pid)
     cpu0 = baseline[0] if baseline is not None else 0.0
     peak_rss = baseline[1] if baseline is not None else 0
     overrun: ResourceExhausted | None = None
     lease_lost = False
     reply: Any = None
     try:
-        child.conn.send((reference, args, kwargs, log_context))
         while True:
             if child.conn.poll(_POLL_S):
                 try:

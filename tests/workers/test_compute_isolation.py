@@ -328,3 +328,12 @@ def test_warming_configures_mappers_caches_the_storage_client_and_freezes():
     finally:
         gc.unfreeze()
         get_storage_client.cache_clear()
+
+
+def test_an_idle_child_that_died_is_replaced_before_the_job_starts():
+    pid = run_isolated(children.report, 1, budget=ROOMY, label="unit")["pid"]
+    os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not _gone(pid):
+        time.sleep(0.05)
+    assert run_isolated(children.report, 2, budget=ROOMY, label="unit")["value"] == 2
