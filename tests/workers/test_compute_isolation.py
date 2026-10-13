@@ -63,6 +63,14 @@ def test_the_result_comes_back_with_the_childs_degraded_records_and_metrics():
     assert [(e.phase, e.job_id, e.stage) for e in degraded] == [("child_phase", "job-7", "policy")]
     assert metrics["child_metric"] == 5
     assert metrics["isolated_unit_peak_rss_bytes"] > 0
+    assert metrics["isolated_unit_subprocess_cpu_s"] == 0
+
+
+def test_the_cpu_of_what_the_child_spawned_is_reported():
+    metrics: dict = {}
+    stage_metrics_var.set(metrics)
+    run_isolated(children.spawn_and_wait, budget=ROOMY, label="unit")
+    assert metrics["isolated_unit_subprocess_cpu_s"] > 0.1
 
 
 def test_the_childs_own_error_is_raised_as_itself():

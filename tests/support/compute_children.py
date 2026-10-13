@@ -66,3 +66,13 @@ def write_pid_and_sleep(pid_file: str) -> None:
     with open(pid_file, "w") as fh:
         fh.write(str(os.getpid()))
     time.sleep(60)
+
+
+def spawn_and_wait() -> None:
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [sys.executable, "-c", "import time\nt = time.process_time()\nwhile time.process_time() - t < 0.3: pass"],
+        check=True,
+    )

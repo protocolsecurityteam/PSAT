@@ -234,7 +234,13 @@ def _child_main(
     except BaseException as exc:  # noqa: BLE001 — every failure goes back to the worker
         envelope = ("err", exc, traceback.format_exc())
     usage = resource.getrusage(resource.RUSAGE_SELF)
-    payload = (envelope, degraded, metrics, (usage.ru_utime + usage.ru_stime, usage.ru_maxrss * 1024))
+    spawned = resource.getrusage(resource.RUSAGE_CHILDREN)
+    payload = (
+        envelope,
+        degraded,
+        metrics,
+        (usage.ru_utime + usage.ru_stime, usage.ru_maxrss * 1024, spawned.ru_utime + spawned.ru_stime),
+    )
     tmp = result_path + ".tmp"
     try:
         with open(tmp, "wb") as fh:
@@ -372,7 +378,7 @@ def run_isolated(
                 raise ChildProcessKilled(message)
             raise ChildProcessFailed(message)
         with open(result_path, "rb") as fh:
-            envelope, degraded, metrics, (cpu_used, child_peak_rss) = pickle.load(fh)
+            envelope, degraded, metrics, (cpu_used, child_peak_rss, spawned_cpu) = pickle.load(fh)
             peak_rss = max(peak_rss, child_peak_rss)
     accumulator = degraded_errors_var.get()
     if accumulator is not None:
@@ -381,6 +387,7 @@ def run_isolated(
         record_stage_metric(key, value)
     record_stage_metric(f"isolated_{label}_cpu_s", round(cpu_used, 3))
     record_stage_metric(f"isolated_{label}_peak_rss_bytes", peak_rss)
+    record_stage_metric(f"isolated_{label}_subprocess_cpu_s", round(spawned_cpu, 3))
     if envelope[0] == "err":
         raise envelope[1] from RemoteTraceback(envelope[2])
     return envelope[1]
