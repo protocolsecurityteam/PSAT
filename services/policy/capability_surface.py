@@ -853,8 +853,9 @@ def _is_role_store_provably_empty(cap_dict: dict[str, Any]) -> bool:
 
 
 def _is_proven_empty(cap_dict: dict[str, Any]) -> bool:
-    """A complete enumeration of the end user's callers that found none. An empty set that is a lower bound, unread,
-    of unknown quality, or of an intermediate contract's callers proves nothing about who may pass.
+    """A complete enumeration or read of the end user's callers that found none. An empty set that is a lower bound,
+    unread, of unknown quality, of an intermediate contract's callers, or empty because of what an accessor is named
+    (``empty_by_design``) proves nothing about who may pass.
     """
     return (
         cap_dict.get("kind") == "finite_set"
@@ -862,6 +863,7 @@ def _is_proven_empty(cap_dict: dict[str, Any]) -> bool:
         and cap_dict.get("membership_quality") == "exact"
         and cap_dict.get("confidence") == "enumerable"
         and cap_dict.get("subject", "root") == "root"
+        and (cap_dict.get("empty_reason") is None or cap_dict.get("empty_reason") in _READ_CONFIRMED_EMPTY_REASONS)
     )
 
 

@@ -87,6 +87,7 @@ def _proven_empty(cap: dict[str, Any]) -> bool:
         and cap.get("membership_quality") == "exact"
         and cap.get("confidence") == "enumerable"
         and cap.get("subject", "root") == "root"
+        and cap.get("empty_reason") in (None, "owner_read_zero", "slot_read_zero")
     )
 
 
@@ -267,6 +268,7 @@ def _leaf_alphabet() -> list[dict[str, Any]]:
         _set([ADDRS[0]], None, [CONDS[4]]),
         _set([], "exact"),
         _set([], "lower_bound"),
+        {**_set([], "exact"), "empty_reason": "empty_by_design"},
         {"kind": "conditional_universal", "conditions": []},
         {"kind": "conditional_universal", "conditions": [CONDS[1], CONDS[2]]},
         _reach_unread(),
@@ -332,7 +334,15 @@ def _random_leaf(r: random.Random) -> dict[str, Any]:
     if k < 0.9:
         signer = _set(r.sample(ADDRS, 2), "exact", conditions)
         return {"kind": "signature_witness", "signer": signer}
-    return {"kind": "finite_set", "members": [], "membership_quality": "lower_bound", "empty_reason": "empty_by_design"}
+    if k < 0.95:
+        return {
+            "kind": "finite_set",
+            "members": [],
+            "membership_quality": "lower_bound",
+            "empty_reason": "empty_by_design",
+        }
+    # The pending-transfer ceiling: exact and enumerable, but empty only by its accessor's name.
+    return {**_set([], "exact"), "empty_reason": r.choice(["empty_by_design", "owner_read_zero"])}
 
 
 def _random_tree(r: random.Random, depth: int, seen: list[dict[str, Any]]) -> dict[str, Any]:

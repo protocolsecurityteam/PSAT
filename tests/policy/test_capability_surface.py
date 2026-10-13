@@ -382,6 +382,15 @@ def _empty(**fields) -> dict:
     return {**capability_to_dict(CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")), **fields}
 
 
+def _pending_ceiling() -> dict:
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator.authority import _pending_ceiling_capability
+
+    # What a ``msg.sender == pendingOwner()`` gate lowers to when the pending read failed: empty by its name alone.
+    pending = {"source": "view_call", "callee_signature": "pendingOwner()"}
+    return capability_to_dict(_pending_ceiling_capability(pending, None))
+
+
 def test_a_proven_empty_conjunct_closes_a_path_that_may_be_open():
     from services.policy.capability_surface import capability_surface_openness
 
@@ -391,6 +400,7 @@ def test_a_proven_empty_conjunct_closes_a_path_that_may_be_open():
         {"kind": "AND", "children": [{"kind": "OR", "children": [_unread_reach(), _owner()]}, _empty()]},
         {"kind": "AND", "children": [{"kind": "AND", "children": [_empty(), _unread_reach()]}, _unread_reach()]},
         {"kind": "AND", "children": [{"kind": "OR", "children": [_empty(), _empty()]}, _unread_reach()]},
+        {"kind": "AND", "children": [_empty(empty_reason="owner_read_zero"), _unread_reach()]},
     ):
         surface = project_capability_surface(cap)
         assert not surface.open_not_determined, cap
@@ -415,7 +425,8 @@ def test_an_empty_that_proves_nothing_leaves_a_path_that_may_be_open_not_determi
         "lower_bound": _empty(membership_quality="lower_bound", confidence="partial", empty_reason="not_read"),
         "unknown_quality": _empty(membership_quality=None),
         "exact_but_partial": _empty(confidence="partial"),
-        "empty_by_design": _empty(membership_quality="lower_bound", empty_reason="empty_by_design"),
+        "named_pending_ceiling": _pending_ceiling(),
+        "empty_by_design_lower_bound": _empty(membership_quality="lower_bound", empty_reason="empty_by_design"),
         "intermediate_callers": _empty(subject="bound"),
         "budget_hit": not_determined_capability(PROJECTION_BUDGET_EXCEEDED),
         "resource_exhausted": not_determined_capability("resource_exhausted"),
