@@ -29,7 +29,7 @@ from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
 from .effects import _collect_reentrancy_guard_vars
 from .mapping_events import member_witness_records
-from .predicate_types import is_read_reach_condition
+from .predicate_types import names_controllers
 from .shared import (
     _contract_functions,
     _declaring_contract_name,
@@ -395,7 +395,7 @@ def _walk_leaves(node: Any, callback) -> None:
         return
     if node.get("op") == "LEAF":
         leaf = node.get("leaf")
-        if leaf is not None and not is_read_reach_condition(leaf):
+        if leaf is not None and names_controllers(leaf):
             callback(leaf)
         return
     for child in node.get("children") or []:

@@ -262,16 +262,40 @@ def is_reach_condition(leaf: Any) -> bool:
 _CALLER_SOURCES: Final = frozenset({"msg_sender", "tx_origin", "signature_recovery"})
 
 
+def _leaf_operands(leaf: dict[str, Any]) -> list[Any]:
+    descriptor = leaf.get("set_descriptor") or {}
+    return [
+        *(leaf.get("operands") or []),
+        *(leaf.get("absorbed_operands") or []),
+        *(descriptor.get("key_sources") or []),
+    ]
+
+
+def _derives_from_caller(operand: Any, depth: int = 0) -> bool:
+    if not isinstance(operand, dict) or depth > 8:
+        return False
+    if operand.get("source") in _CALLER_SOURCES:
+        return True
+    inner = [*(operand.get("derived_from") or []), *(operand.get("callee_args") or [])]
+    return any(_derives_from_caller(op, depth + 1) for op in inner)
+
+
 def is_read_reach_condition(leaf: Any) -> bool:
-    """A reach condition on state or calldata: read at a block, never resolved to callers. One that mentions the caller
-    says who passes, so it resolves to callers like any gate leaf.
+    """A reach condition resolution reads at a block rather than resolving to callers: one with no caller operand. A
+    caller operand says who passes, so that leaf resolves to callers like any gate leaf.
     """
     if not is_reach_condition(leaf) or leaf.get("references_msg_sender"):
         return False
-    descriptor = leaf.get("set_descriptor") or {}
-    operands = [*(leaf.get("operands") or []), *(leaf.get("absorbed_operands") or [])]
-    operands += descriptor.get("key_sources") or []
-    return not any(isinstance(op, dict) and op.get("source") in _CALLER_SOURCES for op in operands)
+    return not any(isinstance(op, dict) and op.get("source") in _CALLER_SOURCES for op in _leaf_operands(leaf))
+
+
+def names_controllers(leaf: Any) -> bool:
+    """Whether a leaf's state says who passes: any leaf but a reach condition that involves the caller nowhere, not
+    even through what a call or computation it reads was given.
+    """
+    if not isinstance(leaf, dict) or not is_reach_condition(leaf) or leaf.get("references_msg_sender"):
+        return True
+    return any(_derives_from_caller(op) for op in _leaf_operands(leaf))
 
 
 def is_read_reach_tree(tree: Any) -> bool:

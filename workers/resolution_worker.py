@@ -59,7 +59,7 @@ from services.resolution.role_holder_plane import (
     resolve_role_holder_planes,
 )
 from services.resolution.tracking import build_control_snapshot
-from services.static.contract_analysis_pipeline.predicate_types import is_read_reach_condition
+from services.static.contract_analysis_pipeline.predicate_types import names_controllers
 from utils.balance_status import BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled, chain_name_to_id_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
@@ -819,7 +819,7 @@ def _collect_authority_contract_state_vars(node: dict, out: set[str]) -> None:
         return
     if node.get("op") == "LEAF":
         leaf = node.get("leaf") or {}
-        if is_read_reach_condition(leaf):
+        if not names_controllers(leaf):
             return
         descriptor = leaf.get("set_descriptor") or {}
         authority = descriptor.get("authority_contract") or {}

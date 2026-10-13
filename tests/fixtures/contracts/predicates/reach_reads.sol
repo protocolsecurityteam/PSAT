@@ -3,7 +3,14 @@ pragma solidity ^0.8.19;
 
 // Reach conditions as reads: an OpenZeppelin-style open role, a flag read in a bool helper's connective return, a
 // state condition beside a caller check, a parameter reassigned before its branch, a branch on storage written before
-// it, a caller-referencing reach condition, and a state variable only compared with calldata.
+// it, a branch on the chain id, caller-referencing reach conditions (directly and through a library call), and a state
+// variable only compared with calldata.
+
+library AddressAliasHelper {
+    function undoL1ToL2Alias(address account) internal pure returns (address) {
+        unchecked { return address(uint160(account) - uint160(0x1111000000000000000000000000000000001111)); }
+    }
+}
 
 contract ReachReads {
     struct RoleData { mapping(address => bool) members; bytes32 adminRole; }
@@ -63,6 +70,22 @@ contract ReachReads {
 
     function callerBranch(uint256 v) external {
         if (msg.sender != admin) { require(allowed[msg.sender], "NOT_ALLOWED"); }
+        hook = v;
+    }
+
+    function onlyOffMainnet(uint256 v) external {
+        if (block.chainid != 1) { require(msg.sender == owner, "UNAUTHORIZED"); }
+        hook = v;
+    }
+
+    address public otherMessenger;
+
+    function _isOtherMessenger() internal view returns (bool) {
+        return AddressAliasHelper.undoL1ToL2Alias(msg.sender) == otherMessenger;
+    }
+
+    function relayMessage(uint256 v) external {
+        if (_isOtherMessenger()) { require(v > 0, "REPLAY"); } else { require(v == 0, "VALUE"); }
         hook = v;
     }
 

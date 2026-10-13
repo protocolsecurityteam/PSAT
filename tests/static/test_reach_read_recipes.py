@@ -96,6 +96,12 @@ def test_a_branch_on_storage_written_before_it_is_an_unread_reach_condition(arti
     assert "reach_read" not in leaf
 
 
+def test_the_chain_id_is_read_as_the_chain(artifacts):
+    [read] = _reads(artifacts, "onlyOffMainnet(uint256)")
+    assert read is not None and read["holds"] is False
+    assert {"op": "chainid", "type": "uint256"} in (read["expression"]["left"], read["expression"]["right"])
+
+
 def test_calldata_is_read_as_the_parameter_the_caller_sends(artifacts):
     [read] = _reads(artifacts, "rateFor(address)")
     assert read is not None
@@ -110,4 +116,6 @@ def test_only_a_reach_condition_on_the_caller_nominates_a_controller(artifacts):
     assert not is_read_reach_condition(caller_branch)
     controllers = {target["controller_id"] for target in artifacts[0]["controller_tracking"]}
     assert "state_variable:admin" in controllers
+    # The caller reaches ``_isOtherMessenger`` only as a library call's argument; it still says who passes.
+    assert "state_variable:otherMessenger" in controllers
     assert "state_variable:base" not in controllers
