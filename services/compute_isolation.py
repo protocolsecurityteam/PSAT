@@ -13,6 +13,7 @@ from __future__ import annotations
 import atexit
 import contextvars
 import ctypes
+import gc
 import importlib
 import logging
 import multiprocessing
@@ -49,7 +50,7 @@ T = TypeVar("T")
 RESOURCE_EXHAUSTED = "resource_exhausted"
 
 # Imported once by the fork server (from the worker's working directory, the repository root) so a new child starts
-# without paying for them.
+# without paying for them; the last one finishes the setup each child would otherwise repeat.
 _PRELOAD = (
     "db.models",
     "db.queue",
@@ -57,6 +58,7 @@ _PRELOAD = (
     "services.resolution.capability_resolver",
     "services.policy.effective_permissions",
     "workers.policy_worker",
+    "services.compute_warmup",
 )
 
 _POLL_S = 0.1
@@ -165,6 +167,22 @@ _CONTEXT_VARS = {
     "address": address_var,
     "chain": chain_var,
 }
+
+
+def warm_fork_server() -> None:
+    """The first-use setup every child would otherwise repeat on its first job, done once in the fork server.
+
+    Nothing here opens a connection: mapper configuration is in memory and the storage client connects lazily.
+    """
+    from sqlalchemy.orm import configure_mappers
+
+    import db.models  # noqa: F401 — every mapper must be registered before configuring
+    from db.storage import get_storage_client
+
+    configure_mappers()
+    get_storage_client()
+    # Everything so far lives as long as the server: the children's collections then skip it, and its pages stay shared.
+    gc.freeze()
 
 
 def _child_setup(server_pid: int) -> None:

@@ -304,3 +304,27 @@ def test_a_worker_that_exits_leaves_no_child_and_does_not_wait_on_one(tmp_path):
     while time.monotonic() < deadline and not _gone(child):
         time.sleep(0.05)
     assert _gone(child)
+
+
+def test_children_start_from_a_preloaded_warmed_fork_server():
+    shutdown_children()
+    state = run_isolated(children.fork_server_state, budget=ROOMY, label="unit")
+    assert state["missing_preloads"] == []
+    assert state["mappers_configured"] is True
+    assert state["frozen"] > 0
+
+
+def test_warming_configures_mappers_caches_the_storage_client_and_freezes():
+    import gc
+
+    from db.storage import get_storage_client
+    from services.compute_isolation import warm_fork_server
+
+    get_storage_client.cache_clear()
+    try:
+        warm_fork_server()
+        assert gc.get_freeze_count() > 0
+        assert get_storage_client.cache_info().currsize == 1
+    finally:
+        gc.unfreeze()
+        get_storage_client.cache_clear()

@@ -94,3 +94,19 @@ def exit_now() -> None:
 
 def unpicklable() -> Any:
     return lambda: None
+
+
+def fork_server_state() -> dict[str, Any]:
+    import gc
+    import sys
+
+    from sqlalchemy import inspect
+
+    from db.models import Job
+    from services.compute_isolation import _PRELOAD
+
+    return {
+        "frozen": gc.get_freeze_count(),
+        "mappers_configured": inspect(Job).configured,
+        "missing_preloads": [name for name in _PRELOAD if name not in sys.modules],
+    }
