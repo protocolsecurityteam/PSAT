@@ -15,6 +15,7 @@ from sqlalchemy import select
 from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
+    LeaseLost,
     create_job,
     failed_semantic_artifact,
     get_artifact,
@@ -25,6 +26,7 @@ from db.queue import (
 )
 from schemas.contract_analysis import ContractAnalysis
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
+from services.compute_isolation import ChildProcessKilled, ResourceExhausted, run_isolated, static_budget
 from services.discovery import (
     build_dependency_visualization,
     build_unified_dependencies,
@@ -1440,9 +1442,15 @@ class StaticWorker(BaseWorker):
     ) -> ContractAnalysis | None:
         self.update_detail(session, job, "Building structured contract analysis")
         try:
-            analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
-                project_dir
+            analysis_data, semantic_predicate_trees, semantic_effects = run_isolated(
+                collect_contract_analysis_with_artifacts,
+                project_dir,
+                budget=static_budget(),
+                label="static_analysis",
             )
+        except (ResourceExhausted, ChildProcessKilled, LeaseLost):
+            # Not a property of the source: the job's outcome, not an analysis error.
+            raise
         except Exception as exc:
             record_degraded(
                 phase="contract_analysis",

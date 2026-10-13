@@ -154,3 +154,24 @@ def test_a_via_ir_bundle_is_remembered_only_after_its_via_ir_retry_fails(_wire, 
     assert (_wire["n"], parses["n"]) == (1, 2)
     row = cm_db.query(ContractMaterialization).filter_by(bytecode_keccak=CHILD_KECCAK).one()
     assert (row.status, row.deterministic_failure) == ("failed", True)
+
+
+@requires_postgres
+def test_a_nested_build_over_its_budget_is_remembered_and_never_rebuilt(_wire, monkeypatch, cm_db):  # noqa: F811
+    from services.compute_isolation import ResourceExhausted
+
+    def overrun(*_args, **_kwargs):
+        _wire["n"] += 1
+        raise ResourceExhausted("nested_static_analysis", "cpu", 601.0, 600.0)
+
+    monkeypatch.setattr(recursive, "run_isolated", overrun)
+    first = _child_after_graph_build()
+    second = _child_after_graph_build()
+
+    assert _wire["n"] == 1
+    for node in (first, second):
+        assert node["analyzed"] is False
+        assert node.get("analysis_state") == "attempt_failed"
+        assert "exceeded its cpu budget" in str((node.get("details") or {}).get("materialize_error"))
+    row = cm_db.query(ContractMaterialization).filter_by(bytecode_keccak=CHILD_KECCAK).one()
+    assert (row.status, row.deterministic_failure) == ("failed", True)

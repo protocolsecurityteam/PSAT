@@ -23,6 +23,7 @@ from db.models import (
     EDGE_RELATION_EXTERNAL_CALL_TARGET,
 )
 from db.queue.artifacts import analysis_reports_failure, failed_semantic_artifact
+from db.queue.heartbeats import LeaseLost
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis, ControllerProvenance
 from schemas.control_tracking import (
@@ -39,6 +40,7 @@ from schemas.resolved_control_graph import (
     ResolvedGraphNode,
     ResolvedNodeType,
 )
+from services.compute_isolation import ChildProcessFailed, ResourceExhausted, run_isolated, static_budget
 from services.discovery.classifier import ClassificationIncompleteError
 from services.discovery.fetch import fetch, scaffold, scaffolded_solc_version, solc_installed
 from services.resolution.mapping_enumerator import (
@@ -82,6 +84,10 @@ class DegradedStaticAnalysisError(DeterministicBuildFailure):
 
 class ResourceExhaustedBuildError(RuntimeError):
     """A nested build that ran out of memory; not determined, and not remembered as failed."""
+
+
+class BuildBudgetExceededError(DeterministicBuildFailure):
+    """A nested build past its compute budget; not determined, and remembered so later walks don't spend it again."""
 
 
 class NestedCompileError(DeterministicBuildFailure):
@@ -236,8 +242,16 @@ def _build_static_artifacts(
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
         try:
-            analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
-        except (MemoryError, OSError):
+            analysis, predicate_trees, _effects = run_isolated(
+                collect_contract_analysis_with_artifacts,
+                project_dir,
+                budget=static_budget(),
+                label="nested_static_analysis",
+            )
+        except ResourceExhausted as exc:
+            raise BuildBudgetExceededError(f"build of {effective_address}: {exc}") from exc
+        except (MemoryError, OSError, LeaseLost, ChildProcessFailed):
+            # A child that died proves nothing about the source, so it is never remembered as a compile failure.
             raise
         except Exception as exc:
             # Without the compiler on disk the failure may be its download, which a later build can get past.
@@ -1744,7 +1758,7 @@ def resolve_control_graph(
                 chain_id=chain_id,
             )
             return artifacts, None
-        except (StorageContentIncomplete, StorageUnavailable):
+        except (StorageContentIncomplete, StorageUnavailable, LeaseLost):
             raise
         except Exception as exc:
             return None, exc

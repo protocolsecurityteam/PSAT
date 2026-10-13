@@ -80,3 +80,44 @@ class TestAnalysisPhaseFailure:
         assert len(calls) == 1
         assert calls[0]["name"] == "analysis_error"
         assert "LLM analysis timed out" in calls[0]["data"]["error"]
+
+
+class TestAnalysisPhaseBudget:
+    def test_runs_the_pipeline_in_a_child_under_the_static_budget(self, monkeypatch, tmp_path):
+        from services.compute_isolation import static_budget
+
+        worker = StaticWorker()
+        monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+        monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
+        _capture_store_artifact(monkeypatch)
+        seen: dict = {}
+
+        def fake_run_isolated(fn, *args, budget, label, **kwargs):
+            seen.update(fn=fn, args=args, budget=budget, label=label)
+            return {"schema_version": "0.1", "subject": {"name": "T"}}, None, None
+
+        monkeypatch.setattr("workers.static_worker.run_isolated", fake_run_isolated)
+        worker._run_analysis_phase(MagicMock(), _job(), tmp_path, "TestContract", "0xabc")
+        from workers import static_worker
+
+        assert seen["fn"] is static_worker.collect_contract_analysis_with_artifacts
+        assert seen["args"] == (tmp_path,)
+        assert seen["budget"] == static_budget()
+        assert seen["label"] == "static_analysis"
+
+    def test_an_overrun_is_the_jobs_outcome_not_an_analysis_error(self, monkeypatch, tmp_path):
+        import pytest
+
+        from services.compute_isolation import ResourceExhausted
+
+        worker = StaticWorker()
+        monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
+        calls = _capture_store_artifact(monkeypatch)
+
+        def overrun(*_args, **_kwargs):
+            raise ResourceExhausted("static_analysis", "memory", 5e9, 3e9)
+
+        monkeypatch.setattr("workers.static_worker.run_isolated", overrun)
+        with pytest.raises(ResourceExhausted):
+            worker._run_analysis_phase(MagicMock(), _job(), tmp_path, "TestContract", "0xabc")
+        assert calls == []
