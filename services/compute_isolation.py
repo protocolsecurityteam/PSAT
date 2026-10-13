@@ -295,10 +295,14 @@ def _sample(pid: int) -> tuple[float, int] | None:
 def _kill_group(pid: int) -> None:
     try:
         os.killpg(pid, signal.SIGKILL)
+        return
+    except (ProcessLookupError, PermissionError):
+        pass
+    # A child that hasn't reached its own process group yet.
+    try:
+        os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    except PermissionError:
-        os.kill(pid, signal.SIGKILL)
 
 
 @dataclass
@@ -311,18 +315,14 @@ class _Child:
     def pid(self) -> int:
         return self.process.pid
 
-    def discard(self) -> None:
-        _kill_group(self.pid)
-        self.process.join()
-        self.conn.close()
-        self.process.close()
-
 
 class _Pool:
     """Idle warm children of this worker process; one per job running at once, never shared between jobs."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # Process.start() polls every child's handle; two readers of one exit status leave the loser with 255, so every
+        # start, status read and close happens under this lock.
+        self._lock = threading.RLock()
         self._idle: list[_Child] = []
         self._live: set[int] = set()
         self._context: BaseContext | None = None
@@ -339,17 +339,17 @@ class _Pool:
         stale: list[_Child] = []
         chosen: _Child | None = None
         now = time.monotonic()
+        idle_s = _env_number("PSAT_COMPUTE_IDLE_S", 300)
         with self._lock:
             while self._idle:
                 child = self._idle.pop()
-                if not child.process.is_alive() or now - child.idle_since > _env_number("PSAT_COMPUTE_IDLE_S", 300):
+                if child.process.exitcode is not None or now - child.idle_since > idle_s:
                     stale.append(child)
                     continue
                 chosen = child
                 break
             for child in stale:
-                self._live.discard(child.pid)
-                child.discard()
+                self.forget(child)
             if chosen is not None:
                 return chosen
             from multiprocessing import forkserver
@@ -387,17 +387,33 @@ class _Pool:
                 return
         self.forget(child)
 
-    def forget(self, child: _Child) -> None:
+    def exitcode(self, child: _Child, wait_s: float = 0.0) -> int | None:
+        """The child's exit code once it has exited, waiting up to *wait_s* for it."""
+        deadline = time.monotonic() + wait_s
+        while True:
+            with self._lock:
+                code = child.process.exitcode
+            if code is not None or time.monotonic() >= deadline:
+                return code
+            time.sleep(0.01)
+
+    def forget(self, child: _Child) -> int | None:
+        """Kill the child and what it spawned, and return its exit code."""
+        _kill_group(child.pid)
+        code = self.exitcode(child, wait_s=10)
         with self._lock:
             self._live.discard(child.pid)
-        child.discard()
+            child.conn.close()
+            if code is not None:
+                child.process.close()
+        return code
 
     def shutdown(self) -> None:
         with self._lock:
             idle, self._idle = self._idle, []
             live, self._live = self._live, set()
         for child in idle:
-            child.discard()
+            self.forget(child)
         for pid in live:
             _kill_group(pid)
         from multiprocessing import forkserver
@@ -460,7 +476,13 @@ def run_isolated(
     cancel = compute_cancel_var.get()
     log_context = {name: var.get() for name, var in _CONTEXT_VARS.items()}
     started = time.monotonic()
-    child, baseline = _dispatch((reference, args, kwargs, log_context))
+    try:
+        child, baseline = _dispatch((reference, args, kwargs, log_context))
+    except ChildProcessFailed:
+        raise
+    except Exception as exc:
+        # A failure on the worker's side of the hand-off proves nothing about the job, so it stays a failure.
+        raise ChildProcessFailed(f"{label} could not be handed to a child: {type(exc).__name__}: {exc}") from exc
     pid = child.pid
     cpu0 = baseline[0] if baseline is not None else 0.0
     peak_rss = baseline[1] if baseline is not None else 0
@@ -475,7 +497,7 @@ def run_isolated(
                 except (EOFError, ConnectionResetError):
                     reply = None
                 break
-            if not child.process.is_alive():
+            if _pool.exitcode(child) is not None:
                 break
             sample = _sample(pid)
             if sample is not None:
@@ -488,14 +510,17 @@ def run_isolated(
                 lease_lost = True
             if overrun is not None or lease_lost:
                 break
+    except Exception as exc:
+        _pool.forget(child)
+        raise ChildProcessFailed(f"{label} reply could not be read: {type(exc).__name__}: {exc}") from exc
     except BaseException:
         _pool.forget(child)
         raise
     if reply is None:
-        if overrun is None and not lease_lost:
-            child.process.join(5)
-        exitcode = child.process.exitcode
-        _pool.forget(child)
+        # A child that ended on its own reports its own exit code; one stopped here is killed first.
+        exitcode = _pool.exitcode(child, wait_s=5) if overrun is None and not lease_lost else None
+        killed = _pool.forget(child)
+        exitcode = killed if exitcode is None else exitcode
         if overrun is not None:
             logger.warning(
                 "isolated compute %s exceeded its %s budget",

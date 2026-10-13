@@ -369,3 +369,47 @@ def test_a_child_that_dies_reading_its_job_is_a_failure():
     with pytest.raises(ChildProcessFailed, match="exited with 1"):
         run_isolated(children.echo, children.Unloadable(), budget=ROOMY, label="unit")
     assert run_isolated(children.echo, 5, budget=ROOMY, label="unit") == 5
+
+
+def test_a_reply_the_worker_cannot_read_is_a_failure():
+    with pytest.raises(ChildProcessFailed, match="reply could not be read"):
+        run_isolated(children.return_unloadable, budget=ROOMY, label="unit")
+    assert run_isolated(children.echo, 6, budget=ROOMY, label="unit") == 6
+
+
+def test_a_job_that_cannot_be_handed_over_is_a_failure():
+    started = time.monotonic()
+    with pytest.raises(ChildProcessFailed, match="could not be handed to a child"):
+        run_isolated(children.echo, lambda: None, budget=ROOMY, label="unit")
+    # The fresh child is killed even before it has its own process group.
+    assert time.monotonic() - started < 5
+
+
+def test_exit_codes_survive_children_starting_in_other_threads(monkeypatch):
+    # Every job spawns a child while others exit, so starts and exit-status reads interleave across threads.
+    monkeypatch.setenv("PSAT_COMPUTE_MAX_IDLE", "0.5")
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def run(offset):
+        for step in range(8):
+            try:
+                if (offset + step) % 2:
+                    run_isolated(children.raise_memory_error, budget=ROOMY, label="unit")
+                    outcome = "no error"
+                else:
+                    outcome = "ok" if run_isolated(children.echo, 1, budget=ROOMY, label="unit") == 1 else "wrong"
+            except ResourceExhausted as exc:
+                outcome = "memory" if exc.resource == "memory" else exc.resource
+            except Exception as exc:
+                outcome = f"{type(exc).__name__}: {exc}"
+            with lock:
+                outcomes.append(outcome)
+
+    threads = [threading.Thread(target=run, args=(offset,)) for offset in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(set(outcomes)) == ["memory", "ok"]
+    assert outcomes.count("memory") == 24

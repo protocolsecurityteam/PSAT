@@ -126,3 +126,7 @@ class Unloadable:
 
     def __reduce__(self):
         return (_refuse_to_load, ())
+
+
+def return_unloadable() -> Unloadable:
+    return Unloadable()

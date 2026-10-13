@@ -175,3 +175,19 @@ def test_a_nested_build_over_its_budget_is_remembered_and_never_rebuilt(_wire, m
         assert "exceeded its cpu budget" in str((node.get("details") or {}).get("materialize_error"))
     row = cm_db.query(ContractMaterialization).filter_by(bytecode_keccak=CHILD_KECCAK).one()
     assert (row.status, row.deterministic_failure) == ("failed", True)
+
+
+@requires_postgres
+def test_a_nested_build_whose_child_died_is_not_remembered(_wire, monkeypatch, cm_db):  # noqa: F811
+    from services.compute_isolation import ChildProcessFailed
+
+    def died(*_args, **_kwargs):
+        _wire["n"] += 1
+        raise ChildProcessFailed("nested_static_analysis reply could not be read: EOFError: ")
+
+    monkeypatch.setattr(recursive, "run_isolated", died)
+    for _ in range(2):
+        assert _child_after_graph_build().get("analysis_state") == "attempt_failed"
+    assert _wire["n"] == 2
+    row = cm_db.query(ContractMaterialization).filter_by(bytecode_keccak=CHILD_KECCAK).one()
+    assert (row.status, row.deterministic_failure) == ("failed", False)
