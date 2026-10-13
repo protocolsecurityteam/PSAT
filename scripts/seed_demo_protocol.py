@@ -42,6 +42,7 @@ from db.models import (
     ProtocolScore,
     SessionLocal,
 )
+from utils import claim_ids
 
 DEFAULT_NAME = "demo-protocol"
 CHAIN = "ethereum"
@@ -160,7 +161,7 @@ def _score_document(protocol: Protocol) -> dict:
     """Shaped like ``ScoreDocument.document()``; the figures are invented."""
     findings = [
         {
-            "capability": "upgrade.implementation",
+            "capability": claim_ids.UPGRADE_IMPLEMENTATION,
             "chain": CHAIN,
             "principal_unit": f"{CHAIN}::{SAFE}",
             "access_path": "direct",
@@ -178,7 +179,7 @@ def _score_document(protocol: Protocol) -> dict:
             "counterfactual": "add a timelock in front of the Safe, or raise its threshold",
         },
         {
-            "capability": "flow.out",
+            "capability": claim_ids.FLOW_OUT,
             "chain": CHAIN,
             "principal_unit": f"{CHAIN}::{TIMELOCK}",
             "access_path": "direct",
@@ -286,8 +287,8 @@ def seed(session: Session, name: str) -> None:
             SAFE,
             "safe",
             [
-                ("upgradeToAndCall", "upgradeToAndCall(address,bytes)", "upgrade.implementation"),
-                ("pause", "pause()", "pause.set"),
+                ("upgradeToAndCall", "upgradeToAndCall(address,bytes)", claim_ids.UPGRADE_IMPLEMENTATION),
+                ("pause", "pause()", claim_ids.PAUSE_SET),
             ],
             details=safe_details,
         )
@@ -306,7 +307,7 @@ def seed(session: Session, name: str) -> None:
         treasury,
         TIMELOCK,
         "timelock",
-        [("withdraw", "withdraw(address,uint256)", "flow.out")],
+        [("withdraw", "withdraw(address,uint256)", claim_ids.FLOW_OUT)],
         details={"delay": 172_800},
     )
     session.add(
@@ -318,7 +319,8 @@ def seed(session: Session, name: str) -> None:
             source="Fee admin",
         )
     )
-    _guarded(session, fee_controller, ADMIN_EOA, "eoa", [("setFee", "setFee(uint256)", "fee.set")])
+    handover = ("transferOwnership", "transferOwnership(address)", claim_ids.OWNERSHIP_TRANSFER)
+    _guarded(session, fee_controller, ADMIN_EOA, "eoa", [handover])
 
     document = _score_document(protocol)
     session.add(
