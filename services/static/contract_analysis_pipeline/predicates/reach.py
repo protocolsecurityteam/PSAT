@@ -70,6 +70,8 @@ class _Cfg:
     repeats: bool | None = None
     # Rendered alternatives, shared by the gates under one branch; the key's objects are held so ids stay unique.
     rendered: dict[tuple, tuple[Any, PredicateTree | None]] = field(default_factory=dict)
+    # node_id -> ids of the nodes Slither split one statement into (a ternary's condition and arms), itself included.
+    statements: dict[int, list[int]] = field(default_factory=dict)
 
 
 def _sons(node: Any) -> list[Any]:
@@ -152,6 +154,7 @@ def _build_cfg(function: Any) -> _Cfg:
                 control_parents.setdefault(nodes[n].node_id, []).append((nodes[b], nodes[s]))
 
     return _Cfg(
+        statements=_split_statements(nodes),
         preds={nodes[i].node_id: [nodes[p].node_id for p in preds[i]] for i in range(count)},
         nodes={n.node_id: n for n in nodes},
         control_parents=control_parents,
@@ -164,6 +167,19 @@ def _build_cfg(function: Any) -> _Cfg:
             if getattr(ir, "is_modifier_call", False) or type(getattr(ir, "function", None)).__name__ == "Modifier"
         ],
     )
+
+
+def _split_statements(nodes: list[Any]) -> dict[int, list[int]]:
+    """Nodes sharing one statement's source range: Slither lowers a ternary to a condition node and an arm node per
+    outcome, each carrying the whole statement's range.
+    """
+    groups: dict[tuple, list[int]] = {}
+    for node in nodes:
+        source = getattr(node, "source_mapping", None)
+        start, length = getattr(source, "start", None), getattr(source, "length", None)
+        if start is not None and length is not None:
+            groups.setdefault((getattr(source, "filename", None), start, length), []).append(node.node_id)
+    return {node_id: group for group in groups.values() if len(group) > 1 for node_id in group}
 
 
 def _cyclic_node_ids(nodes: list[Any], succ: list[list[int]]) -> set[int]:
@@ -622,13 +638,18 @@ def _effect_before(entry: Any, chain: list[Any], frame: Any, node: Any) -> Effec
             return (frozenset(), True)
         # In a loop, a later iteration runs after the call, and so may an earlier one's operations after it.
         lead = call if anchor.node_id not in cfg.cyclic else None
+        preceding = _preceding(cfg, anchor.node_id)
         effects = []
-        for node_id in _preceding(cfg, anchor.node_id):
+        for node_id in preceding:
             effects.append(_node_effect(cfg.nodes[node_id], (), skip=lead if node_id == anchor.node_id else None))
             if level and _node_is_type(cfg.nodes[node_id], "NodeType.PLACEHOLDER"):
                 effects.append(
                     _function_effect(frames[level - 1]) if frames[level - 1] is not None else (frozenset(), True)
                 )
+        # A split statement's operands may run before its condition or arm is reached, whichever arm holds them.
+        for node_id in cfg.statements.get(anchor.node_id, []):
+            if node_id not in preceding:
+                effects.append(_node_effect(cfg.nodes[node_id], ()))
         for more, more_opaque in effects:
             names |= more
             opaque = opaque or more_opaque

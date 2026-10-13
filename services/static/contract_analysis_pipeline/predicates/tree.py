@@ -256,12 +256,11 @@ def _branch_tree_builder(
     entry: Any,
     entry_chain: list[Any],
     basis: list[str] | None = None,
-    check_writes: bool = True,
 ) -> Callable[[Any, Any, bool], PredicateTree | None]:
     """Leaves for a branch outcome in ``frame``, reached from ``entry`` through ``entry_chain``.
 
-    Leaves state storage as it is when the call starts, so with ``check_writes`` an outcome whose condition reads
-    storage the call may already have written on the way to the branch is not determined.
+    Leaves state storage as it is when the call starts, so an outcome whose condition reads storage the call may
+    already have written on the way to the branch is not determined.
     """
 
     def build(node: Any, condition: Any, holds: bool) -> PredicateTree | None:
@@ -280,7 +279,7 @@ def _branch_tree_builder(
         # A bool helper that never returns the value this outcome needs makes the outcome impossible.
         if leaf.get("unsupported_reason") == _HELPER_NEVER_RETURNS:
             return None
-        written, writes_other = effect_before(entry, entry_chain, frame, node) if check_writes else (frozenset(), False)
+        written, writes_other = effect_before(entry, entry_chain, frame, node)
         if written or writes_other:
             if reads_conflict(branch_reads(entry, entry_chain, frame, node), (written, writes_other)):
                 return make_leaf_node(_unsupported_leaf("branch_reads_state_written_before", gate.expression_text))
@@ -805,7 +804,7 @@ def _helper_value_tree(
         if _node_is_if(node) and _branch_value_is_only(getattr(node, "son_true", None), wanted)
     )
     unclassified = [_forward_reachable_node_ids(node) for node in cfg_nodes if _node_has_unclassified_call(node)]
-    builder = _branch_tree_builder(callee, sub_prov, entry, chain, basis=list(gate.basis), check_writes=False)
+    builder = _branch_tree_builder(callee, sub_prov, entry, chain, basis=list(gate.basis))
     paths: list[PredicateTree] = []
     always = False
     for node, value in _helper_exits(callee):

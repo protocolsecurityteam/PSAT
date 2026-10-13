@@ -836,3 +836,101 @@ contract ApprovalChain {
         hook = id;
     }
 }
+
+// A ternary's operands, whichever arm Slither puts them in, may run before its condition.
+contract TernarySplit {
+    address public admin;
+    bool public open;
+    uint256 public hook;
+
+    function _guard() internal view returns (uint256) {
+        require(msg.sender == admin, "UNAUTHORIZED");
+        return 1;
+    }
+
+    function _closeRet() internal returns (uint256) {
+        open = false;
+        return 1;
+    }
+
+    function _sink(uint256 a, uint256 b) internal {
+        hook = a + b;
+    }
+
+    function r1() external {
+        hook = _closeRet() + (open ? 0 : _guard());
+    }
+
+    function r2() external {
+        hook = (open ? 0 : _guard()) + _closeRet();
+    }
+
+    function r3() external {
+        _sink(_closeRet(), open ? 0 : _guard());
+    }
+}
+
+// A bool helper's return paths branch on storage the call may already have written.
+contract HelperValueWrites {
+    address public admin;
+    bool public open;
+    bool public paused;
+    uint256 public hook;
+    mapping(address => bool) public ops;
+    mapping(address => bool) public member;
+
+    function _either() internal view returns (bool) {
+        if (open) return true;
+        return member[msg.sender];
+    }
+
+    function _l3() internal view returns (bool) {
+        if (open) return true;
+        return msg.sender == admin;
+    }
+
+    function _l2() internal view returns (bool) {
+        return ops[msg.sender] || _l3();
+    }
+
+    function _l1() internal view returns (bool) {
+        return !paused && _l2();
+    }
+
+    function _close() internal returns (bool) {
+        open = false;
+        return true;
+    }
+
+    function _l2w() internal returns (bool) {
+        return _close() && _l3();
+    }
+
+    function closeThenEither(uint256 v) external {
+        open = false;
+        require(_either(), "NO");
+        hook = v;
+    }
+
+    function deep(uint256 v) external {
+        open = false;
+        require(_l1(), "NO");
+        hook = v;
+    }
+
+    function deepNoWrite(uint256 v) external {
+        require(_l1(), "NO");
+        hook = v;
+    }
+
+    function deepW(uint256 v) external {
+        require(_l2w(), "NO");
+        hook = v;
+    }
+
+    function deepNeg(uint256 v) external {
+        open = false;
+        if (!_l1()) revert("NO");
+        hook = v;
+    }
+}

@@ -349,6 +349,37 @@ def _flat(shape: Any) -> list[Any]:
     return [shape]
 
 
+ADMIN = ("equality", "eq", "msg_sender", "admin")
+OPS = ("membership", "truthy", "msg_sender")
+
+
+@pytest.mark.parametrize("signature", ["r1()", "r2()", "r3()"])
+def test_a_ternarys_operands_may_run_before_its_condition(signature):
+    """Slither splits a ternary into a condition and arms, but the statement's other operands may run first."""
+    assert _tree("TernarySplit", signature) == ("OR", WRITTEN_BEFORE, ADMIN)
+
+
+def test_a_helper_return_path_sees_the_writes_before_the_call():
+    assert _tree("HelperValueWrites", "closeThenEither(uint256)") == ("OR", WRITTEN_BEFORE, OPS)
+
+
+@pytest.mark.parametrize("signature", ["deep(uint256)", "deepNeg(uint256)"])
+def test_a_nested_helper_return_path_sees_the_writes_before_the_outer_call(signature):
+    expected = ("AND", ("equality", "falsy", "paused"), ("OR", OPS, ("OR", WRITTEN_BEFORE, ADMIN)))
+    assert _tree("HelperValueWrites", signature) == expected
+
+
+def test_a_nested_helper_return_path_sees_a_sibling_calls_writes():
+    tree = _tree("HelperValueWrites", "deepW(uint256)")
+    assert ("OR", WRITTEN_BEFORE, ADMIN) in tree[1:], tree
+    assert OPEN_FLAG not in _flat(tree), tree
+
+
+def test_a_nested_helper_return_path_without_writes_keeps_its_branch():
+    expected = ("AND", ("equality", "falsy", "paused"), ("OR", OPS, ("OR", OPEN_FLAG, ADMIN)))
+    assert _tree("HelperValueWrites", "deepNoWrite(uint256)") == expected
+
+
 def test_a_write_to_other_storage_keeps_the_branch():
     assert _tree("ConditionalGates", "unrelatedWriteThenBranch(uint256)") == ("OR", OPEN_MODE, OWNER)
 
