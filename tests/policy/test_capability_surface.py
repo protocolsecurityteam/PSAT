@@ -440,3 +440,18 @@ def test_an_empty_that_proves_nothing_leaves_a_path_that_may_be_open_not_determi
             surface = project_capability_surface(cap)
             assert surface.open_not_determined, name
             assert capability_surface_openness(cap, surface) == "not_determined", name
+
+
+def test_a_proven_empty_conjunct_closes_the_and_whatever_its_siblings_open_and_in_any_order():
+    import itertools
+
+    from services.policy.capability_surface import capability_surface_openness
+
+    universal = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "amount > 0"}]}
+    for siblings in ([universal], [universal, _unread_reach()], [_unread_reach(), _unread_reach()]):
+        for children in itertools.permutations([_empty(), *siblings]):
+            cap = {"kind": "AND", "children": list(children)}
+            surface = project_capability_surface(cap)
+            assert not surface.authority_public and not surface.open_not_determined, cap
+            assert capability_surface_openness(cap, surface) == "restricted", cap
+            assert capability_surface_status(cap, surface) == "resolved_empty", cap

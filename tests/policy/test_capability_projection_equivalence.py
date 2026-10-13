@@ -34,7 +34,7 @@ CONDS = [{"kind": "business", "description": f"c{i}"} for i in range(4)] + [
 
 # The expansion the projection replaced: every AND multiplies its children's paths and caller rows, and rows are merged
 # by (address, origin, principal_type) at the end. ``nobody``: the subtree is proven to admit no end user, which an AND
-# inherits from any child and an OR only from every child.
+# inherits from any child, dropping every path and any that may be open, and an OR only from every child.
 
 
 def _reference(cap: dict[str, Any]) -> dict[str, Any]:
@@ -145,13 +145,20 @@ def _ref_node(cap: dict[str, Any]) -> tuple[list, list, list, bool, bool]:
 
 
 def _ref_and(left: tuple, right: tuple) -> tuple:
-    l_rows, l_paths, l_res, l_ond, l_nobody = left
-    r_rows, r_paths, r_res, r_ond, r_nobody = right
+    rows, paths, residual, ond = _ref_and_paths(left[:4], right[:4])
+    if left[4] or right[4]:
+        return rows, [], residual, False
+    return rows, paths, residual, ond
 
-    def admits(rows, paths, ond, nobody):
-        return bool(paths) or ond or not (rows or paths or nobody)
 
-    ond = (l_ond and admits(r_rows, r_paths, r_ond, r_nobody)) or (r_ond and admits(l_rows, l_paths, l_ond, l_nobody))
+def _ref_and_paths(left: tuple, right: tuple) -> tuple:
+    l_rows, l_paths, l_res, l_ond = left
+    r_rows, r_paths, r_res, r_ond = right
+
+    def admits(rows, paths, ond):
+        return bool(paths) or ond or not (rows or paths)
+
+    ond = (l_ond and admits(r_rows, r_paths, r_ond)) or (r_ond and admits(l_rows, l_paths, l_ond))
     l_valid, r_valid = bool(l_rows or l_paths), bool(r_rows or r_paths)
     if not l_valid and not r_valid:
         return [], [], l_res + r_res, ond

@@ -486,7 +486,7 @@ class _Summary:
         return bool(self.rows) or self.count > 0
 
     def may_admit_anyone(self) -> bool:
-        return self.count > 0 or self.ond or not (self.valid or self.nobody)
+        return not self.nobody and (self.count > 0 or self.ond or not self.valid)
 
 
 _EMPTY = _Summary()
@@ -718,9 +718,11 @@ class _Projector:
             surface = self.with_side_checks(right, left.residual)
         else:
             surface = self.product(left, right)
-        # A path that may be open stays one beside anything but a conjunct that admits only its callers, or nobody.
+        if left.nobody or right.nobody:
+            # No end user passes a conjunct proven to admit nobody, so no path through the AND is open or may be.
+            return _Summary(rows=surface.rows, residual=surface.residual, nobody=True)
+        # A path that may be open stays one beside anything but a conjunct that admits only its callers.
         surface.ond = (left.ond and right.may_admit_anyone()) or (right.ond and left.may_admit_anyone())
-        surface.nobody = left.nobody or right.nobody
         return surface
 
     def with_side_checks(self, valid: _Summary, side_residual: list[dict[str, Any]]) -> _Summary:
