@@ -95,6 +95,17 @@ def _authority_roles(tree: Any) -> set[str]:
     }
 
 
+def _gate_authority_roles(tree: Any) -> set[str]:
+    """Roles of the leaves that gate; a leaf stating where a gate is reached is an alternative to it, not a gate."""
+    from services.static.contract_analysis_pipeline.predicate_types import is_reach_condition
+
+    return {
+        str(leaf.get("authority_role"))
+        for leaf in _all_leaves(tree)
+        if isinstance(leaf.get("authority_role"), str) and not is_reach_condition(leaf)
+    }
+
+
 def _gate_ref(tree: Any) -> str:
     """A gate-structure descriptor (roles, never an address).
 

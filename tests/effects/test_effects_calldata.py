@@ -498,6 +498,33 @@ def test_authority_targets_the_gate_the_function_writes():
     assert spec.mutate_calldata == "0x13af4035" + "00" * 32
 
 
+def test_authority_skips_a_target_whose_only_authority_check_reaches_its_gate():
+    reach_owner = _leaf(_state("owner"), authority_role="caller_authority")
+    reach_owner["leaf"]["basis"] = ["revert_path_condition"]
+    mode = _leaf(_state("mode"))
+    effects = dict(_token_facts().effects)
+    effects["setMode(uint256)"] = _effect_info(
+        "setMode(uint256)", "0xa6b4c5d1", state_writes=[_write("mode", "uint256")]
+    )
+    for name in ("checkEarly()", "checkLate()"):
+        effects[name] = _effect_info(name, "0x00000000")
+    facts = _token_facts(
+        effects=effects,
+        canonical_signatures={name: name for name in effects},
+        trees={
+            **_token_facts().trees,
+            "setMode(uint256)": OWNER_GATE,
+            "checkEarly()": _and(mode, _or(reach_owner, _leaf(_timestamp()))),
+            "checkLate()": _and(mode, _leaf(_state("owner"), authority_role="caller_authority")),
+        },
+    )
+    fn = cd.facts_for_name(facts, "setMode(uint256)")
+    assert fn is not None
+    spec = cd.synthesize_authority(_candidate("0xa6b4c5d1"), facts, fn)
+    assert spec is not None
+    assert spec.probe_function == "checkLate()"
+
+
 def test_guarded_functions_only_counts_mandatory_paths():
     trees = {
         "mandatory()": _and(_leaf(_state("paused"))),
