@@ -110,3 +110,8 @@ def fork_server_state() -> dict[str, Any]:
         "mappers_configured": inspect(Job).configured,
         "missing_preloads": [name for name in _PRELOAD if name not in sys.modules],
     }
+
+
+def sleep_then_pid(seconds: float) -> int:
+    time.sleep(seconds)
+    return os.getpid()

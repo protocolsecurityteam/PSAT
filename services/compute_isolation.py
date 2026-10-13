@@ -374,14 +374,18 @@ class _Pool:
 
     def release(self, child: _Child) -> None:
         sample = _sample(child.pid)
-        retire_bytes = _env_number("PSAT_COMPUTE_RETIRE_RSS_MB", 1024) * 1024 * 1024
+        retire_bytes = _env_number("PSAT_COMPUTE_RETIRE_RSS_MB", 512) * 1024 * 1024
         if sample is None or sample[1] > retire_bytes:
             # A child that kept a large heap would carry it into every later job.
             self.forget(child)
             return
         child.idle_since = time.monotonic()
         with self._lock:
-            self._idle.append(child)
+            # Enough warm children for the jobs a worker runs at once; a burst's extras would only hold memory.
+            if len(self._idle) < int(_env_number("PSAT_COMPUTE_MAX_IDLE", 2)):
+                self._idle.append(child)
+                return
+        self.forget(child)
 
     def forget(self, child: _Child) -> None:
         with self._lock:

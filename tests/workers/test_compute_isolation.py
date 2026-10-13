@@ -337,3 +337,22 @@ def test_an_idle_child_that_died_is_replaced_before_the_job_starts():
     while time.monotonic() < deadline and not _gone(pid):
         time.sleep(0.05)
     assert run_isolated(children.report, 2, budget=ROOMY, label="unit")["value"] == 2
+
+
+def test_a_burst_keeps_only_as_many_warm_children_as_allowed(monkeypatch):
+    monkeypatch.setenv("PSAT_COMPUTE_MAX_IDLE", "1")
+    pids: list[int] = []
+
+    def run():
+        pids.append(run_isolated(children.sleep_then_pid, 0.5, budget=ROOMY, label="unit"))
+
+    threads = [threading.Thread(target=run) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(set(pids)) == 3
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and sum(not _gone(pid) for pid in pids) > 1:
+        time.sleep(0.05)
+    assert sum(not _gone(pid) for pid in pids) == 1
