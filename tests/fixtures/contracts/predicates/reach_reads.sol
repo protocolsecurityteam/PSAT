@@ -93,6 +93,13 @@ contract ReachReads {
 
     function isLate() public view returns (bool) { return block.timestamp > deadline; }
 
+    function seeded() public view returns (bool) { return blockhash(deadline) != bytes32(0); }
+
+    function whileSeeded(uint256 v) external {
+        if (seeded()) { require(msg.sender == owner, "UNAUTHORIZED"); }
+        hook = v;
+    }
+
     function afterDeadline(uint256 v) external {
         if (isLate()) { require(msg.sender == owner, "UNAUTHORIZED"); }
         hook = v;

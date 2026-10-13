@@ -243,6 +243,7 @@ def _view_call(ir: Any, contract: Any, operand: Any) -> dict[str, Any] | None:
         return None
     try:
         read = {str(variable) for variable in callee.all_solidity_variables_read()}
+        read |= {str(getattr(getattr(call, "function", None), "name", None)) for call in callee.all_solidity_calls()}
     except Exception:
         return None
     if read & _CALL_CONTEXT:
