@@ -92,6 +92,13 @@
       "detection_patterns": ["helper_return_polarity", "conditional_revert_gate"]
     },
     {
+      "path": "predicates/reach_reads.sol",
+      "category": "predicates",
+      "contract_name": "ReachReads",
+      "description": "Reach conditions recorded as reads: an open-role check through a public view, a flag in a bool helper's connective return, a state condition beside a caller check, a reassigned parameter, a branch on storage written before it, a caller-referencing reach condition, and a state variable only compared with calldata.",
+      "detection_patterns": ["reach_condition_read"]
+    },
+    {
       "path": "upgrade/direct_admin_upgrade.sol",
       "category": "upgrade",
       "contract_name": "DirectAdminUpgrade",

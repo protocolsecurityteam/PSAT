@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from ..predicate_types import PredicateTree, make_and_node, make_leaf_node, make_or_node
+from ..predicate_types import PredicateTree, make_and_node, make_leaf_node, make_or_node, mark_reach_condition
 from ..slither_compat import (
     Condition,
     Constant,
@@ -371,24 +371,31 @@ def reached_formula(function: Any, node: Any, assume: frozenset = frozenset()) -
 
 
 def render(
-    formula: Formula, function: Any, branch_tree: Callable[[Any, Any, bool], PredicateTree | None]
+    formula: Formula,
+    function: Any,
+    branch_tree: Callable[[Any, Any, bool], PredicateTree | None],
+    *,
+    reach: bool = False,
 ) -> PredicateTree | None:
     """A formula as a tree, or ``None`` when it can't hold.
 
     ``branch_tree(node, condition, holds)`` builds the leaves for a branch condition holding (``holds``) or failing, or
-    ``None`` when that outcome is impossible.
+    ``None`` when that outcome is impossible. ``reach``: the formula is where a gate isn't reached, so its unstated
+    parts are reach conditions too.
     """
     kind = formula[0]
     if kind == "false":
         return None
-    if kind == "true":
-        return make_leaf_node(_unsupported_leaf(reason="gate_never_reached", expression="gate_never_reached"))
-    if kind == "unsupported":
-        return make_leaf_node(_unsupported_leaf(reason=formula[1], expression=formula[1]))
+    if kind in ("true", "unsupported"):
+        reason = "gate_never_reached" if kind == "true" else formula[1]
+        leaf = _unsupported_leaf(reason=reason, expression=reason)
+        if reach:
+            mark_reach_condition(leaf)
+        return make_leaf_node(leaf)
     if kind == "branch":
         node = _cfg(function).nodes[formula[1]]
         return branch_tree(node, _if_condition_value(node), formula[2])
-    children = [render(child, function, branch_tree) for child in formula[1]]
+    children = [render(child, function, branch_tree, reach=reach) for child in formula[1]]
     if kind == "and":
         return None if any(child is None for child in children) else make_and_node(cast(list, children))
     possible = [child for child in children if child is not None]
@@ -789,19 +796,29 @@ def branch_reads(entry: Any, chain: list[Any], frame: Any, node: Any) -> Reads:
     return _memo("branch_reads", entry, chain, node, lambda: _branch_reads(entry, chain, frame, node))
 
 
+def value_reads(entry: Any, chain: list[Any], frame: Any, value: Any) -> Reads:
+    """What ``value`` in ``frame`` reads, followed like a branch condition."""
+    return _memo("value_reads", entry, chain, value, lambda: _reads_from(entry, chain, [value]))
+
+
 def _branch_reads(entry: Any, chain: list[Any], frame: Any, node: Any) -> Reads:
     """What the condition of ``node`` in ``frame`` reads, followed through the locals and helpers that feed it and,
     for a parameter of an inner frame, through the argument passed in from the frame above.
     """
-    frames = [entry, *(getattr(call, "function", None) for call in chain)]
-    names: set = set()
-    other = external = False
-    work: list[tuple[int, Any]] = [
-        (len(chain), value)
+    values = [
+        value
         for ir in getattr(node, "irs", []) or []
         if isinstance(ir, Condition)
         for value in getattr(ir, "read", None) or []
     ]
+    return _reads_from(entry, chain, values)
+
+
+def _reads_from(entry: Any, chain: list[Any], values: list[Any]) -> Reads:
+    frames = [entry, *(getattr(call, "function", None) for call in chain)]
+    names: set = set()
+    other = external = False
+    work: list[tuple[int, Any]] = [(len(chain), value) for value in values]
     seen: set = set()
     while work:
         level, value = work.pop()

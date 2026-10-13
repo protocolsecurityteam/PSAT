@@ -13,11 +13,14 @@ from typing import Any, cast
 
 from ..predicate_types import (
     REACH_CONDITION_BASIS,
+    REACH_READ,
     LeafPredicate,
     PredicateTree,
+    is_reach_condition,
     make_and_node,
     make_leaf_node,
     make_or_node,
+    mark_reach_condition,
 )
 from ..provenance import (
     ProvenanceEngine,
@@ -80,7 +83,9 @@ from .reach import (
     rendered_cache,
     runs_body_repeatedly,
     unreached_formula,
+    value_reads,
 )
+from .reach_read import reach_read
 
 # ``(callee_id, bindings) -> ProvenanceMap`` for helpers shared across a contract's functions (``_checkRole`` behind
 # grant/revoke/renounce). Set by ``build_predicate_artifacts``; ``None`` in direct test calls. Pure performance.
@@ -207,7 +212,7 @@ def _where_reached(
     for level in range(first_level, len(frames)):
         frame, anchor = frames[level], anchors[level]
         if frame is None or anchor is None:
-            alternatives.append(make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text)))
+            alternatives.append(make_leaf_node(_reach_unsupported_leaf("gate_location_not_determined", gate)))
             continue
         level_chain = chain[:level]
         targets = [(frame, [anchor], level_chain)]
@@ -220,22 +225,22 @@ def _where_reached(
             if formula is None:
                 continue
             if unread is not None and level >= unread[0]:
-                alternatives.append(make_leaf_node(_unsupported_leaf(unread[1], gate.expression_text)))
+                alternatives.append(make_leaf_node(_reach_unsupported_leaf(unread[1], gate)))
                 continue
             # Provenance only for a frame whose reach depends on a branch; most gates are reached unconditionally.
             target_prov: ProvenanceMap | None = prov
             if target_chain:
                 _, target_prov, chain_end = _build_chain_bindings(target_chain, target_fn, function, top_prov=prov)
                 if chain_end is not target_fn or target_prov is None:
-                    alternatives.append(
-                        make_leaf_node(_unsupported_leaf("gate_location_not_determined", gate.expression_text))
-                    )
+                    alternatives.append(make_leaf_node(_reach_unsupported_leaf("gate_location_not_determined", gate)))
                     continue
             entry_chain = [*prefix, *target_chain]
             memo = rendered_cache(target_fn)
             key = (formula, tuple(id(call) for call in entry_chain), id(target_prov), id(entry))
             if key not in memo:
-                rendered = render(formula, target_fn, _branch_tree_builder(target_fn, target_prov, entry, entry_chain))
+                rendered = render(
+                    formula, target_fn, _branch_tree_builder(target_fn, target_prov, entry, entry_chain), reach=True
+                )
                 memo[key] = ((entry_chain, target_prov, entry), rendered)
             alternative = memo[key][1]
             if alternative is not None:
@@ -264,6 +269,7 @@ def _branch_tree_builder(
     """
 
     def build(node: Any, condition: Any, holds: bool) -> PredicateTree | None:
+        reach = basis is None
         gate = RevertGate(
             kind="if_revert",
             condition_value=condition,
@@ -282,10 +288,103 @@ def _branch_tree_builder(
         written, writes_other = effect_before(entry, entry_chain, frame, node)
         if written or writes_other:
             if reads_conflict(branch_reads(entry, entry_chain, frame, node), (written, writes_other)):
-                return make_leaf_node(_unsupported_leaf("branch_reads_state_written_before", gate.expression_text))
-        return tree
+                unread = _unsupported_leaf("branch_reads_state_written_before", gate.expression_text)
+                if reach:
+                    mark_reach_condition(unread)
+                return make_leaf_node(unread)
+        return _with_reach_read(tree, reach_read(condition, entry, entry_chain), holds, reach_only=reach)
 
     return build
+
+
+def _reach_unsupported_leaf(reason: str, gate: RevertGate) -> LeafPredicate:
+    leaf = _unsupported_leaf(reason, gate.expression_text)
+    mark_reach_condition(leaf)
+    return leaf
+
+
+def _with_reach_read(
+    tree: PredicateTree, expression: dict[str, Any] | None, holds: bool, *, reach_only: bool
+) -> PredicateTree:
+    """``tree`` with the outcome it states as a read on each leaf (each reach leaf when ``reach_only``)."""
+    if expression is None or expression.get("type") != "bool":
+        return tree
+    tree = deepcopy(tree)
+    stamp = {"expression": expression, "holds": holds}
+
+    def visit(node: PredicateTree) -> None:
+        leaf = node.get("leaf")
+        if leaf is not None and (is_reach_condition(leaf) or not reach_only):
+            leaf[REACH_READ] = stamp
+        for child in node.get("children") or []:
+            visit(child)
+
+    visit(tree)
+    return tree
+
+
+_STATE_SOURCES = frozenset({"state_variable", "constant", "self_address"})
+
+
+def _reads_only_state(operand: Any) -> bool:
+    if not isinstance(operand, dict):
+        return False
+    source = operand.get("source")
+    if source == "view_call":
+        signature = operand.get("callee_signature")
+        return isinstance(signature, str) and signature.endswith("()")
+    return source in _STATE_SOURCES
+
+
+def _is_business_state_tree(tree: PredicateTree) -> bool:
+    """Every leaf a business condition on this contract's state alone: no caller, calldata, block or other contract."""
+    leaf = tree.get("leaf")
+    if tree.get("op") == "LEAF":
+        if not isinstance(leaf, dict) or leaf.get("kind") == "unsupported" or is_reach_condition(leaf):
+            return False
+        if leaf.get("authority_role") != "business" or leaf.get("references_msg_sender"):
+            return False
+        descriptor = leaf.get("set_descriptor") or {}
+        operands = [
+            *(leaf.get("operands") or []),
+            *(leaf.get("absorbed_operands") or []),
+            *(descriptor.get("key_sources") or []),
+        ]
+        if descriptor.get("authority_contract"):
+            return False
+        return bool(leaf.get("operands")) and all(_reads_only_state(operand) for operand in operands)
+    children = tree.get("children") or []
+    return bool(children) and all(_is_business_state_tree(child) for child in children)
+
+
+def _state_disjuncts_as_reach(
+    children: list[PredicateTree], reads: list[dict[str, Any] | None], holds: bool
+) -> list[PredicateTree]:
+    """A disjunct that only reads this contract's state, beside one that doesn't, is the condition under which the
+    other isn't needed (``!flag || isExecutor(msg.sender)`` is ``if (flag) require(isExecutor(msg.sender))``), so it
+    is a reach condition with its read, not an open path.
+    """
+    state = [_is_business_state_tree(child) for child in children]
+    if all(state) or not any(state):
+        return children
+    out: list[PredicateTree] = []
+    for child, is_state, expression in zip(children, state, reads):
+        if not is_state:
+            out.append(child)
+            continue
+        child = _with_reach_read(child, expression, holds, reach_only=False)
+        child = deepcopy(child) if expression is None or expression.get("type") != "bool" else child
+        _mark_reach_leaves(child)
+        out.append(child)
+    return out
+
+
+def _mark_reach_leaves(tree: PredicateTree) -> None:
+    leaf = tree.get("leaf")
+    if leaf is not None:
+        mark_reach_condition(leaf)
+    for child in tree.get("children") or []:
+        _mark_reach_leaves(child)
 
 
 def _unread_above(entry: Any, chain: list[Any]) -> str | None:
@@ -553,13 +652,14 @@ def _build_subtree_from_value(
     if isinstance(defining_ir, Binary):
         op_name = _binary_op(getattr(defining_ir, "type", None))
         if op_name in ("and", "or"):
-            left_tree = _build_subtree_from_value(defining_ir.variable_left, prov, gate, function)
-            right_tree = _build_subtree_from_value(defining_ir.variable_right, prov, gate, function)
-            children = [left_tree, right_tree]
-            if gate.polarity == "allowed_when_true":
-                return make_and_node(children) if op_name == "and" else make_or_node(children)
+            values = [defining_ir.variable_left, defining_ir.variable_right]
+            children = [_build_subtree_from_value(value, prov, gate, function) for value in values]
             # If-revert polarity flips AND/OR (De Morgan).
-            return make_or_node(children) if op_name == "and" else make_and_node(children)
+            if (op_name == "or") == (gate.polarity == "allowed_when_true"):
+                holds = gate.polarity == "allowed_when_true"
+                reads = [_disjunct_read(value, gate, function) for value in values]
+                return make_or_node(_state_disjuncts_as_reach(children, reads, holds))
+            return make_and_node(children)
 
     # A helper whose return is AND/OR (Solmate Auth, DSAuth, Maker ``wish``, USDT): recurse into its bindings so it
     # doesn't bottom out as unsupported business.
@@ -732,6 +832,10 @@ def _build_internal_call_or_and_subtree(
             _build_subtree_from_value(left, sub_prov, inside, callee),
             _build_subtree_from_value(right, sub_prov, inside, callee),
         ]
+        if (op_name == "or") == (gate.polarity == "allowed_when_true"):
+            node = getattr(inner, "node", None)
+            reads = [_disjunct_read(value, inside, callee, node) for value in (left, right)]
+            children = _state_disjuncts_as_reach(children, reads, gate.polarity == "allowed_when_true")
     elif isinstance(inner, (InternalCall, LibraryCall)):
         # The return is itself an assembly combinator call; its args are the children.
         inner_callee = getattr(inner, "function", None)
@@ -853,8 +957,36 @@ def _helper_value_tree(
                 )
             )
         return make_and_node(gates)
+    if len(paths) > 1:
+        paths = _state_disjuncts_as_reach(paths, [None] * len(paths), True)
+    for path in paths:
+        _drop_unmarked_reads(path)
     value = make_or_node(paths)
     return make_and_node([*gates, *(value.get("children") or [] if value.get("op") == "AND" else [value])])
+
+
+def _drop_unmarked_reads(tree: PredicateTree) -> None:
+    """A helper path's outcome reads are kept only where the outcome became a reach condition."""
+    leaf = tree.get("leaf")
+    if leaf is not None and not is_reach_condition(leaf):
+        leaf.pop(REACH_READ, None)
+    for child in tree.get("children") or []:
+        _drop_unmarked_reads(child)
+
+
+def _disjunct_read(value: Any, gate: RevertGate, function: Any, node: Any = None) -> dict[str, Any] | None:
+    """``value``, one side of a connective at ``node`` (the gate's own by default), as a read, when nothing the call
+    writes before it can change it.
+    """
+    entry, chain = _entry_and_chain(gate, function)
+    frame = getattr(chain[-1], "function", None) if chain else entry
+    node = node if node is not None else gate.node
+    if node is None or frame is not function:
+        return None
+    written, writes_other = effect_before(entry, chain, frame, node)
+    if (written or writes_other) and reads_conflict(value_reads(entry, chain, frame, value), (written, writes_other)):
+        return None
+    return reach_read(value, entry, chain)
 
 
 # Explicit conditional reverts only: opaque fail-safes would add ``unsupported`` leaves, and external-call/try-catch

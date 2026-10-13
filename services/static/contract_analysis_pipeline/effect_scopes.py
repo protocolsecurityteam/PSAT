@@ -12,12 +12,13 @@ from dataclasses import replace
 
 from .effect_scope_codec import EFFECT_SCOPES_VERSION
 from .effects.sinks import _classify_node_irs, _is_modifier_call, _node_kind_state_writes
-from .predicate_types import PredicateTree, make_and_node, make_or_node
+from .predicate_types import PredicateTree, make_and_node, make_leaf_node, make_or_node, mark_reach_condition
 from .predicates._helpers import _unsupported_leaf
 from .predicates.control_flow import _callee_always_reverts, _forward_reachable_node_ids
 from .predicates.operands import _operand_for_value
 from .predicates.reach import _cfg_cache as _reach_cfg_cache
 from .predicates.tree import (
+    _branch_tree_builder,
     _build_chain_bindings,
     _build_subtree_from_gate,
     _helper_engine_cache,
@@ -135,26 +136,54 @@ def _guard_trees(unit, site, chain, entry, provenance, gates):
         if reaches_true == reaches_false:
             continue
         condition = next((ir.value for ir in node.irs if isinstance(ir, Condition)), None)
-        gate = RevertGate(
-            kind="if_revert",
-            condition_value=condition,
-            polarity="allowed_when_true" if reaches_true else "allowed_when_false",
-            node=node,
-            containing_function=unit,
-            call_chain=list(chain),
-            expression_text=str(condition),
-            basis=["effect_control_dependency"],
-        )
+        # The site runs only where this branch goes its way: a reach condition, read like any other.
         tree = (
-            _lower(gate, provenance, entry, ("dominator", id(node), gate.polarity, _chain_key(chain), id(provenance)))
+            _path_condition(unit, node, condition, reaches_true, chain, entry, provenance)
             if condition is not None
             else None
         )
-        out.append(tree or unknown("effect_branch_not_lowered"))
+        out.append(tree or _reach_unknown("effect_branch_not_lowered", str(condition)))
     conditional = _conditional_prefix(unit, site, chain, entry, provenance, gates)
     if conditional is not None:
         out.append(conditional)
     return out
+
+
+def _path_condition(unit, node, value, positive, chain, entry, provenance):
+    """A branch outcome on one path to a site, or ``None`` when it can't hold. The guards on the site's other paths
+    aren't reached under it, so it is a reach condition: written-before reads and all.
+    """
+    cache = _lowered_cache.get()
+    key = ("path", id(node), positive, _chain_key(chain), id(provenance))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    _, frame_prov, frame = _build_chain_bindings(list(chain), unit, entry, top_prov=provenance)
+    if frame is not unit or frame_prov is None:
+        tree = _reach_unknown("effect_branch_not_lowered", str(value))
+    else:
+        tree = _branch_tree_builder(unit, frame_prov, entry, list(chain))(node, value, positive)
+        if tree is not None:
+            tree = deepcopy(tree)
+            gate = RevertGate(
+                kind="if_revert",
+                condition_value=value,
+                polarity="allowed_when_true" if positive else "allowed_when_false",
+                node=node,
+                containing_function=unit,
+                call_chain=list(chain),
+                expression_text=str(value),
+                basis=["effect_path_condition"],
+            )
+            _stamp_gate_scope(tree, gate, entry)
+    if cache is not None:
+        cache[key] = ((node, provenance, entry), tree)
+    return tree
+
+
+def _reach_unknown(reason, expression):
+    leaf = _unsupported_leaf(reason, expression)
+    mark_reach_condition(leaf)
+    return make_leaf_node(leaf)
 
 
 def _authorization_leaves(tree):
@@ -451,29 +480,11 @@ def _conditional_prefix(unit, site, chain, entry, provenance, gates):
                 state = positive == orientation
                 if key is not None and key in literals and literals[key] != state:
                     continue
-                gate = RevertGate(
-                    kind="if_revert",
-                    condition_value=value,
-                    polarity="allowed_when_true" if positive else "allowed_when_false",
-                    node=node,
-                    containing_function=unit,
-                    call_chain=list(chain),
-                    expression_text=str(value),
-                    basis=["effect_path_condition"],
-                )
-                tree = _lower(
-                    gate, provenance, entry, ("path", id(node), gate.polarity, _chain_key(chain), id(provenance))
-                )
-                if tree is not None and predicate_truth(tree) is False:
+                tree = _path_condition(unit, node, value, positive, chain, entry, provenance)
+                if tree is None or predicate_truth(tree) is False:
                     continue
-                if key is None and (tree is None or predicate_truth(tree) is not True):
-                    tree = make_and_node(
-                        [tree or unknown("effect_branch_not_lowered"), unknown("effect_condition_value_unresolved")]
-                    )
                 next_literals = {**literals, **({key: state} if key is not None else {})}
-                pending.append(
-                    (branch, [*current, tree or unknown("effect_branch_not_lowered")], next_literals, visited | {node})
-                )
+                pending.append((branch, [*current, tree], next_literals, visited | {node}))
         else:
             pending.extend((son, current, literals, visited | {node}) for son in node.sons if _reachable(son, site))
     if not paths:
