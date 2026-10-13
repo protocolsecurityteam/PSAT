@@ -19,7 +19,6 @@ from db.queue import (
     DEFAULT_JOB_LEASE_TTL_S,
     complete_job,
     count_analysis_children,
-    create_job,
     find_existing_job_for_address,
     is_known_proxy,
     store_artifact,
@@ -330,7 +329,7 @@ class SelectionWorker(BaseWorker):
             if not chain_enabled(chain):
                 _drop(entry, "chain_not_enabled")
                 continue
-            existing = find_existing_job_for_address(session, addr, chain=chain)
+            existing = find_existing_job_for_address(session, addr, chain=chain, parent_job=job)
             if existing is not None:
                 if not is_known_proxy(session, addr, chain=chain):
                     _drop(entry, "existing_job", existing_job_id=str(existing.id))
@@ -376,7 +375,14 @@ class SelectionWorker(BaseWorker):
             }
             if company:
                 child_request["company"] = company
-            child_job = create_job(session, child_request)
+            from db.queue.jobs import create_discovery_child
+
+            if force:
+                child_request["force"] = True
+            child_job, created = create_discovery_child(session, job, child_request)
+            if not created:
+                _drop(entry, "existing_scoped_job", existing_job_id=str(child_job.id))
+                continue
             child_ids.append(
                 {
                     "job_id": str(child_job.id),

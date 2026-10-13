@@ -23,6 +23,32 @@ def _stable_etherscan_response_mock(payload: dict):
 
 
 @pytest.mark.parametrize(
+    "payload,absence",
+    [
+        ({"status": "1", "result": [{"SourceCode": ""}]}, True),
+        ({"status": "0", "result": "rate limit"}, False),
+        ({"status": "1", "result": [{}]}, False),
+        ({"result": [{"SourceCode": ""}]}, False),
+    ],
+)
+def test_only_explicit_successful_empty_source_is_an_absence_observation(monkeypatch, payload, absence):
+    monkeypatch.setattr(etherscan, "get", lambda *a, **k: payload)
+    with pytest.raises(RuntimeError) as caught:
+        etherscan.get_source("0x" + "11" * 20, chain_id=1)
+    assert isinstance(caught.value, etherscan.VerifiedSourceUnavailable) is absence
+
+
+def test_source_can_become_verified_without_changing_code(monkeypatch):
+    replies = iter(
+        [{"status": "1", "result": [{"SourceCode": ""}]}, {"status": "1", "result": [{"SourceCode": "contract C {}"}]}]
+    )
+    monkeypatch.setattr(etherscan, "get", lambda *a, **k: next(replies))
+    with pytest.raises(etherscan.VerifiedSourceUnavailable):
+        etherscan.get_source("0x" + "11" * 20, chain_id=1)
+    assert etherscan.get_source("0x" + "11" * 20, chain_id=1)["SourceCode"]
+
+
+@pytest.mark.parametrize(
     ("params_a", "params_b", "equal"),
     [
         pytest.param(

@@ -52,11 +52,11 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         198: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
-        1187: "Boot-time sweep failure; runs before any job context exists.",
+        1198: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # The reanalysis completed before the notifier; recording would mark it degraded.
-        1052: "Notifier side-effect; reanalysis already completed before this fired.",
+        1107: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # A resource side-effect, not a degraded verdict.

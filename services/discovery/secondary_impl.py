@@ -149,11 +149,10 @@ def queue_secondary_impl_jobs(
     created: list[Any] = []
     for addr in secondary_addrs:
         addr_lc = addr.lower()
-        if force:
-            # Serializes reconcile-then-insert against concurrent workers.
-            lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{addr_lc}"
-            lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
-            session.execute(sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
+        # Serializes reconcile-then-insert against concurrent workers.
+        lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{addr_lc}"
+        lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
+        session.execute(sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
         decision = reconcile_impl_job_for_proxy(
             session,
@@ -162,10 +161,12 @@ def queue_secondary_impl_jobs(
             proxy_type=proxy_type,
             chain=chain,
             root_job_id=root_job_id if force else None,
+            parent_job=parent_job,
             discovery_relationship="secondary_implementation",
         )
         if decision in ("skip", "backpatched"):
             logger.info("secondary impl %s -> %s (proxy %s)", addr_lc, decision, proxy_lc)
+            session.commit()  # release this implementation lock before taking another
             continue
         child_request: dict[str, Any] = {
             "address": addr_lc,

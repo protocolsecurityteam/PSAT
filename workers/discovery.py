@@ -978,6 +978,13 @@ class DiscoveryWorker(BaseWorker):
         address = job.address
         if address is None:
             raise ValueError("Address job missing address")
+        from db.queue.source_failures import SOURCE_ABSENCE
+
+        if SOURCE_ABSENCE in (job.request or {}):
+            # An explicit retry performs a new source check; a later unrelated failure
+            # must not inherit the previous attempt's absence observation.
+            job.request = {key: value for key, value in (job.request or {}).items() if key != SOURCE_ABSENCE}
+            session.commit()
 
         # Reuse cached static data from a completed job on the same chain; ``force`` bypasses it (see
         # AnalyzeRequest.force).
@@ -1041,6 +1048,10 @@ class DiscoveryWorker(BaseWorker):
             )
         result_or_exc = fan_out["fetch"]
         if isinstance(result_or_exc, BaseException):
+            if isinstance(result_or_exc, etherscan.VerifiedSourceUnavailable):
+                from db.queue.source_failures import record_source_absence
+
+                record_source_absence(session, job, fetch_chain_id)
             raise result_or_exc
         result = cast(dict, result_or_exc)
 

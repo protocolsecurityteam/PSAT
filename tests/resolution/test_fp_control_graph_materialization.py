@@ -214,13 +214,13 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
     assert ledger["out_of_population"] == [{"address": principal, "reason": "not_analyzable_type"}]
 
     calls: list[Any] = []
-    real_create_job = __import__("db.queue", fromlist=["create_job"]).create_job
+    from db.queue.jobs import create_discovery_child as real_create_job
 
     def counting_create_job(*args, **kwargs):
         calls.append(args)
         return real_create_job(*args, **kwargs)
 
-    monkeypatch.setattr("services.discovery.perimeter.create_job", counting_create_job)
+    monkeypatch.setattr("db.queue.jobs.create_discovery_child", counting_create_job)
 
     job = Job(
         stage=JobStage.policy,

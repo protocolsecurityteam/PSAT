@@ -1034,6 +1034,15 @@ def enumerate_mapping_values_sync(
     return result
 
 
+def finite_value_predicate(predicate: dict[str, Any]) -> bool:
+    """Enumeration cannot answer a predicate accepting unwritten (zero-valued) keys.
+
+    This is a semantic precondition, independent of index warmth or how many logs exist.
+    An unevaluable predicate also fails closed before any history scan.
+    """
+    return _value_predicate_passes(_ZERO_WORD, predicate) is False
+
+
 def filter_value_entries(
     entries: list[EnumeratedKeyValue],
     predicate: dict[str, Any],
@@ -1045,7 +1054,7 @@ def filter_value_entries(
     evaluated is ``None`` too. Empty means no written key satisfies it; callers mark it lower_bound when the scan was
     incomplete.
     """
-    if _value_predicate_passes(_ZERO_WORD, predicate) is not False:
+    if not finite_value_predicate(predicate):
         return None
     out: list[str] = []
     for entry in entries:

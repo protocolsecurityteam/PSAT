@@ -37,7 +37,7 @@ from services.clients.rpc import (
 from services.monitoring.restaking_reads import decode_word as _decode_word
 from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 from utils.evm import EIP1967_IMPL_SLOT, SAFE_GUARD_SLOT, SAFE_MODULES_HEAD_SLOT
-from utils.logging import record_degraded
+from utils.logging import record_degraded, record_stage_metric, stage_metrics_var
 from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
@@ -45,9 +45,9 @@ logger = logging.getLogger(__name__)
 # Distinguishes "function absent" (None) from "RPC raised"; caching the latter would cement misclassification.
 _PROBE_ERROR = object()
 
-# Keyed on (rpc_url, address, block_tag); error results aren't cached. 'latest' entries with mutable details (Safe
-# owners, timelock delay) use a short TTL.
-_CLASSIFY_CACHE: dict[tuple[str, str, str], tuple[ResolvedControllerType, dict[str, object], float]] = {}
+# Keyed on (rpc_url, chain_id, address, block_tag); errors aren't cached. Mutable 'latest'
+# details (Safe owners, timelock delay) use a short TTL.
+_CLASSIFY_CACHE: dict[tuple[str, int | None, str, str], tuple[ResolvedControllerType, dict[str, object], float]] = {}
 _CLASSIFY_CACHE_LOCK = threading.Lock()
 _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
@@ -228,7 +228,7 @@ def classify_resolved_address_with_status(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
 ) -> tuple[ResolvedControllerType, dict[str, object], bool]:
     normalized = _normalize_hex(address)
-    cache_key = (rpc_url, normalized, block_tag)
+    cache_key = (rpc_url, chain_id, normalized, block_tag)
     now = time.monotonic()
 
     with _CLASSIFY_CACHE_LOCK:
@@ -236,8 +236,14 @@ def classify_resolved_address_with_status(
         if cached is not None:
             kind, cached_details, inserted_at = cached
             if now - inserted_at < _classify_ttl(block_tag, cached_details):
+                metrics = stage_metrics_var.get()
+                if metrics is not None:
+                    record_stage_metric("classification_cache_hits", metrics.get("classification_cache_hits", 0) + 1)
                 return kind, copy.deepcopy(cached_details), True
             del _CLASSIFY_CACHE[cache_key]
+        metrics = stage_metrics_var.get()
+        if metrics is not None:
+            record_stage_metric("classification_probes", metrics.get("classification_probes", 0) + 1)
 
     if _CLASSIFY_BATCH_ENABLED:
         kind, details, had_error = _classify_uncached_batched(rpc_url, normalized, block_tag, chain_id=chain_id)

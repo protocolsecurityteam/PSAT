@@ -243,7 +243,7 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
     from db.models import JobStatus
 
     # Still in flight, so it stands for the current analyzer.
-    existing_job = SimpleNamespace(id="existing-job-id", status=JobStatus.queued)
+    existing_job = SimpleNamespace(id="existing-job-id", status=JobStatus.queued, request={})
     session.execute.return_value.scalar_one_or_none.side_effect = [
         None,  # Contract table lookup (no row)
         existing_job,  # impl: same-proxy job exists -> "skip" (one query)

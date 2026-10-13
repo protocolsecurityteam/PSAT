@@ -27,6 +27,12 @@ from utils.scoring_status import (
 logger = logging.getLogger("services.scoring.planes")
 
 
+def load_effects_coverage(session: Session, protocol_id: int) -> dict[str, Any]:
+    from services.effects.completeness import effects_coverage
+
+    return effects_coverage(session, protocol_id)
+
+
 # Reasons per relation; the published set comes from the database plus every relation the graph writer can emit, so
 # unclassified relations are still published with counts.
 UNCONSUMED_REACH_REASONS: dict[str, str] = {

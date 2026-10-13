@@ -368,6 +368,7 @@ from services.scoring.planes.provenance import (
 from services.scoring.planes.provenance import (
     load_audit_posture as load_audit_posture,
 )
+from services.scoring.planes.provenance import load_effects_coverage as load_effects_coverage
 from services.scoring.planes.provenance import (
     load_ledgers as load_ledgers,
 )

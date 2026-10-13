@@ -25,7 +25,7 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import create_job, get_artifact, store_artifact, usable_semantic_artifact
+from db.queue import get_artifact, store_artifact, usable_semantic_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
@@ -682,7 +682,9 @@ class ResolutionWorker(BaseWorker):
             lock_key = _stable_lock_key(chain, target_addr)
             session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
-            provider_lookup = find_dependency_provider_job_for_address(session, target_addr, chain=chain, eras=eras)
+            provider_lookup = find_dependency_provider_job_for_address(
+                session, target_addr, chain=chain, eras=eras, parent_job=job
+            )
             provider_job = provider_lookup.analysis_job if provider_lookup is not None else None
             dependency_provider_addr = (
                 (provider_job.address or target_addr).lower() if provider_job is not None else target_addr
@@ -696,7 +698,9 @@ class ResolutionWorker(BaseWorker):
                     "discovered_by": "resolution_dependency",
                     "chain": chain,
                 }
-                provider_job = create_job(session, provider_request, initial_stage=JobStage.discovery)
+                from db.queue.jobs import create_discovery_child
+
+                provider_job, _created = create_discovery_child(session, job, provider_request)
                 if parent_company:
                     provider_job.company = parent_company
                 if job.protocol_id:

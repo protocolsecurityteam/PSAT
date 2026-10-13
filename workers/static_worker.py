@@ -854,11 +854,10 @@ class StaticWorker(BaseWorker):
         from sqlalchemy import text as _sa_text
 
         for impl_addr, label in impl_entries:
-            if force:
-                # Serializes reconcile-then-insert across workers.
-                lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{impl_addr.lower()}"
-                lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
-                session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
+            # Serializes reconcile-then-insert across workers.
+            lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{impl_addr.lower()}"
+            lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
+            session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
             # A standalone job for this impl is the discovery-order race: convert it to proxy context. Same proxy is a
             # duplicate; a different proxy is a shared impl and gets its own per-deployment job.
@@ -869,6 +868,7 @@ class StaticWorker(BaseWorker):
                 proxy_type=proxy_type,
                 chain=chain,
                 root_job_id=root_job_id if force else None,
+                parent_job=job,
             )
             if decision in ("skip", "backpatched"):
                 _redirect_proxy_policy_dependencies(
@@ -885,6 +885,7 @@ class StaticWorker(BaseWorker):
                     decision,
                     address,
                 )
+                session.commit()  # release this implementation lock before taking another
                 continue
 
             impl_name = f"{base_name}: ({label})"
@@ -916,6 +917,7 @@ class StaticWorker(BaseWorker):
                         "site": "static_impl",
                     },
                 )
+                session.commit()
                 continue
             if getattr(job, "protocol_id", None):
                 child_request["protocol_id"] = job.protocol_id

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
+import threading
 from collections.abc import Callable, Collection, Mapping
+from concurrent.futures import Future
 from typing import Any, cast
 
 from sqlalchemy import func, select
@@ -103,7 +106,7 @@ def _make_principal_type_resolver(
 
 
 def _make_terminal_controller_resolver(
-    rpc_url: str | None, *, chain_id: int | None = None
+    rpc_url: str | None, *, chain_id: int | None = None, block_tag: str = "latest"
 ) -> Callable[[str], list[dict[str, object]] | None] | None:
     """The ``address -> [controller-step, ...] | None`` resolver for the contract-principal terminal walk: reads
     ``owner()``/``authority()``/``admin()`` and classifies each, so ``resolve_terminal_principal`` can chain to a
@@ -113,22 +116,68 @@ def _make_terminal_controller_resolver(
     if not rpc_url:
         return None
 
-    def _resolve(address: str) -> list[dict[str, object]] | None:
-        controllers = read_contract_controllers(rpc_url, address, chain_id=chain_id)
+    # One resolver belongs to one label pass. Never persist these stateful observations or
+    # reuse them by implementation: different proxies can have different controllers.
+    pinned = block_tag.startswith("0x")
+    cache: dict[str, list[dict[str, object]]] = {}
+    in_flight: dict[str, Future] = {}
+    lock = threading.Lock()
+    stats = {"reads": 0, "hits": 0, "waits": 0}
+
+    def metric(key: str) -> None:
+        stats[key] += 1
+        record_stage_metric("label_controller_" + key, stats[key])
+
+    def _read(address: str) -> tuple[list[dict[str, object]] | None, bool]:
+        kwargs: dict[str, Any] = {"chain_id": chain_id}
+        if pinned:
+            kwargs["block_tag"] = block_tag
+        controllers = read_contract_controllers(rpc_url, address, **kwargs)
         if controllers is None:
             # A probe error: the plane set isn't known this round, reported as ``unknown_unfetched``.
-            return None
+            return None, False
         if not controllers:
             # Every getter answered and named nothing: reported as ``controllers_not_determined``. Distinct from
             # ``None``, but neither proves there's no controller.
-            return []
+            return [], True
         steps: list[dict[str, object]] = []
+        complete = True
         for owner in controllers:
-            resolved_type, details, _cacheable = classify_resolved_address_with_status(
-                rpc_url, owner, chain_id=chain_id
-            )
+            resolved_type, details, cacheable = classify_resolved_address_with_status(rpc_url, owner, **kwargs)
+            complete = complete and cacheable
             steps.append({"address": owner, "resolved_type": resolved_type, "details": details})
-        return steps
+        return steps, complete
+
+    def _resolve(address: str) -> list[dict[str, object]] | None:
+        key = address.lower()
+        if not pinned:
+            return _read(key)[0]
+        with lock:
+            if key in cache:
+                metric("hits")
+                return copy.deepcopy(cache[key])
+            pending = in_flight.get(key)
+            leader = pending is None
+            if pending is None:
+                pending = in_flight[key] = Future()
+                metric("reads")
+            else:
+                metric("waits")
+        if not leader:
+            return copy.deepcopy(pending.result())
+        try:
+            result, complete = _read(key)
+            with lock:
+                if complete and result is not None and len(cache) < 1024:
+                    cache[key] = copy.deepcopy(result)
+            pending.set_result(copy.deepcopy(result))
+            return result
+        except Exception as exc:
+            pending.set_exception(exc)
+            raise
+        finally:
+            with lock:
+                in_flight.pop(key, None)
 
     return _resolve
 
@@ -918,7 +967,13 @@ class PolicyWorker(BaseWorker):
                     load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
                 ),
                 # Contract principal to terminal Safe/EOA walk.
-                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
+                resolve_controllers=_make_terminal_controller_resolver(
+                    rpc_url,
+                    chain_id=_chain_id_for_job(job),
+                    block_tag=hex(control_snapshot["block_number"])
+                    if isinstance(control_snapshot.get("block_number"), int)
+                    else "latest",
+                ),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))
 

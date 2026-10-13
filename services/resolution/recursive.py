@@ -10,7 +10,9 @@ import tempfile
 import threading
 from collections import deque
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from typing_extensions import NotRequired
@@ -205,6 +207,16 @@ def _build_effective_permissions(
         return None
 
 
+@contextmanager
+def _recursive_phase(name: str):
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        _bump_stage_metric("recursive_" + name + "_ms", round((perf_counter() - started) * 1000))
+        _bump_stage_metric("recursive_" + name + "_calls")
+
+
 def _build_static_artifacts(
     effective_address: str,
     workspace_prefix: str,
@@ -216,14 +228,16 @@ def _build_static_artifacts(
     Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``. ``effects`` isn't returned: the policy stage
     reads the static worker's per-job artifact instead. Separate so the cross-process cache can call it as its builder.
     """
-    result = fetch(effective_address, chain_id=chain_id)
+    with _recursive_phase("source_fetch"):
+        result = fetch(effective_address, chain_id=chain_id)
     contract_name = str(result.get("ContractName") or "Contract")
     project_name = _workspace_name(contract_name, effective_address, workspace_prefix)
 
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
-        analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
+        with _recursive_phase("static_build"):
+            analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
     if analysis_reports_failure(analysis):
         # Raised so the cache records ``failed`` (rebuilt on the next request) and the node stays undetermined, rather
         # than a ready row built on failed semantics.
@@ -422,12 +436,13 @@ def _materialize_contract_artifacts(
         logger.debug("Recursive resolve: get_code_with_keccak failed for %s: %s", effective_address, exc)
 
     # ``materialize_or_wait``'s advisory lock ensures concurrent same-bytecode requests across processes build once.
-    contract_name, analysis, plan, predicate_trees = _materialize_with_cross_process_cache(
-        effective_address=effective_address,
-        bytecode_keccak=bytecode_keccak,
-        workspace_prefix=workspace_prefix,
-        chain=chain,
-    )
+    with _recursive_phase("materialization"):
+        contract_name, analysis, plan, predicate_trees = _materialize_with_cross_process_cache(
+            effective_address=effective_address,
+            bytecode_keccak=bytecode_keccak,
+            workspace_prefix=workspace_prefix,
+            chain=chain,
+        )
     # A row built for another address with the same bytecode has that address in the plan; restamp it.
     if isinstance(analysis.get("subject"), dict):
         analysis["subject"]["address"] = effective_address
@@ -435,7 +450,8 @@ def _materialize_contract_artifacts(
     if snapshot_address != effective_address:
         plan = {**plan, "contract_address": snapshot_address}
 
-    snapshot = build_control_snapshot(cast(Any, plan), rpc_url, chain_id=chain_id)
+    with _recursive_phase("snapshot"):
+        snapshot = build_control_snapshot(cast(Any, plan), rpc_url, chain_id=chain_id)
     effective_permissions = _build_effective_permissions(cast(dict, analysis), snapshot)
 
     return {

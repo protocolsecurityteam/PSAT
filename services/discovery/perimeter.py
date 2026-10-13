@@ -33,9 +33,8 @@ from db.models import (
     ContractMembershipWitness,
     ContractProbeAttempt,
     Job,
-    JobStage,
 )
-from db.queue import _mainnet_coalesced_chain, create_job, find_existing_job_for_address
+from db.queue import _mainnet_coalesced_chain, find_existing_job_for_address
 from services.clients.rpc import chain_id_for_chain_name
 from utils.chains import canonical_chain, chain_enabled
 from utils.logging import record_degraded
@@ -496,7 +495,7 @@ def queue_discovered_contracts(
             _out(addr, "not_contract_node")
             continue
         # Case-insensitive and chain-scoped.
-        if find_existing_job_for_address(session, addr, chain=chain_name) is not None:
+        if find_existing_job_for_address(session, addr, chain=chain_name, parent_job=job) is not None:
             _out(addr, "existing_job")
             continue
         # Defence in depth: children share the parent's chain, but a disabled chain must never spawn.
@@ -528,7 +527,12 @@ def queue_discovered_contracts(
             child_request["discovery_relationship"] = structural_rel
             child_request["parent_is_member"] = parent_is_member
 
-        child_job = create_job(session, child_request, initial_stage=JobStage.discovery)
+        from db.queue.jobs import create_discovery_child
+
+        child_job, created = create_discovery_child(session, job, child_request)
+        if not created:
+            _out(addr, "existing_scoped_job")
+            continue
         if parent_company:
             child_job.company = parent_company
         if job.protocol_id:

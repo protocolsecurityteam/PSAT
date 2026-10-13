@@ -173,6 +173,14 @@ def job_stands_for_current_analyzer(session: Session, job: Job, memo: dict[str, 
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
+    from .source_failures import SOURCE_ABSENCE, source_failure_active, unstructured_source_failure
+
+    if unstructured_source_failure(job):
+        return False
+
+    if job.status == JobStatus.failed_terminal and SOURCE_ABSENCE in (job.request or {}):
+        return source_failure_active(job)
+
     if job.status in (JobStatus.queued, JobStatus.processing, JobStatus.failed):
         return True
     era = proven_analysis_schema_version(session, job, memo)
@@ -429,11 +437,20 @@ def _existing_job_stmt(chain_scoped: bool, version: int, first_only: bool):
     return stmt.limit(1) if first_only else stmt
 
 
-def find_existing_job_for_address(session: Session, address: str, chain: str | None = None) -> Job | None:
+def find_existing_job_for_address(
+    session: Session,
+    address: str,
+    chain: str | None = None,
+    *,
+    parent_job: Job | None = None,
+    proxy_address: str | None = None,
+) -> Job | None:
     """A non-failed job for *address* (case-insensitive) that stands for the current analyzer
     (``job_stands_for_current_analyzer``), filtered by *chain* when given.
     """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
+
+    from .source_failures import source_failure_in_scope
 
     params: dict[str, Any] = {"address": address.lower()}
     if chain is not None:
@@ -443,14 +460,16 @@ def find_existing_job_for_address(session: Session, address: str, chain: str | N
     first = session.execute(_existing_job_stmt(scoped, ANALYSIS_SCHEMA_VERSION, True), params).scalar_one_or_none()
     if first is None:
         return None
-    if (
+    if source_failure_in_scope(first, parent_job, proxy_address) and (
         first.status in (JobStatus.queued, JobStatus.processing)
         or first.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
     ):
         return first
     eras: dict[str, int | None] = {}
     for candidate in session.execute(_existing_job_stmt(scoped, ANALYSIS_SCHEMA_VERSION, False), params).scalars():
-        if job_stands_for_current_analyzer(session, candidate, eras):
+        if source_failure_in_scope(candidate, parent_job, proxy_address) and job_stands_for_current_analyzer(
+            session, candidate, eras
+        ):
             return candidate
     return None
 

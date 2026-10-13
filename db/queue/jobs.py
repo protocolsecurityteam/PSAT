@@ -91,6 +91,46 @@ def create_job(
     return job
 
 
+def create_discovery_child(session: Session, parent: Job, request: dict[str, Any]) -> tuple[Job, bool]:
+    """Atomically reuse automatic children within a root/chain/deployment scope.
+
+    This does not change explicit submissions or retries, and a cached failure remains
+    failed, never successful analysis. The caller can report reuse without spending budget.
+    """
+    import hashlib
+
+    from .source_failures import root_id, source_failure_active
+
+    request = {**request, "root_job_id": root_id(parent), "protocol_id": parent.protocol_id}
+    address = str(request["address"]).lower()
+    chain_id = derive_job_chain_id(request.get("chain"), address)
+    proxy = str(request.get("proxy_address") or "").lower()
+    key = f"auto-discovery:{chain_id}:{address}:{proxy}:{root_id(parent)}:{parent.protocol_id}"
+    lock_key = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") & ((1 << 63) - 1)
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+    candidates = session.execute(
+        select(Job)
+        .where(
+            func.lower(Job.address) == address,
+            Job.chain_id == chain_id,
+            Job.protocol_id.is_not_distinct_from(parent.protocol_id),
+            Job.request["root_job_id"].astext == root_id(parent),
+            func.lower(func.coalesce(Job.request["proxy_address"].astext, "")) == proxy,
+            Job.request["effects_resume_work_id"].astext.is_(None),
+            Job.status.in_([JobStatus.queued, JobStatus.processing, JobStatus.failed, JobStatus.failed_terminal]),
+        )
+        .order_by(Job.created_at.desc())
+    ).scalars()
+    for candidate in candidates:
+        active = candidate.status in (JobStatus.queued, JobStatus.processing, JobStatus.failed)
+        if active or (
+            not request.get("force") and not (parent.request or {}).get("force") and source_failure_active(candidate)
+        ):
+            session.commit()  # release the enqueue lock on reuse too
+            return candidate, False
+    return create_job(session, request, initial_stage=JobStage.discovery), True
+
+
 def claim_job(
     session: Session,
     target_stage: JobStage,
@@ -336,6 +376,7 @@ def reconcile_impl_job_for_proxy(
     chain: str | None = None,
     root_job_id: str | None = None,
     discovery_relationship: str = "implementation",
+    parent_job: Job | None = None,
 ) -> str:
     """How to spawn or dedupe an impl job now known to sit behind ``proxy_addr``:
 
@@ -359,12 +400,20 @@ def reconcile_impl_job_for_proxy(
     shape = (chain is not None, root_job_id is not None, ANALYSIS_SCHEMA_VERSION)
     eras: dict[str, int | None] = {}
 
+    def stands(candidate: Job) -> bool:
+        from .source_failures import source_failure_in_scope
+
+        # A standalone source failure cannot acquire a proxy observation by backpatching.
+        return source_failure_in_scope(candidate, parent_job, proxy_lc) and job_stands_for_current_analyzer(
+            session, candidate, eras
+        )
+
     def _first_standing(kind: str) -> Job | None:
         first = session.execute(_impl_job_stmt(kind, *shape, first_only=True), params).scalar_one_or_none()
-        if first is None or job_stands_for_current_analyzer(session, first, eras):
+        if first is None or stands(first):
             return first
         for candidate in session.execute(_impl_job_stmt(kind, *shape, first_only=False), params).scalars():
-            if job_stands_for_current_analyzer(session, candidate, eras):
+            if stands(candidate):
                 return candidate
         return None
 
