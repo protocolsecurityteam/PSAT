@@ -319,32 +319,42 @@ def test_a_condition_required_false_is_published_as_it_must_hold():
     cap = _stated(_outcome(_compare("ne", delegatee, _ZERO_ADDRESS), False, "to != address(0)"))
     [condition] = cap["conditions"]
     zero = "0x" + "00" * 20
-    assert condition["description"] == f"holds with calldata delegatee={zero}: delegatee == address(0)"
+    stated = "delegatee == address(0) [written: to != address(0)]"
+    assert condition["description"] == f"holds with calldata delegatee={zero}: {stated}"
     [step] = cap["trace"]
-    assert step["expression"] == "delegatee == address(0)" and step["holds"] is True
+    assert step["expression"] == stated and step["holds"] is True
     assert step["calldata"] == {"delegatee": zero}
 
-    hook = {"op": "storage", "type": "address", "variable": "hook", "getter": _selector("hook()")}
-    unread = _stated(
-        _outcome(_compare("ne", {"op": "convert", "type": "address", "value": hook}, _ZERO_ADDRESS), False, "x")
-    )
-    assert _unread_text(unread) == "hook == address(0)"
-    flag = _storage("paused", "bool")
-    assert _unread_text(_stated(_outcome(flag, False, "paused"))) == "!paused"
-    assert _unread_text(_stated(_outcome(_compare("gt", flag, flag), False, "x"))) == "paused <= paused"
+    hook = {"op": "convert", "type": "address", "value": _storage("hook", "address")}
+    unread = _stated(_outcome(_compare("ne", hook, _ZERO_ADDRESS), False, "address(hook) != address(0)"))
+    assert _unread_text(unread) == "hook == address(0) [written: address(hook) != address(0)]"
+    paused = _storage("paused", "bool")
+    assert _unread_text(_stated(_outcome(paused, False, "paused"))) == "!paused [written: paused]"
+    assert _unread_text(_stated(_outcome(paused, True, "paused"))) == "paused"
 
 
 def test_a_negation_required_false_cancels_and_a_negated_connective_stays_whole():
+    from services.resolution.reach_reads import describe_reach
+
     flag = _storage("executorRequired", "bool")
     negated = {"op": "not", "type": "bool", "value": flag}
-    assert _unread_text(_stated(_outcome(negated, False, "!executorRequired"))) == "executorRequired"
-    assert _unread_text(_stated(_outcome(negated, True, "!executorRequired"))) == "!executorRequired"
     twice = {"op": "not", "type": "bool", "value": negated}
-    assert _unread_text(_stated(_outcome(twice, False, "!!executorRequired"))) == "!executorRequired"
     both = {"op": "and", "type": "bool", "left": flag, "right": _storage("paused", "bool")}
-    assert _unread_text(_stated(_outcome(both, False, "x"))) == "!(executorRequired && paused)"
     either = {"op": "or", "type": "bool", "left": both, "right": negated}
-    assert _unread_text(_stated(_outcome(either, True, "x"))) == "(executorRequired && paused) || !executorRequired"
+    a = _storage("a", "int256")
+    assert describe_reach(_stamp(negated, False)) == ("executorRequired", False)
+    assert describe_reach(_stamp(negated)) == ("!executorRequired", False)
+    assert describe_reach(_stamp(twice, False)) == ("!executorRequired", False)
+    assert describe_reach(_stamp(twice)) == ("executorRequired", False)
+    assert describe_reach(_stamp(both, False)) == ("!(executorRequired && paused)", False)
+    assert describe_reach(_stamp(either)) == ("(executorRequired && paused) || !executorRequired", True)
+    assert describe_reach(_stamp(either, False)) == ("!((executorRequired && paused) || !executorRequired)", False)
+    for op, flipped in (("lt", ">="), ("lte", ">"), ("gt", "<="), ("gte", "<"), ("eq", "!="), ("ne", "==")):
+        assert describe_reach(_stamp(_compare(op, a, _literal(-1, "int256")), False)) == (f"a {flipped} -1", False)
+    assert describe_reach(_stamp({"op": "mul", "type": "bool"})) is None
+    # OneSig's ``if (!canExecuteTransaction(msg.sender))``: reached past the executor check while the flag is off.
+    onesig = _stated(_beside_owner(_outcome(flag, False, "! canExecuteTransaction(msg.sender)")))
+    assert _unread_text(onesig) == "!executorRequired [written: ! canExecuteTransaction(msg.sender)]"
 
 
 def test_outcomes_under_a_connective_keep_it_and_an_unstated_outcome_says_so():
@@ -360,8 +370,22 @@ def test_outcomes_under_a_connective_keep_it_and_an_unstated_outcome_says_so():
             {"op": "OR", "children": [shared, _outcome(mode, True, "mode == 1")]},
         ],
     }
-    assert _unread_text(_stated(_beside_owner(tree))) == "a <= 5 && (!paused || mode == 1)"
+    assert _unread_text(_stated(_beside_owner(tree))) == (
+        "(a <= 5 [written: a > 5]) && ((!paused [written: paused]) || mode == 1)"
+    )
     unstated = _reach_leaf(_compare("gt", a, _literal(5)), "a > 5")
     del unstated["leaf"]["reach_read"]
     either = {"op": "AND", "children": [unstated, _outcome(paused, True, "paused")]}
     assert _unread_text(_stated(_beside_owner(either))) == "(a > 5 [required outcome not recorded]) && paused"
+
+
+def test_a_caller_pinned_to_the_contract_is_still_read_from_the_published_text():
+    from services.scoring.planes.conditions import _caller_self_pins
+
+    # The read names the entry point's parameter; the source names the callee's, which the pin reader matches on.
+    sender = {"op": "param", "type": "address", "index": 0, "name": "from"}
+    pinned = _compare("ne", sender, {"op": "self", "type": "address"})
+    cap = _stated(_outcome(pinned, False, "sender != address(this)"))
+    [condition] = cap["conditions"]
+    assert condition["description"].endswith(": from == address(this) [written: sender != address(this)]")
+    assert _caller_self_pins([condition]) == (condition["description"],)

@@ -242,14 +242,18 @@ def _reach_text(node: PredicateTree) -> tuple[str, bool]:
     if stamps and all(stamp == stamps[0] for stamp in stamps):
         described = describe_reach(stamps[0])
         if described is not None:
-            return described
+            written = list(dict.fromkeys(_source_texts(leaves)))
+            if not written or written == [described[0]]:
+                return described
+            # The source as written stays verbatim beside it: stored condition text is matched by its source names
+            # (``conditions._caller_self_pins``), which the read's names (an entry point's parameters) can differ from.
+            return f"{described[0]} [written: {' ; '.join(written)}]", True
     if node.get("op") == "LEAF":
-        leaf = node.get("leaf") or {}
-        text = leaf.get("expression")
-        if not text or text == leaf.get("unsupported_reason"):
-            return text or "", False
+        leaf = leaves[0] if leaves else {}
+        if not _source_texts([leaf]):
+            return leaf.get("expression") or "", False
         # The source text alone doesn't say which way the condition must go.
-        return f"{text} [required outcome not recorded]", True
+        return f"{leaf['expression']} [required outcome not recorded]", True
     parts: list[tuple[str, bool]] = []
     for child in node.get("children") or []:
         part = _reach_text(child)
@@ -259,6 +263,17 @@ def _reach_text(node: PredicateTree) -> tuple[str, bool]:
         return parts[0]
     joiner = " && " if node.get("op") == "AND" else " || "
     return joiner.join(f"({text})" if compound else text for text, compound in parts), len(parts) > 1
+
+
+def _source_texts(leaves: list[dict[str, Any]]) -> list[str]:
+    """The source conditions ``leaves`` were built from; an unsupported leaf's reason standing in for one isn't."""
+    return [
+        leaf["expression"]
+        for leaf in leaves
+        if isinstance(leaf.get("expression"), str)
+        and leaf["expression"]
+        and leaf["expression"] != leaf.get("unsupported_reason")
+    ]
 
 
 def _leaves(node: PredicateTree) -> list[dict[str, Any]]:
