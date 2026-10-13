@@ -274,3 +274,33 @@ def test_the_worker_signals_its_jobs_compute_when_the_lease_is_lost(monkeypatch)
     _Worker()._execute_job(MagicMock(), cast(Any, _make_job(lease_id=uuid.uuid4())))
     assert seen["set"] is True
     assert compute_cancel_var.get() is None
+
+
+def test_a_worker_that_exits_leaves_no_child_and_does_not_wait_on_one(tmp_path):
+    import subprocess
+    import sys
+
+    script = tmp_path / "worker.py"
+    script.write_text(
+        "import os\n"
+        "from services.compute_isolation import ComputeBudget, run_isolated\n"
+        "from tests.support import compute_children\n"
+        "if __name__ == '__main__':\n"
+        "    budget = ComputeBudget(1 << 30, 30)\n"
+        "    print(run_isolated(compute_children.report, 1, budget=budget, label='exit')['pid'], flush=True)\n"
+    )
+    repo = Path(__file__).resolve().parents[2]
+    done = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=repo,
+        env={**os.environ, "PSAT_COMPUTE_ISOLATION": "1", "PYTHONPATH": str(repo)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    child = int(done.stdout.strip().splitlines()[-1])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not _gone(child):
+        time.sleep(0.05)
+    assert _gone(child)

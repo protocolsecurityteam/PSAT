@@ -10,6 +10,7 @@ writes nothing to the database; it returns its result to the worker, which write
 
 from __future__ import annotations
 
+import atexit
 import contextvars
 import ctypes
 import importlib
@@ -305,7 +306,9 @@ class _Pool:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._idle: list[_Child] = []
+        self._live: set[int] = set()
         self._context: BaseContext | None = None
+        self._exit_hook = False
 
     def _ctx(self) -> BaseContext:
         if self._context is None:
@@ -327,6 +330,7 @@ class _Pool:
                 chosen = child
                 break
             for child in stale:
+                self._live.discard(child.pid)
                 child.discard()
             if chosen is not None:
                 return chosen
@@ -343,6 +347,11 @@ class _Pool:
             )
             process.start()
             child_end.close()
+            if not self._exit_hook:
+                # Before multiprocessing's own exit hook, which would wait forever on a child idling for its next job.
+                atexit.register(self.shutdown)
+                self._exit_hook = True
+            self._live.add(process.pid)
             return _Child(process, parent_end)
 
     def release(self, child: _Child) -> None:
@@ -350,17 +359,25 @@ class _Pool:
         retire_bytes = _env_number("PSAT_COMPUTE_RETIRE_RSS_MB", 1024) * 1024 * 1024
         if sample is None or sample[1] > retire_bytes:
             # A child that kept a large heap would carry it into every later job.
-            child.discard()
+            self.forget(child)
             return
         child.idle_since = time.monotonic()
         with self._lock:
             self._idle.append(child)
 
+    def forget(self, child: _Child) -> None:
+        with self._lock:
+            self._live.discard(child.pid)
+        child.discard()
+
     def shutdown(self) -> None:
         with self._lock:
             idle, self._idle = self._idle, []
+            live, self._live = self._live, set()
         for child in idle:
             child.discard()
+        for pid in live:
+            _kill_group(pid)
         from multiprocessing import forkserver
 
         stop = getattr(forkserver._forkserver, "_stop", None)
@@ -430,13 +447,13 @@ def run_isolated(
             if overrun is not None or lease_lost:
                 break
     except BaseException:
-        child.discard()
+        _pool.forget(child)
         raise
     if reply is None:
         if overrun is None and not lease_lost:
             child.process.join(5)
         exitcode = child.process.exitcode
-        child.discard()
+        _pool.forget(child)
         if overrun is not None:
             logger.warning(
                 "isolated compute %s exceeded its %s budget",
