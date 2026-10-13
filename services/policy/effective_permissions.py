@@ -27,6 +27,7 @@ from services.policy.capability_surface import (
     capability_surface_openness,
     capability_surface_status,
     project_capability_surface,
+    projection_scoped,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     _split_top_level,
@@ -590,6 +591,7 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+@projection_scoped
 def build_effective_permissions(
     target_analysis: Mapping[str, Any] | ContractAnalysis,
     *,

@@ -308,6 +308,23 @@ def resolve_contract_capabilities(
     ``ControllerValue`` lookup so other runs' rows don't leak in; without ``job_id`` it falls back to the chain's latest
     row with a warning. ``None`` when the chain can't be determined.
     """
+    from services.policy.capability_surface import projection_pass
+
+    with projection_pass():
+        return _resolve_contract_capabilities(
+            session, address=address, chain_id=chain_id, block=block, job_id=job_id, chain=chain
+        )
+
+
+def _resolve_contract_capabilities(
+    session: Session,
+    *,
+    address: str,
+    chain_id: int,
+    block: int | None,
+    job_id: Any,
+    chain: str | None,
+) -> dict[str, dict[str, Any]] | None:
     addr = address.lower()
     runtime_addr = addr
     # Every lookup below is chain-scoped: the given chain, else the job's, else ``chain_id``'s.
@@ -431,6 +448,8 @@ def resolve_contract_capabilities(
     function_trees = dict(artifact["trees"] or {})
     for signature in effect_scopes:
         function_trees.setdefault(signature, None)
+    from services.policy.capability_surface import bounded_capability
+
     for fn_signature, tree in function_trees.items():
         ctx = EvaluationContext(
             chain_id=chain_id,
@@ -475,7 +494,9 @@ def resolve_contract_capabilities(
             )
             if aggregate is not None:
                 cap = aggregate
-        cap_dict = capability_to_dict(cap)
+        cap_dict = bounded_capability(capability_to_dict(cap))
+        for record in scope_records:
+            record["capability"] = bounded_capability(record["capability"])
         if scope_records:
             cap_dict["effect_capabilities"] = scope_records
         if one_shot_enabled and rpc_url:

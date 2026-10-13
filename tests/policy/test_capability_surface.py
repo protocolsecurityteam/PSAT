@@ -28,8 +28,10 @@ def test_cofinite_projects_to_public_path_with_denylist_condition():
     assert surface.principal_rows == []
     assert surface.residual == []
     assert surface.authority_public is True
-    assert len(surface.public_paths) == 1
-    path = surface.public_paths[0]
+    paths = surface.public_path_list()
+    assert paths.incomplete_reason is None
+    assert len(paths.paths) == 1
+    path = paths.paths[0]
     # Exhaustive and un-enumerated exclusions differ.
     assert any(c["kind"] == "denylist" and "2 excluded, exhaustive" in c["description"] for c in path), path
 
@@ -42,7 +44,7 @@ def test_cofinite_carries_its_own_conditions_into_the_public_path():
     }
     surface = project_capability_surface(cap)
     assert capability_surface_status(cap, surface) == "public"
-    descriptions = {c.get("description") for path in surface.public_paths for c in path}
+    descriptions = {c.get("description") for path in surface.public_path_list().paths for c in path}
     assert "whenNotPaused" in descriptions
     assert any("denylist exclusion (0 known excluded" in (d or "") for d in descriptions)
 

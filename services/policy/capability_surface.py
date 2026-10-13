@@ -4,26 +4,52 @@ so DB and artifact paths don't drift.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import copy
+import functools
+import hashlib
+import itertools
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from services.resolution.capabilities import DEFERRED_MARKER, is_reach_not_determined
 from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS, earned_public_enabled
 from utils.scoring_status import OPENNESS_STATES, TRACE_STEP_ENUMERABLE_ROLE_STORE, TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
+# Work units (condition ids touched) one projection may spend; a capability over it publishes not_determined.
+PROJECTION_WORK_BUDGET = 20_000_000
+PROJECTION_BUDGET_EXCEEDED = "projection_budget_exceeded"
+# Paths an explicit public-path list may hold; openness and caller rows never read the list.
+PUBLIC_PATH_LIST_BUDGET = 256
+PUBLIC_PATH_LIST_BUDGET_EXCEEDED = "public_path_list_budget_exceeded"
+
+
+@dataclass
+class PublicPathList:
+    paths: list[list[dict[str, Any]]]
+    # ``None`` only when ``paths`` holds every public path.
+    incomplete_reason: str | None = None
+
 
 @dataclass
 class CapabilitySurface:
     principal_rows: list[dict[str, Any]] = field(default_factory=list)
-    public_paths: list[list[dict[str, Any]]] = field(default_factory=list)
     residual: list[dict[str, Any]] = field(default_factory=list)
     # A path whose callers aren't determined (an unread reach condition): it may be open, so the rows beside it are no
     # proof of a restriction.
     open_not_determined: bool = False
+    public_path_count: int = 0
+    # Set when the projection stopped at its work budget: neither the rows nor the paths are a finished answer.
+    not_determined_reason: str | None = None
+    _path_condition_ids: tuple[int, ...] = field(default=(), repr=False, compare=False)
+    _table: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
+    _paths: Any = field(default=None, repr=False, compare=False)
 
     @property
     def authority_public(self) -> bool:
-        return bool(self.public_paths)
+        return self.public_path_count > 0
 
     @property
     def conditions(self) -> list[dict[str, Any]]:
@@ -32,9 +58,17 @@ class CapabilitySurface:
             details = row.get("details")
             if isinstance(details, dict):
                 out.extend(_condition_dicts(details.get("conditions")))
-        for path in self.public_paths:
-            out.extend(path)
+        out.extend(copy.deepcopy(self._table[i]) for i in self._path_condition_ids)
         return _unique_conditions(out)
+
+    def public_path_list(self, budget: int = PUBLIC_PATH_LIST_BUDGET) -> PublicPathList:
+        """The public paths themselves, in expansion order, at most ``budget`` of them."""
+        if self._paths is None or not self.public_path_count:
+            return PublicPathList(paths=[])
+        expansion = itertools.islice(_enumerate_paths(self._paths), budget)
+        paths = [[copy.deepcopy(self._table[i]) for i in path] for path in expansion]
+        reason = PUBLIC_PATH_LIST_BUDGET_EXCEEDED if self.public_path_count > budget else None
+        return PublicPathList(paths=paths, incomplete_reason=reason)
 
 
 # Persisted beside ``authority_public``; see ``capability_surface_openness``.
@@ -53,6 +87,8 @@ def capability_surface_openness(cap_dict: dict[str, Any], surface: CapabilitySur
     Never raises. ``restricted`` means a restriction exists, not that these are all the callers (that's
     ``membership_quality``).
     """
+    if surface.not_determined_reason is not None:
+        return "not_determined"
     if surface.authority_public:
         return "open"
     if surface.open_not_determined:
@@ -262,6 +298,8 @@ def capability_role_grants(cap_dict: dict[str, Any]) -> list[dict[str, Any]] | N
 
 
 def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurface) -> str | None:
+    if surface.not_determined_reason is not None:
+        return "unsupported"
     if surface.authority_public:
         return "public"
     # Only with no caller rows: an AND with real callers beside an exact-empty bound side-condition keeps them (the Veda
@@ -273,100 +311,466 @@ def capability_surface_status(cap_dict: dict[str, Any], surface: CapabilitySurfa
     return None
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+_projection_memo: contextvars.ContextVar[dict[bytes, Any] | None] = contextvars.ContextVar(
+    "psat_projection_memo", default=None
+)
+
+
+@contextlib.contextmanager
+def projection_pass() -> Iterator[None]:
+    """Share projections by content for one pass; a nested pass reuses the outer one."""
+    if _projection_memo.get() is not None:
+        yield
+        return
+    token = _projection_memo.set({})
+    try:
+        yield
+    finally:
+        _projection_memo.reset(token)
+
+
+def projection_scoped(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    @functools.wraps(fn)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with projection_pass():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def project_capability_surface(
     cap_dict: dict[str, Any],
     *,
     safe_address_lookup: dict[str, str] | None = None,
     function_signature: str | None = None,
 ) -> CapabilitySurface:
-    surface = _project_node(
-        cap_dict,
-        safe_address_lookup=safe_address_lookup,
-        function_signature=function_signature,
-    )
-    surface.principal_rows = _dedupe_rows(surface.principal_rows)
-    surface.public_paths = [_unique_conditions(path) for path in surface.public_paths]
-    return surface
+    """Caller rows, public paths and residual checks of one capability, computed on the tree in one bottom-up pass.
 
-
-def _project_node(
-    cap_dict: dict[str, Any],
-    *,
-    safe_address_lookup: dict[str, str] | None,
-    function_signature: str | None,
-) -> CapabilitySurface:
-    kind = cap_dict.get("kind")
-    node_conditions = _condition_dicts(cap_dict.get("conditions"))
-
-    if is_reach_not_determined(cap_dict):
-        return CapabilitySurface(residual=[dict(cap_dict)], open_not_determined=True)
-    if kind == "finite_set":
-        return CapabilitySurface(principal_rows=_rows_for_finite_set(cap_dict, node_conditions))
-    if kind == "threshold_group":
+    Equal to expanding the tree into its paths (an AND's paths are the products of its children's) and merging rows
+    by ``(address, origin, principal_type)``, without materializing the product.
+    """
+    memo = _projection_memo.get()
+    key = None
+    result = None
+    if memo is not None:
+        key = _projection_key(cap_dict, safe_address_lookup, function_signature)
+        result = memo.get(key)
+    if result is None:
+        projector = _Projector(safe_address_lookup=safe_address_lookup, function_signature=function_signature)
+        try:
+            summary: _Summary | None = projector.node(cap_dict)
+        except _ProjectionBudgetExceeded:
+            summary = None
+        result = (summary, projector.table)
+        if memo is not None and key is not None:
+            memo[key] = result
+    summary, table = result
+    if summary is None:
         return CapabilitySurface(
-            principal_rows=_rows_for_threshold_group(
-                cap_dict,
-                conditions=node_conditions,
-                safe_address_lookup=safe_address_lookup,
-                function_signature=function_signature,
-            )
+            residual=[
+                {
+                    "kind": "unsupported",
+                    "unsupported_reason": PROJECTION_BUDGET_EXCEEDED,
+                    "confidence": "check_only",
+                }
+            ],
+            not_determined_reason=PROJECTION_BUDGET_EXCEEDED,
         )
-    if kind == "signature_witness":
-        return CapabilitySurface(principal_rows=_rows_for_signature_witness(cap_dict, node_conditions))
-    if kind == "conditional_universal":
-        return CapabilitySurface(public_paths=[node_conditions])
-    if kind == "OR":
-        surface = CapabilitySurface()
-        for child in _child_dicts(cap_dict):
-            child_surface = _project_node(
-                child,
-                safe_address_lookup=safe_address_lookup,
-                function_signature=function_signature,
+    return CapabilitySurface(
+        principal_rows=[acc.materialize(table) for acc in summary.rows.values()],
+        residual=list(summary.residual),
+        open_not_determined=summary.ond,
+        public_path_count=summary.count,
+        _path_condition_ids=summary.punion,
+        _table=table,
+        _paths=summary.pexpr,
+    )
+
+
+def bounded_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
+    """``cap_dict``, or the unsupported capability naming the budget its projection exceeded."""
+    surface = project_capability_surface(cap_dict)
+    if surface.not_determined_reason is None:
+        return cap_dict
+    return {"kind": "unsupported", "unsupported_reason": surface.not_determined_reason, "confidence": "check_only"}
+
+
+def _projection_key(cap_dict: Any, safe_address_lookup: dict[str, str] | None, function_signature: str | None) -> bytes:
+    # ``repr`` keeps types (a tuple of children isn't a list of them) and insertion order; a differently ordered equal
+    # dict only misses the memo.
+    material = repr((cap_dict, safe_address_lookup, function_signature, earned_public_enabled()))
+    return hashlib.blake2b(material.encode(), digest_size=20).digest()
+
+
+class _ProjectionBudgetExceeded(Exception):
+    pass
+
+
+_RowKey = tuple[str, str, str]
+_Ids = tuple[int, ...]
+
+
+class _RowAcc:
+    """Every copy of one ``(address, origin, principal_type)`` row the expansion would hold, merged.
+
+    ``first`` is the first copy's conditions and ``union`` all copies' conditions, both in expansion order; ``multi`` is
+    whether there is more than one copy (a lone copy keeps its details as they are).
+    """
+
+    __slots__ = ("row", "first", "union", "multi", "touched", "trace", "has_quality", "quality")
+
+    def __init__(self, row, first, union, multi, touched, trace, has_quality, quality):
+        self.row: dict[str, Any] = row
+        self.first: _Ids = first
+        self.union: _Ids = union
+        self.multi: bool = multi
+        self.touched: bool = touched
+        self.trace: list[Any] = trace
+        self.has_quality: bool = has_quality
+        self.quality: Any = quality
+
+    def materialize(self, table: list[dict[str, Any]]) -> dict[str, Any]:
+        # A copy: the summary may be shared with later projections of the same content in this pass.
+        out = copy.deepcopy(self.row)
+        details = out["details"] = dict(out.get("details") or {})
+        if self.multi:
+            details["conditions"] = [copy.deepcopy(table[i]) for i in self.union]
+            if self.trace:
+                details["trace"] = copy.deepcopy(self.trace)
+            if self.has_quality:
+                details["membership_quality"] = self.quality
+        elif self.touched:
+            details["conditions"] = [copy.deepcopy(table[i]) for i in self.first]
+        return out
+
+
+class _Summary:
+    __slots__ = ("rows", "residual", "ond", "count", "pfirst", "punion", "pexpr")
+
+    def __init__(
+        self,
+        rows: dict[_RowKey, _RowAcc] | None = None,
+        residual: list[dict[str, Any]] | None = None,
+        ond: bool = False,
+        count: int = 0,
+        pfirst: _Ids = (),
+        punion: _Ids = (),
+        pexpr: Any = None,
+    ):
+        self.rows = rows if rows is not None else {}
+        self.residual = residual if residual is not None else []
+        # A path that may be open (``open_not_determined``).
+        self.ond = ond
+        # The number of public paths, the first one, and every condition on any of them, in expansion order.
+        self.count = count
+        self.pfirst = pfirst
+        self.punion = punion
+        # How to enumerate the paths: ("leaf", ids) | ("or", a, b) | ("and", a, b) | ("app", a, ids).
+        self.pexpr = pexpr
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.rows) or self.count > 0
+
+    def may_admit_anyone(self) -> bool:
+        return self.count > 0 or self.ond or not self.valid
+
+
+_EMPTY = _Summary()
+
+
+class _Projector:
+    """One projection: the interned condition table, the work spent, and per-node memo of authority blockers."""
+
+    def __init__(self, *, safe_address_lookup: dict[str, str] | None, function_signature: str | None):
+        self.safe_address_lookup = safe_address_lookup
+        self.function_signature = function_signature
+        self.index: dict[str, int] = {}
+        self.table: list[dict[str, Any]] = []
+        self.work = 0
+        self.earned_public = earned_public_enabled()
+        self.blockers: dict[int, tuple[dict[str, Any], bool]] = {}
+        self.not_read = self.intern([_CONDITION_NOT_READ])
+
+    def spend(self, units: int) -> None:
+        self.work += units
+        if self.work > PROJECTION_WORK_BUDGET:
+            raise _ProjectionBudgetExceeded
+
+    def intern(self, conditions: list[dict[str, Any]]) -> _Ids:
+        """Ids of ``_condition_dicts``-clean conditions, first occurrences only, keyed as ``_unique_conditions``."""
+        self.spend(len(conditions))
+        out: dict[int, None] = {}
+        for condition in conditions:
+            key = repr(sorted(condition.items()))
+            ident = self.index.get(key)
+            if ident is None:
+                ident = self.index[key] = len(self.table)
+                self.table.append(condition)
+            out[ident] = None
+        return tuple(out)
+
+    def unique(self, *parts: _Ids) -> _Ids:
+        self.spend(sum(len(part) for part in parts))
+        return tuple(dict.fromkeys(itertools.chain(*parts)))
+
+    def node(self, cap_dict: dict[str, Any]) -> _Summary:
+        self.spend(1)
+        kind = cap_dict.get("kind")
+        node_conditions = _condition_dicts(cap_dict.get("conditions"))
+
+        if is_reach_not_determined(cap_dict):
+            return _Summary(residual=[dict(cap_dict)], ond=True)
+        if kind == "finite_set":
+            return self.leaf_rows(_rows_for_finite_set(cap_dict, node_conditions))
+        if kind == "threshold_group":
+            return self.leaf_rows(
+                _rows_for_threshold_group(
+                    cap_dict,
+                    conditions=node_conditions,
+                    safe_address_lookup=self.safe_address_lookup,
+                    function_signature=self.function_signature,
+                )
             )
-            surface = _or_surface(surface, child_surface)
-        return _with_node_conditions(surface, node_conditions)
-    if kind == "AND":
-        # Start empty: ``anyone`` must be earned by a conditional_universal child, not minted by AND-ing checks.
-        surface = CapabilitySurface()
-        blocked = False
-        for child in _child_dicts(cap_dict):
-            child_surface = _project_node(
-                child,
-                safe_address_lookup=safe_address_lookup,
-                function_signature=function_signature,
+        if kind == "signature_witness":
+            return self.leaf_rows(_rows_for_signature_witness(cap_dict, node_conditions))
+        if kind == "conditional_universal":
+            return self.leaf_path(node_conditions)
+        if kind == "OR":
+            surface = _EMPTY
+            for child in _child_dicts(cap_dict):
+                surface = self.or_(surface, self.node(child))
+            return self.append(surface, node_conditions)
+        if kind == "AND":
+            # Start empty: ``anyone`` must be earned by a conditional_universal child, not minted by AND-ing checks.
+            surface = _EMPTY
+            blocked = False
+            for child in _child_dicts(cap_dict):
+                child_surface = self.node(child)
+                if self.earned_public and not child_surface.valid and self.is_blocker(child):
+                    blocked = True
+                surface = self.and_(surface, child_surface)
+            surface = self.append(surface, node_conditions)
+            if blocked and surface.count:
+                # An unresolved root-caller authorization AND-ed in means the function is gated with principals unknown;
+                # sibling public paths aren't earned. See ``_is_root_authority_blocker``.
+                surface = _Summary(rows=surface.rows, residual=surface.residual, ond=surface.ond)
+            return surface
+        if kind == "cofinite_blacklist":
+            # A cofinite is a public path with the denylist as a side-condition. Quality doesn't change openness but
+            # does change condition text: a ``lower_bound`` denylist isn't the complete exclusion set. Absent quality
+            # means a pre-fix row, rendered as unknown.
+            quality = cap_dict.get("blacklist_quality")
+            excluded = len(cap_dict.get("blacklist") or [])
+            if quality == "exact":
+                description = f"denylist exclusion ({excluded} excluded, exhaustive)"
+            elif quality is None:
+                description = f"denylist exclusion ({excluded} known excluded; completeness not recorded)"
+            else:
+                description = f"denylist exclusion (at least {excluded} excluded; not exhaustive)"
+            denial = {"kind": "denylist", "description": description}
+            return self.leaf_path(node_conditions + [denial])
+        return _Summary(residual=[dict(cap_dict)])
+
+    def is_blocker(self, cap_dict: dict[str, Any]) -> bool:
+        hit = self.blockers.get(id(cap_dict))
+        if hit is None:
+            hit = self.blockers[id(cap_dict)] = (cap_dict, _is_root_authority_blocker(cap_dict, self))
+        return hit[1]
+
+    def leaf_path(self, conditions: list[dict[str, Any]]) -> _Summary:
+        ids = self.intern(conditions)
+        return _Summary(count=1, pfirst=ids, punion=ids, pexpr=("leaf", ids))
+
+    def leaf_rows(self, rows: list[dict[str, Any]]) -> _Summary:
+        accs: dict[_RowKey, _RowAcc] = {}
+        for row in rows:
+            self.spend(1)
+            raw_details = row.get("details")
+            details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
+            first = self.intern(_condition_dicts(details.get("conditions")))
+            acc = _RowAcc(
+                row=row,
+                first=first,
+                union=first,
+                multi=False,
+                touched=False,
+                trace=list(details.get("trace") or []),
+                has_quality="membership_quality" in details,
+                quality=details.get("membership_quality"),
             )
-            if earned_public_enabled() and not _has_valid_path(child_surface) and _is_root_authority_blocker(child):
-                blocked = True
-            surface = _and_surface(surface, child_surface)
-        surface = _with_node_conditions(surface, node_conditions)
-        if blocked and surface.public_paths:
-            # An unresolved root-caller authorization AND-ed in means the function is gated with principals unknown;
-            # sibling public paths aren't earned. See ``_is_root_authority_blocker``.
-            surface = CapabilitySurface(
-                principal_rows=list(surface.principal_rows),
-                public_paths=[],
-                residual=list(surface.residual),
-                open_not_determined=surface.open_not_determined,
-            )
-        return surface
-    if kind == "cofinite_blacklist":
-        # A cofinite is a public path with the denylist as a side-condition. Quality doesn't change openness but does
-        # change condition text: a ``lower_bound`` denylist isn't the complete exclusion set. Absent quality means a
-        # pre-fix row, rendered as unknown.
-        quality = cap_dict.get("blacklist_quality")
-        excluded = len(cap_dict.get("blacklist") or [])
-        if quality == "exact":
-            description = f"denylist exclusion ({excluded} excluded, exhaustive)"
-        elif quality is None:
-            description = f"denylist exclusion ({excluded} known excluded; completeness not recorded)"
+            key = _row_key(row)
+            accs[key] = self.merge(accs[key], acc) if key in accs else acc
+        return _Summary(rows=accs)
+
+    def merge(self, earlier: _RowAcc, later: _RowAcc) -> _RowAcc:
+        trace = list(earlier.trace)
+        self.spend(len(trace) + len(later.trace))
+        trace.extend(item for item in later.trace if item not in trace)
+        return _RowAcc(
+            row=earlier.row,
+            first=earlier.first,
+            union=self.unique(earlier.union, later.union),
+            multi=True,
+            touched=earlier.touched,
+            trace=trace,
+            has_quality=earlier.has_quality or later.has_quality,
+            quality=merged_membership_quality(earlier.quality, later.quality),
+        )
+
+    def concat(self, *parts: dict[_RowKey, _RowAcc]) -> dict[_RowKey, _RowAcc]:
+        out: dict[_RowKey, _RowAcc] = {}
+        for part in parts:
+            for key, acc in part.items():
+                out[key] = self.merge(out[key], acc) if key in out else acc
+        return out
+
+    def with_conditions(self, acc: _RowAcc, ids: _Ids) -> _RowAcc:
+        """Every copy with ``ids`` appended."""
+        return _RowAcc(
+            row=acc.row,
+            first=self.unique(acc.first, ids),
+            union=self.unique(acc.first, ids, acc.union),
+            multi=acc.multi,
+            touched=True,
+            trace=acc.trace,
+            has_quality=acc.has_quality,
+            quality=acc.quality,
+        )
+
+    def crossed(self, acc: _RowAcc, paths: _Summary) -> _RowAcc:
+        """Every copy once per path of ``paths``, with that path's conditions appended."""
+        return _RowAcc(
+            row=acc.row,
+            first=self.unique(acc.first, paths.pfirst) if paths.pfirst else acc.first,
+            union=self.unique(acc.first, paths.punion, acc.union),
+            multi=acc.multi or paths.count > 1,
+            touched=acc.touched or bool(paths.pfirst),
+            trace=acc.trace,
+            has_quality=acc.has_quality,
+            quality=acc.quality,
+        )
+
+    def append(self, surface: _Summary, raw: list[dict[str, Any]]) -> _Summary:
+        """Node conditions narrow a real authorization; they never constitute one."""
+        if not raw:
+            return surface
+        ids = self.intern(raw)
+        rows = {key: self.with_conditions(acc, ids) for key, acc in surface.rows.items()}
+        if not surface.count:
+            return _Summary(rows=rows, residual=surface.residual, ond=surface.ond)
+        return _Summary(
+            rows=rows,
+            residual=surface.residual,
+            ond=surface.ond,
+            count=surface.count,
+            pfirst=self.unique(surface.pfirst, ids),
+            punion=self.unique(surface.pfirst, ids, surface.punion),
+            pexpr=("app", surface.pexpr, ids),
+        )
+
+    def or_(self, left: _Summary, right: _Summary) -> _Summary:
+        if left is _EMPTY:
+            return right
+        self.spend(len(left.residual) + len(right.residual))
+        if not right.count:
+            pfirst, punion, pexpr = left.pfirst, left.punion, left.pexpr
+        elif not left.count:
+            pfirst, punion, pexpr = right.pfirst, right.punion, right.pexpr
         else:
-            description = f"denylist exclusion (at least {excluded} excluded; not exhaustive)"
-        denial = {"kind": "denylist", "description": description}
-        return CapabilitySurface(public_paths=[node_conditions + [denial]])
-    return CapabilitySurface(residual=[dict(cap_dict)])
+            pfirst, punion, pexpr = left.pfirst, self.unique(left.punion, right.punion), ("or", left.pexpr, right.pexpr)
+        return _Summary(
+            rows=self.concat(left.rows, right.rows),
+            residual=left.residual + right.residual,
+            ond=left.ond or right.ond,
+            count=left.count + right.count,
+            pfirst=pfirst,
+            punion=punion,
+            pexpr=pexpr,
+        )
+
+    def and_(self, left: _Summary, right: _Summary) -> _Summary:
+        self.spend(len(left.residual) + len(right.residual))
+        if not left.valid and not right.valid:
+            surface = _Summary(residual=left.residual + right.residual)
+        elif not right.valid:
+            # The pure-check side is a side-condition, not grounds to drop the callers; collapsing to residual silently
+            # dropped the Veda Teller caller sets.
+            surface = self.with_side_checks(left, right.residual)
+        elif not left.valid:
+            surface = self.with_side_checks(right, left.residual)
+        else:
+            surface = self.product(left, right)
+        # A path that may be open stays one beside anything but a conjunct that admits only its callers.
+        surface.ond = (left.ond and right.may_admit_anyone()) or (right.ond and left.may_admit_anyone())
+        return surface
+
+    def with_side_checks(self, valid: _Summary, side_residual: list[dict[str, Any]]) -> _Summary:
+        """Keep ``valid``'s callers/public paths, folding the other branch in as side-conditions (and in ``residual``
+        for the API).
+        """
+        conditions = [cond for residual in side_residual for cond in _residual_as_conditions(residual)]
+        appended = self.append(valid, conditions)
+        return _Summary(
+            rows=appended.rows,
+            residual=valid.residual + side_residual,
+            count=appended.count,
+            pfirst=appended.pfirst,
+            punion=appended.punion,
+            pexpr=appended.pexpr,
+        )
+
+    def product(self, left: _Summary, right: _Summary) -> _Summary:
+        rows = self.concat(
+            {key: self.crossed(acc, right) for key, acc in left.rows.items()} if right.count else {},
+            {key: self.crossed(acc, left) for key, acc in right.rows.items()} if left.count else {},
+            # A side that may admit anyone passes the other side's callers through, as a public path would.
+            {key: self.with_conditions(acc, self.not_read) for key, acc in left.rows.items()} if right.ond else {},
+            {key: self.with_conditions(acc, self.not_read) for key, acc in right.rows.items()} if left.ond else {},
+        )
+        residual = left.residual + right.residual
+        if left.rows and right.rows:
+            residual.append({"kind": "unsupported", "unsupported_reason": "and_multiple_principal_shapes"})
+        if not (left.count and right.count):
+            return _Summary(rows=rows, residual=residual)
+        return _Summary(
+            rows=rows,
+            residual=residual,
+            count=left.count * right.count,
+            pfirst=self.unique(left.pfirst, right.pfirst),
+            punion=self.unique(left.pfirst, right.punion, left.punion),
+            pexpr=("and", left.pexpr, right.pexpr),
+        )
 
 
-def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
+def _row_key(row: dict[str, Any]) -> _RowKey:
+    return (
+        str(row.get("address") or "").lower(),
+        str(row.get("origin") or ""),
+        str(row.get("principal_type") or ""),
+    )
+
+
+def _enumerate_paths(expr: Any) -> Iterator[_Ids]:
+    kind = expr[0]
+    if kind == "leaf":
+        yield expr[1]
+    elif kind == "or":
+        yield from _enumerate_paths(expr[1])
+        yield from _enumerate_paths(expr[2])
+    elif kind == "and":
+        for left in _enumerate_paths(expr[1]):
+            for right in _enumerate_paths(expr[2]):
+                yield tuple(dict.fromkeys(left + right))
+    else:
+        for path in _enumerate_paths(expr[1]):
+            yield tuple(dict.fromkeys(path + expr[2]))
+
+
+def _is_root_authority_blocker(cap_dict: dict[str, Any], projector: _Projector | None = None) -> bool:
     """Is this an unresolved authorization on the root caller? Public must be earned, so such a check AND-ed with
     public side-conditions gates the function.
 
@@ -401,11 +805,15 @@ def _is_root_authority_blocker(cap_dict: dict[str, Any]) -> bool:
         basis = extra.get("basis") or []
         return any(tag in CALLER_GATE_BASIS_TAGS for tag in basis)
     if kind == "AND":
-        return any(_is_root_authority_blocker(child) for child in _child_dicts(cap_dict))
+        return any(_child_blocks(child, projector) for child in _child_dicts(cap_dict))
     if kind == "OR":
         children = _child_dicts(cap_dict)
-        return bool(children) and all(_is_root_authority_blocker(child) for child in children)
+        return bool(children) and all(_child_blocks(child, projector) for child in children)
     return False
+
+
+def _child_blocks(cap_dict: dict[str, Any], projector: _Projector | None) -> bool:
+    return projector.is_blocker(cap_dict) if projector is not None else _is_root_authority_blocker(cap_dict)
 
 
 # Both settle cold reads to deferral, so an exact-empty here is real, not under-resolution.
@@ -429,18 +837,6 @@ def _is_role_store_provably_empty(cap_dict: dict[str, Any]) -> bool:
     return any(isinstance(step, dict) and step.get("step") in _PROVABLY_EMPTY_TRACE_STEPS for step in trace)
 
 
-def _with_node_conditions(surface: CapabilitySurface, conditions: list[dict[str, Any]]) -> CapabilitySurface:
-    """Node conditions narrow a real authorization; they never constitute one."""
-    if not conditions:
-        return surface
-    return CapabilitySurface(
-        principal_rows=[_row_with_conditions(row, conditions) for row in surface.principal_rows],
-        public_paths=[_unique_conditions(path + conditions) for path in surface.public_paths],
-        residual=list(surface.residual),
-        open_not_determined=surface.open_not_determined,
-    )
-
-
 def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:
     kind = cap_dict.get("kind")
     if kind == "finite_set":
@@ -456,88 +852,7 @@ def _is_resolved_empty_capability(cap_dict: dict[str, Any]) -> bool:
     return False
 
 
-def _or_surface(left: CapabilitySurface, right: CapabilitySurface) -> CapabilitySurface:
-    return CapabilitySurface(
-        principal_rows=left.principal_rows + right.principal_rows,
-        public_paths=left.public_paths + right.public_paths,
-        residual=left.residual + right.residual,
-        open_not_determined=left.open_not_determined or right.open_not_determined,
-    )
-
-
-def _and_surface(left: CapabilitySurface, right: CapabilitySurface) -> CapabilitySurface:
-    surface = _and_paths(left, right)
-    # A path that may be open stays one beside anything but a conjunct that admits only its callers.
-    surface.open_not_determined = (left.open_not_determined and _may_admit_anyone(right)) or (
-        right.open_not_determined and _may_admit_anyone(left)
-    )
-    return surface
-
-
 _CONDITION_NOT_READ: dict[str, Any] = {"kind": "business", "description": "condition not read"}
-
-
-def _may_admit_anyone(surface: CapabilitySurface) -> bool:
-    return bool(surface.public_paths) or surface.open_not_determined or not _has_valid_path(surface)
-
-
-def _and_paths(left: CapabilitySurface, right: CapabilitySurface) -> CapabilitySurface:
-    left_valid = _has_valid_path(left)
-    right_valid = _has_valid_path(right)
-
-    if not left_valid and not right_valid:
-        return CapabilitySurface(residual=left.residual + right.residual)
-
-    # The pure-check side is a side-condition, not grounds to drop the callers; collapsing to residual silently dropped
-    # the Veda Teller caller sets.
-    if not right_valid:
-        return _surface_with_side_checks(left, right.residual)
-    if not left_valid:
-        return _surface_with_side_checks(right, left.residual)
-
-    public_paths: list[list[dict[str, Any]]] = []
-    for left_path in left.public_paths:
-        for right_path in right.public_paths:
-            public_paths.append(_unique_conditions(left_path + right_path))
-
-    rows: list[dict[str, Any]] = []
-    for row in left.principal_rows:
-        for path in right.public_paths:
-            rows.append(_row_with_conditions(row, path))
-    for row in right.principal_rows:
-        for path in left.public_paths:
-            rows.append(_row_with_conditions(row, path))
-    # A side that may admit anyone passes the other side's callers through, as a public path would.
-    if right.open_not_determined:
-        rows.extend(_row_with_conditions(row, [_CONDITION_NOT_READ]) for row in left.principal_rows)
-    if left.open_not_determined:
-        rows.extend(_row_with_conditions(row, [_CONDITION_NOT_READ]) for row in right.principal_rows)
-
-    residual = left.residual + right.residual
-    if left.principal_rows and right.principal_rows:
-        residual.append({"kind": "unsupported", "unsupported_reason": "and_multiple_principal_shapes"})
-
-    return CapabilitySurface(principal_rows=rows, public_paths=public_paths, residual=residual)
-
-
-def _surface_with_side_checks(valid: CapabilitySurface, side_residual: list[dict[str, Any]]) -> CapabilitySurface:
-    """Keep ``valid``'s callers/public paths, folding the other branch in as side-conditions (and in ``residual`` for
-    the API).
-    """
-    conditions = [cond for residual in side_residual for cond in _residual_as_conditions(residual)]
-    if not conditions:
-        return CapabilitySurface(
-            principal_rows=list(valid.principal_rows),
-            public_paths=list(valid.public_paths),
-            residual=list(valid.residual) + list(side_residual),
-        )
-    rows = [_row_with_conditions(row, conditions) for row in valid.principal_rows]
-    public_paths = [_unique_conditions(path + conditions) for path in valid.public_paths]
-    return CapabilitySurface(
-        principal_rows=rows,
-        public_paths=public_paths,
-        residual=list(valid.residual) + list(side_residual),
-    )
 
 
 def _residual_as_conditions(residual: dict[str, Any]) -> list[dict[str, Any]]:
@@ -558,10 +873,6 @@ def _residual_as_conditions(residual: dict[str, Any]) -> list[dict[str, Any]]:
     else:
         out.append({"kind": "business", "description": "external authorization check"})
     return out
-
-
-def _has_valid_path(surface: CapabilitySurface) -> bool:
-    return bool(surface.principal_rows or surface.public_paths)
 
 
 # Unrecognized labels (including 33 rows of the pre-split ``internal_accessor_convention``) aren't passed through: one
@@ -725,13 +1036,6 @@ def _rows_for_signature_witness(cap_dict: dict[str, Any], conditions: list[dict[
     return rows
 
 
-def _row_with_conditions(row: dict[str, Any], conditions: list[dict[str, Any]]) -> dict[str, Any]:
-    out = dict(row)
-    details = dict(out.get("details") or {})
-    out["details"] = _details_with_conditions(details, conditions)
-    return out
-
-
 def resolver_path(cap_dict: dict[str, Any]) -> list[str] | None:
     """Which resolver path produced the members.
 
@@ -769,41 +1073,6 @@ def merged_membership_quality(a: Any, b: Any) -> Any:
     if {a, b} <= {"exact", "lower_bound"}:
         return "lower_bound"
     return None
-
-
-def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for row in rows:
-        key = (
-            str(row.get("address") or "").lower(),
-            str(row.get("origin") or ""),
-            str(row.get("principal_type") or ""),
-        )
-        if key in by_key:
-            existing = by_key[key]
-            existing_details = dict(existing.get("details") or {})
-            row_details = row.get("details") if isinstance(row.get("details"), dict) else {}
-            if isinstance(row_details, dict):
-                existing_details["conditions"] = _unique_conditions(
-                    _condition_dicts(existing_details.get("conditions"))
-                    + _condition_dicts(row_details.get("conditions"))
-                )
-                trace = list(existing_details.get("trace") or [])
-                trace.extend(item for item in row_details.get("trace") or [] if item not in trace)
-                if trace:
-                    existing_details["trace"] = trace
-                if "membership_quality" in existing_details or "membership_quality" in row_details:
-                    existing_details["membership_quality"] = merged_membership_quality(
-                        existing_details.get("membership_quality"), row_details.get("membership_quality")
-                    )
-            existing["details"] = existing_details
-            continue
-        copied = dict(row)
-        copied["details"] = dict(copied.get("details") or {})
-        by_key[key] = copied
-        out.append(copied)
-    return out
 
 
 def _condition_dicts(raw: Any) -> list[dict[str, Any]]:
