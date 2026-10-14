@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import aliased
 
@@ -30,6 +31,7 @@ from services.aggregations.company_overview.entity_keys import _entity_key
 from services.aggregations.company_overview.jobs import eligible_company_names
 from services.audits.serializers import _audit_brief, _audit_report_to_dict
 from services.company_pages import cache_tag, enabled, prepared_or_pending
+from services.exports import EXPORT_FORMATS, build_report, export_filename, render_report
 
 from . import deps
 
@@ -441,6 +443,64 @@ def company_summary(company_name: str, request: Request) -> Response | dict:
             return build_company_summary(session, company_name)
         except CompanyNotFound:
             raise HTTPException(404, "Company not found") from None
+
+
+@router.get("/api/company/{company_name}/export", response_model=None)
+def company_export(company_name: str, fmt: str = Query("json", alias="format")) -> Response:
+    """The protocol's latest results as a downloadable file: overview, score and audit coverage.
+
+    Always built live, never from prepared pages: an export is a point-in-time record and is stamped as one.
+    """
+    started = time.monotonic()
+    fmt = fmt.lower()
+    if fmt not in EXPORT_FORMATS:
+        allowed = ", ".join(EXPORT_FORMATS)
+        raise HTTPException(status_code=400, detail=f"Unsupported export format; use one of: {allowed}")
+    generated_at = datetime.now(timezone.utc)
+    with deps.SessionLocal() as session:
+        try:
+            overview = build_company_overview(session, company_name)
+        except CompanyNotFound:
+            _log_endpoint("/api/company/{name}/export", company=company_name, started=started, outcome="not_found")
+            raise HTTPException(status_code=404, detail="Company not found")
+
+    # The protocol exists, so a score 404 means "not scored yet"; a 503 means the document couldn't be read.
+    score: Any = None
+    try:
+        score = company_score(company_name)
+        score_status = "available"
+    except HTTPException as exc:
+        if exc.status_code not in (404, 503):
+            raise
+        score_status = "not_scored" if exc.status_code == 404 else "unavailable"
+    try:
+        coverage: Any = company_audit_coverage(company_name)
+    except HTTPException:
+        coverage = None
+
+    report = build_report(
+        company=company_name,
+        overview=dict(overview),
+        score=score,
+        score_status=score_status,
+        audit_coverage=coverage,
+        generated_at=generated_at,
+    )
+    content = render_report(report, fmt)
+    _log_endpoint(
+        "/api/company/{name}/export",
+        company=company_name,
+        started=started,
+        outcome="success",
+        export_format=fmt,
+        size_bytes=len(content),
+    )
+    filename = export_filename(company_name, fmt, generated_at)
+    return Response(
+        content=content,
+        media_type=EXPORT_FORMATS[fmt],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/api/company/{company_name}/refresh", dependencies=[Depends(deps.require_admin)], status_code=202)

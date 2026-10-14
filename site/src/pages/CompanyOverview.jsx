@@ -9,6 +9,7 @@ import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
 import ScoreBand from "../score/ScoreBand.jsx";
 import StaleBanner from "../shared/StaleBanner.jsx";
+import ExportMenu from "./ExportMenu.jsx";
 
 const ProtocolSurface = lazy(() => import("../surface/ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../addresses/AddressesModal.jsx"));
@@ -186,6 +187,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? "—"} reports on file
             </p>
             <StaleBanner metas={Object.values(sectionMeta)} className="company-hero-subtitle" />
+            <ExportMenu companyName={companyName} />
           </div>
           <div className="company-hero-stats">
             {isAdmin ? (

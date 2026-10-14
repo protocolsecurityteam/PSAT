@@ -15,7 +15,8 @@ from collections import deque
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-_PATH = re.compile(r"/api/company/[^/]+(?:/functions)?/?$")
+# ``/export`` builds the full overview, then renders it.
+_PATH = re.compile(r"/api/company/[^/]+(?:/functions|/export)?/?$")
 
 
 class CompanyReadLimit:

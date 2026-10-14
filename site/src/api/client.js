@@ -52,7 +52,8 @@ export async function adminKeyHeaders(init) {
 
 async function request(path, options = {}) {
   // `silent: true` skips the sign-in prompt, for background polls.
-  const { silent, ...fetchOptions } = options;
+  // `asBlob: true` keeps the body binary (file downloads).
+  const { silent, asBlob, ...fetchOptions } = options;
   const response = await fetch(path, { ...fetchOptions, headers: await adminKeyHeaders(fetchOptions.headers) });
   if (response.status === 401 && !silent) {
     window.dispatchEvent(new Event("psat:auth-required"));
@@ -82,6 +83,7 @@ async function request(path, options = {}) {
     err.code = code;
     throw err;
   }
+  if (asBlob) return { data: await response.blob(), headers: response.headers };
   const type = response.headers.get("content-type") || "";
   const data = type.includes("application/json") ? await response.json() : await response.text();
   return { data, headers: response.headers };
@@ -89,6 +91,14 @@ async function request(path, options = {}) {
 
 export async function api(path, options = {}) {
   return (await request(path, options)).data;
+}
+
+// A file response, with the server's Content-Disposition filename when given.
+export async function apiDownload(path, options = {}) {
+  const { data, headers } = await request(path, { ...options, asBlob: true });
+  const disposition = headers.get("content-disposition") || "";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] || null;
+  return { blob: data, filename };
 }
 
 // Matches PAYLOAD_SCHEMA in services/company_pages.py.

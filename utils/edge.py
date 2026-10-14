@@ -40,6 +40,7 @@ PUBLIC_READS = (
     "/api/analyses/{run_name:path}",
     "/api/company/{company_name}/audits",
     "/api/company/{company_name}/audit_coverage",
+    "/api/company/{company_name}/export",
     "/api/company/{company_name}/score",
     "/api/company/{company_name}/semantic_capabilities",
     "/api/contract/{address}/capabilities",
