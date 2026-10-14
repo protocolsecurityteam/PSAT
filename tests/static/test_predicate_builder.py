@@ -72,6 +72,56 @@ def test_saturated_caller_guard_remains_unknown(tmp_path, monkeypatch, guard, he
 @pytest.mark.parametrize(
     "body",
     [
+        "if (!ready) return false; return who == owner;",
+        "if (ready) return isOwner(who); return false;",
+        "if (who == owner) return ready; return false;",
+    ],
+)
+def test_nested_boolean_wrappers_preserve_authorization(tmp_path, monkeypatch, body):
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
+    from services.static.contract_analysis_pipeline.predicates import tree as tree_module
+
+    source = (
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool public ready; address public owner; uint public value;
+            function direct() external { require(check(msg.sender)); value=1; }
+            function wrapped() external { require(wrapper(msg.sender)); value=1; }
+            function negatedDirect() external { require(!check(msg.sender)); value=1; }
+            function negatedWrapped() external { require(!wrapper(msg.sender)); value=1; }
+            function wrapper(address who) internal view returns(bool) { return second(who); }
+            function second(address who) internal view returns(bool) { return check(who); }
+            function isOwner(address who) internal view returns(bool) { return who == owner; }
+            function check(address who) internal view returns(bool) {
+    """
+        + body
+        + "}}"
+    )
+    sl = _compile(tmp_path, source)
+    owner = "0x" + "12" * 20
+    context = EvaluationContext(state_var_values={"owner": owner})
+    for name in ("direct", "wrapped"):
+        tree = build_predicate_tree(_function(sl, name))
+        cap = evaluate_tree(tree, context)
+        assert cap.kind == "finite_set" and cap.members == [owner]
+    for name in ("negatedDirect", "negatedWrapped"):
+        tree = build_predicate_tree(_function(sl, name))
+        cap_dict = capability_to_dict(evaluate_tree(tree, context))
+        assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined"
+    # If path reconstruction cannot represent a multi-return helper, its first
+    # literal return must not become a public side condition.
+    monkeypatch.setattr(tree_module, "_build_if_else_returns_or_children", lambda *args: [])
+    tree = build_predicate_tree(_function(sl, "wrapped"))
+    cap_dict = capability_to_dict(evaluate_tree(tree, context))
+    assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         "if (n == 0) return false; return who == owner && allowed(who, n - 1);",
         "return who == owner || (n > 0 && allowed(who, n - 1));",
     ],
@@ -224,8 +274,15 @@ def test_issue120_maker_dsauth_allow_chain_unchanged(tmp_path):
     assert tree.get("op") == "OR", tree
     leaves = _all_leaves(tree)
     kinds = sorted(le["kind"] for le in leaves)
-    assert kinds == ["equality", "equality", "external_bool"], leaves
-    assert sorted(le["operator"] for le in leaves) == ["eq", "eq", "truthy"], leaves
+    assert kinds == ["equality", "equality", "equality", "external_bool"], leaves
+    # The delegated branch also requires a nonzero authority. Its caller-independent
+    # branch guard must not disappear merely because the return is nonliteral.
+    assert any(
+        leaf.get("operator") == "ne"
+        and any(op.get("state_variable_name") == "authority" for op in leaf.get("operands", []))
+        for leaf in leaves
+    )
+    assert sorted(le["operator"] for le in leaves) == ["eq", "eq", "ne", "truthy"], leaves
     assert not any(le["operator"] == "falsy" for le in leaves), leaves
     assert not any(le["kind"] == "unsupported" for le in leaves), leaves
 

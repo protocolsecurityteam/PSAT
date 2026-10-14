@@ -217,7 +217,7 @@ def _guards_contain_opening(guards: list[PredicateTree]) -> bool:
 def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gate: RevertGate) -> list[PredicateTree]:
     """OR-children for a bool helper written as an if/else chain of returns: one child per non-``false`` return path.
 
-    For each ``return true``, AND the guards reaching it: a condition reachable only from ``IF.son_true`` is a positive
+    For each non-false return, AND the guards reaching it: a condition reachable only from ``IF.son_true`` is a positive
     guard. From ``son_false`` only: skip if the true branch is an allow (it's its own child), otherwise AND ``!cond``.
     Post-join or off-path IFs don't guard it.
 
@@ -228,7 +228,7 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
 
     A ``return true`` with no guard, or an unattributable guard beside a cofinite opening, becomes a fail-closed
     ``unsupported`` leaf, never an always-true one. ANDing every dominating deny's negation keeps multi-deny chains from
-    dropping a guard. A non-literal tail return is walked as its own subtree.
+    dropping a guard. A non-literal return is conjoined with its path guards, never treated as an unconditional tail.
     """
     from .tree import _build_subtree_from_value
 
@@ -293,62 +293,59 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
         rv_str = str(getattr(return_value, "value", return_value))
         if rv_str == "False":
             continue  # denied path
+        rid = id(node)
+        guards: list[PredicateTree] = []
+        unmodeled_guard = False
+
+        dom_ids = {id(d) for d in getattr(node, "dominators", None) or []}
+        # Ordinary return check-trees keep entrypoint revert guards in the separate
+        # gate tree; helper call sites conjoin them via their inlining pass.
+        for req_cond, req_node in require_guards if rv_str == "True" else []:
+            if id(req_node) not in dom_ids:
+                continue
+            guards.append(
+                _build_subtree_from_value(
+                    req_cond,
+                    sub_prov,
+                    _return_guard_gate(gate, req_cond, "allowed_when_true", req_node, callee),
+                    callee,
+                )
+            )
+        if rv_str == "True" and require_guards and not dom_ids:
+            # No dominators but require guards exist: can't rule out a dropped guard.
+            unmodeled_guard = True
+
+        for cond_value, t_ids, f_ids, t_is_allow, condition_node in if_facts:
+            t_reach = rid in t_ids
+            f_reach = rid in f_ids
+            if t_reach == f_reach:
+                continue  # both (post-join) or neither (off-path)
+            if f_reach and t_is_allow:
+                continue  # else of an allow-IF — OR-covered elsewhere
+            if cond_value is None:
+                # An unmodelable discriminating IF.
+                unmodeled_guard = True
+                continue
+            polarity: Polarity = "allowed_when_true" if t_reach else "allowed_when_false"
+            guards.append(
+                _build_subtree_from_value(
+                    cond_value,
+                    sub_prov,
+                    _return_guard_gate(gate, cond_value, polarity, condition_node, callee),
+                    callee,
+                )
+            )
+
+        # An unclassified call on the path may have leaked a guard (fails closed only with a cofinite opening).
+        if any(rid in reach for reach in unclassified_reach):
+            unmodeled_guard = True
+
         if rv_str == "True":
-            rid = id(node)
-            guards: list[PredicateTree] = []
-            unmodeled_guard = False
-
-            dom_ids = {id(d) for d in getattr(node, "dominators", None) or []}
-            for req_cond, req_node in require_guards:
-                if id(req_node) not in dom_ids:
-                    continue
-                guards.append(
-                    _build_subtree_from_value(
-                        req_cond,
-                        sub_prov,
-                        _return_guard_gate(gate, req_cond, "allowed_when_true", req_node, callee),
-                        callee,
-                    )
-                )
-            if require_guards and not dom_ids:
-                # No dominators but require guards exist: can't rule out a dropped guard.
-                unmodeled_guard = True
-
-            for cond_value, t_ids, f_ids, t_is_allow, condition_node in if_facts:
-                t_reach = rid in t_ids
-                f_reach = rid in f_ids
-                if t_reach == f_reach:
-                    continue  # both (post-join) or neither (off-path)
-                if f_reach and t_is_allow:
-                    continue  # else of an allow-IF — OR-covered elsewhere
-                if cond_value is None:
-                    # An unmodelable discriminating IF.
-                    unmodeled_guard = True
-                    continue
-                polarity: Polarity = "allowed_when_true" if t_reach else "allowed_when_false"
-                guards.append(
-                    _build_subtree_from_value(
-                        cond_value,
-                        sub_prov,
-                        _return_guard_gate(gate, cond_value, polarity, condition_node, callee),
-                        callee,
-                    )
-                )
-
-            # An unclassified call on the path may have leaked a guard (fails closed only with a cofinite opening).
-            if any(rid in reach for reach in unclassified_reach):
-                unmodeled_guard = True
-
             if not guards or (unmodeled_guard and _guards_contain_opening(guards)):
                 # No attributed guard, or an unattributable one with a cofinite opening: fail closed.
-                children.append(
-                    make_leaf_node(
-                        _unsupported_leaf(
-                            reason="unattributable_return_true",
-                            expression="literal true",
-                        )
-                    )
-                )
+                leaf = _unsupported_leaf("unattributable_return_true", "literal true")
+                leaf["authority_proof"] = {"state": "not_determined", "requirements": ["unattributable_return_true"]}
+                children.append(make_leaf_node(leaf))
             else:
                 children.append(make_and_node(guards))
             continue
@@ -362,7 +359,12 @@ def _build_if_else_returns_or_children(callee: Any, sub_prov: ProvenanceMap, gat
             expression_text=f"return {return_value}",
             basis=list(gate.basis),
         )
-        children.append(_build_subtree_from_value(return_value, sub_prov, branch_gate, callee))
+        guards.append(_build_subtree_from_value(return_value, sub_prov, branch_gate, callee))
+        if unmodeled_guard:
+            leaf = _unsupported_leaf("unattributable_return_path", gate.expression_text)
+            leaf["authority_proof"] = {"state": "not_determined", "requirements": ["unattributable_return_path"]}
+            guards.append(make_leaf_node(leaf))
+        children.append(make_and_node(guards))
     return children
 
 
@@ -415,11 +417,17 @@ def _resolve_internal_call_return(ir: Any, prov: ProvenanceMap) -> tuple[Any, Pr
 
 
 def _find_callee_return_value(callee: Any) -> Any | None:
-    """The first Return value in the callee (bool gate helpers usually have one)."""
+    """A representative return for locating IR; multi-return helpers require path lowering."""
+    values = _callee_return_values(callee)
+    return values[0] if values else None
+
+
+def _callee_return_values(callee: Any) -> list[Any]:
+    result = []
     for node in getattr(callee, "nodes", []) or []:
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if isinstance(ir, Return):
                 values = getattr(ir, "values", ()) or ()
                 if values:
-                    return values[0]
-    return None
+                    result.append(values[0])
+    return result

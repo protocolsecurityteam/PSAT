@@ -46,6 +46,7 @@ from .authority import _CALLER_SOURCES
 from .confidence import apply_confidence_to_tree
 from .control_flow import (
     _build_if_else_returns_or_children,
+    _callee_return_values,
     _detect_assembly_combinator_op,
     _resolve_internal_call_return,
 )
@@ -489,6 +490,8 @@ def _expand_internal_call_leaf(
     """A bool InternalCall condition (``if (!check(role, account)) revert``): recurse into the callee with bound
     parameters and classify its return, unfolding helpers deeper than the revert chain.
     """
+    if len(_callee_return_values(getattr(ir, "function", None))) > 1:
+        return _unmodeled_return_paths(gate)
     resolved = _resolve_internal_call_return(ir, prov)
     if resolved is None:
         return None
@@ -499,6 +502,12 @@ def _expand_internal_call_leaf(
         leaf = _build_truthy_leaf(return_value, sub_prov, gate)
         return _attach_call_site_arg_origins(leaf, ir, prov)
     return _classify_leaf_from_ir(inner, sub_prov, gate, callee)
+
+
+def _unmodeled_return_paths(gate: RevertGate) -> LeafPredicate:
+    leaf = _unsupported_leaf("internal_return_paths_unmodeled", gate.expression_text)
+    leaf["authority_proof"] = {"state": "not_determined", "requirements": ["internal_return_paths_unmodeled"]}
+    return leaf
 
 
 def _call_site_arg_origins(ir: Any, caller_prov: ProvenanceMap) -> set[Source]:
@@ -572,7 +581,16 @@ def _expand_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Rev
     callee, sub_prov, _return_value, inner = resolved
     op_name: str | None = None
     children: list[PredicateTree] = []
-    if isinstance(inner, Binary):
+    if len(_callee_return_values(callee)) > 1:
+        # The CFG walker describes true-return paths. Complementing its OR into
+        # an AND does not model false returns or invert every path condition.
+        if gate.polarity != "allowed_when_true":
+            return make_leaf_node(_unmodeled_return_paths(gate))
+        children = _build_if_else_returns_or_children(callee, sub_prov, gate)
+        if not children:
+            return make_leaf_node(_unmodeled_return_paths(gate))
+        op_name = "or"
+    elif isinstance(inner, Binary):
         op_name = _binary_op(getattr(inner, "type", None))
         if op_name not in ("and", "or"):
             return None
@@ -589,7 +607,10 @@ def _expand_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Rev
         inner_callee = getattr(inner, "function", None)
         asm_op = _detect_assembly_combinator_op(inner_callee) if inner_callee else None
         if asm_op is None:
-            return None
+            # A wrapper can return a helper with several paths. Keep the bound
+            # subtree and its mandatory guards instead of selecting its first return.
+            subtree = _build_subtree_from_value(_return_value, sub_prov, gate, callee)
+            return _attach_call_site_arg_origins_to_tree(subtree, ir, prov)
         op_name = asm_op
         call_args = list(getattr(inner, "arguments", []) or [])
         if not call_args:
