@@ -1033,7 +1033,7 @@ class StaticWorker(BaseWorker):
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
 
-        solc_version = _detect_solc_version(sources)
+        solc_version = _detect_solc_version(sources, meta.get("compiler_version"))
         src_dir = _detect_src_dir(sources)
         evm_version = sanitize_evm_version(build_settings.get("evm_version", "shanghai"))
         optimizer = str(bool(build_settings.get("optimization_used", True))).lower()

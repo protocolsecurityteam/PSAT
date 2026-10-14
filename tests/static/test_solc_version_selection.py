@@ -141,7 +141,8 @@ def test_discovery_scaffold_compiler_and_pragma_agree(tmp_path, pragma, solc, wr
         "SourceCode": "{" + json.dumps(bundle) + "}",
     }
     project = scaffold("0xabc", result, tmp_path / "proj")
-    assert _foundry_solc(project) == solc
+    expected = "0.8.21" if pragma == TELLER_PRAGMA else solc
+    assert _foundry_solc(project) == expected
     assert (project / "src/T.sol").read_text().splitlines()[0] == written
 
 
@@ -185,3 +186,31 @@ def test_selected_solc_compiles_relaxed_compound_pragma(tmp_path):
         path.write_text(content)
         proc = subprocess.run([solc, "--bin", str(path)], capture_output=True, text=True, timeout=120)
         assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("path", ["discovery", "static"])
+def test_verified_compiler_preserves_custom_error_require_syntax(tmp_path, path):
+    # The loose pragma permits old compilers which cannot parse this newer syntax.
+    source = (
+        "pragma solidity ^0.8.0; contract T { error Denied(); "
+        "function f(bool ok) external pure { require(ok, Denied()); } }"
+    )
+    project = tmp_path / "project"
+    if path == "discovery":
+        scaffold(
+            "0xabc", {"SourceCode": source, "ContractName": "T", "CompilerVersion": "v0.8.27+commit.40a35a09"}, project
+        )
+    else:
+        project.mkdir()
+        StaticWorker()._scaffold_project(
+            project, {"T.sol": source}, {"compiler_version": "v0.8.27+commit.40a35a09"}, {}, []
+        )
+    assert _foundry_solc(project) == "0.8.27"
+    solc = _installed_solc(_foundry_solc(project))
+    proc = subprocess.run([solc, "--bin", str(project / "T.sol")], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("preferred", ["v0.9.0+commit.abc", "nightly", '0.8.27"\nevm_version = "bad'])
+def test_incompatible_or_invalid_compiler_metadata_does_not_override_constraints(preferred):
+    assert detect_fetch_solc({"T.sol": "pragma solidity >=0.8.20 <0.8.25; contract T {}"}, preferred) == "0.8.24"

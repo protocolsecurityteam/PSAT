@@ -296,14 +296,21 @@ def _solidity_pragmas(sources: dict[str, str]) -> list[list[_Range]]:
     return pragmas
 
 
-def _detect_solc_version(sources: dict[str, str]) -> str:
+def _detect_solc_version(sources: dict[str, str], preferred_version: str | None = None) -> str:
     """One solc that satisfies every ``pragma solidity`` in the bundle as ``_relax_pragmas`` rewrites it.
 
-    Prefers the highest lower bound (of the newest ``||`` alternative), floored to ``_MIN_SOLC`` on its minor line.
+    Prefer a compatible verified compiler: a loose pragma can omit the minimum version
+    required by the syntax actually used. Otherwise use the highest lower bound (of the
+    newest ``||`` alternative), floored to ``_MIN_SOLC`` on its minor line.
     When a ceiling rules that out, the newest admissible version named by some bound is used; if nothing is admissible
     the preference stands and the compile reports the conflict.
     """
     pragmas = _solidity_pragmas(sources)
+    match = re.fullmatch(r"v?(\d+\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", preferred_version or "")
+    if match:
+        verified = _parse_version(match[1])
+        if all(any(r.admits(verified) for r in ranges) for ranges in pragmas):
+            return _format_version(verified)
     floor = _parse_version(_MIN_SOLC)
     lowers = []
     for ranges in pragmas:
@@ -357,7 +364,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     remappings = parse_remappings(result)
     bundle = parse_verification_bundle(result)
     language = "vyper" if is_vyper_result(result) else "solidity"
-    solc_version = _detect_solc_version(sources)
+    solc_version = _detect_solc_version(sources, result.get("CompilerVersion"))
     src_dir = _project_src_dir(sources)
     evm_version = sanitize_evm_version(result.get("EVMVersion", ""))
 
