@@ -12,7 +12,11 @@ from services.resolution.predicate_evaluator import (  # noqa: E402
     _bind_callee_parameters,
     evaluate_tree,
 )
-from services.static.contract_analysis_pipeline.predicate_types import PredicateTree  # noqa: E402
+from services.static.contract_analysis_pipeline.predicate_types import (  # noqa: E402
+    LeafPredicate,
+    PredicateTree,
+    SetDescriptor,
+)
 from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
     build_predicate_tree,
 )
@@ -637,3 +641,125 @@ def test_bound_view_acl_leaf_promotes_to_delegated_authority(tmp_path):
     bound_leaf = _leaves(bound)[0]
     assert bound_leaf["authority_role"] == "delegated_authority"
     assert bound_leaf["references_msg_sender"] is True
+
+
+@pytest.mark.parametrize("quality", ["exact", "lower_bound"])
+def test_authenticated_signer_registry_keeps_its_identity_dimension(monkeypatch, quality):
+    import services.resolution.predicate_evaluator.core as core
+    from services.policy.capability_surface import project_capability_surface
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    member = "0x" + "56" * 20
+    leaf = {
+        "kind": "external_bool",
+        "operator": "truthy",
+        "authority_role": "delegated_authority",
+        "operands": [{"source": "signature_recovery"}],
+        "set_descriptor": {"kind": "external_set", "callee_signature": "check(address)"},
+        "authority_proof": {"state": "proven", "kind": "recovered_signer_membership"},
+    }
+
+    def inline(bound_leaf, descriptor, ctx):
+        assert bound_leaf["operands"] == [{"source": "root_caller"}]
+        return CapabilityExpr.finite_set([member], quality=quality)
+
+    monkeypatch.setattr(core, "_maybe_inline_cross_contract_call", inline)
+    cap = core._evaluate_leaf(cast(LeafPredicate, leaf), EvaluationContext())
+    assert cap.kind == "signature_witness"
+    surface = project_capability_surface(capability_to_dict(cap))
+    assert not surface.authority_public
+    assert surface.principal_rows[0]["principal_type"] == "signature_witness"
+    assert surface.principal_rows[0]["details"]["membership_quality"] == quality
+    # Enumeration without a recovery/nonzero proof must never create callers.
+    leaf.pop("authority_proof")
+    unknown = core._evaluate_leaf(cast(LeafPredicate, leaf), EvaluationContext())
+    assert unknown.kind == "external_check_only"
+    assert not project_capability_surface(capability_to_dict(unknown)).principal_rows
+
+
+def test_inlined_boolean_checker_requires_guards_and_return(monkeypatch):
+    import db.queue as queue
+    import services.resolution.capability_resolver as resolver
+    import services.resolution.predicate_evaluator.core as core
+    from services.resolution.adapters import AdapterRegistry, CallFrame
+    from services.resolution.adapters import EvaluationContext as ResolverContext
+    from services.resolution.capabilities import CapabilityExpr
+
+    root, checker, member = ["0x" + byte * 20 for byte in ["11", "22", "33"]]
+    guard = {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "equality",
+            "operator": "eq",
+            "authority_role": "caller_authority",
+            "operands": [{"source": "msg_sender"}, {"source": "state_variable", "state_variable_name": "owner"}],
+        },
+    }
+    returned = {
+        "op": "LEAF",
+        "leaf": {
+            "kind": "membership",
+            "operator": "truthy",
+            "authority_role": "business",
+            "operands": [{"source": "parameter", "parameter_index": 0}],
+            "set_descriptor": {
+                "kind": "mapping_membership",
+                "storage_var": "members",
+                "key_sources": [{"source": "parameter", "parameter_index": 0}],
+            },
+        },
+    }
+    artifact = {
+        "schema_version": "semantic",
+        "trees": {"check(address)": guard},
+        "check_trees": {"check(address)": returned},
+    }
+
+    def lookup(*args, **kwargs):
+        assert kwargs["chain"] == "ethereum"
+        job = SimpleNamespace(id=1, address=checker)
+        return SimpleNamespace(analysis_job=job, runtime_job=job)
+
+    monkeypatch.setattr(resolver, "find_analysis_job_for_address", lookup)
+    monkeypatch.setattr(queue, "get_artifact", lambda *args: artifact)
+    monkeypatch.setattr(resolver, "_load_state_var_values", lambda *args, **kwargs: {"owner": root})
+
+    class Inventory:
+        @classmethod
+        def supports_external_check_only(cls):
+            return False
+
+        @classmethod
+        def matches(cls, descriptor, ctx):
+            return 100
+
+        def enumerate(self, descriptor, ctx):
+            assert descriptor["key_sources"] == [{"source": "root_caller"}]
+            assert ctx.contract_address == checker
+            return CapabilityExpr.finite_set([member], quality="exact")
+
+    registry = AdapterRegistry()
+    registry.register(Inventory)
+    outer = ResolverContext(
+        chain_id=1,
+        contract_address=root,
+        state_var_values={"checker": checker},
+        session=object(),
+        call_frame=CallFrame.root(contract_address=root, function_signature="act()", function_selector="0xee42b10b"),
+    )
+    ctx = EvaluationContext(
+        contract_address=root, adapter=cast(Any, SimpleNamespace(_outer_ctx=outer, _registry=registry))
+    )
+    leaf = {
+        "kind": "external_bool",
+        "operator": "truthy",
+        "authority_role": "delegated_authority",
+        "operands": [{"source": "msg_sender"}],
+    }
+    descriptor = {
+        "callee_signature": "check(address)",
+        "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "checker"}},
+    }
+    result = core._maybe_inline_cross_contract_call(cast(LeafPredicate, leaf), cast(SetDescriptor, descriptor), ctx)
+    assert result is not None and result.kind == "finite_set" and result.members == [member]

@@ -162,3 +162,42 @@ def test_caller_gate_member_demotes_on_re_earn(db_session):
     assert endpoint.nominated_protocol_id == protocol.id
     assert endpoint.id in demoted
     assert stale.id in revoked
+
+
+def test_d1_resource_argument_loses_transitive_membership_after_reanalysis(db_session):
+    protocol = _protocol(db_session)
+    resource = _member(db_session, protocol, _addr(0xF10))
+    candidate = _contract(db_session, _addr(0xF11), protocol_id=protocol.id, nominated_protocol_id=protocol.id)
+    value = _caller_gate(db_session, on=candidate, controller_id="state_variable:resource", value=resource.address)
+    gate.write_witness(
+        db_session,
+        contract_id=candidate.id,
+        protocol_id=protocol.id,
+        rule="w1_code",
+        evidence=gate.w1_evidence(chain_id=1, code_probe_block=50),
+    )
+    stale = ContractMembershipWitness(
+        contract_id=candidate.id,
+        protocol_id=protocol.id,
+        rule="w3_control",
+        via_address=resource.address,
+        evidence={"direction": "d1", "source": "controller_values", "via": resource.address, "via_transitive": True},
+    )
+    db_session.add(stale)
+    db_session.flush()
+    assert gate._witness_fact_holds(
+        db_session,
+        contract=candidate,
+        protocol_id=protocol.id,
+        rule=stale.rule,
+        evidence=stale.evidence,
+        via_address=stale.via_address,
+    )
+    # Resolution replaces controller rows; the structural argument correction
+    # writes NULL provenance instead of retaining the old caller-gate assertion.
+    value.authority_provenance = None
+    db_session.flush()
+    revoked, demoted = gate._revocation_quiescence(db_session, {resource.address, candidate.address})
+    assert stale.id in revoked and candidate.id in demoted
+    assert candidate.protocol_id is None
+    assert candidate.nominated_protocol_id == protocol.id

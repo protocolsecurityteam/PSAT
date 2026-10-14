@@ -189,7 +189,7 @@ def _resolve_two_hop(session, caller_trees: dict[str, Any], callee_artifact: dic
         now = datetime.now(timezone.utc)
         job = Job(
             address=addr,
-            request={"address": addr, "name": "T"},
+            request={"address": addr, "name": "T", "chain": "ethereum"},
             status=JobStatus.completed,
             stage=JobStage.done,
             analysis_schema_version=ANALYSIS_SCHEMA_VERSION,

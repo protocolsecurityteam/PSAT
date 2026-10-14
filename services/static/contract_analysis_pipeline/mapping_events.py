@@ -369,6 +369,124 @@ def discover_mapping_writer_events(contract: Any) -> list[WriterEventSpec]:
     return specs
 
 
+def complete_boolean_writer_relations(
+    contract: Any, specs: list[WriterEventSpec]
+) -> dict[tuple[str, int], tuple[str, ...]]:
+    """Boolean projections for which every source write has a matching mandatory event.
+
+    Used when exposing parameter-keyed checker inventories. A matching event
+    somewhere in a function is insufficient: its key and value must be the
+    written values and every continuation of the write must reach that emit.
+    Unknown assembly writes, unlogged initialization and ambiguous struct
+    projections prevent a completeness claim.
+    """
+    from slither.slithir.operations import EventCall, InternalDynamicCall, LibraryCall, LowLevelCall, SolidityCall
+
+    from .structural_evidence import evidence_for
+    from .structural_ir import integer, operations, same
+
+    functions = list(getattr(contract, "functions", []) or [])
+    if any(
+        (isinstance(ir, SolidityCall) and ir.function.name.startswith("sstore("))
+        or (isinstance(ir, LowLevelCall) and str(ir.function_name) in {"delegatecall", "callcode"})
+        or isinstance(ir, InternalDynamicCall)
+        or (
+            isinstance(ir, LibraryCall)
+            and any(_is_mapping_type(arg) or getattr(arg, "points_to_origin", None) is not None for arg in ir.arguments)
+        )
+        for fn in functions
+        for _, ir in operations(fn)
+    ):
+        return {}
+    evidence = evidence_for(contract)
+    groups: dict[tuple[str, int], list[Any]] = {}
+    for fn in functions:
+        for write in evidence.summary(fn).writes:
+            if str(getattr(write.operation.lvalue, "type", "")) == "bool" and write.cell.keys:
+                key = (write.cell.variable.name, len(write.cell.keys))
+                groups.setdefault(key, []).append(write)
+
+    def matched_event(write, ir, spec):
+        if not isinstance(ir, EventCall) or str(ir.name) != spec["event_name"]:
+            return False
+        args = ir.arguments
+        # Resolve overloads by actual ABI types, never by event name/arity alone.
+        signature = f"{ir.name}({','.join(_abi_type(arg.type) for arg in args)})"
+        if signature != spec["event_signature"]:
+            return False
+        positions = spec["key_positions_by_index"]
+        if set(positions) != set(range(len(write.cell.keys))):
+            return False
+        if any(pos >= len(args) or not same(args[pos], write.cell.keys[i]) for i, pos in positions.items()):
+            return False
+        # A mutable temporary/parameter reused in an emit is not necessarily the
+        # value written earlier. Without SSA equivalence, refuse such aliases.
+        values = [*write.cell.keys, write.value]
+        if any(
+            getattr(op, "lvalue", None) is value
+            for _, op in operations(write.function)
+            for value in values
+            if value is not None
+        ):
+            return False
+        value = 0 if _ir_name(write.operation) == "Delete" else integer(write.value, write.function)
+        if spec["direction"] in {"add", "remove"}:
+            return value in (0, 1) and bool(value) == (spec["direction"] == "add")
+        pos = spec.get("value_position")
+        return pos is not None and pos < len(args) and same(args[pos], write.value)
+
+    def covered(write):
+        candidates = [
+            s
+            for s in specs
+            if s["mapping_name"] == write.cell.variable.name and s["writer_function"] == write.function.full_name
+        ]
+        start_index = list(write.node.irs).index(write.operation) + 1
+
+        def walk(node, index, seen):
+            if node in seen:
+                return False
+            for ir in node.irs[index:]:
+                if any(matched_event(write, ir, spec) for spec in candidates):
+                    return True
+            return bool(node.sons) and all(walk(child, 0, seen | {node}) for child in node.sons)
+
+        return bool(candidates) and walk(write.node, start_index, set())
+
+    def no_unbacked_emits(writes):
+        relevant = [
+            spec
+            for spec in specs
+            if spec["mapping_name"] == writes[0].cell.variable.name
+            and len(spec["key_positions_by_index"]) == len(writes[0].cell.keys)
+        ]
+        names = {spec["event_name"] for spec in relevant}
+        for fn in functions:
+            for node, ir in operations(fn):
+                if not isinstance(ir, EventCall) or str(ir.name) not in names:
+                    continue
+                if not any(
+                    w.function is fn
+                    and any(matched_event(w, ir, spec) for spec in relevant)
+                    and (
+                        w.node in node.dominators
+                        if w.node is not node
+                        else list(node.irs).index(w.operation) < list(node.irs).index(ir)
+                    )
+                    for w in writes
+                ):
+                    return False
+        return True
+
+    return {
+        key: writes[0].cell.members
+        for key, writes in groups.items()
+        if len({(id(w.cell.variable), w.cell.members) for w in writes}) == 1
+        and all(covered(w) for w in writes)
+        and no_unbacked_emits(writes)
+    }
+
+
 def member_witness_record(spec: WriterEventSpec) -> dict[str, Any]:
     """JSON-clean correspondence record for monitoring's member qualification: proof an occurrence names the written
     entry. Unlike ``_value_writer_spec`` it keeps the real direction and allows ``value_position=None``

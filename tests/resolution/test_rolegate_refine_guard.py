@@ -222,7 +222,7 @@ def _seed_two_hop(
     def _seed(addr: str, trees: dict[str, Any]):
         job = Job(
             address=addr,
-            request={"address": addr, "name": "T"},
+            request={"address": addr, "name": "T", "chain": "ethereum"},
             status=JobStatus.completed,
             stage=JobStage.done,
             analysis_schema_version=ANALYSIS_SCHEMA_VERSION,

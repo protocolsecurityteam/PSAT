@@ -321,3 +321,139 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
     assert cached_count < uncached_count, (
         f"helper-engine cache did not reduce engine count: cached={cached_count} uncached={uncached_count}"
     )
+
+
+@pytest.mark.parametrize("name", ["members", "arbitraryRegistry"])
+def test_parameterized_boolean_getters_retain_writer_event_evidence(tmp_path, name):
+    source = f"""
+    pragma solidity ^0.8.19;
+    contract C {{
+        mapping(bytes32 => mapping(address => bool)) public {name};
+        mapping(address => uint) public amounts;
+        mapping(address => bool) private hidden;
+        event Changed(bytes32 indexed group, address indexed who, bool enabled);
+        function update(bytes32 group, address who, bool enabled) external {{
+            {name}[group][who] = enabled;
+            emit Changed(group, who, enabled);
+        }}
+        function check(bytes32 group, address who) external view returns(bool) {{
+            return {name}[group][who];
+        }}
+    }}
+    """
+    artifact = build_predicate_artifacts(_contract(_compile(tmp_path, source)))
+    checks = artifact["check_trees"]
+    assert "amounts(address)" not in checks and "hidden(address)" not in checks
+    for signature in [f"{name}(bytes32,address)", "check(bytes32,address)"]:
+        descriptor = _leaves(checks[signature])[0]["set_descriptor"]
+        assert [k["parameter_index"] for k in descriptor["key_sources"]] == [0, 1]
+        assert len(descriptor["enumeration_hint"]) == 1
+        hint = descriptor["enumeration_hint"][0]
+        assert hint["event_signature"] == "Changed(bytes32,address,bool)"
+        assert hint["topics_to_keys"] == {1: 0, 2: 1}
+        assert hint["value_position"] == 2
+
+
+@pytest.mark.parametrize("nonzero", [True, False])
+@pytest.mark.parametrize("join", ["&&", "||"])
+@pytest.mark.parametrize("concrete", [False, True])
+def test_recovered_signer_requires_conjunctive_nonzero_authentication(tmp_path, nonzero, join, concrete):
+    guard = (
+        f"recovered != address(0) {join} registry.permitted(recovered)" if nonzero else "registry.permitted(recovered)"
+    )
+    registry = (
+        "contract Registry {{ mapping(address => bool) public permitted; }}"
+        if concrete
+        else "interface Registry {{ function permitted(address who) external view returns(bool); }}"
+    )
+    source = f"""
+    pragma solidity ^0.8.19;
+    {registry.format()}
+    contract C {{
+        Registry public registry;
+        uint public value;
+        function act(bytes32 digest, uint8 v, bytes32 r, bytes32 s) external {{
+            address recovered = ecrecover(digest, v, r, s);
+            require({guard});
+            value++;
+        }}
+    }}
+    """
+    artifact = build_predicate_artifacts(_contract(_compile(tmp_path, source), "C"))
+    leaves = _leaves(artifact["trees"]["act(bytes32,uint8,bytes32,bytes32)"])
+    checks = [leaf for leaf in leaves if leaf.get("kind") == "external_bool"]
+    assert checks
+    assert any((leaf.get("authority_proof") or {}).get("kind") == "recovered_signer_membership" for leaf in checks) == (
+        nonzero and join == "&&"
+    )
+
+
+@pytest.mark.parametrize(
+    "extra,emit",
+    [
+        ("function bypass(address who) external { users[who] = true; }", "emit Changed(who, enabled);"),
+        ("constructor() { users[msg.sender] = true; }", "emit Changed(who, enabled);"),
+        ("", "if (enabled) emit Changed(who, enabled);"),
+        ("", "who = msg.sender; emit Changed(who, enabled);"),
+        ("function fake(address who) external { emit Changed(who, true); }", "emit Changed(who, enabled);"),
+    ],
+)
+def test_checker_event_inventory_requires_all_writes_and_truthful_emits(tmp_path, extra, emit):
+    source = f"""
+    pragma solidity ^0.8.19;
+    contract C {{
+        mapping(address => bool) public users;
+        event Changed(address indexed who, bool enabled);
+        function update(address who, bool enabled) external {{ users[who] = enabled; {emit} }}
+        {extra}
+    }}
+    """
+    artifact = build_predicate_artifacts(_contract(_compile(tmp_path, source)))
+    descriptor = _leaves(artifact["check_trees"]["users(address)"])[0]["set_descriptor"]
+    assert not descriptor.get("enumeration_hint")
+
+
+def test_struct_membership_checker_preserves_constant_key_and_complete_events(tmp_path):
+    from eth_utils.crypto import keccak
+
+    source = """
+    pragma solidity ^0.8.19;
+    contract C {
+        struct Rule { mapping(address => bool) allowed; bytes32 parent; }
+        mapping(bytes32 => Rule) private rules;
+        bytes32 public constant KEY = keccak256("unfamiliar-key");
+        event Added(bytes32 indexed group, address indexed who);
+        event Removed(bytes32 indexed group, address indexed who);
+        function add(bytes32 group, address who) external { rules[group].allowed[who] = true; emit Added(group, who); }
+        function remove(bytes32 group, address who) external {
+            rules[group].allowed[who] = false; emit Removed(group, who);
+        }
+        function setParent(bytes32 group, bytes32 parent) external { rules[group].parent = parent; }
+        function check(address who) external view returns(bool) { return rules[KEY].allowed[who]; }
+    }
+    """
+    artifact = build_predicate_artifacts(_contract(_compile(tmp_path, source)))
+    descriptor = _leaves(artifact["check_trees"]["check(address)"])[0]["set_descriptor"]
+    assert descriptor["key_sources"][0] == {
+        "source": "constant",
+        "constant_value": "0x" + keccak(text="unfamiliar-key").hex(),
+    }
+    assert {hint["direction"] for hint in descriptor["enumeration_hint"]} == {"add", "remove"}
+
+
+def test_checker_cannot_borrow_a_sibling_mapping_field_inventory(tmp_path):
+    source = """
+    pragma solidity ^0.8.19;
+    contract C {
+        struct Rule { mapping(address => bool) members; mapping(address => bool) blocked; }
+        mapping(bytes32 => Rule) private rules;
+        event Changed(bytes32 indexed group, address indexed who, bool enabled);
+        function update(bytes32 group, address who, bool enabled) external {
+            rules[group].members[who] = enabled; emit Changed(group, who, enabled);
+        }
+        function check(bytes32 group, address who) external view returns(bool) { return rules[group].blocked[who]; }
+    }
+    """
+    artifact = build_predicate_artifacts(_contract(_compile(tmp_path, source)))
+    descriptor = _leaves(artifact["check_trees"]["check(bytes32,address)"])[0]["set_descriptor"]
+    assert not descriptor.get("enumeration_hint")

@@ -5,6 +5,7 @@ other).
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any, cast
 
@@ -13,6 +14,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     LeafPredicate,
     PredicateTree,
     SetDescriptor,
+    make_and_node,
 )
 from utils.predicate_provenance import has_unknown_predicate_provenance
 
@@ -207,6 +209,37 @@ def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
 def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExpr:
     if has_unknown_predicate_provenance(leaf):
         return CapabilityExpr.unsupported("predicate_provenance_unknown")
+    proof = leaf.get("authority_proof") or {}
+    if proof.get("state") == "proven" and proof.get("kind") == "recovered_signer_membership":
+        # Enumerate the authenticated signer's registry in its own identity
+        # dimension, then wrap it. Its members are never transaction callers.
+        signer_leaf = deepcopy(leaf)
+        signer_leaf.pop("authority_proof", None)
+        for operand in signer_leaf.get("operands") or []:
+            if operand.get("source") == "signature_recovery":
+                cast(dict[str, Any], operand)["source"] = "root_caller"
+        signer = _evaluate_leaf(signer_leaf, ctx)
+        return CapabilityExpr.signature_witness(
+            signer,
+            conditions=[
+                Condition(
+                    kind="permit_sig",
+                    description=(
+                        "authenticated registry signer; payload completeness and replay protection not determined"
+                    ),
+                )
+            ],
+        )
+    if leaf.get("kind") == "external_bool" and any(
+        operand.get("source") == "signature_recovery" for operand in leaf.get("operands") or []
+    ):
+        return CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=ctx.contract_address,
+                target_call_selector=None,
+                extra={"basis": ["caller_tainted_authority_unresolved", "signer_authorization_unresolved"]},
+            )
+        )
     if _is_recovered_signer_membership(leaf) or (leaf.get("authority_proof") or {}).get("state") == "not_determined":
         return CapabilityExpr.external_check_only(
             ExternalCheck(
@@ -551,11 +584,15 @@ def _maybe_inline_cross_contract_call(
     # A proxy registry's predicate_trees live on its implementation job.
     from db.queue import get_artifact, usable_semantic_artifact
     from services.resolution.capability_resolver import find_analysis_job_for_address
+    from utils.chains import chain_by_id
+
+    chain = chain_by_id(chain_id).name
 
     lookup = find_analysis_job_for_address(
         session,
         registry_addr,
         required_artifact="predicate_trees",
+        chain=chain,
         completed_only=False,
     )
     if lookup is None:
@@ -603,7 +640,7 @@ def _maybe_inline_cross_contract_call(
             call_args=call_args,
         )
 
-    entry = None
+    entries = []
     for tree_map in tree_maps:
         entry = _callee_tree_entry(
             tree_map,
@@ -612,8 +649,8 @@ def _maybe_inline_cross_contract_call(
             canonical_signatures=artifact.get("canonical_signatures"),
         )
         if entry is not None:
-            break
-    if entry is None:
+            entries.append(entry)
+    if not entries:
         return _materialize_external_check_from_candidates(
             session=session,
             outer_ctx=outer_ctx,
@@ -623,7 +660,15 @@ def _maybe_inline_cross_contract_call(
             call_args=call_args,
         )
 
-    callee_key, callee_tree = entry
+    callee_key = entries[0][0]
+    if len(entries) > 1 and leaf.get("operator") == "falsy":
+        # Negating (guard AND result) would admit callers for whom the call
+        # reverts. Until guard/result polarities can be represented separately,
+        # retain uncertainty rather than complementing the successful call set.
+        return CapabilityExpr.unsupported("negated_checker_requires_separate_guard_and_result")
+    # A successful boolean call must both pass its guards and return true.
+    # Choosing the guard tree first silently discards the returned permission.
+    callee_tree = make_and_node([entry[1] for entry in entries]) if len(entries) > 1 else entries[0][1]
     # The function actually found decides the dispatch selector (``msg.sig`` below, any materializer ``eth_call``).
     callee_selector = _key_dispatch_selector(callee_key, artifact.get("canonical_signatures")) or callee_selector
     callee_tree = _bind_callee_parameters(

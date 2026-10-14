@@ -52,7 +52,7 @@ def _seed_job_with_artifact(session, *, address: str, predicate_trees: dict | No
 
     job = Job(
         address=address,
-        request={"address": address, "name": "T"},
+        request={"address": address, "name": "T", "chain": "ethereum"},
         status=JobStatus.completed,
         stage=JobStage.done,
         analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
