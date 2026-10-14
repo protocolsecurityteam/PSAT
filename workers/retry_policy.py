@@ -13,6 +13,7 @@ from typing import Literal
 
 import requests
 import urllib3.exceptions
+from sqlalchemy.exc import DBAPIError
 
 from db.storage import (
     StorageContentAbsent,
@@ -104,6 +105,9 @@ def classify(exc: BaseException) -> Kind:
 
     ``HTTPError`` is checked first (status decides); transient beats terminal on overlap.
     """
+    # SQLAlchemy wraps driver exceptions; retain the driver's existing retry semantics.
+    if isinstance(exc, DBAPIError):
+        return classify(exc.orig) if exc.orig is not None else "terminal"
     if isinstance(exc, requests.exceptions.HTTPError):
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None) if response is not None else None
