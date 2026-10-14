@@ -744,6 +744,8 @@ class PolicyWorker(BaseWorker):
 
             # Capture principals before the rewrite: dropped ones are only reachable through the pre-image.
             principals_before = membership_gate.principal_addresses(session, [contract_row.id])
+            # Finish prior writes before the writer prefetches principal classifications.
+            session.commit()
             with log_timed_phase(logger, "effective_function_rows", durations_ms=durations_ms) as ph:
                 fp_added = write_effective_function_rows(
                     session,

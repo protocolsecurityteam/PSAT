@@ -253,3 +253,45 @@ def _write(db_session, contract, records: dict[str, Any]) -> None:
         capability_by_function={},
     )
     db_session.commit()
+
+
+def test_principal_reads_finish_before_function_rows_are_locked(db_session, _contract):
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from db.models import FunctionPrincipal
+    from services.resolution.capabilities import CapabilityExpr
+
+    old = EffectiveFunction(contract_id=_contract.id, function_name="old", selector="0x11111111")
+    db_session.add(old)
+    db_session.commit()
+    old_id = old.id
+    observed = []
+
+    def resolve(address):
+        # Classification can use another connection. It must not contend with this
+        # writer's uncommitted replacement; NOWAIT makes the regression fail promptly.
+        with Session(db_session.get_bind()) as other:
+            locked = other.execute(
+                select(EffectiveFunction.id).where(EffectiveFunction.id == old_id).with_for_update(nowait=True)
+            ).scalar_one()
+            observed.append(locked)
+            other.commit()
+        return "eoa", {}
+
+    caller = "0x" + "22" * 20
+    write_effective_function_rows(
+        db_session,
+        contract_id=_contract.id,
+        function_records=[{"function": "setValue(uint256)", "selector": "0x22222222"}],
+        capability_by_function={"setValue(uint256)": CapabilityExpr.finite_set([caller])},
+        resolve_principal_type=resolve,
+    )
+    db_session.commit()
+    assert observed == [old_id]
+    principal = db_session.execute(
+        select(FunctionPrincipal)
+        .join(EffectiveFunction)
+        .where(EffectiveFunction.contract_id == _contract.id, FunctionPrincipal.address == caller)
+    ).scalar_one()
+    assert principal.resolved_type == "eoa"
