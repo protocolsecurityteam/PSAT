@@ -23,7 +23,6 @@ from db.models import (
     ControllerValue,
     EffectiveFunction,
     FunctionPrincipal,
-    Protocol,
     RoleHolderPlane,
 )
 from services.clients.rpc import chain_id_for_chain_name
@@ -468,20 +467,6 @@ def _witness_fact_holds(
     """Whether this witness's via-fact still holds. W1, W5 and W6 have none and hold as recorded."""
     if rule in (WITNESS_RULE_W1_CODE, WITNESS_RULE_W5_HUMAN, WITNESS_RULE_W6_LLAMA_SEED):
         return True
-    if rule == "w7_publisher_registry":
-        from services.discovery.publisher_registry import protocol_key, validate_membership_evidence
-
-        try:
-            validated = validate_membership_evidence(evidence)
-            protocol = session.get(Protocol, protocol_id)
-            return bool(
-                protocol is not None
-                and validated["protocol"] in {protocol_key(protocol.name), protocol_key(protocol.canonical_slug)}
-                and validated["address"] == (contract.address or "").lower()
-                and validated["chain_id"] == chain_id_for_chain_name(contract.chain)
-            )
-        except (KeyError, TypeError, ValueError):
-            return False
     evidence = evidence if isinstance(evidence, dict) else {}
     via = (via_address or "").lower()
     if rule == WITNESS_RULE_W4_DEPLOYER:

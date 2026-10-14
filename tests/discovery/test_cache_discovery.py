@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -118,101 +117,6 @@ def _mock_inventory(contracts, **extra):
     inv = {"contracts": contracts, "official_domain": "example.com"}
     inv.update(extra)
     return inv
-
-
-@pytest.mark.parametrize(
-    "company,key,content",
-    [
-        (
-            "Maple",
-            "maple_eth",
-            f"contract MapleAddressRegistryETH {{ address public constant syrupUSDCPoolManager = {ADDR_A}; }}",
-        ),
-        ("Aave", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
-        ("Aave V2", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
-        ("Aave V3", "aave_v3_eth", f"library AaveV3Ethereum {{ address constant ACL_MANAGER = {ADDR_A}; }}"),
-        (
-            "Lido",
-            "lido_eth",
-            f'<h2>DAO Contracts</h2><p>Admin Executor: <a href="https://etherscan.io/address/{ADDR_A}">{ADDR_A}</a></p>',
-        ),
-    ],
-)
-def test_company_discovery_admits_publisher_core_before_selection(db_session, monkeypatch, company, key, content):
-    from sqlalchemy import select
-
-    from db.models import Contract, ContractMembershipWitness
-    from db.queue import get_artifact
-    from services.clients.rpc import EthCallResult
-    from services.discovery import probes
-    from services.discovery.publisher_registry import REGISTRIES
-    from tests.discovery.test_protocol_resolver import AAVE, AAVE_V2
-    from tests.discovery.test_publisher_registry import REVISION, snapshot
-    from workers.base import JobHandledDirectly
-    from workers.discovery import DiscoveryWorker
-
-    monkeypatch.setattr(
-        "services.discovery.run_discovery.run_discovery",
-        lambda *a, **kw: {
-            "audits": {"reports": []},
-            "addresses": _mock_inventory([]),
-            "meta": {},
-        },
-    )
-    # Exercise the actual family resolver, registry selection and admission together.
-    # Only external responses are stubbed: mocking fetch_registries hid the versioned-slug bug.
-    if key == "aave_v3_eth":
-        monkeypatch.setattr("services.discovery.protocol_resolver._fetch_protocols", lambda: [AAVE, AAVE_V2])
-    payloads = {snapshot(key, content)["url"]: content.encode()}
-    expected_registries = {key}
-    if key == "aave_v3_eth":
-        v4 = snapshot("aave_v4_eth", f"library AaveV4EthereumHubs {{ address constant CORE_HUB = {ADDR_B}; }}")
-        payloads[v4["url"]] = v4["content"].encode()
-        expected_registries.add("aave_v4_eth")
-    for source in REGISTRIES:
-        if source.key in expected_registries and source.repo:
-            payloads[f"https://api.github.com/repos/{source.repo}/commits/main"] = json.dumps(
-                {"sha": REVISION}
-            ).encode()
-    fetched = []
-
-    def get_bytes(url, **kwargs):
-        fetched.append(url)
-        return payloads[url]
-
-    monkeypatch.setattr("services.discovery.publisher_registry._get", get_bytes)
-    monkeypatch.setattr("services.discovery.membership_gate.probe", probes.run_probe)
-    monkeypatch.setattr(
-        probes, "rpc_request", lambda url, method, params, **kw: "0x7b" if method == "eth_blockNumber" else "0x6000"
-    )
-    monkeypatch.setattr(probes, "eth_call_batch", lambda *a, **kw: [EthCallResult(False, "0x", None, "no getter")] * 2)
-    monkeypatch.setattr(probes, "rpc_batch_request", lambda *a, **kw: ["0x" + "0" * 64] * 3)
-    monkeypatch.setattr("services.discovery.probes.etherscan.get", lambda *a, **kw: {"result": []})
-    job = _make_company_job(db_session, company=company, chain="ethereum")
-    worker = DiscoveryWorker()
-    worker.update_detail = MagicMock()
-    monkeypatch.setattr(worker, "_spawn_parallel_discovery", lambda *a, **kw: None)
-    with pytest.raises(JobHandledDirectly):
-        worker._process_company(db_session, job)
-    contract = db_session.execute(select(Contract).where(Contract.address == ADDR_A.lower())).scalar_one()
-    assert contract.protocol_id == job.protocol_id
-    rules = set(
-        db_session.execute(
-            select(ContractMembershipWitness.rule).where(ContractMembershipWitness.contract_id == contract.id)
-        ).scalars()
-    )
-    assert {"w1_code", "w7_publisher_registry"} <= rules
-    registry_artifact = get_artifact(db_session, job.id, "publisher_registries")
-    assert isinstance(registry_artifact, dict)
-    assert registry_artifact["snapshots"][0]["sha256"]
-    assert registry_artifact["failures"] == []
-    assert {item["registry"] for item in registry_artifact["snapshots"]} == expected_registries
-    assert set(fetched) == set(payloads)
-    if key == "aave_v3_eth":
-        from db.models import Protocol
-
-        protocol = db_session.get(Protocol, job.protocol_id)
-        assert protocol is not None and protocol.canonical_slug == "aave-v2"
 
 
 def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):

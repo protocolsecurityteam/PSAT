@@ -229,25 +229,6 @@ def heuristic_evidence(affinity: DeployerAffinity, *, challenges: int) -> dict[s
     }
 
 
-def _publisher_mode(session: Session, protocol_id: int) -> bool:
-    """Once publisher declarations are used, new membership requires evidence beyond deployer affinity.
-
-    Sticky across revocation: withdrawing a declaration must not enable heuristic expansion
-    through its retained structural descendants. Existing members still undergo normal revocation.
-    """
-    return (
-        session.execute(
-            select(ContractMembershipWitness.id)
-            .where(
-                ContractMembershipWitness.protocol_id == protocol_id,
-                ContractMembershipWitness.rule == "w7_publisher_registry",
-            )
-            .limit(1)
-        ).first()
-        is not None
-    )
-
-
 def grant_heuristic_deployer(
     session: Session, *, protocol_id: int, address: str, affinity: DeployerAffinity, challenges: int
 ) -> ProtocolDeployer | None:
@@ -256,8 +237,6 @@ def grant_heuristic_deployer(
     None when affinity doesn't qualify, the quorum is met, or a proof class covers the EOA.
     """
     addr = _require_address(address, "address")
-    if _publisher_mode(session, protocol_id):
-        return None
     if not affinity.qualifies() or challenges >= W4H_CHALLENGE_QUORUM:
         return None
     evidence = heuristic_evidence(affinity, challenges=challenges)
@@ -330,8 +309,6 @@ def _attempt_w4h_admission(
     """Affinity admission: W1 code-present, creation attributed to the EOA, and the caller re-verified the H row at this
     write.
     """
-    if _publisher_mode(session, registry.protocol_id):
-        return False
     addr = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
     if not addr or chain_id is None:

@@ -482,11 +482,6 @@ def _rebuild_evidence(rule: str, evidence: dict[str, Any]) -> dict[str, Any]:
     equality.
     """
 
-    if rule == "w7_publisher_registry":
-        from services.discovery.publisher_registry import validate_membership_evidence
-
-        return validate_membership_evidence(evidence)
-
     def picked(*keys: str) -> dict[str, Any]:
         return {key: evidence.get(key) for key in keys}
 
@@ -557,7 +552,6 @@ def write_witness(
     rule: str,
     evidence: dict[str, Any],
     via_address: str | None = None,
-    rearm_revoked: bool = True,
 ) -> ContractMembershipWitness:
     """Race-safe idempotent upsert on (contract, protocol, rule, via_address) via ``INSERT ..
 
@@ -578,13 +572,9 @@ def write_witness(
         observed_at=func.now(),
     )
     set_ = {
-        "revoked_at": None if rearm_revoked else ContractMembershipWitness.revoked_at,
-        "evidence": case((was_revoked, stmt.excluded.evidence), else_=ContractMembershipWitness.evidence)
-        if rearm_revoked
-        else ContractMembershipWitness.evidence,
-        "observed_at": case((was_revoked, func.now()), else_=ContractMembershipWitness.observed_at)
-        if rearm_revoked
-        else ContractMembershipWitness.observed_at,
+        "revoked_at": None,
+        "evidence": case((was_revoked, stmt.excluded.evidence), else_=ContractMembershipWitness.evidence),
+        "observed_at": case((was_revoked, func.now()), else_=ContractMembershipWitness.observed_at),
     }
     if via is None:
         stmt = stmt.on_conflict_do_update(

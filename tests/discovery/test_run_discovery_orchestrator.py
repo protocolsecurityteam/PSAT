@@ -83,37 +83,6 @@ def test_patch_classify_with_seeds_appends_unseen_urls():
         rd.audit_reports_mod.classify_search_results = original
 
 
-def test_load_known_docs_present(monkeypatch, tmp_path):
-    p = tmp_path / "k.yaml"
-    p.write_text("protocols:\n  gmx:\n    audit_urls: [https://a]\n")
-    monkeypatch.setattr(rd, "KNOWN_DOCS_PATH", p)
-    out = rd._load_known_docs()
-    assert "gmx" in out
-    assert out["gmx"]["audit_urls"] == ["https://a"]
-
-
-def test_apply_spa_overrides_injects(monkeypatch):
-    monkeypatch.setattr(
-        rd,
-        "_load_known_docs",
-        lambda: {
-            "gmx": {
-                "contract_docs_urls": ["https://docs.gmx/c"],
-                "contract_docs_raw_urls": ["https://docs.gmx/raw"],
-                "audit_urls": ["https://gmx-audit.pdf"],
-            }
-        },
-    )
-    inv: dict = {"contracts": []}
-    aud: dict = {"reports": []}
-    rd._apply_spa_overrides("GMX", inv, aud)
-    assert any("docs.gmx/c" in n for n in inv["notes"])
-    assert any("raw" in n for n in inv["notes"])
-    assert len(aud["reports"]) == 1
-    assert aud["reports"][0]["discovery_source"] == "spa_override"
-    assert aud["reports"][0]["confidence"] == 1.0
-
-
 @pytest.mark.parametrize(
     "protocol,contracts,audits,llm_reply,expected,prompt_fragment",
     [
@@ -376,20 +345,6 @@ def test_run_discovery_skips_invalid_addresses_from_deep_research(monkeypatch):
     out = rd.run_discovery("p")
     addrs = [c["address"] for c in out["addresses"]["contracts"]]
     assert addrs == ["0x" + "a" * 40]
-
-
-def test_run_discovery_applies_spa_overrides(monkeypatch):
-    _stub_discovery_modules(monkeypatch)
-    monkeypatch.setattr(rd, "_cached_deep_research", lambda instructions, schema=None: {"data": {}})
-    monkeypatch.setattr(rd, "_needs_dependency_pass", lambda protocol, contracts, audits: False)
-    monkeypatch.setattr(
-        rd,
-        "_load_known_docs",
-        lambda: {"p": {"audit_urls": ["https://known.audit/a.pdf"]}},
-    )
-    out = rd.run_discovery("p")
-    urls = [r["url"] for r in out["audits"]["reports"]]
-    assert "https://known.audit/a.pdf" in urls
 
 
 def test_research_cache_evicts_at_max(monkeypatch):

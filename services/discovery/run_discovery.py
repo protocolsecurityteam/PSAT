@@ -11,10 +11,7 @@ import json
 import logging
 import threading
 import time
-from pathlib import Path
 from typing import Any
-
-import yaml
 
 from services.clients import exa
 from services.discovery import audit_reports as audit_reports_mod
@@ -28,9 +25,6 @@ from utils.chains import canonical_chain
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 
 logger = logging.getLogger(__name__)
-
-ROOT = Path(__file__).resolve().parents[2]
-KNOWN_DOCS_PATH = ROOT / "config" / "known_docs.yaml"
 
 # Per-protocol budget; abort and alert if exceeded.
 MAX_SEARCH_CALLS_PER_PROTOCOL = 10
@@ -64,13 +58,6 @@ Return exactly one JSON object:
 Evidence:
 {evidence}
 """
-
-
-def _load_known_docs() -> dict[str, dict[str, list[str]]]:
-    if not KNOWN_DOCS_PATH.exists():
-        return {}
-    data = yaml.safe_load(KNOWN_DOCS_PATH.read_text()) or {}
-    return data.get("protocols", {}) or {}
 
 
 # Keyed (instructions, schema_hash) → ``(monotonic_ts, result)``; 24h TTL and a size cap for long-lived workers.
@@ -456,28 +443,6 @@ def _dependency_research(protocol: str, budget: _Budget) -> list[dict]:
     return dep_audits
 
 
-def _apply_spa_overrides(protocol: str, inventory_result: dict, audit_result: dict) -> None:
-    """Fold hardcoded known-docs URLs into results for protocols whose docs are SPAs."""
-    known = _load_known_docs().get(protocol.lower()) or {}
-    if not known:
-        return
-    # Recorded as notes for a worker to fetch directly (the pipeline can't index SPAs).
-    for url in known.get("contract_docs_urls", []):
-        inventory_result.setdefault("notes", []).append(f"SPA override: fetch {url} manually")
-    for url in known.get("contract_docs_raw_urls", []):
-        inventory_result.setdefault("notes", []).append(f"SPA override (raw): {url}")
-    for url in known.get("audit_urls", []):
-        audit_result.setdefault("reports", []).append(
-            {
-                "url": url,
-                "auditor": "SPA override (see config/known_docs.yaml)",
-                "title": f"{protocol} audits (known-docs override)",
-                "confidence": 1.0,
-                "discovery_source": "spa_override",
-            }
-        )
-
-
 def run_discovery(
     protocol: str,
     *,
@@ -597,7 +562,6 @@ def run_discovery(
     else:
         logger.info("dependency classifier skipped two-pass for %s", protocol)
 
-    _apply_spa_overrides(protocol, inventory_result, audit_result)
     enrich_audit_reports(audit_result, protocol, debug=False)
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
