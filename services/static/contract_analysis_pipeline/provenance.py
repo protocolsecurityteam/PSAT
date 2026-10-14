@@ -125,7 +125,10 @@ def union(a: SourceSet, b: SourceSet) -> SourceSet:
     """Lattice join; TOP absorbs."""
     if is_top(a) or is_top(b):
         return TOP
-    return a | b
+    combined = a | b
+    # Recursive member projections can grow combinatorially even after digest widening.
+    # Saturate to unknown rather than retain an arbitrary, apparently exhaustive subset.
+    return TOP if len(combined) > DEFAULT_SOURCE_SET_CAP else combined
 
 
 def arg_origins(args_union: SourceSet) -> frozenset[Source]:
@@ -193,6 +196,7 @@ DEFAULT_INTERNAL_CALL_DEPTH = _env_int("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", 4)
 DEFAULT_WORKLIST_ITER_CAP = _env_int("PSAT_PROVENANCE_WORKLIST_CAP", 200)
 # A value rewritten more often than this is churning, not converging.
 DEFAULT_WIDEN_AFTER = _env_int("PSAT_PROVENANCE_WIDEN_AFTER", 8)
+DEFAULT_SOURCE_SET_CAP = _env_int("PSAT_PROVENANCE_SOURCE_SET_CAP", 256)
 
 
 def widen(s: SourceSet) -> SourceSet:
@@ -238,6 +242,9 @@ class ProvenanceMap:
         After ``DEFAULT_WIDEN_AFTER`` rewrites the store becomes ``widen(prev | value)``: monotone (several writers
         otherwise oscillate) and finite. Converging values never widen.
         """
+        # Some transfers construct sets directly rather than through union().
+        if len(value) > DEFAULT_SOURCE_SET_CAP:
+            value = TOP
         prev = self.sources.get(var_name, EMPTY)
         if prev == value:
             return False

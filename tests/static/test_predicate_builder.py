@@ -29,6 +29,47 @@ def _all_leaves(tree):
 
 
 @pytest.mark.parametrize(
+    "guard",
+    [
+        "address(uint160(x)) == owner",
+        "address(uint160(x)) == owner && value > 0",
+        "address(uint160(x)) == owner || msg.sender == other",
+    ],
+)
+@pytest.mark.parametrize("helper", [False, True])
+def test_saturated_caller_guard_remains_unknown(tmp_path, monkeypatch, guard, helper):
+    import json
+
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
+    from services.static.contract_analysis_pipeline import provenance
+
+    body = "".join(f"x += {number};" for number in range(1, 13)) + f"x -= 78; require({guard});"
+    source = "pragma solidity ^0.8.19; contract C { address public owner; address public other; uint public value; "
+    if helper:
+        source += "function f() external { require(check(msg.sender)); value=1; } "
+        source += "function check(address who) internal view returns(bool) { uint x=uint160(who); "
+        source += body + "return value > 0; }}"
+    else:
+        source += "function f() external { uint x=uint160(msg.sender); " + body + "value=1; }}"
+    function = _function(_compile(tmp_path, source), "f")
+    context = EvaluationContext(state_var_values={"owner": "0x" + "11" * 20, "other": "0x" + "22" * 20})
+    for cap in (10000, 8):
+        monkeypatch.setattr(provenance, "DEFAULT_SOURCE_SET_CAP", cap)
+        tree = build_predicate_tree(function)
+        capability = capability_to_dict(evaluate_tree(tree, context))
+        expected = "restricted" if cap == 10000 or "||" in guard else "not_determined"
+        assert capability_surface_openness(capability, project_capability_surface(capability)) == expected
+        if cap == 8:
+            assert "predicate_provenance_unknown" in json.dumps(capability)
+            assert any(
+                "operand_provenance_unknown" in (leaf.get("authority_proof") or {}).get("requirements", [])
+                for leaf in _all_leaves(tree)
+            )
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "if (n == 0) return false; return who == owner && allowed(who, n - 1);",

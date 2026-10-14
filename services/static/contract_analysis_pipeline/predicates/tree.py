@@ -8,6 +8,8 @@ import contextvars as _contextvars
 import os
 from typing import Any, cast
 
+from utils.predicate_provenance import has_unknown_predicate_provenance
+
 from ..predicate_types import (
     LeafPredicate,
     PredicateTree,
@@ -701,6 +703,13 @@ def _tree_has_caller_tainted_leaf(tree: Any) -> bool:
         return False
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf") or {}
+        # Unknown origin may include the caller. Dropping a mandatory helper guard
+        # here would bypass the resolver's later uncertainty handling entirely.
+        if (
+            has_unknown_predicate_provenance(leaf)
+            or (leaf.get("authority_proof") or {}).get("state") == "not_determined"
+        ):
+            return True
         for op in leaf.get("operands") or []:
             if (op or {}).get("source") in _CALLER_SOURCES:
                 return True

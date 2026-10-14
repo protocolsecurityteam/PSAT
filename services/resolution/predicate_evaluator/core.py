@@ -14,6 +14,7 @@ from services.static.contract_analysis_pipeline.predicate_types import (
     PredicateTree,
     SetDescriptor,
 )
+from utils.predicate_provenance import has_unknown_predicate_provenance
 
 from ..capabilities import (
     CapabilityExpr,
@@ -204,6 +205,8 @@ def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
 
 
 def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExpr:
+    if has_unknown_predicate_provenance(leaf):
+        return CapabilityExpr.unsupported("predicate_provenance_unknown")
     if _is_recovered_signer_membership(leaf) or (leaf.get("authority_proof") or {}).get("state") == "not_determined":
         return CapabilityExpr.external_check_only(
             ExternalCheck(
@@ -442,6 +445,8 @@ def _side_conditions_from_tree(tree: PredicateTree) -> list[Condition] | None:
     if op == "LEAF":
         leaf = tree.get("leaf")
         if not isinstance(leaf, dict):
+            return None
+        if has_unknown_predicate_provenance(leaf):
             return None
         if (
             _is_recovered_signer_membership(leaf)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from utils.predicate_provenance import has_unknown_predicate_provenance
+
 from ..predicate_types import Confidence, LeafPredicate, PredicateTree
 
 
@@ -13,6 +15,14 @@ def apply_confidence_to_tree(tree: PredicateTree | None) -> None:
     if op == "LEAF":
         leaf = tree.get("leaf")
         if leaf is not None:
+            if has_unknown_predicate_provenance(leaf):
+                proof = leaf.get("authority_proof") or {}
+                requirements = list(proof.get("requirements") or [])
+                if "operand_provenance_unknown" not in requirements:
+                    requirements.append("operand_provenance_unknown")
+                leaf["authority_proof"] = {"state": "not_determined", "requirements": requirements}
+                leaf["confidence"] = "low"
+                return
             leaf["confidence"] = _derive_confidence(leaf)
         return
     for child in tree.get("children", []) or []:

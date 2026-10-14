@@ -20,6 +20,36 @@ from tests.support.predicate_trees import _build_pipeline  # noqa: E402
 from tests.support.slither_compile import _compile  # noqa: E402
 
 
+@pytest.mark.parametrize("location", ["operand", "derived_from", "descriptor"])
+@pytest.mark.parametrize("combined", [False, True])
+def test_unknown_provenance_is_not_a_public_side_condition(location, combined):
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+
+    leaf: dict[str, Any] = {
+        "kind": "equality",
+        "operator": "eq",
+        "authority_role": "business",
+        "operands": [],
+        "references_msg_sender": False,
+        "expression": "opaque == owner",
+        "basis": [],
+    }
+    if location == "operand":
+        leaf["operands"] = [{"source": "top"}]
+    elif location == "derived_from":
+        leaf["operands"] = [{"source": "computed", "derived_from": [{"source": "top"}]}]
+    else:
+        leaf["set_descriptor"] = {"key_sources": [{"source": "computed", "derived_from": [{"source": "top"}]}]}
+    tree: dict[str, Any] = {"op": "LEAF", "leaf": leaf}
+    if combined:
+        side = {**leaf, "operands": [{"source": "constant", "constant_value": "1"}]}
+        side.pop("set_descriptor", None)
+        tree = {"op": "AND", "children": [{"op": "LEAF", "leaf": side}, tree]}
+    capability = capability_to_dict(evaluate_tree(cast(PredicateTree, tree)))
+    assert capability_surface_openness(capability, project_capability_surface(capability)) == "not_determined"
+
+
 def test_non_caller_or_side_condition_under_and_preserves_principals():
     owner = "0x" + "cd" * 20
     tree = {
