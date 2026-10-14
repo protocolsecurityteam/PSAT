@@ -100,8 +100,7 @@ def source_content_hash(result: dict) -> str:
 
     Covers the source file set (``parse_sources``), the selected ``ContractName`` (one bundle can verify several
     contracts), and the compiler settings that change the IR: language, EVM version, optimizer on/off and runs, and
-    remappings. Excludes address, constructor args, immutable values and chain id. The solc version comes from the
-    hashed pragmas.
+    remappings and verified compiler settings. Excludes address, constructor args, immutable values and chain id.
 
     Returns a ``0x``-prefixed sha256 (66 chars).
     """
@@ -114,6 +113,8 @@ def source_content_hash(result: dict) -> str:
         "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
         "optimizer": str(result.get("OptimizationUsed", "") or ""),
         "runs": str(result.get("Runs", "") or ""),
+        "compiler_version": str(result.get("CompilerVersion", "") or ""),
+        "compiler_settings": parse_compiler_settings(result),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "0x" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -140,6 +141,13 @@ def parse_verification_bundle(result: dict) -> dict | None:
     if not parsed or "sources" not in parsed:
         return None
     return parsed
+
+
+def parse_compiler_settings(result: dict) -> dict:
+    """Verified Standard JSON settings, retained as source facts rather than inferred from pragmas."""
+    bundle = parse_verification_bundle(result)
+    settings = bundle.get("settings") if bundle else None
+    return settings if isinstance(settings, dict) else {}
 
 
 def is_vyper_result(result: dict) -> bool:
@@ -384,6 +392,7 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
             evm_version = "{evm_version}"
             optimizer = {str(result.get("OptimizationUsed", "1") == "1").lower()}
             optimizer_runs = {int(result.get("Runs", "200") or 200)}
+            via_ir = {str(parse_compiler_settings(result).get("viaIR") is True).lower()}
             auto_detect_solc = false
         """
         )

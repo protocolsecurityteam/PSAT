@@ -65,6 +65,18 @@ def test_source_hash_changes_with_source_and_compiler_inputs():
     assert source_content_hash(_flat_result(evm="cancun")) != base
     assert source_content_hash(_flat_result(opt="0")) != base
     assert source_content_hash(_flat_result(runs="999")) != base
+    assert source_content_hash({**_flat_result(), "CompilerVersion": "v0.8.25"}) != base
+
+
+def test_source_hash_separates_verified_compilation_settings():
+    import json
+
+    result = _standard_json_result("Open")
+    base = source_content_hash(result)
+    bundle = json.loads(result["SourceCode"][1:-1])
+    bundle["settings"]["viaIR"] = True
+    result["SourceCode"] = "{" + json.dumps(bundle) + "}"
+    assert source_content_hash(result) != base
 
 
 def _standard_json_result(name: str) -> dict[str, Any]:

@@ -48,6 +48,7 @@ _STATIC_ARTIFACT_NAMES = frozenset(
         "effects",
         "static_dependencies",
         "enrichment_cache",
+        "compiler_settings",
     }
 )
 
@@ -591,7 +592,9 @@ def copy_static_cache(session: Session, source_job_id: Any, target_job_id: Any) 
 # Code-plane artifacts safe to reuse across chains. Excludes ``static_dependencies``, ``enrichment_cache`` and the seed
 # artifacts (chain-specific or merged). ``contract_analysis``/``control_tracking_plan`` have their address re-stamped on
 # copy.
-_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset({"contract_analysis", "control_tracking_plan", "predicate_trees", "effects"})
+_CROSS_CHAIN_STATIC_ARTIFACTS = frozenset(
+    {"contract_analysis", "control_tracking_plan", "predicate_trees", "effects", "compiler_settings"}
+)
 
 
 def copy_static_cache_cross_chain(

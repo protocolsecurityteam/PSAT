@@ -215,3 +215,29 @@ def test_verified_compiler_preserves_custom_error_require_syntax(tmp_path, path)
 )
 def test_incompatible_or_invalid_compiler_metadata_does_not_override_constraints(preferred):
     assert detect_fetch_solc({"T.sol": "pragma solidity >=0.8.20 <0.8.25; contract T {}"}, preferred) == "0.8.24"
+
+
+@pytest.mark.parametrize("via_ir", [True, False, None, "true"])
+def test_both_scaffolds_preserve_verified_via_ir(tmp_path, via_ir):
+    from services.discovery.fetch import parse_compiler_settings
+
+    sources = {"src/T.sol": "pragma solidity ^0.8.25; contract T {}"}
+    bundle = {
+        "language": "Solidity",
+        "sources": {path: {"content": content} for path, content in sources.items()},
+        "settings": {"viaIR": via_ir},
+    }
+    result = {"SourceCode": "{" + json.dumps(bundle) + "}", "CompilerVersion": "v0.8.25"}
+    recursive = scaffold("0xabc", result, tmp_path / "recursive")
+    top_level = tmp_path / "top_level"
+    top_level.mkdir()
+    StaticWorker()._scaffold_project(
+        top_level,
+        sources,
+        {"compiler_version": result["CompilerVersion"]},
+        {"via_ir": parse_compiler_settings(result).get("viaIR") is True},
+        [],
+    )
+    expected = f"via_ir = {str(via_ir is True).lower()}"
+    assert expected in (recursive / "foundry.toml").read_text()
+    assert expected in (top_level / "foundry.toml").read_text()

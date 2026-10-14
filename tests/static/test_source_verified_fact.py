@@ -26,7 +26,7 @@ contract Subject {
 def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session, monkeypatch):
     """NULL (410 rows at writing) especially must survive."""
     from db.models import Contract
-    from db.queue import create_job, store_source_files
+    from db.queue import create_job, store_artifact, store_source_files
     from workers.static_worker import StaticWorker
 
     for index, fact in enumerate((True, False, None)):
@@ -48,6 +48,7 @@ def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session,
         )
         db_session.commit()
         store_source_files(db_session, job.id, {"src/TestContract.sol": "contract TestContract {}"})
+        store_artifact(db_session, job.id, "compiler_settings", data={"viaIR": fact})
 
         worker = StaticWorker()
         _patch_static_worker_phases(monkeypatch, worker)
@@ -55,9 +56,10 @@ def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session,
         monkeypatch.setattr(
             worker,
             "_scaffold_project",
-            lambda _dir, _sources, meta, *_a, **_kw: captured.update(meta),
+            lambda _dir, _sources, meta, settings, *_a, **_kw: captured.update(meta, build_settings=settings),
         )
         worker.process(db_session, job)
 
         assert captured["source_verified"] is fact
         assert _source_verified(captured) is fact
+        assert captured["build_settings"]["via_ir"] is (fact is True)

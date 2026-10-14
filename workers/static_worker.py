@@ -584,10 +584,12 @@ class StaticWorker(BaseWorker):
             # Consumed by ``core._source_verified``.
             "source_verified": contract_row.source_verified,
         }
+        compiler_settings = get_artifact(session, job.id, "compiler_settings")
         build_settings = {
             "evm_version": contract_row.evm_version or "shanghai",
             "optimization_used": contract_row.optimization or False,
             "runs": contract_row.optimization_runs or 200,
+            "via_ir": isinstance(compiler_settings, dict) and compiler_settings.get("viaIR") is True,
         }
         remappings = meta.get("remappings", [])
 
@@ -1050,6 +1052,7 @@ class StaticWorker(BaseWorker):
                 evm_version = "{evm_version}"
                 optimizer = {optimizer}
                 optimizer_runs = {optimizer_runs}
+                via_ir = {str(build_settings.get("via_ir") is True).lower()}
                 auto_detect_solc = false
             """
             )

@@ -131,6 +131,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
             "static_dependencies": {"address": ADDR_MAINNET.lower(), "dependencies": ["0x" + "42" * 20]},
             "enrichment_cache": {"0x" + "42" * 20: {"name": "MainnetDep"}},
             "upgrade_history": {"target_address": ADDR_MAINNET.lower(), "total_upgrades": 3},
+            "compiler_settings": {"viaIR": True},
         },
     )
     target_job, target_contract = _make_target(db_session)
@@ -147,6 +148,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
     assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
     assert get_artifact(db_session, target_job.id, "effects") == _EFFECTS
+    assert get_artifact(db_session, target_job.id, "compiler_settings") == {"viaIR": True}
 
     assert get_artifact(db_session, target_job.id, "static_dependencies") is None
     assert get_artifact(db_session, target_job.id, "enrichment_cache") is None
@@ -250,7 +252,7 @@ def _bundle_result(name: str) -> dict:
     bundle = {
         "language": "Solidity",
         "sources": {"src/Bundle.sol": {"content": "pragma solidity ^0.8.24;\ncontract Open {}\ncontract Guarded {}\n"}},
-        "settings": {"optimizer": {"enabled": True, "runs": 200}},
+        "settings": {"optimizer": {"enabled": True, "runs": 200}, "viaIR": True},
     }
     return {
         "ContractName": name,
@@ -291,6 +293,10 @@ def test_discovery_reuses_only_the_same_contract_from_a_shared_bundle(db_session
     req = target_job.request
     assert isinstance(req, dict)
     assert target_job.source_content_hash == source_content_hash(_bundle_result(target_name))
+    settings = get_artifact(db_session, target_job.id, "compiler_settings")
+    assert isinstance(settings, dict) and settings["viaIR"] is True
+    target_contract = db_session.execute(select(Contract).where(Contract.job_id == target_job.id)).scalar_one()
+    assert target_contract.source_format == "standard_json"
     if reused:
         assert req.get("cross_chain_cache_source_job_id") == str(donor_job.id)
     else:

@@ -49,7 +49,15 @@ from services.discovery.deployer_enumeration import (
     enumerate_with_coverage,
     session_deployer_enumerator,
 )
-from services.discovery.fetch import fetch, is_vyper_result, parse_remappings, parse_sources, source_content_hash
+from services.discovery.fetch import (
+    fetch,
+    is_vyper_result,
+    parse_compiler_settings,
+    parse_remappings,
+    parse_sources,
+    parse_verification_bundle,
+    source_content_hash,
+)
 from services.discovery.inventory import inventory_entries, merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import (
     needs_probe,
@@ -1035,6 +1043,7 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(session, job, "Storing source files")
         with log_timed_phase(logger, "source_storage", files=len(sources)):
             store_source_files(session, job.id, sources)
+            store_artifact(session, job.id, "compiler_settings", data=parse_compiler_settings(result))
         self.update_detail(session, job, "Evaluating membership")
 
         raw_evm = result.get("EVMVersion", "") or ""
@@ -1072,7 +1081,7 @@ class DiscoveryWorker(BaseWorker):
             existing.evm_version = evm_version
             existing.optimization = result.get("OptimizationUsed", "1") == "1"
             existing.optimization_runs = int(result.get("Runs", "200") or 200)
-            existing.source_format = "standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat"
+            existing.source_format = "standard_json" if parse_verification_bundle(result) else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
             # ``None`` means no answer, not no deployer; keep prior evidence.
@@ -1094,7 +1103,7 @@ class DiscoveryWorker(BaseWorker):
                 evm_version=evm_version,
                 optimization=result.get("OptimizationUsed", "1") == "1",
                 optimization_runs=int(result.get("Runs", "200") or 200),
-                source_format="standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat",
+                source_format="standard_json" if parse_verification_bundle(result) else "flat",
                 source_file_count=len(sources),
                 license=result.get("LicenseType", ""),
                 deployer=deployer,
