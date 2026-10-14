@@ -675,7 +675,7 @@ def _normalize_prefetch(result: dict) -> dict:
         "balances": {cid: sorted(bal_key(b) for b in rows) for cid, rows in result["balances"].items()},
         "cgn": {cid: sorted(cgn_key(n) for n in rows) for cid, rows in result["cgn"].items()},
         "cge": {cid: sorted(cge_key(e) for e in rows) for cid, rows in result["cge"].items()},
-        # The terminal walk is keyed by address, not contract_id.
+        # Terminal walks retain runtime scope before the chain/address key.
         "terminal_walk": {addr: tuple(sorted(record.items())) for addr, record in result["terminal_walk"].items()},
     }
 
@@ -1396,6 +1396,7 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
     # The canvas keys off the proxy address.
     ef_vault = EffectiveFunction(
         contract_id=impl_contract.id,
+        deployment_address=proxy_addr,
         function_name="setFee",
         selector="0x11111111",
         abi_signature="setFee(uint256)",
@@ -1434,10 +1435,19 @@ def test_primary_for_resolves_safe_through_in_protocol_timelock(db_session):
 
     # The Timelock is typed ``timelock`` so it is a pass-through; the fee Safe deliberately has no FP row.
     db_session.add(
-        ControlGraphNode(contract_id=impl_contract.id, address=timelock_addr.lower(), resolved_type="timelock")
+        ControlGraphNode(
+            contract_id=impl_contract.id,
+            deployment_address=proxy_addr,
+            address=timelock_addr.lower(),
+            resolved_type="timelock",
+        )
     )
     db_session.add(ControlGraphNode(contract_id=tl_contract.id, address=gov_safe, resolved_type="safe"))
-    db_session.add(ControlGraphNode(contract_id=impl_contract.id, address=fee_safe, resolved_type="safe"))
+    db_session.add(
+        ControlGraphNode(
+            contract_id=impl_contract.id, deployment_address=proxy_addr, address=fee_safe, resolved_type="safe"
+        )
+    )
     db_session.commit()
 
     payload = build_company_overview(db_session, p.name)
@@ -1554,6 +1564,7 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
 
     ef_vault = EffectiveFunction(
         contract_id=impl_contract.id,
+        deployment_address=proxy_addr,
         function_name="setFee",
         selector="0x11111111",
         abi_signature="setFee(uint256)",
@@ -1591,7 +1602,12 @@ def test_primary_for_surfaces_safe_typed_only_via_function_principal(db_session)
     )
 
     db_session.add(
-        ControlGraphNode(contract_id=impl_contract.id, address=timelock_addr.lower(), resolved_type="timelock")
+        ControlGraphNode(
+            contract_id=impl_contract.id,
+            deployment_address=proxy_addr,
+            address=timelock_addr.lower(),
+            resolved_type="timelock",
+        )
     )
     db_session.commit()
 

@@ -72,7 +72,7 @@ function isExactEmptyCapability(cap) {
 }
 
 function isResolvedEmptyFunction(fn) {
-  return fn?.status === "resolved_empty" || isExactEmptyCapability(fn?.capability_expr);
+  return fn?.status === "resolved_empty" || fn?.capability_proven_empty === true || isExactEmptyCapability(fn?.capability_expr);
 }
 
 // All callable by anyone; `shape` says under what side-conditions.

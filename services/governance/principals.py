@@ -297,10 +297,28 @@ def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mappin
     return {**dict(grant), "principals": principals}
 
 
+def _capability_proven_empty(cap: Any) -> bool:
+    """The report's exact-empty witness; false means no proof of emptiness, never proof of a caller."""
+    if not isinstance(cap, dict):
+        return False
+    if cap.get("kind") == "finite_set":
+        return cap.get("membership_quality") == "exact" and cap.get("members") == []
+    children = cap.get("children")
+    if not isinstance(children, list):
+        return False
+    if cap.get("kind") == "AND":
+        return any(_capability_proven_empty(child) for child in children)
+    if cap.get("kind") == "OR":
+        return bool(children) and all(_capability_proven_empty(child) for child in children)
+    return False
+
+
 def _build_company_function_entry(
     ef: EffectiveFunction,
     principals: list[FunctionPrincipal],
     principal_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    include_capability_expr: bool = True,
 ) -> dict[str, Any]:
     direct_owner = None
     controllers_by_label: dict[str, dict[str, Any]] = {}
@@ -409,8 +427,12 @@ def _build_company_function_entry(
     }
 
     capability_expr = getattr(ef, "capability_expr", None)
-    if capability_expr is not None:
-        entry["capability_expr"] = capability_expr
+    if include_capability_expr:
+        if capability_expr is not None:
+            entry["capability_expr"] = capability_expr
+    else:
+        # The company list only consumes this witness. Full trees remain in analysis detail and persisted evidence.
+        entry["capability_proven_empty"] = _capability_proven_empty(capability_expr)
     conditions = getattr(ef, "conditions", None)
     if conditions is not None:
         entry["conditions"] = conditions
