@@ -42,9 +42,10 @@ def test_evm_version_injection_falls_back():
     assert fetch.sanitize_evm_version(injected) == "shanghai"
 
 
-def test_evm_version_allowlist_passes_legit():
-    assert fetch.sanitize_evm_version("cancun") == "cancun"
-    assert fetch.sanitize_evm_version("CANCUN") == "cancun"
+@pytest.mark.parametrize("version", ["cancun", "prague", "osaka"])
+def test_evm_version_allowlist_passes_legit(version):
+    assert fetch.sanitize_evm_version(version) == version
+    assert fetch.sanitize_evm_version(version.upper()) == version
     assert fetch.sanitize_evm_version("") == "shanghai"
 
 

@@ -26,6 +26,7 @@ _ALLOWED_EVM_VERSIONS = (
     "shanghai",
     "cancun",
     "prague",
+    "osaka",
 )
 _EVM_VERSION_BY_KEY = {v.lower(): v for v in _ALLOWED_EVM_VERSIONS}
 _DEFAULT_EVM_VERSION = "shanghai"
