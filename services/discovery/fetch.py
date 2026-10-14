@@ -306,12 +306,15 @@ def _detect_solc_version(sources: dict[str, str], preferred_version: str | None 
     the preference stands and the compile reports the conflict.
     """
     pragmas = _solidity_pragmas(sources)
+    floor = _parse_version(_MIN_SOLC)
     match = re.fullmatch(r"v?(\d+\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", preferred_version or "")
     if match:
         verified = _parse_version(match[1])
-        if all(any(r.admits(verified) for r in ranges) for ranges in pragmas):
+        # Preserve the existing patch-floor workaround for compiler internal errors;
+        # metadata must not downgrade a working 0.8.x analysis to those releases.
+        above_floor = verified[:2] != floor[:2] or verified >= floor
+        if above_floor and all(any(r.admits(verified) for r in ranges) for ranges in pragmas):
             return _format_version(verified)
-    floor = _parse_version(_MIN_SOLC)
     lowers = []
     for ranges in pragmas:
         bounded = [v for v in (r.least() for r in ranges) if v is not None]

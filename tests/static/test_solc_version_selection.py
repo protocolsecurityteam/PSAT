@@ -141,8 +141,7 @@ def test_discovery_scaffold_compiler_and_pragma_agree(tmp_path, pragma, solc, wr
         "SourceCode": "{" + json.dumps(bundle) + "}",
     }
     project = scaffold("0xabc", result, tmp_path / "proj")
-    expected = "0.8.21" if pragma == TELLER_PRAGMA else solc
-    assert _foundry_solc(project) == expected
+    assert _foundry_solc(project) == solc
     assert (project / "src/T.sol").read_text().splitlines()[0] == written
 
 
@@ -211,6 +210,8 @@ def test_verified_compiler_preserves_custom_error_require_syntax(tmp_path, path)
     assert proc.returncode == 0, proc.stderr
 
 
-@pytest.mark.parametrize("preferred", ["v0.9.0+commit.abc", "nightly", '0.8.27"\nevm_version = "bad'])
+@pytest.mark.parametrize(
+    "preferred", ["v0.8.21+commit.abc", "v0.9.0+commit.abc", "nightly", '0.8.27"\nevm_version = "bad']
+)
 def test_incompatible_or_invalid_compiler_metadata_does_not_override_constraints(preferred):
     assert detect_fetch_solc({"T.sol": "pragma solidity >=0.8.20 <0.8.25; contract T {}"}, preferred) == "0.8.24"
