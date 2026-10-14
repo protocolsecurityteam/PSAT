@@ -8,7 +8,6 @@ import pytest
 from services.discovery.fetch import _detect_solc_version as detect_fetch_solc
 from services.discovery.fetch import _relax_pragmas, scaffold
 from workers.static_worker import StaticWorker
-from workers.static_worker import _detect_solc_version as detect_static_solc
 
 TELLER_PRAGMA = "pragma solidity <0.9.0 =0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;"
 
@@ -90,7 +89,6 @@ TELLER_PRAGMA = "pragma solidity <0.9.0 =0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;"
 )
 def test_detect_solc_version(sources, expected):
     assert detect_fetch_solc(sources) == expected
-    assert detect_static_solc(sources) == expected
     # The version must not depend on whether the sources were relaxed first; the static worker relaxes before detecting.
     assert detect_fetch_solc(_relax_pragmas(sources)) == expected
 
@@ -124,7 +122,7 @@ def _foundry_solc(project) -> str:
 
 
 _SCAFFOLD_CASES = [
-    pytest.param(TELLER_PRAGMA, "0.8.24", "pragma solidity <0.9.0 ^0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;", id="teller"),
+    pytest.param(TELLER_PRAGMA, "0.8.21", "pragma solidity <0.9.0 ^0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;", id="teller"),
     pytest.param("pragma solidity >=0.8.0 <0.8.20;", "0.8.19", "pragma solidity >=0.8.0 <0.8.20;", id="ceiling"),
 ]
 
@@ -153,7 +151,12 @@ def test_static_scaffold_compiler_and_pragma_agree(tmp_path, pragma, solc, writt
         project,
         {"src/T.sol": f"{pragma}\ncontract T {{}}\n"},
         {"contract_name": "T"},
-        {"evm_version": "shanghai", "optimization_used": True, "runs": 200},
+        {
+            "compiler_version": "v0.8.21+commit.d9974bed",
+            "evm_version": "shanghai",
+            "optimization_used": True,
+            "runs": 200,
+        },
         [],
     )
     assert _foundry_solc(project) == solc

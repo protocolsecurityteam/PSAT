@@ -13,6 +13,11 @@ from ..capabilities import CapabilityExpr, ExternalCheck
 from . import EvaluationContext
 
 _MAX_LINKED_MEMBERS = 256
+MEMBERSHIP_INVENTORY_BUDGET_EXCEEDED = "membership_inventory_budget_exceeded"
+
+
+class _InventoryBudgetExceeded(RuntimeError):
+    pass
 
 
 class AuthorizationAdapter:
@@ -80,6 +85,20 @@ class AuthorizationAdapter:
                 members = _read_inventory(rpc_url, address, block, descriptor["membership_inventory"], ctx.chain_id)
                 cap = CapabilityExpr.finite_set(members)
                 step = "source_membership_inventory"
+        except _InventoryBudgetExceeded:
+            return CapabilityExpr.external_check_only(
+                ExternalCheck(
+                    target_address=address,
+                    target_call_selector=None,
+                    extra={
+                        "basis": [
+                            "caller_tainted_authority_unresolved",
+                            "authorization_storage_unavailable",
+                            MEMBERSHIP_INVENTORY_BUDGET_EXCEEDED,
+                        ]
+                    },
+                )
+            )
         except (KeyError, TypeError, ValueError, RuntimeError):
             return fallback
         cap = replace(
@@ -143,7 +162,7 @@ def _read_inventory(rpc_url: str, address: str, block: int, descriptor: dict, ch
             raise RuntimeError("malformed linked membership list")
         seen.add(current)
         members.append(_address(current))
-    raise RuntimeError("linked membership list exceeds bound")
+    raise _InventoryBudgetExceeded("linked membership list exceeds bound")
 
 
 def _address(value: int) -> str:

@@ -267,3 +267,13 @@ def test_missing_effect_predicate_is_not_a_public_path():
     assert cap is not None
     data = capability_to_dict(cap)
     assert capability_surface_openness(data, project_capability_surface(data)) == "not_determined"
+
+
+def test_a_membership_keyed_by_constants_is_not_folded_as_its_key():
+    from services.static.contract_analysis_pipeline.structural_evidence import predicate_truth
+
+    # ``allowed[address(0)]``: the operand is the key, so the leaf's value is unknown, not ``0``.
+    member = {"kind": "membership", "operator": "truthy", "operands": [{"source": "constant", "constant_value": "0"}]}
+    assert predicate_truth({"op": "LEAF", "leaf": member}) is None
+    equal = {"kind": "equality", "operator": "eq", "operands": [{"source": "constant", "constant_value": "0"}] * 2}
+    assert predicate_truth({"op": "LEAF", "leaf": equal}) is True

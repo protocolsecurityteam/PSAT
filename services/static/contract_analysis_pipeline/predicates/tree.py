@@ -6,14 +6,21 @@ from __future__ import annotations
 
 import contextvars as _contextvars
 import os
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import replace
 from typing import Any, cast
 
 from ..predicate_types import (
+    REACH_CONDITION_BASIS,
+    REACH_READ,
     LeafPredicate,
     PredicateTree,
+    is_reach_condition,
     make_and_node,
     make_leaf_node,
     make_or_node,
+    mark_reach_condition,
 )
 from ..provenance import (
     ProvenanceEngine,
@@ -43,8 +50,13 @@ from ._helpers import (
 from .authority import _CALLER_SOURCES
 from .confidence import apply_confidence_to_tree
 from .control_flow import (
-    _build_if_else_returns_or_children,
+    _branch_value_is_only,
     _detect_assembly_combinator_op,
+    _forward_reachable_node_ids,
+    _guards_contain_opening,
+    _helper_exits,
+    _node_has_unclassified_call,
+    _node_is_type,
     _resolve_internal_call_return,
 )
 from .leaves import (
@@ -57,12 +69,42 @@ from .leaves import (
     _self_gate_or_truthy_leaf,
 )
 from .operands import _operand_for_value, _published_source_key, _source_to_operand
+from .reach import (
+    REACHED_ALWAYS,
+    branch_reads,
+    call_site_unread,
+    effect_before,
+    modifiers_before,
+    node_text,
+    placeholders,
+    reached_formula,
+    reads_conflict,
+    render,
+    rendered_cache,
+    runs_body_repeatedly,
+    unreached_formula,
+    value_reads,
+)
+from .reach_read import reach_read
 
 # ``(callee_id, bindings) -> ProvenanceMap`` for helpers shared across a contract's functions (``_checkRole`` behind
 # grant/revoke/renounce). Set by ``build_predicate_artifacts``; ``None`` in direct test calls. Pure performance.
 _helper_engine_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
     "psat_predicate_helper_engine_cache", default=None
 )
+
+# ``id(function) -> (function, revert gates)`` for entry points and the helpers whose gates are inlined; set alongside
+# ``_helper_engine_cache``. Pure performance.
+_helper_gate_cache: _contextvars.ContextVar[dict | None] = _contextvars.ContextVar(
+    "psat_predicate_helper_gate_cache", default=None
+)
+
+_HELPER_NEVER_RETURNS = "helper_never_returns_allowed_value"
+
+
+def _node_is_if(node: Any) -> bool:
+    return _node_is_type(node, "NodeType.IF")
+
 
 # Callees being gate-inlined, breaking mutual recursion and bounding depth.
 _inline_gate_callee_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
@@ -100,8 +142,7 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
     """
     if not SLITHER_AVAILABLE:
         raise RuntimeError("predicate builder requires slither")
-    detector = RevertDetector(function)
-    gates = detector.run()
+    gates = _revert_gates(function)
     if not gates:
         return None
 
@@ -115,7 +156,7 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
         subtree = _build_subtree_from_gate(gate, prov, function)
         if subtree is not None:
             _stamp_gate_scope(subtree, gate, function)
-            subtrees.append(subtree)
+            subtrees.append(_where_reached(subtree, gate, prov, function))
         elif uncertain_out is not None and _gate_condition_is_caller_eq_neq(gate, prov, function):
             caller_eq_unmodeled = True
 
@@ -128,6 +169,246 @@ def build_predicate_tree(function: Any, *, uncertain_out: set[str] | None = None
     tree = make_and_node(subtrees)
     apply_confidence_to_tree(tree)
     return tree
+
+
+def _where_reached(
+    subtree: PredicateTree,
+    gate: RevertGate,
+    prov: ProvenanceMap,
+    function: Any,
+    *,
+    first_level: int = 0,
+    outer: tuple[Any, list[Any]] | None = None,
+) -> PredicateTree:
+    """``subtree`` as an alternative to every condition under which ``gate`` isn't reached.
+
+    Levels run from ``function`` down ``gate.call_chain`` to the gate's node; a level's modifiers that run before its
+    anchor add the condition their ``_`` is reached under. ``first_level`` skips outer levels whose control flow the
+    caller already accounts for. ``outer`` is the entry point and call chain that lead to ``function`` when it isn't
+    the entry point itself, for the writes made before it. The alternatives' leaves carry the gate's scope, so whatever
+    consumes the gate consumes them too.
+    """
+    entry, prefix = outer if outer is not None else (function, [])
+    if gate.node is None:
+        return subtree
+    chain = list(gate.call_chain or [])
+    frames = [function, *(getattr(ir, "function", None) for ir in chain)]
+    anchors = [*(getattr(ir, "node", None) for ir in chain), gate.node]
+    alternatives: list[PredicateTree] = []
+    # Reach is read for one run of a body; a body a modifier or a loop runs again sees the first run's writes and
+    # returns.
+    unread: tuple[int, str] | None = None
+    above = _unread_above(entry, prefix)
+    if above is not None:
+        unread = (0, above)
+    for level, frame in enumerate(frames):
+        if unread is not None:
+            break
+        reason = call_site_unread(frames[level - 1], chain[level - 1]) if level else None
+        if reason is None and frame is not None and runs_body_repeatedly(frame):
+            reason = "body_runs_repeatedly"
+        if reason is not None:
+            unread = (level, reason)
+    for level in range(first_level, len(frames)):
+        frame, anchor = frames[level], anchors[level]
+        if frame is None or anchor is None:
+            alternatives.append(make_leaf_node(_reach_unsupported_leaf("gate_location_not_determined", gate)))
+            continue
+        level_chain = chain[:level]
+        targets = [(frame, [anchor], level_chain)]
+        targets += [
+            (call.function, placeholders(call.function), [*level_chain, call])
+            for call in modifiers_before(frame, anchor)
+        ]
+        for target_fn, target_anchors, target_chain in targets:
+            formula = unreached_formula(target_fn, target_anchors)
+            if formula is None:
+                continue
+            if unread is not None and level >= unread[0]:
+                alternatives.append(make_leaf_node(_reach_unsupported_leaf(unread[1], gate)))
+                continue
+            # Provenance only for a frame whose reach depends on a branch; most gates are reached unconditionally.
+            target_prov: ProvenanceMap | None = prov
+            if target_chain:
+                _, target_prov, chain_end = _build_chain_bindings(target_chain, target_fn, function, top_prov=prov)
+                if chain_end is not target_fn or target_prov is None:
+                    alternatives.append(make_leaf_node(_reach_unsupported_leaf("gate_location_not_determined", gate)))
+                    continue
+            entry_chain = [*prefix, *target_chain]
+            memo = rendered_cache(target_fn)
+            key = (formula, tuple(id(call) for call in entry_chain), id(target_prov), id(entry))
+            if key not in memo:
+                rendered = render(
+                    formula, target_fn, _branch_tree_builder(target_fn, target_prov, entry, entry_chain), reach=True
+                )
+                memo[key] = ((entry_chain, target_prov, entry), rendered)
+            alternative = memo[key][1]
+            if alternative is not None:
+                alternatives.append(deepcopy(alternative))
+    if not alternatives:
+        return subtree
+    for alternative in alternatives:
+        _restamp_scope(alternative, gate, function)
+    children: list[PredicateTree] = []
+    for tree in [*alternatives, subtree]:
+        children.extend(tree.get("children") or [] if tree.get("op") == "OR" else [tree])
+    return make_or_node(children)
+
+
+def _branch_tree_builder(
+    frame: Any,
+    prov: ProvenanceMap,
+    entry: Any,
+    entry_chain: list[Any],
+    basis: list[str] | None = None,
+) -> Callable[[Any, Any, bool], PredicateTree | None]:
+    """Leaves for a branch outcome in ``frame``, reached from ``entry`` through ``entry_chain``.
+
+    Leaves state storage as it is when the call starts, so an outcome whose condition reads storage the call may
+    already have written on the way to the branch is not determined.
+    """
+
+    def build(node: Any, condition: Any, holds: bool) -> PredicateTree | None:
+        reach = basis is None
+        gate = RevertGate(
+            kind="if_revert",
+            condition_value=condition,
+            polarity="allowed_when_true" if holds else "allowed_when_false",
+            node=node,
+            containing_function=frame,
+            call_chain=list(entry_chain),
+            expression_text=node_text(node, condition),
+            basis=list(basis) if basis is not None else [REACH_CONDITION_BASIS],
+        )
+        tree = _build_subtree_from_value(condition, prov, gate, frame)
+        leaf = tree.get("leaf") or {}
+        # A bool helper that never returns the value this outcome needs makes the outcome impossible.
+        if leaf.get("unsupported_reason") == _HELPER_NEVER_RETURNS:
+            return None
+        written, writes_other = effect_before(entry, entry_chain, frame, node)
+        if written or writes_other:
+            if reads_conflict(branch_reads(entry, entry_chain, frame, node), (written, writes_other)):
+                unread = _unsupported_leaf("branch_reads_state_written_before", gate.expression_text)
+                if reach:
+                    mark_reach_condition(unread)
+                return make_leaf_node(unread)
+        return _with_reach_read(tree, reach_read(condition, entry, entry_chain), holds, reach_only=reach)
+
+    return build
+
+
+def _reach_unsupported_leaf(reason: str, gate: RevertGate) -> LeafPredicate:
+    leaf = _unsupported_leaf(reason, gate.expression_text)
+    mark_reach_condition(leaf)
+    return leaf
+
+
+def _with_reach_read(
+    tree: PredicateTree, expression: dict[str, Any] | None, holds: bool, *, reach_only: bool
+) -> PredicateTree:
+    """``tree`` with the outcome it states as a read on each leaf (each reach leaf when ``reach_only``)."""
+    if expression is None or expression.get("type") != "bool":
+        return tree
+    tree = deepcopy(tree)
+    stamp = {"expression": expression, "holds": holds}
+
+    def visit(node: PredicateTree) -> None:
+        leaf = node.get("leaf")
+        if leaf is not None and (is_reach_condition(leaf) or not reach_only):
+            leaf[REACH_READ] = stamp
+        for child in node.get("children") or []:
+            visit(child)
+
+    visit(tree)
+    return tree
+
+
+_STATE_SOURCES = frozenset({"state_variable", "constant", "self_address"})
+
+
+def _reads_only_state(operand: Any) -> bool:
+    if not isinstance(operand, dict):
+        return False
+    source = operand.get("source")
+    if source == "view_call":
+        signature = operand.get("callee_signature")
+        return isinstance(signature, str) and signature.endswith("()")
+    return source in _STATE_SOURCES
+
+
+def _is_business_state_tree(tree: PredicateTree) -> bool:
+    """Every leaf a business condition on this contract's state alone: no caller, calldata, block or other contract."""
+    leaf = tree.get("leaf")
+    if tree.get("op") == "LEAF":
+        if not isinstance(leaf, dict) or leaf.get("kind") == "unsupported" or is_reach_condition(leaf):
+            return False
+        if leaf.get("authority_role") != "business" or leaf.get("references_msg_sender"):
+            return False
+        descriptor = leaf.get("set_descriptor") or {}
+        operands = [
+            *(leaf.get("operands") or []),
+            *(leaf.get("absorbed_operands") or []),
+            *(descriptor.get("key_sources") or []),
+        ]
+        if descriptor.get("authority_contract"):
+            return False
+        return bool(leaf.get("operands")) and all(_reads_only_state(operand) for operand in operands)
+    children = tree.get("children") or []
+    return bool(children) and all(_is_business_state_tree(child) for child in children)
+
+
+def _state_disjuncts_as_reach(
+    children: list[PredicateTree], read: Callable[[int], dict[str, Any] | None], holds: bool
+) -> list[PredicateTree]:
+    """A disjunct that only reads this contract's state, beside one that doesn't, is the condition under which the
+    other isn't needed (``!flag || isExecutor(msg.sender)`` is ``if (flag) require(isExecutor(msg.sender))``), so it
+    is a reach condition with its read (``read(i)`` for the ``i``-th), not an open path.
+    """
+    state = [_is_business_state_tree(child) for child in children]
+    if all(state) or not any(state):
+        return children
+    out: list[PredicateTree] = []
+    for index, (child, is_state) in enumerate(zip(children, state)):
+        if not is_state:
+            out.append(child)
+            continue
+        expression = read(index)
+        child = _with_reach_read(child, expression, holds, reach_only=False)
+        child = deepcopy(child) if expression is None or expression.get("type") != "bool" else child
+        _mark_reach_leaves(child)
+        out.append(child)
+    return out
+
+
+def _mark_reach_leaves(tree: PredicateTree) -> None:
+    leaf = tree.get("leaf")
+    if leaf is not None:
+        mark_reach_condition(leaf)
+    for child in tree.get("children") or []:
+        _mark_reach_leaves(child)
+
+
+def _unread_above(entry: Any, chain: list[Any]) -> str | None:
+    """Why reach can't be read for one run of the frame ``chain`` leads into from ``entry``: a call on the way in isn't
+    located in its caller, or a frame on the way runs a body more than once, or a call on the way may run more than
+    once.
+    """
+    frames = [entry, *(getattr(call, "function", None) for call in chain)]
+    reasons = {call_site_unread(frames[level], call) for level, call in enumerate(chain)}
+    if "gate_location_not_determined" in reasons:
+        return "gate_location_not_determined"
+    if "body_runs_repeatedly" in reasons or any(frame is not None and runs_body_repeatedly(frame) for frame in frames):
+        return "body_runs_repeatedly"
+    return None
+
+
+def _restamp_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
+    leaf = tree.get("leaf")
+    if leaf is not None:
+        leaf["source_function"] = (gate.containing_function or function).canonical_name
+        leaf["source_node_id"] = gate.node.node_id
+    for child in tree.get("children") or []:
+        _restamp_scope(child, gate, function)
 
 
 def _stamp_gate_scope(tree: PredicateTree, gate: RevertGate, function: Any) -> None:
@@ -194,11 +475,9 @@ def build_return_predicate_tree(function: Any) -> PredicateTree | None:
         expression_text=f"return {getattr(function, 'full_name', 'bool')}",
         basis=["bool-return predicate"],
     )
-    children = _build_if_else_returns_or_children(function, prov, base_gate)
-
-    if not children:
+    tree = _helper_value_tree(function, prov, base_gate, [], function)
+    if tree is None:
         return None
-    tree = make_or_node(children)
     apply_confidence_to_tree(tree)
     return tree
 
@@ -374,20 +653,23 @@ def _build_subtree_from_value(
     if isinstance(defining_ir, Binary):
         op_name = _binary_op(getattr(defining_ir, "type", None))
         if op_name in ("and", "or"):
-            left_tree = _build_subtree_from_value(defining_ir.variable_left, prov, gate, function)
-            right_tree = _build_subtree_from_value(defining_ir.variable_right, prov, gate, function)
-            children = [left_tree, right_tree]
-            if gate.polarity == "allowed_when_true":
-                return make_and_node(children) if op_name == "and" else make_or_node(children)
+            values = [defining_ir.variable_left, defining_ir.variable_right]
+            children = [_build_subtree_from_value(value, prov, gate, function) for value in values]
             # If-revert polarity flips AND/OR (De Morgan).
-            return make_or_node(children) if op_name == "and" else make_and_node(children)
+            if (op_name == "or") == (gate.polarity == "allowed_when_true"):
+                holds = gate.polarity == "allowed_when_true"
+                children = _state_disjuncts_as_reach(
+                    children, lambda index: _disjunct_read(values[index], gate, function), holds
+                )
+                return make_or_node(children)
+            return make_and_node(children)
 
     # A helper whose return is AND/OR (Solmate Auth, DSAuth, Maker ``wish``, USDT): recurse into its bindings so it
     # doesn't bottom out as unsupported business.
     if isinstance(defining_ir, (InternalCall, LibraryCall)):
-        subtree = _build_internal_call_or_and_subtree(defining_ir, prov, gate)
+        subtree, holds_gates = _build_internal_call_or_and_subtree(defining_ir, prov, gate)
         # The helper's revert gates are conjuncts at this call site, inside any enclosing OR branch.
-        gate_subtrees = _internal_call_revert_gate_subtrees(defining_ir, prov)
+        gate_subtrees = [] if holds_gates else _internal_call_revert_gate_subtrees(defining_ir, prov, gate)
         if gate_subtrees:
             if subtree is None:
                 inline_leaf = _classify_leaf_from_ir(defining_ir, prov, gate, function)
@@ -519,68 +801,199 @@ def _attach_call_site_arg_origins(leaf: LeafPredicate, ir: Any, caller_prov: Pro
     return leaf
 
 
-def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> PredicateTree | None:
+def _build_internal_call_or_and_subtree(
+    ir: Any, prov: ProvenanceMap, gate: RevertGate
+) -> tuple[PredicateTree | None, bool]:
     """An AND/OR subtree for a helper whose return is a connective (Solmate ``isAuthorized``, DSAuth, Maker ``wish``,
     USDT), which ``_build_binary_leaf`` can't handle.
 
     Shapes: a direct Binary AND/OR return; a return of an assembly combinator call (Maker ``return either(...)``); the
     helper itself being an assembly ``or``/``and`` combinator (below Slither's IR, so detected structurally with the
-    call-site args as children); and an if/else chain of bool returns (see ``_build_if_else_returns_or_children``).
+    call-site args as children); and any helper with several returns or a non-connective one, read path by path (see
+    ``_helper_value_tree``). The flag says the subtree already holds the helper's own revert gates.
     """
     resolved = _resolve_internal_call_return(ir, prov)
     if resolved is None:
-        return None
+        return None, False
     callee, sub_prov, _return_value, inner = resolved
+    if len(_helper_exits(callee)) > 1:
+        # The shapes below read the first return only.
+        return _helper_return_paths_subtree(ir, prov, callee, sub_prov, gate), True
     op_name: str | None = None
     children: list[PredicateTree] = []
+    # Values read in the callee's frame are reached through this call, so helpers they call see the full chain.
+    inside = replace(gate, call_chain=[*(gate.call_chain or []), ir])
     if isinstance(inner, Binary):
         op_name = _binary_op(getattr(inner, "type", None))
         if op_name not in ("and", "or"):
-            return None
+            return None, False
         left = inner.variable_left
         right = inner.variable_right
         if left is None or right is None:
-            return None
+            return None, False
         children = [
-            _build_subtree_from_value(left, sub_prov, gate, callee),
-            _build_subtree_from_value(right, sub_prov, gate, callee),
+            _build_subtree_from_value(left, sub_prov, inside, callee),
+            _build_subtree_from_value(right, sub_prov, inside, callee),
         ]
+        if (op_name == "or") == (gate.polarity == "allowed_when_true"):
+            node = getattr(inner, "node", None)
+            values = (left, right)
+            children = _state_disjuncts_as_reach(
+                children,
+                lambda index: _disjunct_read(values[index], inside, callee, node),
+                gate.polarity == "allowed_when_true",
+            )
     elif isinstance(inner, (InternalCall, LibraryCall)):
         # The return is itself an assembly combinator call; its args are the children.
         inner_callee = getattr(inner, "function", None)
         asm_op = _detect_assembly_combinator_op(inner_callee) if inner_callee else None
         if asm_op is None:
-            return None
+            return None, False
         op_name = asm_op
         call_args = list(getattr(inner, "arguments", []) or [])
         if not call_args:
-            return None
-        children = [_build_subtree_from_value(arg, sub_prov, gate, callee) for arg in call_args]
+            return None, False
+        children = [_build_subtree_from_value(arg, sub_prov, inside, callee) for arg in call_args]
     else:
         # The helper is the assembly combinator; the call-site args are the children.
         asm_op = _detect_assembly_combinator_op(callee)
-        if asm_op is not None:
-            op_name = asm_op
-            call_args = list(getattr(ir, "arguments", []) or [])
-            if not call_args:
-                return None
-            children = [
-                _build_subtree_from_value(arg, prov, gate, gate.containing_function or callee) for arg in call_args
-            ]
-        else:
-            # If/else chain of bool returns: OR of each return-true path's conditions.
-            children = _build_if_else_returns_or_children(callee, sub_prov, gate)
-            if children:
-                op_name = "or"
-        if op_name is None or not children:
-            return None
+        if asm_op is None:
+            return _helper_return_paths_subtree(ir, prov, callee, sub_prov, gate), True
+        op_name = asm_op
+        call_args = list(getattr(ir, "arguments", []) or [])
+        if not call_args:
+            return None, False
+        children = [_build_subtree_from_value(arg, prov, gate, gate.containing_function or callee) for arg in call_args]
     if op_name is None or not children:
-        return None
+        return None, False
     # Re-attach call-site argument origins lost in the callee's frame.
     children = [_attach_call_site_arg_origins_to_tree(child, ir, prov) for child in children]
     if gate.polarity == "allowed_when_true":
-        return make_and_node(children) if op_name == "and" else make_or_node(children)
-    return make_or_node(children) if op_name == "and" else make_and_node(children)
+        return (make_and_node(children) if op_name == "and" else make_or_node(children)), False
+    return (make_or_node(children) if op_name == "and" else make_and_node(children)), False
+
+
+def _helper_return_paths_subtree(
+    ir: Any, prov: ProvenanceMap, callee: Any, sub_prov: ProvenanceMap, gate: RevertGate
+) -> PredicateTree:
+    entry, chain = _entry_and_chain(gate, callee)
+    tree = _helper_value_tree(callee, sub_prov, gate, [*chain, ir], entry)
+    if tree is None:
+        return make_leaf_node(_unsupported_leaf(reason=_HELPER_NEVER_RETURNS, expression=gate.expression_text))
+    return _attach_call_site_arg_origins_to_tree(tree, ir, prov)
+
+
+def _entry_and_chain(gate: RevertGate, fallback: Any) -> tuple[Any, list[Any]]:
+    """The entry point a gate was reached from and the calls leading to its frame."""
+    chain = list(gate.call_chain or [])
+    head = getattr(getattr(chain[0], "node", None), "function", None) if chain else None
+    return (head if head is not None else gate.containing_function or fallback), chain
+
+
+def _helper_value_tree(
+    callee: Any, sub_prov: ProvenanceMap, gate: RevertGate, chain: list[Any], entry: Any
+) -> PredicateTree | None:
+    """When a bool helper, entered through ``chain``, returns the value ``gate`` allows on (``true`` under
+    ``allowed_when_true``, ``false`` under a negated call), or ``None`` when no return yields it.
+
+    Every explicit revert gate in the helper is a conjunct where it's reached. Each return that can yield the value
+    contributes its path condition, read from the helper's control dependence (loops and ``try`` outcomes not
+    determined), ANDed with its value when that isn't a literal. A branch whose true side only returns the wanted value
+    is its own alternative, so the paths past its false side don't repeat its negation. Falling off the end returns
+    the default ``false``. A wanted literal reached unconditionally with no gate to state, or an unproven call before a
+    path whose condition opens cofinite, is ``unsupported``.
+    """
+    wanted = "True" if gate.polarity == "allowed_when_true" else "False"
+    unread = "body_runs_repeatedly" if runs_body_repeatedly(callee) else _unread_above(entry, chain)
+    if unread is not None:
+        return make_leaf_node(_unsupported_leaf(unread, gate.expression_text))
+    gates = _helper_gate_subtrees(callee, sub_prov, chain, entry, caller_tainted_only=False)
+    cfg_nodes = list(getattr(callee, "nodes", []) or [])
+    assume = frozenset(
+        ("branch", node.node_id, False)
+        for node in cfg_nodes
+        if _node_is_if(node) and _branch_value_is_only(getattr(node, "son_true", None), wanted)
+    )
+    unclassified = [_forward_reachable_node_ids(node) for node in cfg_nodes if _node_has_unclassified_call(node)]
+    builder = _branch_tree_builder(callee, sub_prov, entry, chain, basis=list(gate.basis))
+    paths: list[PredicateTree] = []
+    always = False
+    for node, value in _helper_exits(callee):
+        literal = "False" if value is None else str(getattr(value, "value", value))
+        literal = literal if literal in ("True", "False") else None
+        if literal is not None and literal != wanted:
+            continue
+        formula = reached_formula(callee, node, assume)
+        path = None if formula == REACHED_ALWAYS else render(formula, callee, builder)
+        if formula != REACHED_ALWAYS and path is None:
+            continue
+        if path is not None and _guards_contain_opening([path]) and any(id(node) in r for r in unclassified):
+            paths.append(
+                make_leaf_node(
+                    _unsupported_leaf(
+                        reason=f"unattributable_return_{(literal or 'value').lower()}",
+                        expression=f"literal {(literal or 'value').lower()}",
+                    )
+                )
+            )
+            continue
+        parts = [path] if path is not None else []
+        if literal is None:
+            value_gate = RevertGate(
+                kind=gate.kind,
+                condition_value=value,
+                polarity=gate.polarity,
+                node=node,
+                containing_function=callee,
+                call_chain=list(chain),
+                expression_text=f"return {value}",
+                basis=list(gate.basis),
+            )
+            parts.append(_build_subtree_from_value(value, sub_prov, value_gate, callee))
+        if not parts:
+            always = True
+            continue
+        paths.append(make_and_node(parts))
+    if not paths and not always:
+        return None
+    if always:
+        if not gates:
+            return make_leaf_node(
+                _unsupported_leaf(
+                    reason=f"unattributable_return_{wanted.lower()}", expression=f"literal {wanted.lower()}"
+                )
+            )
+        return make_and_node(gates)
+    if len(paths) > 1:
+        paths = _state_disjuncts_as_reach(paths, lambda _index: None, True)
+    for path in paths:
+        _drop_unmarked_reads(path)
+    value = make_or_node(paths)
+    return make_and_node([*gates, *(value.get("children") or [] if value.get("op") == "AND" else [value])])
+
+
+def _drop_unmarked_reads(tree: PredicateTree) -> None:
+    """A helper path's outcome reads are kept only where the outcome became a reach condition."""
+    leaf = tree.get("leaf")
+    if leaf is not None and not is_reach_condition(leaf):
+        leaf.pop(REACH_READ, None)
+    for child in tree.get("children") or []:
+        _drop_unmarked_reads(child)
+
+
+def _disjunct_read(value: Any, gate: RevertGate, function: Any, node: Any = None) -> dict[str, Any] | None:
+    """``value``, one side of a connective at ``node`` (the gate's own by default), as a read, when nothing the call
+    writes before it can change it.
+    """
+    entry, chain = _entry_and_chain(gate, function)
+    frame = getattr(chain[-1], "function", None) if chain else entry
+    node = node if node is not None else gate.node
+    if node is None or frame is not function:
+        return None
+    written, writes_other = effect_before(entry, chain, frame, node)
+    if (written or writes_other) and reads_conflict(value_reads(entry, chain, frame, value), (written, writes_other)):
+        return None
+    return reach_read(value, entry, chain)
 
 
 # Explicit conditional reverts only: opaque fail-safes would add ``unsupported`` leaves, and external-call/try-catch
@@ -588,7 +1001,7 @@ def _build_internal_call_or_and_subtree(ir: Any, prov: ProvenanceMap, gate: Reve
 _INLINED_GATE_KINDS = ("require", "assert", "if_revert", "custom_revert")
 
 
-def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[PredicateTree]:
+def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap, gate: RevertGate) -> list[PredicateTree]:
     """The inlined helper's own revert gates, rebuilt in the caller's frame.
 
     ``require(helper(args))`` also depends on the helper not reverting, but neither side owned its internal gates
@@ -604,21 +1017,6 @@ def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[Pr
     callee = getattr(ir, "function", None)
     if callee is None:
         return []
-    callee_id = id(callee)
-    if not callee_id:
-        return []
-    stack = _inline_gate_callee_stack.get()
-    if callee_id in stack or len(stack) >= DEFAULT_INTERNAL_CALL_DEPTH:
-        return []
-
-    try:
-        inner_gates = RevertDetector(callee).run()
-    except Exception:
-        return []
-    inner_gates = [g for g in inner_gates if g.kind in _INLINED_GATE_KINDS]
-    if not inner_gates:
-        return []
-
     # Bind like ``_resolve_internal_call_return``, through the helper-engine cache.
     bindings: dict[str, Any] = {}
     args = list(getattr(ir, "arguments", []) or [])
@@ -637,19 +1035,65 @@ def _internal_call_revert_gate_subtrees(ir: Any, prov: ProvenanceMap) -> list[Pr
         sub_prov = sub_engine.provenance
         if cache is not None and cache_key is not None:
             cache[cache_key] = sub_prov
+    entry, chain = _entry_and_chain(gate, callee)
+    return _helper_gate_subtrees(callee, sub_prov, [*chain, ir], entry, caller_tainted_only=True)
+
+
+def _helper_gate_subtrees(
+    callee: Any, sub_prov: ProvenanceMap, chain: list[Any], entry: Any, *, caller_tainted_only: bool
+) -> list[PredicateTree]:
+    """``callee``'s explicit revert gates, each as an alternative to where it isn't reached, built with ``callee``'s
+    bound provenance; ``chain`` leads from ``entry`` to ``callee``.
+    """
+    callee_id = id(callee)
+    stack = _inline_gate_callee_stack.get()
+    if callee_id in stack or len(stack) >= DEFAULT_INTERNAL_CALL_DEPTH:
+        return []
+    try:
+        inner_gates = [g for g in _revert_gates(callee) if g.kind in _INLINED_GATE_KINDS]
+    except Exception:
+        return []
+    if not inner_gates:
+        return []
 
     token = _inline_gate_callee_stack.set(stack + (callee_id,))
     try:
         subtrees: list[PredicateTree] = []
         for inner_gate in inner_gates:
-            subtree = _build_subtree_from_gate(inner_gate, sub_prov, callee)
-            if subtree is None or not _tree_has_caller_tainted_leaf(subtree):
+            frame = inner_gate.containing_function or callee
+            frame_prov: ProvenanceMap | None = sub_prov
+            if inner_gate.call_chain:
+                _, frame_prov, chain_end = _build_chain_bindings(
+                    inner_gate.call_chain, frame, callee, top_prov=sub_prov
+                )
+                if chain_end is not frame:
+                    frame_prov = None
+            if inner_gate.condition_value is None or frame_prov is None:
+                subtree = make_leaf_node(_unsupported_leaf("missing_condition", inner_gate.expression_text))
+            else:
+                # Built with the chain from the entry point, so helpers it reads see the writes made on the way in.
+                rebased = replace(inner_gate, call_chain=[*chain, *inner_gate.call_chain])
+                subtree = _build_subtree_from_value(inner_gate.condition_value, frame_prov, rebased, frame)
+            if caller_tainted_only and not _tree_has_caller_tainted_leaf(subtree):
                 continue
+            subtree = _where_reached(subtree, inner_gate, sub_prov, callee, outer=(entry, chain))
             _tag_tree_leaves_basis(subtree, f"inlined_internal_gate:{_callee_label(callee)}")
             subtrees.append(subtree)
         return subtrees
     finally:
         _inline_gate_callee_stack.reset(token)
+
+
+def _revert_gates(function: Any) -> list[RevertGate]:
+    """``RevertDetector(function).run()``, shared within a contract pass."""
+    cache = _helper_gate_cache.get()
+    hit = cache.get(id(function)) if cache is not None else None
+    if hit is not None:
+        return hit[1]
+    gates = RevertDetector(function).run()
+    if cache is not None:
+        cache[id(function)] = (function, gates)
+    return gates
 
 
 def _callee_label(callee: Any) -> str:

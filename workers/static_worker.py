@@ -7,7 +7,6 @@ import json
 import logging
 import shutil
 import tempfile
-import textwrap
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +15,7 @@ from sqlalchemy import select
 from db.models import Contract, ContractSummary, Job, JobDependency, JobStage, RoleDefinition, derive_job_chain_id
 from db.queue import (
     _MUTABLE_CONTRACT_FIELDS,
+    LeaseLost,
     create_job,
     failed_semantic_artifact,
     get_artifact,
@@ -26,6 +26,7 @@ from db.queue import (
 )
 from schemas.contract_analysis import ContractAnalysis
 from services.clients.rpc import default_rpc_url, normalize_hex  # used for address comparison
+from services.compute_isolation import ChildProcessKilled, ResourceExhausted, run_isolated, static_budget
 from services.discovery import (
     build_dependency_visualization,
     build_unified_dependencies,
@@ -35,7 +36,15 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, _detect_solc_version, _relax_pragmas, sanitize_evm_version
+from services.discovery.fetch import (
+    CompilerUnavailableError,
+    _confine,
+    _relax_pragmas,
+    compile_settings,
+    render_foundry_toml,
+    scaffolded_solc_version,
+    solc_installed,
+)
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -585,9 +594,12 @@ class StaticWorker(BaseWorker):
             "source_verified": contract_row.source_verified,
         }
         build_settings = {
-            "evm_version": contract_row.evm_version or "shanghai",
-            "optimization_used": contract_row.optimization or False,
-            "runs": contract_row.optimization_runs or 200,
+            "language": contract_row.language or "solidity",
+            "compiler_version": contract_row.compiler_version,
+            "evm_version": contract_row.evm_version,
+            "optimization_used": contract_row.optimization,
+            "runs": contract_row.optimization_runs,
+            "via_ir": contract_row.via_ir,
         }
         remappings = meta.get("remappings", [])
 
@@ -672,6 +684,11 @@ class StaticWorker(BaseWorker):
                     analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
 
                 if analysis_data is None:
+                    solc_version = scaffolded_solc_version(project_dir)
+                    if solc_version is not None and not solc_installed(solc_version):
+                        raise CompilerUnavailableError(
+                            f"Contract analysis failed for {contract_name} ({address}) without solc {solc_version}."
+                        )
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
                 with log_timed_phase(logger, "tracking_plan"):
@@ -848,9 +865,9 @@ class StaticWorker(BaseWorker):
         force = bool(request.get("force"))
         # Under --force, the same impl reached via several proxies spawns once per cascade.
         root_job_id = request.get("root_job_id") or str(job.id)
-        # Coalesce a chainless request via the job's chain: with chain=None the reconcile has no chain filter, and
-        # CREATE2 impls share addresses across chains.
-        chain = request.get("chain") or _parent_chain_name(job)
+        # The job's own chain, never None: with chain=None the reconcile has no chain filter, and CREATE2 impls share
+        # addresses across chains.
+        chain = _parent_chain_name(job)
         from sqlalchemy import text as _sa_text
 
         for impl_addr, label in impl_entries:
@@ -903,7 +920,7 @@ class StaticWorker(BaseWorker):
                 "parent_is_member": parent_is_member,
             }
             # Always stamp the parent's chain so the child can't default elsewhere.
-            impl_chain = request.get("chain") or _parent_chain_name(job)
+            impl_chain = chain
             child_request["chain"] = impl_chain
             # Defence in depth: a disabled chain spawns nothing.
             if not chain_enabled(impl_chain):
@@ -1031,27 +1048,23 @@ class StaticWorker(BaseWorker):
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content)
 
-        solc_version = _detect_solc_version(sources)
-        src_dir = _detect_src_dir(sources)
-        evm_version = sanitize_evm_version(build_settings.get("evm_version", "shanghai"))
-        optimizer = str(bool(build_settings.get("optimization_used", True))).lower()
-        optimizer_runs = int(build_settings.get("runs", 200) or 200)
-
-        (project_dir / "foundry.toml").write_text(
-            textwrap.dedent(
-                f"""\
-                [profile.default]
-                src = "{src_dir}"
-                out = "out"
-                libs = ["lib"]
-                solc_version = "{solc_version}"
-                evm_version = "{evm_version}"
-                optimizer = {optimizer}
-                optimizer_runs = {optimizer_runs}
-                auto_detect_solc = false
-            """
-            )
+        language = str(build_settings.get("language") or "solidity")
+        settings = compile_settings(
+            sources,
+            language=language,
+            compiler_version=build_settings.get("compiler_version"),
+            evm_version=build_settings.get("evm_version"),
+            optimizer=build_settings.get("optimization_used"),
+            optimizer_runs=build_settings.get("runs"),
+            via_ir=build_settings.get("via_ir"),
         )
+        (project_dir / "foundry.toml").write_text(render_foundry_toml(_detect_src_dir(sources), settings))
+        meta = {
+            **meta,
+            "solc_version": settings.solc_version if language == "solidity" else None,
+            "via_ir": settings.via_ir,
+            "via_ir_used": False,
+        }
 
         # Keep only remappings whose targets contain sources.
         pruned = _prune_remappings(remappings, set(sources.keys()))
@@ -1429,9 +1442,15 @@ class StaticWorker(BaseWorker):
     ) -> ContractAnalysis | None:
         self.update_detail(session, job, "Building structured contract analysis")
         try:
-            analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
-                project_dir
+            analysis_data, semantic_predicate_trees, semantic_effects = run_isolated(
+                collect_contract_analysis_with_artifacts,
+                project_dir,
+                budget=static_budget(),
+                label="static_analysis",
             )
+        except (ResourceExhausted, ChildProcessKilled, LeaseLost):
+            # Not a property of the source: the job's outcome, not an analysis error.
+            raise
         except Exception as exc:
             record_degraded(
                 phase="contract_analysis",
@@ -1441,6 +1460,11 @@ class StaticWorker(BaseWorker):
             _log_phase_error(str(job.id), address, contract_name, "contract_analysis", str(exc))
             store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
             return None
+        try:
+            build_meta = json.loads((project_dir / "contract_meta.json").read_text())
+        except (OSError, ValueError):
+            build_meta = {}
+        record_stage_metric("ir_fallback", isinstance(build_meta, dict) and build_meta.get("via_ir_used") is True)
 
         # A failed build is kept for diagnosis under ``<name>_error``, never under the name policy reads as the facts.
         for name, artifact in (("predicate_trees", semantic_predicate_trees), ("effects", semantic_effects)):

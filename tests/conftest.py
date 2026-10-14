@@ -23,6 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 if not os.environ.get("ERPC_BASE_URL"):
     os.environ["ERPC_BASE_URL"] = "http://erpc.invalid"
 
+# Tests stub the wire inside this process, which a fork-server child never sees, so heavy compute runs inline here. The
+# isolation tests turn it back on and stub the wire across processes.
+os.environ["PSAT_COMPUTE_ISOLATION"] = "0"
+
 _STORAGE_ENV_KEYS = (
     "ARTIFACT_STORAGE_ENDPOINT",
     "ARTIFACT_STORAGE_BUCKET",
@@ -43,6 +47,7 @@ from db.models import (  # noqa: E402
     ContractBalanceFetch,
     ContractCreationWitness,
     DaemonLease,
+    DeployerChainEnumeration,
     EffectVerdict,
     IndexedEventCursor,
     IndexedEventLog,
@@ -590,6 +595,8 @@ def db_session():
             # Only reachable once Contract is gone.
             UpgradeTransaction,
             ContractCreationWitness,
+            # Keyed by (chain, EOA) with no FK; a leftover would stand in for the next test's enumeration.
+            DeployerChainEnumeration,
             # Leases carry a live TTL; clear them so warm-DB reruns don't couple.
             DaemonLease,
             # Entity-keyed balance rows (no contract FK) are reachable by no cascade, and a leftover reading would read

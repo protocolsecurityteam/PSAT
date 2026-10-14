@@ -317,7 +317,7 @@ def test_view_call_mapping_key_expands_to_returned_role_members(monkeypatch):
     monkeypatch.setattr(
         evaluator_mod,
         "_call_unary_bytes32_view",
-        lambda **_kwargs: [admin_role],
+        lambda **_kwargs: evaluator_mod.ViewWords(words=[admin_role], complete=True),
     )
 
     tree = {

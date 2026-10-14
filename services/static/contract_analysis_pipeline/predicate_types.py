@@ -219,6 +219,7 @@ class LeafPredicate(TypedDict):
     # (``_stamp_absorbed_operands``). A sibling list; consumers needing the whole expression take the union. An opaque
     # ``computed`` member is not determined.
     absorbed_operands: NotRequired[list[Operand]]
+    reach_read: NotRequired[dict[str, Any]]
 
 
 PredicateOp = Literal["AND", "OR", "LEAF"]
@@ -240,6 +241,81 @@ class PredicateTree(TypedDict, total=False):
 # The only question is whether the recorder ran; absence is the other answer.
 OperandAbsorption = Literal["recorded"]
 OPERAND_ABSORPTION_RECORDED: Final[OperandAbsorption] = "recorded"
+
+# Basis on leaves stating where a gate is reached: alternatives to a gate, never gates themselves. A reach condition
+# opens a path only once read true at a block (``REACH_READ``); read false it opens nothing, and unread it is not
+# determined.
+REACH_CONDITION_BASIS: Final = "revert_path_condition"
+
+# Leaf key: ``{"expression": <reach_read recipe>, "holds": bool}``, the outcome this leaf's alternative states. Every
+# leaf of one outcome carries the whole outcome. Absent when the condition can't be stated as exact reads.
+REACH_READ: Final = "reach_read"
+
+# The basis tag resolution publishes for a reach condition it couldn't read: a path that may be open.
+REACH_NOT_DETERMINED: Final = "reach_condition_not_determined"
+
+
+def is_reach_condition(leaf: Any) -> bool:
+    return isinstance(leaf, dict) and REACH_CONDITION_BASIS in (leaf.get("basis") or [])
+
+
+# ``root_caller`` is the root ``msg.sender`` rewritten into an inlined callee's frame.
+_CALLER_SOURCES: Final = frozenset({"msg_sender", "tx_origin", "signature_recovery", "root_caller"})
+
+
+def _leaf_operands(leaf: dict[str, Any]) -> list[Any]:
+    descriptor = leaf.get("set_descriptor") or {}
+    return [
+        *(leaf.get("operands") or []),
+        *(leaf.get("absorbed_operands") or []),
+        *(descriptor.get("key_sources") or []),
+    ]
+
+
+def _derives_from_caller(operand: Any, depth: int = 0) -> bool:
+    if not isinstance(operand, dict) or depth > 8:
+        return False
+    if operand.get("source") in _CALLER_SOURCES:
+        return True
+    inner = [*(operand.get("derived_from") or []), *(operand.get("callee_args") or [])]
+    return any(_derives_from_caller(op, depth + 1) for op in inner)
+
+
+def is_read_reach_condition(leaf: Any) -> bool:
+    """A reach condition resolution reads at a block rather than resolving to callers: one with no caller operand. A
+    caller operand says who passes, so that leaf resolves to callers like any gate leaf.
+    """
+    if not is_reach_condition(leaf) or leaf.get("references_msg_sender"):
+        return False
+    return not any(isinstance(op, dict) and op.get("source") in _CALLER_SOURCES for op in _leaf_operands(leaf))
+
+
+def names_controllers(leaf: Any) -> bool:
+    """Whether a leaf's state says who passes: any leaf but a reach condition that involves the caller nowhere, not
+    even through what a call or computation it reads was given.
+    """
+    if not isinstance(leaf, dict) or not is_reach_condition(leaf) or leaf.get("references_msg_sender"):
+        return True
+    return any(_derives_from_caller(op) for op in _leaf_operands(leaf))
+
+
+def is_read_reach_tree(tree: Any) -> bool:
+    """Whether every leaf of ``tree`` is a reach condition read at a block."""
+    if not isinstance(tree, dict):
+        return False
+    if tree.get("op") == "LEAF":
+        return is_read_reach_condition(tree.get("leaf"))
+    children = tree.get("children") or []
+    return bool(children) and all(is_read_reach_tree(child) for child in children)
+
+
+def mark_reach_condition(leaf: Any) -> None:
+    if isinstance(leaf, dict) and not is_reach_condition(leaf):
+        leaf["basis"] = [*(leaf.get("basis") or []), REACH_CONDITION_BASIS]
+
+
+# An inline-assembly revert's gate is recorded as ``allowed_when_true`` whichever way it reverts.
+INLINE_ASM_REVERT_BASIS: Final = "inline assembly conditional revert"
 
 # Minted by the effects pass, matched by scoring and the calldata prober.
 StateVarTargetKind = Literal["constant", "immutable", "storage_setter", "storage_no_setter"]

@@ -17,9 +17,9 @@ from db.models import (
     JobStatus,
     MonitoredContract,
 )
-from db.queue import create_job
+from db.queue import _job_chain_name, _mainnet_coalesced_chain, create_job
 from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
-from utils.chains import chain_enabled
+from utils.chains import canonical_chain, chain_enabled
 
 # Must match _OWNER_CONTROLLER_IDS in unified_watcher.py.
 _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
@@ -120,8 +120,7 @@ def maybe_queue_reanalysis(
         .all()
     )
     for candidate in in_flight_candidates:
-        req = candidate.request if isinstance(candidate.request, dict) else {}
-        if req.get("chain", "ethereum") == mc.chain:
+        if _job_chain_name(candidate) == _mainnet_coalesced_chain(canonical_chain(mc.chain)):
             logger.info(
                 "Skipping re-analysis for %s: job %s already in-flight (stage=%s)",
                 mc.address,
@@ -230,13 +229,12 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
         return []
 
     address = (job.address or "").lower()
-    chain = request.get("chain", "ethereum")
 
     contract = (
         session.execute(
             select(Contract).where(
                 func.lower(Contract.address) == address,
-                Contract.chain == chain,
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(job)),
             )
         )
         .scalars()

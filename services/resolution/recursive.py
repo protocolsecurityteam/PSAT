@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import re
@@ -15,12 +16,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from typing_extensions import NotRequired
 
+from db.contract_materializations import DeterministicBuildFailure
 from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE,
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
     EDGE_RELATION_EXTERNAL_CALL_TARGET,
 )
 from db.queue.artifacts import analysis_reports_failure, failed_semantic_artifact
+from db.queue.heartbeats import LeaseLost
 from db.storage import StorageContentIncomplete, StorageUnavailable
 from schemas.contract_analysis import ContractAnalysis, ControllerProvenance
 from schemas.control_tracking import (
@@ -37,8 +40,9 @@ from schemas.resolved_control_graph import (
     ResolvedGraphNode,
     ResolvedNodeType,
 )
+from services.compute_isolation import ChildProcessFailed, ResourceExhausted, run_isolated, static_budget
 from services.discovery.classifier import ClassificationIncompleteError
-from services.discovery.fetch import fetch, scaffold
+from services.discovery.fetch import fetch, scaffold, scaffolded_solc_version, solc_installed
 from services.resolution.mapping_enumerator import (
     MAPPING_ENUMERATION_AWAITS,
     MAPPING_ENUMERATION_SOURCE,
@@ -72,9 +76,23 @@ class UnresolvedProxyError(RuntimeError):
     """
 
 
-class DegradedStaticAnalysisError(RuntimeError):
+class DegradedStaticAnalysisError(DeterministicBuildFailure):
     """A nested contract whose predicate or effects build failed; its guards are not determined, so the BFS records a
     degraded node instead of resolving from them.
+    """
+
+
+class ResourceExhaustedBuildError(RuntimeError):
+    """A nested build that ran out of memory; not determined, and not remembered as failed."""
+
+
+class BuildBudgetExceededError(DeterministicBuildFailure):
+    """A nested build past its compute budget; not determined, and remembered so later walks don't spend it again."""
+
+
+class NestedCompileError(DeterministicBuildFailure):
+    """A nested contract whose compile or Slither parse failed with its compiler installed; its guards are not
+    determined.
     """
 
 
@@ -223,16 +241,43 @@ def _build_static_artifacts(
     with tempfile.TemporaryDirectory(prefix=f"psat_{workspace_prefix}_") as tmp:
         project_dir = Path(tmp) / project_name
         scaffold(effective_address, result, project_dir)
-        analysis, predicate_trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
+        try:
+            analysis, predicate_trees, _effects = run_isolated(
+                collect_contract_analysis_with_artifacts,
+                project_dir,
+                budget=static_budget(),
+                label="nested_static_analysis",
+            )
+        except ResourceExhausted as exc:
+            raise BuildBudgetExceededError(f"build of {effective_address}: {exc}") from exc
+        except (MemoryError, OSError, LeaseLost, ChildProcessFailed):
+            # A child that died proves nothing about the source, so it is never remembered as a compile failure.
+            raise
+        except Exception as exc:
+            # Without the compiler on disk the failure may be its download, which a later build can get past.
+            if solc_installed(scaffolded_solc_version(project_dir)):
+                raise NestedCompileError(f"build of {effective_address} failed: {type(exc).__name__}: {exc}") from exc
+            raise
+        if _build_meta(project_dir).get("via_ir_used") is True:
+            _bump_materialize_metric("materialize_ir_fallbacks")
     if analysis_reports_failure(analysis):
-        # Raised so the cache records ``failed`` (rebuilt on the next request) and the node stays undetermined, rather
-        # than a ready row built on failed semantics.
-        raise DegradedStaticAnalysisError(
-            f"static analysis of {effective_address} failed: {'; '.join(analysis['analysis_status']['errors'])}"
-        )
+        # Raised so the cache records ``failed`` (served until the source or analyzer changes) and the node stays
+        # undetermined, rather than a ready row built on failed semantics.
+        message = f"static analysis of {effective_address} failed: {'; '.join(analysis['analysis_status']['errors'])}"
+        if analysis["analysis_status"].get("resource_exhausted"):
+            raise ResourceExhaustedBuildError(message)
+        raise DegradedStaticAnalysisError(message)
 
     plan = build_control_tracking_plan(analysis)
     return contract_name, analysis, plan, predicate_trees
+
+
+def _build_meta(project_dir: Path) -> dict[str, Any]:
+    try:
+        meta = json.loads((project_dir / "contract_meta.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:
@@ -319,6 +364,8 @@ def _materialize_with_cross_process_cache(
     except Exception as exc:
         # Builder failures propagate for the stage's own retry classification; DB-layer failures fall back to a direct
         # build.
+        if isinstance(exc, cm.RememberedBuildFailure):
+            _bump_materialize_metric("materialize_failures_remembered")
         if _is_builder_exception(exc):
             raise
         record_degraded(
@@ -1711,7 +1758,7 @@ def resolve_control_graph(
                 chain_id=chain_id,
             )
             return artifacts, None
-        except (StorageContentIncomplete, StorageUnavailable):
+        except (StorageContentIncomplete, StorageUnavailable, LeaseLost):
             raise
         except Exception as exc:
             return None, exc

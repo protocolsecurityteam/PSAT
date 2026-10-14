@@ -614,6 +614,7 @@ def _reclassify_deployers(
                     creation_history=history,
                     history_complete=True,
                     creation_factories={c.address: c.factory for c in records if getattr(c, "factory", None)},
+                    enumeration_as_of=(getattr(deployer_enumerator, "as_of", None) or {}).get(deployer),
                 )
         if verdict.trust_class is None and verdict.evidence.get("reason") == "cross_protocol_collision":
             # a collision is Class C for every party, so every protocol's proof row for this EOA falls this

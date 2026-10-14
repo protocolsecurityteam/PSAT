@@ -39,13 +39,13 @@ def test_scaffold_writes_source(tmp_path, key, expected_file):
 
 def test_evm_version_injection_falls_back():
     injected = 'shanghai"\nffi = true\nx = "'
-    assert fetch.sanitize_evm_version(injected) == "shanghai"
+    assert fetch._resolve_evm_version(injected, "0.8.24") == "shanghai"
 
 
 def test_evm_version_allowlist_passes_legit():
-    assert fetch.sanitize_evm_version("cancun") == "cancun"
-    assert fetch.sanitize_evm_version("CANCUN") == "cancun"
-    assert fetch.sanitize_evm_version("") == "shanghai"
+    assert fetch._resolve_evm_version("cancun", "0.8.24") == "cancun"
+    assert fetch._resolve_evm_version("CANCUN", "0.8.24") == "cancun"
+    assert fetch._resolve_evm_version("", "0.8.24") == "shanghai"
 
 
 def test_scaffold_evm_injection_not_in_toml(tmp_path):

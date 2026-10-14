@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -58,8 +59,9 @@ from services.resolution.role_holder_plane import (
     resolve_role_holder_planes,
 )
 from services.resolution.tracking import build_control_snapshot
+from services.static.contract_analysis_pipeline.predicate_types import names_controllers
 from utils.balance_status import BALANCE_WRITER_RESOLUTION
-from utils.chains import UnknownChainError, chain_by_id, chain_enabled
+from utils.chains import UnknownChainError, chain_by_id, chain_enabled, chain_name_to_id_map
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -637,6 +639,10 @@ class ResolutionWorker(BaseWorker):
             value = payload.get("value")
             if not isinstance(value, str) or not value.startswith("0x") or len(value) != 42:
                 continue
+            # A zero read is an unset authority: there's no contract to analyse, so a provider job for it can only fail
+            # and would hold this job's policy stage until it did.
+            if value.lower() == _ZERO_ADDRESS:
+                continue
             name = cid.split(":", 1)[1] if ":" in cid else cid
             state_var_addresses.setdefault(name, value.lower())
 
@@ -813,6 +819,8 @@ def _collect_authority_contract_state_vars(node: dict, out: set[str]) -> None:
         return
     if node.get("op") == "LEAF":
         leaf = node.get("leaf") or {}
+        if not names_controllers(leaf):
+            return
         descriptor = leaf.get("set_descriptor") or {}
         authority = descriptor.get("authority_contract") or {}
         address_source = authority.get("address_source") or {}
@@ -835,7 +843,7 @@ def _detect_dep_cycle(
     ``None``.
 
     A recursive CTE walks forward from the provider, joining via ``Job.address`` (dependency rows store only
-    chain+address for the provider), with path-based cycle elimination.
+    chain+address for the provider; the provider job is matched on ``chain_id``), with path-based cycle elimination.
     """
     from sqlalchemy import text as _sa_text
 
@@ -851,7 +859,7 @@ def _detect_dep_cycle(
             FROM job_dependencies jd
             JOIN jobs provider_job
               ON LOWER(provider_job.address) = LOWER(jd.provider_address)
-             AND COALESCE(provider_job.request->>'chain', '') = COALESCE(jd.provider_chain, '')
+             AND provider_job.chain_id = (CAST(:chain_ids AS jsonb) ->> COALESCE(jd.provider_chain, 'ethereum'))::int
             WHERE jd.depender_job_id = :start_provider
               AND jd.status IN ('pending', 'satisfied')
 
@@ -866,7 +874,7 @@ def _detect_dep_cycle(
             FROM job_dependencies jd
             JOIN jobs provider_job
               ON LOWER(provider_job.address) = LOWER(jd.provider_address)
-             AND COALESCE(provider_job.request->>'chain', '') = COALESCE(jd.provider_chain, '')
+             AND provider_job.chain_id = (CAST(:chain_ids AS jsonb) ->> COALESCE(jd.provider_chain, 'ethereum'))::int
             JOIN chain ON jd.depender_job_id = chain.to_job
             WHERE jd.status IN ('pending', 'satisfied')
               AND NOT (jd.depender_job_id::text = ANY(chain.path))
@@ -879,6 +887,7 @@ def _detect_dep_cycle(
         {
             "start_provider": str(proposed_provider_id),
             "target_depender": str(proposed_depender_id),
+            "chain_ids": json.dumps(chain_name_to_id_map()),
         },
     ).first()
     if row is None:
