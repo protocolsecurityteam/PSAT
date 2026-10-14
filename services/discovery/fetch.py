@@ -125,7 +125,7 @@ def _parse_source_code(raw: str) -> dict | None:
     if not isinstance(raw, str):
         return None
 
-    candidate = raw
+    candidate = raw.strip()
     if candidate.startswith("{{") and candidate.endswith("}}"):
         candidate = candidate[1:-1]
 
@@ -139,9 +139,14 @@ def _parse_source_code(raw: str) -> dict | None:
 
 def parse_verification_bundle(result: dict) -> dict | None:
     parsed = _parse_source_code(result.get("SourceCode", ""))
-    if not parsed or "sources" not in parsed:
+    if not parsed:
         return None
-    return parsed
+    if "sources" in parsed:
+        return parsed
+    # Explorer legacy multi-file responses are a filename -> content map, without a Standard JSON envelope.
+    if all(isinstance(value, dict) and isinstance(value.get("content"), str) for value in parsed.values()):
+        return {"sources": parsed}
+    return None
 
 
 def parse_compiler_settings(result: dict) -> dict:
@@ -303,6 +308,16 @@ def _solidity_pragmas(sources: dict[str, str]) -> list[list[_Range]]:
             if ranges:
                 pragmas.append(ranges)
     return pragmas
+
+
+def _verified_solc_version(sources: dict[str, str], preferred_version: str | None) -> str | None:
+    """A syntactically valid verified compiler satisfying the source constraints; no inferred patch floor."""
+    match = re.fullmatch(r"v?(\d+\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", preferred_version or "")
+    if match:
+        verified = _parse_version(match[1])
+        if all(any(r.admits(verified) for r in ranges) for ranges in _solidity_pragmas(sources)):
+            return _format_version(verified)
+    return None
 
 
 def _detect_solc_version(sources: dict[str, str], preferred_version: str | None = None) -> str:

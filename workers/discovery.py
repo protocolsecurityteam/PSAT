@@ -1044,6 +1044,15 @@ class DiscoveryWorker(BaseWorker):
         with log_timed_phase(logger, "source_storage", files=len(sources)):
             store_source_files(session, job.id, sources)
             store_artifact(session, job.id, "compiler_settings", data=parse_compiler_settings(result))
+            store_artifact(
+                session,
+                job.id,
+                "verified_build_metadata",
+                data={
+                    "compiler_version": result.get("CompilerVersion"),
+                    "evm_version": result.get("EVMVersion"),
+                },
+            )
         self.update_detail(session, job, "Evaluating membership")
 
         raw_evm = result.get("EVMVersion", "") or ""

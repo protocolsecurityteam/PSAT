@@ -35,7 +35,13 @@ from services.discovery import (
     find_dynamic_dependencies,
 )
 from services.discovery.dynamic_dependencies import NoNewTransactionsError
-from services.discovery.fetch import _confine, _detect_solc_version, _relax_pragmas, sanitize_evm_version
+from services.discovery.fetch import (
+    _confine,
+    _detect_solc_version,
+    _relax_pragmas,
+    _verified_solc_version,
+    sanitize_evm_version,
+)
 from services.monitoring.proxy_watcher import resolve_current_implementation
 from services.resolution.tracking_plan import build_control_tracking_plan
 from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -674,6 +680,18 @@ class StaticWorker(BaseWorker):
                     analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
 
                 if analysis_data is None:
+                    analysis_data = self._retry_verified_compiler(
+                        session,
+                        job,
+                        project_dir,
+                        sources,
+                        meta,
+                        build_settings,
+                        remappings,
+                        contract_name,
+                        address,
+                    )
+                if analysis_data is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
                 with log_timed_phase(logger, "tracking_plan"):
@@ -1036,8 +1054,17 @@ class StaticWorker(BaseWorker):
             full_path.write_text(content)
 
         solc_version = _detect_solc_version(sources, meta.get("compiler_version"))
+        fallback = build_settings.get("verified_compiler_fallback") is True
+        if fallback:
+            verified = _verified_solc_version(sources, meta.get("compiler_version"))
+            if verified is None:
+                raise ValueError("Compiler fallback requires compatible verified compiler metadata")
+            solc_version = verified
         src_dir = _detect_src_dir(sources)
         evm_version = sanitize_evm_version(build_settings.get("evm_version", "shanghai"))
+        evm_line = f'evm_version = "{evm_version}"'
+        if fallback and build_settings.get("evm_version") is None:
+            evm_line = ""  # Foundry chooses the selected compiler's default; never inject a newer hardfork.
         optimizer = str(bool(build_settings.get("optimization_used", True))).lower()
         optimizer_runs = int(build_settings.get("runs", 200) or 200)
 
@@ -1049,7 +1076,7 @@ class StaticWorker(BaseWorker):
                 out = "out"
                 libs = ["lib"]
                 solc_version = "{solc_version}"
-                evm_version = "{evm_version}"
+                {evm_line}
                 optimizer = {optimizer}
                 optimizer_runs = {optimizer_runs}
                 via_ir = {str(build_settings.get("via_ir") is True).lower()}
@@ -1429,6 +1456,46 @@ class StaticWorker(BaseWorker):
                 address,
             )
 
+    def _retry_verified_compiler(
+        self,
+        session,
+        job,
+        project_dir,
+        sources,
+        meta,
+        build_settings,
+        remappings,
+        contract_name,
+        address,
+    ) -> ContractAnalysis | None:
+        error = get_artifact(session, job.id, "analysis_error")
+        if not isinstance(error, dict) or error.get("compilation_failed") is not True:
+            return None
+        verified = _verified_solc_version(sources, meta.get("compiler_version"))
+        primary = _detect_solc_version(sources, meta.get("compiler_version"))
+        if verified is None or verified == primary:
+            return None
+        inputs = get_artifact(session, job.id, "verified_build_metadata")
+        if not isinstance(inputs, dict) or inputs.get("compiler_version") != meta.get("compiler_version"):
+            return None  # Legacy injected defaults cannot be mistaken for verified build settings.
+        raw_evm = inputs.get("evm_version")
+        fallback_evm = raw_evm if isinstance(raw_evm, str) and raw_evm.lower() not in ("", "default") else None
+        fallback_settings = {**build_settings, "verified_compiler_fallback": True, "evm_version": fallback_evm}
+        self._scaffold_project(project_dir, sources, meta, fallback_settings, remappings)
+        witness = {
+            "primary_compiler": primary,
+            "verified_compiler": verified,
+            "evm_version": fallback_evm,
+            "evm_basis": "verified" if fallback_evm else "verified_compiler_default",
+            "reason": error.get("error"),
+            "completed": False,
+        }
+        store_artifact(session, job.id, "compiler_fallback", data=witness)
+        self.update_detail(session, job, f"Retrying failed compilation with verified Solidity {verified}")
+        analysis = self._run_analysis_phase(session, job, project_dir, contract_name, address)
+        store_artifact(session, job.id, "compiler_fallback", data={**witness, "completed": analysis is not None})
+        return analysis
+
     def _run_analysis_phase(
         self, session, job, project_dir: Path, contract_name: str, address: str
     ) -> ContractAnalysis | None:
@@ -1444,7 +1511,24 @@ class StaticWorker(BaseWorker):
                 context={"address": address, "contract_name": contract_name},
             )
             _log_phase_error(str(job.id), address, contract_name, "contract_analysis", str(exc))
-            store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
+            from crytic_compile.platform.exceptions import InvalidCompilation
+
+            cause: BaseException | None = exc
+            seen: set[int] = set()
+            compilation_failed = False
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                compilation_failed |= isinstance(cause, InvalidCompilation)
+                cause = cause.__cause__ or cause.__context__
+            store_artifact(
+                session,
+                job.id,
+                "analysis_error",
+                data={
+                    "error": str(exc),
+                    "compilation_failed": compilation_failed,
+                },
+            )
             return None
 
         # A failed build is kept for diagnosis under ``<name>_error``, never under the name policy reads as the facts.

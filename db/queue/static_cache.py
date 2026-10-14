@@ -49,6 +49,8 @@ _STATIC_ARTIFACT_NAMES = frozenset(
         "static_dependencies",
         "enrichment_cache",
         "compiler_settings",
+        "verified_build_metadata",
+        "compiler_fallback",
     }
 )
 

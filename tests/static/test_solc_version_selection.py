@@ -241,3 +241,68 @@ def test_both_scaffolds_preserve_verified_via_ir(tmp_path, via_ir):
     expected = f"via_ir = {str(via_ir is True).lower()}"
     assert expected in (recursive / "foundry.toml").read_text()
     assert expected in (top_level / "foundry.toml").read_text()
+
+
+def test_verified_compiler_fallback_is_limited_to_failed_compilation(monkeypatch, tmp_path):
+    import workers.static_worker as module
+
+    source = "// SPDX-License-Identifier: MIT & GPL-3.0\npragma solidity ^0.8.6; contract T {}"
+    sources = {"src/T.sol": source}
+    meta = {"compiler_version": "v0.8.6+commit.11564f7e", "contract_name": "T"}
+    settings = {"evm_version": "shanghai"}
+    artifacts = {
+        "analysis_error": {"error": "compiler rejected source", "compilation_failed": True},
+        "verified_build_metadata": {"compiler_version": meta["compiler_version"], "evm_version": "Default"},
+    }
+    monkeypatch.setattr(module, "get_artifact", lambda session, job_id, name: artifacts.get(name))
+    monkeypatch.setattr(module, "store_artifact", lambda session, job_id, name, data: artifacts.__setitem__(name, data))
+    worker = StaticWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *args: None)
+    from types import SimpleNamespace
+
+    job = SimpleNamespace(id="job")
+    calls = []
+    analysis = {"summary": {}}
+    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *args: calls.append(args) or analysis)
+    worker._scaffold_project(tmp_path, sources, meta, settings, [])
+    assert _foundry_solc(tmp_path) == "0.8.24"  # Successful primary behavior and cache semantics stay unchanged.
+    result = worker._retry_verified_compiler(None, job, tmp_path, sources, meta, settings, [], "T", "0xabc")
+    assert result is analysis and len(calls) == 1
+    assert _foundry_solc(tmp_path) == "0.8.6"
+    assert "evm_version" not in (tmp_path / "foundry.toml").read_text()
+    assert artifacts["compiler_fallback"]["completed"] is True
+    assert (tmp_path / "src/T.sol").read_text().startswith("// SPDX-License-Identifier: MIT & GPL-3.0")
+    artifacts["analysis_error"] = {"error": "semantic lowering failed", "compilation_failed": False}
+    assert worker._retry_verified_compiler(None, job, tmp_path, sources, meta, settings, [], "T", "0xabc") is None
+    assert len(calls) == 1
+
+
+def test_compiler_failure_marker_uses_exception_cause_not_error_text(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from crytic_compile.platform.exceptions import InvalidCompilation
+    from slither.exceptions import SlitherError
+
+    import workers.static_worker as module
+
+    artifacts = {}
+    monkeypatch.setattr(module, "store_artifact", lambda session, job_id, name, data: artifacts.__setitem__(name, data))
+    worker = StaticWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *args: None)
+
+    def compile_failure(*args):
+        try:
+            raise InvalidCompilation("compiler error")
+        except InvalidCompilation:
+            raise SlitherError("wrapped compiler error")
+
+    monkeypatch.setattr(module, "collect_contract_analysis_with_artifacts", compile_failure)
+    assert worker._run_analysis_phase(None, SimpleNamespace(id="job"), tmp_path, "T", "0xabc") is None
+    assert artifacts["analysis_error"]["compilation_failed"] is True
+
+    def semantic_failure(*args):
+        raise RuntimeError("Invalid compilation is only text here")
+
+    monkeypatch.setattr(module, "collect_contract_analysis_with_artifacts", semantic_failure)
+    assert worker._run_analysis_phase(None, SimpleNamespace(id="job"), tmp_path, "T", "0xabc") is None
+    assert artifacts["analysis_error"]["compilation_failed"] is False
