@@ -38,6 +38,13 @@ class ObservedKeyWords(NamedTuple):
     complete: bool
 
 
+class ViewWords(NamedTuple):
+    """Words a unary view returned; ``complete`` only when every call answered with a word."""
+
+    words: list[str]
+    complete: bool
+
+
 def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr | None:
     if descriptor.get("kind") != "mapping_membership":
         return None
@@ -109,7 +116,7 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
             block=view_block,
         ),
     )
-    if not admin_words:
+    if not admin_words.words:
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=contract_address.lower(),
@@ -118,8 +125,19 @@ def _resolve_view_key_membership(descriptor: SetDescriptor, ctx: EvaluationConte
             )
         )
 
-    result: CapabilityExpr | None = None
-    for admin_word in admin_words:
+    # An unanswered key's admin holders are unread: the set read so far is a lower bound.
+    result: CapabilityExpr | None = (
+        None
+        if admin_words.complete
+        else CapabilityExpr.finite_set(
+            [],
+            quality="lower_bound",
+            confidence="partial",
+            trace=[{"step": "view_key_read_failed", "selector": selector.lower()}],
+            empty_reason="not_read",
+        )
+    )
+    for admin_word in admin_words.words:
         patched = dict(descriptor)
         patched_keys = [dict(source) for source in key_sources]
         patched_keys[view_index] = {"source": "constant", "constant_value": admin_word}
@@ -400,14 +418,16 @@ def _call_unary_bytes32_view(
     selector: str,
     args: list[str],
     block: int | None,
-) -> list[str]:
+) -> ViewWords:
     from services.clients.rpc import rpc_batch_request_with_status
     from services.resolution.repos.event_logs_pg import _normalize_word
 
+    complete = True
     calls: list[tuple[str, list[Any]]] = []
     for arg in args:
         word = _normalize_word(arg)
         if word is None:
+            complete = False
             continue
         calls.append(
             (
@@ -419,12 +439,12 @@ def _call_unary_bytes32_view(
             )
         )
     if not calls:
-        return []
+        return ViewWords(words=[], complete=False)
     out: set[str] = set()
     for raw, had_error in rpc_batch_request_with_status(rpc_url, calls):
-        if had_error:
+        word = None if had_error else _normalize_word(raw)
+        if word is None:
+            complete = False
             continue
-        word = _normalize_word(raw)
-        if word is not None:
-            out.add(word)
-    return sorted(out)
+        out.add(word)
+    return ViewWords(words=sorted(out), complete=complete)

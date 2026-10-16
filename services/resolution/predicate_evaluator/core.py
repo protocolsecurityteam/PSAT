@@ -11,11 +11,16 @@ from typing import Any, cast
 
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.static.contract_analysis_pipeline.predicate_types import (
+    REACH_NOT_DETERMINED,
+    REACH_READ,
     LeafPredicate,
     PredicateTree,
     SetDescriptor,
+    is_read_reach_condition,
+    is_read_reach_tree,
     make_and_node,
 )
+from utils.chains import UnknownChainError, chain_by_id
 from utils.predicate_provenance import has_unknown_predicate_provenance
 
 from ..capabilities import (
@@ -26,6 +31,7 @@ from ..capabilities import (
     negate,
     union,
 )
+from ..pass_memo import shared
 from ..permissionless_shapes import (
     caller_gate_basis,
     earned_public_enabled,
@@ -35,6 +41,7 @@ from ..permissionless_shapes import (
     is_permissionless_caller_shape,
     leaf_is_caller_tainted,
 )
+from ..reach_reads import ReachTruth, describe_reach, read_reach
 from .adapters import SetAdapter, _NullAdapter
 from .binding import (
     _bind_callee_parameters,
@@ -160,6 +167,8 @@ def evaluate_tree(
     children = tree.get("children") or []
     if not children:
         return CapabilityExpr.unsupported("empty_branch")
+    if op == "OR":
+        return _evaluate_or(children, ctx)
     evaluated = []
     for child in children:
         side_condition = _side_condition_capability(child) if op == "AND" and len(children) > 1 else None
@@ -169,12 +178,153 @@ def evaluate_tree(
         for child in evaluated[1:]:
             result = intersect(result, child)
         return result
-    if op == "OR":
-        result = evaluated[0]
-        for child in evaluated[1:]:
-            result = union(result, child)
-        return result
     return CapabilityExpr.unsupported(f"unknown_op_{op}")
+
+
+def _evaluate_or(children: list[PredicateTree], ctx: EvaluationContext) -> CapabilityExpr:
+    """A reach alternative opens a path only when read true; read false it drops out, and unread it is a path that
+    may be open.
+    """
+    evaluated: list[CapabilityExpr] = []
+    refuted: list[dict[str, Any]] = []
+    for child in children:
+        if not is_read_reach_tree(child):
+            evaluated.append(evaluate_tree(child, ctx))
+            continue
+        truth = _reach_truth(child, ctx)
+        if truth.holds is False:
+            refuted.append(_reach_step(truth, child))
+            continue
+        evaluated.append(_reach_capability(truth, child))
+    if not evaluated:
+        return _reach_capability(ReachTruth(None, [], "every_reach_alternative_refuted"), children[0])
+    result = evaluated[0]
+    for child in evaluated[1:]:
+        result = union(result, child)
+    if refuted:
+        result.trace = [*result.trace, *refuted]
+    return result
+
+
+def _reach_truth(tree: PredicateTree, ctx: EvaluationContext) -> ReachTruth:
+    if tree.get("op") == "LEAF":
+        leaf = tree.get("leaf") or {}
+        if REACH_READ not in leaf:
+            return ReachTruth(None, [], leaf.get("unsupported_reason") or "reach_condition_unstated")
+        return read_reach(leaf[REACH_READ], ctx)
+    truths = [_reach_truth(child, ctx) for child in tree.get("children") or []]
+    decisive = tree.get("op") != "AND"
+    for truth in truths:
+        if truth.holds is decisive:
+            return truth
+    reads = [read for truth in truths for read in truth.reads]
+    unread = next((truth for truth in truths if truth.holds is None), None)
+    if unread is not None:
+        return ReachTruth(None, reads, unread.reason)
+    if decisive:
+        return ReachTruth(False, reads)
+    # Every conjunct holds, each for the calldata it found; they hold together only on one assignment.
+    calldata: dict[str, str] = {}
+    for truth in truths:
+        for name, value in (truth.calldata or {}).items():
+            if calldata.setdefault(name, value) != value:
+                return ReachTruth(None, reads, "reach_condition_calldata_not_jointly_witnessed")
+    return ReachTruth(True, reads, calldata=calldata or None)
+
+
+def _reach_expression(tree: PredicateTree) -> str:
+    """The reach condition as it must hold: each outcome its leaves state, under the tree's connectives."""
+    return _reach_text(tree)[0]
+
+
+def _reach_text(node: PredicateTree) -> tuple[str, bool]:
+    """``node``'s condition and whether its text is a connective."""
+    leaves = _leaves(node)
+    stamps = [leaf.get(REACH_READ) for leaf in leaves]
+    # Every leaf of one outcome carries the whole outcome, so a subtree whose leaves share one is that outcome.
+    if stamps and all(stamp == stamps[0] for stamp in stamps):
+        described = describe_reach(stamps[0])
+        if described is not None:
+            written = list(dict.fromkeys(_source_texts(leaves)))
+            if not written or written == [described[0]]:
+                return described
+            # The source as written stays verbatim beside it: stored condition text is matched by its source names
+            # (``conditions._caller_self_pins``), which the read's names (an entry point's parameters) can differ from.
+            return f"{described[0]} [written: {' ; '.join(written)}]", True
+    if node.get("op") == "LEAF":
+        leaf = leaves[0] if leaves else {}
+        if not _source_texts([leaf]):
+            return leaf.get("expression") or "", False
+        # The source text alone doesn't say which way the condition must go.
+        if isinstance(leaf.get(REACH_READ), dict):
+            return f"{leaf['expression']} [required outcome recorded, not renderable]", True
+        return f"{leaf['expression']} [required outcome not recorded]", True
+    parts: list[tuple[str, bool]] = []
+    for child in node.get("children") or []:
+        part = _reach_text(child)
+        if part[0] and part not in parts:
+            parts.append(part)
+    if len(parts) == 1:
+        return parts[0]
+    joiner = " && " if node.get("op") == "AND" else " || "
+    return joiner.join(f"({text})" if compound else text for text, compound in parts), len(parts) > 1
+
+
+def _source_texts(leaves: list[dict[str, Any]]) -> list[str]:
+    """The source conditions ``leaves`` were built from; an unsupported leaf's reason standing in for one isn't."""
+    return [
+        leaf["expression"]
+        for leaf in leaves
+        if isinstance(leaf.get("expression"), str)
+        and leaf["expression"]
+        and leaf["expression"] != leaf.get("unsupported_reason")
+    ]
+
+
+def _leaves(node: PredicateTree) -> list[dict[str, Any]]:
+    leaf = node.get("leaf")
+    if isinstance(leaf, dict):
+        return [cast(dict[str, Any], leaf)]
+    return [found for child in node.get("children") or [] for found in _leaves(child)]
+
+
+def _reach_step(truth: ReachTruth, tree: PredicateTree, expression: str | None = None) -> dict[str, Any]:
+    step: dict[str, Any] = {
+        "step": "reach_condition_read",
+        "expression": _reach_expression(tree) if expression is None else expression,
+        "holds": truth.holds,
+        "reads": truth.reads,
+    }
+    if truth.reason is not None:
+        step["reason"] = truth.reason
+    if truth.calldata:
+        step["calldata"] = truth.calldata
+    return step
+
+
+def _reach_capability(truth: ReachTruth, tree: PredicateTree) -> CapabilityExpr:
+    """A reach condition read true is an open path with the read as its witness; unread, it is not determined."""
+    expression = _reach_expression(tree)
+    if truth.holds is True:
+        sent = ", ".join(f"{name}={value}" for name, value in (truth.calldata or {}).items())
+        when = f"with calldata {sent}" if sent else "at the analysis block"
+        condition = Condition(kind="business", description=f"holds {when}: {expression}")
+        cap = CapabilityExpr.conditional_universal(condition)
+    elif truth.holds is False:
+        cap = CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
+    else:
+        cap = CapabilityExpr.external_check_only(
+            ExternalCheck(
+                target_address=None,
+                target_call_selector=None,
+                extra={
+                    "basis": [REACH_NOT_DETERMINED, truth.reason or "reach_condition_unread"],
+                    "expression": expression,
+                },
+            )
+        )
+    cap.trace = [_reach_step(truth, tree, expression)]
+    return cap
 
 
 def _has_caller_keyed_value_predicate(leaf: LeafPredicate) -> bool:
@@ -240,6 +390,9 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 extra={"basis": ["caller_tainted_authority_unresolved", "signer_authorization_unresolved"]},
             )
         )
+    if is_read_reach_condition(leaf):
+        node = cast(PredicateTree, {"op": "LEAF", "leaf": leaf})
+        return _reach_capability(_reach_truth(node, ctx), node)
     if _is_recovered_signer_membership(leaf) or (leaf.get("authority_proof") or {}).get("state") == "not_determined":
         return CapabilityExpr.external_check_only(
             ExternalCheck(
@@ -584,22 +737,37 @@ def _maybe_inline_cross_contract_call(
     # A proxy registry's predicate_trees live on its implementation job.
     from db.queue import get_artifact, usable_semantic_artifact
     from services.resolution.capability_resolver import find_analysis_job_for_address
-    from utils.chains import chain_by_id
 
-    chain = chain_by_id(chain_id).name
-
-    lookup = find_analysis_job_for_address(
-        session,
-        registry_addr,
-        required_artifact="predicate_trees",
-        chain=chain,
-        completed_only=False,
-    )
-    if lookup is None:
+    try:
+        registry_chain = chain_by_id(chain_id).name
+    except UnknownChainError:
         return None
-    artifact = usable_semantic_artifact(
-        "predicate_trees", get_artifact(session, lookup.analysis_job.id, "predicate_trees")
+
+    def registry_analysis() -> tuple[Any, dict[str, Any] | None] | None:
+        found = find_analysis_job_for_address(
+            session,
+            registry_addr,
+            required_artifact="predicate_trees",
+            chain=registry_chain,
+            completed_only=False,
+        )
+        if found is None:
+            return None
+        trees = usable_semantic_artifact(
+            "predicate_trees", get_artifact(session, found.analysis_job.id, "predicate_trees")
+        )
+        return found, trees
+
+    # Read-only below (binding and frame normalization copy the tree first), so one read serves the whole pass.
+    analysis = shared(
+        outer_ctx,
+        ("inline_registry_analysis", id(session), registry_chain, registry_addr),
+        registry_analysis,
+        keep_alive=(session,),
     )
+    if analysis is None:
+        return None
+    lookup, artifact = analysis
     if artifact is None:
         return None
     from services.resolution.adapters import CallFrame
@@ -679,13 +847,23 @@ def _maybe_inline_cross_contract_call(
     # Child frame: msg.sender is the caller contract, address(this) the registry, msg.sig the callee selector.
     from services.resolution.capability_resolver import _load_state_var_values
 
-    state_var_values = _load_state_var_values(
-        session,
-        lookup.analysis_job.address or registry_addr,
-        job_id=lookup.analysis_job.id,
+    def registry_state_var_values() -> dict[str, str]:
+        values = _load_state_var_values(
+            session,
+            lookup.analysis_job.address or registry_addr,
+            job_id=lookup.analysis_job.id,
+            chain=registry_chain,
+        )
+        if not values and lookup.runtime_job.id != lookup.analysis_job.id:
+            values = _load_state_var_values(session, registry_addr, job_id=lookup.runtime_job.id, chain=registry_chain)
+        return values
+
+    state_var_values = shared(
+        outer_ctx,
+        ("inline_registry_state_vars", id(session), registry_chain, registry_addr, str(lookup.analysis_job.id)),
+        registry_state_var_values,
+        keep_alive=(session,),
     )
-    if not state_var_values and lookup.runtime_job.id != lookup.analysis_job.id:
-        state_var_values = _load_state_var_values(session, registry_addr, job_id=lookup.runtime_job.id)
 
     parent_this = getattr(parent_frame, "current_address_this", None) or getattr(
         parent_frame, "executing_contract_address", None

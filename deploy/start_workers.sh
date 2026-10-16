@@ -73,21 +73,6 @@ export PSAT_DB_MAX_OVERFLOW="${PSAT_DB_MAX_OVERFLOW:-10}"
 #   PSAT_POLICY_JOB_CONCURRENCY=2
 # Or set PSAT_JOB_CONCURRENCY for a fleet-wide default.
 
-PIDS=()
-
-cleanup() {
-  local exit_code=$?
-  trap - EXIT INT TERM
-  if [ ${#PIDS[@]} -gt 0 ]; then
-    kill "${PIDS[@]}" 2>/dev/null || true
-    wait "${PIDS[@]}" 2>/dev/null || true
-  fi
-  exit $exit_code
-}
-
-trap cleanup EXIT
-trap 'exit 0' INT TERM
-
 if [ -x ".venv/bin/python" ]; then
   PYTHON_CMD=(./.venv/bin/python)
 elif command -v uv >/dev/null 2>&1; then
@@ -121,63 +106,53 @@ log_json INFO "static workers: $STATIC_COUNT (set PSAT_STATIC_WORKERS to overrid
 log_json INFO "resolution workers: $RESOLUTION_COUNT (set PSAT_RESOLUTION_WORKERS to override)"
 log_json INFO "policy workers: $POLICY_COUNT (set PSAT_POLICY_WORKERS to override)"
 
-"${PYTHON_CMD[@]}" -m workers.discovery &
-PIDS+=($!)
-for _ in $(seq 1 "$STATIC_COUNT"); do
-  "${PYTHON_CMD[@]}" -m workers.static_worker &
-  PIDS+=($!)
+# Address-space cap per worker process, sized from the workers' measured footprints so no single process can push
+# the VM into reclaim. The stage workers and the effects worker cover the compilers and the anvil fork they spawn, which
+# inherit the cap; a stage worker's budgeted compute child inherits it too.
+HEAVY_CAP_MB="${PSAT_HEAVY_WORKER_AS_MB:-6144}"
+WORKER_CAP_MB="${PSAT_WORKER_AS_MB:-4096}"
+
+SPECS=("discovery|$WORKER_CAP_MB|workers.discovery")
+for i in $(seq 1 "$STATIC_COUNT"); do
+  SPECS+=("static_worker.$i|$HEAVY_CAP_MB|workers.static_worker")
 done
-for _ in $(seq 1 "$RESOLUTION_COUNT"); do
-  "${PYTHON_CMD[@]}" -m workers.resolution_worker &
-  PIDS+=($!)
+for i in $(seq 1 "$RESOLUTION_COUNT"); do
+  SPECS+=("resolution_worker.$i|$HEAVY_CAP_MB|workers.resolution_worker")
 done
-for _ in $(seq 1 "$POLICY_COUNT"); do
-  "${PYTHON_CMD[@]}" -m workers.policy_worker &
-  PIDS+=($!)
+for i in $(seq 1 "$POLICY_COUNT"); do
+  SPECS+=("policy_worker.$i|$HEAVY_CAP_MB|workers.policy_worker")
 done
 # Effects stage: sits between policy and coverage.
 # Launched unconditionally so enabling PSAT_EFFECTS_STAGE never parks jobs at a
 # stage no worker drains; idles when the flag is off. Single instance
 # (PSAT_EFFECTS_JOB_CONCURRENCY=1 — anvil snapshot/revert is
 # process-global).
-"${PYTHON_CMD[@]}" -m workers.effects_worker &
-PIDS+=($!)
-"${PYTHON_CMD[@]}" -m workers.coverage_worker &
-PIDS+=($!)
+SPECS+=("effects_worker|$HEAVY_CAP_MB|workers.effects_worker")
+SPECS+=("coverage_worker|$WORKER_CAP_MB|workers.coverage_worker")
 # Drains audit_contract_coverage rows where equivalence_status='pending'.
 # Single instance is enough — concurrency is intentionally low (default 2
 # threads) so we don't reintroduce the Etherscan rate-limit cascade the
 # inline verify path used to cause (#82).
-"${PYTHON_CMD[@]}" -m workers.coverage_verify &
-PIDS+=($!)
-"${PYTHON_CMD[@]}" -m workers.defillama_worker &
-PIDS+=($!)
-"${PYTHON_CMD[@]}" -m workers.selection_worker &
-PIDS+=($!)
-"${PYTHON_CMD[@]}" -m workers.audit_text_extraction &
-PIDS+=($!)
-"${PYTHON_CMD[@]}" -m workers.audit_scope_extraction &
-PIDS+=($!)
+SPECS+=("coverage_verify|$WORKER_CAP_MB|workers.coverage_verify")
+SPECS+=("defillama_worker|$WORKER_CAP_MB|workers.defillama_worker")
+SPECS+=("selection_worker|$WORKER_CAP_MB|workers.selection_worker")
+SPECS+=("audit_text_extraction|$WORKER_CAP_MB|workers.audit_text_extraction")
+SPECS+=("audit_scope_extraction|$WORKER_CAP_MB|workers.audit_scope_extraction")
 # v2 capability resolver indexer. It follows generic event hints
 # discovered by the semantic predicate pipeline.
 if [ "${PSAT_INDEXER_GROUP:-workers}" = "workers" ]; then
   if [ "${PSAT_WORKER_LIFECYCLE_MODE:-off}" != "off" ]; then
-    "${PYTHON_CMD[@]}" -m workers.machine_runtime indexer &
+    SPECS+=("event_log_indexer|$WORKER_CAP_MB|workers.machine_runtime indexer")
   else
-    "${PYTHON_CMD[@]}" -m workers.event_log_indexer &
+    SPECS+=("event_log_indexer|$WORKER_CAP_MB|workers.event_log_indexer")
   fi
-  PIDS+=($!)
 fi
 # Enrollment reconciler drainer. Moved off the 512MB `monitor` VM: its
 # per-tick governance-view recompute is jobs-pipeline-weight and belongs
-# on this 16GB box. Its loop swallows exceptions, so the shared `wait -n`
-# fate here is process-death-only.
-"${PYTHON_CMD[@]}" -m workers.protocol_monitor --reconcile &
-PIDS+=($!)
+# on this 16GB box.
+SPECS+=("enrollment_reconciler|$WORKER_CAP_MB|workers.protocol_monitor --reconcile")
 
-log_json INFO "All workers started: ${PIDS[*]}"
-# Exit on first death — Fly restarts the machine so every worker
-# relaunches. Silent-dead-worker is worse than a 30s restart.
-wait -n || true
-# Even an unexpected clean child exit is a failed fleet, not an idle stop.
-exit 1
+log_json INFO "Supervising ${#SPECS[@]} workers"
+# The supervisor restarts a dead worker alone and exits nonzero only on a restart loop, which restarts the machine.
+# exec, so SIGTERM from the platform or the lifecycle runtime reaches it directly and drains every worker.
+exec "${PYTHON_CMD[@]}" -m workers.process_supervisor "${SPECS[@]}"

@@ -79,6 +79,16 @@ def test_source_hash_separates_verified_compilation_settings():
     assert source_content_hash(result) != base
 
 
+def test_source_hash_changes_with_via_ir():
+    import json
+
+    def result(settings: dict) -> dict:
+        bundle = {"language": "Solidity", "sources": {"src/C.sol": {"content": "contract C {}"}}, "settings": settings}
+        return {"ContractName": "C", "SourceCode": "{" + json.dumps(bundle) + "}"}
+
+    assert source_content_hash(result({"viaIR": True})) != source_content_hash(result({}))
+
+
 def _standard_json_result(name: str) -> dict[str, Any]:
     import json
 

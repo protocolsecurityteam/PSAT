@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import re
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from services.clients.etherscan import get_source
+
+logger = logging.getLogger(__name__)
 
 # EVMVersion comes from untrusted Etherscan metadata and goes into foundry.toml, so allowlist it to prevent TOML
 # injection.
@@ -29,11 +35,6 @@ _ALLOWED_EVM_VERSIONS = (
     "osaka",
 )
 _EVM_VERSION_BY_KEY = {v.lower(): v for v in _ALLOWED_EVM_VERSIONS}
-_DEFAULT_EVM_VERSION = "shanghai"
-
-
-def sanitize_evm_version(raw: object) -> str:
-    return _EVM_VERSION_BY_KEY.get(str(raw or "").strip().lower(), _DEFAULT_EVM_VERSION)
 
 
 def _normalize_source_path(filename: str) -> str:
@@ -100,8 +101,8 @@ def source_content_hash(result: dict) -> str:
     hashes give identical analysis bundles across chains and addresses.
 
     Covers the source file set (``parse_sources``), the selected ``ContractName`` (one bundle can verify several
-    contracts), and the compiler settings that change the IR: language, EVM version, optimizer on/off and runs, and
-    remappings and verified compiler settings. Excludes address, constructor args, immutable values and chain id.
+    contracts), and the compiler inputs that change the build: language, verified compiler version, EVM version,
+    optimizer on/off and runs, viaIR, and remappings. Excludes address, constructor args, immutable values and chain id.
 
     Returns a ``0x``-prefixed sha256 (66 chars).
     """
@@ -111,11 +112,7 @@ def source_content_hash(result: dict) -> str:
         "contract_name": str(result.get("ContractName", "") or ""),
         "remappings": sorted(parse_remappings(result)),
         "language": "vyper" if is_vyper_result(result) else "solidity",
-        "evm_version": str(result.get("EVMVersion", "") or "").strip().lower(),
-        "optimizer": str(result.get("OptimizationUsed", "") or ""),
-        "runs": str(result.get("Runs", "") or ""),
-        "compiler_version": str(result.get("CompilerVersion", "") or ""),
-        "compiler_settings": parse_compiler_settings(result),
+        **_verified_compile_inputs(result),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "0x" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -192,6 +189,33 @@ def parse_remappings(result: dict) -> list[str]:
         for entry in remappings
         if isinstance(entry, str) and entry.strip() and _remapping_target_is_safe(entry.strip())
     ]
+
+
+def _verified_compile_inputs(result: dict) -> dict[str, Any]:
+    """The compiler inputs the bundle was verified with: the standard-json ``settings`` the verifier compiled with, else
+    Etherscan's flat fields. ``evm_version`` is empty or ``"default"`` when the verifier used the compiler's default.
+    """
+    bundle = parse_verification_bundle(result)
+    settings = bundle.get("settings") if bundle else None
+    settings = settings if isinstance(settings, dict) else {}
+    optimizer = settings.get("optimizer")
+    optimizer = optimizer if isinstance(optimizer, dict) else {}
+    enabled = optimizer.get("enabled")
+    if not isinstance(enabled, bool):
+        enabled = str(result.get("OptimizationUsed", "1")) == "1"
+    runs = optimizer.get("runs")
+    if not isinstance(runs, int) or isinstance(runs, bool):
+        runs = int(result.get("Runs", "200") or 200)
+    evm_version = settings.get("evmVersion")
+    if not isinstance(evm_version, str):
+        evm_version = result.get("EVMVersion", "")
+    return {
+        "compiler_version": str(result.get("CompilerVersion", "") or "").strip(),
+        "evm_version": str(evm_version or "").strip().lower(),
+        "optimizer": enabled,
+        "runs": runs,
+        "via_ir": settings.get("viaIR") is True,
+    }
 
 
 _MIN_SOLC = "0.8.24"  # 0.8.21-0.8.23 have Natspec.cpp internal compiler errors on some OZ contracts
@@ -310,35 +334,19 @@ def _solidity_pragmas(sources: dict[str, str]) -> list[list[_Range]]:
     return pragmas
 
 
-def _verified_solc_version(sources: dict[str, str], preferred_version: str | None) -> str | None:
-    """A syntactically valid verified compiler satisfying the source constraints; no inferred patch floor."""
-    match = re.fullmatch(r"v?(\d+\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", preferred_version or "")
-    if match:
-        verified = _parse_version(match[1])
-        if all(any(r.admits(verified) for r in ranges) for ranges in _solidity_pragmas(sources)):
-            return _format_version(verified)
-    return None
+def _admits_all(pragmas: list[list[_Range]], version: _Version) -> bool:
+    return all(any(r.admits(version) for r in ranges) for ranges in pragmas)
 
 
-def _detect_solc_version(sources: dict[str, str], preferred_version: str | None = None) -> str:
+def _detect_solc_version(sources: dict[str, str]) -> str:
     """One solc that satisfies every ``pragma solidity`` in the bundle as ``_relax_pragmas`` rewrites it.
 
-    Prefer a compatible verified compiler: a loose pragma can omit the minimum version
-    required by the syntax actually used. Otherwise use the highest lower bound (of the
-    newest ``||`` alternative), floored to ``_MIN_SOLC`` on its minor line.
+    Prefers the highest lower bound (of the newest ``||`` alternative), floored to ``_MIN_SOLC`` on its minor line.
     When a ceiling rules that out, the newest admissible version named by some bound is used; if nothing is admissible
     the preference stands and the compile reports the conflict.
     """
     pragmas = _solidity_pragmas(sources)
     floor = _parse_version(_MIN_SOLC)
-    match = re.fullmatch(r"v?(\d+\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?", preferred_version or "")
-    if match:
-        verified = _parse_version(match[1])
-        # Preserve the existing patch-floor workaround for compiler internal errors;
-        # metadata must not downgrade a working 0.8.x analysis to those releases.
-        above_floor = verified[:2] != floor[:2] or verified >= floor
-        if above_floor and all(any(r.admits(verified) for r in ranges) for ranges in pragmas):
-            return _format_version(verified)
     lowers = []
     for ranges in pragmas:
         bounded = [v for v in (r.least() for r in ranges) if v is not None]
@@ -348,19 +356,192 @@ def _detect_solc_version(sources: dict[str, str], preferred_version: str | None 
     if preferred[:2] == floor[:2] and preferred < floor:
         preferred = floor
 
-    def admitted(version: _Version) -> bool:
-        return all(any(r.admits(version) for r in ranges) for ranges in pragmas)
-
-    if admitted(preferred):
+    if _admits_all(pragmas, preferred):
         return _format_version(preferred)
     candidates = {v for ranges in pragmas for r in ranges for v in (r.least(), r.greatest_nameable()) if v is not None}
-    viable = sorted(v for v in candidates if admitted(v))
+    viable = sorted(v for v in candidates if _admits_all(pragmas, v))
     below = [v for v in viable if v <= preferred]
     if below:
         return _format_version(below[-1])
     if viable:
         return _format_version(viable[0])
     return _format_version(preferred)
+
+
+_VERIFIED_SOLC_RE = re.compile(r"v?(\d+\.\d+\.\d+)(?:\+commit\.[0-9a-fA-F]+)?")
+
+
+def select_solc_version(sources: dict[str, str], compiler_version: str | None) -> str:
+    """The verified compiler release when it satisfies every ``pragma solidity`` as ``_relax_pragmas`` writes it.
+
+    Pragma detection only stands in when the verified version is absent, not a release (nightlies), or rejected by a
+    pragma, and each fallback is logged: a pragma admits releases the bundle was never compiled with (a ``^0.7.0``
+    file-level function needs 0.7.1). ``_MIN_SOLC``'s floor doesn't apply: the verified compiler already built this
+    bundle, metadata and NatSpec included.
+    """
+    raw = str(compiler_version or "").strip()
+    match = _VERIFIED_SOLC_RE.fullmatch(raw)
+    if match is None:
+        detected = _detect_solc_version(sources)
+        logger.info(
+            "solc %s from pragmas: no release in the verified compiler version",
+            detected,
+            extra={"solc_source": "pragma", "verified_compiler": raw[:64]},
+        )
+        return detected
+    verified = _parse_version(match.group(1))
+    pragmas = _solidity_pragmas(sources)
+    if not _admits_all(pragmas, verified):
+        detected = _detect_solc_version(sources)
+        logger.warning(
+            "solc %s from pragmas: verified compiler %s does not satisfy every pragma",
+            detected,
+            _format_version(verified),
+            extra={"solc_source": "pragma_conflict", "verified_compiler": raw[:64]},
+        )
+        return detected
+    chosen = _format_version(verified)
+    logger.info(
+        "solc %s from the verified compiler", chosen, extra={"solc_source": "verified", "verified_compiler": raw[:64]}
+    )
+    return chosen
+
+
+# solc's own default target per release, for bundles verified with "Default".
+_SOLC_DEFAULT_EVM: tuple[tuple[_Version, str], ...] = (
+    ((0, 8, 31), "osaka"),
+    ((0, 8, 30), "prague"),
+    ((0, 8, 25), "cancun"),
+    ((0, 8, 20), "shanghai"),
+    ((0, 8, 18), "paris"),
+    ((0, 8, 7), "london"),
+    ((0, 8, 5), "berlin"),
+    ((0, 5, 14), "istanbul"),
+    ((0, 5, 5), "petersburg"),
+    ((0, 4, 21), "byzantium"),
+)
+
+
+def _resolve_evm_version(raw: object, solc_version: str) -> str:
+    """The verified EVM target, or solc's default for ``solc_version`` when the verifier used the default.
+
+    Allowlisted because it comes from untrusted metadata and goes into foundry.toml.
+    """
+    key = str(raw or "").strip().lower()
+    if key in _EVM_VERSION_BY_KEY:
+        return _EVM_VERSION_BY_KEY[key]
+    if key not in ("", "default"):
+        logger.warning("unrecognised verified EVM version %r; using solc %s's default", key[:32], solc_version)
+    version = _parse_version(solc_version)
+    return next((evm for since, evm in _SOLC_DEFAULT_EVM if version >= since), "homestead")
+
+
+@dataclass(frozen=True)
+class CompileSettings:
+    solc_version: str
+    evm_version: str
+    optimizer: bool
+    optimizer_runs: int
+    via_ir: bool
+
+
+def compile_settings(
+    sources: dict[str, str],
+    *,
+    language: str,
+    compiler_version: str | None,
+    evm_version: str | None,
+    optimizer: bool | None,
+    optimizer_runs: int | None,
+    via_ir: bool | None,
+) -> CompileSettings:
+    """The Foundry build settings for a verified bundle. Vyper keeps pragma detection; its compiler is chosen apart."""
+    if language == "vyper":
+        solc_version = _detect_solc_version(sources)
+    else:
+        solc_version = select_solc_version(sources, compiler_version)
+    return CompileSettings(
+        solc_version=solc_version,
+        evm_version=_resolve_evm_version(evm_version, solc_version),
+        optimizer=bool(optimizer),
+        optimizer_runs=int(optimizer_runs or 200),
+        via_ir=bool(via_ir),
+    )
+
+
+def verified_compile_settings(result: dict, sources: dict[str, str]) -> CompileSettings:
+    inputs = _verified_compile_inputs(result)
+    return compile_settings(
+        sources,
+        language="vyper" if is_vyper_result(result) else "solidity",
+        compiler_version=inputs["compiler_version"],
+        evm_version=inputs["evm_version"],
+        optimizer=inputs["optimizer"],
+        optimizer_runs=inputs["runs"],
+        via_ir=inputs["via_ir"],
+    )
+
+
+_VIA_IR_OFF = "via_ir = false\n"
+
+
+def render_foundry_toml(src_dir: str, settings: CompileSettings) -> str:
+    """The first build is always without viaIR: Slither reads the AST, which viaIR doesn't change, and the legacy
+    pipeline compiles faster. ``enable_via_ir`` turns it on for the one retry a viaIR-verified bundle gets.
+    """
+    return textwrap.dedent(
+        f"""\
+        [profile.default]
+        src = "{src_dir}"
+        out = "out"
+        libs = ["lib"]
+        solc_version = "{settings.solc_version}"
+        evm_version = "{settings.evm_version}"
+        optimizer = {str(settings.optimizer).lower()}
+        optimizer_runs = {settings.optimizer_runs}
+        via_ir = false
+        auto_detect_solc = false
+    """
+    )
+
+
+class CompilerUnavailableError(RuntimeError):
+    """A build failed with its solc release not on disk, so the failure may be the release's download."""
+
+
+def solc_installed(version: str | None) -> bool:
+    """Whether Foundry has ``version`` on disk (``FOUNDRY_SOLC``, else the svm store it installs releases into)."""
+    if not version:
+        return False
+    override = os.environ.get("FOUNDRY_SOLC")
+    if override:
+        return Path(override).is_file()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    roots = (Path.home() / ".svm", Path(xdg) / "svm" if xdg else Path.home() / ".local" / "share" / "svm")
+    return any((root / version / f"solc-{version}").is_file() for root in roots)
+
+
+def scaffolded_solc_version(project_dir: Path) -> str | None:
+    """The solc release a scaffolded Solidity project builds with, from its ``contract_meta.json``."""
+    try:
+        meta = json.loads((project_dir / "contract_meta.json").read_text())
+    except (OSError, ValueError):
+        return None
+    value = meta.get("solc_version") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def enable_via_ir(project_dir: Path) -> bool:
+    """Switch a scaffolded project's build to viaIR; ``False`` when it isn't a viaIR-off project from this writer."""
+    toml = project_dir / "foundry.toml"
+    try:
+        text = toml.read_text()
+    except OSError:
+        return False
+    if _VIA_IR_OFF not in text:
+        return False
+    toml.write_text(text.replace(_VIA_IR_OFF, "via_ir = true\n", 1))
+    return True
 
 
 def _relax_pragmas(sources: dict[str, str]) -> dict[str, str]:
@@ -391,28 +572,12 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
     remappings = parse_remappings(result)
     bundle = parse_verification_bundle(result)
     language = "vyper" if is_vyper_result(result) else "solidity"
-    solc_version = _detect_solc_version(sources, result.get("CompilerVersion"))
+    settings = verified_compile_settings(result, sources)
     src_dir = _project_src_dir(sources)
-    evm_version = sanitize_evm_version(result.get("EVMVersion", ""))
 
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    (project_dir / "foundry.toml").write_text(
-        textwrap.dedent(
-            f"""\
-            [profile.default]
-            src = "{src_dir}"
-            out = "out"
-            libs = ["lib"]
-            solc_version = "{solc_version}"
-            evm_version = "{evm_version}"
-            optimizer = {str(result.get("OptimizationUsed", "1") == "1").lower()}
-            optimizer_runs = {int(result.get("Runs", "200") or 200)}
-            via_ir = {str(parse_compiler_settings(result).get("viaIR") is True).lower()}
-            auto_detect_solc = false
-        """
-        )
-    )
+    (project_dir / "foundry.toml").write_text(render_foundry_toml(src_dir, settings))
 
     if remappings:
         (project_dir / "remappings.txt").write_text("\n".join(remappings) + "\n")
@@ -435,6 +600,9 @@ def scaffold(address: str, result: dict, project_dir: Path) -> Path:
         "optimization_used": result.get("OptimizationUsed", ""),
         "runs": result.get("Runs", ""),
         "evm_version": result.get("EVMVersion", ""),
+        "solc_version": settings.solc_version if language == "solidity" else None,
+        "via_ir": settings.via_ir,
+        "via_ir_used": False,
         "license": result.get("LicenseType", ""),
         "source_format": "standard_json" if bundle else "flat",
         "source_file_count": len(sources),

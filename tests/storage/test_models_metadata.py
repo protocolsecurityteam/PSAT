@@ -33,6 +33,7 @@ EXPECTED_TABLES = [
     "daemon_leases",
     "dapp_interactions",
     "deployer_affinity_challenges",
+    "deployer_chain_enumerations",
     "effect_behavior_cache",
     "effect_verdicts",
     "effective_functions",

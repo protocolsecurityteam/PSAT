@@ -29,6 +29,7 @@ from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
 from .effects import _collect_reentrancy_guard_vars
 from .mapping_events import member_witness_records
+from .predicate_types import names_controllers
 from .shared import (
     _contract_functions,
     _declaring_contract_name,
@@ -387,11 +388,14 @@ def _functions_by_signature(contract) -> dict[str, object]:
 
 
 def _walk_leaves(node: Any, callback) -> None:
+    """The leaves that say who passes. A reach condition on state or calldata says when a gate applies, so the state
+    it reads nominates no controller (resolution reads it itself).
+    """
     if not isinstance(node, dict):
         return
     if node.get("op") == "LEAF":
         leaf = node.get("leaf")
-        if leaf is not None:
+        if leaf is not None and names_controllers(leaf):
             callback(leaf)
         return
     for child in node.get("children") or []:
@@ -1007,6 +1011,11 @@ def _component_for_member_path(
     return next((component for component in components if component["name"] == member_path[0]), None)
 
 
+def _value_in_code(sv: Any) -> bool:
+    """Whether the compiler places the variable's value in bytecode rather than storage."""
+    return sv is not None and (getattr(sv, "is_immutable", False) is True or getattr(sv, "is_constant", False) is True)
+
+
 def _state_var_read_spec(
     name: str,
     state_vars_by_name: dict[str, Any],
@@ -1037,6 +1046,8 @@ def _state_var_read_spec(
     )
     if projected_component is not None:
         spec["parent_type"] = type_str
+    if _value_in_code(sv):
+        spec["value_in_code"] = True
     if member_path:
         spec["member_path"] = list(member_path)
     if components:
@@ -1217,6 +1228,8 @@ def build_controller_tracking(
         if controller_id in seen_ids:
             continue
         read_spec: ControllerReadSpec = {"strategy": "getter_call", "target": role_name}
+        if _value_in_code(state_vars_by_name.get(role_name)):
+            read_spec["value_in_code"] = True
         tracking_targets.append(
             {
                 "controller_id": controller_id,
@@ -1259,7 +1272,7 @@ def build_controller_tracking(
             controller_id = f"role_identifier:{name}"
             if controller_id in seen_ids:
                 continue
-            read_spec_role: ControllerReadSpec = {"strategy": "getter_call", "target": name}
+            read_spec_role: ControllerReadSpec = {"strategy": "getter_call", "target": name, "value_in_code": True}
             tracking_targets.append(
                 {
                     "controller_id": controller_id,

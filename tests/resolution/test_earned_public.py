@@ -310,9 +310,9 @@ def test_bound_check_never_blocks_public_path(earned_public):
     assert surface.authority_public
 
 
-def test_resolved_empty_is_not_a_blocker(earned_public):
+def test_a_proven_empty_conjunct_closes_a_sibling_public_path(earned_public):
     surface = project_capability_surface(_and_dict(_PUBLIC, _EMPTY_EXACT))
-    assert surface.authority_public
+    assert not surface.authority_public
 
 
 def test_or_blocks_only_when_every_disjunct_blocks(earned_public):

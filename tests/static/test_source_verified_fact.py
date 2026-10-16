@@ -44,6 +44,7 @@ def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session,
                 source_file_count=1,
                 remappings=[],
                 source_verified=fact,
+                via_ir=fact,
             )
         )
         db_session.commit()
@@ -62,4 +63,4 @@ def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session,
 
         assert captured["source_verified"] is fact
         assert _source_verified(captured) is fact
-        assert captured["build_settings"]["via_ir"] is (fact is True)
+        assert captured["build_settings"]["via_ir"] is fact

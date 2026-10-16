@@ -365,3 +365,13 @@ def test_unknown_and_library_calls_are_not_assumed_read_only():
     library = type("LibraryCall", (), {"is_static_call": lambda self: True})()
     assert not _proven_read_only_call(library)
     assert not _proven_read_only_call(SimpleNamespace(function_name="value"))
+
+
+def test_a_membership_keyed_by_constants_is_not_folded_as_its_key():
+    from services.static.contract_analysis_pipeline.structural_evidence import predicate_truth
+
+    # ``allowed[address(0)]``: the operand is the key, so the leaf's value is unknown, not ``0``.
+    member = {"kind": "membership", "operator": "truthy", "operands": [{"source": "constant", "constant_value": "0"}]}
+    assert predicate_truth({"op": "LEAF", "leaf": member}) is None
+    equal = {"kind": "equality", "operator": "eq", "operands": [{"source": "constant", "constant_value": "0"}] * 2}
+    assert predicate_truth({"op": "LEAF", "leaf": equal}) is True

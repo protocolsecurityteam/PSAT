@@ -121,6 +121,14 @@ _STANDARD_JSON_SOURCE = json.dumps(
     }
 )
 assert "sources" in _STANDARD_JSON_SOURCE[:10]
+_VIA_IR_SOURCE = json.dumps(
+    {
+        "sources": {"contracts/Token.sol": {"content": "pragma solidity ^0.4.18; contract Token {}"}},
+        "language": "Solidity",
+        "settings": {"optimizer": {"enabled": True, "runs": 200}, "viaIR": True},
+    }
+)
+_SOLC_0_8_20 = {"CompilerVersion": "v0.8.20+commit.a1b79de6", "SourceCode": "pragma solidity ^0.8.20; contract C {}"}
 
 
 @pytest.mark.parametrize(
@@ -156,12 +164,31 @@ assert "sources" in _STANDARD_JSON_SOURCE[:10]
             {"language": "solidity"},
             id="solidity-when-compiler-not-vyper",
         ),
-        pytest.param({"EVMVersion": ""}, (), {"evm_version": "shanghai"}, id="evm-version-empty-defaults-to-shanghai"),
         pytest.param(
-            {"EVMVersion": "Default"}, (), {"evm_version": "shanghai"}, id="evm-version-default-defaults-to-shanghai"
+            {"EVMVersion": "", **_SOLC_0_8_20}, (), {"evm_version": "shanghai"}, id="evm-version-empty-is-solc-default"
+        ),
+        pytest.param(
+            {"EVMVersion": "Default", **_SOLC_0_8_20},
+            (),
+            {"evm_version": "shanghai"},
+            id="evm-version-default-is-solc-default",
+        ),
+        pytest.param(
+            {
+                "EVMVersion": "Default",
+                "CompilerVersion": "v0.8.27+commit.40a35a09",
+                "SourceCode": "pragma solidity ^0.8.20;",
+            },
+            (),
+            {"evm_version": "cancun"},
+            id="evm-version-default-follows-the-verified-compiler",
         ),
         pytest.param({"EVMVersion": "cancun"}, (), {"evm_version": "cancun"}, id="evm-version-explicit-preserved"),
-        pytest.param({}, ("EVMVersion",), {"evm_version": "shanghai"}, id="evm-version-key-missing"),
+        pytest.param({**_SOLC_0_8_20}, ("EVMVersion",), {"evm_version": "shanghai"}, id="evm-version-key-missing"),
+        pytest.param({}, (), {"via_ir": False}, id="via-ir-absent-is-off"),
+        pytest.param(
+            {"SourceCode": _VIA_IR_SOURCE, "ContractName": "Token"}, (), {"via_ir": True}, id="via-ir-from-settings"
+        ),
         pytest.param(
             {"SourceCode": _STANDARD_JSON_SOURCE, "ContractName": "Token"},
             (),

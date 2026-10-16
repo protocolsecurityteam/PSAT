@@ -60,19 +60,10 @@ function describeCaller(principal, companyData) {
   return { kind, name, sub, accent: meta.accent };
 }
 
-function isExactEmptyCapability(cap) {
-  if (!cap || typeof cap !== "object") return false;
-  if (cap.kind === "finite_set") {
-    return cap.membership_quality === "exact" && Array.isArray(cap.members) && cap.members.length === 0;
-  }
-  const children = Array.isArray(cap.children) ? cap.children : [];
-  if (cap.kind === "AND") return children.some(isExactEmptyCapability);
-  if (cap.kind === "OR") return children.length > 0 && children.every(isExactEmptyCapability);
-  return false;
-}
-
+// Only the backend's verdict: an empty set in the capability isn't proof of nobody unless it was read or
+// enumerated, which the backend checks and the capability's shape alone doesn't show.
 function isResolvedEmptyFunction(fn) {
-  return fn?.status === "resolved_empty" || fn?.capability_proven_empty === true || isExactEmptyCapability(fn?.capability_expr);
+  return fn?.status === "resolved_empty";
 }
 
 // All callable by anyone; `shape` says under what side-conditions.

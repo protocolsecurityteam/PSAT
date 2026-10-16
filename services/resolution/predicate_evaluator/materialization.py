@@ -30,7 +30,9 @@ def _public_without_root_cofinites(cap: CapabilityExpr) -> bool:
         return node
 
     counterfactual = strip(capability_to_dict(cap))
-    return project_capability_surface(counterfactual).authority_public
+    surface = project_capability_surface(counterfactual)
+    # An unfinished projection may hide a public path, so the guard keeps the outer check.
+    return surface.authority_public or surface.not_determined_reason is not None
 
 
 def _inline_result_needs_materialization(cap: CapabilityExpr) -> bool:

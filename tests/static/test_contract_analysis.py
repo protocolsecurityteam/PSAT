@@ -470,3 +470,36 @@ def test_standards_absence_is_measured_not_missing(tmp_path):
     classification = _detect_contract_classification(contract, tmp_path, None)
     assert "ERC20" in classification["standards"]
     assert classification["is_factory"] is None
+
+
+_CODE_AND_STORAGE_CONTROLLERS_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+interface Authority { function canCall(address user, address target, bytes4 sig) external view returns (bool); }
+contract Gated {
+    address public immutable manager;
+    Authority public authority;
+    address public owner;
+    uint256 public value;
+    constructor(address m) { manager = m; }
+    function setByManager(uint256 v) external { require(msg.sender == manager, "no"); value = v; }
+    function setByAuth(uint256 v) external {
+        require(msg.sender == owner || authority.canCall(msg.sender, address(this), msg.sig), "no");
+        value = v;
+    }
+}
+"""
+
+
+def test_only_a_controller_whose_value_lives_in_code_is_marked_so(tmp_path):
+    project_dir = _write_project(tmp_path, "Gated", _CODE_AND_STORAGE_CONTROLLERS_SOURCE)
+
+    analysis = collect_contract_analysis(project_dir)
+
+    marked = {
+        target["controller_id"]: (target["read_spec"] or {}).get("value_in_code")
+        for target in analysis["controller_tracking"]
+    }
+    assert marked["state_variable:manager"] is True
+    assert marked["state_variable:owner"] is None
+    assert marked["external_contract:authority"] is None

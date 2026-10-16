@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
-from db.models import Contract, Job, JobStage, JobStatus
+from db.models import Contract, Job, JobStage, JobStatus, derive_job_chain_id
 from db.queue import (
     DEFAULT_JOB_LEASE_TTL_S,
     complete_job,
@@ -47,7 +47,7 @@ def _existing_in_same_cascade(session: Session, addr: str, chain: str | None, ro
         Job.request["root_job_id"].as_string() == root_job_id,
     )
     if chain is not None:
-        stmt = stmt.where(Job.request["chain"].as_string() == chain)
+        stmt = stmt.where(Job.chain_id == derive_job_chain_id(chain, addr))
     stmt = stmt.limit(1)
     return session.execute(stmt).scalar_one_or_none() is not None
 

@@ -18,20 +18,30 @@ from utils.scoring_status import (
     W2_BASIS_CLEAR_DOMINATES_CALLS,
 )
 
+from ...contract_analysis_pipeline.predicate_types import INLINE_ASM_REVERT_BASIS, is_reach_condition
 from ..context import ClaimContext, abi_selector, selector_of
 
 # Keyed by the per-contract ClaimContext.
 _PAUSE_TARGETS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
-_MANDATORY_READS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
+_GATE_READS: WeakKeyDictionary[ClaimContext, dict[tuple[str, str | None], dict[str, frozenset[bool | None]]]] = (
+    WeakKeyDictionary()
+)
+_FLAG_BLOCKING: WeakKeyDictionary[
+    ClaimContext, dict[tuple[tuple[str, str | None], str | None], frozenset[bool | None]]
+] = WeakKeyDictionary()
+_FLAG_WRITES: WeakKeyDictionary[ClaimContext, dict[tuple[str, tuple[str, str | None]], str | None]] = (
+    WeakKeyDictionary()
+)
 _TOTAL_SUPPLY_VARS: WeakKeyDictionary[ClaimContext, set[str]] = WeakKeyDictionary()
 
 
 def _iter_leaves(tree: Any) -> Any:
+    """The gate leaves of a tree; a leaf saying where a gate is reached is not a gate."""
     if not isinstance(tree, dict):
         return
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if isinstance(leaf, dict):
+        if isinstance(leaf, dict) and not is_reach_condition(leaf):
             yield leaf
         return
     for child in tree.get("children") or []:
@@ -51,33 +61,22 @@ def tree_is_one_shot(tree: Any) -> bool:
     return tree_has_role(tree, ("one_shot",))
 
 
-def _mandatory_operands(tree: Any) -> set[tuple[str, str | None]]:
-    """State-var operands on a mandatory gate path (only ``AND`` ancestors, so the value can force a revert with no
-    ``OR`` escape). Separates a real pause gate from a mode selector under a branch (``if (executorRequired)
+def _mandatory_leaves(tree: Any) -> list[dict[str, Any]]:
+    """Leaves on a mandatory gate path (only ``AND`` ancestors, so the value can force a revert with no ``OR``
+    escape). Separates a real pause gate from a mode selector under a branch (``if (executorRequired)
     require(sig)``).
     """
-    out: set[tuple[str, str | None]] = set()
+    out: list[dict[str, Any]] = []
 
     def walk(node: Any, mandatory: bool) -> None:
         if not isinstance(node, dict):
             return
-        op = node.get("op")
-        if op == "LEAF":
-            if not mandatory:
-                return
+        if node.get("op") == "LEAF":
             leaf = node.get("leaf")
-            if not isinstance(leaf, dict):
-                return
-            for operand in leaf.get("operands") or []:
-                if not isinstance(operand, dict):
-                    continue
-                name = operand.get("state_variable_name")
-                if not name:
-                    continue
-                member_path = operand.get("member_path") or []
-                out.add((name, member_path[0] if member_path else None))
+            if mandatory and isinstance(leaf, dict):
+                out.append(leaf)
             return
-        child_mandatory = mandatory and op != "OR"
+        child_mandatory = mandatory and node.get("op") != "OR"
         for child in node.get("children") or []:
             walk(child, child_mandatory)
 
@@ -85,18 +84,68 @@ def _mandatory_operands(tree: Any) -> set[tuple[str, str | None]]:
     return out
 
 
-def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
-    """Every ``(var, member)`` read as a mandatory revert gate in the contract (cached)."""
-    cached = _MANDATORY_READS.get(ctx)
+_UNPOLARIZED_BASES = frozenset({INLINE_ASM_REVERT_BASIS})
+
+
+def _bool_literal(operand: dict[str, Any]) -> bool | None:
+    if operand.get("source") != "constant" or operand.get("value_type") != "bool":
+        return None
+    return {"True": True, "False": False}.get(str(operand.get("constant_value")))
+
+
+def _flag_reverting_value(leaf: dict[str, Any], flag: dict[str, Any], operands: list[dict[str, Any]]) -> bool | None:
+    """The value of ``flag`` that makes this mandatory leaf revert, or ``None`` when the leaf's shape doesn't fix one.
+
+    Leaves state the allowed condition (``if (x) revert`` is ``falsy``), so ``truthy`` reverts on false. The only other
+    shape read is ``eq``/``ne`` against a bool literal. A nested member path names a field below the ``(var, member)``
+    pair writes are keyed by, so it fixes nothing. Neither does an inline-assembly gate, whose operator the builder
+    didn't derive from the revert.
+    """
+    if leaf.get("kind") != "equality" or len(flag.get("member_path") or []) > 1:
+        return None
+    if _UNPOLARIZED_BASES.intersection(leaf.get("basis") or []):
+        return None
+    operator = leaf.get("operator")
+    if len(operands) == 1 and operator in ("truthy", "falsy"):
+        return operator == "falsy"
+    if len(operands) == 2 and operator in ("eq", "ne"):
+        literal = _bool_literal(operands[1] if operands[0] is flag else operands[0])
+        if literal is None:
+            return None
+        return literal != (operator == "eq")
+    return None
+
+
+def gate_read_reverting_values(ctx: ClaimContext) -> dict[tuple[str, str | None], dict[str, frozenset[bool | None]]]:
+    """Every ``(var, member)`` read as a mandatory revert gate, by reading function, with the flag values that make the
+    gate revert (``None`` where the leaf's shape doesn't say) (cached).
+    """
+    cached = _GATE_READS.get(ctx)
     if cached is not None:
         return cached
-    reads: set[tuple[str, str | None]] = set()
+    reads: dict[tuple[str, str | None], dict[str, set[bool | None]]] = {}
     for signature in ctx.function_signatures():
         tree = ctx.predicate_tree(signature)
-        if tree is not None:
-            reads |= _mandatory_operands(tree)
-    _MANDATORY_READS[ctx] = reads
-    return reads
+        if tree is None:
+            continue
+        for leaf in _mandatory_leaves(tree):
+            operands = [operand for operand in leaf.get("operands") or [] if isinstance(operand, dict)]
+            for operand in operands:
+                name = operand.get("state_variable_name")
+                if not name:
+                    continue
+                member_path = operand.get("member_path") or []
+                pair = (name, member_path[0] if member_path else None)
+                value = _flag_reverting_value(leaf, operand, operands)
+                reads.setdefault(pair, {}).setdefault(signature, set()).add(value)
+    frozen = {pair: {sig: frozenset(values) for sig, values in by_fn.items()} for pair, by_fn in reads.items()}
+    _GATE_READS[ctx] = frozen
+    return frozen
+
+
+def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
+    """Every ``(var, member)`` read as a mandatory revert gate in the contract."""
+    return set(gate_read_reverting_values(ctx))
 
 
 # Parameter destination constraints: does a mandatory revert gate reference each ABI parameter between entry and sink?
@@ -888,7 +937,8 @@ def contract_functions(ctx: ClaimContext, signature: str) -> list[Any]:
 
 
 def pause_targets(ctx: ClaimContext) -> set[tuple[str, str | None]]:
-    """``(var, member)`` bool flags written in some function body and read as a mandatory revert gate by another.
+    """``(var, member)`` bool flags written in some function body and read as a mandatory revert gate by an entry point
+    that doesn't write them (:func:`flag_blocking_values`).
 
     Member-path facts recover struct-member and inherited-private pauses; the mandatory structure excludes branch-mode
     selectors.
@@ -896,11 +946,10 @@ def pause_targets(ctx: ClaimContext) -> set[tuple[str, str | None]]:
     cached = _PAUSE_TARGETS.get(ctx)
     if cached is not None:
         return cached
-    gate_reads = mandatory_gate_reads(ctx)
     all_bool_writes: set[tuple[str, str | None]] = set()
     for signature in ctx.function_signatures():
         all_bool_writes |= bool_write_targets(ctx, signature)
-    targets = {pair for pair in all_bool_writes if _pair_is_gate_read(pair, gate_reads)}
+    targets = {pair for pair in all_bool_writes if flag_blocking_values(ctx, pair)}
     _PAUSE_TARGETS[ctx] = targets
     return targets
 
@@ -916,8 +965,94 @@ def _pair_is_gate_read(pair: tuple[str, str | None], gate_reads: set[tuple[str, 
     return member is None and any(read_var == var for read_var, _read_member in gate_reads)
 
 
+def flag_blocking_values(
+    ctx: ClaimContext, pair: tuple[str, str | None], *, excluding: str | None = None
+) -> frozenset[bool | None]:
+    """The values of the written flag ``pair`` that make another entry point revert: the union over entry points with a
+    mandatory gate on a read of it that never write it (``excluding`` aside). Empty when the flag gates nothing else
+    (cached).
+
+    A function that writes the flag toggles it: its own gate on it (``if (x) revert; x = true``, ``whenNotPaused
+    pause()``) is a precondition of the toggle, not something the flag blocks. A reader whose values are already in the
+    union can't change it, so its writes aren't checked.
+    """
+    memo = _FLAG_BLOCKING.setdefault(ctx, {})
+    key = (pair, excluding)
+    cached = memo.get(key)
+    if cached is not None:
+        return cached
+    blocking: set[bool | None] = set()
+    for read_pair, by_fn in gate_read_reverting_values(ctx).items():
+        if not _pair_is_gate_read(pair, {read_pair}):
+            continue
+        for signature, values in by_fn.items():
+            if signature == excluding or values <= blocking:
+                continue
+            if not _may_write(ctx, signature, read_pair):
+                blocking |= values
+    frozen = frozenset(blocking)
+    memo[key] = frozen
+    return frozen
+
+
 def function_pause_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
     return bool_write_targets(ctx, function) & pause_targets(ctx)
+
+
+def flag_write_polarity(ctx: ClaimContext, function: str, pair: tuple[str, str | None]) -> str | None:
+    """How ``function`` writes the bool flag ``pair`` (:func:`toggle_polarity`), or ``None`` when the write isn't proven
+    to reach the flag (cached).
+
+    Namespaced latches are written through a storage pointer, so the member the guard reads identifies the flag. An
+    ERC-7201 slot holds a whole struct, so writing it proves nothing; only a constant-bool toggle of a guard-read member
+    counts.
+    """
+    memo = _FLAG_WRITES.setdefault(ctx, {})
+    key = (function, pair)
+    if key in memo:
+        return memo[key]
+    var, member = pair
+    fn = contract_function(ctx, function)
+    aliases = frozenset(m for v, m in mandatory_gate_reads(ctx) if v == var and m) if member is None else frozenset()
+    polarity: str | None = toggle_polarity(fn, var, member, alias_members=aliases) if fn is not None else "both"
+    if polarity == "both" and var in namespaced_write_vars(ctx, function):
+        polarity = None
+    memo[key] = polarity
+    return polarity
+
+
+def pause_directions(ctx: ClaimContext, function: str, pair: tuple[str, str | None], polarity: str) -> frozenset[str]:
+    """The claims (``"set"``, ``"unset"``) that ``function`` writing the flag ``pair`` with ``polarity`` makes.
+
+    ``set`` writes the value other entry points' gates on the flag revert on. ``unset`` writes the other value of a flag
+    some function can set to the blocking one, so a one-way enable (a migration completed, a timer started) unpauses
+    nothing. When the reverting value isn't determined, or entry points revert on each value, the written value is read
+    as it always was: ``true`` pauses.
+    """
+    blocking = flag_blocking_values(ctx, pair, excluding=function)
+    if not blocking:
+        return frozenset()
+    value = next(iter(blocking))
+    if value is None or len(blocking) > 1:
+        return frozenset({"set", "unset"}) if polarity == "both" else frozenset({polarity})
+    written = {"set": {True}, "unset": {False}}.get(polarity, {True, False})
+    directions: set[str] = set()
+    if value in written:
+        directions.add("set")
+    if (not value) in written and _flag_can_hold(ctx, pair, value):
+        directions.add("unset")
+    return frozenset(directions)
+
+
+def _flag_can_hold(ctx: ClaimContext, pair: tuple[str, str | None], value: bool) -> bool:
+    """Whether some function writes ``value`` to the flag ``pair``."""
+    for signature in ctx.function_signatures():
+        if pair not in bool_write_targets(ctx, signature):
+            continue
+        polarity = flag_write_polarity(ctx, signature, pair)
+        if polarity == "both" or (polarity is not None and (polarity == "set") == value):
+            return True
+    return False
 
 
 def toggle_polarity(function: Any, var: str, member: str | None, *, alias_members: frozenset[str] = frozenset()) -> str:

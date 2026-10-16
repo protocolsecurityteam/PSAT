@@ -94,6 +94,13 @@ def _live_authority_result(read_addr: str, selector: str, contract: str, block: 
     )
 
 
+_REVERTED = object()
+
+
+def _unreadable_revert() -> CapabilityExpr:
+    return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial", empty_reason="unreadable_revert")
+
+
 def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None) -> CapabilityExpr | None:
     """Resolve ``msg.sender == X`` by reading ``X`` live when ``state_var_values`` lacks it.
 
@@ -112,12 +119,14 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
         return None
     if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
         return None
-    # Pass-scoped dedup of deterministic getter reads; only successes are memoized so failures retry independently.
+    # Pass-scoped dedup of deterministic getter reads: successes, and reverts at a pinned block.
     memo = _pass_live_read_memo(outer)
     block_repr = block if isinstance(block, int) else "latest"
     memo_key = ("live_authority", rpc_url, contract.lower(), selector, block_repr)
     if memo is not None and memo_key in memo:
         _bump_resolve_counter(outer, "live_getter_memo_hits")
+        if memo[memo_key] is _REVERTED:
+            return _unreadable_revert()
         # Pass ``block`` so a memo hit reproduces ``observed_at_block``.
         return _live_authority_result(memo[memo_key], selector, contract, block if isinstance(block, int) else None)
 
@@ -132,11 +141,12 @@ def _live_resolve_authority(ctx: EvaluationContext | None, selector: str | None)
             retries=1,
             chain_id=getattr(outer, "chain_id", None),
         )
-    except Exception:
+    except Exception as exc:
         _bump_resolve_counter(outer, "live_getter_failures")
-        return CapabilityExpr.finite_set(
-            [], quality="lower_bound", confidence="partial", empty_reason="unreadable_revert"
-        )
+        # The EVM's answer at a pinned block is the same on every read; a transport failure may not be.
+        if memo is not None and isinstance(block, int) and "revert" in str(exc).lower():
+            memo[memo_key] = _REVERTED
+        return _unreadable_revert()
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
         return CapabilityExpr.finite_set(
             [], quality="lower_bound", confidence="partial", empty_reason="unreadable_empty"

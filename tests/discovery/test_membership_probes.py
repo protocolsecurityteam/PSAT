@@ -228,7 +228,7 @@ def test_fetch_creations_batches_five_per_call(db_session, monkeypatch):
     out = probes.fetch_creations(db_session, addresses, chain_id=1)
 
     assert len(calls) == 2
-    assert set(out) == {a.lower() for a in addresses}
+    assert set(out.records) == {a.lower() for a in addresses}
     witness = db_session.get(ContractCreationWitness, (1, addresses[0].lower()))
     assert witness is not None and witness.creation_tx_hash == _TX and witness.creation_block == 7
 
