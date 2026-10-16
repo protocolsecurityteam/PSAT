@@ -666,3 +666,14 @@ def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expe
 # Each Slither run needs its own directory.
 def _tmp() -> Path:
     return Path(tempfile.mkdtemp())
+
+
+def test_a_counterfactual_projection_over_its_budget_keeps_the_outer_check(monkeypatch):
+    import services.policy.capability_surface as surface
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.predicate_evaluator.materialization import _public_without_root_cofinites
+
+    gated = CapabilityExpr.finite_set(["0x" + "ab" * 20], quality="exact")
+    assert _public_without_root_cofinites(gated) is False
+    monkeypatch.setattr(surface, "PROJECTION_WORK_BUDGET", 1)
+    assert _public_without_root_cofinites(gated) is True

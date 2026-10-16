@@ -69,8 +69,8 @@ def test_mode1_cross_attach_functions(db_session):
     _newer(base_impl_job)
     base_impl_c = _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base")
 
-    _ef(s, eth_impl_c, "ethOnly", effect_labels=["pause_toggle"])
-    _ef(s, base_impl_c, "baseOnly", effect_labels=["pause_toggle"])
+    _ef(s, eth_impl_c, "ethOnly", effect_labels=["pause_toggle"], deployment_address=proxy_eth)
+    _ef(s, base_impl_c, "baseOnly", effect_labels=["pause_toggle"], deployment_address=proxy_base)
     s.commit()
 
     funcs = build_functions_for_protocol(s, p.name)
@@ -116,8 +116,8 @@ def test_mode2_drop_entry_functions(db_session):
     _newer(base_job)
     base_c = _add_contract(s, address=shared, job=base_job, protocol_id=p.id, chain="base")
 
-    _ef(s, core_c, "coreFn", effect_labels=["asset_pull"])
-    _ef(s, admin_c, "adminFn", effect_labels=["pause_toggle"])
+    _ef(s, core_c, "coreFn", effect_labels=["asset_pull"], deployment_address=proxy_eth)
+    _ef(s, admin_c, "adminFn", effect_labels=["pause_toggle"], deployment_address=proxy_eth)
     _ef(s, base_c, "baseFn", effect_labels=["mint"])
     s.commit()
 
@@ -165,8 +165,8 @@ def test_mode1_cross_attach_overview(db_session):
     _newer(base_impl_job)
     base_impl_c = _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base")
 
-    _ef(s, eth_impl_c, "deposit", effect_labels=["asset_pull"])
-    _ef(s, base_impl_c, "wrap", effect_labels=["mint"])
+    _ef(s, eth_impl_c, "deposit", effect_labels=["asset_pull"], deployment_address=proxy_eth)
+    _ef(s, base_impl_c, "wrap", effect_labels=["mint"], deployment_address=proxy_base)
     s.commit()
 
     overview = build_company_overview(s, p.name)
@@ -240,7 +240,7 @@ def test_nullchain_linkage_preserved(db_session):
         s, address=impl, protocol_id=p.id, name="LegacyImpl", request={"address": impl, "proxy_address": proxy_addr}
     )
     impl_c = _add_contract(s, address=impl, job=impl_job, protocol_id=p.id, chain=None)
-    _ef(s, impl_c, "legacyFn", effect_labels=["pause_toggle"])
+    _ef(s, impl_c, "legacyFn", effect_labels=["pause_toggle"], deployment_address=proxy_addr)
     s.commit()
 
     funcs = build_functions_for_protocol(s, p.name)
@@ -279,7 +279,7 @@ def test_f1_controller_attribution_no_cross_chain_fold(db_session):
         s, address=impl, protocol_id=p.id, name="EthImpl", request={"address": impl, "proxy_address": proxy_eth}
     )
     eth_impl_c = _add_contract(s, address=impl, job=eth_impl_job, protocol_id=p.id, chain="ethereum")
-    eth_ef = _ef(s, eth_impl_c, "ethGov", effect_labels=["pause_toggle"])
+    eth_ef = _ef(s, eth_impl_c, "ethGov", effect_labels=["pause_toggle"], deployment_address=proxy_eth)
     _fp_safe(s, eth_ef, eth_safe)
 
     base_job = _add_job(

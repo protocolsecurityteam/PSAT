@@ -60,6 +60,39 @@ def test_check_constraint_rejects_address_without_chain_id(session):
     session.rollback()
 
 
+@requires_postgres
+@pytest.mark.parametrize(
+    ("request_chain", "stored_chain", "chain_id"),
+    [
+        (None, "ethereum", 1),
+        ("", "ethereum", 1),
+        ("base", "base", 8453),
+        ("mainnet", "ethereum", 1),
+        ("Base Mainnet", "base", 8453),
+        ("nonsense-l2", "nonsense-l2", 1),
+    ],
+)
+def test_create_job_stamps_the_canonical_chain_on_an_address_job(session, request_chain, stored_chain, chain_id):
+    from db.queue import create_job
+
+    request = {"address": ADDR} if request_chain is None else {"address": ADDR, "chain": request_chain}
+    job = create_job(session, request)
+
+    assert job.chain_id == chain_id
+    assert isinstance(job.request, dict) and job.request["chain"] == stored_chain
+    assert "chain" not in request or request["chain"] == request_chain
+
+
+@requires_postgres
+def test_create_job_leaves_an_address_less_job_chainless(session):
+    from db.queue import create_job
+
+    job = create_job(session, {"company": "acme"})
+
+    assert job.chain_id is None
+    assert isinstance(job.request, dict) and "chain" not in job.request
+
+
 def _load_migration():
     path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "f3a9c1d47b02_add_chain_id_to_jobs.py"
     spec = importlib.util.spec_from_file_location("_mig_chain_id", path)

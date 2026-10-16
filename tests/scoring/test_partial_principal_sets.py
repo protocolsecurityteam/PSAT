@@ -373,3 +373,103 @@ def test_exact_operands_and_an_exact_signer_set_are_unchanged(world):
         assert signal.principal_state == PRINCIPAL_STATE_ENUMERATED
         assert [ref.address for ref in signal.principal_refs] == [address.lower()]
         assert not any(n.startswith("principal_set_not_exact") for n in signal.witness_notes)
+
+
+PAUSE = [{"claim_id": "pause.set", "tier": "standard_exact", "witness": {"observed": {"pause_effective": True}}}]
+UNPAUSE = [{"claim_id": "pause.unset", "tier": "standard_exact", "witness": {}}]
+
+
+def _pause_world(world: _World, recovery_quality: str | None) -> tuple[Contract, str, str]:
+    """An EOA pauser that is one of two owners on the 2-of-2 Safe that unpauses: proven dependent when the Safe set is
+    whole."""
+    vault = world.contract(_address("vault"))
+    pauser, cosigner, safe = _address("pauser"), _address("cosigner"), _address("safe")
+    for name, claims, member, details in (
+        ("pause", PAUSE, pauser, {"membership_quality": "exact"}),
+        (
+            "unpause",
+            UNPAUSE,
+            safe,
+            {"owners": [pauser, cosigner], "threshold": 2}
+            | ({} if recovery_quality is None else {"membership_quality": recovery_quality}),
+        ),
+    ):
+        function = EffectiveFunction(
+            contract_id=vault.id,
+            deployment_address=vault.address,
+            function_name=name,
+            selector="0x" + uuid.uuid4().hex[:8],
+            abi_signature=f"{name}()",
+            authority_public=False,
+            authority_openness="restricted",
+            claims=claims,
+        )
+        world.session.add(function)
+        world.session.flush()
+        world.session.add(
+            FunctionPrincipal(
+                function_id=function.id,
+                address=member,
+                resolved_type="eoa" if member == pauser else "safe",
+                origin=FINITE_SET,
+                details={"trace": [], **details},
+            )
+        )
+    world.session.commit()
+    return vault, pauser, safe
+
+
+@pytest.mark.parametrize(
+    ("quality", "note"),
+    [
+        pytest.param("lower_bound", "freeze_recovery_set_not_exact:lower_bound", id="lower-bound"),
+        pytest.param(None, "freeze_recovery_set_not_exact:not_determined", id="quality-absent"),
+    ],
+)
+def test_a_partial_recovery_set_is_not_determined_and_moves_severity_in_neither_direction(world, quality, note):
+    vault, _, _ = _pause_world(world, quality)
+
+    signal = _signal(world, vault, "pause")
+    assert signal.gate_inputs["freeze_recovery_principals"] == {"state": "not_determined", "value": None}
+    assert note in signal.witness_notes
+
+    document = world.score()
+    (finding,) = [f for f in document.findings if f["capability"] == "pause.set"]
+    assert "freeze_keyset_not_independent" not in finding["severity_basis"]
+    assert "freeze_keyset_independent" not in finding["severity_basis"]
+    assert "freeze_recovery_independence_not_determined" in finding["severity_basis"]
+    (warning,) = [w for w in document.warnings if w["kind"] == "freeze_recovery_independence_not_determined"]
+    assert warning["note"] == note
+
+
+def test_an_exact_recovery_set_is_enumerated_and_proves_dependence(world):
+    vault, _, safe = _pause_world(world, "exact")
+
+    signal = _signal(world, vault, "pause")
+    recovery = signal.gate_inputs["freeze_recovery_principals"]
+    assert recovery["state"] == "enumerated"
+    assert [entry["address"] for entry in recovery["value"]] == [safe.lower()]
+    assert not any(n.startswith("freeze_recovery_set_not_exact") for n in signal.witness_notes)
+
+    (finding,) = [f for f in world.score().findings if f["capability"] == "pause.set"]
+    assert "freeze_keyset_not_independent" in finding["severity_basis"]
+
+
+def test_one_unpause_path_short_of_exact_leaves_the_whole_recovery_set_undetermined(world):
+    vault, _, _ = _pause_world(world, "exact")
+    function = EffectiveFunction(
+        contract_id=vault.id,
+        deployment_address=vault.address,
+        function_name="emergencyUnpause",
+        selector="0x" + uuid.uuid4().hex[:8],
+        abi_signature="emergencyUnpause()",
+        authority_public=False,
+        authority_openness="restricted",
+        claims=UNPAUSE,
+    )
+    world.session.add(function)
+    world.session.commit()
+
+    signal = _signal(world, vault, "pause")
+    assert signal.gate_inputs["freeze_recovery_principals"] == {"state": "not_determined", "value": None}
+    assert "freeze_recovery_set_not_exact:not_determined" in signal.witness_notes

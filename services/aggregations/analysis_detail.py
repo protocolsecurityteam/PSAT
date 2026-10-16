@@ -107,10 +107,12 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     # ``copy_static_cache`` may have reassigned the Contract row to a newer job; chain-scoped.
     contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
     if contract_row is None and job.address:
-        fallback_stmt = select(Contract).where(Contract.address == job.address.lower())
-        job_chain = job.request.get("chain") if isinstance(job.request, dict) else None
-        if job_chain:
-            fallback_stmt = fallback_stmt.where(Contract.chain == job_chain)
+        from db.queue import _job_chain_name, _mainnet_coalesced_chain
+
+        fallback_stmt = select(Contract).where(
+            Contract.address == job.address.lower(),
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(job)),
+        )
         contract_row = session.execute(fallback_stmt.limit(1)).scalar_one_or_none()
 
     def _company_for(j: Job) -> str | None:
@@ -189,7 +191,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     if proxy_address:
         proxy_stmt = (
             select(Job)
-            .where(Job.address == proxy_address, Job.request["effects_resume_work_id"].astext.is_(None))
+            .where(
+                Job.address == proxy_address,
+                Job.chain_id == job.chain_id,
+                Job.request["effects_resume_work_id"].astext.is_(None),
+            )
             .order_by(Job.updated_at.desc())
             .limit(1)
         )
@@ -209,7 +215,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     if is_proxy and impl_addr:
         impl_stmt = (
             select(Job)
-            .where(Job.address == impl_addr, Job.request["effects_resume_work_id"].astext.is_(None))
+            .where(
+                Job.address == impl_addr,
+                Job.chain_id == job.chain_id,
+                Job.request["effects_resume_work_id"].astext.is_(None),
+            )
             .order_by(Job.updated_at.desc())
             .limit(1)
         )

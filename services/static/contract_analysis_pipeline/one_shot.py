@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-from .predicate_types import LeafPredicate, PredicateTree
+from .predicate_types import LeafPredicate, PredicateTree, is_reach_condition
 from .slither_compat import (
     SLITHER_AVAILABLE,
     Assignment,
@@ -124,7 +124,7 @@ def _maybe_stamp_leaf(
     expected_version: int | None,
     expected_version_basis: str | None,
 ) -> bool:
-    if leaf.get("authority_role") not in ("business", None):
+    if leaf.get("authority_role") not in ("business", None) or is_reach_condition(leaf):
         return False
     read_names: list[str] = [
         name
@@ -394,7 +394,7 @@ def _apply_structural_candidates(contract: Any, predicate_trees: dict[str, Predi
 
 
 def _candidate_leaf_shape(leaf: LeafPredicate) -> bool:
-    if leaf.get("authority_role") not in ("business", None):
+    if leaf.get("authority_role") not in ("business", None) or is_reach_condition(leaf):
         return False
     if leaf.get("references_msg_sender"):
         return False

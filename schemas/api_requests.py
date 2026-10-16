@@ -82,6 +82,22 @@ class AnalyzeRequest(BaseModel):
         return self
 
 
+BULK_ANALYZE_MAX_ROWS = 500
+
+
+class BulkAnalyzeRow(BaseModel):
+    # Unbounded on purpose: each row is re-validated through ``AnalyzeRequest`` so one bad cell is that row's result.
+    # The body as a whole stays under the app-wide ``PSAT_MAX_BODY_BYTES`` cap.
+    address: str
+    chain: str | None = None
+    name: str | None = None
+
+
+class BulkAnalyzeRequest(BaseModel):
+    company: str = Field(min_length=1)
+    rows: list[BulkAnalyzeRow] = Field(min_length=1, max_length=BULK_ANALYZE_MAX_ROWS)
+
+
 class _EventFilteredRequest(BaseModel):
     event_filter: dict | None = Field(default=None, description='Optional filter: {"event_types": ["upgraded", ...]}')
 
@@ -251,6 +267,9 @@ __all__ = [
     "AddAuditRequest",
     "AddressLabelUpsert",
     "AnalyzeRequest",
+    "BULK_ANALYZE_MAX_ROWS",
+    "BulkAnalyzeRequest",
+    "BulkAnalyzeRow",
     "ProtocolSubscribeRequest",
     "SaveWebhookRequest",
     "UpdateMonitoredContractRequest",

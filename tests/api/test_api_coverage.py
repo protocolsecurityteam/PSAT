@@ -822,6 +822,7 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
     db_session.add(
         ControllerValue(
             contract_id=impl_contract.id,
+            deployment_address=proxy_addr,
             controller_id="state_variable:owner",
             value="0x" + "1" * 40,
             resolved_type="eoa",
@@ -831,6 +832,7 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
 
     ef = EffectiveFunction(
         contract_id=impl_contract.id,
+        deployment_address=proxy_addr,
         function_name="pause",
         selector="0x8456cb59",
         abi_signature="pause()",

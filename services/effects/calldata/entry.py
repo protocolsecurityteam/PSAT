@@ -33,7 +33,7 @@ def synthesize(session: Session, candidate: Candidate) -> CandidatePlanInputs:
     Facts are read from the code-bearing address (artifacts live on the implementation's job); probes target
     ``candidate.probe_target`` (the deployment).
     """
-    facts = load_contract_facts(session, candidate.contract_address)
+    facts = load_contract_facts(session, candidate.contract_address, candidate.chain_id)
     if facts is None:
         return CandidatePlanInputs()
     fn = resolve_function(facts, candidate.selector)

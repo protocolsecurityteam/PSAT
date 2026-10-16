@@ -354,18 +354,17 @@ def test_materializer_rejects_low_int_phantom_candidates():
 
 
 def test_and_surface_preserves_rows_when_anded_with_pure_check():
-    from services.policy.capability_surface import CapabilitySurface, _and_surface
+    from services.policy.capability_surface import project_capability_surface
 
-    valid = CapabilitySurface(principal_rows=[{"address": "0x" + "a" * 40, "details": {}}])
-    check = CapabilitySurface(
-        residual=[
-            {
-                "kind": "external_check_only",
-                "check": {"target_address": "0x" + "b" * 40, "target_call_selector": "0xdeadbeef"},
-            }
-        ]
-    )
-    for out in (_and_surface(valid, check), _and_surface(check, valid)):  # commutative
+    valid = {"kind": "finite_set", "members": ["0x" + "a" * 40], "membership_quality": "exact"}
+    check = {
+        "kind": "external_check_only",
+        "check": {"target_address": "0x" + "b" * 40, "target_call_selector": "0xdeadbeef"},
+    }
+    for out in (
+        project_capability_surface({"kind": "AND", "children": [valid, check]}),
+        project_capability_surface({"kind": "AND", "children": [check, valid]}),
+    ):  # commutative
         assert len(out.principal_rows) == 1, "caller row dropped when AND-ed with a pure check"
         assert out.principal_rows[0]["details"].get("conditions"), "check not attached as condition"
         assert out.residual, "check should also be retained as residual for the API probe"

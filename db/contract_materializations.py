@@ -39,10 +39,19 @@ from utils.chains import chain_cache_token
 logger = logging.getLogger(__name__)
 
 # Stamped on every row; reads serve only matching rows, so older rows rebuild. Bump by hand when the analysis,
-# tracking-plan or predicate-tree output shape changes; not tied to a git SHA, which would rebuild every multi-MB bundle
-# on unrelated deploys. If the change also moves an effects probe input, consider ``EFFECT_CACHE_SCHEMA_VERSION``
+# tracking-plan or predicate-tree output shape changes, or when a build that failed could now succeed (deterministic
+# failures are served until the version moves); not tied to a git SHA, which would rebuild every multi-MB bundle on
+# unrelated deploys. If the change also moves an effects probe input, consider ``EFFECT_CACHE_SCHEMA_VERSION``
 # (db/effect_cache.py). Bump reasons are in the commit history.
-ANALYSIS_SCHEMA_VERSION = 19
+ANALYSIS_SCHEMA_VERSION = 20
+
+
+class DeterministicBuildFailure(RuntimeError):
+    """A builder failure that rebuilding the same source under the same analyzer would repeat."""
+
+
+class RememberedBuildFailure(DeterministicBuildFailure):
+    """A deterministic failure already recorded for this content, raised instead of rebuilding."""
 
 
 # Who produced a row and from which job; provenance requires the source job for anything monitoring enrolls from.
@@ -382,7 +391,9 @@ def materialize_or_wait(
       3. Under the lock, recheck (a takeover may have finished first; serve theirs), else write ``ready``.
 
     The ``building`` claim lets a second caller wait instead of duplicating a 60-150 s build. Builder failure writes
-    ``failed`` with the error, then re-raises. Blob upload failure writes nothing.
+    ``failed`` with the error, then re-raises. Blob upload failure writes nothing. A ``failed`` row from a
+    ``DeterministicBuildFailure`` with this address, source hash and analyzer version raises
+    ``RememberedBuildFailure`` instead of rebuilding.
     """
     chain_norm, addr_norm, keccak_norm = _normalize(chain, address, bytecode_keccak)
     staleness_s = _builder_staleness_s()
@@ -418,6 +429,19 @@ def materialize_or_wait(
                 session.commit()
                 return row
             # An old-version ready row falls through to be rebuilt.
+
+            if (
+                row is not None
+                and row.status == "failed"
+                and row.deterministic_failure
+                and row.analysis_schema_version == ANALYSIS_SCHEMA_VERSION
+                and row.address == addr_norm
+                and row.source_content_hash is not None
+                and row.source_content_hash == _get_source_hash()
+            ):
+                error = row.error or "build failed"
+                session.commit()
+                raise RememberedBuildFailure(error)
 
             if row is not None and row.status == "building":
                 started = row.builder_started_at
@@ -467,6 +491,7 @@ def materialize_or_wait(
                 status="building",
                 builder_started_at=now_dt,
                 error=None,
+                deterministic_failure=False,
                 source_content_hash=src_hash,
                 analysis_schema_version=ANALYSIS_SCHEMA_VERSION,
             )
@@ -477,7 +502,9 @@ def materialize_or_wait(
                     "builder_started_at": now_dt,
                     "address": claim_stmt.excluded.address,
                     "error": None,
+                    "deterministic_failure": False,
                     "source_content_hash": claim_stmt.excluded.source_content_hash,
+                    "analysis_schema_version": claim_stmt.excluded.analysis_schema_version,
                     "updated_at": func.now(),
                 },
             )
@@ -490,6 +517,7 @@ def materialize_or_wait(
         bundle = builder()
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"[:4000]
+        deterministic = isinstance(exc, DeterministicBuildFailure)
         with SessionLocal() as session:
             stmt = pg_insert(ContractMaterialization).values(
                 chain=chain_norm,
@@ -497,6 +525,7 @@ def materialize_or_wait(
                 address=addr_norm,
                 status="failed",
                 error=err,
+                deterministic_failure=deterministic,
                 builder_started_at=None,
                 source_content_hash=_src["hash"],
                 provenance=build_provenance(PRODUCED_BY_RESOLUTION),
@@ -507,8 +536,10 @@ def materialize_or_wait(
                 set_={
                     "status": "failed",
                     "error": err,
+                    "deterministic_failure": deterministic,
                     "builder_started_at": None,
                     "source_content_hash": stmt.excluded.source_content_hash,
+                    "analysis_schema_version": stmt.excluded.analysis_schema_version,
                     "provenance": stmt.excluded.provenance,
                     "updated_at": func.now(),
                 },

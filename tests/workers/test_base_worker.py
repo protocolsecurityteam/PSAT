@@ -49,8 +49,9 @@ def test_recover_stale_jobs_requeues(mock_signal):
 
 
 @patch("workers.base.signal.signal")
+@patch("workers.base.static_restart_pending", return_value=False)
 @patch("workers.base.advance_job")
-def test_execute_job_heartbeats_while_process_blocks(mock_advance, mock_signal, monkeypatch):
+def test_execute_job_heartbeats_while_process_blocks(mock_advance, _mock_restart, mock_signal, monkeypatch):
     monkeypatch.setenv("PSAT_JOB_HEARTBEAT_INTERVAL_S", "0.01")
     release = threading.Event()
     job = _make_job(lease_id=uuid.uuid4())

@@ -110,10 +110,29 @@ def test_nested_boolean_wrappers_preserve_authorization(tmp_path, monkeypatch, b
     for name in ("negatedDirect", "negatedWrapped"):
         tree = build_predicate_tree(_function(sl, name))
         cap_dict = capability_to_dict(evaluate_tree(tree, context))
-        assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined"
+        # The newer return-path evaluator can prove the negated checker admits
+        # non-owners, while retaining the unresolved readiness branch.
+        assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "open"
+        assert any(
+            leaf.get("operator") == "ne"
+            and any(op.get("state_variable_name") == "owner" for op in leaf.get("operands", []))
+            for leaf in _all_leaves(tree)
+        )
     # If path reconstruction cannot represent a multi-return helper, its first
     # literal return must not become a public side condition.
-    monkeypatch.setattr(tree_module, "_build_if_else_returns_or_children", lambda *args: [])
+    monkeypatch.setattr(
+        tree_module,
+        "_helper_value_tree",
+        lambda *args: {
+            "op": "LEAF",
+            "leaf": {
+                "kind": "unsupported",
+                "unsupported_reason": "unmodeled_helper_return",
+                "authority_role": "caller_authority",
+                "authority_proof": {"state": "not_determined"},
+            },
+        },
+    )
     tree = build_predicate_tree(_function(sl, "wrapped"))
     cap_dict = capability_to_dict(evaluate_tree(tree, context))
     assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined"

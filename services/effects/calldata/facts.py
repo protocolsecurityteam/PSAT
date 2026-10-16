@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from db.queue import get_artifact, usable_semantic_artifact
 from services.policy.effective_permissions import _canonical_signature_map, recorded_abi_signature
+from utils.chains import UnknownChainError, chain_by_id
 from utils.logging import record_degraded
 
 from .flows import _selector_of
@@ -55,27 +56,36 @@ class FunctionFacts:
 
 
 # Per-session memo, weak on the Session so it dies with the unit of work.
-_FACTS_CACHE: "WeakKeyDictionary[Session, dict[str, ContractFacts | None]]" = WeakKeyDictionary()
+_FACTS_CACHE: "WeakKeyDictionary[Session, dict[tuple[int, str], ContractFacts | None]]" = WeakKeyDictionary()
 
 
-def load_contract_facts(session: Session, address: str) -> ContractFacts | None:
-    """Load and index the static artifacts behind ``address`` (via ``find_analysis_job_for_address``, since proxies'
-    artifacts live on the implementation job). ``None`` when there's no effects artifact.
+def load_contract_facts(session: Session, address: str, chain_id: int | None) -> ContractFacts | None:
+    """Load and index the static artifacts behind ``(chain_id, address)`` (via ``find_analysis_job_for_address``, since
+    proxies' artifacts live on the implementation job). ``None`` when there's no effects artifact or no known chain: a
+    same-address deployment on another chain never supplies them.
     """
+    if chain_id is None:
+        return None
+    try:
+        chain = chain_by_id(chain_id).name
+    except UnknownChainError:
+        return None
     cache = _FACTS_CACHE.setdefault(session, {})
-    key = (address or "").lower()
+    key = (chain_id, (address or "").lower())
     if key in cache:
         return cache[key]
-    facts = _load_contract_facts_uncached(session, key)
+    facts = _load_contract_facts_uncached(session, key[1], chain)
     cache[key] = facts
     return facts
 
 
-def _load_contract_facts_uncached(session: Session, address: str) -> ContractFacts | None:
+def _load_contract_facts_uncached(session: Session, address: str, chain: str) -> ContractFacts | None:
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
     try:
-        lookup = find_analysis_job_for_address(session, address, required_artifact="effects", completed_only=False)
+        lookup = find_analysis_job_for_address(
+            session, address, required_artifact="effects", chain=chain, completed_only=False
+        )
     except Exception as exc:
         # The lookup didn't answer (not "no facts"), so record degradation. ``contract_address`` because the formatter
         # drops extras colliding with the ambient ``address`` contextvar.

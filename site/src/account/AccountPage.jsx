@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client.js";
 import { neonAuth, sitePath } from "../api/neonAuth.js";
 import { requestSignIn, signOut, useSession } from "../api/session.js";
+import Avatar from "./Avatar.jsx";
 import { MONITOR_ALERT_GROUPS } from "../surface/meta.js";
 import { eventTypesFromGroupKeys } from "../surface/sidebar/activity/helpers.js";
 
@@ -463,9 +464,7 @@ export default function AccountPage({ onOpenCompany }) {
   return (
     <main className="page account-page">
       <header className="account-header">
-        {user.avatar_url
-          ? <img className="account-avatar" src={user.avatar_url} alt="" referrerPolicy="no-referrer" />
-          : <span className="account-avatar account-avatar-initial" aria-hidden="true">{(user.display_name || user.email)[0].toUpperCase()}</span>}
+        <Avatar className="account-avatar" url={user.avatar_url} name={user.display_name || user.email} />
         <div>
           <p className="eyebrow">Account{user.is_admin ? " · admin" : ""}</p>
           <h1>{user.display_name || user.email}</h1>

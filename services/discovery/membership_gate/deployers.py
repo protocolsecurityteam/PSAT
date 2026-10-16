@@ -80,6 +80,7 @@ def classify_deployer(
     creation_history: Sequence[str] | None = None,
     history_complete: bool = False,
     creation_factories: Mapping[str, str] | None = None,
+    enumeration_as_of: Sequence[Mapping[str, Any]] | None = None,
 ) -> DeployerClassification:
     """trust-ladder verdict for one EOA (read-only; ``register_deployer`` writes A/B rows).
 
@@ -89,6 +90,9 @@ def classify_deployer(
     ``creation_factories`` (created → factory) feeds the member-factory rule, a deliberate extension of deployer
     lineage: a creation by
     this protocol's own anchoring member factory counts as mapped for exclusivity. It admits nothing itself.
+
+    ``enumeration_as_of`` (per chain: when the enumeration ran and the block it is settled through) goes into Class-B
+    evidence, so a reused enumeration says how old it is; ``checked_at`` is when this classification ran.
     """
     _require_positive_int(protocol_id, "protocol_id")
     addr = _require_address(address, "address")
@@ -215,6 +219,8 @@ def classify_deployer(
         "enumeration": {"count": len(created), "complete": True},
         "checked_at": checked_at,
     }
+    if enumeration_as_of is not None:
+        evidence["enumeration"]["chains"] = [dict(chain) for chain in enumeration_as_of]
     if factory_mapped:
         # The deciding factories and their child counts.
         evidence["member_factory_mapped"] = {

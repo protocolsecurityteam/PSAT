@@ -482,7 +482,7 @@ def _evaluate(session, monkeypatch) -> tuple[CapabilityExpr, list[list[str]]]:
 
     def _admin_view(*, args, **_k):
         viewed.append(list(args))
-        return [ADMIN_ROLE]
+        return membership.ViewWords(words=[ADMIN_ROLE], complete=True)
 
     monkeypatch.setattr(membership, "_call_unary_bytes32_view", _admin_view)
 

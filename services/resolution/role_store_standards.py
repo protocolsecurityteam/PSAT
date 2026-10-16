@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Contract
 from services.clients.rpc import default_rpc_url, get_code, parse_address_result, rpc_request
+from utils.chains import UnknownChainError, chain_by_id
 from utils.evm import EIP1967_IMPL_SLOT
 
 _ZERO_ADDRESS = "0x" + "0" * 40
@@ -203,13 +204,19 @@ def _code_at(address: str, chain_id: int, rpc_url: str | None) -> str | None:
         return None
 
 
-def _impl_via_db(session: Session | None, address: str) -> str | None:
+def _impl_via_db(session: Session | None, address: str, chain_id: int) -> str | None:
     if session is None:
+        return None
+    try:
+        chain = chain_by_id(chain_id).name
+    except UnknownChainError:
         return None
     try:
         row = session.execute(
             select(Contract.implementation)
             .where(func.lower(Contract.address) == address.lower())
+            # Legacy mainnet rows have ``chain=NULL``.
+            .where(func.lower(func.coalesce(Contract.chain, "ethereum")) == chain)
             .where(Contract.implementation.isnot(None))
             .limit(1)
         ).first()
@@ -249,7 +256,7 @@ def resolve_probe_code(
     seen = {addr}
     code = _code_at(addr, chain_id, rpc_url)
     for _ in range(max_hops):
-        impl = _impl_via_db(session, addr) or _impl_via_slot(addr, chain_id, rpc_url)
+        impl = _impl_via_db(session, addr, chain_id) or _impl_via_slot(addr, chain_id, rpc_url)
         if impl is None or impl in seen:
             break
         seen.add(impl)

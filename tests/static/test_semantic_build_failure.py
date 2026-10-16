@@ -104,7 +104,9 @@ def test_a_degraded_donor_is_never_a_static_cache(db_session, degradation):  # n
     from db.queue import find_completed_static_cache, store_artifact
 
     donor = _create_completed_job_with_static_data(db_session, address=ADDR_A)
-    assert find_completed_static_cache(db_session, ADDR_A) is not None, "guard: the healthy donor is reusable"
+    assert find_completed_static_cache(db_session, ADDR_A, chain="ethereum") is not None, (
+        "guard: the healthy donor is reusable"
+    )
 
     if degradation == "legacy_trees_error_shape":
         store_artifact(db_session, donor.id, "predicate_trees", data=dict(ERROR_SHAPE))
@@ -124,7 +126,7 @@ def test_a_degraded_donor_is_never_a_static_cache(db_session, degradation):  # n
         )
     db_session.commit()
 
-    assert find_completed_static_cache(db_session, ADDR_A) is None
+    assert find_completed_static_cache(db_session, ADDR_A, chain="ethereum") is None
 
 
 @pytest.mark.parametrize(
@@ -183,6 +185,27 @@ def test_a_degraded_nested_build_fails_the_node_instead_of_caching(tmp_path, mon
     monkeypatch.setattr(core, "build_effects", _boom)
     with pytest.raises(recursive.DegradedStaticAnalysisError, match="effects_emit"):
         recursive._build_static_artifacts(ADDR_A, "t", chain_id=1)
+
+
+def test_a_nested_build_out_of_memory_is_not_a_deterministic_failure(tmp_path, monkeypatch):
+    from db.contract_materializations import DeterministicBuildFailure
+    from services.resolution import recursive
+    from services.static.contract_analysis_pipeline import core
+    from tests.support.foundry_project import write_foundry_project
+
+    monkeypatch.setattr(recursive, "fetch", lambda address, chain_id: {"ContractName": "C"})
+    template = write_foundry_project(tmp_path, "C", SOURCE)
+    monkeypatch.setattr(
+        recursive, "scaffold", lambda address, result, project_dir: shutil.copytree(template, project_dir)
+    )
+
+    def _oom(*_a, **_k):
+        raise MemoryError("effects")
+
+    monkeypatch.setattr(core, "build_effects", _oom)
+    with pytest.raises(recursive.ResourceExhaustedBuildError, match="effects_emit") as raised:
+        recursive._build_static_artifacts(ADDR_A, "t", chain_id=1)
+    assert not isinstance(raised.value, DeterministicBuildFailure)
 
 
 @requires_postgres

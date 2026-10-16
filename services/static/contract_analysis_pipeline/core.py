@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gc
+import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -13,7 +16,8 @@ from typing import Any
 
 from slither.slither import Slither
 
-from schemas.contract_analysis import AuditAlignment, ContractAnalysis, Summary
+from schemas.contract_analysis import AnalysisStatus, AuditAlignment, ContractAnalysis, Summary
+from services.discovery.fetch import enable_via_ir
 from utils.logging import record_degraded, record_stage_metric
 
 from ..claims import attach_claims_to_effects, build_claims, project_effect_labels
@@ -120,12 +124,57 @@ def _slither_target(project_dir: Path, meta: dict) -> str:
     return str(candidates[0])
 
 
+def _parse_with_ir_fallback(project_dir: Path, meta: dict) -> Slither:
+    """Parse the project as scaffolded (without viaIR); a viaIR-verified bundle that fails gets one retry with it.
+
+    The retry's failure is the build's failure. ``via_ir_used`` in ``contract_meta.json`` records which build parsed.
+    """
+    target = _slither_target(project_dir, meta)
+    try:
+        return Slither(target)
+    except Exception:
+        if meta.get("via_ir") is not True or not enable_via_ir(project_dir):
+            raise
+    logger.info("compile without viaIR failed; retrying with the verified viaIR", extra={"phase": "ir_fallback"})
+    slither = Slither(target)
+    meta["via_ir_used"] = True
+    (project_dir / "contract_meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return slither
+
+
 def collect_contract_analysis(project_dir: Path) -> ContractAnalysis:
     """The analysis dict only; the static worker uses :func:`collect_contract_analysis_with_artifacts` to also get
     the predicate and effects artifacts from one parse.
     """
     analysis, _trees, _effects = collect_contract_analysis_with_artifacts(project_dir)
     return analysis
+
+
+# Slither's IR is a large object graph that lives for the whole analysis; at the default young-generation threshold the
+# collector rescans it often enough to cost a fifth of static CPU.
+_ANALYSIS_GC_THRESHOLD = 10_000
+_gc_lock = threading.Lock()
+_gc_holders = 0
+_gc_saved: tuple[int, int, int] | None = None
+
+
+@contextmanager
+def _analysis_gc() -> Iterator[None]:
+    """Collect the young generation less often while any analysis in this process runs (worker threads share it)."""
+    global _gc_holders, _gc_saved
+    with _gc_lock:
+        if _gc_holders == 0:
+            _gc_saved = gc.get_threshold()
+            gc.set_threshold(max(_ANALYSIS_GC_THRESHOLD, _gc_saved[0]), _gc_saved[1], _gc_saved[2])
+        _gc_holders += 1
+    try:
+        yield
+    finally:
+        with _gc_lock:
+            _gc_holders -= 1
+            if _gc_holders == 0 and _gc_saved is not None:
+                gc.set_threshold(*_gc_saved)
+                _gc_saved = None
 
 
 def collect_contract_analysis_with_artifacts(
@@ -135,6 +184,13 @@ def collect_contract_analysis_with_artifacts(
     per-phase durations (and ``pipeline_phase`` lines above the threshold) so slow phases on pathological
     contracts can be ranked in Loki. Vyper uses the same path.
     """
+    with _analysis_gc():
+        return _collect_contract_analysis_with_artifacts(project_dir)
+
+
+def _collect_contract_analysis_with_artifacts(
+    project_dir: Path,
+) -> tuple[ContractAnalysis, dict[str, Any] | None, Mapping[str, Any] | None]:
     durations_ms: dict[str, int] = {}
     pipeline_started = time.monotonic()
 
@@ -142,7 +198,7 @@ def collect_contract_analysis_with_artifacts(
     _guard_vyper_version(project_dir, meta)
 
     with _phase("slither_parse", durations_ms):
-        slither = Slither(_slither_target(project_dir, meta))
+        slither = _parse_with_ir_fallback(project_dir, meta)
 
     subject_contract = _select_subject_contract(slither, meta.get("contract_name"))
     if subject_contract is None:
@@ -157,6 +213,8 @@ def collect_contract_analysis_with_artifacts(
 
     # A whole-artifact build failure; the analysis then reports itself incomplete so it is never reused as complete.
     semantic_errors: list[str] = []
+    # Running out of memory says nothing about the source, so a rebuild may succeed.
+    resource_exhausted = False
     predicate_trees_artifact: dict[str, Any]
     pause_info: PauseInfo
     try:
@@ -170,6 +228,7 @@ def collect_contract_analysis_with_artifacts(
         )
         record_degraded(phase="predicate_trees_emit", exc=exc, context={"project_dir": str(project_dir)})
         semantic_errors.append(f"predicate_trees_emit: {type(exc).__name__}: {exc}")
+        resource_exhausted = resource_exhausted or isinstance(exc, MemoryError)
         predicate_trees_artifact = {"schema_version": "semantic", "error": str(exc)}
         pause_info = {
             "pause_state_vars": [],
@@ -190,6 +249,7 @@ def collect_contract_analysis_with_artifacts(
         )
         record_degraded(phase="effects_emit", exc=exc, context={"project_dir": str(project_dir)})
         semantic_errors.append(f"effects_emit: {type(exc).__name__}: {exc}")
+        resource_exhausted = resource_exhausted or isinstance(exc, MemoryError)
         effects_artifact = {"schema_version": "semantic", "error": str(exc)}
 
     # Mint claims from the facts and project them onto legacy ``effect_labels``; must run before semantic_control, which
@@ -211,6 +271,7 @@ def collect_contract_analysis_with_artifacts(
             )
             record_degraded(phase="claims", exc=exc, context={"project_dir": str(project_dir)})
             semantic_errors.append(f"claims: {type(exc).__name__}: {exc}")
+            resource_exhausted = resource_exhausted or isinstance(exc, MemoryError)
 
     with _phase("classification", durations_ms):
         classification = _detect_contract_classification(subject_contract, project_dir, effects_artifact)
@@ -269,6 +330,9 @@ def collect_contract_analysis_with_artifacts(
         "is_nft": classification["is_nft"],
     }
 
+    analysis_status: AnalysisStatus = {"static_analysis_completed": not semantic_errors, "errors": semantic_errors}
+    if resource_exhausted:
+        analysis_status["resource_exhausted"] = True
     analysis: ContractAnalysis = {
         "schema_version": "0.1",
         "subject": {
@@ -277,10 +341,7 @@ def collect_contract_analysis_with_artifacts(
             "compiler_version": meta.get("compiler_version", ""),
             "source_verified": _source_verified(meta),
         },
-        "analysis_status": {
-            "static_analysis_completed": not semantic_errors,
-            "errors": semantic_errors,
-        },
+        "analysis_status": analysis_status,
         "summary": summary,
         "contract_classification": classification,
         "semantic_control": semantic_control,

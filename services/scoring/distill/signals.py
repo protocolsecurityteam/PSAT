@@ -31,6 +31,7 @@ from utils.scoring_status import (
     PRINCIPAL_STATE_NOT_DETERMINED,
     REACH_GATE_LICENSED,
     REACH_GATE_NOT_DETERMINED,
+    RECOVERY_SET_NOT_EXACT_NOTE,
     SEVERITY_STATE_PROVEN,
     VALUE_BOUND_EXACT,
     VALUE_BOUND_FLOOR,
@@ -40,7 +41,7 @@ from utils.scoring_status import (
     VALUE_STATE_PROVEN_REACH,
 )
 
-from .claims import _amount_kinds, _best_tier, _claims, _tier
+from .claims import _amount_kinds, _best_tier, _claim_ids, _claims, _tier
 from .destination import (
     _UNDETERMINED_DESTINATION,
     _Destination,
@@ -387,7 +388,7 @@ def _build_signal(
     if claim_id == C.FLOW_OUT:
         gates.update(_flow_gates(facts, entries, all_claims, notes))
     if claim_id == C.PAUSE_SET:
-        gates.update(_pause_gates(facts, func, entries))
+        gates.update(_pause_gates(facts, func, entries, notes))
 
     # Read once so the citation and execution record name the same verdict. Extra verdicts are still cited and disclosed
     # in notes.
@@ -613,18 +614,49 @@ def _token_identity(facts: _ContractFacts, entries: list[dict[str, Any]]) -> tup
     return Tri[dict[str, Any]].not_determined(), furthest
 
 
-def _pause_gates(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]) -> dict[str, Any]:
+def _freeze_recovery_principals(facts: _ContractFacts) -> tuple[Tri[list], list[str]]:
+    """Every principal on a ``pause.unset`` path, and the qualities short of ``exact`` that leave it undetermined.
+
+    Dependence is a claim over the whole set, so one restricted path whose own set isn't proven whole (the signal
+    rule: no rows, or a finite set short of ``exact``) leaves the union undetermined.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    inexact: set[str] = set()
+    for func in facts.functions:
+        if C.PAUSE_UNSET not in _claim_ids(func) or _openness(func) == OPENNESS_OPEN:
+            continue
+        principals = facts.principals.get(func.id, [])
+        if not principals:
+            inexact.add(NOT_DETERMINED)
+        inexact.update(_inexact_finite_set_qualities(principals))
+        for principal in principals:
+            address = _lower(principal.address)
+            seen.setdefault(
+                address,
+                {
+                    "address": address,
+                    "chain": facts.chain,
+                    "function_principal_id": principal.id,
+                    "resolved_type": principal.resolved_type,
+                },
+            )
+    if inexact or not seen:
+        return Tri[list].not_determined(), sorted(inexact)
+    return Tri.proven("enumerated", [seen[a] for a in sorted(seen)]), []
+
+
+def _pause_gates(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]], notes: set[str]) -> dict[str, Any]:
     observed_blocks = [(e.get("witness") or {}).get("observed") or {} for e in entries]
     effective = any(_is_true(o.get("pause_effective")) for o in observed_blocks)
     blast: list[str] = []
     for observed in observed_blocks:
         blast.extend(str(x) for x in (observed.get("observed_blast_radius") or []))
-    recovery = facts.pause_unset_principals
+    recovery, inexact = _freeze_recovery_principals(facts)
+    if inexact:
+        notes.add(RECOVERY_SET_NOT_EXACT_NOTE + ",".join(inexact))
     return {
         "pause_effective": (Tri.proven("proven", True) if effective else Tri[bool].not_determined()).to_json(),
-        "freeze_recovery_principals": (
-            Tri.proven("enumerated", recovery) if recovery else Tri[list].not_determined()
-        ).to_json(),
+        "freeze_recovery_principals": recovery.to_json(),
         # A coverage fraction over function names, never multiplied into dollars.
         "freeze_coverage_fraction": (
             Tri.proven("observed_blast_radius", sorted(set(blast))) if blast else Tri[list].not_determined()

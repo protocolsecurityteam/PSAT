@@ -15,8 +15,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.creation_witnesses import upsert_creation_witness
-from db.models import Contract, ContractProbeAttempt
+from db.models import Contract, ContractCreationWitness, ContractProbeAttempt
 from services.clients import etherscan
+from services.clients.etherscan import CreationRecord, parse_creation_record
 from services.clients.rpc import (
     chain_id_for_chain_name,
     erpc_url_for_chain_id,
@@ -26,7 +27,7 @@ from services.clients.rpc import (
     rpc_request,
     selector,
 )
-from utils.chains import chain_enabled
+from utils.chains import chain_by_id, chain_enabled
 from utils.evm import (
     EIP1967_ADMIN_SLOT,
     EIP1967_BEACON_SLOT,
@@ -55,6 +56,17 @@ STATUS_RPC_ERROR = "rpc_error"
 # The five reads, in persisted order.
 _READS = ("owner", "authority", "implementation", "admin", "beacon")
 
+# How long a code-less address's "no creation record" answer is reused. Every probe re-reads ``eth_getCode``, so code
+# that appears drops it at once; the window bounds a creation that left no code behind (created and destroyed since).
+CREATION_ABSENCE_REVALIDATE_S = 86_400
+
+
+@dataclass(frozen=True)
+class CreationAnswers:
+    records: dict[str, CreationRecord]
+    # Addresses Etherscan explicitly answered with no creation record (never a failed call).
+    no_record: frozenset[str] = frozenset()
+
 
 @dataclass(frozen=True)
 class ProbeResult:
@@ -71,6 +83,8 @@ class ProbeResult:
     creation_tx_hash: str | None = None
     creation_block: int | None = None
     deployer: str | None = None
+    # True: allocated at genesis, so ``deployer`` and ``creation_tx_hash`` are absent by fact, not by missing answer.
+    created_at_genesis: bool | None = None
     owner: str | None = None
     authority: str | None = None
     implementation: str | None = None
@@ -125,13 +139,13 @@ def fetch_creations(
     addresses: Sequence[str],
     *,
     chain_id: int,
-) -> dict[str, tuple[str | None, int | None, str | None, str | None]]:
-    """Etherscan ``getcontractcreation`` for *addresses* (5 per call), persisting tx/block/factory into
-    ``contract_creation_witnesses``. Returns ``{address: (tx, block, creator, factory)}`` for answered addresses;
-    missing means no answer, not no creation.
+) -> CreationAnswers:
+    """Etherscan ``getcontractcreation`` for *addresses* (5 per call), persisting tx/block/factory/genesis into
+    ``contract_creation_witnesses``. An address in neither ``records`` nor ``no_record`` got no answer.
     """
     wanted = sorted({a.lower() for a in addresses})
-    out: dict[str, tuple[str | None, int | None, str | None, str | None]] = {}
+    out: dict[str, CreationRecord] = {}
+    no_record: set[str] = set()
     for start in range(0, len(wanted), _CREATION_BATCH):
         batch = wanted[start : start + _CREATION_BATCH]
         try:
@@ -139,6 +153,7 @@ def fetch_creations(
                 "contract",
                 "getcontractcreation",
                 chain_id=chain_id,
+                empty_result_ok=True,
                 contractaddresses=",".join(batch),
             )
         except Exception as exc:
@@ -155,43 +170,28 @@ def fetch_creations(
             )
             continue
         result = data.get("result") if isinstance(data, dict) else None
+        if result is None and isinstance(data, dict) and str(data.get("status")).strip() == "0":
+            no_record.update(batch)
+            continue
         if not isinstance(result, list):
             continue
         for item in result:
-            if not isinstance(item, dict):
+            record = parse_creation_record(item)
+            # A malformed tx is no answer; only genesis licenses a creation without one.
+            if record is None or (record.tx_hash is None and not record.genesis):
                 continue
-            addr = item.get("contractAddress")
-            tx = item.get("txHash")
-            if not isinstance(addr, str) or not isinstance(tx, str):
-                continue
-            creator = item.get("contractCreator")
-            factory = item.get("contractFactory")
-            out[addr.lower()] = (
-                tx.lower(),
-                _coerce_block(item.get("blockNumber")),
-                creator.lower() if isinstance(creator, str) else None,
-                factory.lower() if isinstance(factory, str) and factory else None,
-            )
-    for addr, (tx, block, _creator, factory) in out.items():
-        fields: dict[str, Any] = {"creation_tx_hash": tx, "creation_block": block}
-        if factory is not None:
-            fields["creation_factory"] = factory
+            out[record.address] = record
+    for addr, record in out.items():
+        fields: dict[str, Any] = {
+            "creation_tx_hash": record.tx_hash,
+            "creation_block": record.block,
+            "creation_genesis": record.genesis,
+            "no_creation_record_block": None,
+        }
+        if record.factory is not None:
+            fields["creation_factory"] = record.factory
         upsert_creation_witness(session, chain_id=chain_id, address=addr, **fields)
-    return out
-
-
-def _coerce_block(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip():
-        raw = value.strip()
-        try:
-            return int(raw, 16) if raw.startswith("0x") else int(raw)
-        except ValueError:
-            return None
-    return None
+    return CreationAnswers(records=out, no_record=frozenset(no_record))
 
 
 def _code_verdict(code: Any) -> bool | None:
@@ -207,9 +207,21 @@ def _code_verdict(code: Any) -> bool | None:
 
 
 def _record_code_probe(session: Session, *, chain_id: int, address: str, block_number: int, code_absent: bool) -> None:
-    upsert_creation_witness(
-        session, chain_id=chain_id, address=address, code_probe_block=block_number, code_absent_at_probe=code_absent
-    )
+    fields: dict[str, Any] = {"code_probe_block": block_number, "code_absent_at_probe": code_absent}
+    if not code_absent:
+        fields["no_creation_record_block"] = None
+    upsert_creation_witness(session, chain_id=chain_id, address=address, **fields)
+
+
+def _creation_absence_stands(session: Session, *, chain_id: int, address: str, block_number: int) -> bool:
+    """Whether a kept "no creation record" answer still covers a code-less *address* at *block_number*."""
+    witness = session.get(ContractCreationWitness, (chain_id, address))
+    if witness is None or witness.no_creation_record_block is None:
+        return False
+    if witness.creation_tx_hash or witness.creation_genesis:
+        return False
+    window_blocks = CREATION_ABSENCE_REVALIDATE_S / chain_by_id(chain_id).block_time_s
+    return block_number - witness.no_creation_record_block <= window_blocks
 
 
 def run_probe(session: Session, contract: Contract) -> ProbeResult:
@@ -245,8 +257,18 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
     creation_tx: str | None = None
     creation_block: int | None = None
     deployer: str | None = None
+    genesis: bool | None = None
     try:
-        creations = fetch_creations(session, [address], chain_id=chain_id)
+        if code_absent and _creation_absence_stands(
+            session, chain_id=chain_id, address=address, block_number=block_number
+        ):
+            creations = CreationAnswers(records={})
+        else:
+            creations = fetch_creations(session, [address], chain_id=chain_id)
+            if code_absent and address in creations.no_record:
+                upsert_creation_witness(
+                    session, chain_id=chain_id, address=address, no_creation_record_block=block_number
+                )
     except Exception as exc:
         record_degraded(phase="membership_probe_creation_fetch", exc=exc, context={"address": address})
         logger.warning(
@@ -258,9 +280,10 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
             exc=exc,
             context={"address": address, "chain_id": chain_id},
         )
-        creations = {}
-    if address in creations:
-        creation_tx, creation_block, deployer, _factory = creations[address]
+        creations = CreationAnswers(records={})
+    if address in creations.records:
+        record = creations.records[address]
+        creation_tx, creation_block, deployer, genesis = record.tx_hash, record.block, record.creator, record.genesis
         if deployer and not contract.deployer:
             contract.deployer = deployer
 
@@ -325,6 +348,7 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
         creation_tx_hash=creation_tx,
         creation_block=creation_block,
         deployer=deployer,
+        created_at_genesis=genesis,
         owner=values["owner"],
         authority=values["authority"],
         implementation=values["implementation"],

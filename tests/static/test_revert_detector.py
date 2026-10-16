@@ -313,3 +313,46 @@ def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
 
 # EigenLayer StrategyManager's ``_depositIntoStrategy`` carries the whitelist modifier; recursion (a96b2ca3) is the only
 # path to it, and losing it published a false ``unconstrained_proven``.
+
+
+_CUSTOM_ERROR_REQUIRES = """
+pragma solidity ^0.8.26;
+contract C {
+    error Unauthorized();
+    address owner;
+    uint256 hook;
+    function guardedBranch(uint256 v) external {
+        if (v > 3) {
+            require(msg.sender == owner, Unauthorized());
+            hook = v;
+        }
+    }
+    function leadingRequire(uint256 v) external {
+        require(msg.sender == owner, Unauthorized());
+        hook = v;
+    }
+}
+"""
+
+
+def _custom_error_contract(tmp_path):
+    from tests.support.label_corpus import _solc_select_binary
+
+    solc = _solc_select_binary("0.8.27")
+    if not solc.exists():  # pragma: no cover - only when the pinned solc is absent
+        pytest.skip("solc 0.8.27 not installed via solc-select")
+    source = tmp_path / "C.sol"
+    source.write_text(_CUSTOM_ERROR_REQUIRES)
+    return next(c for c in Slither(str(source), solc=str(solc)).contracts if c.name == "C")
+
+
+def test_a_require_with_a_custom_error_does_not_end_its_branch(tmp_path):
+    """``require(cond, Error())`` lowers its error argument as a ``revert Error()`` call in the same node; that call
+    reverts only when the require fails, so the branch holding it doesn't always revert."""
+    from services.static.contract_analysis_pipeline.predicates.control_flow import _callee_always_reverts
+
+    contract = _custom_error_contract(tmp_path)
+    branch = next(f for f in contract.functions if f.name == "guardedBranch")
+    assert [(gate.kind, gate.polarity) for gate in RevertDetector(branch).run()] == [("require", "allowed_when_true")]
+    leading = next(f for f in contract.functions if f.name == "leadingRequire")
+    assert not _callee_always_reverts(leading)

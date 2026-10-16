@@ -27,7 +27,7 @@ export RUST_LOG="${RUST_LOG:-error}"
 # deploy/start_workers.sh), not a blanket ignore.
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning:requests}"
 
-WORKER_PATTERN='workers\.(discovery|static_worker|resolution_worker|policy_worker|effects_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
+WORKER_PATTERN='workers\.(process_supervisor|discovery|static_worker|resolution_worker|policy_worker|effects_worker|coverage_worker|coverage_verify|selection_worker|dapp_crawl_worker|defillama_worker|audit_text_extraction|audit_scope_extraction|event_log_indexer|protocol_monitor)'
 API_PID=""
 WORKERS_PID=""
 BROWSER_PID=""

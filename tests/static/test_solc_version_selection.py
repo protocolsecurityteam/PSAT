@@ -6,9 +6,8 @@ import subprocess
 import pytest
 
 from services.discovery.fetch import _detect_solc_version as detect_fetch_solc
-from services.discovery.fetch import _relax_pragmas, scaffold
+from services.discovery.fetch import _relax_pragmas, scaffold, select_solc_version
 from workers.static_worker import StaticWorker
-from workers.static_worker import _detect_solc_version as detect_static_solc
 
 TELLER_PRAGMA = "pragma solidity <0.9.0 =0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;"
 
@@ -90,7 +89,6 @@ TELLER_PRAGMA = "pragma solidity <0.9.0 =0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;"
 )
 def test_detect_solc_version(sources, expected):
     assert detect_fetch_solc(sources) == expected
-    assert detect_static_solc(sources) == expected
     # The version must not depend on whether the sources were relaxed first; the static worker relaxes before detecting.
     assert detect_fetch_solc(_relax_pragmas(sources)) == expected
 
@@ -124,7 +122,7 @@ def _foundry_solc(project) -> str:
 
 
 _SCAFFOLD_CASES = [
-    pytest.param(TELLER_PRAGMA, "0.8.24", "pragma solidity <0.9.0 ^0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;", id="teller"),
+    pytest.param(TELLER_PRAGMA, "0.8.21", "pragma solidity <0.9.0 ^0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;", id="teller"),
     pytest.param("pragma solidity >=0.8.0 <0.8.20;", "0.8.19", "pragma solidity >=0.8.0 <0.8.20;", id="ceiling"),
 ]
 
@@ -153,7 +151,12 @@ def test_static_scaffold_compiler_and_pragma_agree(tmp_path, pragma, solc, writt
         project,
         {"src/T.sol": f"{pragma}\ncontract T {{}}\n"},
         {"contract_name": "T"},
-        {"evm_version": "shanghai", "optimization_used": True, "runs": 200},
+        {
+            "compiler_version": "v0.8.21+commit.d9974bed",
+            "evm_version": "shanghai",
+            "optimization_used": True,
+            "runs": 200,
+        },
         [],
     )
     assert _foundry_solc(project) == solc
@@ -206,15 +209,22 @@ def test_verified_compiler_preserves_custom_error_require_syntax(tmp_path, path)
         )
     assert _foundry_solc(project) == "0.8.27"
     solc = _installed_solc(_foundry_solc(project))
-    proc = subprocess.run([solc, "--bin", str(project / "T.sol")], capture_output=True, text=True, timeout=120)
+    source_file = project / ("src/T.sol" if path == "discovery" else "T.sol")
+    proc = subprocess.run([solc, "--bin", str(source_file)], capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
 
 
 @pytest.mark.parametrize(
-    "preferred", ["v0.8.21+commit.abc", "v0.9.0+commit.abc", "nightly", '0.8.27"\nevm_version = "bad']
+    ("preferred", "expected"),
+    [
+        ("v0.8.21+commit.abc", "0.8.21"),
+        ("v0.9.0+commit.abc", "0.8.24"),
+        ("nightly", "0.8.24"),
+        ('0.8.27"\nevm_version = "bad', "0.8.24"),
+    ],
 )
-def test_incompatible_or_invalid_compiler_metadata_does_not_override_constraints(preferred):
-    assert detect_fetch_solc({"T.sol": "pragma solidity >=0.8.20 <0.8.25; contract T {}"}, preferred) == "0.8.24"
+def test_verified_compiler_metadata_respects_constraints(preferred, expected):
+    assert select_solc_version({"T.sol": "pragma solidity >=0.8.20 <0.8.25; contract T {}"}, preferred) == expected
 
 
 @pytest.mark.parametrize("via_ir", [True, False, None, "true"])
@@ -238,43 +248,20 @@ def test_both_scaffolds_preserve_verified_via_ir(tmp_path, via_ir):
         {"via_ir": parse_compiler_settings(result).get("viaIR") is True},
         [],
     )
-    expected = f"via_ir = {str(via_ir is True).lower()}"
-    assert expected in (recursive / "foundry.toml").read_text()
-    assert expected in (top_level / "foundry.toml").read_text()
+    for project in (recursive, top_level):
+        # The initial AST build uses the legacy compiler pipeline; verified
+        # viaIR is retained in metadata for the supported fallback.
+        assert "via_ir = false" in (project / "foundry.toml").read_text()
+        assert json.loads((project / "contract_meta.json").read_text())["via_ir"] is (via_ir is True)
 
 
-def test_verified_compiler_fallback_is_limited_to_failed_compilation(monkeypatch, tmp_path):
-    import workers.static_worker as module
-
-    source = "// SPDX-License-Identifier: MIT & GPL-3.0\npragma solidity ^0.8.6; contract T {}"
-    sources = {"src/T.sol": source}
-    meta = {"compiler_version": "v0.8.6+commit.11564f7e", "contract_name": "T"}
-    settings = {"evm_version": "shanghai"}
-    artifacts = {
-        "analysis_error": {"error": "compiler rejected source", "compilation_failed": True},
-        "verified_build_metadata": {"compiler_version": meta["compiler_version"], "evm_version": "Default"},
-    }
-    monkeypatch.setattr(module, "get_artifact", lambda session, job_id, name: artifacts.get(name))
-    monkeypatch.setattr(module, "store_artifact", lambda session, job_id, name, data: artifacts.__setitem__(name, data))
+def test_verified_compiler_is_selected_before_analysis(tmp_path):
+    sources = {"T.sol": "pragma solidity ^0.8.0; contract T {}"}
     worker = StaticWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *args: None)
-    from types import SimpleNamespace
-
-    job = SimpleNamespace(id="job")
-    calls = []
-    analysis = {"summary": {}}
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *args: calls.append(args) or analysis)
-    worker._scaffold_project(tmp_path, sources, meta, settings, [])
-    assert _foundry_solc(tmp_path) == "0.8.24"  # Successful primary behavior and cache semantics stay unchanged.
-    result = worker._retry_verified_compiler(None, job, tmp_path, sources, meta, settings, [], "T", "0xabc")
-    assert result is analysis and len(calls) == 1
-    assert _foundry_solc(tmp_path) == "0.8.6"
-    assert "evm_version" not in (tmp_path / "foundry.toml").read_text()
-    assert artifacts["compiler_fallback"]["completed"] is True
-    assert (tmp_path / "src/T.sol").read_text().startswith("// SPDX-License-Identifier: MIT & GPL-3.0")
-    artifacts["analysis_error"] = {"error": "semantic lowering failed", "compilation_failed": False}
-    assert worker._retry_verified_compiler(None, job, tmp_path, sources, meta, settings, [], "T", "0xabc") is None
-    assert len(calls) == 1
+    worker._scaffold_project(tmp_path, sources, {"compiler_version": "v0.8.6+commit.11564f7e"}, {}, [])
+    config = (tmp_path / "foundry.toml").read_text()
+    assert 'solc_version = "0.8.6"' in config
+    assert 'evm_version = "berlin"' in config
 
 
 def test_compiler_failure_marker_uses_exception_cause_not_error_text(monkeypatch, tmp_path):

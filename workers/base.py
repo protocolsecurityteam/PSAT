@@ -23,15 +23,18 @@ from db.queue import (
     LeaseLost,
     advance_job,
     claim_job,
+    defer_job,
     fail_job_terminal,
     get_artifact,
     heartbeat_job,
     reclaim_stuck_jobs,
     requeue_job,
+    static_restart_pending,
     store_artifact,
     update_job_detail,
 )
 from schemas.stage_errors import StageError, StageErrors
+from services.compute_isolation import compute_cancel_var
 from utils.logging import (
     bind_trace_context,
     configure_logging,
@@ -126,6 +129,16 @@ def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
 
 class JobHandledDirectly(Exception):
     pass
+
+
+class JobDeferred(Exception):
+    """The stage can't decide yet because another job hasn't settled a fact it reads; re-queue it after
+    ``delay_seconds`` without spending a retry."""
+
+    def __init__(self, detail: str, *, delay_seconds: int = 30) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.delay_seconds = delay_seconds
 
 
 class BaseWorker:
@@ -259,6 +272,8 @@ class BaseWorker:
                 inflight_registered = True
             heartbeat_stop = threading.Event()
             heartbeat_thread: threading.Thread | None = None
+            lease_lost = threading.Event()
+            cancel_token = compute_cancel_var.set(lease_lost)
             rss_span = None
 
             def _background_heartbeat() -> None:
@@ -273,6 +288,7 @@ class BaseWorker:
                             lease_exc,
                             extra={"phase": "job", "outcome": "lease_lost"},
                         )
+                        lease_lost.set()
                         return
                     except Exception:
                         logger.warning(
@@ -335,8 +351,10 @@ class BaseWorker:
                     if degraded_accumulator:
                         self._persist_stage_errors(job, degraded_accumulator)
                     # Satisfy dependents in the same transaction as the stage change so they become claimable
-                    # atomically.
-                    self._satisfy_dependencies(session, job, completed_stage=self.stage)
+                    # atomically, unless the exit sends the job back to static: this stage ran on a request the job
+                    # no longer has, and dependents wait for the re-run.
+                    if not static_restart_pending(session, job.id, lease_id=claim_lease_id):
+                        self._satisfy_dependencies(session, job, completed_stage=self.stage)
                     if self.next_stage == JobStage.done:
                         from db.queue import complete_job
 
@@ -384,6 +402,38 @@ class BaseWorker:
                             "duration_ms": int(elapsed * 1000),
                             "phase": "job",
                             "outcome": "handled_directly",
+                            **rss_span.finish(),
+                        },
+                    )
+                except JobDeferred as deferred:
+                    finish_memory_span()
+                    try:
+                        session.rollback()
+                        defer_job(
+                            session,
+                            job.id,
+                            detail=deferred.detail,
+                            delay_seconds=deferred.delay_seconds,
+                            lease_id=claim_lease_id,
+                        )
+                    except LeaseLost as lease_exc:
+                        logger.warning(
+                            "Worker %s: lease lost deferring job %s: %s",
+                            self.worker_id,
+                            job.id,
+                            lease_exc,
+                            extra={"phase": "job", "outcome": "lease_lost"},
+                        )
+                        return
+                    logger.info(
+                        "Worker %s: job %s deferred: %s",
+                        self.worker_id,
+                        job.id,
+                        deferred.detail,
+                        extra={
+                            "phase": "job",
+                            "outcome": "deferred",
+                            "delay_s": deferred.delay_seconds,
                             **rss_span.finish(),
                         },
                     )
@@ -566,6 +616,7 @@ class BaseWorker:
                     heartbeat_thread.join(timeout=1)
                 degraded_errors_var.reset(accumulator_token)
                 stage_metrics_var.reset(metrics_token)
+                compute_cancel_var.reset(cancel_token)
                 if inflight_registered:
                     with self._inflight_lock:
                         self._inflight_jobs.pop(claim_job_id, None)
@@ -835,14 +886,19 @@ class BaseWorker:
 
     @staticmethod
     def _provider_chain_for(job: Job) -> str | None:
-        """The provider's chain from the job request (as ``_queue_discovered_contracts`` stamps it); ``getattr``
-        tolerates test doubles.
+        """The provider's canonical chain, as dependency edges record it: the name of the job's ``chain_id``, else the
+        request's chain. ``getattr`` tolerates test doubles.
         """
+        from utils.chains import UnknownChainError, canonical_chain, chain_by_id
+
+        chain_id = getattr(job, "chain_id", None)
+        if isinstance(chain_id, int):
+            try:
+                return chain_by_id(chain_id).name
+            except UnknownChainError:
+                return None
         request = getattr(job, "request", None)
-        if not isinstance(request, dict):
-            return None
-        chain = request.get("chain")
-        return chain if isinstance(chain, str) and chain else None
+        return canonical_chain(request.get("chain")) if isinstance(request, dict) else None
 
     def _persist_stage_errors(self, job: Job, errors: list[StageError]) -> None:
         """Write ``stage_errors`` via a fresh session, merged with the existing artifact so retries accumulate.

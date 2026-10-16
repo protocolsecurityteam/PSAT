@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from typing import Callable, Collection, Sequence, cast
+from typing import Any, Callable, Collection, Sequence, cast
 
 from sqlalchemy import func, null, select
 from sqlalchemy.orm import Session
@@ -27,6 +27,8 @@ from db.models import (
     SessionLocal,
 )
 from db.queue import (
+    ProxyContextUnsettled,
+    adopt_current_proxy_context,
     advance_job,
     bulk_upsert_discovered_contracts,
     copy_static_cache,
@@ -36,6 +38,7 @@ from db.queue import (
     find_previous_company_inventory,
     get_artifact,
     get_or_create_protocol,
+    merge_job_request,
     store_artifact,
     store_source_files,
 )
@@ -57,6 +60,7 @@ from services.discovery.fetch import (
     parse_sources,
     parse_verification_bundle,
     source_content_hash,
+    verified_compile_settings,
 )
 from services.discovery.inventory import inventory_entries, merge_inventory, search_protocol_inventory
 from services.discovery.perimeter import (
@@ -78,7 +82,7 @@ from utils.chains import (
     supported_chain_ids,
 )
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
-from workers.base import BaseWorker, JobHandledDirectly
+from workers.base import BaseWorker, JobDeferred, JobHandledDirectly
 
 logger = logging.getLogger("workers.discovery")
 
@@ -227,6 +231,7 @@ def _register_protocol_deployer(
     factories: dict[str, str] = {}
     scope: list[int] = []
     coverage_gap: str | None = None
+    as_of: list[dict[str, Any]] | None = None
     if verdict.trust_class is None and verdict.evidence.get("reason") == "no_complete_enumeration":
         sibling_count = session.execute(
             select(func.count(Contract.id)).where(
@@ -235,7 +240,7 @@ def _register_protocol_deployer(
             )
         ).scalar_one()
         if existing is not None or sibling_count >= 2:
-            creations, scope, complete, coverage_gap = enumerate_with_coverage(session, addr)
+            creations, scope, complete, coverage_gap, as_of = enumerate_with_coverage(session, addr)
             history = sorted({c.address for c in creations})
             factories = creation_factories(creations)
             verdict = gate.classify_deployer(
@@ -245,6 +250,7 @@ def _register_protocol_deployer(
                 creation_history=history,
                 history_complete=complete,
                 creation_factories=factories,
+                enumeration_as_of=as_of,
             )
     if verdict.trust_class is None:
         reason = verdict.evidence.get("reason")
@@ -958,20 +964,33 @@ class DiscoveryWorker(BaseWorker):
             job.request = {key: value for key, value in (job.request or {}).items() if key != SOURCE_ABSENCE}
             session.commit()
 
+        request = job.request if isinstance(job.request, dict) else {}
+        # The job's own chain (``chain_id`` first) scopes every lookup below. An address job without a resolvable chain
+        # is a data bug.
+        fetch_chain = require_chain(
+            getattr(job, "chain_id", None),
+            chain=request.get("chain"),
+            context=f"discovery for {address}",
+        )
+        # Before anything takes the contract row: the current implementation of a known proxy is analysed in that
+        # proxy's context whatever the submission path or order.
+        try:
+            adopt_current_proxy_context(session, job, chain=fetch_chain.name)
+        except ProxyContextUnsettled as unsettled:
+            raise JobDeferred(f"Waiting for proxy analysis to settle: {unsettled}") from unsettled
+        request = job.request if isinstance(job.request, dict) else {}
         # Reuse cached static data from a completed job on the same chain; ``force`` bypasses it (see
         # AnalyzeRequest.force).
-        request = job.request if isinstance(job.request, dict) else {}
         if request.get("force"):
             cached_job = None
             logger.info("Discovery: force=True, skipping static cache lookup for %s", address)
         else:
-            cached_job = find_completed_static_cache(session, address, chain=request.get("chain"))
+            cached_job = find_completed_static_cache(session, address, chain=fetch_chain.name)
         if cached_job is not None:
             self.update_detail(session, job, f"Reusing cached static data for {address}")
             new_contract_id = copy_static_cache(session, cached_job.id, job.id)
             if new_contract_id is not None:
-                req = job.request if isinstance(job.request, dict) else {}
-                job.request = {**req, "static_cached": True, "cache_source_job_id": str(cached_job.id)}
+                merge_job_request(session, job, {"static_cached": True, "cache_source_job_id": str(cached_job.id)})
                 session.commit()
 
                 if not job.name:
@@ -1003,13 +1022,7 @@ class DiscoveryWorker(BaseWorker):
             )
 
         self.update_detail(session, job, f"Fetching verified source for {address}")
-        # Both Etherscan calls in parallel under the global rate limit. An address job without a resolvable chain is a
-        # data bug.
-        fetch_chain = require_chain(
-            getattr(job, "chain_id", None),
-            chain=request.get("chain") if isinstance(request, dict) else None,
-            context=f"discovery source fetch for {address}",
-        )
+        # Both Etherscan calls in parallel under the global rate limit.
         fetch_chain_id = fetch_chain.chain_id
         with log_timed_phase(logger, "source_fetch"):
             fan_out = etherscan.parallel_get(
@@ -1055,8 +1068,7 @@ class DiscoveryWorker(BaseWorker):
             )
         self.update_detail(session, job, "Evaluating membership")
 
-        raw_evm = result.get("EVMVersion", "") or ""
-        evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
+        build = verified_compile_settings(result, sources)
 
         deployer = None
         creators_or_exc = fan_out.get("creators")
@@ -1087,9 +1099,10 @@ class DiscoveryWorker(BaseWorker):
             existing.contract_name = contract_name
             existing.compiler_version = result.get("CompilerVersion", "")
             existing.language = "vyper" if is_vyper_result(result) else "solidity"
-            existing.evm_version = evm_version
-            existing.optimization = result.get("OptimizationUsed", "1") == "1"
-            existing.optimization_runs = int(result.get("Runs", "200") or 200)
+            existing.evm_version = build.evm_version
+            existing.optimization = build.optimizer
+            existing.optimization_runs = build.optimizer_runs
+            existing.via_ir = build.via_ir
             existing.source_format = "standard_json" if parse_verification_bundle(result) else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
@@ -1109,9 +1122,10 @@ class DiscoveryWorker(BaseWorker):
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),
                 language="vyper" if is_vyper_result(result) else "solidity",
-                evm_version=evm_version,
-                optimization=result.get("OptimizationUsed", "1") == "1",
-                optimization_runs=int(result.get("Runs", "200") or 200),
+                evm_version=build.evm_version,
+                optimization=build.optimizer,
+                optimization_runs=build.optimizer_runs,
+                via_ir=build.via_ir,
                 source_format="standard_json" if parse_verification_bundle(result) else "flat",
                 source_file_count=len(sources),
                 license=result.get("LicenseType", ""),
@@ -1140,18 +1154,18 @@ class DiscoveryWorker(BaseWorker):
         # code-plane analysis. State is still resolved per (chain, address).
         if not request.get("force"):
             donor = find_completed_static_cache(
-                session, address, chain=request.get("chain"), source_content_hash=this_source_hash
+                session, address, chain=fetch_chain.name, source_content_hash=this_source_hash
             )
             if donor is not None and donor.id != job.id:
                 copied = copy_static_cache_cross_chain(session, donor.id, job.id, target_address=address)
                 if copied is not None:
                     # ``static_cached`` skips forge+Slither, but without ``cache_source_job_id``, which would validate
                     # the donor's per-chain implementation address. Proxy classification re-resolves here.
-                    job.request = {
-                        **request,
-                        "static_cached": True,
-                        "cross_chain_cache_source_job_id": str(donor.id),
-                    }
+                    merge_job_request(
+                        session,
+                        job,
+                        {"static_cached": True, "cross_chain_cache_source_job_id": str(donor.id)},
+                    )
                     session.commit()
                     logger.info(
                         "Discovery cross-chain code-plane reuse for %s from job %s (source_hash=%s)",

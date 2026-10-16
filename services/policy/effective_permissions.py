@@ -27,12 +27,14 @@ from services.policy.capability_surface import (
     capability_surface_openness,
     capability_surface_status,
     project_capability_surface,
+    projection_scoped,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import (
     _split_top_level,
     has_no_selector,
     is_canonical_abi_signature,
 )
+from services.static.contract_analysis_pipeline.predicate_types import names_controllers
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -403,7 +405,8 @@ def _controller_refs_from_tree(tree: Mapping[str, Any] | None) -> list[str]:
             return
         if node.get("op") == "LEAF":
             leaf = node.get("leaf") or {}
-            if not isinstance(leaf, dict):
+            # A reach condition's state says when a gate applies, not who passes it.
+            if not isinstance(leaf, dict) or not names_controllers(leaf):
                 return
             for operand in leaf.get("operands") or []:
                 if isinstance(operand, dict) and operand.get("source") == "state_variable":
@@ -588,6 +591,7 @@ def _column_values_for_capability(cap_dict: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+@projection_scoped
 def build_effective_permissions(
     target_analysis: Mapping[str, Any] | ContractAnalysis,
     *,

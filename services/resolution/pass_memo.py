@@ -45,6 +45,21 @@ def memoized(ctx: Any, key: tuple[Any, ...], compute: Callable[[], T], *, keep_a
     return value
 
 
+def shared(ctx: Any, key: tuple[Any, ...], compute: Callable[[], T], *, keep_alive: tuple[Any, ...] = ()) -> T:
+    """``compute()`` once per pass for ``key``, handing every caller the same object: only for values no caller
+    mutates, such as an artifact read from the database.
+    """
+    memo = _memo(ctx)
+    if memo is None:
+        return compute()
+    if key in memo:
+        _bump(ctx, "pass_shared_hits")
+        return memo[key][0]
+    value = compute()
+    memo[key] = (value, keep_alive)
+    return value
+
+
 def _bump(ctx: Any, name: str) -> None:
     meta = getattr(ctx, "meta", None)
     counters = meta.get("resolve_counters") if isinstance(meta, dict) else None

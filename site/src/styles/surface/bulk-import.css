@@ -1,0 +1,88 @@
+/* Bulk import modal: the Addresses modal shell, table and chips, plus layout. */
+.ps-bulk-import-toolbar,
+.ps-bulk-import-summary {
+  flex-wrap: wrap;
+}
+
+.ps-bulk-import-summary {
+  gap: 6px;
+}
+
+.ps-bulk-import-company {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.ps-bulk-import-company input {
+  width: 200px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.ps-bulk-import-company-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ps-bulk-import-company-match {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.ps-bulk-import-hint {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.ps-bulk-import-lead {
+  font-size: 12px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin-right: 2px;
+}
+
+.ps-bulk-import-why {
+  margin-top: 3px;
+  font-size: 10.5px;
+}
+
+.ps-bulk-import-muted {
+  color: #64748b;
+  font-weight: 400;
+}
+
+.ps-bulk-import-drop {
+  flex: 1;
+  margin: 22px;
+  border: 1px dashed rgba(148, 163, 184, 0.25);
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.ps-bulk-import-drop.dragging {
+  border-color: rgba(45, 212, 191, 0.55);
+  background: rgba(45, 212, 191, 0.04);
+}
+
+.ps-bulk-import-drop .ps-bulk-import-hint {
+  margin-top: 10px;
+}
+
+.ps-bulk-import-choose {
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  margin-left: 4px;
+}

@@ -12,22 +12,25 @@ from dataclasses import replace
 
 from .effect_scope_codec import EFFECT_SCOPES_VERSION
 from .effects.sinks import _classify_node_irs, _is_modifier_call, _node_kind_state_writes
-from .predicate_types import PredicateTree, make_and_node, make_or_node
+from .predicate_types import PredicateTree, make_and_node, make_leaf_node, make_or_node, mark_reach_condition
 from .predicates._helpers import _unsupported_leaf
 from .predicates.control_flow import _callee_always_reverts, _forward_reachable_node_ids
 from .predicates.operands import _operand_for_value
+from .predicates.reach import _cfg_cache as _reach_cfg_cache
 from .predicates.tree import (
+    _branch_tree_builder,
     _build_chain_bindings,
     _build_subtree_from_gate,
     _helper_engine_cache,
+    _helper_gate_cache,
     _stamp_gate_scope,
+    _where_reached,
 )
 from .provenance import ProvenanceEngine
 from .reentrancy_pause import apply_reentrancy_pause_pass
 from .revert_detect import RevertDetector, RevertGate
 from .slither_compat import Condition, InternalCall, LibraryCall, LowLevelCall, Send, SolidityCall, Transfer
 from .structural_evidence import attach_storage_dependencies, evidence_for, predicate_truth, structural_scope
-from .structural_ir import mandatory
 from .writer_gate import apply_writer_gate_pass
 
 
@@ -59,13 +62,18 @@ _lowered_cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
 )
 
 
-def _lower(gate, provenance, entry, key):
+def _lower(gate, provenance, entry, key, reached_from=None):
+    """``reached_from``: the call-chain level from which the gate's own reach conditions are added (the outer levels'
+    control flow is the site's).
+    """
     cache = _lowered_cache.get()
     if cache is not None and key in cache:
         return cache[key][1]
     tree = _build_subtree_from_gate(gate, provenance, entry)
     if tree is not None:
         _stamp_gate_scope(tree, gate, entry)
+        if reached_from is not None:
+            tree = _where_reached(tree, gate, provenance, entry, first_level=reached_from)
         # Detached from anything the entry-point analysis holds; those trees are published separately.
         tree = deepcopy(tree)
     if cache is not None:
@@ -111,17 +119,10 @@ def _guard_trees(unit, site, chain, entry, provenance, gates):
         if not dominates and not _postdominates(site, anchor):
             out.append(unknown("conditional_post_effect_guard"))
             continue
-        if gate.call_chain and not mandatory(gate.node, owner):
-            # Loop/branch helper conditions need a summary; they cannot all be conjoined.
-            unresolved = unknown("helper_control_requires_summary")
-            unresolved_leaf = unresolved.get("leaf")
-            assert unresolved_leaf is not None
-            unresolved_leaf["source_function"] = owner.canonical_name
-            unresolved_leaf["source_node_id"] = gate.node.node_id
-            out.append(unresolved)
-            continue
         bound = replace(gate, call_chain=[*chain, *gate.call_chain])
-        tree = _lower(bound, provenance, entry, ("gate", id(gate), _chain_key(chain), id(provenance)))
+        tree = _lower(
+            bound, provenance, entry, ("gate", id(gate), _chain_key(chain), id(provenance)), reached_from=len(chain) + 1
+        )
         out.append(tree or unknown("effect_guard_not_lowered"))
         if owner is unit:
             covered_nodes.add(gate.node)
@@ -135,26 +136,54 @@ def _guard_trees(unit, site, chain, entry, provenance, gates):
         if reaches_true == reaches_false:
             continue
         condition = next((ir.value for ir in node.irs if isinstance(ir, Condition)), None)
-        gate = RevertGate(
-            kind="if_revert",
-            condition_value=condition,
-            polarity="allowed_when_true" if reaches_true else "allowed_when_false",
-            node=node,
-            containing_function=unit,
-            call_chain=list(chain),
-            expression_text=str(condition),
-            basis=["effect_control_dependency"],
-        )
+        # The site runs only where this branch goes its way: a reach condition, read like any other.
         tree = (
-            _lower(gate, provenance, entry, ("dominator", id(node), gate.polarity, _chain_key(chain), id(provenance)))
+            _path_condition(unit, node, condition, reaches_true, chain, entry, provenance)
             if condition is not None
             else None
         )
-        out.append(tree or unknown("effect_branch_not_lowered"))
+        out.append(tree or _reach_unknown("effect_branch_not_lowered", str(condition)))
     conditional = _conditional_prefix(unit, site, chain, entry, provenance, gates)
     if conditional is not None:
         out.append(conditional)
     return out
+
+
+def _path_condition(unit, node, value, positive, chain, entry, provenance):
+    """A branch outcome on one path to a site, or ``None`` when it can't hold. The guards on the site's other paths
+    aren't reached under it, so it is a reach condition: written-before reads and all.
+    """
+    cache = _lowered_cache.get()
+    key = ("path", id(node), positive, _chain_key(chain), id(provenance))
+    if cache is not None and key in cache:
+        return cache[key][1]
+    _, frame_prov, frame = _build_chain_bindings(list(chain), unit, entry, top_prov=provenance)
+    if frame is not unit or frame_prov is None:
+        tree = _reach_unknown("effect_branch_not_lowered", str(value))
+    else:
+        tree = _branch_tree_builder(unit, frame_prov, entry, list(chain))(node, value, positive)
+        if tree is not None:
+            tree = deepcopy(tree)
+            gate = RevertGate(
+                kind="if_revert",
+                condition_value=value,
+                polarity="allowed_when_true" if positive else "allowed_when_false",
+                node=node,
+                containing_function=unit,
+                call_chain=list(chain),
+                expression_text=str(value),
+                basis=["effect_path_condition"],
+            )
+            _stamp_gate_scope(tree, gate, entry)
+    if cache is not None:
+        cache[key] = ((node, provenance, entry), tree)
+    return tree
+
+
+def _reach_unknown(reason, expression):
+    leaf = _unsupported_leaf(reason, expression)
+    mark_reach_condition(leaf)
+    return make_leaf_node(leaf)
 
 
 def _authorization_leaves(tree):
@@ -190,9 +219,13 @@ def attach_effect_scopes(contract, predicates, effects):
     engine_token = _helper_engine_cache.set({})
     reachable_token = _reachable_cache.set({})
     lowered_token = _lowered_cache.set({})
+    cfg_token = _reach_cfg_cache.set({})
+    gate_token = _helper_gate_cache.set({})
     try:
         _attach_effect_scopes(contract, predicates, effects)
     finally:
+        _helper_gate_cache.reset(gate_token)
+        _reach_cfg_cache.reset(cfg_token)
         _lowered_cache.reset(lowered_token)
         _reachable_cache.reset(reachable_token)
         _helper_engine_cache.reset(engine_token)
@@ -251,7 +284,8 @@ def _attach_effect_scopes(contract, predicates, effects):
                         gate_cache[id(unit)] = RevertDetector(unit).run()
                     local = _guard_trees(unit, node, chain, entry, engine.provenance, gate_cache[id(unit)])
                     required = [*inherited, *local]
-                    if any(predicate_truth(t) is False for t in required):
+                    # ``inherited`` was checked at the call site that led here.
+                    if any(predicate_truth(t) is False for t in local):
                         continue
                     for kind, target, selector, _, library_signature in candidates:
                         paths = [str(getattr(getattr(c, "node", None), "node_id", "unknown")) for c in chain]
@@ -431,12 +465,14 @@ def _conditional_prefix(unit, site, chain, entry, provenance, gates):
             continue
         current = list(facts)
         for gate in anchored.get(node, []):
-            owner = gate.containing_function or unit
-            if gate.call_chain and not mandatory(gate.node, owner):
-                current.append(unknown("helper_control_requires_summary"))
-                continue
             bound = replace(gate, call_chain=[*chain, *gate.call_chain])
-            tree = _lower(bound, provenance, entry, ("gate", id(gate), _chain_key(chain), id(provenance)))
+            tree = _lower(
+                bound,
+                provenance,
+                entry,
+                ("gate", id(gate), _chain_key(chain), id(provenance)),
+                reached_from=len(chain) + 1,
+            )
             current.append(tree or unknown("effect_guard_not_lowered"))
         if any(predicate_truth(t) is False for t in current):
             continue
@@ -450,29 +486,11 @@ def _conditional_prefix(unit, site, chain, entry, provenance, gates):
                 state = positive == orientation
                 if key is not None and key in literals and literals[key] != state:
                     continue
-                gate = RevertGate(
-                    kind="if_revert",
-                    condition_value=value,
-                    polarity="allowed_when_true" if positive else "allowed_when_false",
-                    node=node,
-                    containing_function=unit,
-                    call_chain=list(chain),
-                    expression_text=str(value),
-                    basis=["effect_path_condition"],
-                )
-                tree = _lower(
-                    gate, provenance, entry, ("path", id(node), gate.polarity, _chain_key(chain), id(provenance))
-                )
-                if tree is not None and predicate_truth(tree) is False:
+                tree = _path_condition(unit, node, value, positive, chain, entry, provenance)
+                if tree is None or predicate_truth(tree) is False:
                     continue
-                if key is None and (tree is None or predicate_truth(tree) is not True):
-                    tree = make_and_node(
-                        [tree or unknown("effect_branch_not_lowered"), unknown("effect_condition_value_unresolved")]
-                    )
                 next_literals = {**literals, **({key: state} if key is not None else {})}
-                pending.append(
-                    (branch, [*current, tree or unknown("effect_branch_not_lowered")], next_literals, visited | {node})
-                )
+                pending.append((branch, [*current, tree], next_literals, visited | {node}))
         else:
             pending.extend((son, current, literals, visited | {node}) for son in node.sons if _reachable(son, site))
     if not paths:

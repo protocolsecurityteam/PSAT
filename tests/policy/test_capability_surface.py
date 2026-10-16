@@ -28,8 +28,10 @@ def test_cofinite_projects_to_public_path_with_denylist_condition():
     assert surface.principal_rows == []
     assert surface.residual == []
     assert surface.authority_public is True
-    assert len(surface.public_paths) == 1
-    path = surface.public_paths[0]
+    paths = surface.public_path_list()
+    assert paths.incomplete_reason is None
+    assert len(paths.paths) == 1
+    path = paths.paths[0]
     # Exhaustive and un-enumerated exclusions differ.
     assert any(c["kind"] == "denylist" and "2 excluded, exhaustive" in c["description"] for c in path), path
 
@@ -42,7 +44,7 @@ def test_cofinite_carries_its_own_conditions_into_the_public_path():
     }
     surface = project_capability_surface(cap)
     assert capability_surface_status(cap, surface) == "public"
-    descriptions = {c.get("description") for path in surface.public_paths for c in path}
+    descriptions = {c.get("description") for path in surface.public_path_list().paths for c in path}
     assert "whenNotPaused" in descriptions
     assert any("denylist exclusion (0 known excluded" in (d or "") for d in descriptions)
 
@@ -72,7 +74,19 @@ def test_openness_is_total_and_three_valued():
         "open": {"kind": "conditional_universal", "conditions": [], "membership_quality": "exact"},
         "open_cofinite": {"kind": "cofinite_blacklist", "blacklist": [ADDR_A], "membership_quality": "exact"},
         "restricted_set": {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"},
-        "restricted_empty": {"kind": "finite_set", "members": [], "membership_quality": "exact"},
+        "restricted_empty": {
+            "kind": "finite_set",
+            "members": [],
+            "membership_quality": "exact",
+            "confidence": "enumerable",
+        },
+        "nd_named_empty": _pending_ceiling(),
+        "nd_partial_empty": {
+            "kind": "finite_set",
+            "members": [],
+            "membership_quality": "exact",
+            "confidence": "partial",
+        },
         "nd_unsupported": {"kind": "unsupported", "unsupported_reason": "guard_extraction_uncertain"},
         "nd_check": {"kind": "external_check_only", "check": {"target_address": ADDR_B}},
         "nd_lower_bound_empty": {"kind": "finite_set", "members": [], "membership_quality": "lower_bound"},
@@ -92,6 +106,8 @@ def test_openness_is_total_and_three_valued():
         "restricted_empty": "restricted",
         "nd_unsupported": "not_determined",
         "nd_check": "not_determined",
+        "nd_named_empty": "not_determined",
+        "nd_partial_empty": "not_determined",
         "nd_lower_bound_empty": "not_determined",
         "nd_unknown_kind": "not_determined",
     }
@@ -292,3 +308,182 @@ def test_resolver_path_is_recorded_on_every_principal_row_shape():
     assert project_capability_surface(witness).principal_rows[0]["details"]["resolver_path"] == [
         "live_getter_resolution"
     ]
+
+
+def _unread_reach() -> dict:
+    from services.static.contract_analysis_pipeline.predicate_types import REACH_NOT_DETERMINED
+
+    check = {"target_address": None, "target_call_selector": None, "extra": {"basis": [REACH_NOT_DETERMINED, "x"]}}
+    return {"kind": "external_check_only", "check": check}
+
+
+def _owner(address: str = ADDR_A) -> dict:
+    return {"kind": "finite_set", "members": [address], "membership_quality": "exact"}
+
+
+def test_an_unread_reach_condition_beside_a_gate_is_not_determined_never_restricted():
+    from services.policy.capability_surface import capability_surface_openness
+
+    cap = {"kind": "OR", "children": [_unread_reach(), _owner()]}
+    surface = project_capability_surface(cap)
+    assert not surface.authority_public
+    assert capability_surface_openness(cap, surface) == "not_determined"
+
+
+def test_an_unread_reach_condition_beside_an_open_path_is_open():
+    from services.policy.capability_surface import capability_surface_openness
+
+    open_path = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "amount > 0"}]}
+    cap = {"kind": "OR", "children": [_unread_reach(), open_path]}
+    assert capability_surface_openness(cap, project_capability_surface(cap)) == "open"
+
+
+def test_an_unread_reach_condition_is_bounded_by_a_gate_every_path_passes():
+    from services.policy.capability_surface import capability_surface_openness
+
+    either = {"kind": "OR", "children": [_unread_reach(), _owner()]}
+    bounded = {"kind": "AND", "children": [either, _owner(ADDR_B)]}
+    assert not project_capability_surface(bounded).open_not_determined
+    side = {"kind": "conditional_universal", "conditions": [{"kind": "pause", "description": "whenNotPaused"}]}
+    unbounded = {"kind": "AND", "children": [side, either]}
+    assert capability_surface_openness(unbounded, project_capability_surface(unbounded)) == "not_determined"
+
+
+def test_an_unread_reach_condition_folded_beside_callers_names_the_condition():
+    unread = _unread_reach()
+    unread["check"]["extra"]["expression"] = "! executorRequired"
+    either = {"kind": "OR", "children": [unread, {"kind": "unsupported", "unsupported_reason": "loop"}]}
+    cap = {"kind": "AND", "children": [_owner(), either]}
+    [row] = project_capability_surface(cap).principal_rows
+    descriptions = [c["description"] for c in row["details"]["conditions"]]
+    assert "condition not read: ! executorRequired" in descriptions
+
+
+def test_an_unread_reach_condition_beside_an_unresolved_gate_earns_no_public_path():
+    from services.policy.capability_surface import capability_surface_openness
+
+    open_path = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "sendValue"}]}
+    gate = {
+        "kind": "external_check_only",
+        "check": {"target_address": None, "extra": {"basis": ["caller_tainted_authority_unresolved"]}},
+    }
+    cap = {
+        "kind": "AND",
+        "children": [
+            {"kind": "OR", "children": [_unread_reach(), open_path]},
+            {"kind": "OR", "children": [_unread_reach(), gate]},
+        ],
+    }
+    surface = project_capability_surface(cap)
+    assert not surface.authority_public
+    assert capability_surface_openness(cap, surface) == "not_determined"
+
+
+def test_callers_beside_a_path_that_may_be_open_keep_their_rows():
+    from services.policy.capability_surface import capability_surface_openness
+
+    # ``AND(OR(unread reach, owner), liquidityPool)``: the conjunct every path passes still names its callers.
+    cap = {"kind": "AND", "children": [{"kind": "OR", "children": [_unread_reach(), _owner()]}, _owner(ADDR_B)]}
+    surface = project_capability_surface(cap)
+    assert [row["address"] for row in surface.principal_rows] == [ADDR_B]
+    assert capability_surface_openness(cap, surface) == "restricted"
+
+
+def _empty(**fields) -> dict:
+    from services.resolution.capabilities import CapabilityExpr
+    from services.resolution.capability_resolver import capability_to_dict
+
+    return {**capability_to_dict(CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")), **fields}
+
+
+def _pending_ceiling() -> dict:
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator.authority import _pending_ceiling_capability
+
+    # What a ``msg.sender == pendingOwner()`` gate lowers to when the pending read failed: empty by its name alone.
+    pending = {"source": "view_call", "callee_signature": "pendingOwner()"}
+    return capability_to_dict(_pending_ceiling_capability(pending, None))
+
+
+def test_a_proven_empty_conjunct_closes_a_path_that_may_be_open():
+    from services.policy.capability_surface import capability_surface_openness
+
+    # A reach condition read false resolves to this set: no caller passes the conjunct, so nobody passes the AND.
+    for cap in (
+        {"kind": "AND", "children": [_empty(), _unread_reach()]},
+        {"kind": "AND", "children": [{"kind": "OR", "children": [_unread_reach(), _owner()]}, _empty()]},
+        {"kind": "AND", "children": [{"kind": "AND", "children": [_empty(), _unread_reach()]}, _unread_reach()]},
+        {"kind": "AND", "children": [{"kind": "OR", "children": [_empty(), _empty()]}, _unread_reach()]},
+        {"kind": "AND", "children": [_empty(empty_reason="owner_read_zero"), _unread_reach()]},
+    ):
+        surface = project_capability_surface(cap)
+        assert not surface.open_not_determined, cap
+        assert capability_surface_openness(cap, surface) == "restricted", cap
+        if not surface.principal_rows:
+            assert capability_surface_status(cap, surface) == "resolved_empty", cap
+
+
+def test_an_empty_that_proves_nothing_leaves_a_path_that_may_be_open_not_determined():
+    from services.policy.capability_surface import (
+        PROJECTION_BUDGET_EXCEEDED,
+        capability_surface_openness,
+        not_determined_capability,
+    )
+
+    unproven = {
+        "unsupported": {"kind": "unsupported", "unsupported_reason": "loop"},
+        "unresolved": {
+            "kind": "external_check_only",
+            "check": {"target_address": ADDR_A, "extra": {"basis": ["caller_tainted_authority_unresolved"]}},
+        },
+        "lower_bound": _empty(membership_quality="lower_bound", confidence="partial", empty_reason="not_read"),
+        "unknown_quality": _empty(membership_quality=None),
+        "exact_but_partial": _empty(confidence="partial"),
+        "named_pending_ceiling": _pending_ceiling(),
+        "empty_by_design_lower_bound": _empty(membership_quality="lower_bound", empty_reason="empty_by_design"),
+        "intermediate_callers": _empty(subject="bound"),
+        "budget_hit": not_determined_capability(PROJECTION_BUDGET_EXCEEDED),
+        "resource_exhausted": not_determined_capability("resource_exhausted"),
+        "one_disjunct_proven": {"kind": "OR", "children": [_empty(), _empty(membership_quality="lower_bound")]},
+    }
+    for name, empty in unproven.items():
+        for cap in (
+            {"kind": "AND", "children": [empty, _unread_reach()]},
+            {"kind": "AND", "children": [_unread_reach(), empty]},
+        ):
+            surface = project_capability_surface(cap)
+            assert surface.open_not_determined, name
+            assert capability_surface_openness(cap, surface) == "not_determined", name
+
+
+def test_a_proven_empty_conjunct_closes_the_and_whatever_its_siblings_open_and_in_any_order():
+    import itertools
+
+    from services.policy.capability_surface import capability_surface_openness
+
+    universal = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "amount > 0"}]}
+    for siblings in ([universal], [universal, _unread_reach()], [_unread_reach(), _unread_reach()]):
+        for children in itertools.permutations([_empty(), *siblings]):
+            cap = {"kind": "AND", "children": list(children)}
+            surface = project_capability_surface(cap)
+            assert not surface.authority_public and not surface.open_not_determined, cap
+            assert capability_surface_openness(cap, surface) == "restricted", cap
+            assert capability_surface_status(cap, surface) == "resolved_empty", cap
+
+
+def test_an_empty_that_proves_nothing_never_closes_a_sibling_public_path_nor_reads_as_resolved_empty():
+    import itertools
+
+    from services.policy.capability_surface import capability_surface_openness
+
+    universal = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "amount > 0"}]}
+    ceiling = _pending_ceiling()
+    surface = project_capability_surface(ceiling)
+    assert capability_surface_openness(ceiling, surface) == "not_determined"
+    assert capability_surface_status(ceiling, surface) is None
+    # An unread caller authorization beside a public path earns no public path either.
+    for children in itertools.permutations([ceiling, universal]):
+        cap = {"kind": "AND", "children": list(children)}
+        surface = project_capability_surface(cap)
+        assert not surface.authority_public, cap
+        assert capability_surface_openness(cap, surface) == "not_determined", cap

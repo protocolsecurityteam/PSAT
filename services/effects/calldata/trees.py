@@ -12,7 +12,7 @@ if TYPE_CHECKING:  # typing-only: the effects plane stays off static's runtime i
 
 logger = logging.getLogger("services.effects.calldata")
 
-# Mirrors ``claims.matchers._facts._mandatory_operands``.
+# Mirrors ``claims.matchers._facts._mandatory_leaves``.
 
 
 def _mandatory_leaves(tree: Any) -> Iterator[dict[str, Any]]:
@@ -92,6 +92,17 @@ def _param_index_by_name(tree: Any) -> dict[str, int]:
 def _authority_roles(tree: Any) -> set[str]:
     return {
         str(leaf.get("authority_role")) for leaf in _all_leaves(tree) if isinstance(leaf.get("authority_role"), str)
+    }
+
+
+def _gate_authority_roles(tree: Any) -> set[str]:
+    """Roles of the leaves that gate; a leaf stating where a gate is reached is an alternative to it, not a gate."""
+    from services.static.contract_analysis_pipeline.predicate_types import is_reach_condition
+
+    return {
+        str(leaf.get("authority_role"))
+        for leaf in _all_leaves(tree)
+        if isinstance(leaf.get("authority_role"), str) and not is_reach_condition(leaf)
     }
 
 

@@ -1067,10 +1067,27 @@ def test_load_state_var_values_falls_back_when_job_id_missing(session, caplog):
     )
     session.commit()
 
+    twin = Contract(address=address, chain="base", protocol_id=proto.id)
+    session.add(twin)
+    session.flush()
+    session.add(
+        ControllerValue(
+            contract_id=twin.id,
+            controller_id="state_variable:_owner",
+            value="0x" + "44" * 20,
+            resolved_type="eoa",
+            source="state_variable",
+        )
+    )
+    session.commit()
+
     with caplog.at_level(logging.WARNING, logger="services.resolution.capability_resolver"):
-        values = _load_state_var_values(session, address, job_id=None, chain=None)
+        values = _load_state_var_values(session, address, job_id=None, chain="ethereum")
+        # Without a chain, the latest row could be any chain's: no values, never the twin's.
+        chainless = _load_state_var_values(session, address, job_id=None, chain=None)
 
     assert values.get("_owner") == owner, "legacy address-only fallback should still resolve"
+    assert chainless == {}
     assert any("without job_id" in rec.message for rec in caplog.records), (
         f"expected a warn-log about job_id=None fallback; got {[r.message for r in caplog.records]}"
     )

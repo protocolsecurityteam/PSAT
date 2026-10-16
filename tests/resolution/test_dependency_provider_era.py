@@ -267,6 +267,78 @@ def test_a_stale_terminal_failure_is_retried_once(session):
     assert [job.status for job in jobs] == [JobStatus.failed_terminal, JobStatus.queued]
 
 
+def test_a_provider_waiting_on_a_retry_stands_and_spawns_no_duplicate(session):
+    from datetime import datetime, timedelta, timezone
+
+    from db.queue import requeue_job
+
+    provider = _address("b4")
+    retrying = _job(session, provider, status=JobStatus.processing, version=None)
+    requeue_job(
+        session,
+        retrying.id,
+        "transient",
+        retry_count=1,
+        next_attempt_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    dependers = [_depender(session) for _ in range(3)]
+
+    for depender in dependers:
+        _emit(session, depender, provider)
+        _emit(session, depender, provider)
+
+    assert [job.id for job in _provider_jobs(session, provider)] == [retrying.id]
+    assert {_edge(session, depender).status for depender in dependers} == {"pending"}
+
+
+@pytest.mark.parametrize("version", [None, CURRENT])
+def test_a_failed_provider_that_nothing_will_run_is_replaced_once(session, version):
+    from db.queue import fail_job
+
+    provider = _address("b5")
+    dead = _job(session, provider, status=JobStatus.processing, version=version)
+    fail_job(session, dead.id, "boom")
+    dependers = [_depender(session) for _ in range(3)]
+
+    for depender in dependers:
+        _emit(session, depender, provider)
+        _emit(session, depender, provider)
+
+    jobs = _provider_jobs(session, provider)
+    assert [job.status for job in jobs] == [JobStatus.failed, JobStatus.queued]
+    # Waiting on the failed row would block every depender forever; the one fresh provider is what they wait on.
+    assert {_edge(session, depender).status for depender in dependers} == {"pending"}
+    assert find_dependency_provider_job_for_address(session, provider, chain="ethereum") is not None
+
+
+def test_a_proxy_whose_implementation_job_failed_spawns_one_provider(session):
+    from db.queue import fail_job
+
+    proxy, impl = _address("d9"), _address("da")
+    proxy_job, impl_job = _proxy_over(session, proxy, impl, proxy_version=CURRENT, impl_version=CURRENT)
+    fail_job(session, impl_job.id, "boom")
+    first, second = _depender(session), _depender(session)
+
+    _emit(session, first, proxy)
+    _emit(session, second, proxy)
+    _emit(session, first, proxy)
+
+    jobs = _provider_jobs(session, proxy)
+    assert [job.id for job in jobs][0] == proxy_job.id and len(jobs) == 2
+    assert {_edge(session, d).status for d in (first, second)} == {"pending"}
+
+
+def test_a_failed_job_never_stands_for_the_current_analyzer(session):
+    from db.queue import fail_job, job_stands_for_current_analyzer
+
+    for version in (None, CURRENT):
+        job = _job(session, _address("db"), status=JobStatus.processing, version=version)
+        fail_job(session, job.id, "boom")
+        session.refresh(job)
+        assert job.status == JobStatus.failed
+        assert not job_stands_for_current_analyzer(session, job)
+
+
 def test_a_live_provider_is_preferred_over_a_standing_failure(session):
     provider = _address("b3")
     _job(session, provider, status=JobStatus.failed_terminal, version=None)

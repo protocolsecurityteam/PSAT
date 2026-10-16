@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import distinct, func, select, text, tuple_
 
 from db.models import Job, JobStatus
-from schemas.api_responses import PipelineStatsResponse
+from schemas.api_responses import AdminConfigResponse, PipelineStatsResponse
+from utils.chains import accepted_chain_spellings, all_chains, supported_chain_ids
 
 from . import deps
 from .spa import _site_index_response
@@ -98,11 +99,16 @@ def version() -> dict[str, str]:
     return {"sha": os.environ.get("GIT_SHA", "unknown")}
 
 
-@router.get("/api/config", dependencies=[Depends(deps.require_admin)])
-def config() -> dict[str, str]:
+@router.get("/api/config", dependencies=[Depends(deps.require_admin)], response_model=None)
+def config() -> AdminConfigResponse:
     from utils.secrets import sanitize_url
 
-    return {"default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL)}
+    enabled = supported_chain_ids()
+    return {
+        "default_rpc_url": sanitize_url(deps.DEFAULT_RPC_URL),
+        "enabled_chains": [info.name for info in all_chains() if info.chain_id in enabled],
+        "chain_spellings": accepted_chain_spellings(),
+    }
 
 
 @router.get("/api/stats", dependencies=[Depends(deps.require_admin)], response_model=None)

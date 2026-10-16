@@ -155,31 +155,26 @@ def prefetch_contracts(session: Session, jobs: list[Job]) -> dict[Any, Contract]
         ).scalars():
             contracts_by_job_id[c.job_id] = c
 
-    unresolved_addrs_by_chain: dict[str | None, set[str]] = {}
-    for j in jobs:
-        if contracts_by_job_id.get(j.id) is not None or not j.address:
-            continue
-        req = j.request if isinstance(j.request, dict) else {}
-        unresolved_addrs_by_chain.setdefault(req.get("chain"), set()).add(j.address.lower())
-    contracts_by_addr_chain: dict[tuple[str, str | None], Contract] = {}
-    all_unresolved_addrs = {a for addrs in unresolved_addrs_by_chain.values() for a in addrs}
-    if all_unresolved_addrs:
+    # Keyed by the job's own chain; legacy mainnet rows have ``chain=NULL``.
+    unresolved = {
+        (j.address.lower(), _job_chain_name(j)) for j in jobs if contracts_by_job_id.get(j.id) is None and j.address
+    }
+    contracts_by_addr_chain: dict[tuple[str, str], Contract] = {}
+    if unresolved:
         for c in session.execute(
             select(Contract)
-            .where(Contract.address.in_(list(all_unresolved_addrs)))
+            .where(Contract.address.in_(sorted({addr for addr, _chain in unresolved})))
             .options(selectinload(Contract.summary))
         ).scalars():
-            addr_lc = (c.address or "").lower()
-            for chain_key, addrs in unresolved_addrs_by_chain.items():
-                if addr_lc in addrs and (chain_key is None or c.chain == chain_key):
-                    contracts_by_addr_chain[(addr_lc, chain_key)] = c
+            key = ((c.address or "").lower(), (c.chain or "ethereum").lower())
+            if key in unresolved:
+                contracts_by_addr_chain[key] = c
 
     out = dict(contracts_by_job_id)
     for j in jobs:
         if out.get(j.id) is not None or not j.address:
             continue
-        req = j.request if isinstance(j.request, dict) else {}
-        fallback = contracts_by_addr_chain.get((j.address.lower(), req.get("chain")))
+        fallback = contracts_by_addr_chain.get((j.address.lower(), _job_chain_name(j)))
         if fallback is not None:
             # Another job's row may legitimately point at this Contract.
             out[j.id] = fallback

@@ -43,7 +43,7 @@ def _batch_get_creators(
     debug: bool = False,
     chain_id: int = 1,
 ) -> dict[str, str]:
-    """Contract creators in batches, as ``{contract_address: creator_address}``."""
+    """Contract creators in batches, as ``{contract_address: creator_address}``; only well-formed creator addresses."""
     creators: dict[str, str] = {}
     for i in range(0, len(addresses), batch_size):
         batch = addresses[i : i + batch_size]
@@ -55,9 +55,10 @@ def _batch_get_creators(
                 contractaddresses=",".join(batch),
             )
             for item in data.get("result", []):
-                contract_addr = normalize_address(item["contractAddress"])
-                creator_addr = normalize_address(item["contractCreator"])
-                creators[contract_addr] = creator_addr
+                record = etherscan.parse_creation_record(item)
+                # A genesis allocation or malformed creator names no deployer.
+                if record is not None and record.creator is not None:
+                    creators[record.address] = record.creator
         except RuntimeError:
             _debug_log(debug, f"getcontractcreation batch failed for {len(batch)} address(es)")
     return creators

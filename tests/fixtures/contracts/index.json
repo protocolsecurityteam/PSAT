@@ -78,6 +78,27 @@
       "detection_patterns": ["timestamp_latch_negative"]
     },
     {
+      "path": "pause/gate_polarity.sol",
+      "category": "pause",
+      "contract_name": "OpenCloseFlag",
+      "description": "Bool flags read as revert gates on either value: unblocking one-way flags, self-checked writers, open/close pairs, literal comparisons, getter-read flags, a one-way kill switch and an OpenZeppelin v4 pause pair.",
+      "detection_patterns": ["pause_gate_polarity"]
+    },
+    {
+      "path": "predicates/control_flow_fidelity.sol",
+      "category": "predicates",
+      "contract_name": "ConditionalGates",
+      "description": "Gate conditions under control flow: getter and helper returns read under a negated call, OpenZeppelin v4 and v5 pause helpers, helpers with guarded and implicit returns, and reverts reached only under a branch, an early return, a conditional modifier placeholder, a loop or a try block.",
+      "detection_patterns": ["helper_return_polarity", "conditional_revert_gate"]
+    },
+    {
+      "path": "predicates/reach_reads.sol",
+      "category": "predicates",
+      "contract_name": "ReachReads",
+      "description": "Reach conditions recorded as reads: an open-role check through a public view, a flag in a bool helper's connective return, a state condition beside a caller check, a reassigned parameter, a branch on storage written before it, a branch on the chain id, a view that reads the clock, caller-referencing reach conditions (directly and through a library call), and a state variable only compared with calldata.",
+      "detection_patterns": ["reach_condition_read"]
+    },
+    {
       "path": "upgrade/direct_admin_upgrade.sol",
       "category": "upgrade",
       "contract_name": "DirectAdminUpgrade",

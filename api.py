@@ -57,14 +57,16 @@ _GLOBAL_RATE_WINDOW_S = float(os.environ.get("PSAT_GLOBAL_RATE_WINDOW_S", "60"))
 _global_limiter = SlidingWindowRateLimiter(_GLOBAL_RATE_LIMIT, _GLOBAL_RATE_WINDOW_S)
 
 # No inline scripts in the built SPA. Inline styles and Google Fonts are allowed; img/connect pinned to the CoinGecko
-# hosts. frame-ancestors 'self' keeps the audit-pdf iframe working.
+# hosts, plus the GitHub and Google profile-picture hosts for OAuth avatars. frame-ancestors 'self' keeps the
+# audit-pdf iframe working.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "object-src 'none'; "
     "base-uri 'self'; "
     "frame-ancestors 'self'; "
-    "img-src 'self' data: https://assets.coingecko.com https://coin-images.coingecko.com; "
+    "img-src 'self' data: https://assets.coingecko.com https://coin-images.coingecko.com "
+    "https://avatars.githubusercontent.com https://lh3.googleusercontent.com; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src 'self' https://fonts.gstatic.com; "
     "connect-src 'self' https://api.coingecko.com"

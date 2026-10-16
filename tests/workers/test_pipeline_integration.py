@@ -804,6 +804,7 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
         evm_version="shanghai",
         optimization=True,
         optimization_runs=200,
+        via_ir=False,
         source_format="flat",
         source_file_count=1,
         remappings=[],

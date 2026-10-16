@@ -8,6 +8,7 @@ The fixtures are grouped by analysis theme:
 - `nft/`: non-fungible token scenarios
 - `composed/`: mixed-pattern scenarios
 - `tracking/`: controller-writer and event-to-polling tracking scenarios
+- `predicates/`: gate conditions under control flow (helper return polarity, conditional reverts)
 
 Each Solidity file starts with a short scenario comment so the purpose of the
 fixture is clear when reading test failures.

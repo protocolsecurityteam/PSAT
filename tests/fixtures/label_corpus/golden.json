@@ -882,12 +882,14 @@
           ],
           "predicate_tree": {
             "present": true,
-            "root_op": "LEAF",
-            "leaf_count": 1,
+            "root_op": "OR",
+            "leaf_count": 2,
             "authority_roles": [
+              "business",
               "delegated_authority"
             ],
             "leaf_kinds": [
+              "equality",
               "external_bool"
             ],
             "references_msg_sender": true
@@ -936,12 +938,14 @@
           ],
           "predicate_tree": {
             "present": true,
-            "root_op": "LEAF",
-            "leaf_count": 1,
+            "root_op": "OR",
+            "leaf_count": 2,
             "authority_roles": [
+              "business",
               "delegated_authority"
             ],
             "leaf_kinds": [
+              "equality",
               "external_bool"
             ],
             "references_msg_sender": true
@@ -3428,13 +3432,14 @@
           "predicate_tree": {
             "present": true,
             "root_op": "AND",
-            "leaf_count": 2,
+            "leaf_count": 3,
             "authority_roles": [
               "business",
               "caller_authority"
             ],
             "leaf_kinds": [
-              "equality"
+              "equality",
+              "unsupported"
             ],
             "references_msg_sender": true
           }
@@ -7592,12 +7597,14 @@
           "predicate_tree": {
             "present": true,
             "root_op": "AND",
-            "leaf_count": 2,
+            "leaf_count": 4,
             "authority_roles": [
-              "business"
+              "business",
+              "caller_authority"
             ],
             "leaf_kinds": [
-              "comparison"
+              "comparison",
+              "equality"
             ],
             "references_msg_sender": true
           }
@@ -7627,12 +7634,14 @@
           "predicate_tree": {
             "present": true,
             "root_op": "AND",
-            "leaf_count": 2,
+            "leaf_count": 4,
             "authority_roles": [
-              "business"
+              "business",
+              "caller_authority"
             ],
             "leaf_kinds": [
-              "comparison"
+              "comparison",
+              "equality"
             ],
             "references_msg_sender": true
           }

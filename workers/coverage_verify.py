@@ -387,8 +387,8 @@ class CoverageVerifyWorker:
                             self._recover_stale(session)
                         claimed_ids = self._claim_batch(session)
                     except Exception:
-                        # A DB failure here used to crash the worker, and ``wait -n`` in start_workers.sh takes the VM
-                        # down. Seen: proxy-coverage trigger violations, Neon SSL drops on idle sessions.
+                        # A DB failure here used to crash the worker. Seen: proxy-coverage trigger violations, Neon SSL
+                        # drops on idle sessions.
                         logger.exception(
                             "Worker %s: claim/recover phase raised; rolling back and continuing",
                             self.worker_id,

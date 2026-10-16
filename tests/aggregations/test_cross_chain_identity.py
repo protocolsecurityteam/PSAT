@@ -392,3 +392,38 @@ def test_impl_windows_come_only_from_a_proxy_on_the_implementations_chain(db_ses
 
     assert [w.proxy_contract_id for w in windows[impls["ethereum"].id]] == [proxy.id]
     assert windows[impls["base"].id] == []
+
+
+@pytest.mark.parametrize("order", ORDERS, ids=["ethereum-first", "base-first"])
+def test_prefetch_falls_back_only_to_the_jobs_own_chain_row(db_session, order):
+    protocol = _add_protocol(db_session, f"xchain-prefetch-{uuid.uuid4().hex[:8]}")
+    shared = _addr("prefetch")
+    # A mainnet job enqueued before requests carried their chain; its row now belongs to a later job.
+    legacy = _add_job(db_session, address=shared, protocol_id=protocol.id, request={"address": shared})
+    rows: dict[str, Contract] = {}
+    for chain in order:
+        owner = _add_job(
+            db_session, address=shared, protocol_id=protocol.id, request={"address": shared, "chain": chain}
+        )
+        owner.chain_id = 1 if chain == "ethereum" else 8453
+        db_session.commit()
+        # The legacy mainnet row carries ``chain=NULL``.
+        rows[chain] = _add_contract(
+            db_session, address=shared, job=owner, protocol_id=protocol.id, chain=None if chain == "ethereum" else chain
+        )
+
+    assert prefetch_contracts(db_session, [legacy])[legacy.id].id == rows["ethereum"].id
+
+
+def test_prefetch_never_falls_back_to_a_twin_chain_row(db_session):
+    protocol = _add_protocol(db_session, f"xchain-prefetch-{uuid.uuid4().hex[:8]}")
+    shared = _addr("prefetch-twin")
+    legacy = _add_job(db_session, address=shared, protocol_id=protocol.id, request={"address": shared})
+    base_owner = _add_job(
+        db_session, address=shared, protocol_id=protocol.id, request={"address": shared, "chain": "base"}
+    )
+    base_owner.chain_id = 8453
+    db_session.commit()
+    _add_contract(db_session, address=shared, job=base_owner, protocol_id=protocol.id, chain="base")
+
+    assert legacy.id not in prefetch_contracts(db_session, [legacy])

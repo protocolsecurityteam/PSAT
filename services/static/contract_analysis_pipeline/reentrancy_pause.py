@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict, get_args
 
-from .predicate_types import AuthorityRole, LeafPredicate, PredicateTree
+from .predicate_types import AuthorityRole, LeafPredicate, PredicateTree, is_reach_condition
 from .shared import _all_modifiers, _all_state_variables
 from .slither_compat import (
     SLITHER_AVAILABLE,
@@ -568,7 +568,7 @@ def _tree_has_state_var_operand(tree: PredicateTree, var_name: str) -> bool:
     """True iff some leaf reads ``var_name``; catches reads in helpers invisible in the outer IR."""
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if leaf is None:
+        if leaf is None or is_reach_condition(leaf):
             return False
         for op in leaf.get("operands") or []:
             if op.get("state_variable_name") == var_name:
@@ -586,7 +586,7 @@ def _tree_has_constant_equality_on_var(tree: PredicateTree, var_name: str) -> bo
     """
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if leaf is None:
+        if leaf is None or is_reach_condition(leaf):
             return False
         if leaf.get("operator") not in ("eq", "ne"):
             return False
@@ -603,7 +603,7 @@ def _tree_has_constant_equality_on_var(tree: PredicateTree, var_name: str) -> bo
 def _tree_has_authority(tree: PredicateTree) -> bool:
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if leaf is None:
+        if leaf is None or is_reach_condition(leaf):
             return False
         return leaf.get("authority_role") in ("caller_authority", "delegated_authority")
     for child in tree.get("children") or []:
@@ -701,7 +701,7 @@ def _walk_and_classify(tree: PredicateTree, reentrancy_vars: set[str], pause_var
 
 
 def _maybe_classify_guard_leaf(leaf: LeafPredicate, reentrancy_vars: set[str], pause_vars: set[str]) -> None:
-    if leaf.get("authority_role") not in ("business", None):
+    if leaf.get("authority_role") not in ("business", None) or is_reach_condition(leaf):
         return
     operands = leaf.get("operands") or []
     for op in operands:

@@ -34,6 +34,7 @@ from services.policy.capability_surface import (
     capability_surface_openness,
     capability_surface_status,
     project_capability_surface,
+    projection_scoped,
 )
 from services.policy.effective_permissions import MUTABILITY_FIELDS
 from services.resolution.capabilities import CapabilityExpr
@@ -179,6 +180,7 @@ def _capture_observed_before(
     }
 
 
+@projection_scoped
 def write_effective_function_rows(
     session: Session,
     *,

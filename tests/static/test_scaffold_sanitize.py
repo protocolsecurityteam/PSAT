@@ -39,14 +39,14 @@ def test_scaffold_writes_source(tmp_path, key, expected_file):
 
 def test_evm_version_injection_falls_back():
     injected = 'shanghai"\nffi = true\nx = "'
-    assert fetch.sanitize_evm_version(injected) == "shanghai"
+    assert fetch._resolve_evm_version(injected, "0.8.24") == "shanghai"
 
 
 @pytest.mark.parametrize("version", ["cancun", "prague", "osaka"])
 def test_evm_version_allowlist_passes_legit(version):
-    assert fetch.sanitize_evm_version(version) == version
-    assert fetch.sanitize_evm_version(version.upper()) == version
-    assert fetch.sanitize_evm_version("") == "shanghai"
+    assert fetch._resolve_evm_version(version, "0.8.24") == version
+    assert fetch._resolve_evm_version(version.upper(), "0.8.24") == version
+    assert fetch._resolve_evm_version("", "0.8.24") == "shanghai"
 
 
 def test_scaffold_evm_injection_not_in_toml(tmp_path):

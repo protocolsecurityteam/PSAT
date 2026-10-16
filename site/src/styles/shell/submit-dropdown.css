@@ -40,3 +40,11 @@
   white-space: nowrap;
   align-self: end;
 }
+
+.submit-form .submit-form-secondary {
+  padding: 9px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  white-space: nowrap;
+  align-self: end;
+}

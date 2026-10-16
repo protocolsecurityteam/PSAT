@@ -65,4 +65,5 @@ def test_scaffold_writes_standard_json_layout_and_metadata(tmp_path):
 
     foundry_toml = (project_dir / "foundry.toml").read_text()
     assert 'src = "src"' in foundry_toml
-    assert 'solc_version = "0.8.24"' in foundry_toml
+    # The verified compiler, not the 0.8.24 floor pragma detection would apply.
+    assert 'solc_version = "0.8.21"' in foundry_toml

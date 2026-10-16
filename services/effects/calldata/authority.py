@@ -15,7 +15,7 @@ from .encoding import encode_calldata
 from .facts import ContractFacts, FunctionFacts
 from .flows import _selector_of
 from .plans import _AUTHORITY_ROLES, AuthorityPlanInputs
-from .trees import _authority_roles, _gate_ref, _mandatory_state_vars
+from .trees import _gate_authority_roles, _gate_ref, _mandatory_state_vars
 
 logger = logging.getLogger("services.effects.calldata")
 
@@ -51,7 +51,7 @@ def _authority_gate_target(facts: ContractFacts, fn: FunctionFacts) -> str | Non
         if name == fn.full_name:
             continue
         tree = facts.trees[name]
-        if not _authority_roles(tree) & set(_AUTHORITY_ROLES):
+        if not _gate_authority_roles(tree) & set(_AUTHORITY_ROLES):
             continue
         # Var-level, as in ``guarded_functions``.
         if _mandatory_state_vars(tree) & {var for var, _member in written}:

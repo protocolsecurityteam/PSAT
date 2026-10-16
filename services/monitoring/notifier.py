@@ -6,7 +6,7 @@ import logging
 from urllib.parse import urlparse
 
 import requests
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from db.models import (
@@ -648,10 +648,13 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
 
     contract_name = None
     if job.address:
+        from db.queue import _job_chain_name, _mainnet_coalesced_chain
+
         contract_row = session.execute(
             select(Contract)
             .where(
                 Contract.address == job.address.lower(),
+                func.lower(func.coalesce(Contract.chain, "ethereum")) == _mainnet_coalesced_chain(_job_chain_name(job)),
             )
             .limit(1)
         ).scalar_one_or_none()

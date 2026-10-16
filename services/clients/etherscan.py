@@ -8,6 +8,7 @@ import json as _json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -260,15 +261,18 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
 # call site via ``empty_result_ok`` so no other error can reach a caller as data.
 _EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found", "No records found"})
 
+# Actions whose "nothing" answer carries a null result instead of an empty list, with the exact message.
+_NULL_RESULT_ANSWERS: Mapping[tuple[str, str], str] = {("contract", "getcontractcreation"): "No data found"}
 
-def _is_empty_result(data: dict) -> bool:
+
+def _is_empty_result(data: dict, module: str, action: str) -> bool:
     result = data.get("result")
-    return (
-        str(data.get("status")).strip() == "0"
-        and str(data.get("message", "")).strip() in _EMPTY_RESULT_MESSAGES
-        and isinstance(result, list)
-        and not result
-    )
+    if str(data.get("status")).strip() != "0":
+        return False
+    message = str(data.get("message", "")).strip()
+    if result is None:
+        return _NULL_RESULT_ANSWERS.get((module, action)) == message
+    return message in _EMPTY_RESULT_MESSAGES and isinstance(result, list) and not result
 
 
 def get(
@@ -278,10 +282,10 @@ def get(
 
     *chain_id* is required (v2 is chain-scoped).
 
-    ``empty_result_ok`` returns the empty-list triple instead of raising, so "holds no tokens" is distinguishable from
-    transport failure. An empty answer is cached only when PG-eligible AND ``cache_empty=True``: even per-txhash
-    ``txlistinternal`` can be falsely empty while Etherscan's trace indexing lags, and only the caller knows the tx's
-    age.
+    ``empty_result_ok`` returns the empty-list triple (or an action's null-result answer, e.g. no creation record)
+    instead of raising, so "holds no tokens" is distinguishable from transport failure. An empty answer is cached only
+    when PG-eligible AND ``cache_empty=True``: even per-txhash ``txlistinternal`` can be falsely empty while
+    Etherscan's trace indexing lags, and only the caller knows the tx's age.
     """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
@@ -344,7 +348,7 @@ def get(
             _pg_cache_put(module, action, chain_id, params, data)
             return data
 
-        if empty_result_ok and _is_empty_result(data):
+        if empty_result_ok and _is_empty_result(data, module, action):
             # A lag-empty frozen for a fresh tx would permanently delete its CREATE frames.
             if cache_empty:
                 _pg_cache_put(module, action, chain_id, params, data)
@@ -376,6 +380,66 @@ def get(
     )
     record_degraded(phase="etherscan_rate_limit", exc=exhausted, context={"module": module, "action": action})
     raise exhausted
+
+
+_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+# Etherscan's stand-in for both creator and tx of a contract in the chain's genesis state (e.g. L2 predeploys).
+_GENESIS_MARKER = "GENESIS"
+
+
+@dataclass(frozen=True)
+class CreationRecord:
+    """One ``getcontractcreation`` entry.
+
+    ``genesis``: the contract was allocated in the chain's genesis state, so there is no creation tx and no deployer.
+    ``tx_hash``, ``creator`` and ``factory`` are None unless the field is a well-formed hash or address.
+    """
+
+    address: str
+    tx_hash: str | None
+    block: int | None
+    creator: str | None
+    factory: str | None
+    genesis: bool
+
+
+def _creation_block(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip():
+        raw = value.strip()
+        try:
+            block = int(raw, 16) if raw.startswith("0x") else int(raw)
+        except ValueError:
+            return None
+        return block if block >= 0 else None
+    return None
+
+
+def parse_creation_record(item: object) -> CreationRecord | None:
+    """Typed view of one ``getcontractcreation`` entry, or None when it names no contract address."""
+    if not isinstance(item, dict):
+        return None
+    address = item.get("contractAddress")
+    if not isinstance(address, str) or not _ADDRESS_RE.match(address):
+        return None
+    creator = item.get("contractCreator")
+    tx = item.get("txHash")
+    factory = item.get("contractFactory")
+    genesis = (isinstance(creator, str) and creator.strip().upper() == _GENESIS_MARKER) or (
+        isinstance(tx, str) and tx.strip().upper().startswith(_GENESIS_MARKER)
+    )
+    return CreationRecord(
+        address=address.lower(),
+        tx_hash=tx.lower() if not genesis and isinstance(tx, str) and _TX_HASH_RE.match(tx) else None,
+        block=_creation_block(item.get("blockNumber")),
+        creator=creator.lower() if not genesis and isinstance(creator, str) and _ADDRESS_RE.match(creator) else None,
+        factory=factory.lower() if not genesis and isinstance(factory, str) and _ADDRESS_RE.match(factory) else None,
+        genesis=genesis,
+    )
 
 
 def get_contract_creation_block(address: str, *, chain_id: int, rpc_url: str | None = None) -> int | None:

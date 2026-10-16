@@ -7,6 +7,7 @@ from typing import Any
 
 from utils.evm import CANCALL_SIGNATURE
 
+from ...contract_analysis_pipeline.predicate_types import is_reach_condition
 from ..context import ClaimContext, abi_selector
 
 # Canonical selectors, so renames can't dodge detection and interface params resolve.
@@ -42,11 +43,12 @@ def canonical_selector(ctx: ClaimContext, function: str) -> str | None:
 
 
 def _iter_leaves(tree: Any) -> Iterator[dict[str, Any]]:
+    """The gate leaves of a tree; a leaf saying where a gate is reached is not a gate."""
     if not isinstance(tree, dict):
         return
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf")
-        if isinstance(leaf, dict):
+        if isinstance(leaf, dict) and not is_reach_condition(leaf):
             yield leaf
         return
     for child in tree.get("children") or []:

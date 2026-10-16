@@ -38,6 +38,7 @@
 @import "./styles/surface/audit-modal.css";
 @import "./styles/surface/address-label.css";
 @import "./styles/surface/addresses-modal.css";
+@import "./styles/surface/bulk-import.css";
 @import "./styles/components/splash-hero.css";
 @import "./styles/components/product-hero.css";
 @import "./styles/pages/account.css";

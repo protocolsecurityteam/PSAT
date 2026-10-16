@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from services.static.contract_analysis_pipeline.predicate_types import REACH_NOT_DETERMINED
+
 CapKind = Literal[
     "finite_set",
     "threshold_group",
@@ -49,6 +51,9 @@ EmptyReason = Literal[
     # 0x…dEaD is a convention, not proof of unspendability, so it never licenses an earned negative.
     "owner_read_burn_address",
 ]
+
+# The reasons that report a completed read; every other reason names a gap or a classification, never proof of nobody.
+READ_CONFIRMED_EMPTY_REASONS: frozenset[EmptyReason] = frozenset({"owner_read_zero", "slot_read_zero"})
 
 # Which caller a capability constrains. ``root`` is the function's end-user caller; ``bound`` is the caller of an
 # inlined downstream call (e.g. a Teller calling ``vault.exit``). A bound guard is a runtime side condition;
@@ -478,6 +483,20 @@ def _inherited_empty_reason(*operands: CapabilityExpr) -> EmptyReason | None:
     return None
 
 
+def _union_empty_reason(a: CapabilityExpr, b: CapabilityExpr) -> EmptyReason | None:
+    """Nobody passes a union only if nobody passes either operand, so an operand empty without proof keeps its reason
+    where disagreeing reasons would otherwise leave none.
+    """
+    unproven: list[EmptyReason] = sorted(
+        {
+            op.empty_reason
+            for op in (a, b)
+            if op.empty_reason is not None and op.empty_reason not in READ_CONFIRMED_EMPTY_REASONS
+        }
+    )
+    return unproven[0] if unproven else _inherited_empty_reason(a, b)
+
+
 def _intersect_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     am = set(a.members or [])
     bm = set(b.members or [])
@@ -521,7 +540,7 @@ def _union_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         confidence=confidence,
         conditions=conditions,
         subject=a.subject,
-        empty_reason=_inherited_empty_reason(a, b) if not merged else None,
+        empty_reason=_union_empty_reason(a, b) if not merged else None,
     )
     cap.trace = list(a.trace) + list(b.trace)
     # A union is empty only when both operands were.
@@ -664,6 +683,14 @@ def _intersect_cross_subject(a: CapabilityExpr, b: CapabilityExpr) -> Capability
 def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
     """A bound-subject capability as side conditions: its existing conditions plus one for the delegated check."""
     return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
+
+
+def is_reach_not_determined(cap_dict: Any) -> bool:
+    """A serialized capability for a reach condition resolution couldn't read: a path that may be open."""
+    if not isinstance(cap_dict, dict) or cap_dict.get("kind") != "external_check_only":
+        return False
+    extra = (cap_dict.get("check") or {}).get("extra") or {}
+    return REACH_NOT_DETERMINED in (extra.get("basis") or [])
 
 
 # Same value as ``deferred_reconciler.DEFERRED_MARKER``, shared by value to avoid an import dependency.

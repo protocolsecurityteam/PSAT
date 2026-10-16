@@ -253,6 +253,7 @@ def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monk
                     "kind": "state_variable",
                     "type": "address",
                     "type_kind": "address",
+                    "value_in_code": True,
                 },
                 "tracking_mode": "state_only",
                 "event_watch": None,
@@ -295,6 +296,64 @@ def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monk
     cv2 = nulled["controller_values"]["state_variable:etherFiNodesManager"]
     assert cv2["value"] is None
     assert cv2["observed_via"] == "eth_call_error"
+
+
+@pytest.mark.parametrize("impl_answer", ["00" * 32, "00" * 12 + "8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"])
+def test_a_storage_getter_failing_on_the_proxy_is_never_answered_by_the_implementation(monkeypatch, impl_answer):
+    """The implementation's storage isn't the proxy's: whatever it holds (usually zero) proves nothing here."""
+    proxy = "0x" + "3c" * 20
+    impl = "0x" + "a9" * 20
+    plan: ControlTrackingPlan = {
+        "schema_version": "0.1",
+        "contract_address": proxy,
+        "contract_name": "Proxied",
+        "tracking_strategy": "event_first_with_polling_fallback",
+        "tracked_controllers": [
+            {
+                "controller_id": "external_contract:authority",
+                "label": "authority",
+                "source": "authority",
+                "kind": "external_contract",
+                "read_spec": {
+                    "strategy": "getter_call",
+                    "target": "authority",
+                    "kind": "state_variable",
+                    "type": "address",
+                    "type_kind": "address",
+                },
+                "tracking_mode": "state_only",
+                "event_watch": None,
+                "polling_fallback": {
+                    "contract_address": proxy,
+                    "polling_sources": ["authority"],
+                    "cadence": "state_only",
+                    "notes": [],
+                },
+                "notes": [],
+            }
+        ],
+    }
+    calls: list[str] = []
+
+    def fake_rpc(_rpc_url, method, params, *, chain_id=None):
+        if method == "eth_blockNumber":
+            return "0x10"
+        if method == "eth_call":
+            to = params[0]["to"].lower()
+            calls.append(to)
+            if to == proxy:
+                raise RuntimeError("{'code': -32000, 'message': 'header not found'}")
+            return "0x" + impl_answer
+        raise AssertionError(f"Unexpected RPC call: {method}")
+
+    monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
+    monkeypatch.setattr("services.resolution.tracking._SNAPSHOT_MULTICALL_ENABLED", False)
+
+    snapshot = build_control_snapshot(plan, "https://rpc.example", getter_fallback_address=impl)
+
+    cv = snapshot["controller_values"]["external_contract:authority"]
+    assert (cv["value"], cv["observed_via"]) == (None, "eth_call_error")
+    assert impl not in calls
 
 
 def _avs_operator_plan(instance: str) -> ControlTrackingPlan:

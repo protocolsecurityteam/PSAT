@@ -46,7 +46,7 @@ def needs_token_inventory(session, candidate):
     from services.effects.calldata.roles import address_param_roles
     from services.resolution.differential_probe import _parse_arg_types
 
-    facts = load_contract_facts(session, candidate.contract_address)
+    facts = load_contract_facts(session, candidate.contract_address, candidate.chain_id)
     fn = resolve_function(facts, candidate.selector) if facts else None
     if fn is None:
         return False  # missing facts do not establish a collection dependency
@@ -64,7 +64,7 @@ def dependent_families(session, candidate):
     from services.effects.calldata.facts import load_contract_facts, resolve_function
     from services.effects.calldata.flows import _OUT_DIRECTIONS, _flow_directions
 
-    facts = load_contract_facts(session, candidate.contract_address)
+    facts = load_contract_facts(session, candidate.contract_address, candidate.chain_id)
     fn = resolve_function(facts, candidate.selector) if facts else None
     if fn is None:
         return frozenset()

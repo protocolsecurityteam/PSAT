@@ -1,5 +1,6 @@
 """P2: accept-side 2-step transfer gates are uncallable until a transfer is queued, so a ``pending``-prefixed
-accessor lowers to ``empty_by_design``. Operand shapes are compiled from source; the global
+accessor whose read failed lowers to ``empty_by_design``. That rests on the accessor's name, not a read, so it is
+published as not determined, never as resolved empty. Operand shapes are compiled from source; the global
 ``_stub_live_authority`` fixture is deliberately not used.
 """
 
@@ -11,6 +12,7 @@ import pytest
 
 from services.policy.capability_surface import (
     _is_resolved_empty_capability,
+    capability_surface_openness,
     project_capability_surface,
 )
 from services.resolution.capabilities import CapabilityExpr
@@ -58,12 +60,17 @@ def _assert_empty_by_design(cap: CapabilityExpr) -> None:
     assert cap.members == []
     assert cap.membership_quality == "exact"
     assert cap.empty_reason == "empty_by_design"
-    assert project_capability_surface(capability_to_dict(cap)).principal_rows == []
-    assert _status(cap) == "resolved_empty"
+    cap_dict = capability_to_dict(cap)
+    surface = project_capability_surface(cap_dict)
+    assert surface.principal_rows == []
+    assert _status(cap) is None
+    assert capability_surface_openness(cap_dict, surface) == "not_determined"
 
 
 @pytest.mark.parametrize("mode", ["revert", "empty"])
-def test_pending_governor_accept_gate_is_resolved_empty(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+def test_pending_governor_accept_gate_is_empty_by_design_but_not_determined(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
     _stub_rpc(monkeypatch, mode)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc())
     _assert_empty_by_design(cap)
@@ -94,3 +101,22 @@ def test_detector_fails_closed_for_non_authority_operand_sources() -> None:
 def test_detector_handles_missing_signature() -> None:
     assert _is_pending_authority_accessor_operand({"source": "view_call", "callee_signature": None}) is False
     assert _is_pending_authority_accessor_operand({"source": "view_call"}) is False
+
+
+def test_a_read_empty_owner_or_a_pending_ceiling_is_not_proven_empty() -> None:
+    from services.policy.capability_surface import capability_surface_status
+    from services.resolution.capabilities import union
+    from services.resolution.predicate_evaluator.authority import _pending_ceiling_capability
+
+    # ``msg.sender == owner() || msg.sender == pendingOwner()`` with owner() read as 0x0 and the pending read failed.
+    owner_zero = CapabilityExpr.finite_set([], quality="exact", empty_reason="owner_read_zero")
+    ceiling = _pending_ceiling_capability({"source": "view_call", "callee_signature": "pendingOwner()"}, None)
+    for cap in (union(owner_zero, ceiling), union(ceiling, owner_zero)):
+        cap_dict = capability_to_dict(cap)
+        surface = project_capability_surface(cap_dict)
+        assert capability_surface_openness(cap_dict, surface) == "not_determined", cap_dict
+        assert capability_surface_status(cap_dict, surface) is None, cap_dict
+    # Every operand read empty: the union is.
+    slot_zero = CapabilityExpr.finite_set([], quality="exact", empty_reason="slot_read_zero")
+    both = capability_to_dict(union(owner_zero, slot_zero))
+    assert capability_surface_openness(both, project_capability_surface(both)) == "restricted"

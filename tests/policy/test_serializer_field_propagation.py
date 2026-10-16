@@ -287,12 +287,15 @@ def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None
         ),
     ],
 )
-def test_company_compact_capability_preserves_only_exact_empty_witness(cap, empty):
+@pytest.mark.parametrize("status", [None, "resolved_empty", "not_determined"])
+def test_company_compact_capability_preserves_backend_empty_verdict(cap, empty, status):
     from services.governance.principals import _build_company_function_entry
 
-    ef = _ef_namespace(capability_expr=cap, conditions=[{"kind": "time"}], authority_openness="not_determined")
+    ef = _ef_namespace(
+        capability_expr=cap, conditions=[{"kind": "time"}], authority_openness="not_determined", status=status
+    )
     compact = _build_company_function_entry(cast(Any, ef), [], include_capability_expr=False)
-    assert compact["capability_proven_empty"] is empty
+    assert compact["capability_proven_empty"] is (status == "resolved_empty")
     assert "capability_expr" not in compact
     assert compact["conditions"] == ef.conditions
     assert compact["authority_openness"] == "not_determined"

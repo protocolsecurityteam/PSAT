@@ -79,6 +79,7 @@ from utils.scoring_status import (
     OPENNESS_OPEN,
     PRINCIPAL_SET_NOT_EXACT_NOTE,
     PRINCIPAL_STATE_ENUMERATED,
+    RECOVERY_SET_NOT_EXACT_NOTE,
     SCORE_TRIGGER_MANUAL,
     SEVERITY_STATE_PROVEN,
     VALUE_STATE_PROVEN_NO_REACH,
@@ -877,7 +878,8 @@ def _keyset_independence(
 
     gate = _gate(signal, "freeze_recovery_principals")
     if not gate.is_determined or not isinstance(gate.value, list):
-        return None, None, "recovery_path_not_determined_no_unset_claim"
+        partial = next((n for n in signal.witness_notes if n.startswith(RECOVERY_SET_NOT_EXACT_NOTE)), None)
+        return None, None, partial or "recovery_path_not_determined_no_unset_claim"
     saw_safe = False
     best: int | None = None
     for entry in sorted((e for e in gate.value if _is_principal_ref(e)), key=lambda e: str(e.get("address"))):

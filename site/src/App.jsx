@@ -17,6 +17,7 @@ import PipelineDashboard from "./pages/PipelineDashboard.jsx";
 import CompanyOverview from "./pages/CompanyOverview.jsx";
 import LoadingFallback from "./LoadingFallback.jsx";
 import RunsPage from "./pages/RunsPage.jsx";
+import BulkImportModal from "./bulkImport/BulkImportModal.jsx";
 
 // Lazy so the home bundle stays slim; Vite dedupes it with CompanyOverview's
 // import.
@@ -32,6 +33,7 @@ export default function App() {
   const [, setActiveJobs] = useState([]);
   const [form, setForm] = useState({ target: "", name: "", chain: "", analyzeLimit: "5" });
   const [formOpen, setFormOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const analysesRef = useRef([]);
   const doneTimerRef = useRef(null);
@@ -261,9 +263,12 @@ export default function App() {
             <label><span>Chain</span><input value={form.chain} onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Analyze limit</span><input type="number" min="1" max="200" value={form.analyzeLimit} onChange={(e) => setForm((c) => ({ ...c, analyzeLimit: e.target.value }))} /></label>
             <button className="btn" type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
+            <button className="ghost submit-form-secondary" type="button" onClick={() => setBulkOpen(true)}>Import CSV…</button>
           </form>
         </div>
       )}
+
+      {isAdmin && isMonitor && bulkOpen && <BulkImportModal onClose={() => setBulkOpen(false)} />}
 
       {isMonitor && isAdmin && <PipelineDashboard />}
 
