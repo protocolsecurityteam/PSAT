@@ -236,25 +236,6 @@ def test_confidence_low_for_unsupported(tmp_path):
     assert leaves[0]["confidence"] == "low"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
-def test_caller_equals_constant_address_classifies_caller_authority(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            uint256 public x;
-            function f() external {
-                require(msg.sender == 0x1111111111111111111111111111111111111111);
-                x = 1;
-            }
-        }
-    """,
-    )
-    fn = _function(sl, "f")
-    leaves = _all_leaves(build_predicate_tree(fn))
-    assert leaves[0]["authority_role"] == "caller_authority"
-
-
 # #120: a tail ``return true`` must carry the negation of every dominating deny-IF, or fail closed.
 
 

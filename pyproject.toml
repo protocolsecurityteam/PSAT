@@ -42,6 +42,7 @@ dev = [
   "responses>=0.25.0",
   "coverage>=7.6.0",
   "diff-cover>=10.2.0",
+  "hypothesis>=6.168.5",
 ]
 
 [tool.uv]

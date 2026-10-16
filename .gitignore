@@ -48,3 +48,4 @@ fly.production.toml
 fly.bridge.toml
 fly.rollback.json
 fly.lifecycle.json
+.hypothesis/

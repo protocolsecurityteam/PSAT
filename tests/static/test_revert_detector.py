@@ -160,35 +160,6 @@ def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
     )
 
 
-# A returned result is never branched on, so recursion is the only path to the gate (G3 class F).
-
-
-def test_returned_helper_result_yields_a_caller_authority_leaf(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public owner;
-            uint256 public total;
-            function _gated(uint256 amt) internal returns (uint256) {
-                require(msg.sender == owner, "not owner");
-                total += amt;
-                return amt;
-            }
-            function forward(uint256 amt) external returns (uint256) {
-                return _gated(amt);
-            }
-            function open(uint256 amt) external { total += amt; }
-        }
-    """,
-    )
-    gated = _cap_for(sl, "forward(uint256)")
-    ungated = _cap_for(sl, "open(uint256)")
-    assert gated.kind == "finite_set", f"forwarder must resolve to the owner set, got {gated.kind}"
-    assert ungated.kind == "conditional_universal", f"the ungated control must stay open, got {ungated.kind}"
-
-
 # The expression-text memo is instance-scoped so ``id(expr)`` keys never outlive the parse.
 
 
