@@ -583,8 +583,6 @@ def _verify_single_repo(
     fetch_pairs: list[tuple[str, str]] = []
     for commit in reviewed_commits:
         for path in source_paths:
-            if not source_paths:
-                continue
             fetch_pairs.append((commit, path))
 
     fetch_results: dict[tuple[str, str], object] = {}
@@ -648,9 +646,11 @@ def _verify_single_repo(
                             source_repo=source_repo,
                         )
                     )
-                if not equal_paths:
+                if not equal_paths and path in source_paths:
                     any_hash_mismatch = True
                     details.append(f"{commit[:8]} {path}: GitHub content differs from verified {scope_name} source")
+                # A differing file at a guessed path may be an unrelated same-named file, so it proves only that the
+                # commit resolves, not that the deployed source differs.
             elif gh.status == "http_404":
                 commit_had_404 = True
             elif gh.status in ("http_5xx", "transport_error"):

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import Job
-from db.queue import create_job, fail_job_terminal, find_existing_job_for_address
+from db.queue import create_job, fail_job, fail_job_terminal, find_existing_job_for_address
 from db.queue.jobs import create_discovery_child
 from db.queue.source_failures import SOURCE_ABSENCE, record_source_absence
 from tests.conftest import requires_postgres
@@ -65,6 +65,16 @@ def test_source_absence_does_not_block_fresh_scope_or_retry(db_session, monkeypa
         request["force"] = True
     child, created = create_discovery_child(db_session, parent, request)
     assert created and child.id != failed.id
+
+
+def test_failed_child_is_not_reused_as_in_progress(db_session):
+    parent = create_job(db_session, {"company": "failed-scope"})
+    request = {"address": ADDRESS, "chain": "ethereum"}
+    first, created = create_discovery_child(db_session, parent, request)
+    assert created
+    fail_job(db_session, first.id, "RuntimeError: transient")
+    retry, created = create_discovery_child(db_session, parent, request)
+    assert created and retry.id != first.id
 
 
 def test_old_free_text_failure_is_rechecked_not_indefinitely_cached(db_session):

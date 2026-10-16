@@ -294,3 +294,33 @@ def test_bare_event_name_in_ir_resolves_to_canonical_signature():
     assert len(specs) == 1
     assert specs[0]["event_signature"] == "Rely(address)"
     assert specs[0]["event_name"] == "Rely"
+
+
+def test_branchy_writer_completeness_is_not_exponential(tmp_path):
+    import time
+
+    from services.static.contract_analysis_pipeline.mapping_events import complete_boolean_writer_relations
+    from tests.support.slither_compile import _compile_contract
+
+    branches = "\n".join(f"if (x & {1 << i} != 0) {{ y += {i}; }} else {{ y -= {i}; }}" for i in range(24))
+    contract = _compile_contract(
+        tmp_path,
+        f"""
+        pragma solidity ^0.8.19;
+        contract C {{
+            mapping(address => bool) public allowed;
+            uint256 y;
+            event Allowed(address indexed who);
+            function allow(address who, uint256 x) external {{
+                allowed[who] = true;
+                {branches}
+                emit Allowed(who);
+            }}
+        }}
+        """,
+    )
+    specs = discover_mapping_writer_events(contract)
+    started = time.monotonic()
+    complete = complete_boolean_writer_relations(contract, specs)
+    assert time.monotonic() - started < 5
+    assert ("allowed", 1) in complete

@@ -392,7 +392,8 @@ class TestVerifyAuditCoversImplStatuses:
             impl_source=self._src({deployed: "verified", "other/Other.sol": "unrelated"}),
         )
         assert deployed in seen and reviewed in seen
-        assert out.status == ("proven" if match else "hash_mismatch")
+        # A differing file at a guessed path may be unrelated, so it never proves the deployed source differs.
+        assert out.status == ("proven" if match else "candidate_path_missing")
         if match:
             assert len(out.matches) == 1
             assert out.matches[0].etherscan_path == deployed

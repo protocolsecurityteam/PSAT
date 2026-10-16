@@ -162,12 +162,13 @@ def create_discovery_child(session: Session, parent: Job, request: dict[str, Any
             Job.request["root_job_id"].astext == root_id(parent),
             func.lower(func.coalesce(Job.request["proxy_address"].astext, "")) == proxy,
             Job.request["effects_resume_work_id"].astext.is_(None),
-            Job.status.in_([JobStatus.queued, JobStatus.processing, JobStatus.failed, JobStatus.failed_terminal]),
+            # ``failed`` is excluded: nothing claims or retries it, so reusing one would block the address for good.
+            Job.status.in_([JobStatus.queued, JobStatus.processing, JobStatus.failed_terminal]),
         )
         .order_by(Job.created_at.desc())
     ).scalars()
     for candidate in candidates:
-        active = candidate.status in (JobStatus.queued, JobStatus.processing, JobStatus.failed)
+        active = candidate.status in (JobStatus.queued, JobStatus.processing)
         if active or (
             not request.get("force") and not (parent.request or {}).get("force") and source_failure_active(candidate)
         ):

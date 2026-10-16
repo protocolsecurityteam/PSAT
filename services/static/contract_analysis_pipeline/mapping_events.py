@@ -442,14 +442,21 @@ def complete_boolean_writer_relations(
             if s["mapping_name"] == write.cell.variable.name and s["writer_function"] == write.function.full_name
         ]
         start_index = list(write.node.irs).index(write.operation) + 1
+        # Per-node memo keeps the walk linear in CFG size; without it, sequential branches explode exponentially. Sound
+        # because every node on the stack is emit-free, so a revisit means an emit-free cycle wherever it is reached.
+        memo: dict[Any, bool] = {}
 
         def walk(node, index, seen):
             if node in seen:
                 return False
-            for ir in node.irs[index:]:
-                if any(matched_event(write, ir, spec) for spec in candidates):
-                    return True
-            return bool(node.sons) and all(walk(child, 0, seen | {node}) for child in node.sons)
+            if index == 0 and node in memo:
+                return memo[node]
+            result = any(matched_event(write, ir, spec) for ir in node.irs[index:] for spec in candidates) or (
+                bool(node.sons) and all(walk(child, 0, seen | {node}) for child in node.sons)
+            )
+            if index == 0:
+                memo[node] = result
+            return result
 
         return bool(candidates) and walk(write.node, start_index, set())
 
