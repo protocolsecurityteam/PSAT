@@ -521,18 +521,19 @@ def _leaves(tree):
     return out
 
 
-def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_public):
+@pytest.mark.parametrize("guard_name", ["onlyUpgradeTimelock", "requireAccess"])
+def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_public, guard_name):
     """The self-gate is emitted as the same ``external_set`` shape as an external call, reaching the role-store
     adapter.
     """
-    sl = _compile(tmp_path, _SOLADY_SELF_GATE)
+    sl = _compile(tmp_path, _SOLADY_SELF_GATE.replace("onlyUpgradeTimelock", guard_name))
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_pipeline(contract)
     leaves = _leaves(trees["f()"])
     gate = next(leaf for leaf in leaves if leaf.get("set_descriptor"))
     descriptor = gate["set_descriptor"]
     assert descriptor["kind"] == "external_set"
-    assert descriptor["callee_signature"] == "onlyUpgradeTimelock(address)"
+    assert descriptor["callee_signature"] == f"{guard_name}(address)"
     assert descriptor["authority_contract"]["address_source"] == {"source": "self_address"}
     assert descriptor["key_sources"] == [{"source": "msg_sender"}]
     assert gate["authority_role"] == "delegated_authority"
@@ -626,3 +627,50 @@ def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_check
     assert not leaf_caller_taint_is_collapsed(
         {"kind": "equality", "operator": "truthy", "operands": [{"source": "computed", "derived_from": None}]}
     )
+
+
+@pytest.mark.parametrize("copies", ["uint n = slots[msg.sender];", "uint saved = slots[msg.sender]; uint n = saved;"])
+def test_mapping_value_snapshot_is_not_the_callers_identity(tmp_path, earned_public, copies):
+    source = """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => uint) public slots;
+            function enter() external view { BODY require(n != 0); }
+        }
+    """.replace("BODY", copies)
+    sl = _compile(tmp_path, source)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    tree = _build_pipeline(contract)["enter()"]
+    membership = next(leaf for leaf in _leaves(tree) if leaf.get("kind") == "membership")
+    assert membership["set_descriptor"]["storage_var"] == "slots"
+    assert membership["set_descriptor"]["value_predicate"]["op"] == "ne"
+    assert evaluate_tree(tree).kind == "external_check_only"
+
+
+def test_overwritten_mapping_snapshot_does_not_reuse_its_old_membership(tmp_path, earned_public):
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            mapping(address => uint) public slots;
+            function enter() external view {
+                uint n = slots[msg.sender]; n = 1; require(n != 0);
+            }
+        }
+    """,
+    )
+    contract = next(c for c in sl.contracts if c.name == "C")
+    tree = _build_pipeline(contract)["enter()"]
+    assert not any(leaf.get("kind") == "membership" for leaf in _leaves(tree))
+
+
+def test_private_opaque_guard_does_not_get_an_external_probe_descriptor(tmp_path, earned_public):
+    source = _SOLADY_SELF_GATE.replace(
+        "onlyUpgradeTimelock(address account) public", "onlyUpgradeTimelock(address account) private"
+    )
+    sl = _compile(tmp_path, source)
+    contract = next(c for c in sl.contracts if c.name == "C")
+    tree = _build_pipeline(contract)["f()"]
+    assert not any(leaf.get("set_descriptor") for leaf in _leaves(tree))
+    assert evaluate_tree(tree).kind == "external_check_only"
