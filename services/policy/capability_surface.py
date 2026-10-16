@@ -552,9 +552,23 @@ class _Projector:
         if kind == "conditional_universal":
             return self.leaf_path(node_conditions)
         if kind == "OR":
+            children = [self.node(child) for child in _child_dicts(cap_dict)]
+            # Beside an unresolved caller gate, resolved callers are some of the callers, not all of them.
+            partial = any(self.unresolved_callers(child) for child in children)
             surface = _EMPTY
-            for child in _child_dicts(cap_dict):
-                surface = self.or_(surface, self.node(child))
+            for child in children:
+                if partial and child.rows:
+                    child = _Summary(
+                        rows={key: self.lower_bound(acc) for key, acc in child.rows.items()},
+                        residual=child.residual,
+                        ond=child.ond,
+                        count=child.count,
+                        pfirst=child.pfirst,
+                        punion=child.punion,
+                        pexpr=child.pexpr,
+                        nobody=child.nobody,
+                    )
+                surface = self.or_(surface, child)
             return self.append(surface, node_conditions)
         if kind == "AND":
             # Start empty: ``anyone`` must be earned by a conditional_universal child, not minted by AND-ing checks.
@@ -704,6 +718,22 @@ class _Projector:
             punion=punion,
             pexpr=pexpr,
             nobody=left.nobody and right.nobody,
+        )
+
+    def unresolved_callers(self, surface: _Summary) -> bool:
+        return not surface.valid and any(self.is_blocker(cap) for cap in surface.residual)
+
+    def lower_bound(self, acc: _RowAcc) -> _RowAcc:
+        details = {**(acc.row.get("details") or {}), "membership_quality": "lower_bound"}
+        return _RowAcc(
+            row={**acc.row, "details": details},
+            first=acc.first,
+            union=acc.union,
+            multi=acc.multi,
+            touched=acc.touched,
+            trace=acc.trace,
+            has_quality=True,
+            quality="lower_bound",
         )
 
     def and_(self, left: _Summary, right: _Summary) -> _Summary:

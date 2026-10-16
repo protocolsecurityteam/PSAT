@@ -123,8 +123,17 @@ def _ref_node(cap: dict[str, Any]) -> tuple[list, list, list, bool, bool]:
     ond = False
     nobodies = []
     blocked = False
-    for child in cs._child_dicts(cap):
-        c_rows, c_paths, c_res, c_ond, c_nobody = _ref_node(child)
+    children = [(child, _ref_node(child)) for child in cs._child_dicts(cap)]
+    # An OR beside an unresolved caller gate holds only some of its callers.
+    partial = kind == "OR" and any(
+        not (c_rows or c_paths) and any(cs._is_root_authority_blocker(r) for r in c_res)
+        for _, (c_rows, c_paths, c_res, _, _) in children
+    )
+    for child, (c_rows, c_paths, c_res, c_ond, c_nobody) in children:
+        if partial:
+            c_rows = [
+                {**r, "details": {**(r.get("details") or {}), "membership_quality": "lower_bound"}} for r in c_rows
+            ]
         nobodies.append(c_nobody)
         if kind == "OR":
             rows, paths, residual, ond = rows + c_rows, paths + c_paths, residual + c_res, ond or c_ond

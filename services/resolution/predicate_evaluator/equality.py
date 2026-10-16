@@ -64,6 +64,9 @@ def _resolve_equality_principal(
     src = op["source"]
     if src == "constant":
         val = op.get("constant_value")
+        # Slither renders an address literal as its decimal integer.
+        if op.get("value_type") == "address" and isinstance(val, str) and val.isdigit() and int(val) < 1 << 160:
+            val = f"0x{int(val):040x}"
         if isinstance(val, str) and val.startswith("0x") and len(val) == 42:
             if _is_zero_address(val):
                 return CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
