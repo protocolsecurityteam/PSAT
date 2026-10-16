@@ -96,7 +96,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Matches the validated build runtime. Node 20's npm install crashes
+          # while resolving the auth SDK peer tree before tests can run.
+          node-version: "22.23.2"
           cache: "npm"
           cache-dependency-path: site/package-lock.json
       - run: npm ci

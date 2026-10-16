@@ -65,6 +65,7 @@ from .leaves import (
     _build_binary_leaf,
     _build_external_bool_leaf,
     _build_index_membership_leaf,
+    _build_self_gate_leaf,
     _build_solidity_call_leaf,
     _build_truthy_leaf,
     _build_unary_leaf,
@@ -541,7 +542,23 @@ def _build_subtree_from_gate(
             helper_engine.run()
             prov = helper_engine.provenance
 
-    return _build_subtree_from_value(cond, prov, gate, operating_fn)
+    tree = _build_subtree_from_value(cond, prov, gate, operating_fn)
+    leaf = tree.get("leaf") if tree.get("op") == "LEAF" else None
+    if (
+        leaf is not None
+        and leaf.get("kind") == "equality"
+        and leaf.get("operator") in ("truthy", "falsy")
+        and not leaf.get("set_descriptor")
+        and leaf.get("operands")
+        and all(op.get("source") in ("computed", "top") for op in leaf["operands"])
+    ):
+        # Lowering nested boolean helpers can still leave an opaque assembly
+        # read. Keep the enclosing public view guard's callable boundary, just
+        # as the bare-bool fallback does, instead of losing its probe target.
+        self_gate = _build_self_gate_leaf(prov, gate, operating_fn)
+        if self_gate is not None:
+            return make_leaf_node(self_gate)
+    return tree
 
 
 def _build_chain_bindings(
