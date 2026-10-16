@@ -9,6 +9,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import func as sql_func
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from services.scoring.schema import (
@@ -31,6 +33,7 @@ logger = logging.getLogger("services.scoring.distill")
 
 # Why the flow-asset plane produced no receiver map; published on every refusal it causes.
 ASSET_IDENTITY_LOADED = "loaded"
+ASSET_IDENTITY_SCOPE_MISMATCH = "artifact_scope_mismatch"
 ASSET_IDENTITY_JOB_ABSENT = "job_absent"
 ASSET_IDENTITY_ARTIFACT_ABSENT = "artifact_absent"
 ASSET_IDENTITY_ARTIFACT_MALFORMED = "artifact_malformed"
@@ -142,7 +145,17 @@ def distill_job_signals(
 
     query = session.query(Contract)
     if contract_ids is None:
-        contracts = query.filter(Contract.job_id == job.id).order_by(Contract.id).all()
+        if getattr(job, "address", None):
+            # A shared implementation has many producing jobs but only one mutable job pointer.
+            query = query.filter(
+                sql_func.lower(Contract.address) == job.address.lower(),
+                sql_func.lower(sql_func.coalesce(Contract.chain, "ethereum")) == _job_chain_name(job),
+            )
+            if getattr(job, "protocol_id", None) is not None:
+                query = query.filter(or_(Contract.protocol_id == job.protocol_id, Contract.protocol_id.is_(None)))
+        else:
+            query = query.filter(Contract.job_id == job.id)
+        contracts = query.order_by(Contract.id).all()
     else:
         requested = {int(contract_id) for contract_id in contract_ids}
         if job.protocol_id is None:
@@ -187,15 +200,84 @@ def distill_job_signals(
 def distill_contract_signals(
     session: Session, contract: Any, *, job_id: Any, facts_job_id: Any = None
 ) -> list[FunctionSignal]:
+    from db.models import EffectiveFunction
+
     from .signals import _signals_for_function
 
-    # Recovery reruns effects only; flow-asset artifacts belong to the original job.
-    facts = _load_contract_facts(session, contract, job_id=facts_job_id or job_id)
+    # Replace is contract-scoped, but every input plane is deployment-scoped. Never refresh one proxy by borrowing
+    # a sibling's owner, asset, principal snapshot, or flow artifact.
+    deployments = (
+        session.query(EffectiveFunction.deployment_address)
+        .filter(EffectiveFunction.contract_id == contract.id)
+        .distinct()
+        .all()
+    )
     signals: list[FunctionSignal] = []
-    for func in facts.functions:
-        signals.extend(_signals_for_function(facts, func, job_id=job_id))
-    signals.sort(key=lambda s: (s.deployment_address, s.selector, s.claim_id))
+    for address in sorted({_lower(row[0] or contract.address) for row in deployments}):
+        facts = _load_contract_facts(
+            session,
+            contract,
+            job_id=facts_job_id or job_id,
+            deployment_address=address,
+        )
+        for function in facts.functions:
+            signals.extend(_signals_for_function(facts, function, job_id=job_id))
+    signals.sort(key=lambda signal: (signal.deployment_address, signal.selector, signal.claim_id))
     return signals
+
+
+def _job_chain_name(job: Any) -> str:
+    from db.models import derive_job_chain_id
+    from utils.chains import chain_by_id
+
+    request = job.request if isinstance(getattr(job, "request", None), dict) else {}
+    chain_id = (
+        getattr(job, "chain_id", None) or derive_job_chain_id(request.get("chain"), getattr(job, "address", None)) or 1
+    )
+    return chain_by_id(chain_id).name
+
+
+def _deployment_asset_identity(
+    session: Session, contract: Any, address: str, preferred_job_id: Any
+) -> tuple[dict, str]:
+    """Select a matching saved observation, including its producer and payload identity; absence stays unknown."""
+    from db.models import Artifact, Job
+    from utils.chains import chain_by_name
+
+    chain = coalesce_chain(contract.chain)
+    expected_chain_id = chain_by_name(chain).chain_id
+    candidates = (
+        session.query(Job)
+        .join(Artifact, Artifact.job_id == Job.id)
+        .filter(
+            Artifact.name == "flow_asset_addresses",
+            Job.protocol_id == contract.protocol_id,
+            or_(sql_func.lower(Job.address) == _lower(contract.address), Job.id == preferred_job_id),
+        )
+        .order_by((Job.id == preferred_job_id).desc(), Job.updated_at.desc().nullslast(), Job.id.desc())
+        .all()
+    )
+    state = ASSET_IDENTITY_JOB_ABSENT
+    for job in candidates:
+        if _job_chain_name(job) != chain:
+            continue
+        request = job.request if isinstance(job.request, dict) else {}
+        if job.address and (
+            _lower(job.address) != _lower(contract.address)
+            or _lower(request.get("proxy_address") or job.address) != address
+        ):
+            continue
+        identity, candidate_state = _asset_identity(
+            session,
+            job.id,
+            chain_id=expected_chain_id,
+            deployment_address=address,
+        )
+        if candidate_state == ASSET_IDENTITY_SCOPE_MISMATCH:
+            state = candidate_state
+            continue
+        return identity, candidate_state
+    return {}, state
 
 
 # Artifact bodies are immutable, so caching by ``(job_id, artifact_name)`` can't give two answers. Tests clear
@@ -267,14 +349,23 @@ class _TranscriptReader:
         return body
 
 
-def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _ContractFacts:
+def _load_contract_facts(
+    session: Session,
+    contract: Any,
+    *,
+    job_id: Any,
+    deployment_address: str | None = None,
+) -> _ContractFacts:
     from db.models import ControlGraphNode, ControllerValue, EffectiveFunction, EffectVerdict, FunctionPrincipal
 
     chain = coalesce_chain(contract.chain)
-    address = _lower(contract.address)
+    address = _lower(deployment_address or contract.address)
     functions = (
         session.query(EffectiveFunction)
-        .filter(EffectiveFunction.contract_id == contract.id)
+        .filter(
+            EffectiveFunction.contract_id == contract.id,
+            sql_func.lower(sql_func.coalesce(EffectiveFunction.deployment_address, contract.address)) == address,
+        )
         .order_by(EffectiveFunction.id)
         .all()
     )
@@ -317,7 +408,10 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
     }
     facts.registry_owner = _registry_owner(
         session.query(ControllerValue)
-        .filter(ControllerValue.contract_id == contract.id)
+        .filter(
+            ControllerValue.contract_id == contract.id,
+            sql_func.lower(sql_func.coalesce(ControllerValue.deployment_address, contract.address)) == address,
+        )
         .order_by(ControllerValue.source, ControllerValue.id)
         .all()
     )
@@ -348,7 +442,7 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         .all()
     )
     facts.licensed_reach_entities = _licensed_reach_entities(session, backlinks, address, chain)
-    facts.asset_identity, facts.asset_identity_state = _asset_identity(session, job_id)
+    facts.asset_identity, facts.asset_identity_state = _deployment_asset_identity(session, contract, address, job_id)
     return facts
 
 
@@ -401,14 +495,15 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
         anchor = session.get(Contract, node.contract_id)
         if anchor is None or anchor.protocol_id is None:
             continue
-        if _lower(backlink.get("gated_contract_address")) != _lower(anchor.address):
+        anchor_address = _lower(node.deployment_address or anchor.address)
+        if _lower(backlink.get("gated_contract_address")) != anchor_address:
             # Payload names a different contract: two facts, not a licence.
             continue
         anchor_chain = coalesce_chain(anchor.chain)
         if anchor_chain != chain:
             # Licences are per chain; crossing would alias same-address deployments.
             continue
-        key = entity_key(anchor_chain, anchor.address)
+        key = entity_key(anchor_chain, anchor_address)
         if key == entity_key(chain, address):
             continue
         out.setdefault(
@@ -422,7 +517,13 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
     return [out[k] for k in sorted(out)]
 
 
-def _asset_identity(session: Session, job_id: Any) -> tuple[dict[str, Any], str]:
+def _asset_identity(
+    session: Session,
+    job_id: Any,
+    *,
+    chain_id: int | None = None,
+    deployment_address: str | None = None,
+) -> tuple[dict[str, Any], str]:
     """``flow_asset_addresses`` receivers by selector, and why the map is empty.
 
     Absence is ``not_determined``, never a proven-empty set. No job, no artifact and an unrecognised body are distinct
@@ -437,6 +538,10 @@ def _asset_identity(session: Session, job_id: Any) -> tuple[dict[str, Any], str]
         return {}, ASSET_IDENTITY_ARTIFACT_ABSENT
     if not isinstance(payload, dict):
         return {}, ASSET_IDENTITY_ARTIFACT_MALFORMED
+    if chain_id is not None and payload.get("chain_id") != chain_id:
+        return {}, ASSET_IDENTITY_SCOPE_MISMATCH
+    if deployment_address is not None and _lower(payload.get("deployment_address")) != deployment_address:
+        return {}, ASSET_IDENTITY_SCOPE_MISMATCH
     receivers = payload.get("receivers")
     if not isinstance(receivers, list):
         return {}, ASSET_IDENTITY_ARTIFACT_MALFORMED

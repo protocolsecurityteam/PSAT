@@ -28,6 +28,159 @@ def _all_leaves(tree):
     return out
 
 
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "address(uint160(x)) == owner",
+        "address(uint160(x)) == owner && value > 0",
+        "address(uint160(x)) == owner || msg.sender == other",
+    ],
+)
+@pytest.mark.parametrize("helper", [False, True])
+def test_saturated_caller_guard_remains_unknown(tmp_path, monkeypatch, guard, helper):
+    import json
+
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
+    from services.static.contract_analysis_pipeline import provenance
+
+    body = "".join(f"x += {number};" for number in range(1, 13)) + f"x -= 78; require({guard});"
+    source = "pragma solidity ^0.8.19; contract C { address public owner; address public other; uint public value; "
+    if helper:
+        source += "function f() external { require(check(msg.sender)); value=1; } "
+        source += "function check(address who) internal view returns(bool) { uint x=uint160(who); "
+        source += body + "return value > 0; }}"
+    else:
+        source += "function f() external { uint x=uint160(msg.sender); " + body + "value=1; }}"
+    function = _function(_compile(tmp_path, source), "f")
+    context = EvaluationContext(state_var_values={"owner": "0x" + "11" * 20, "other": "0x" + "22" * 20})
+    for cap in (10000, 8):
+        monkeypatch.setattr(provenance, "DEFAULT_SOURCE_SET_CAP", cap)
+        tree = build_predicate_tree(function)
+        capability = capability_to_dict(evaluate_tree(tree, context))
+        expected = "restricted" if cap == 10000 or "||" in guard else "not_determined"
+        assert capability_surface_openness(capability, project_capability_surface(capability)) == expected
+        if cap == 8:
+            assert "predicate_provenance_unknown" in json.dumps(capability)
+            assert any(
+                "operand_provenance_unknown" in (leaf.get("authority_proof") or {}).get("requirements", [])
+                for leaf in _all_leaves(tree)
+            )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if (!ready) return false; return who == owner;",
+        "if (ready) return isOwner(who); return false;",
+        "if (who == owner) return ready; return false;",
+    ],
+)
+def test_nested_boolean_wrappers_preserve_authorization(tmp_path, monkeypatch, body):
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
+    from services.static.contract_analysis_pipeline.predicates import tree as tree_module
+
+    source = (
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            bool public ready; address public owner; uint public value;
+            function direct() external { require(check(msg.sender)); value=1; }
+            function wrapped() external { require(wrapper(msg.sender)); value=1; }
+            function negatedDirect() external { require(!check(msg.sender)); value=1; }
+            function negatedWrapped() external { require(!wrapper(msg.sender)); value=1; }
+            function wrapper(address who) internal view returns(bool) { return second(who); }
+            function second(address who) internal view returns(bool) { return check(who); }
+            function isOwner(address who) internal view returns(bool) { return who == owner; }
+            function check(address who) internal view returns(bool) {
+    """
+        + body
+        + "}}"
+    )
+    sl = _compile(tmp_path, source)
+    owner = "0x" + "12" * 20
+    context = EvaluationContext(state_var_values={"owner": owner})
+    for name in ("direct", "wrapped"):
+        tree = build_predicate_tree(_function(sl, name))
+        cap = evaluate_tree(tree, context)
+        assert cap.kind == "finite_set" and cap.members == [owner]
+    for name in ("negatedDirect", "negatedWrapped"):
+        tree = build_predicate_tree(_function(sl, name))
+        cap_dict = capability_to_dict(evaluate_tree(tree, context))
+        # The newer return-path evaluator can prove the negated checker admits
+        # non-owners, while retaining the unresolved readiness branch.
+        assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "open"
+        assert any(
+            leaf.get("operator") == "ne"
+            and any(op.get("state_variable_name") == "owner" for op in leaf.get("operands", []))
+            for leaf in _all_leaves(tree)
+        )
+    # If path reconstruction cannot represent a multi-return helper, its first
+    # literal return must not become a public side condition.
+    monkeypatch.setattr(
+        tree_module,
+        "_helper_value_tree",
+        lambda *args: {
+            "op": "LEAF",
+            "leaf": {
+                "kind": "unsupported",
+                "unsupported_reason": "unmodeled_helper_return",
+                "authority_role": "caller_authority",
+                "authority_proof": {"state": "not_determined"},
+            },
+        },
+    )
+    tree = build_predicate_tree(_function(sl, "wrapped"))
+    cap_dict = capability_to_dict(evaluate_tree(tree, context))
+    assert capability_surface_openness(cap_dict, project_capability_surface(cap_dict)) == "not_determined"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if (n == 0) return false; return who == owner && allowed(who, n - 1);",
+        "return who == owner || (n > 0 && allowed(who, n - 1));",
+    ],
+    ids=["conditional-return", "binary-return"],
+)
+def test_recursive_authorization_helper_preserves_unknown_gate(tmp_path, body):
+    sl = _compile(
+        tmp_path,
+        """
+        pragma solidity ^0.8.19;
+        contract C {
+            address public owner;
+            function f(uint256 n) external view { require(allowed(msg.sender, n)); }
+            function allowed(address who, uint256 n) internal view returns (bool) {
+        """
+        + body
+        + "}}",
+    )
+    tree = build_predicate_tree(_function(sl, "f"))
+    leaves = _all_leaves(tree)
+    assert tree is not None
+    assert any(leaf.get("unsupported_reason") == "internal_return_recursion_limit" for leaf in leaves), repr(tree)
+    from services.policy.capability_surface import capability_surface_openness, project_capability_surface
+    from services.resolution.capability_resolver import capability_to_dict
+    from services.resolution.predicate_evaluator import evaluate_tree
+    from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+    from services.static.contract_analysis_pipeline.predicates._helpers import _unsupported_leaf
+
+    limit = next(leaf for leaf in leaves if leaf.get("unsupported_reason") == "internal_return_recursion_limit")
+    combined = {
+        "op": "AND",
+        "children": [
+            {"op": "LEAF", "leaf": _unsupported_leaf("business_note", "business condition")},
+            {"op": "LEAF", "leaf": limit},
+        ],
+    }
+    capability = capability_to_dict(evaluate_tree(cast(PredicateTree, combined)))
+    assert capability_surface_openness(capability, project_capability_surface(capability)) == "not_determined"
+
+
 def test_try_catch_external_bool_call_builds_delegated_authority(tmp_path):
     sl = _compile(
         tmp_path,
@@ -141,7 +294,13 @@ def test_issue120_maker_dsauth_allow_chain_unchanged(tmp_path):
     leaves = _all_leaves(tree)
     kinds = sorted(le["kind"] for le in leaves)
     assert kinds == ["equality", "equality", "equality", "external_bool"], leaves
-    # The authority call is read under the ``authority != address(0)`` branch that reaches it.
+    # The delegated branch also requires a nonzero authority. Its caller-independent
+    # branch guard must not disappear merely because the return is nonliteral.
+    assert any(
+        leaf.get("operator") == "ne"
+        and any(op.get("state_variable_name") == "authority" for op in leaf.get("operands", []))
+        for leaf in leaves
+    )
     assert sorted(le["operator"] for le in leaves) == ["eq", "eq", "ne", "truthy"], leaves
     assert not any(le["operator"] == "falsy" for le in leaves), leaves
     assert not any(le["kind"] == "unsupported" for le in leaves), leaves

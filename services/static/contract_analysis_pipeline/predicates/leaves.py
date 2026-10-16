@@ -17,6 +17,7 @@ from ..provenance import ProvenanceMap
 from ..revert_detect import RevertGate
 from ..shared import external_bool_leaf_is_gate_shape
 from ..slither_compat import (
+    Assignment,
     Binary,
     Constant,
     HighLevelCall,
@@ -296,6 +297,15 @@ def _find_index_value_pair(a: Any, b: Any, function: Any) -> tuple[Any | None, A
         return None, None, None
     const_value = _coerce_constant_value(b)
     defining = _find_defining_ir(a, None, function)
+    # A local snapshot of a mapping entry is its value, not the caller-derived
+    # index. Follow assignment definitions before classifying the comparison;
+    # otherwise `position = entries[caller]; position != 0` becomes caller != 0.
+    seen: set[int] = set()
+    while isinstance(defining, Assignment):
+        if id(defining) in seen:
+            return None, None, None
+        seen.add(id(defining))
+        defining = _find_defining_ir(defining.rvalue, None, function)
     if isinstance(defining, Index):
         return defining, const_value, None
     # ``(map[k] & MASK) op CONST`` is a value compare on the Index; the mask is carried to the value side.

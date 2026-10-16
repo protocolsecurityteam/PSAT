@@ -1,5 +1,5 @@
 {
-  "payload_schema": 1,
+  "payload_schema": 2,
   "skeleton": {
     "functions": {
       "<address>": []

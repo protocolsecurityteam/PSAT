@@ -39,6 +39,15 @@ from .principals import (
     _principal_lookup_meta,
     _trim_control_graph,
 )
+from .runtime_scope import (
+    RuntimeKey,
+    code_id,
+    entry_key,
+    principal_classification,
+    scoped_rows,
+    scoped_walks,
+    with_classification,
+)
 
 
 def build_governance_view(
@@ -55,19 +64,19 @@ def build_governance_view(
     for protocol_id in {c.protocol_id for c in contracts_by_job_id.values() if c and c.protocol_id is not None}:
         partial_by_cid.update(partial_asset_rows(session, protocol_id))
 
-    controller_values_by_cid: dict[int, list[ControllerValue]] = children["controller_values"]
-    ef_effects_by_cid: dict[int, list[dict[str, list[str]]]] = children["ef_effects"]
-    fp_governance_by_cid: dict[int, list[dict[str, Any]]] = children["fp_governance_rows"]
+    controller_values_by_cid: dict[RuntimeKey, list[ControllerValue]] = children["controller_values"]
+    ef_effects_by_cid: dict[RuntimeKey, list[dict[str, list[str]]]] = children["ef_effects"]
+    fp_governance_by_cid: dict[RuntimeKey, list[dict[str, Any]]] = children["fp_governance_rows"]
     upgrade_events_count_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_count"]
     last_upgrade_by_cid: dict[int, dict[str, Any]] = children["upgrade_events_last"]
     balances_by_cid: dict[int, list[Any]] = children["balances"]
     balance_fetch_by_id: dict[int, Any] = children["balance_fetches"]
-    cgn_by_cid: dict[int, list[ControlGraphNode]] = children["cgn"]
-    cge_by_cid: dict[int, list[ControlGraphEdge]] = children["cge"]
-    fp_in_contract_by_cid: dict[int, set[str]] = children["fp_in_contract_principals"]
-    fp_all_addrs_by_cid: dict[int, set[str]] = children["fp_all_addrs"]
-    fp_function_detail_by_cid: dict[int, list[dict[str, Any]]] = children["fp_function_detail"]
-    terminal_walk_by_entity: dict[str, dict[str, Any]] = children["terminal_walk"]  # pyright: ignore[reportAssignmentType]
+    cgn_by_cid: dict[RuntimeKey, list[ControlGraphNode]] = children["cgn"]
+    cge_by_cid: dict[RuntimeKey, list[ControlGraphEdge]] = children["cge"]
+    fp_in_contract_by_cid: dict[RuntimeKey, set[str]] = children["fp_in_contract_principals"]
+    fp_all_addrs_by_cid: dict[RuntimeKey, set[str]] = children["fp_all_addrs"]
+    fp_function_detail_by_cid: dict[RuntimeKey, list[dict[str, Any]]] = children["fp_function_detail"]
+    terminal_walk_by_entity: dict[RuntimeKey, dict[str, dict[str, Any]]] = children["terminal_walk"]
 
     def _fetch_for(balance_row: Any) -> Any | None:
         fetch_id = getattr(balance_row, "fetch_id", None)
@@ -75,6 +84,7 @@ def build_governance_view(
 
     # Fold secondary-impl rows into the primary impl's buckets so a Safe with authority only on the admin impl still
     # surfaces as a proxy controller.
+    folded: set[RuntimeKey] = set()
     for job in jobs:
         cr = contracts_by_job_id.get(job.id)
         secondaries = _secondary_impl_contracts(cr, impl_job_by_entity, contracts_by_job_id)
@@ -85,30 +95,40 @@ def build_governance_view(
         )
         primary_impl = contracts_by_job_id.get(impl_job.id) if impl_job else None
         primary_cid = primary_impl.id if primary_impl else (cr.id if cr else None)
-        if primary_cid is None:
+        if primary_cid is None or cr is None:
             continue
+        primary_key = entry_key(primary_cid, cr)
+        if primary_key in folded:
+            continue
+        folded.add(primary_key)
         for sc in secondaries:
             if sc.id == primary_cid:
                 continue
-            cv_extra = controller_values_by_cid.get(sc.id)
+            extra_nodes = cgn_by_cid.get(entry_key(sc.id, cr))
+            if extra_nodes:
+                cgn_by_cid[primary_key] = list(cgn_by_cid.get(primary_key) or []) + extra_nodes
+            extra_edges = cge_by_cid.get(entry_key(sc.id, cr))
+            if extra_edges:
+                cge_by_cid[primary_key] = list(cge_by_cid.get(primary_key) or []) + extra_edges
+            cv_extra = controller_values_by_cid.get(entry_key(sc.id, cr))
             if cv_extra:
-                controller_values_by_cid[primary_cid] = list(controller_values_by_cid.get(primary_cid) or []) + cv_extra
-            fpg_extra = fp_governance_by_cid.get(sc.id)
+                controller_values_by_cid[primary_key] = list(controller_values_by_cid.get(primary_key) or []) + cv_extra
+            fpg_extra = fp_governance_by_cid.get(entry_key(sc.id, cr))
             if fpg_extra:
-                fp_governance_by_cid[primary_cid] = list(fp_governance_by_cid.get(primary_cid) or []) + fpg_extra
-            extra_addrs = fp_in_contract_by_cid.get(sc.id)
+                fp_governance_by_cid[primary_key] = list(fp_governance_by_cid.get(primary_key) or []) + fpg_extra
+            extra_addrs = fp_in_contract_by_cid.get(entry_key(sc.id, cr))
             if extra_addrs:
-                fp_in_contract_by_cid[primary_cid] = set(fp_in_contract_by_cid.get(primary_cid) or set()) | set(
+                fp_in_contract_by_cid[primary_key] = set(fp_in_contract_by_cid.get(primary_key) or set()) | set(
                     extra_addrs
                 )
             # The CGN principal gate checks the primary cid, so fold secondary-impl governors up too.
-            extra_all = fp_all_addrs_by_cid.get(sc.id)
+            extra_all = fp_all_addrs_by_cid.get(entry_key(sc.id, cr))
             if extra_all:
-                fp_all_addrs_by_cid[primary_cid] = set(fp_all_addrs_by_cid.get(primary_cid) or set()) | set(extra_all)
+                fp_all_addrs_by_cid[primary_key] = set(fp_all_addrs_by_cid.get(primary_key) or set()) | set(extra_all)
 
-    principal_lookup = _build_principal_lookup(
-        contracts_by_job_id, controller_values_by_cid, cgn_by_cid, terminal_walk_by_entity
-    )
+    # Only immutable code classification is global; runtime metadata is selected per rendered deployment.
+    principal_lookup = principal_classification(contracts_by_job_id, controller_values_by_cid, cgn_by_cid)
+    principal_lookups_by_entity: dict[str, dict[str, dict[str, Any]]] = {}
 
     contracts: list[dict[str, Any]] = []
     owner_groups: dict[str, list[dict]] = {}
@@ -130,6 +150,21 @@ def build_governance_view(
         impl_contract = contracts_by_job_id.get(impl_job.id) if impl_job else None
 
         secondary_impl_contracts = _secondary_impl_contracts(contract_row, impl_job_by_entity, contracts_by_job_id)
+        runtime_keys = [
+            entry_key(c.id, contract_row)
+            for c in [contract_row, impl_contract, *secondary_impl_contracts]
+            if c is not None and contract_row is not None
+        ]
+        local_lookup = _build_principal_lookup(
+            contracts_by_job_id,
+            scoped_rows(controller_values_by_cid, runtime_keys),
+            scoped_rows(cgn_by_cid, runtime_keys),
+            scoped_walks(terminal_walk_by_entity, runtime_keys),
+        )
+        local_lookup = with_classification(local_lookup, principal_lookup)
+        principal_lookups_by_entity[_entity_key(contract_row.chain if contract_row else None, job.address)] = (
+            local_lookup
+        )
 
         summary_row = impl_contract.summary if impl_contract else None
         if not summary_row and contract_row:
@@ -139,14 +174,14 @@ def build_governance_view(
         lookup_contract = contract_row
         if is_proxy:
             for candidate in [impl_contract, *secondary_impl_contracts]:
-                if candidate and controller_values_by_cid.get(candidate.id):
+                if candidate and controller_values_by_cid.get(entry_key(candidate.id, contract_row)):
                     lookup_contract = candidate
                     break
 
         owner = None
         controllers: dict[str, Any] = {}
         if lookup_contract:
-            for cv in controller_values_by_cid.get(lookup_contract.id, []):
+            for cv in controller_values_by_cid.get(entry_key(lookup_contract.id, contract_row), []):
                 controllers[cv.controller_id] = cv.value
                 if _is_active_owner_controller(cv.controller_id) and cv.value and cv.value.startswith("0x"):
                     owner = cv.value.lower()
@@ -168,7 +203,7 @@ def build_governance_view(
         value_effects: list[str] = []
         caps_set: set[str] = set()
         for cid in ef_contract_ids:
-            for rec in ef_effects_by_cid.get(cid, []):
+            for rec in ef_effects_by_cid.get(entry_key(cid, contract_row), []):
                 for label in rec["labels"]:
                     if label in ("asset_pull", "asset_send", "mint", "burn") and label not in value_effects:
                         value_effects.append(label)
@@ -335,12 +370,12 @@ def build_governance_view(
             "holdings_coverage": holdings_coverage,
         }
 
-        graph_contract = lookup_contract or contract_row
+        graph_contract = impl_contract or lookup_contract or contract_row
         if graph_contract:
-            cg_nodes = cgn_by_cid.get(graph_contract.id, [])
-            cg_edges = cge_by_cid.get(graph_contract.id, [])
+            cg_nodes = cgn_by_cid.get(entry_key(graph_contract.id, contract_row), [])
+            cg_edges = cge_by_cid.get(entry_key(graph_contract.id, contract_row), [])
             node_meta = {
-                n.address: _principal_lookup_meta(principal_lookup, graph_contract.chain, n.address, n.details)
+                n.address: _principal_lookup_meta(local_lookup, graph_contract.chain, n.address, n.details)
                 for n in cg_nodes
             }
             nodes_payload = [
@@ -405,6 +440,7 @@ def build_governance_view(
         fp_all_addrs_by_cid,
         principal_lookup,
         reach_edges,
+        principal_lookups_by_entity,
     )
 
     # FP-by-cid reshaped to FP-by-entity for ``primary_for`` (Surface group containment):
@@ -420,21 +456,15 @@ def build_governance_view(
     contract_entity_by_cid: dict[int, str] = {
         c.id: _entity_key(c.chain, c.address) for c in contracts_by_job_id.values() if c is not None and c.address
     }
-    impl_entity_to_proxy_entity: dict[str, str] = {}
-    for c in contracts:
-        if not (c.get("is_proxy") and c.get("address")):
-            continue
-        proxy_entity = _entity_key(c.get("chain"), c["address"])
-        if c.get("implementation"):
-            impl_entity_to_proxy_entity[_entity_key(c.get("chain"), c["implementation"])] = proxy_entity
-        for saddr in c.get("secondary_implementations") or []:
-            impl_entity_to_proxy_entity[_entity_key(c.get("chain"), saddr)] = proxy_entity
 
-    def _rendered_entity(cid: int) -> str | None:
-        own_entity = contract_entity_by_cid.get(cid)
+    def _rendered_entity(key: RuntimeKey) -> str | None:
+        own_entity = contract_entity_by_cid.get(code_id(key))
         if not own_entity:
             return None
-        return impl_entity_to_proxy_entity.get(own_entity) or own_entity
+        if isinstance(key, tuple):
+            entity = _entity_key(_entity_chain(own_entity), key[1])
+            return entity if entity in remaining else None
+        return own_entity if own_entity in remaining else None
 
     # Callers are composited with their target's chain (always same-chain) so a governance contract is one node as key
     # and as caller.
@@ -693,7 +723,7 @@ def _protocol_reach_edges(
 def _control_edge_witness(
     contracts: list[dict[str, Any]],
     lookup_contract_by_entity: dict[str, Contract | None],
-    cge_by_cid: dict[int, list[ControlGraphEdge]],
+    cge_by_cid: dict[RuntimeKey, list[ControlGraphEdge]],
     reach_edges: Iterable[tuple[str, str, str, str | None, str | None]] = (),
 ) -> dict[tuple[str, str, str], dict[str, Any]]:
     """``(chain, flow_from, flow_to)`` -> witnessed claims on that control edge.
@@ -710,7 +740,7 @@ def _control_edge_witness(
         if not lookup_c:
             continue
         chain_tok = _coalesce_chain(entry.get("chain"))
-        for edge in cge_by_cid.get(lookup_c.id, []):
+        for edge in cge_by_cid.get(entry_key(lookup_c.id, entry), []):
             if edge.relation not in CONTROL_EDGE_RELATIONS:
                 continue
             subject = (edge.from_node_id or "").replace("address:", "").lower()
@@ -738,14 +768,15 @@ def _control_edge_witness(
 def _build_flows_and_principals(
     contracts: list[dict[str, Any]],
     contracts_by_job_id: dict[Any, Contract],
-    controller_values_by_cid: dict[int, list[ControllerValue]],
-    fp_governance_by_cid: dict[int, list[dict[str, Any]]],
-    cgn_by_cid: dict[int, list[ControlGraphNode]],
-    cge_by_cid: dict[int, list[ControlGraphEdge]],
-    fp_in_contract_by_cid: dict[int, set[str]],
-    fp_all_addrs_by_cid: dict[int, set[str]],
+    controller_values_by_cid: dict[RuntimeKey, list[ControllerValue]],
+    fp_governance_by_cid: dict[RuntimeKey, list[dict[str, Any]]],
+    cgn_by_cid: dict[RuntimeKey, list[ControlGraphNode]],
+    cge_by_cid: dict[RuntimeKey, list[ControlGraphEdge]],
+    fp_in_contract_by_cid: dict[RuntimeKey, set[str]],
+    fp_all_addrs_by_cid: dict[RuntimeKey, set[str]],
     principal_lookup: dict[str, dict[str, Any]],
     reach_edges: list[tuple[str, str, str, str | None, str | None]],
+    principal_lookups_by_entity: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     # Composite keys throughout: an address that is a contract on one chain can be a Safe or an EOA on another.
     contract_entities = {_entity_key(c.get("chain"), c["address"]) for c in contracts if c["address"]}
@@ -800,7 +831,7 @@ def _build_flows_and_principals(
         chain = c.get("chain")
         prefix = _entity_prefix(chain)
         lookup_c = lookup_contract_by_entity.get(prefix + target)
-        fp_principals: set[str] = fp_in_contract_by_cid.get(lookup_c.id, set()) if lookup_c else set()
+        fp_principals: set[str] = fp_in_contract_by_cid.get(entry_key(lookup_c.id, c), set()) if lookup_c else set()
 
         if c.get("owner") and prefix + c["owner"].lower() in contract_entities:
             flow_type = (
@@ -845,7 +876,7 @@ def _build_flows_and_principals(
         lookup_c = lookup_contract_by_entity.get(prefix + c["address"].lower())
         if not lookup_c:
             continue
-        safe_owner_edges = [e for e in cge_by_cid.get(lookup_c.id, []) if e.relation == "safe_owner"]
+        safe_owner_edges = [e for e in cge_by_cid.get(entry_key(lookup_c.id, c), []) if e.relation == "safe_owner"]
         for edge in sorted(safe_owner_edges, key=_edge_order):
             safe_key = prefix + edge.from_node_id.replace("address:", "").lower()
             owner_addr = edge.to_node_id.replace("address:", "").lower()
@@ -879,10 +910,10 @@ def _build_flows_and_principals(
         lookup_c = lookup_contract_by_entity.get(prefix + target)
         if not lookup_c:
             continue
-        fp_addrs = fp_all_addrs_by_cid.get(lookup_c.id, set())
+        fp_addrs = fp_all_addrs_by_cid.get(entry_key(lookup_c.id, c), set())
 
         accepted: list[tuple[Any, str, str, dict[str, Any], str]] = []
-        for cgn in cgn_by_cid.get(lookup_c.id, []):
+        for cgn in cgn_by_cid.get(entry_key(lookup_c.id, c), []):
             node_addr = (cgn.address or "").lower()
             principal_key = prefix + node_addr
             if not node_addr or principal_key in contract_entities:
@@ -893,7 +924,9 @@ def _build_flows_and_principals(
             # feeRecipient) claim control they don't hold.
             if node_addr not in fp_addrs or node_addr == "0x0000000000000000000000000000000000000000":
                 continue
-            lookup_meta = principal_lookup.get(principal_key, {})
+            lookup_meta = (
+                (principal_lookups_by_entity or {}).get(prefix + target, principal_lookup).get(principal_key, {})
+            )
             resolved_type = lookup_meta.get("resolved_type") or cgn.resolved_type
             if resolved_type not in _SETTLED_CONTROLLER_TYPES:
                 continue
@@ -909,7 +942,7 @@ def _build_flows_and_principals(
                 details: dict[str, Any] = dict(lookup_meta.get("details") or {})
                 if isinstance(cgn.details, dict):
                     details.update(cgn.details)
-                for cv in controller_values_by_cid.get(lookup_c.id, []):
+                for cv in controller_values_by_cid.get(entry_key(lookup_c.id, c), []):
                     if (cv.value or "").lower() != node_addr:
                         continue
                     if cv.details and isinstance(cv.details, dict):
@@ -936,7 +969,7 @@ def _build_flows_and_principals(
         if not lookup_c:
             continue
         accepted_fp: list[tuple[dict[str, Any], str, str, dict[str, Any], str]] = []
-        for fp in fp_governance_by_cid.get(lookup_c.id, []):
+        for fp in fp_governance_by_cid.get(entry_key(lookup_c.id, c), []):
             pa = (fp.get("address") or "").lower()
             if not pa or pa == target:
                 continue
@@ -945,7 +978,9 @@ def _build_flows_and_principals(
             principal_key = prefix + pa
             if principal_key in owner_of_safe or principal_key in contract_entities:
                 continue
-            lookup_meta = principal_lookup.get(principal_key, {})
+            lookup_meta = (
+                (principal_lookups_by_entity or {}).get(prefix + target, principal_lookup).get(principal_key, {})
+            )
             resolved_type = fp.get("resolved_type")
             if lookup_meta.get("resolved_type") and resolved_type in (None, "", "unknown", "contract"):
                 resolved_type = lookup_meta["resolved_type"]
@@ -991,7 +1026,7 @@ def _edge_order(edge: Any) -> tuple[str, str, int]:
 
 
 def _controller_enumeration(
-    contracts_by_job_id: dict[Any, Contract], cgn_by_cid: dict[int, list[ControlGraphNode]]
+    contracts_by_job_id: dict[Any, Contract], cgn_by_cid: dict[RuntimeKey, list[ControlGraphNode]]
 ) -> dict[str, dict[str, str]]:
     """Per entity with a member replay: ``complete``, or ``not_determined`` with the statuses it reached.
 
@@ -1004,7 +1039,7 @@ def _controller_enumeration(
             details = node.details if isinstance(node.details, dict) else {}
             status = details.get(MAPPING_ENUMERATION_STATUS)
             if status is not None:
-                statuses.setdefault(_entity_key(chain_by_cid.get(cid), node.address), set()).add(str(status))
+                statuses.setdefault(_entity_key(chain_by_cid.get(code_id(cid)), node.address), set()).add(str(status))
     unread = controllers_not_determined(statuses)
     return {
         key: ({"state": "not_determined", "status": unread[key]} if key in unread else {"state": "complete"})

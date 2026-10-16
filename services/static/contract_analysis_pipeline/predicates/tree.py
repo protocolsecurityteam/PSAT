@@ -11,6 +11,8 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Any, cast
 
+from utils.predicate_provenance import has_unknown_predicate_provenance
+
 from ..predicate_types import (
     REACH_CONDITION_BASIS,
     REACH_READ,
@@ -63,6 +65,7 @@ from .leaves import (
     _build_binary_leaf,
     _build_external_bool_leaf,
     _build_index_membership_leaf,
+    _build_self_gate_leaf,
     _build_solidity_call_leaf,
     _build_truthy_leaf,
     _build_unary_leaf,
@@ -539,7 +542,23 @@ def _build_subtree_from_gate(
             helper_engine.run()
             prov = helper_engine.provenance
 
-    return _build_subtree_from_value(cond, prov, gate, operating_fn)
+    tree = _build_subtree_from_value(cond, prov, gate, operating_fn)
+    leaf = tree.get("leaf") if tree.get("op") == "LEAF" else None
+    if (
+        leaf is not None
+        and leaf.get("kind") == "equality"
+        and leaf.get("operator") in ("truthy", "falsy")
+        and not leaf.get("set_descriptor")
+        and leaf.get("operands")
+        and all(op.get("source") in ("computed", "top") for op in leaf["operands"])
+    ):
+        # Lowering nested boolean helpers can still leave an opaque assembly
+        # read. Keep the enclosing public view guard's callable boundary, just
+        # as the bare-bool fallback does, instead of losing its probe target.
+        self_gate = _build_self_gate_leaf(prov, gate, operating_fn)
+        if self_gate is not None:
+            return make_leaf_node(self_gate)
+    return tree
 
 
 def _build_chain_bindings(
@@ -738,7 +757,32 @@ def _classify_leaf_from_ir(
     return None
 
 
+_return_helper_stack: _contextvars.ContextVar[tuple[int, ...]] = _contextvars.ContextVar(
+    "predicate_return_helper_stack", default=()
+)
+
+
+def _recursive_return_unknown(gate: RevertGate) -> LeafPredicate:
+    leaf = _unsupported_leaf("internal_return_recursion_limit", gate.expression_text)
+    leaf["authority_proof"] = {"state": "not_determined", "requirements": ["internal_return_recursion_limit"]}
+    return leaf
+
+
 def _build_internal_call_leaf(
+    ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None
+) -> LeafPredicate | None:
+    key = id(getattr(ir, "function", ir))
+    stack = _return_helper_stack.get()
+    if key in stack or len(stack) >= 32:
+        return _recursive_return_unknown(gate)
+    token = _return_helper_stack.set((*stack, key))
+    try:
+        return _expand_internal_call_leaf(ir, prov, gate, function)
+    finally:
+        _return_helper_stack.reset(token)
+
+
+def _expand_internal_call_leaf(
     ir: Any, prov: ProvenanceMap, gate: RevertGate, function: Any | None
 ) -> LeafPredicate | None:
     """A bool InternalCall condition (``if (!check(role, account)) revert``): recurse into the callee with bound
@@ -804,6 +848,20 @@ def _attach_call_site_arg_origins(leaf: LeafPredicate, ir: Any, caller_prov: Pro
 def _build_internal_call_or_and_subtree(
     ir: Any, prov: ProvenanceMap, gate: RevertGate
 ) -> tuple[PredicateTree | None, bool]:
+    key = id(getattr(ir, "function", ir))
+    stack = _return_helper_stack.get()
+    if key in stack or len(stack) >= 32:
+        return (make_leaf_node(_recursive_return_unknown(gate)), False)
+    token = _return_helper_stack.set((*stack, key))
+    try:
+        return _expand_internal_call_or_and_subtree(ir, prov, gate)
+    finally:
+        _return_helper_stack.reset(token)
+
+
+def _expand_internal_call_or_and_subtree(
+    ir: Any, prov: ProvenanceMap, gate: RevertGate
+) -> tuple[PredicateTree | None, bool]:
     """An AND/OR subtree for a helper whose return is a connective (Solmate ``isAuthorized``, DSAuth, Maker ``wish``,
     USDT), which ``_build_binary_leaf`` can't handle.
 
@@ -848,7 +906,11 @@ def _build_internal_call_or_and_subtree(
         inner_callee = getattr(inner, "function", None)
         asm_op = _detect_assembly_combinator_op(inner_callee) if inner_callee else None
         if asm_op is None:
-            return None, False
+            # Keep the nested helper's complete return paths and bound frame;
+            # classifying only its first return can turn an owner gate into a
+            # literal business condition.
+            subtree = _build_subtree_from_value(_return_value, sub_prov, inside, callee)
+            return _attach_call_site_arg_origins_to_tree(subtree, ir, prov), False
         op_name = asm_op
         call_args = list(getattr(inner, "arguments", []) or [])
         if not call_args:
@@ -1108,6 +1170,11 @@ def _tree_has_caller_tainted_leaf(tree: Any) -> bool:
         return False
     if tree.get("op") == "LEAF":
         leaf = tree.get("leaf") or {}
+        if (
+            has_unknown_predicate_provenance(leaf)
+            or (leaf.get("authority_proof") or {}).get("state") == "not_determined"
+        ):
+            return True
         for op in leaf.get("operands") or []:
             if (op or {}).get("source") in _CALLER_SOURCES:
                 return True

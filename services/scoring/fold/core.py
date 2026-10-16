@@ -247,6 +247,7 @@ def compute_protocol_score(
     perimeter, perimeter_detail = P.perimeter_state(session, protocol_id)
     provenance: dict[str, Any] = {
         "plane_row_counts": P.plane_row_counts(session, protocol_id),
+        "effects_coverage": P.load_effects_coverage(session, protocol_id),
         "population": {
             "signals": len(signals),
             "signals_entering_grade": sum(1 for s in signals if s.enters_grade),
@@ -370,7 +371,9 @@ def compute_protocol_score(
     elif partial_inputs:
         withheld_basis, withheld_signals = GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS, partial_inputs
     elif findings and grade_exposure is None:
-        withheld_basis = GRADE_WITHHELD_EXPOSURE_UNPRICED
+        withheld_basis = (
+            GRADE_WITHHELD_EXPOSURE_UNPRICED if not value_plane.tracked_total else GRADE_WITHHELD_EXPOSURE_UNMEASURED
+        )
     scored = bool(findings) and withheld_basis is None
     if not scored:
         withheld_rows = [
@@ -1775,6 +1778,7 @@ def _execution_fault_warning(census: dict[str, Any]) -> dict[str, Any]:
 GRADE_WITHHELD_STALE_INPUTS = "stale_scoring_inputs"
 GRADE_WITHHELD_PARTIAL_PRINCIPAL_SETS = "partial_principal_sets"
 GRADE_WITHHELD_EXPOSURE_UNPRICED = "exposure_denominator_not_determined"
+GRADE_WITHHELD_EXPOSURE_UNMEASURED = "finding_exposure_not_determined"
 _WITHHELD_REASONS = {
     GRADE_WITHHELD_STALE_INPUTS: (
         "stale scoring inputs: {signals} enumerated signal(s) name principal rows that no longer exist, so the "
@@ -1785,6 +1789,10 @@ _WITHHELD_REASONS = {
         "call them, and the findings that would follow, are not_determined"
     ),
     GRADE_WITHHELD_EXPOSURE_UNPRICED: "no priced value in the perimeter, so the exposure denominator is not_determined",
+    GRADE_WITHHELD_EXPOSURE_UNMEASURED: (
+        "priced holdings exist, but no finding has a determined exposure amount; "
+        "holdings ceilings are not measured effects"
+    ),
 }
 
 

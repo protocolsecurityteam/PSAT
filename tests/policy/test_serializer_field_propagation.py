@@ -244,3 +244,61 @@ def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None
     assert "0x" + "a" * 40 not in addrs
     assert "0x" + "b" * 40 in addrs
     assert addrs["0x" + "b" * 40]["roles"] == [7]
+
+
+@pytest.mark.parametrize(
+    "cap,empty",
+    [
+        (None, False),
+        ({"kind": "unknown"}, False),
+        ({"kind": "finite_set", "membership_quality": "exact", "members": []}, True),
+        ({"kind": "finite_set", "membership_quality": "lower_bound", "members": [], "empty_by_design": True}, False),
+        ({"kind": "finite_set", "membership_quality": "exact", "members": ["0x1"]}, False),
+        ({"kind": "OR", "children": []}, False),
+        ({"kind": "AND", "children": []}, False),
+        (
+            {
+                "kind": "AND",
+                "children": [
+                    {"kind": "unknown"},
+                    {"kind": "finite_set", "membership_quality": "exact", "members": []},
+                ],
+            },
+            True,
+        ),
+        (
+            {
+                "kind": "OR",
+                "children": [
+                    {"kind": "unknown"},
+                    {"kind": "finite_set", "membership_quality": "exact", "members": []},
+                ],
+            },
+            False,
+        ),
+        (
+            {
+                "kind": "OR",
+                "children": [
+                    {"kind": "finite_set", "membership_quality": "exact", "members": []},
+                ],
+            },
+            True,
+        ),
+    ],
+)
+@pytest.mark.parametrize("status", [None, "resolved_empty", "not_determined"])
+def test_company_compact_capability_preserves_backend_empty_verdict(cap, empty, status):
+    from services.governance.principals import _build_company_function_entry
+
+    ef = _ef_namespace(
+        capability_expr=cap, conditions=[{"kind": "time"}], authority_openness="not_determined", status=status
+    )
+    compact = _build_company_function_entry(cast(Any, ef), [], include_capability_expr=False)
+    assert compact["capability_proven_empty"] is (status == "resolved_empty")
+    assert "capability_expr" not in compact
+    assert compact["conditions"] == ef.conditions
+    assert compact["authority_openness"] == "not_determined"
+    detail = _analysis_detail_entry(ef)
+    if cap is not None:
+        assert detail["capability_expr"] == cap

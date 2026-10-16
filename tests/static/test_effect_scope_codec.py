@@ -64,6 +64,7 @@ def _artifacts():
         _site("a()", 3, {"op": "AND", "children": [alternatives, _unsupported("effect_call_graph_incomplete")]}),
         _site("a()", 4, None),
         {**_site("a()", 5, owner), "forwarded_parameters": {"destination": 0, "payload": 1}},
+        {**_site("a()", 8, owner), "kind": "external_call", "read_only": True},
     ]
     # Content-equal but distinct objects in another function collapse to the same entries.
     second = [_site("b()", 6, deepcopy(both)), _site("b()", 7, _leaf("unique_to_b"))]

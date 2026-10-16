@@ -268,7 +268,12 @@ def _attach_effect_scopes(contract, predicates, effects):
                         incomplete.append("effect_site_budget")
                         break
                     candidates = [("state_write", var, None, None, None) for var in _node_kind_state_writes(node)]
-                    candidates += _classify_node_irs(node, unit, entry_params, contract)
+                    call_candidates = _classify_node_irs(node, unit, entry_params, contract)
+                    consequential = _classify_node_irs(node, unit, entry_params, contract, exclude_read_only=True)
+                    read_only_keys = {(k, t, s, lib) for k, t, s, _, lib in call_candidates} - {
+                        (k, t, s, lib) for k, t, s, _, lib in consequential
+                    }
+                    candidates += call_candidates
                     for ir in node.irs:
                         if isinstance(ir, (Send, Transfer)):
                             candidates.append(("external_call", str(ir.destination), None, None, None))
@@ -305,6 +310,7 @@ def _attach_effect_scopes(contract, predicates, effects):
                                 "kind": kind,
                                 "target": target,
                                 "origin": origin,
+                                "read_only": (kind, target, selector, library_signature) in read_only_keys,
                                 "sink_ids": matching,
                                 "declaration": unit.canonical_name,
                                 "node": node.node_id,

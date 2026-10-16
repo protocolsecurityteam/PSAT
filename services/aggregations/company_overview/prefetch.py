@@ -28,6 +28,7 @@ from services.scoring.planes import MAPPING_ENUMERATION_STATUS
 from .entity_keys import _entity_key
 from .jobs import _time_phase
 from .principals import _PRINCIPAL_TYPES_SQL, _SETTLED_CONTROLLER_TYPES, _claim_ids_list, _principal_lookup_type
+from .runtime_scope import RuntimeKey, runtime_key
 
 logger = logging.getLogger("services.aggregations.company_overview")
 
@@ -41,12 +42,20 @@ _DB_MAX_OVERFLOW = int(os.environ.get("PSAT_DB_MAX_OVERFLOW", "10"))
 _PREFETCH_MAX_WORKERS = max(1, min(4, (_DB_POOL_SIZE + _DB_MAX_OVERFLOW - 1) // 2))
 
 
-def terminal_walk_by_entity(session: Session, contract_ids: list[int]) -> tuple[dict[str, dict[str, Any]], int]:
-    """``principal_labels.details.terminal_principal`` per ``(chain, address)``, first record per entity by label id."""
-    local: dict[str, dict[str, Any]] = {}
+def terminal_walk_by_entity(
+    session: Session, contract_ids: list[int]
+) -> tuple[dict[RuntimeKey, dict[str, dict[str, Any]]], int]:
+    """Terminal walks by runtime scope, then chain/address; never borrow another deployment's walk."""
+    local: dict[RuntimeKey, dict[str, dict[str, Any]]] = {}
     rows = 0
-    for address, details, chain in session.execute(
-        select(PrincipalLabel.address, PrincipalLabel.details, Contract.chain)
+    for cid, deployment, address, details, chain in session.execute(
+        select(
+            PrincipalLabel.contract_id,
+            PrincipalLabel.deployment_address,
+            PrincipalLabel.address,
+            PrincipalLabel.details,
+            Contract.chain,
+        )
         .join(Contract, Contract.id == PrincipalLabel.contract_id)
         .where(
             PrincipalLabel.contract_id.in_(contract_ids),
@@ -58,7 +67,7 @@ def terminal_walk_by_entity(session: Session, contract_ids: list[int]) -> tuple[
         record = (details or {}).get("terminal_principal")
         if not isinstance(record, dict) or not address:
             continue
-        local.setdefault(_entity_key(chain, address), record)
+        local.setdefault(runtime_key(cid, deployment), {}).setdefault(_entity_key(chain, address), record)
         rows += 1
     return local, rows
 
@@ -68,7 +77,7 @@ def _prefetch_child_tables(
     contract_ids: set[int],
     *,
     max_workers: int = _PREFETCH_MAX_WORKERS,
-) -> dict[str, dict[int, Any]]:
+) -> dict[str, Any]:
     """Pre-load every per-contract child row used downstream.
 
     Full EffectiveFunction rows are served lazily by /functions; ``ef_effects`` and ``fp_governance_rows`` are the
@@ -77,7 +86,7 @@ def _prefetch_child_tables(
     ``controller_values`` runs first because its principal set feeds the CGN/CGE predicate; the rest fan out on threads,
     each with its own Session. Tests pass ``max_workers=1``.
     """
-    out: dict[str, dict[int, Any]] = {
+    out: dict[str, Any] = {
         "controller_values": {},
         "ef_effects": {},
         "fp_governance_rows": {},
@@ -102,7 +111,7 @@ def _prefetch_child_tables(
     with _time_phase(timings_ms, "controller_values"):
         cv_rows = 0
         for cv in session.execute(select(ControllerValue).where(ControllerValue.contract_id.in_(id_list))).scalars():
-            out["controller_values"].setdefault(cv.contract_id, []).append(cv)
+            out["controller_values"].setdefault(runtime_key(cv.contract_id, cv.deployment_address), []).append(cv)
             cv_rows += 1
         counts["controller_values"] = cv_rows
 
@@ -172,27 +181,31 @@ def _prefetch_child_tables(
             clauses.append(func.lower(node_ref.address).in_(list(cv_principal_addrs_lc)))
         return or_(*clauses)
 
-    def _ef_effects(s: Session) -> tuple[dict[int, list[dict[str, list[str]]]], int]:
+    def _ef_effects(s: Session) -> tuple[dict[RuntimeKey, list[dict[str, list[str]]]], int]:
         # One record per function so claims-vs-legacy stays per-function.
-        local: dict[int, list[dict[str, list[str]]]] = {}
+        local: dict[RuntimeKey, list[dict[str, list[str]]]] = {}
         rows = 0
-        for cid, labels, claims in s.execute(
+        for cid, deployment, labels, claims in s.execute(
             select(
                 EffectiveFunction.contract_id,
+                EffectiveFunction.deployment_address,
                 EffectiveFunction.effect_labels,
                 EffectiveFunction.claims,
             ).where(EffectiveFunction.contract_id.in_(id_list))
         ).all():
-            local.setdefault(cid, []).append({"labels": list(labels or []), "claims": _claim_ids_list(claims)})
+            local.setdefault(runtime_key(cid, deployment), []).append(
+                {"labels": list(labels or []), "claims": _claim_ids_list(claims)}
+            )
             rows += 1
         return local, rows
 
-    def _fp_governance(s: Session) -> tuple[dict[int, list[dict[str, Any]]], int]:
-        local: dict[int, list[dict[str, Any]]] = {}
+    def _fp_governance(s: Session) -> tuple[dict[RuntimeKey, list[dict[str, Any]]], int]:
+        local: dict[RuntimeKey, list[dict[str, Any]]] = {}
         rows = 0
         for row in s.execute(
             select(
                 EffectiveFunction.contract_id,
+                EffectiveFunction.deployment_address,
                 FunctionPrincipal.address,
                 FunctionPrincipal.resolved_type,
                 FunctionPrincipal.details,
@@ -205,8 +218,8 @@ def _prefetch_child_tables(
             # The governance view takes a principal's details from its first row.
             .order_by(EffectiveFunction.contract_id, func.lower(FunctionPrincipal.address), FunctionPrincipal.id)
         ).all():
-            cid, address, resolved_type, details = row
-            local.setdefault(cid, []).append(
+            cid, deployment, address, resolved_type, details = row
+            local.setdefault(runtime_key(cid, deployment), []).append(
                 {
                     "address": address,
                     "resolved_type": resolved_type,
@@ -216,17 +229,18 @@ def _prefetch_child_tables(
             rows += 1
         return local, rows
 
-    def _fp_in_contract_principals(s: Session) -> tuple[dict[int, set[str]], int]:
+    def _fp_in_contract_principals(s: Session) -> tuple[dict[RuntimeKey, set[str]], int]:
         """Per-contract in-protocol addresses with call authority on some EffectiveFunction.
 
         Replaces the CGN walk, which surfaced transitively composed tokens as principals. ``signature_witness`` excluded
         (a signer isn't a caller); NULL type included for legacy rows.
         """
-        local: dict[int, set[str]] = {}
+        local: dict[RuntimeKey, set[str]] = {}
         rows = 0
-        for cid, addr in s.execute(
+        for cid, deployment, addr in s.execute(
             select(
                 EffectiveFunction.contract_id,
+                EffectiveFunction.deployment_address,
                 func.lower(FunctionPrincipal.address),
             )
             .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -243,19 +257,20 @@ def _prefetch_child_tables(
         ).all():
             if not addr:
                 continue
-            local.setdefault(cid, set()).add(addr)
+            local.setdefault(runtime_key(cid, deployment), set()).add(addr)
             rows += 1
         return local, rows
 
-    def _fp_all_addrs(s: Session) -> tuple[dict[int, set[str]], int]:
+    def _fp_all_addrs(s: Session) -> tuple[dict[RuntimeKey, set[str]], int]:
         """Every FP address per contract, unfiltered, for ``primary_controller`` (``_fp_in_contract_principals``
         filters out the Safes/EOAs it needs). ``signature_witness`` excluded.
         """
-        local: dict[int, set[str]] = {}
+        local: dict[RuntimeKey, set[str]] = {}
         rows = 0
-        for cid, addr in s.execute(
+        for cid, deployment, addr in s.execute(
             select(
                 EffectiveFunction.contract_id,
+                EffectiveFunction.deployment_address,
                 func.lower(FunctionPrincipal.address),
             )
             .join(FunctionPrincipal, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -271,19 +286,20 @@ def _prefetch_child_tables(
         ).all():
             if not addr:
                 continue
-            local.setdefault(cid, set()).add(addr)
+            local.setdefault(runtime_key(cid, deployment), set()).add(addr)
             rows += 1
         return local, rows
 
-    def _fp_function_detail(s: Session) -> tuple[dict[int, list[dict[str, Any]]], int]:
+    def _fp_function_detail(s: Session) -> tuple[dict[RuntimeKey, list[dict[str, Any]]], int]:
         """Per-function ``{function, callers, claims}`` for the co-controller rule and per-controller capability
         detail. ``signature_witness`` excluded.
         """
         by_ef: dict[int, dict[str, Any]] = {}
         rows = 0
-        for cid, ef_id, fname, claims, addr in s.execute(
+        for cid, deployment, ef_id, fname, claims, addr in s.execute(
             select(
                 EffectiveFunction.contract_id,
+                EffectiveFunction.deployment_address,
                 EffectiveFunction.id,
                 EffectiveFunction.function_name,
                 EffectiveFunction.claims,
@@ -304,7 +320,7 @@ def _prefetch_child_tables(
             entry = by_ef.get(ef_id)
             if entry is None:
                 entry = {
-                    "contract_id": cid,
+                    "contract_id": runtime_key(cid, deployment),
                     "function": fname,
                     "claims": _claim_ids_list(claims),
                     "callers": set(),
@@ -312,7 +328,7 @@ def _prefetch_child_tables(
                 by_ef[ef_id] = entry
             entry["callers"].add(addr)
             rows += 1
-        local: dict[int, list[dict[str, Any]]] = {}
+        local: dict[RuntimeKey, list[dict[str, Any]]] = {}
         for entry in by_ef.values():
             local.setdefault(entry["contract_id"], []).append(
                 {
@@ -397,8 +413,8 @@ def _prefetch_child_tables(
             rows += 1
         return local, rows
 
-    def _cgn(s: Session) -> tuple[dict[int, list[ControlGraphNode]], int]:
-        local: dict[int, list[ControlGraphNode]] = {}
+    def _cgn(s: Session) -> tuple[dict[RuntimeKey, list[ControlGraphNode]], int]:
+        local: dict[RuntimeKey, list[ControlGraphNode]] = {}
         rows = 0
         for n in s.execute(
             select(ControlGraphNode).where(
@@ -414,32 +430,33 @@ def _prefetch_child_tables(
                 ),
             )
         ).scalars():
-            local.setdefault(n.contract_id, []).append(n)
+            local.setdefault(runtime_key(n.contract_id, n.deployment_address), []).append(n)
             rows += 1
         return local, rows
 
-    def _terminal_walk(s: Session) -> tuple[dict[str, dict[str, Any]], int]:
+    def _terminal_walk(s: Session) -> tuple[dict[RuntimeKey, dict[str, dict[str, Any]]], int]:
         """``{"<chain>::<address>": terminal_principal}`` from ``principal_labels`` (the only place it's persisted), for
         ``terminalControllerNote``; the label is on its recording contract's chain.
         """
         return terminal_walk_by_entity(s, id_list)
 
-    def _cge(s: Session) -> tuple[dict[int, list[ControlGraphEdge]], int]:
+    def _cge(s: Session) -> tuple[dict[RuntimeKey, list[ControlGraphEdge]], int]:
         # Drop an edge iff its target has a CGN row in this contract the keep-clause drops.
         keep_edge_clause = ~exists().where(
             and_(
                 cge_target_cgn.contract_id == ControlGraphEdge.contract_id,
+                cge_target_cgn.deployment_address.is_not_distinct_from(ControlGraphEdge.deployment_address),
                 func.lower(cge_target_cgn.address)
                 == func.lower(func.replace(ControlGraphEdge.to_node_id, "address:", "")),
                 ~_node_keep_predicate(cge_target_cgn),
             )
         )
-        local: dict[int, list[ControlGraphEdge]] = {}
+        local: dict[RuntimeKey, list[ControlGraphEdge]] = {}
         rows = 0
         for e in s.execute(
             select(ControlGraphEdge).where(ControlGraphEdge.contract_id.in_(id_list), keep_edge_clause)
         ).scalars():
-            local.setdefault(e.contract_id, []).append(e)
+            local.setdefault(runtime_key(e.contract_id, e.deployment_address), []).append(e)
             rows += 1
         return local, rows
 

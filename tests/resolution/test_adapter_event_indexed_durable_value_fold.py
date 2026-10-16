@@ -92,6 +92,27 @@ def _eigenpod_descriptor() -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        {"op": "eq", "rhs_values": ["0"], "value_type": "uint256"},
+        {"op": "lt", "rhs_values": ["10"], "value_type": "uint256"},
+        {"op": "not_an_operator", "rhs_values": [], "value_type": "uint256"},
+    ],
+)
+def test_non_finite_value_set_refused_before_any_durable_or_live_scan(monkeypatch, predicate):
+    descriptor = {**_eigenpod_descriptor(), "value_predicate": predicate}
+    adapter = EventIndexedAdapter()
+    monkeypatch.setattr(adapter, "_durable_value_fold", lambda *a, **k: pytest.fail("must not scan history"))
+    monkeypatch.setattr(adapter, "_live_value_fold", lambda *a, **k: pytest.fail("must not scan history"))
+    result = adapter.enumerate(descriptor, EvaluationContext(chain_id=1, contract_address=STATE_HOLDER, block=100))
+    from services.resolution.capability_resolver import capability_to_dict
+
+    rendered = capability_to_dict(result)
+    assert rendered["kind"] == "unsupported"
+    assert "deferred_pending_index" not in str(rendered)
+
+
 @pytest.fixture(autouse=True)
 def _stub_creation_block_floor(monkeypatch):
     """Tests of a specific floor or the defer path re-stub ``resolve_scan_floor``."""

@@ -252,3 +252,28 @@ def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, 
     )
     assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
     assert "authority_provenance" not in by_source["liquidityPool"]
+
+
+@pytest.mark.parametrize("resource_name", ["poolManager", "arbitraryResource"])
+def test_permission_check_argument_is_not_a_controller(tmp_path, resource_name):
+    source = f"""
+    pragma solidity ^0.8.20;
+    interface ICheck {{ function test(address resource, address caller) external view returns(bool); }}
+    contract C {{
+        ICheck public checker;
+        address public {resource_name};
+        address public owner;
+        uint public value;
+        function deposit() external {{ require(checker.test({resource_name}, msg.sender)); value++; }}
+        function admin() external {{ require(msg.sender == owner); value=0; }}
+    }}
+    """
+    f = tmp_path / "C.sol"
+    f.write_text(source)
+    c = next(c for c in Slither(str(f)).contracts if c.name == "C")
+    trees = build_predicate_artifacts(c)
+    effects = build_effects(c)
+    targets = {t["source"]: t for t in build_controller_tracking(c, tmp_path, trees, effects)}
+    assert targets["checker"].get("authority_provenance") == "caller_gate"
+    assert targets["owner"].get("authority_provenance") == "caller_gate"
+    assert targets[resource_name].get("authority_provenance") != "caller_gate"

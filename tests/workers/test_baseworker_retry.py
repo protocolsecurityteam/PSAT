@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import requests
 
 from db.models import Job, JobStage, JobStatus
@@ -12,6 +13,7 @@ from tests.support.db_fixtures import (
     clean_jobs,  # noqa: F401  (fixture, registered by import)
     test_session_local,  # noqa: F401  (fixture, registered by import)
 )
+from tests.workers.test_retry_policy import _wrapped_database_error
 from workers.base import BaseWorker
 
 
@@ -38,18 +40,24 @@ def _transient_exc():
 
 
 @requires_postgres
-def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local, monkeypatch):
+@pytest.mark.parametrize("make_exc", [_transient_exc, _wrapped_database_error], ids=["network", "wrapped-db-deadlock"])
+def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local, monkeypatch, make_exc):
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
 
     job = clean_jobs
     job_row = create_job(job, {"address": "0xabc", "name": "exhaustion"})
 
-    worker = _ConfigurableWorker(side_effect=lambda _n: _transient_exc())
-    for _ in range(5):
+    worker = _ConfigurableWorker(side_effect=lambda _n: make_exc())
+    for attempt in range(5):
         job.expire_all()
         current = job.get(Job, job_row.id)
         worker._execute_job(job, current)
+        if attempt < 4:
+            job.expire_all()
+            retry = job.get(Job, job_row.id)
+            assert retry is not None and retry.status == JobStatus.queued
+            assert retry.next_attempt_at is not None
 
     job.expire_all()
     refreshed = job.get(Job, job_row.id)

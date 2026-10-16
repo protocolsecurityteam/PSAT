@@ -110,9 +110,10 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     )
     monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
-    monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-    # create_job is also imported for the dependency-provider spawn, so both bindings are stubbed.
-    monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
+    monkeypatch.setattr(
+        "db.queue.jobs.create_discovery_child",
+        lambda session, parent, request: (fake_create_job(session, request), True),
+    )
     monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build_control_snapshot)
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_control_graph)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)

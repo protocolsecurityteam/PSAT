@@ -91,7 +91,7 @@ def test_unverified_source_writes_no_contract_row(monkeypatch):
         etherscan_module,
         "get",
         lambda module, action, chain_id=None, **params: {
-            "status": "0",
+            "status": "1",
             "result": [{"SourceCode": "", "ABI": "Contract source code not verified"}],
         },
     )
@@ -99,7 +99,7 @@ def test_unverified_source_writes_no_contract_row(monkeypatch):
         etherscan_module.get_source(TIMELOCK_ADDRESS, chain_id=1)
 
     def _raise_unverified(_addr, **_kw):
-        raise RuntimeError(f"No verified source code for {TIMELOCK_ADDRESS}")
+        raise etherscan_module.VerifiedSourceUnavailable(f"No verified source code for {TIMELOCK_ADDRESS}")
 
     monkeypatch.setattr("workers.discovery.fetch", _raise_unverified)
     monkeypatch.setattr("workers.discovery._batch_get_creators", lambda addresses, **kw: {})

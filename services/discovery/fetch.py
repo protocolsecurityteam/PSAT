@@ -122,7 +122,7 @@ def _parse_source_code(raw: str) -> dict | None:
     if not isinstance(raw, str):
         return None
 
-    candidate = raw
+    candidate = raw.strip()
     if candidate.startswith("{{") and candidate.endswith("}}"):
         candidate = candidate[1:-1]
 
@@ -136,9 +136,21 @@ def _parse_source_code(raw: str) -> dict | None:
 
 def parse_verification_bundle(result: dict) -> dict | None:
     parsed = _parse_source_code(result.get("SourceCode", ""))
-    if not parsed or "sources" not in parsed:
+    if not parsed:
         return None
-    return parsed
+    if "sources" in parsed:
+        return parsed
+    # Explorer legacy multi-file responses are a filename -> content map, without a Standard JSON envelope.
+    if all(isinstance(value, dict) and isinstance(value.get("content"), str) for value in parsed.values()):
+        return {"sources": parsed}
+    return None
+
+
+def parse_compiler_settings(result: dict) -> dict:
+    """Verified Standard JSON settings, retained as source facts rather than inferred from pragmas."""
+    bundle = parse_verification_bundle(result)
+    settings = bundle.get("settings") if bundle else None
+    return settings if isinstance(settings, dict) else {}
 
 
 def is_vyper_result(result: dict) -> bool:

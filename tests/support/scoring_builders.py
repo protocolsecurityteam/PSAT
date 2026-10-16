@@ -271,6 +271,7 @@ def fold(monkeypatch):
         monkeypatch.setattr(P, "load_principal_plane", lambda s, refs: principals or {})
         monkeypatch.setattr(P, "perimeter_state", lambda s, p: ("settled", {"pending_jobs": 0}))
         monkeypatch.setattr(P, "plane_row_counts", lambda s, p: {"stub": True})
+        monkeypatch.setattr(P, "load_effects_coverage", lambda s, p: {"state": "not_determined"})
         monkeypatch.setattr(P, "load_upgrade_provenance", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "unconsumed_reach_relations", lambda s, p: {"stub": True})
         monkeypatch.setattr(P, "load_ledgers", lambda s, p: {"stub": True})

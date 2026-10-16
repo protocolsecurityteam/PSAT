@@ -211,6 +211,7 @@ def find_dependency_provider_job_for_address(
     *,
     chain: str | None = None,
     eras: dict[str, int | None] | None = None,
+    parent_job: Job | None = None,
 ) -> AnalysisJobLookup | None:
     """The job that should satisfy a policy dependency for *address*, or ``None`` when a fresh one must be spawned.
 
@@ -223,8 +224,12 @@ def find_dependency_provider_job_for_address(
     """
     eras = {} if eras is None else eras
 
-    def stands(job: Job) -> bool:
-        return job_stands_for_current_analyzer(session, job, eras)
+    def stands(job: Job, proxy_address: str | None = None) -> bool:
+        from db.queue.source_failures import source_failure_in_scope
+
+        return source_failure_in_scope(job, parent_job, proxy_address) and job_stands_for_current_analyzer(
+            session, job, eras
+        )
 
     runtime_jobs = [
         job
@@ -244,7 +249,7 @@ def find_dependency_provider_job_for_address(
                 chain=chain,
                 completed_only=False,
                 include_terminal=True,
-                keep=stands,
+                keep=lambda candidate: stands(candidate, runtime_job.address),
                 impl_addr=impl_addr,
             )
             if impl_addr is not None

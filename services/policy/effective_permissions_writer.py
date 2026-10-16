@@ -199,6 +199,33 @@ def write_effective_function_rows(
     """
     capability_by_function = capability_by_function or {}
 
+    # Resolve external classifications before DELETE/INSERT acquires row and page-revision
+    # locks. A slow RPC or a classifier using another connection must not stall unrelated jobs.
+    type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+    classify_failures: list[BaseException] = []
+    prepared: list[tuple[dict[str, Any] | None, list[dict[str, Any]]]] = []
+    for fn in function_records:
+        signature = str(fn.get("function") or fn.get("abi_signature") or "")
+        cap_dict = _to_dict(capability_by_function.get(signature))
+        rows = []
+        if cap_dict is not None:
+            rows = _principal_rows_for_capability(
+                cap_dict, safe_address_lookup=safe_address_lookup, function_signature=signature
+            )
+            for scope in cap_dict.get("effect_capabilities") or []:
+                rows.extend(
+                    _principal_rows_for_capability(
+                        scope["capability"], safe_address_lookup=safe_address_lookup, function_signature=signature
+                    )
+                )
+        if resolve_principal_type is not None:
+            for row in rows:
+                if row.get("principal_type") != "signature_witness" and (
+                    not row.get("resolved_type") or row.get("resolved_type") == "unknown"
+                ):
+                    _classify_principal(row["address"], resolve_principal_type, type_memo, failures=classify_failures)
+        prepared.append((cap_dict, rows))
+
     observed_before = _capture_observed_before(session, contract_id, deployment_address)
 
     # Principals go via ON DELETE CASCADE.
@@ -209,14 +236,10 @@ def write_effective_function_rows(
     session.flush()
 
     added_principals = 0
-    type_memo: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
-    classify_failures: list[BaseException] = []
-    for fn in function_records:
+    for fn, (cap_dict, semantic_rows) in zip(function_records, prepared):
         fn_signature = str(fn.get("function") or fn.get("abi_signature") or "")
         function_name = fn_signature.split("(")[0] if "(" in fn_signature else fn_signature
 
-        cap = capability_by_function.get(fn_signature)
-        cap_dict = _to_dict(cap)
         # Policy-minted capabilities travel on the record, not in ``capability_by_function``; derive projections from
         # them so a row never has NULL beside a capability that answers it.
         record_cap = fn.get("capability_expr")
@@ -301,17 +324,6 @@ def write_effective_function_rows(
         from .effect_authority import principal_identity
 
         if cap_dict is not None:
-            semantic_rows = _principal_rows_for_capability(
-                cap_dict,
-                safe_address_lookup=safe_address_lookup,
-                function_signature=fn_signature,
-            )
-            for scope in cap_dict.get("effect_capabilities") or []:
-                semantic_rows.extend(
-                    _principal_rows_for_capability(
-                        scope["capability"], safe_address_lookup=safe_address_lookup, function_signature=fn_signature
-                    )
-                )
             for row in semantic_rows:
                 key = (
                     ef.id,
@@ -331,9 +343,7 @@ def write_effective_function_rows(
                     and row.get("principal_type") != "signature_witness"
                     and (not resolved_type or resolved_type == "unknown")
                 ):
-                    classified_type, classified_details = _classify_principal(
-                        row["address"], resolve_principal_type, type_memo, failures=classify_failures
-                    )
+                    classified_type, classified_details = type_memo[(row["address"] or "").lower()]
                     if classified_type:
                         resolved_type = classified_type
                         if isinstance(classified_details, dict) and classified_details:

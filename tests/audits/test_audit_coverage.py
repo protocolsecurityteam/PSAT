@@ -533,6 +533,12 @@ def test_verify_one_coverage_row_proves_when_hashes_match(db_session, seed_proto
     assert row.proof_kind == "clean"
     assert row.matched_commit_sha == "abc1234"
     assert row.equivalence_checked_at is not None
+    import json
+
+    proof = json.loads(row.equivalence_reason)
+    assert proof["matched_files"][0]["etherscan_path"] == "src/MyPool.sol"
+    assert proof["matched_files"][0]["github_path"] == "src/MyPool.sol"
+    assert proof["matched_files"][0]["source_sha256"] == h
 
 
 def test_verify_one_coverage_row_writes_hash_mismatch_when_hashes_differ(db_session, seed_protocol, monkeypatch):
@@ -931,12 +937,12 @@ class TestComputeProofKind:
             ),
             pytest.param(["abc1234", "def5678"], [_REVIEWED, _FIX], "clean", id="clean_reviewed_and_fix"),
             pytest.param(["def5678"], [_REVIEWED, _FIX], "post_fix", id="post_fix_matched_only_fix"),
-            # Deployed matches reviewed, fix commits exist, and deployed matches none: the findings are still live.
+            # A different report-wide fix SHA proves neither relevance nor absence from the matched revision.
             pytest.param(
                 ["abc1234"],
                 [_REVIEWED, _FIX, {"sha": "ffa9876", "label": "fix", "context": "fix L-02"}],
-                "pre_fix_unpatched",
-                id="pre_fix_unpatched",
+                "unclassified",
+                id="unmatched_fix_is_not_proof_of_unpatched_code",
             ),
             # A 'cited' commit is historical context, so the match is coincidence.
             pytest.param(
@@ -953,6 +959,13 @@ class TestComputeProofKind:
             ),
             # Compared on the shared 7-char prefix.
             pytest.param(["abc1234" + "f" * 33], [_REVIEWED], "clean", id="prefix_match_abbreviated_shas"),
+            pytest.param(
+                ["abc1234" + "f" * 33],
+                [{"sha": "abc1234" + "e" * 33, "label": "reviewed"}],
+                "cited_only",
+                id="conflicting_full_shas_are_not_equal",
+            ),
+            pytest.param(["abc1234"], [{"sha": "abc", "label": "reviewed"}], "cited_only", id="short_sha"),
         ],
     )
     def test_proof_kind(self, matched, classified, expected):

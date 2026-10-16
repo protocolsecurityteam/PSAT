@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from sqlalchemy import func, select
 
 from db.models import (
@@ -165,6 +166,55 @@ def test_reconciler_reenqueues_only_when_authority_backfilled(db_session):
     assert job.status == JobStatus.queued and job.stage == JobStage.policy
 
     assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
+
+
+@requires_postgres
+@pytest.mark.parametrize("orphan,drift", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("stored_chain", ["ethereum", None])
+def test_shared_implementation_requeues_the_marker_deployment(db_session, orphan, drift, stored_chain):
+    implementation, proxy_a, proxy_b, authority = ("0x" + byte * 20 for byte in ["d1", "d2", "d3", "d4"])
+
+    def job(proxy, *, chain="ethereum", effects_only=False):
+        request = {"chain": chain, "proxy_address": proxy}
+        if effects_only:
+            request["effects_resume_work_id"] = "effects-only"
+        item = Job(address=implementation, status=JobStatus.completed, stage=JobStage.done, request=request)
+        db_session.add(item)
+        db_session.flush()
+        return item
+
+    correct = job(proxy_a)
+    wrong_proxy = job(proxy_b)
+    wrong_chain = job(proxy_a, chain="base")
+    effects_only = job(proxy_a, effects_only=True)
+    contract = Contract(address=implementation, chain=stored_chain, job_id=None if orphan else wrong_proxy.id)
+    db_session.add(contract)
+    db_session.flush()
+    marker = EffectiveFunction(
+        contract_id=contract.id,
+        deployment_address=proxy_a,
+        function_name="pause",
+        abi_signature="pause()",
+        selector=_PAUSE,
+        capability_expr=_role_store_cap(authority, 100) if drift else _deferred_cap(authority),
+    )
+    db_session.add(marker)
+    _seed_role_store_cursor(db_session, authority)
+    if drift:
+        _seed_role_set_row(db_session, authority, block=200)
+    db_session.commit()
+
+    reconcile = reconcile_role_set_drift if drift else reconcile_deferred_resolutions
+    assert reconcile(db_session, chain_id=1) == 1
+    assert correct.status == JobStatus.queued and correct.stage == JobStage.policy
+    assert all(item.status == JobStatus.completed for item in [wrong_proxy, wrong_chain, effects_only])
+    assert contract.job_id == (correct.id if orphan else wrong_proxy.id)
+
+    # A completed rewrite of the correct deployment removes the trigger; no repeated wrong-proxy work remains.
+    correct.status, correct.stage = JobStatus.completed, JobStage.done
+    marker.capability_expr = _role_store_cap(authority, 200) if drift else {"kind": "finite_set", "members": []}
+    db_session.commit()
+    assert reconcile(db_session, chain_id=1) == 0
 
 
 # ``contracts.job_id`` is SET NULL on job deletion, stranding the contract's rows outside the reconciler; these pin the

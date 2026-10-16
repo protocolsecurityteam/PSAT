@@ -282,6 +282,10 @@ class EventIndexedAdapter:
         ``external_check_only`` with ``deferred_pending_index``; structural absence falls back to live replay; any
         failure is ``unsupported``.
         """
+        from ..mapping_enumerator import finite_value_predicate
+
+        if not finite_value_predicate(value_predicate):
+            return CapabilityExpr.unsupported("value_predicate_not_evaluable")
         event_address = next(
             (addr for addr in (_resolve_event_address(descriptor, hint, ctx) for hint in set_hints) if addr),
             None,

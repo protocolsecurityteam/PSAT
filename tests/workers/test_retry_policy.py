@@ -30,6 +30,13 @@ def _psycopg2_operational() -> Exception:
     return psycopg2.OperationalError("connection closed")
 
 
+def _wrapped_database_error(kind: str = "DeadlockDetected") -> Exception:
+    psycopg2 = pytest.importorskip("psycopg2")
+    from sqlalchemy.exc import DBAPIError
+
+    return DBAPIError("statement", {}, getattr(psycopg2.errors, kind)("driver failure"))
+
+
 # A terminal error that retries loops forever. Exceptions are built lazily so importorskip only skips its own case.
 @pytest.mark.parametrize(
     "make_exc, expected",
@@ -46,6 +53,10 @@ def _psycopg2_operational() -> Exception:
         ),
         pytest.param(lambda: urllib3.exceptions.ProtocolError("partial"), "transient", id="urllib3-protocol"),
         pytest.param(_psycopg2_operational, "transient", id="psycopg2-operational"),
+        pytest.param(_wrapped_database_error, "transient", id="wrapped-deadlock"),
+        pytest.param(lambda: _wrapped_database_error("SerializationFailure"), "transient", id="wrapped-serialization"),
+        pytest.param(lambda: _wrapped_database_error("UniqueViolation"), "terminal", id="wrapped-constraint-violation"),
+        pytest.param(lambda: _wrapped_database_error("UndefinedColumn"), "terminal", id="wrapped-programming-error"),
         pytest.param(lambda: ValueError("bad"), "terminal", id="value-error"),
         pytest.param(lambda: TypeError("bad"), "terminal", id="type-error"),
         pytest.param(lambda: KeyError("missing"), "terminal", id="key-error"),

@@ -15,6 +15,7 @@ requests per pair.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
@@ -917,7 +918,7 @@ def _compute_proof_kind(
 
     - ``unclassified`` — no classification data
     - ``clean`` — matched ``reviewed``, and no ``fix`` commits or a ``fix`` also matched
-    - ``pre_fix_unpatched`` — matched ``reviewed``, ``fix`` commits exist, none matched: known findings are deployed
+    - ``unclassified`` — reviewed code matches but report-wide fix commits do not: fix applicability is unknown
     - ``post_fix`` — matched only a ``fix``
     - ``cited_only`` — matched only ``cited``/``unclear``: coincidental
     """
@@ -931,21 +932,22 @@ def _compute_proof_kind(
             continue
         sha = (entry.get("sha") or "").lower()
         label = (entry.get("label") or "").lower()
-        if not sha:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
             continue
         if label == "reviewed":
             reviewed_shas.add(sha)
         elif label == "fix":
             fix_shas.add(sha)
 
-    # LLM SHAs vary in length; compare 7-char prefixes (git's default abbrev).
+    # Abbreviations may match a full SHA, but two different full SHAs never match.
     def _matches_any(prefix_set: set[str]) -> bool:
         if not prefix_set:
             return False
         for mc in matched_commits:
-            mc_short = mc[:7]
+            if not re.fullmatch(r"[0-9a-f]{7,40}", mc):
+                continue
             for cs in prefix_set:
-                if mc.startswith(cs) or cs.startswith(mc_short):
+                if mc.startswith(cs) or cs.startswith(mc):
                     return True
         return False
 
@@ -953,7 +955,10 @@ def _compute_proof_kind(
     matched_fix = _matches_any(fix_shas)
 
     if matched_reviewed and not matched_fix and fix_shas:
-        return "pre_fix_unpatched"
+        # A different SHA is not evidence that a relevant fix is absent: it may be an
+        # ancestor of the matched revision, or concern another file/finding entirely.
+        # Source equivalence remains proven; vulnerability/fix status needs separate proof.
+        return "unclassified"
     if matched_reviewed:
         return "clean"
     if matched_fix:
@@ -1007,7 +1012,7 @@ def _apply_equivalence_http(
             bytecode_keccak_at_match=base.bytecode_keccak_at_match,
             verified_at=base.verified_at,
             equivalence_status=status,
-            equivalence_reason=reason[:1000] if reason else None,
+            equivalence_reason=(reason if proven else reason[:1000]) if reason else None,
             equivalence_checked_at=now,
             pinned_commit=base.pinned_commit,
             proof_kind=proof_kind if proven else None,
@@ -1272,7 +1277,9 @@ def _stamp_coverage_row(
     now = now or datetime.now(timezone.utc)
     previous = row.equivalence_status
     row.equivalence_status = status
-    row.equivalence_reason = reason[:1000] if reason else None
+    # Proven explanations contain bounded structured file/revision/hash evidence; do not
+    # truncate JSON mid-field. Transport/error prose retains its ordinary display bound.
+    row.equivalence_reason = (reason if proven else reason[:1000]) if reason else None
     row.equivalence_checked_at = now
     if status != previous and row.protocol_id is not None:
         from services.scoring.dirty import SCORE_DIRTY_COVERAGE_VERIFY, mark_protocol_score_dirty

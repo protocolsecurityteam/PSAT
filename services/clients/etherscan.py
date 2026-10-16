@@ -568,12 +568,21 @@ def get_contract_name(address: str, *, chain_id: int) -> str | None:
     return name
 
 
+class VerifiedSourceUnavailable(RuntimeError):
+    """A successful explorer response explicitly reported no verified source; not a transport failure."""
+
+
 def get_source(address: str, *, chain_id: int) -> dict:
     data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
-    result = data["result"][0]
+    rows = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("Malformed explorer source response")
+    result = rows[0]
 
     if not result.get("SourceCode"):
-        raise RuntimeError(f"No verified source code for {address}")
+        if str(data.get("status")) == "1" and result.get("SourceCode") == "":
+            raise VerifiedSourceUnavailable(f"No verified source code for {address}")
+        raise RuntimeError("Explorer did not establish source availability")
 
     return result
 

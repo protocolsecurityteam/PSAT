@@ -105,6 +105,18 @@ def test_an_unpriced_perimeter_still_withholds_for_its_own_reason(fold):
     assert "withheld_by_signals" not in withheld
 
 
+def test_priced_holdings_do_not_imply_a_measured_finding_exposure(fold):
+    _, privileged = _population()
+    # No amount witness: a known balance is only an upper bound on what a function moves.
+    unmeasured = replace(privileged, gate_inputs=sig().gate_inputs)
+    document = fold([unmeasured], value=value_plane(BALANCES), principals={100: facts(100, EOA, "eoa")})
+    assert document.grade_state == GRADE_STATE_NOT_DETERMINED
+    assert document.provenance["exposure_coverage"]["tracked_total_usd"] > 0
+    assert document.provenance["grade_withheld"]["basis"] == "finding_exposure_not_determined"
+    assert "priced holdings exist" in document.provenance["grade_withheld"]["reason"]
+    assert document.grade_exposure is None
+
+
 @pytest.fixture
 def scored_contract(db_session):
     protocol = Protocol(name=f"stale-{uuid.uuid4().hex[:8]}")

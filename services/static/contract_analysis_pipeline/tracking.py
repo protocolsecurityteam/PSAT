@@ -483,6 +483,12 @@ def _collect_state_var_authority_roles(predicate_trees: Mapping[str, Any] | None
             # A non-gate-shaped external call's operands aren't gated on (``vault.enter``'s wrapper token once made WETH
             # a controller).
             return
+        if leaf.get("kind") == "external_bool":
+            # Arguments select the resource/action being checked, not its
+            # controller. The checker receiver is collected independently from
+            # authority_contract.address_source. Treating check(pool, caller)
+            # as authority by pool creates false transitive protocol members.
+            return
         for operand in leaf.get("operands") or []:
             if isinstance(operand, dict) and operand.get("source") == "state_variable":
                 name = operand.get("state_variable_name")

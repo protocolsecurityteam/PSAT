@@ -104,6 +104,64 @@ def test_event_address_for_descriptor(descriptor, hint, job, expected):
     assert _event_address_for_descriptor(descriptor, hint, job, {}) == expected
 
 
+def test_ineligible_value_hint_does_not_enroll_but_sibling_authority_still_does(monkeypatch):
+    import copy
+    from unittest.mock import MagicMock
+
+    import workers.event_log_indexer as indexer
+    from db.models import Job
+    from services.resolution.recursive import _mapping_writer_specs_from_predicate_trees
+
+    approval = "0x" + keccak(text="Approval(address,address,uint256)").hex()
+    descriptor = {
+        "kind": "mapping_membership",
+        "storage_var": "allowed",
+        "key_sources": [{"source": "msg_sender"}, {"source": "parameter", "parameter_index": 0}],
+        "value_predicate": {"op": "eq", "rhs_values": ["0"], "value_type": "uint256"},
+        "enumeration_hint": [
+            {
+                "topic0": approval,
+                "direction": "set",
+                "value_position": 2,
+                "event_signature": "Approval(address,address,uint256)",
+                "event_name": "Approval",
+                "mapping_name": "allowed",
+                "key_position": 1,
+                "indexed_positions": [0, 1],
+            }
+        ],
+    }
+    artifact = {
+        "trees": {
+            "approve(address,uint256)": {
+                "op": "LEAF",
+                "leaf": {"authority_role": "caller_authority", "set_descriptor": descriptor},
+            }
+        }
+    }
+    assert _mapping_writer_specs_from_predicate_trees(artifact) == []
+    monkeypatch.setattr(indexer, "get_artifact", lambda *a: artifact)
+    monkeypatch.setattr(indexer, "usable_semantic_artifact", lambda kind, data: data)
+    monkeypatch.setattr(indexer, "_state_var_values_for_job", lambda *a: {})
+    monkeypatch.setattr(indexer, "_unsettled_replay_targets", lambda *a: iter(()))
+    job = Job(address=_IMPL, chain_id=1, request={"chain": "ethereum", "proxy_address": _PROXY})
+    session = MagicMock()
+    assert list(indexer.hint_targets_for_job(session, job)) == []
+    sibling = copy.deepcopy(descriptor)
+    sibling["value_predicate"]["rhs_values"] = ["1"]
+    artifact["trees"]["authorize(address)"] = {"op": "LEAF", "leaf": {"set_descriptor": sibling}}
+    assert any(approval in (target.topics or ()) for target in indexer.hint_targets_for_job(session, job))
+    del artifact["trees"]["authorize(address)"]
+    # Empty explicit predicates use implicit nonzero membership; they still need history.
+    descriptor["value_predicate"] = {}
+    assert list(indexer.hint_targets_for_job(session, job))
+    # Add/remove-only descriptors use the present-set fold, not the value fold.
+    descriptor["value_predicate"] = {"op": "eq", "rhs_values": ["0"]}
+    descriptor["enumeration_hint"][0]["direction"] = "add"
+    assert list(indexer.hint_targets_for_job(session, job))
+    assert _mapping_writer_specs_from_predicate_trees(artifact)
+
+
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
     """This module asserts which address the cursor lands on, not the grade."""

@@ -12,7 +12,7 @@ import math
 import os
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from eth_utils.crypto import keccak
 
@@ -20,7 +20,7 @@ from utils.logging import record_stage_metric
 
 from .authorization import apply_authorization_pass
 from .internal_authority_slot import apply_internal_authority_slot_pass
-from .mapping_events import WriterEventSpec, discover_mapping_writer_events
+from .mapping_events import WriterEventSpec, complete_boolean_writer_relations, discover_mapping_writer_events
 from .one_shot import apply_one_shot_pass
 from .predicate_types import PredicateTree, mark_operand_absorption_recorded
 from .predicates import _helper_engine_cache, build_predicate_tree, build_return_predicate_tree
@@ -296,7 +296,7 @@ def _build_predicate_artifacts_with_pause_info(
     gate_token = _helper_gate_cache.set({})
     try:
         trees: dict[str, PredicateTree] = {}
-        check_trees: dict[str, PredicateTree] = {}
+        check_trees: dict[str, PredicateTree] = _public_boolean_mapping_getters(contract)
         # Entry points whose caller-authority EQ/NEQ guard couldn't be lowered; policy must not default them to public.
         guard_uncertain: set[str] = set()
         # full_name -> canonical signature where they differ, so selector consumers key on the real ``msg.sig``;
@@ -445,12 +445,88 @@ def apply_mapping_event_hint_pass(contract: Any, trees: dict[str, PredicateTree]
     if not specs_by_mapping:
         return
 
+    constants = _mapping_key_constants(contract)
+    complete = complete_boolean_writer_relations(
+        contract, [spec for group in specs_by_mapping.values() for spec in group]
+    )
+
     def attach(leaf: dict[str, Any]) -> None:
-        _attach_hints_to_leaf(leaf, specs_by_mapping)
+        descriptor = leaf.get("set_descriptor")
+        if isinstance(descriptor, dict):
+            descriptor["key_sources"] = [
+                {"source": "constant", "constant_value": constants[key["state_variable_name"]]}
+                if key.get("source") == "state_variable" and key.get("state_variable_name") in constants
+                else key
+                for key in descriptor.get("key_sources") or []
+            ]
+        # Parameter-keyed leaves become authorities only after call-frame
+        # binding. Do not give that new path an inventory from partial writers.
+        keys = (descriptor.get("key_sources") or []) if isinstance(descriptor, dict) else []
+        parameterized = any(key.get("source") == "parameter" for key in keys)
+        projection = _checker_membership_projection(leaf, contract) if parameterized else None
+        storage_var = descriptor.get("storage_var") if isinstance(descriptor, dict) else None
+        if not parameterized or (
+            isinstance(storage_var, str)
+            and projection is not None
+            and complete.get((storage_var, len(keys))) == projection
+        ):
+            _attach_hints_to_leaf(leaf, specs_by_mapping)
         _attach_value_specs_to_param_keyed_operands(leaf, specs_by_mapping)
 
     for tree in trees.values():
         _walk_tree_leaves(tree, attach)
+
+
+def _checker_membership_projection(leaf: dict[str, Any], contract: Any) -> tuple[str, ...] | None:
+    """Tie the checked boolean field to the written field, including struct members.
+
+    Equal mapping names and key arity do not equate ``rules[id].members[who]``
+    with ``rules[id].blocked[who]``. An ambiguous/read-through-helper cell stays
+    unresolved instead of borrowing a sibling field's event history.
+    """
+    from .structural_evidence import storage_cell
+    from .structural_ir import operations
+
+    if "declared_boolean_mapping_getter" in (leaf.get("basis") or []):
+        return ()
+    descriptor = leaf.get("set_descriptor") or {}
+    paths = set()
+    for fn in getattr(contract, "functions", []) or []:
+        if getattr(fn, "canonical_name", None) != leaf.get("source_function"):
+            continue
+        for node, ir in operations(fn):
+            if node.node_id != leaf.get("source_node_id"):
+                continue
+            value = getattr(ir, "lvalue", None)
+            if str(getattr(value, "type", "")) != "bool":
+                continue
+            cell = storage_cell(value, fn)
+            if (
+                cell is not None
+                and cell.variable.name == descriptor.get("storage_var")
+                and len(cell.keys) == len(descriptor.get("key_sources") or [])
+            ):
+                paths.add(cell.members)
+    return next(iter(paths)) if len(paths) == 1 else None
+
+
+def _mapping_key_constants(contract: Any) -> dict[str, str]:
+    """Fold declared scalar constants with Slither; do not guess role names or hashes."""
+    from slither.visitors.expression.constants_folding import ConstantFolding
+
+    constants: dict[str, str] = {}
+    for variable in getattr(contract, "state_variables", []) or []:
+        if not getattr(variable, "is_constant", False):
+            continue
+        try:
+            value = ConstantFolding(variable.expression, str(variable.type)).result().value
+        except Exception:
+            continue
+        if isinstance(value, bytes):
+            value = int.from_bytes(value, "big")
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**256:
+            constants[variable.name] = "0x" + format(value, "064x")
+    return constants
 
 
 def _attach_value_specs_to_param_keyed_operands(
@@ -562,14 +638,20 @@ def _attach_hints_to_leaf(leaf: dict[str, Any], specs_by_mapping: dict[str, list
     specs = specs_by_mapping.get(storage_var)
     if not specs:
         return
-    member_key_index = _caller_key_index(descriptor.get("key_sources") or [])
-    if member_key_index is None:
+    keys = descriptor.get("key_sources") or []
+    if not keys:
         return
 
     hints = list(descriptor.get("enumeration_hint") or [])
     seen = {_hint_identity(h) for h in hints if isinstance(h, dict)}
     for spec in specs:
-        hint = _event_hint_from_writer_spec(spec, member_key_index)
+        # A return predicate is parameter-keyed until the caller is bound during
+        # cross-contract resolution. Preserve the complete event/key relation;
+        # the runtime adapter chooses the symbolic key after binding.
+        positions = spec.get("key_positions_by_index") or {}
+        if set(map(int, positions)) != set(range(len(keys))):
+            continue
+        hint = _event_hint_from_writer_spec(spec, len(keys) - 1)
         identity = _hint_identity(hint)
         if identity in seen:
             continue
@@ -577,6 +659,53 @@ def _attach_hints_to_leaf(leaf: dict[str, Any], specs_by_mapping: dict[str, list
         hints.append(hint)
     if hints:
         descriptor["enumeration_hint"] = hints
+
+
+def _public_boolean_mapping_getters(contract: Any) -> dict[str, PredicateTree]:
+    """Compiler-generated mapping getters have no Function/return IR in Slither.
+
+    Their return value follows directly from the declared mapping type. Only a
+    scalar boolean terminal is represented; arrays and struct returns are not
+    interchangeable with membership. Names select declarations, never patterns.
+    """
+    from slither.core.solidity_types import ElementaryType, MappingType
+
+    trees: dict[str, PredicateTree] = {}
+    for variable in getattr(contract, "state_variables", []) or []:
+        if getattr(variable, "visibility", None) != "public":
+            continue
+        value_type = variable.type
+        keys: list[dict[str, Any]] = []
+        while isinstance(value_type, MappingType):
+            keys.append({"source": "parameter", "parameter_index": len(keys)})
+            value_type = value_type.type_to
+        if not keys or not isinstance(value_type, ElementaryType) or str(value_type) != "bool":
+            continue
+        signature = dispatch_signature(variable)
+        if signature is None:
+            continue
+        trees[signature] = cast(
+            PredicateTree,
+            {
+                "op": "LEAF",
+                "leaf": {
+                    "kind": "membership",
+                    "operator": "truthy",
+                    "authority_role": "business",
+                    "operands": keys,
+                    "references_msg_sender": False,
+                    "parameter_indices": list(range(len(keys))),
+                    "expression": "compiler-generated boolean mapping getter",
+                    "basis": ["declared_boolean_mapping_getter"],
+                    "set_descriptor": {
+                        "kind": "mapping_membership",
+                        "storage_var": variable.name,
+                        "key_sources": keys,
+                    },
+                },
+            },
+        )
+    return trees
 
 
 def _caller_key_index(key_sources: list[dict[str, Any]]) -> int | None:

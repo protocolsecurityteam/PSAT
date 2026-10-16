@@ -36,8 +36,9 @@ def resolve_effect_scopes(sites, registry, ctx, base_cap=None, effect_predicates
         )
         record = {k: site[k] for k in ("id", "kind", "target", "sink_ids", "origin")}
         record["capability"] = capability_to_dict(cap)
+        record["read_only"] = site.get("read_only") is True
         records.append(record)
-        if site.get("origin") == "body":
+        if site.get("origin") == "body" and site.get("read_only") is not True:
             body_caps.append(cap)
             body_dicts.append(record["capability"])
     if not body_caps:
@@ -48,7 +49,8 @@ def resolve_effect_scopes(sites, registry, ctx, base_cap=None, effect_predicates
         identity = authority_identity(capability_to_dict(base_cap))
         if all(authority_identity(d) == identity for d in body_dicts):
             return base_cap, records
-    # Function openness is existential over effects; per-site records retain the independent restrictions.
+    # Only consequential effects contribute to aggregate authority. A public getter reached
+    # before a mandatory upgrade guard does not make the upgrade permissionless.
     if any(capability_surface_openness(d, project_capability_surface(d)) == "open" for d in body_dicts):
         aggregate = CapabilityExpr.conditional_universal(Condition(kind="business", description="public effect path"))
     else:

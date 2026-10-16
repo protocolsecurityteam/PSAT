@@ -172,8 +172,10 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
             create_calls.append(request_dict)
             return child_ns
 
-        monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-        monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
+        monkeypatch.setattr(
+            "db.queue.jobs.create_discovery_child",
+            lambda session, parent, request: (fake_create_job(session, request), True),
+        )
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": parent_id})
@@ -606,8 +608,10 @@ class TestStructuralOwnershipPropagation:
             create_calls.append(req)
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
-        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+        monkeypatch.setattr(
+            "db.queue.jobs.create_discovery_child",
+            lambda session, parent, request: (_fake_create(session, request), True),
+        )
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -684,8 +688,10 @@ class TestStructuralOwnershipPropagation:
             create_calls.append(req)
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
-        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+        monkeypatch.setattr(
+            "db.queue.jobs.create_discovery_child",
+            lambda session, parent, request: (_fake_create(session, request), True),
+        )
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -769,8 +775,10 @@ class TestStructuralOwnershipPropagation:
             create_calls.append(req)
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
-        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+        monkeypatch.setattr(
+            "db.queue.jobs.create_discovery_child",
+            lambda session, parent, request: (_fake_create(session, request), True),
+        )
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -805,8 +813,10 @@ class TestStructuralOwnershipPropagation:
             create_calls.append(req)
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
-        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+        monkeypatch.setattr(
+            "db.queue.jobs.create_discovery_child",
+            lambda session, parent, request: (_fake_create(session, request), True),
+        )
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
@@ -841,8 +851,10 @@ class TestStructuralOwnershipPropagation:
             create_calls.append(req)
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
-        monkeypatch.setattr("workers.resolution_worker.create_job", _fake_create)
-        monkeypatch.setattr("services.discovery.perimeter.create_job", _fake_create)
+        monkeypatch.setattr(
+            "db.queue.jobs.create_discovery_child",
+            lambda session, parent, request: (_fake_create(session, request), True),
+        )
 
         graph = _resolved_graph(nodes=[{"address": dep_addr, "node_type": "contract", "analyzed": True}])
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")

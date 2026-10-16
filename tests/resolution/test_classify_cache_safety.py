@@ -19,6 +19,28 @@ def _isolated_cache():
     clear_classify_cache()
 
 
+def test_classifier_cache_is_chain_and_block_scoped_and_reports_actual_hits(monkeypatch):
+    from utils.logging import stage_metrics_var
+
+    calls = []
+    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", True)
+    monkeypatch.setattr(
+        tracking, "_classify_uncached_batched", lambda *a, **kw: calls.append(kw.get("chain_id")) or ("eoa", {}, False)
+    )
+    token = stage_metrics_var.set({})
+    try:
+        address = "0x" + "11" * 20
+        for chain, block in [(1, "0x10"), (1, "0x10"), (8453, "0x10"), (1, "0x11")]:
+            tracking.classify_resolved_address_with_status("http://rpc", address, block, chain_id=chain)
+        assert calls == [1, 8453, 1]
+        metrics = stage_metrics_var.get()
+        assert metrics is not None
+        assert metrics["classification_cache_hits"] == 1
+        assert metrics["classification_probes"] == 3
+    finally:
+        stage_metrics_var.reset(token)
+
+
 @pytest.fixture(autouse=True)
 def _stub_batch_probe_rpc(monkeypatch):
     """Batch probes return all-error so the sequential per-call mocks apply."""
@@ -53,7 +75,7 @@ def test_immutable_classification_keeps_long_ttl(monkeypatch):
     assert kind1 == "contract"
 
     assert tracking._CLASSIFY_CACHE_MUTABLE_TTL_S < tracking._CLASSIFY_CACHE_TTL_S
-    key = ("https://rpc", addr, "latest")
+    key = ("https://rpc", None, addr, "latest")
     kind, details, ts = _CLASSIFY_CACHE[key]
     _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
 
@@ -102,7 +124,7 @@ def test_mutable_safe_details_ttl_by_block_tag(monkeypatch, block_tag, expected_
     assert kind1 == "safe"
     assert details1["owners"] == [_OWNER_1]
 
-    key = ("https://rpc", addr, block_tag)
+    key = ("https://rpc", None, addr, block_tag)
     kind, details, ts = _CLASSIFY_CACHE[key]
     _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
 

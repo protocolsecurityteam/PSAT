@@ -19,6 +19,60 @@ from services.static.contract_analysis_pipeline.provenance import (  # noqa: E40
 )
 
 
+def test_large_origin_sets_saturate_to_unknown_without_truncation():
+    # The availability tests reload the module; take the current Source/TOP pair.
+    from services.static.contract_analysis_pipeline.provenance import (
+        DEFAULT_SOURCE_SET_CAP,
+        TOP,
+        ProvenanceMap,
+        Source,
+        union,
+    )
+
+    sources = frozenset(Source(kind="parameter", parameter_index=i) for i in range(DEFAULT_SOURCE_SET_CAP))
+    extra = frozenset({Source(kind="msg_sender")})
+    assert union(sources, frozenset()) == sources
+    assert union(sources, extra) is TOP
+    assert union(extra, sources) is TOP
+    pmap = ProvenanceMap(sources={})
+    pmap.set("large", sources | extra)
+    assert pmap.get("large") is TOP
+
+
+def test_recursive_member_projections_converge_to_unknown():
+    from dataclasses import replace
+
+    from services.static.contract_analysis_pipeline.provenance import (
+        DEFAULT_SOURCE_SET_CAP,
+        TOP,
+        ProvenanceMap,
+        Source,
+        union,
+    )
+
+    source = Source(kind="state_variable", state_variable_name="root")
+    pmap = ProvenanceMap(sources={})
+    pmap.set("value", frozenset({source}))
+    iteration = 100
+    for iteration in range(100):
+        previous = pmap.get("value")
+        if previous == TOP:
+            expanded = TOP
+        else:
+            projected = frozenset(
+                replace(origin, member_path=origin.member_path + (field,))
+                for origin in previous
+                for field in ("left", "right")
+            )
+            expanded = union(previous, projected)
+        changed = pmap.set("value", expanded)
+        assert len(pmap.get("value")) <= DEFAULT_SOURCE_SET_CAP
+        if not changed:
+            break
+    assert iteration < 20
+    assert pmap.get("value") == TOP
+
+
 def test_widen_strips_digest_inside_derived_from():
     nested = Source(kind="computed", computed_kind="BinaryType.ADDITION", callee_args_digest="12345678")
     src = Source(kind="computed", computed_kind="BinaryType.MULTIPLICATION", derived_from=frozenset({nested}))

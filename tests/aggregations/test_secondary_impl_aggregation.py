@@ -24,9 +24,10 @@ from tests.conftest import requires_postgres
 pytestmark = requires_postgres
 
 
-def _ef(session, contract, fname, *, effect_labels=None):
+def _ef(session, contract, fname, *, effect_labels=None, deployment_address=None):
     ef = EffectiveFunction(
         contract_id=contract.id,
+        deployment_address=deployment_address,
         function_name=fname,
         selector="0x" + uuid.uuid4().hex[:8],
         abi_signature=f"{fname}()",
@@ -76,8 +77,8 @@ def test_secondary_impl_absorbed_into_proxy(db_session):
     admin_job = _add_job(s, address=admin_addr, protocol_id=p.id, name="LRTSquaredAdmin")
     admin_c = _add_contract(s, address=admin_addr, job=admin_job, protocol_id=p.id, contract_name="LRTSquaredAdmin")
 
-    _ef(s, core_c, "deposit", effect_labels=["asset_pull"])
-    set_pauser = _ef(s, admin_c, "setPauser", effect_labels=["pause_toggle"])
+    _ef(s, core_c, "deposit", effect_labels=["asset_pull"], deployment_address=proxy_addr)
+    set_pauser = _ef(s, admin_c, "setPauser", effect_labels=["pause_toggle"], deployment_address=proxy_addr)
     s.add(
         FunctionPrincipal(
             function_id=set_pauser.id,
@@ -148,8 +149,8 @@ def test_secondary_impl_fp_all_addrs_folds_into_primary_gate(db_session):
     admin_job = _add_job(s, address=admin_addr, protocol_id=p.id, name="Admin")
     admin_c = _add_contract(s, address=admin_addr, job=admin_job, protocol_id=p.id, contract_name="Admin")
 
-    _ef(s, core_c, "deposit", effect_labels=["asset_pull"])
-    set_pauser = _ef(s, admin_c, "setPauser", effect_labels=["pause_toggle"])
+    _ef(s, core_c, "deposit", effect_labels=["asset_pull"], deployment_address=proxy_addr)
+    set_pauser = _ef(s, admin_c, "setPauser", effect_labels=["pause_toggle"], deployment_address=proxy_addr)
     s.add(
         FunctionPrincipal(
             function_id=set_pauser.id,
@@ -163,6 +164,7 @@ def test_secondary_impl_fp_all_addrs_folds_into_primary_gate(db_session):
     s.add(
         ControlGraphNode(
             contract_id=core_c.id,
+            deployment_address=proxy_addr,
             address=safe.lower(),
             node_type="contract",
             resolved_type="safe",

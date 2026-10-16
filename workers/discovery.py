@@ -52,8 +52,10 @@ from services.discovery.deployer_enumeration import (
 from services.discovery.fetch import (
     fetch,
     is_vyper_result,
+    parse_compiler_settings,
     parse_remappings,
     parse_sources,
+    parse_verification_bundle,
     source_content_hash,
     verified_compile_settings,
 )
@@ -951,6 +953,13 @@ class DiscoveryWorker(BaseWorker):
         address = job.address
         if address is None:
             raise ValueError("Address job missing address")
+        from db.queue.source_failures import SOURCE_ABSENCE
+
+        if SOURCE_ABSENCE in (job.request or {}):
+            # An explicit retry performs a new source check; a later unrelated failure
+            # must not inherit the previous attempt's absence observation.
+            job.request = {key: value for key, value in (job.request or {}).items() if key != SOURCE_ABSENCE}
+            session.commit()
 
         request = job.request if isinstance(job.request, dict) else {}
         # The job's own chain (``chain_id`` first) scopes every lookup below. An address job without a resolvable chain
@@ -1015,6 +1024,10 @@ class DiscoveryWorker(BaseWorker):
             )
         result_or_exc = fan_out["fetch"]
         if isinstance(result_or_exc, BaseException):
+            if isinstance(result_or_exc, etherscan.VerifiedSourceUnavailable):
+                from db.queue.source_failures import record_source_absence
+
+                record_source_absence(session, job, fetch_chain_id)
             raise result_or_exc
         result = cast(dict, result_or_exc)
 
@@ -1034,6 +1047,16 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(session, job, "Storing source files")
         with log_timed_phase(logger, "source_storage", files=len(sources)):
             store_source_files(session, job.id, sources)
+            store_artifact(session, job.id, "compiler_settings", data=parse_compiler_settings(result))
+            store_artifact(
+                session,
+                job.id,
+                "verified_build_metadata",
+                data={
+                    "compiler_version": result.get("CompilerVersion"),
+                    "evm_version": result.get("EVMVersion"),
+                },
+            )
         self.update_detail(session, job, "Evaluating membership")
 
         build = verified_compile_settings(result, sources)
@@ -1071,7 +1094,7 @@ class DiscoveryWorker(BaseWorker):
             existing.optimization = build.optimizer
             existing.optimization_runs = build.optimizer_runs
             existing.via_ir = build.via_ir
-            existing.source_format = "standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat"
+            existing.source_format = "standard_json" if parse_verification_bundle(result) else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
             # ``None`` means no answer, not no deployer; keep prior evidence.
@@ -1094,7 +1117,7 @@ class DiscoveryWorker(BaseWorker):
                 optimization=build.optimizer,
                 optimization_runs=build.optimizer_runs,
                 via_ir=build.via_ir,
-                source_format="standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat",
+                source_format="standard_json" if parse_verification_bundle(result) else "flat",
                 source_file_count=len(sources),
                 license=result.get("LicenseType", ""),
                 deployer=deployer,

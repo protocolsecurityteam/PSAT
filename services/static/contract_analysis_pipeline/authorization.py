@@ -901,6 +901,7 @@ def apply_authorization_pass(contract, trees):
     if getattr(contract, "state_variables", None) is None:
         return
     attach_membership_inventories(contract, trees)
+    _attach_recovered_signer_checks(contract, trees)
     for fn in contract.functions_entry_points:
         witness = quorum_witness(fn, contract)
         if witness is None:
@@ -943,3 +944,69 @@ def apply_authorization_pass(contract, trees):
             },
         }
         trees[fn.full_name] = make_and_node([quorum_leaf, remaining]) if remaining is not None else quorum_leaf
+
+
+def _attach_recovered_signer_checks(contract, trees):
+    """Authenticate one recovered identity without turning its registry into a caller set.
+
+    Both the external membership result and nonzero recovery must be mandatory
+    atoms of the same successful guard. This proves signer authentication only;
+    it awards no quorum, replay-prevention or payload-completeness credit.
+    """
+    from .predicate_artifacts import dispatch_signature
+
+    witnessed = {}
+    for fn in contract.functions:
+        bindings = {p.name: {index} for index, p in enumerate(fn.parameters)}
+        for node, value, polarity in guards(fn):
+            if polarity != "allowed_when_true":
+                continue
+            atoms = mandatory_atoms(value, fn, polarity) or []
+            for call, _ in atoms:
+                if not isinstance(call, HighLevelCall) or call.function is None:
+                    continue
+                if not (
+                    getattr(call.function, "view", False)
+                    or getattr(call.function, "pure", False)
+                    or (isinstance(call.function, StateVariable) and call.function.visibility == "public")
+                ):
+                    continue
+                recovered = [(arg, _signature_result(arg, fn, bindings)) for arg in call.arguments]
+                recovered = [(arg, proof) for arg, proof in recovered if proof is not None]
+                if len(recovered) != 1:
+                    continue
+                signer, (_, bound) = recovered[0]
+                nonzero = any(
+                    isinstance(test, Binary)
+                    and op == "NOT_EQUAL"
+                    and any(
+                        same(unwrap(identity, fn), unwrap(signer, fn)) and integer(zero, fn) == 0
+                        for identity, zero in (
+                            (test.variable_left, test.variable_right),
+                            (test.variable_right, test.variable_left),
+                        )
+                    )
+                    for test, op in atoms
+                )
+                signature = dispatch_signature(call.function)
+                if nonzero and signature:
+                    witnessed[(fn.canonical_name, node.node_id, signature)] = sorted(bound)
+
+    def attach(tree):
+        leaf = tree.get("leaf") or {}
+        descriptor = leaf.get("set_descriptor") or {}
+        key = (leaf.get("source_function"), leaf.get("source_node_id"), descriptor.get("callee_signature"))
+        if leaf.get("kind") == "external_bool" and key in witnessed:
+            leaf["authority_proof"] = {
+                "state": "proven",
+                "kind": "recovered_signer_membership",
+                "basis": "mandatory_nonzero_recovery_and_external_membership",
+                "bound_helper_parameters": witnessed[key],
+                "payload_completeness": "not_determined",
+                "replay_protection": "not_determined",
+            }
+        for child in tree.get("children") or []:
+            attach(child)
+
+    for tree in trees.values():
+        attach(tree)

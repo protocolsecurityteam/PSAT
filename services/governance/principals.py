@@ -301,6 +301,8 @@ def _build_company_function_entry(
     ef: EffectiveFunction,
     principals: list[FunctionPrincipal],
     principal_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    include_capability_expr: bool = True,
 ) -> dict[str, Any]:
     direct_owner = None
     controllers_by_label: dict[str, dict[str, Any]] = {}
@@ -409,8 +411,12 @@ def _build_company_function_entry(
     }
 
     capability_expr = getattr(ef, "capability_expr", None)
-    if capability_expr is not None:
-        entry["capability_expr"] = capability_expr
+    if include_capability_expr:
+        if capability_expr is not None:
+            entry["capability_expr"] = capability_expr
+    else:
+        # Keep the compact flag consistent with the authoritative backend verdict, never infer it from tree shape.
+        entry["capability_proven_empty"] = getattr(ef, "status", None) == "resolved_empty"
     conditions = getattr(ef, "conditions", None)
     if conditions is not None:
         entry["conditions"] = conditions

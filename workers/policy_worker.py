@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
+import threading
 from collections.abc import Callable, Collection, Mapping
+from concurrent.futures import Future
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.deployment import deployment_scope, normalize_deployment
@@ -111,7 +114,7 @@ def _make_principal_type_resolver(
 
 
 def _make_terminal_controller_resolver(
-    rpc_url: str | None, *, chain_id: int | None = None
+    rpc_url: str | None, *, chain_id: int | None = None, block_tag: str = "latest"
 ) -> Callable[[str], list[dict[str, object]] | None] | None:
     """The ``address -> [controller-step, ...] | None`` resolver for the contract-principal terminal walk: reads
     ``owner()``/``authority()``/``admin()`` and classifies each, so ``resolve_terminal_principal`` can chain to a
@@ -121,22 +124,68 @@ def _make_terminal_controller_resolver(
     if not rpc_url:
         return None
 
-    def _resolve(address: str) -> list[dict[str, object]] | None:
-        controllers = read_contract_controllers(rpc_url, address, chain_id=chain_id)
+    # One resolver belongs to one label pass. Never persist these stateful observations or
+    # reuse them by implementation: different proxies can have different controllers.
+    pinned = block_tag.startswith("0x")
+    cache: dict[str, list[dict[str, object]]] = {}
+    in_flight: dict[str, Future] = {}
+    lock = threading.Lock()
+    stats = {"reads": 0, "hits": 0, "waits": 0}
+
+    def metric(key: str) -> None:
+        stats[key] += 1
+        record_stage_metric("label_controller_" + key, stats[key])
+
+    def _read(address: str) -> tuple[list[dict[str, object]] | None, bool]:
+        kwargs: dict[str, Any] = {"chain_id": chain_id}
+        if pinned:
+            kwargs["block_tag"] = block_tag
+        controllers = read_contract_controllers(rpc_url, address, **kwargs)
         if controllers is None:
             # A probe error: the plane set isn't known this round, reported as ``unknown_unfetched``.
-            return None
+            return None, False
         if not controllers:
             # Every getter answered and named nothing: reported as ``controllers_not_determined``. Distinct from
             # ``None``, but neither proves there's no controller.
-            return []
+            return [], True
         steps: list[dict[str, object]] = []
+        complete = True
         for owner in controllers:
-            resolved_type, details, _cacheable = classify_resolved_address_with_status(
-                rpc_url, owner, chain_id=chain_id
-            )
+            resolved_type, details, cacheable = classify_resolved_address_with_status(rpc_url, owner, **kwargs)
+            complete = complete and cacheable
             steps.append({"address": owner, "resolved_type": resolved_type, "details": details})
-        return steps
+        return steps, complete
+
+    def _resolve(address: str) -> list[dict[str, object]] | None:
+        key = address.lower()
+        if not pinned:
+            return _read(key)[0]
+        with lock:
+            if key in cache:
+                metric("hits")
+                return copy.deepcopy(cache[key])
+            pending = in_flight.get(key)
+            leader = pending is None
+            if pending is None:
+                pending = in_flight[key] = Future()
+                metric("reads")
+            else:
+                metric("waits")
+        if not leader:
+            return copy.deepcopy(pending.result())
+        try:
+            result, complete = _read(key)
+            with lock:
+                if complete and result is not None and len(cache) < 1024:
+                    cache[key] = copy.deepcopy(result)
+            pending.set_result(copy.deepcopy(result))
+            return result
+        except Exception as exc:
+            pending.set_exception(exc)
+            raise
+        finally:
+            with lock:
+                in_flight.pop(key, None)
 
     return _resolve
 
@@ -167,6 +216,24 @@ def _rpc_url_for_job(job: Job) -> str:
         chain_id=_chain_id_for_job(job),
         context=f"policy rpc for job {job.id}",
     )
+
+
+def _contract_for_job(session: Session, job: Job) -> Contract | None:
+    """A shared implementation's current job pointer is not its chain-scoped identity."""
+    if not job.address:
+        return None
+    chain = chain_by_id(_chain_id_for_job(job)).name
+    return session.execute(
+        select(Contract)
+        .where(
+            func.lower(Contract.address) == job.address.lower(),
+            func.lower(func.coalesce(Contract.chain, "ethereum")) == chain,
+        )
+        # Legacy NULL-chain rows can duplicate an address. Prefer the valid job link
+        # within that identity, without relying on the link being present for cache reuse.
+        .order_by(Contract.chain.is_(None), Contract.job_id.is_distinct_from(job.id), Contract.id)
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def _chain_id_for_job(job: Job) -> int:
@@ -736,9 +803,7 @@ class PolicyWorker(BaseWorker):
         deployment_address = normalize_deployment(
             (job.request if isinstance(job.request, dict) else {}).get("proxy_address")
         )
-        contract_row = session.execute(
-            select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
-        ).scalar_one_or_none()
+        contract_row = _contract_for_job(session, job)
         # Every DB write below needs contract_row; without one the job succeeds with zero rows, so make that visible.
         record_stage_metric("rows_written", contract_row is not None)
         if contract_row is None:
@@ -763,6 +828,8 @@ class PolicyWorker(BaseWorker):
 
             # Capture principals before the rewrite: dropped ones are only reachable through the pre-image.
             principals_before = membership_gate.principal_addresses(session, [contract_row.id])
+            # Finish prior writes before the writer prefetches principal classifications.
+            session.commit()
             with log_timed_phase(logger, "effective_function_rows", durations_ms=durations_ms) as ph:
                 fp_added = write_effective_function_rows(
                     session,
@@ -982,7 +1049,13 @@ class PolicyWorker(BaseWorker):
                     load_protocol_deployer_groups(session, job.protocol_id) if job.protocol_id else None
                 ),
                 # Contract principal to terminal Safe/EOA walk.
-                resolve_controllers=_make_terminal_controller_resolver(rpc_url, chain_id=_chain_id_for_job(job)),
+                resolve_controllers=_make_terminal_controller_resolver(
+                    rpc_url,
+                    chain_id=_chain_id_for_job(job),
+                    block_tag=hex(control_snapshot["block_number"])
+                    if isinstance(control_snapshot.get("block_number"), int)
+                    else "latest",
+                ),
             )
             ph["principal_count"] = len(pl_data.get("principals", []))
 
@@ -1223,9 +1296,7 @@ class PolicyWorker(BaseWorker):
                     job.id,
                     {fn_sig: sorted({(g["callee"], g["reason"]) for g in fn_gaps}) for fn_sig, fn_gaps in gaps.items()},
                 )
-            contract_row = session.execute(
-                select(Contract).where(Contract.job_id == job.id).order_by(Contract.id).limit(1)
-            ).scalar_one_or_none()
+            contract_row = _contract_for_job(session, job)
             # An impl row can back several deployments; these belong to the deployment the writer tagged, derived the
             # same way.
             row_deployment = normalize_deployment(request.get("proxy_address"))

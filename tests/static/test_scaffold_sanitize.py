@@ -42,9 +42,10 @@ def test_evm_version_injection_falls_back():
     assert fetch._resolve_evm_version(injected, "0.8.24") == "shanghai"
 
 
-def test_evm_version_allowlist_passes_legit():
-    assert fetch._resolve_evm_version("cancun", "0.8.24") == "cancun"
-    assert fetch._resolve_evm_version("CANCUN", "0.8.24") == "cancun"
+@pytest.mark.parametrize("version", ["cancun", "prague", "osaka"])
+def test_evm_version_allowlist_passes_legit(version):
+    assert fetch._resolve_evm_version(version, "0.8.24") == version
+    assert fetch._resolve_evm_version(version.upper(), "0.8.24") == version
     assert fetch._resolve_evm_version("", "0.8.24") == "shanghai"
 
 
@@ -196,3 +197,21 @@ def test_parse_sources_accepts_identical_duplicates_after_normalization():
 def test_interior_parent_segment_collapses_inside_the_path():
     result = _standard_json_result({"src/../lib/X.sol": {"content": "x"}})
     assert fetch.parse_sources(result) == {"lib/X.sol": "x"}
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_legacy_source_map_is_decoded_and_hashes_like_standard_json(wrapped):
+    files = {
+        "src/A.sol": {"content": "pragma solidity ^0.8.6; contract A {}"},
+        "src/I.sol": {"content": "pragma solidity ^0.8.6; interface I {}"},
+    }
+    standard = _standard_json_result(files)
+    legacy = {**standard, "SourceCode": " \n" + ("{" if wrapped else "") + json.dumps(files) + ("}" if wrapped else "")}
+    assert fetch.parse_sources(legacy) == fetch.parse_sources(standard)
+    assert fetch.source_content_hash(legacy) == fetch.source_content_hash(standard)
+
+
+def test_legacy_source_map_keeps_path_confinement():
+    result = {"SourceCode": json.dumps({"a/../../../outside.sol": {"content": "contract A {}"}})}
+    with pytest.raises(ValueError):
+        fetch.parse_sources(result)

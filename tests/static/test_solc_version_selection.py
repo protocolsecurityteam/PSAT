@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 from services.discovery.fetch import _detect_solc_version as detect_fetch_solc
-from services.discovery.fetch import _relax_pragmas, scaffold
+from services.discovery.fetch import _relax_pragmas, scaffold, select_solc_version
 from workers.static_worker import StaticWorker
 
 TELLER_PRAGMA = "pragma solidity <0.9.0 =0.8.21 >=0.8.0 ^0.8.0 ^0.8.20;"
@@ -188,3 +188,108 @@ def test_selected_solc_compiles_relaxed_compound_pragma(tmp_path):
         path.write_text(content)
         proc = subprocess.run([solc, "--bin", str(path)], capture_output=True, text=True, timeout=120)
         assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("path", ["discovery", "static"])
+def test_verified_compiler_preserves_custom_error_require_syntax(tmp_path, path):
+    # The loose pragma permits old compilers which cannot parse this newer syntax.
+    source = (
+        "pragma solidity ^0.8.0; contract T { error Denied(); "
+        "function f(bool ok) external pure { require(ok, Denied()); } }"
+    )
+    project = tmp_path / "project"
+    if path == "discovery":
+        scaffold(
+            "0xabc", {"SourceCode": source, "ContractName": "T", "CompilerVersion": "v0.8.27+commit.40a35a09"}, project
+        )
+    else:
+        project.mkdir()
+        StaticWorker()._scaffold_project(
+            project, {"T.sol": source}, {"compiler_version": "v0.8.27+commit.40a35a09"}, {}, []
+        )
+    assert _foundry_solc(project) == "0.8.27"
+    solc = _installed_solc(_foundry_solc(project))
+    source_file = project / ("src/T.sol" if path == "discovery" else "T.sol")
+    proc = subprocess.run([solc, "--bin", str(source_file)], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("preferred", "expected"),
+    [
+        ("v0.8.21+commit.abc", "0.8.21"),
+        ("v0.9.0+commit.abc", "0.8.24"),
+        ("nightly", "0.8.24"),
+        ('0.8.27"\nevm_version = "bad', "0.8.24"),
+    ],
+)
+def test_verified_compiler_metadata_respects_constraints(preferred, expected):
+    assert select_solc_version({"T.sol": "pragma solidity >=0.8.20 <0.8.25; contract T {}"}, preferred) == expected
+
+
+@pytest.mark.parametrize("via_ir", [True, False, None, "true"])
+def test_both_scaffolds_preserve_verified_via_ir(tmp_path, via_ir):
+    from services.discovery.fetch import parse_compiler_settings
+
+    sources = {"src/T.sol": "pragma solidity ^0.8.25; contract T {}"}
+    bundle = {
+        "language": "Solidity",
+        "sources": {path: {"content": content} for path, content in sources.items()},
+        "settings": {"viaIR": via_ir},
+    }
+    result = {"SourceCode": "{" + json.dumps(bundle) + "}", "CompilerVersion": "v0.8.25"}
+    recursive = scaffold("0xabc", result, tmp_path / "recursive")
+    top_level = tmp_path / "top_level"
+    top_level.mkdir()
+    StaticWorker()._scaffold_project(
+        top_level,
+        sources,
+        {"compiler_version": result["CompilerVersion"]},
+        {"via_ir": parse_compiler_settings(result).get("viaIR") is True},
+        [],
+    )
+    for project in (recursive, top_level):
+        # The initial AST build uses the legacy compiler pipeline; verified
+        # viaIR is retained in metadata for the supported fallback.
+        assert "via_ir = false" in (project / "foundry.toml").read_text()
+        assert json.loads((project / "contract_meta.json").read_text())["via_ir"] is (via_ir is True)
+
+
+def test_verified_compiler_is_selected_before_analysis(tmp_path):
+    sources = {"T.sol": "pragma solidity ^0.8.0; contract T {}"}
+    worker = StaticWorker()
+    worker._scaffold_project(tmp_path, sources, {"compiler_version": "v0.8.6+commit.11564f7e"}, {}, [])
+    config = (tmp_path / "foundry.toml").read_text()
+    assert 'solc_version = "0.8.6"' in config
+    assert 'evm_version = "berlin"' in config
+
+
+def test_compiler_failure_marker_uses_exception_cause_not_error_text(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from crytic_compile.platform.exceptions import InvalidCompilation
+    from slither.exceptions import SlitherError
+
+    import workers.static_worker as module
+
+    artifacts = {}
+    monkeypatch.setattr(module, "store_artifact", lambda session, job_id, name, data: artifacts.__setitem__(name, data))
+    worker = StaticWorker()
+    monkeypatch.setattr(worker, "update_detail", lambda *args: None)
+
+    def compile_failure(*args):
+        try:
+            raise InvalidCompilation("compiler error")
+        except InvalidCompilation:
+            raise SlitherError("wrapped compiler error")
+
+    monkeypatch.setattr(module, "collect_contract_analysis_with_artifacts", compile_failure)
+    assert worker._run_analysis_phase(None, SimpleNamespace(id="job"), tmp_path, "T", "0xabc") is None
+    assert artifacts["analysis_error"]["compilation_failed"] is True
+
+    def semantic_failure(*args):
+        raise RuntimeError("Invalid compilation is only text here")
+
+    monkeypatch.setattr(module, "collect_contract_analysis_with_artifacts", semantic_failure)
+    assert worker._run_analysis_phase(None, SimpleNamespace(id="job"), tmp_path, "T", "0xabc") is None
+    assert artifacts["analysis_error"]["compilation_failed"] is False

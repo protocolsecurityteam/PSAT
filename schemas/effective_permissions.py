@@ -63,6 +63,8 @@ class EffectiveFunctionPermission(TypedDict):
     action_summary: str
     notes: list[str]
     capability_expr: NotRequired[dict[str, Any]]
+    # Compact company-list witness; false does not prove a caller exists.
+    capability_proven_empty: NotRequired[bool]
     conditions: NotRequired[list[dict[str, Any]]]
     status: NotRequired[EffectiveFunctionStatus]
     signature_witnesses: NotRequired[list[ResolvedPrincipal]]

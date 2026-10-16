@@ -183,8 +183,25 @@ def _fold_receivers(descriptors: list[ReceiverDescriptor]) -> ReceiverDescriptor
     return _receiver_not_determined("fold_disagreement")
 
 
+def _proven_read_only_call(ir: Any) -> bool:
+    """Only compiler-proven STATICCALL semantics; library and unknown calls stay consequential."""
+    op = type(ir).__name__
+    if op == "HighLevelCall":
+        check = getattr(ir, "is_static_call", None)
+        if callable(check):
+            try:
+                return check() is True
+            except (AttributeError, ValueError):
+                return False
+    if op == "LowLevelCall":
+        return str(getattr(ir, "function_name", "")) == "staticcall"
+    if op == "SolidityCall":
+        return str(getattr(getattr(ir, "function", None), "name", "")).startswith("staticcall(")
+    return False
+
+
 def _classify_node_irs(
-    node: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any
+    node: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any, *, exclude_read_only: bool = False
 ) -> list[tuple[str, str, str | None, ReceiverDescriptor | None, str | None]]:
     """Non-state-write sinks at a node as ``(kind, target, selector, receiver, library_signature)``; ``receiver`` only
     for high-level/library calls, ``library_signature`` (the library function's spelling, which has no selector to
@@ -195,6 +212,8 @@ def _classify_node_irs(
     # Node-local def map, so an inline-cast receiver resolves past its temporary.
     def_by_id = {id(lv): ir for ir in _node_irs(node) if (lv := getattr(ir, "lvalue", None)) is not None}
     for ir in _node_irs(node):
+        if exclude_read_only and _proven_read_only_call(ir):
+            continue
         op = type(ir).__name__
         if op == "NewContract":
             target = getattr(ir, "contract_name", None) or str(getattr(ir, "contract_created", "")) or "unknown"

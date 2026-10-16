@@ -1624,6 +1624,8 @@ def test_targeted_recovery_keeps_original_asset_facts_and_sibling_signals(corpus
         corpus.job.id,
         "flow_asset_addresses",
         data={
+            "chain_id": 1,
+            "deployment_address": contract.address,
             "receivers": [
                 {
                     "asset_getter_selector": "0x38d52e0f",
@@ -1631,7 +1633,7 @@ def test_targeted_recovery_keeps_original_asset_facts_and_sibling_signals(corpus
                     "asset_address_status": "resolved",
                     "asset_identity_invariant": "immutable",
                 }
-            ]
+            ],
         },
     )
     expected = distill_job_signals(corpus.session, corpus.job)[contract.id]
@@ -1647,3 +1649,92 @@ def test_targeted_recovery_keeps_original_asset_facts_and_sibling_signals(corpus
     assert {s.claim_id for s in resumed[contract.id]} == {"flow.out", "upgrade.implementation"}
     assert [replace(s, job_id=corpus.job.id) for s in resumed[contract.id]] == expected
     assert next(s for s in resumed[contract.id] if s.claim_id == "flow.out").gate_input("asset_identity").is_determined
+
+
+def test_shared_implementation_refreshes_all_deployments_with_their_own_saved_facts(corpus):
+    from db.models import ControllerValue
+    from db.queue import store_artifact
+    from services.scoring.distill.facts import _load_contract_facts
+    from services.scoring.population import replace_contract_signals
+
+    code = corpus.contract("0x" + "b1" * 20)
+    deployments = ["0x" + byte * 20 for byte in ("b2", "b3", "b4")]
+    jobs = []
+    for i, deployment in enumerate(deployments):
+        job = Job(
+            id=uuid.uuid4(),
+            protocol_id=corpus.protocol.id,
+            address=code.address,
+            chain_id=1,
+            request={"chain": "ethereum", "proxy_address": deployment},
+        )
+        corpus.session.add(job)
+        corpus.session.flush()
+        jobs.append(job)
+        claim = _flow_out(None, None, "idiom_structural")
+        claim["witness"]["sink_receivers"] = {
+            "transfer": {"receiver_provenance": "contract_state_unresolved", "auto_getter_selector": "0x38d52e0f"},
+        }
+        fn = corpus.function(
+            code, name="withdraw", selector="0x12345678", claims=[claim], deployment_address=deployment
+        )
+        corpus.principal(fn, address=deployment, resolved_type="safe")
+        asset = "0x" + ("c1", "c2", "c3")[i] * 20
+        store_artifact(
+            corpus.session,
+            job.id,
+            "flow_asset_addresses",
+            data={
+                "chain_id": 1 if i < 2 else 8453,  # A matching job cannot license a mismatched artifact.
+                "deployment_address": deployment,
+                "probe_block": 100 + i,
+                "receivers": [
+                    {
+                        "asset_getter_selector": "0x38d52e0f",
+                        "asset_address": asset,
+                        "asset_address_status": "resolved",
+                        "asset_identity_invariant": "immutable",
+                    }
+                ],
+            },
+        )
+        for source, value, kind in (("authority", "0x" + "0" * 40, "zero"), ("owner", deployment, "safe")):
+            corpus.session.add(
+                ControllerValue(
+                    contract_id=code.id,
+                    deployment_address=deployment,
+                    controller_id=source,
+                    source=source,
+                    value=value,
+                    resolved_type=kind,
+                    authority_provenance="caller_gate",
+                    observed_via="eth_call",
+                )
+            )
+    code.job_id = jobs[0].id
+    # A same-address contract on another chain must never be refreshed by this Ethereum child.
+    twin = corpus.contract(code.address, chain="base")
+    corpus.function(twin, name="unrelated", claims=[{"claim_id": "upgrade.implementation", "tier": "standard_exact"}])
+    corpus.session.commit()
+    grouped = distill_job_signals(corpus.session, jobs[1])
+    assert set(grouped) == {code.id}
+    assert {signal.deployment_address for signal in grouped[code.id]} == set(deployments)
+    assert len(grouped[code.id]) == 3
+    for i, deployment in enumerate(deployments):
+        facts = _load_contract_facts(corpus.session, code, job_id=jobs[0].id, deployment_address=deployment)
+        assert len(facts.functions) == 1
+        assert facts.functions[0].deployment_address == deployment
+        assert facts.registry_owner is not None
+        assert facts.registry_owner["address"] == deployment
+        if i < 2:
+            assert facts.asset_identity["0x38d52e0f"]["asset_address"] == "0x" + ("c1", "c2")[i] * 20
+        else:
+            assert facts.asset_identity == {}
+            assert facts.asset_identity_state == "artifact_scope_mismatch"
+    # Whole-contract validation/replacement retains siblings and references current principals.
+    replace_contract_signals(corpus.session, contract_id=code.id, signals=grouped[code.id], job_id=jobs[1].id)
+    corpus.session.commit()
+    current = current_signals_for_protocol(corpus.session, corpus.protocol.id)
+    assert len(current) == 3
+    document = compute_protocol_score(corpus.session, corpus.protocol.id)
+    assert not any(w["kind"] == "stale_scoring_inputs" for w in document.warnings)

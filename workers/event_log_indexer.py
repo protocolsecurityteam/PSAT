@@ -57,7 +57,7 @@ from services.resolution import indexer_settings as settings
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from services.resolution.deferred_reconciler import unsettled_mapping_await
 from services.resolution.indexer_work import mark_dirty
-from services.resolution.mapping_enumerator import MAPPING_ENUMERATION_AWAITS
+from services.resolution.mapping_enumerator import MAPPING_ENUMERATION_AWAITS, finite_value_predicate
 from services.resolution.repos.event_logs_rpc import FetchedEventLog, FetchWindowStat, LogPage, MalformedLogPage
 from services.resolution.role_store_standards import all_topic0s, detect_standards, resolve_probe_code
 from utils.chains import (
@@ -1920,6 +1920,22 @@ def hint_targets_for_job(session: Session, job: Job) -> Iterator[HintTarget]:
         return
     values = _state_var_values_for_job(session, job)
     for descriptor in _descriptors_from_artifact(artifact):
+        value_predicate = descriptor.get("value_predicate")
+        impossible_value_fold = (
+            descriptor.get("kind") == "mapping_membership"
+            and isinstance(value_predicate, dict)
+            and bool(value_predicate)
+            and any(
+                h.get("topic0") and h.get("direction") == "set" and h.get("value_position") is not None
+                for h in descriptor.get("enumeration_hint") or []
+            )
+            and not finite_value_predicate(value_predicate)
+        )
+        if impossible_value_fold:
+            # E.g. allowance[caller][spender] == 0 includes every unwritten key. Global
+            # history cannot produce that set; the resolver reports the condition unknown.
+            # Another descriptor using the same event may still legitimately enroll it.
+            continue
         for hint in descriptor.get("enumeration_hint") or []:
             topic0 = hint.get("topic0")
             if not isinstance(topic0, str) or not topic0.startswith("0x"):

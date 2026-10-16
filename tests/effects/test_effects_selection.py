@@ -40,6 +40,66 @@ from utils.balance_status import (
 pytestmark = requires_postgres
 
 
+def test_effects_census_exposes_partial_families_and_unplanned_functions(db_session):
+    from services.effects.completeness import effects_coverage
+
+    protocol = _protocol(db_session, "coverage-census")
+    contract = _contract(db_session, protocol.id, "0x" + "81" * 20, chain="ethereum")
+    first = _fn(
+        db_session,
+        contract.id,
+        name="withdraw",
+        selector="0x11111111",
+        claims=[{"claim_id": "flow.out"}, {"claim_id": "pause.set"}],
+    )
+    second = _fn(db_session, contract.id, name="mint", selector="0x22222222", claims=[{"claim_id": "supply.mint"}])
+    _fn(db_session, contract.id, name="unclassified", selector="0x33333333", claims=[])
+    db_session.add(
+        EffectVerdict(
+            function_id=first.id,
+            chain_id=1,
+            contract_address=contract.address,
+            selector=first.selector,
+            effect_class="value_out",
+            verdict="proven",
+            tier="tier1",
+        )
+    )
+    # A verdict for a different chain cannot cover the current function.
+    db_session.add(
+        EffectVerdict(
+            function_id=second.id,
+            chain_id=8453,
+            contract_address=contract.address,
+            selector=second.selector,
+            effect_class="supply",
+            verdict="proven",
+            tier="tier1",
+        )
+    )
+    db_session.flush()
+    census = effects_coverage(db_session, protocol.id)
+    assert census["eligible_functions"] == 3
+    assert census["functions_without_verdicts"] == 2
+    assert census["missing_required_families"] == 2
+    assert census["families_not_determined"] == 1
+    assert census["mismatched_deployment_verdicts"] == 1
+    assert census["pending_work_by_state"] == {} and census["state"] == "incomplete"
+    db_session.add(
+        EffectVerdict(
+            function_id=second.id,
+            chain_id=1,
+            contract_address=contract.address,
+            selector=second.selector,
+            effect_class="supply",
+            verdict="unknown",
+            tier="tier1",
+        )
+    )
+    db_session.flush()
+    assert effects_coverage(db_session, protocol.id)["unknown_verdicts"] == 1
+
+
 def _token_balance(
     session: Session,
     contract_id: int,
