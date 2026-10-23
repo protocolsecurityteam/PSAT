@@ -52,3 +52,22 @@ def test_a_row_missing_from_the_new_run_fails_unless_it_is_a_subset_run(tmp_path
     code, out = _run(tmp_path, old, new, capsys=capsys)
     assert code == 1 and "(m) missing" in out
     assert _run(tmp_path, old, new, "--only-new", capsys=capsys)[0] == 0
+
+
+def test_a_row_twice_in_one_run_is_refused(tmp_path, capsys):
+    import pytest
+
+    from scripts.logic_run_passes import DuplicateRow
+
+    row = _row(lego="restricted")
+    (tmp_path / "corpus_x_new_s2.jsonl").write_text(json.dumps(row) + "\n")
+    with pytest.raises(DuplicateRow, match="duplicate row"):
+        main(
+            [
+                "--old",
+                str(tmp_path / "corpus_x_new_s2.jsonl"),
+                "--new",
+                str(tmp_path / "corpus_x_new_s2.jsonl"),
+                str(tmp_path / "corpus_x_new_s2.jsonl"),
+            ]
+        )

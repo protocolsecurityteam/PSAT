@@ -12,6 +12,7 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
 (c) ``--budget-only``: the two runs differ only in budgets (work, history caps, candidate limits). A budget may cost
     completeness, never the answer: openness and the listed set must be identical; ``complete`` and gaps may differ.
 (m) Rows the old run has and the new one lacks fail too, unless ``--only-new`` (a subset run) is given.
+A row that appears twice within the old files, or within the new ones, stops the comparison with an error.
 
 Always printed, not a failure by itself: every row whose scope changed (or turned self-scoped, where the old run
 recorded none), with how many replay-confirmed holders it stopped listing.
@@ -27,17 +28,26 @@ import re
 import sys
 
 
+class DuplicateRow(SystemExit):
+    """The same row twice in one run: which copy counts is undefined, so the comparison refuses to choose."""
+
+
 def load(patterns: list[str]) -> dict[tuple, dict]:
     rows: dict[tuple, dict] = {}
+    seen: dict[tuple, str] = {}
     for pattern in patterns:
-        for path in sorted(glob.glob(pattern)) or [pattern]:
+        for path in sorted(set(glob.glob(pattern))) or [pattern]:
             named = re.match(r"corpus_([a-z0-9]+)_", os.path.basename(path))
             with open(path) as handle:
-                for line in handle:
+                for number, line in enumerate(handle, 1):
                     row = json.loads(line)
-                    if "function" in row:
-                        corpus = row.get("corpus") or (named.group(1) if named else "")
-                        rows[(corpus, row["address"].lower(), row["function"], row.get("contract"))] = row
+                    if "function" not in row:
+                        continue
+                    corpus = row.get("corpus") or (named.group(1) if named else "")
+                    key = (corpus, row["address"].lower(), row["function"], row.get("contract"))
+                    if key in rows:
+                        raise DuplicateRow(f"duplicate row {key}: {seen[key]} and {path}:{number}")
+                    rows[key], seen[key] = row, f"{path}:{number}"
     return rows
 
 
