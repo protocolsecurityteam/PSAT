@@ -3203,6 +3203,9 @@ def _decide_one(
     return True if solve(mk_not(formula), ground) is None else UNK
 
 
+_CALL_KINDS = frozenset({"call", "item", "ok", "caught", "retsize"})
+
+
 def confirmed(ev: Evaluator, formula: Term, free: frozenset | None = None, answer: Any = None) -> Any:
     """``ev``'s answer on ``formula`` (``answer``, when already asked), with the ``free`` atoms left to the
     connectives when given (``_free_sat``). A pass that rests on a followed callee's code standing in for a call over
@@ -3215,7 +3218,9 @@ def confirmed(ev: Evaluator, formula: Term, free: frozenset | None = None, answe
 
     result = ask(ev, answer)
     if result is True and ev.coded[0]:
-        again = Evaluator(ev.world, ev.identity, ev.assignment, ev.blind, ev.when)
+        # What reads no call is the same however calls are answered: kept, so only the calls are asked again.
+        kept = {t: v for t, v in ev._memo.items() if not contains(t, _CALL_KINDS)}
+        again = Evaluator(ev.world, ev.identity, ev.assignment, ev.blind, ev.when, kept)
         again.code_first = False
         result = ask(again)
     return result
