@@ -3336,7 +3336,10 @@ def _source(item: Any, fits: Any = None) -> str:
     mapping = getattr(item, "source_mapping", None)
     if mapping is None:
         return ""
-    readings = [getattr(mapping, "content", "") or ""]
+    try:
+        readings = [getattr(mapping, "content", "") or ""]
+    except UnicodeDecodeError:  # Slither's slice cut through a multi-byte character: the file's bytes below
+        readings = [""]
     path = getattr(getattr(mapping, "filename", None), "absolute", None)
     if path is not None and path not in _FILES:
         try:
