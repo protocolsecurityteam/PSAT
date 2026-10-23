@@ -3,14 +3,18 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
 ``corpus`` field, else read from a ``corpus_<name>_...`` file name, since one contract can sit in several corpora.
 
 (a) ``--faulty``: the new run injected read failures (``FAILFRAC``, ``FAILSTORE``). A failed read is unknown, never
-    evidence, so no row may gain confidence from it: restricted -> open, partial -> complete, or a complete row the
-    old run did not have.
+    evidence, so no row may gain confidence from it: any non-open row turning open, partial -> complete, a complete
+    row whose listed set changed, or a complete row the old run did not have.
 (b) Always: a holder whose own replayed ``eth_call`` succeeded in the old run (``checks[p] is True``) must still be
-    listed (principal or conditional) in the new one, unless the new row is open (it subsumes everyone) or the new
-    row says the function is self-scoped (``lego_scope == "self"``: its gate is reported as a condition and its
-    members aren't enumerated). A new row that errored counts as losing them.
+    listed (principal or conditional) in the new one, unless the new row is open (it subsumes everyone) or both
+    rows say the function is self-scoped (``lego_scope == "self"``: members not enumerated in either). A row that
+    turns self-scoped doesn't hide what it stopped listing. A new row that errored counts as losing them.
 (c) ``--budget-only``: the two runs differ only in budgets (work, history caps, candidate limits). A budget may cost
     completeness, never the answer: openness and the listed set must be identical; ``complete`` and gaps may differ.
+(m) Rows the old run has and the new one lacks fail too, unless ``--only-new`` (a subset run) is given.
+
+Always printed, not a failure by itself: every row whose scope changed (or turned self-scoped, where the old run
+recorded none), with how many replay-confirmed holders it stopped listing.
 """
 
 from __future__ import annotations
@@ -46,19 +50,26 @@ def verdict(row: dict) -> str | None:
     return row.get("lego")
 
 
+def _confirmed_lost(a: dict, b: dict) -> list[str]:
+    confirmed = {p for p, ok in (a.get("checks") or {}).items() if ok is True and p != "anyone"}
+    return sorted((confirmed & listed(a)) - listed(b))
+
+
 def failures(old: dict[tuple, dict], new: dict[tuple, dict], faulty: bool, budget_only: bool) -> list[str]:
     out: list[str] = []
     for key in sorted(old.keys() & new.keys()):
         a, b = old[key], new[key]
         where = f"{key[0]} {a.get('contract')}.{key[2]} @ {key[1]}"
         if faulty:
-            if verdict(a) == "restricted" and verdict(b) == "open":
-                out.append(f"(a) restricted -> open under failing reads: {where}")
+            if verdict(a) != "open" and verdict(b) == "open":
+                out.append(f"(a) {verdict(a)} -> open under failing reads: {where}")
             if b.get("lego_complete") and not a.get("lego_complete") and verdict(b) != "open":
                 out.append(f"(a) gained completeness under failing reads: {where}")
-        if verdict(b) != "open" and b.get("lego_scope") != "self":
-            confirmed = {p for p, ok in (a.get("checks") or {}).items() if ok is True and p != "anyone"}
-            lost = sorted((confirmed & listed(a)) - listed(b))
+            if a.get("lego_complete") and b.get("lego_complete") and listed(a) != listed(b):
+                out.append(f"(a) a complete list changed under failing reads: {where}")
+        exempt = a.get("lego_scope") == "self" and b.get("lego_scope") == "self"
+        if verdict(b) != "open" and not exempt:
+            lost = _confirmed_lost(a, b)
             if lost:
                 out.append(f"(b) lost {len(lost)} replay-confirmed holder(s) {lost[:4]}: {where} ({verdict(b)})")
         if budget_only and (verdict(a) != verdict(b) or listed(a) != listed(b)):
@@ -69,6 +80,22 @@ def failures(old: dict[tuple, dict], new: dict[tuple, dict], faulty: bool, budge
         for key in sorted(new.keys() - old.keys()):
             if new[key].get("lego_complete") and verdict(new[key]) != "open":
                 out.append(f"(a) a complete row the old run did not have, under failing reads: {key}")
+    return out
+
+
+def scope_flips(old: dict[tuple, dict], new: dict[tuple, dict]) -> list[str]:
+    out = []
+    for key in sorted(old.keys() & new.keys()):
+        a, b = old[key], new[key]
+        # A run that didn't record scope says nothing about it; turning self-scoped always shows.
+        if a.get("lego_scope") != b.get("lego_scope") and (
+            a.get("lego_scope") is not None or b.get("lego_scope") == "self"
+        ):
+            lost = _confirmed_lost(a, b) if verdict(b) != "open" else []
+            out.append(
+                f"{key[0]} {a.get('contract')}.{key[2]} @ {key[1]}: scope {a.get('lego_scope')} -> "
+                f"{b.get('lego_scope')}, {len(lost)} replay-confirmed holder(s) no longer listed"
+            )
     return out
 
 
@@ -84,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.only_new:
         old = {k: v for k, v in old.items() if k in new}
     found = failures(old, new, args.faulty, args.budget_only)
+    found += [f"(m) missing from the new run: {k}" for k in sorted(old.keys() - new.keys())]
+    flips = scope_flips(old, new)
+    print(f"scope changes: {len(flips)}")
+    for line in flips:
+        print("  " + line)
     for line in found:
         print(line)
     print(f"compared {len(old.keys() & new.keys())} rows; {len(found)} failure(s)")
