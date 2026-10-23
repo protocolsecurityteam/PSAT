@@ -13,6 +13,10 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
     losing them.
 (c) ``--budget-only``: the two runs differ only in budgets (work, history caps, candidate limits). A budget may cost
     completeness, never the answer: openness and the listed set must be identical; ``complete`` and gaps may differ.
+(d) Always: a new row claiming "provably nobody" (restricted, complete, nobody listed) where the harness replayed a
+    holder prod names and its call returned (``nobody_refuted``, filled by ``corpus_parity.py``): the chain refutes
+    the strongest claim the engine makes. (A holder that only reverts differently from a stranger, ``nobody_differs``,
+    passed the access check but not the call: no refutation.)
 (m) Rows the old run has and the new one lacks fail too, unless ``--only-new`` (a subset run) is given.
 A row that appears twice within the old files, or within the new ones, stops the comparison with an error.
 
@@ -90,6 +94,11 @@ def failures(
             out.append(
                 f"(c) budget changed the answer: {where} {verdict(a)}/{len(listed(a))} -> {verdict(b)}/{len(listed(b))}"
             )
+    for key in sorted(new):
+        refuted = new[key].get("nobody_refuted") or []
+        if refuted:
+            where = f"{key[0]} {new[key].get('contract')}.{key[2]} @ {key[1]}"
+            out.append(f"(d) nobody claimed but prod holder passes {refuted[:4]}: {where}")
     if faulty:
         for key in sorted(new.keys() - old.keys()):
             if new[key].get("lego_complete") and verdict(new[key]) != "open":
