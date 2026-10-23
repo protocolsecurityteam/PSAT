@@ -2250,10 +2250,21 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     now_maybe = False
     loosened = relaxed_atoms(formula)
     loose_stranger: list[Any] = []
+    # The decision's own work limit; each candidate's questions get a share of what is left of it (``_SHARE``), so
+    # one candidate's search never spends what the rest are owed. What every candidate shares (the stranger's
+    # chances) is asked under the decision's limit, never one candidate's share.
+    limit = world.work_limit
+
+    def uncapped(ask: Callable[[], Any]) -> Any:
+        capped_at, world.work_limit = world.work_limit, limit
+        try:
+            return ask()
+        finally:
+            world.work_limit = capped_at
 
     def stranger_loose() -> Any:
         if not loose_stranger:
-            loose_stranger.append(_outcome(formula, world, anyone, candidates, relaxed=True))
+            loose_stranger.append(uncapped(lambda: _outcome(formula, world, anyone, candidates, relaxed=True)))
         return loose_stranger[0]
 
     freed_stranger: dict[str, Any] = {}
@@ -2263,7 +2274,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         """A stranger's chance with only what the arguments decide freed (and at ``holdings``, the amounts in its
         own entries), stored state read as it is."""
         if level not in freed_stranger:
-            freed_stranger[level] = _outcome(formula, world, anyone, candidates, relaxed=level)
+            freed_stranger[level] = uncapped(lambda: _outcome(formula, world, anyone, candidates, relaxed=level))
         return freed_stranger[level]
 
     # A batch of candidates' first questions at once, so their reads go out in a few batches rather than one round trip
@@ -2292,7 +2303,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         for identity in unsettled:
             _decide_one(formula, world, identity, candidates, fixed={}, refute_ok=False, reads_only=True)
 
-    order = _ranked(candidates, world)
+    order = _screened(formula, world, candidates, loosened)
     batches = [order[i : i + _CANDIDATE_BATCH] for i in range(0, len(order), _CANDIDATE_BATCH)]
     for number, batch in enumerate(batches):
         if world.exhausted():
@@ -2305,9 +2316,11 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         world.chain.gather(guessed, rounds=2)
         pairs = [(root, candidate) for root in roots for candidate in batch]
         for root, candidate in pairs:
+            world.work_limit = limit
             if world.exhausted():
                 untested.add(candidate)
                 continue
+            world.work_limit = min(limit, world.work + max(_MIN_SHARE, (limit - world.work) * _SHARE))
             identity = {**anyone, root: candidate}
             # Every condition not about who calls left open, and still failing: refused whatever the arguments, the
             # state or the business logic, so no search is owed (the cheap answer for most candidates).
@@ -2375,6 +2388,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                     undecided.add(candidate)
             if singled and candidate not in conditions:
                 passes[root].add(candidate)
+    world.work_limit = limit
     if untested:
         # Someone never asked about may pass now: neither "nobody known passes now" nor a complete list holds.
         now_maybe = True
@@ -3604,6 +3618,50 @@ def gate_of(formula: Term) -> tuple[str, ...]:
 def _ranked(candidates: set[int], world: World) -> list[int]:
     """``candidates`` in the order they are asked about (see ``_built``)."""
     return sorted(candidates, key=lambda c: world.ranking.get(c, (True, len(candidates), c)))
+
+
+_SHARE = 0.5  # of the work left, the most one candidate's questions may spend
+_MIN_SHARE = 10.0
+_SCREEN_WORK = 100.0  # evaluation the screen of the candidates may spend, off the decision's own budget
+
+
+def _screened(formula: Term, world: World, candidates: set[int], loosened: frozenset) -> list[int]:
+    """``candidates`` in the order they are asked about, by what the state as it stands says of each: first those
+    it already lets through (the formula, or it with every condition not about who calls freed), then those it
+    leaves open, then those it refuses; within each, those holding more of the formula's lookups keyed by who calls
+    (an entry, a balance, an allowance: nonzero), then ``_ranked``'s order. The screen reads nothing new: what the
+    chain hasn't answered yet (a candidate not prefetched) reads unknown, so it costs no read the questions wouldn't
+    make. The order only: every candidate is asked about in turn."""
+    ranked = _ranked(candidates, world)
+    if len(ranked) < 2:
+        return ranked
+    keyed = [t for t in subterms(formula, "load") if contains(t, IDENTITY_KINDS)]
+    keyed += [t for t in subterms(formula, "call") if t[4] and any(contains(a, IDENTITY_KINDS) for a in t[3])]
+    screen: dict[int, tuple[int, int]] = {}
+    spent = world.work
+
+    def look(chunk: list[int]) -> None:
+        for candidate in chunk:
+            if world.work - spent > _SCREEN_WORK:
+                return  # the rest keep ``_ranked``'s order, among those the screen left open
+            identity = {"caller": candidate, "signer": FRESH}
+            exact = Evaluator(world, identity).truth(formula)
+            loose = Evaluator(world, identity, {}, frozenset(), loosened).truth(formula)
+            probe = Evaluator(world, identity)
+            held = 0
+            for t in keyed:
+                value = probe.eval(t)
+                held += isinstance(value, int) and not isinstance(value, bool) and value != 0
+            screen[candidate] = (0 if True in (exact, loose) else 2 if loose is False else 1, -held)
+
+    deferred, world.chain.pending = world.chain.pending, []  # unanswered reads: unknown, and never sent
+    try:
+        look(ranked)
+    finally:
+        world.chain.pending = deferred
+        world.work = spent
+    place = {c: i for i, c in enumerate(ranked)}
+    return sorted(ranked, key=lambda c: (screen.get(c, (1, 0)), place[c]))
 
 
 def _requirements(formula: Term, world: World) -> tuple:

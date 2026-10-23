@@ -269,6 +269,15 @@ Found while working, not in the before table:
   every such call put to the chain (``confirmed``), and the choice never depends on what the chain has cached. Without
   these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s read budget on one ``hasPermission``
   call per guessed recipient (``test_callee_frame``).
+* ``decide._screened``: candidates are asked about in the order the state as it stands suggests: those it already
+  lets through (the formula, or it with every condition not about who calls freed) first, those it refuses last,
+  within each those holding more of the formula's lookups keyed by who calls; the screen's evaluation is off the
+  decision's budget (bounded apart, ``_SCREEN_WORK``) and it reads nothing new (what the chain hasn't answered,
+  a candidate not yet prefetched, reads unknown, in the middle of the order). Each
+  candidate's questions may spend at most half the work left when it is asked (``_SHARE``); what every candidate
+  shares (the stranger's chances) is asked under the decision's own limit. The order only: every candidate is asked
+  about in turn, and one a budget leaves unasked is counted (``untested_candidates``)
+  (``test_budgets::test_candidates_the_state_refuses_are_asked_about_last``).
 * A delegatecall or a call into this contract's own entry point inside a loop marks storage unknown past the loop
   (``*elsewhere``) without counting as lost writes: those writes are that code's (``logged.py`` and the latch account
   for them there).

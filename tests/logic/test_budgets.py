@@ -1,7 +1,7 @@
 """What a budget may cost: a smaller one never makes a verdict more open, names only holders the full one names, and
 accounts for any it misses with a gap (untested candidates, an undetermined "now"). Batching and windowing alone
-change nothing; a candidate list is asked about in batches rather than cut by address; a history read partial is
-reported as cut, its holders a lower bound."""
+change nothing; a candidate list is asked about in batches rather than cut by address, those the state as it stands
+lets through first and those it refuses last; a history read partial is reported as cut, its holders a lower bound."""
 
 from __future__ import annotations
 
@@ -166,6 +166,23 @@ def test_a_smaller_budget_costs_holders_only_with_a_gap_saying_so(roles, monkeyp
     if (reduced.openness, reduced.principals) != (full.openness, full.principals):
         assert not reduced.complete
         assert any(g.startswith(("untested_candidates:", "now_unknown")) for g in reduced.gaps)
+
+
+def test_candidates_the_state_refuses_are_asked_about_last(roles, monkeypatch):
+    # The revoked minter sits among the others by address and by the sources naming it; its entry, read as it
+    # stands, refuses it: asked about after every candidate the state lets through.
+    asked: list[int] = []
+    screened = decide._screened
+
+    def spy(*args):
+        order = screened(*args)
+        asked.extend(order)
+        return order
+
+    monkeypatch.setattr(decide, "_screened", spy)
+    full = _verdict(roles)
+    assert asked[-1] == REVOKED and set(asked) == set(MINTERS) | {DECOY}
+    assert full.principals == set(MINTERS) - {REVOKED} | {DECOY}
 
 
 def test_the_budgets_above_do_bind(roles, monkeypatch):
