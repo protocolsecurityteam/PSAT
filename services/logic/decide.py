@@ -2965,18 +2965,20 @@ def _domain(term: Term, formula: Term, addresses: set[int]) -> list[Any]:
 def _comparands(formula: Term, ground: Evaluator, free: frozenset) -> dict[Term, list[int]]:
     """For each caller-chosen term compared with something it can't change (``deadline >= block.timestamp``,
     ``signature.length == 65``, ``nonce == nonces[owner]``): that value and its neighbours, the guesses most likely to
-    meet the comparison either way; every value itself before any neighbour, since equality wants it exactly."""
-    exact: dict[Term, list[int]] = {}
-    near: dict[Term, list[int]] = {}
-    for t in sorted(subterms(formula, "cmp"), key=stable):
+    meet the comparison either way. A value an equality names comes first, since only it can meet it; an
+    inequality's value and neighbours follow in order, each as likely as the next."""
+    equal: dict[Term, list[int]] = {}
+    near: dict[Term, set[int]] = {}
+    for t in subterms(formula, "cmp"):
         for side, other in ((t[2], t[3]), (t[3], t[2])):
             if side not in free or contains(other, _FREE_KINDS | IDENTITY_KINDS | {"unknown"}):
                 continue
             value = ground.eval(other)
             if isinstance(value, int) and not isinstance(value, bool):
-                exact.setdefault(side, []).append(value % 2**256)
-                near.setdefault(side, []).extend(v % 2**256 for v in (value + 1, value - 1))
-    return {side: list(dict.fromkeys(exact[side] + near[side])) for side in exact}
+                if t[1] == "eq":
+                    equal.setdefault(side, []).append(value % 2**256)
+                near.setdefault(side, set()).update(v % 2**256 for v in (value, value + 1, value - 1))
+    return {side: list(dict.fromkeys(sorted(set(equal.get(side, ()))) + sorted(near[side]))) for side in near}
 
 
 _HELD_ADDRESSES = 16  # addresses the code holds, tried for an address the caller picks to be called
