@@ -950,8 +950,10 @@ class Lowerer:
         self._vars: dict[int, Any] = {}
         # Objects allocated so far (``("heap", n)``), numbered in the order the lowering meets them.
         self._objects = 0
-        # Whether the statement being lowered slices calldata in a way Slither's IR drops (``data[4:]``).
-        self._sliced = False
+        # Why the statement being lowered may slice calldata in a way Slither's IR drops (``data[4:]``): the label
+        # its dynamic calldata reads as (``unsupported:slice``, or ``unsupported:slice_source`` where its source
+        # can't be read faithfully), else empty.
+        self._sliced = ""
         # Whether the call may carry ether: an entry point that isn't payable reverts on any (``success``).
         self._payable = True
         # Ends of the whole call reached inside callees (an assembly ``return``), gathered for the top level.
@@ -1494,7 +1496,7 @@ class Lowerer:
             return unknown("not_a_loop")
         self._node = header
         bad, cuts = _sliced(header)
-        self._sliced = bad or bool(cuts)
+        self._sliced = bad or ("unsupported:slice" if cuts else "")
         for ir in header.irs:
             if isinstance(ir, Condition):
                 return self.val(ir.value, st)
@@ -1510,7 +1512,7 @@ class Lowerer:
                 continue  # at least the selector's four bytes, or the call wouldn't be here
             held = next((v for v in [*function.parameters, *function.variables] if v.name == base), None)
             if held is None:
-                self._sliced = True
+                self._sliced = "unsupported:slice"
                 break
             # ``bytesN(x[:N])`` reverts unless ``x`` holds N bytes.
             length = self._length(self.val(held, st), getattr(held, "type", None))
@@ -1777,7 +1779,10 @@ class Lowerer:
                 out.env[id(ir.lvalue)] = ret[0] if len(ret) == 1 else ("tuple", ret)
             return out
         if isinstance(ir, Assignment):
-            if self._yul_sload_of_constant(ir.rvalue):
+            loaded = self._yul_sload_of_constant(ir.rvalue)
+            if loaded is None:
+                return self._write(ir.lvalue, unknown("unsupported:yul_source"), st)
+            if loaded:
                 # Slither lowers Yul ``sload(SLOT)`` of a constant to the constant itself (Solady ``Ownable``).
                 return self._write(ir.lvalue, mk("rawload", self.this, self.val(ir.rvalue, st)), st)
             if getattr(ir.lvalue, "is_storage", False) and (loc := self._location(ir.rvalue, st)) is not None:
@@ -2593,11 +2598,15 @@ class Lowerer:
                 return None
         return self._arguments[index]
 
-    def _yul_sload_of_constant(self, value: Any) -> bool:
+    def _yul_sload_of_constant(self, value: Any) -> bool | None:
+        """Whether an assignment of a constant is Yul's ``sload`` of it, which Slither renders as the constant; read
+        from the source, ``None`` in Yul where no reading of it is faithful."""
         if not (isinstance(value, StateVariable) and value.is_constant) or self._node is None:
             return False
-        source = _source(self._node, lambda text: f"sload({value.name})" in text.replace(" ", ""))
-        return bool(source)
+        source = _faithful_source(self._node, [value.name])
+        if source is None:
+            return None if getattr(getattr(self._node, "scope", None), "is_yul", False) else False
+        return f"sload({value.name})" in source.replace(" ", "")
 
     # Storage ----------------------------------------------------------------------------------------------------------
     # A location is (contract, variable, path); a reference variable holds ``("loc", location)``.
@@ -2869,7 +2878,8 @@ class Lowerer:
     def _arguments_only(self) -> bool:
         """Whether every ``msg.data`` in this statement is ``msg.data[4:]``, the arguments without the selector,
         which Slither's IR renders as ``msg.data`` itself; read from the source."""
-        source = _source(self._node, lambda text: "msg.data" in text)
+        expression = getattr(self._node, "expression", None)
+        source = _faithful_source(expression if expression is not None else self._node, ["msg.data"]) or ""
         uses = source.count("msg.data")
         return uses > 0 and len(_ARGUMENTS_SLICE.findall(source)) == uses
 
@@ -2889,7 +2899,7 @@ class Lowerer:
             if var.name == "msg.data" and self._arguments_only():
                 return mk("enc", "abi.encode", self._arguments)
             if var.name == "msg.data" and self._sliced:
-                return unknown("unsupported:slice")  # Slither drops ``x[a:b]``: what is read isn't the whole
+                return unknown(self._sliced)  # Slither drops ``x[a:b]``: what is read isn't the whole
             if var.name == "msg.value" and not self._payable:
                 return const(0)  # a call to a function that isn't payable carrying ether reverts
             if var.name in _ENVIRONMENT:
@@ -2920,7 +2930,7 @@ class Lowerer:
             whole = self._object(self._value(self._structs[held[1]], st), st)
             return _field_of(whole, held[2])
         if self._sliced and isinstance(held, tuple) and held[:1] == ("arg",) and _dynamic_abi(held[2]):
-            return unknown("unsupported:slice")  # Slither drops ``x[a:b]``: what is read isn't the whole
+            return unknown(self._sliced)  # Slither drops ``x[a:b]``: what is read isn't the whole
         if held is not None:
             return held
         if isinstance(var, ReferenceVariable):
@@ -3302,14 +3312,21 @@ def _enum_size(type_: Any) -> int | None:
 _SLICE = re.compile(r"([A-Za-z_$][\w.$]*)\s*\[\s*([^\[\]:]*?)\s*:\s*([^\[\]:]*?)\s*\]")
 
 
-def _sliced(node: Any) -> tuple[bool, list]:
-    """Whether ``node``'s source slices a value (``x[a:b]``, which Slither's IR renders as ``x``) other than as read
-    back exactly: ``msg.data[4:]`` (the arguments), and ``bytesN(x[:N])``, the first N bytes, which is ``bytesN(x)``
-    once ``x`` holds N bytes (returned as (x, N): the slice reverts otherwise). A conditional expression inside an
-    index reads as a slice too: never fewer."""
+def _sliced(node: Any) -> tuple[str, list]:
+    """Why ``node``'s dynamic calldata reads as unknown: its source slices a value (``x[a:b]``, which Slither's IR
+    renders as ``x``) other than as read back exactly (``unsupported:slice``), or it reads calldata a slice could cut
+    and its source can't be read faithfully (``unsupported:slice_source``); else empty. Read back exactly:
+    ``msg.data[4:]`` (the arguments), and ``bytesN(x[:N])``, the first N bytes, which is ``bytesN(x)`` once ``x``
+    holds N bytes (returned as (x, N): the slice reverts otherwise). A conditional expression inside an index reads as
+    a slice too: never fewer."""
+    names = _sliceable(node)
+    if not names:
+        return "", []  # only calldata is sliced, and the statement reads none
     # The statement's own expression: a node's source spans what it opens too (an ``if``'s whole body).
     expression = getattr(node, "expression", None)
-    text = _source(expression, lambda t: ":" in t) if expression is not None else ""
+    text = _faithful_source(expression, names) if expression is not None else ""
+    if text is None:
+        return "unsupported:slice_source", []
     cuts = []
     for found in _SLICE.finditer(text):
         base, start, end = found.groups()
@@ -3319,8 +3336,44 @@ def _sliced(node: Any) -> tuple[bool, list]:
         if cast and start in ("", "0") and end == cast.group(1) and text[found.end() :].lstrip().startswith(")"):
             cuts.append((base, int(end)))
             continue
-        return True, []
-    return False, cuts
+        return "unsupported:slice", []
+    return "", cuts
+
+
+def _sliceable(node: Any) -> list[str]:
+    """Names of what ``node`` reads that a slice can cut: ``msg.data`` and variables held in calldata."""
+    names = ["msg.data"] if any(v.name == "msg.data" for v in getattr(node, "solidity_variables_read", ())) else []
+    for var in getattr(node, "variables_read", ()):
+        if getattr(var, "location", None) == "calldata" and getattr(var, "name", None):
+            names.append(var.name)
+    return list(dict.fromkeys(names))
+
+
+_STRINGS = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+
+
+def _faithful_source(item: Any, names: list[str]) -> str | None:
+    """``item``'s source, the first reading (``_source``) that is faithful to it: every one of ``names`` (what it
+    reads) appears there as a name, and its brackets balance, so a reading shifted or cut short is never taken for
+    the text. ``None`` when no reading is."""
+
+    def faithful(text: str) -> bool:
+        if not all(re.search(rf"(?<![\w$.]){re.escape(n)}(?![\w$])", text) for n in names):
+            return False
+        bare = _STRINGS.sub("", text)
+        depth = {"(": 0, "[": 0, "{": 0}
+        closing = {")": "(", "]": "[", "}": "{"}
+        for ch in bare:
+            if ch in depth:
+                depth[ch] += 1
+            elif ch in closing:
+                depth[closing[ch]] -= 1
+                if depth[closing[ch]] < 0:
+                    return False
+        return all(v == 0 for v in depth.values())
+
+    text = _source(item, faithful)
+    return text if text and faithful(text) else None
 
 
 def _dynamic_abi(type_: Any) -> bool:
@@ -3649,7 +3702,7 @@ def _fold_expression(expr: Any, type_: str, depth: int) -> Term | None:
             return const(value in (True, "true"), "bool")
         if isinstance(value, str) and str(expr.type) == "string":
             source = _source(expr, lambda text: text.startswith(("hex", '"', "'")))
-            raw = _literal_bytes(value, source)
+            raw = _literal_bytes(value, source) if source else None  # unread: a ``hex`` literal's bytes unknown
             aligned = _fixed_bytes(raw, type_) if raw is not None else None
             return const(aligned, type_) if aligned is not None else const(value, "string")
         try:
