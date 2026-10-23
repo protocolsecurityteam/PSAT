@@ -365,7 +365,7 @@ def _merge_maps(states: list[Any], attr: str) -> dict:
     out = {}
     for key in keys:
         # Storage a branch left alone still holds what it held before the call; a local it never set is unset.
-        missing = _unwritten(key) if attr == "store" else unknown("unset")
+        missing = unwritten(key) if attr == "store" else unknown("unset")
         values = [getattr(s, attr).get(key, missing) for s in states]
         out[key] = _select([s.pc for s in states], values)
     return out
@@ -381,14 +381,14 @@ def _changes(exit_: Exit) -> Term:
     from the value it replaces (``if (quorum != MAX) quorum = MAX`` changes nothing once it is MAX)."""
     return mk_or(
         [
-            mk_not(mk_cmp("eq", value, _unwritten(key)))
+            mk_not(mk_cmp("eq", value, unwritten(key)))
             for key, value in exit_.store.items()
             if key[0] not in ("transient", "emit")
         ]
     )
 
 
-def _unwritten(key: tuple) -> Term:
+def unwritten(key: tuple) -> Term:
     if key[0] in ("act", "emit"):
         return FALSE  # no call out, and no event, on a path that didn't make it
     if key[0] == "transient":

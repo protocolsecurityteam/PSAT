@@ -3054,8 +3054,8 @@ def _built(formula: Term, world: World) -> tuple[set[int], bool, list[str]]:
 
 
 def _gate(formula: Term) -> tuple[str, ...]:
-    """The conditions of ``formula`` on who calls, as read (``scope.render``)."""
-    from .scope import render
+    """The conditions of ``formula`` on who calls, as read (``report.render``)."""
+    from .report import render
 
     parts = formula[1] if formula[0] == "and" else (formula,)
     return tuple(sorted(render(c) for c in parts if contains(c, IDENTITY_KINDS)))

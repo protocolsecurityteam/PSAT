@@ -166,8 +166,12 @@ def mk_and(items: Any) -> Term:
     return mk("and", frozenset(parts))
 
 
-def _conjuncts(term: Term) -> frozenset:
+def conjuncts(term: Term) -> frozenset:
+    """The parts of a conjunction (the term itself when it is no ``and``)."""
     return term[1] if term[0] == "and" else frozenset({term})
+
+
+_conjuncts = conjuncts
 
 
 def mk_or(items: Any) -> Term:

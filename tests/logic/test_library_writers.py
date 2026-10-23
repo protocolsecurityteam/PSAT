@@ -131,23 +131,14 @@ def module(tmp_path_factory):
     return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Module")
 
 
-def test_each_operators_manager_is_listed_from_the_librarys_events(module):
+@pytest.mark.parametrize("name", ["addKeys", "changeManager"])
+def test_each_operators_manager_is_listed_from_the_librarys_events(module, name):
+    # ``changeManager`` writes the very entry the managers' checks read: who passes them changes, so it is shared.
     from services.logic.terms import reset_terms
 
     reset_terms()
-    fn = next(f for f in module.functions_entry_points if f.name == "addKeys")
+    fn = next(f for f in module.functions_entry_points if f.name == name)
     verdict, _ = function_verdict(module, fn, AT, _Deployed(), {AT: module})
-    assert verdict.openness == "restricted"
+    assert verdict.openness == "restricted" and verdict.scope == "shared"
     assert verdict.principals | set(verdict.conditions) == {FIRST, THEN}
     assert verdict.complete
-
-
-def test_handing_on_ones_own_operator_is_gated_not_enumerated(module):
-    # ``changeManager`` writes only the operator whose manager the caller is: the gate is the answer.
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in module.functions_entry_points if f.name == "changeManager")
-    verdict, _ = function_verdict(module, fn, AT, _Deployed(), {AT: module})
-    assert verdict.openness == "restricted" and verdict.scope == "self"
-    assert "self_scoped" in verdict.gaps and not verdict.complete and verdict.gate

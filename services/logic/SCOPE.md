@@ -1,24 +1,30 @@
 # Effect scope
 
-A function is **self-scoped** when every effect a successful call can have stays inside positions the caller holds;
-anything else is **shared**. Scope is read off the lowered exits (`Lowerer.exits`: each way the call returns, with its
-path condition and storage writes), never from names, interfaces or token shapes. Each write on each exit is one of:
+`scope.classify` reads each way a function returns (`Lowerer.exits`: path condition and storage writes) and classes
+every write; nothing is matched by name, interface or token shape. Exits whose path condition is false are skipped
+(`selfdestruct` is a successful exit, not one of them). For a write to entry `E[k, ...]`, `k` its first key:
 
-- **own**: an entry keyed by the caller (a key is `msg.sender`, or a hash whose one identity input is the caller).
-- **authorized**: an entry keyed by `k` where that exit's path condition requires the caller to hold `k`: a conjunct
-  `caller == O[..k..]`, or a disjunction whose every branch is that or an entry the holder `O[..k..]` keeps for the
-  caller (`approvals[O[k]][caller]`); or `k` is an address argument and the condition reads an entry keyed
-  `[k][caller]` (what `k` granted the caller).
-- **credit**: `E[x] = E[x] + d` where the same exit debits an own or authorized entry of the same variable and field
-  by the same `d`: value moved out of the caller's position, not created.
-- **unchanged**: a constant equal to what the location holds at the block (a lock set and reset), read on chain.
-- **shared**: everything else: globals (totals, parameters, pause flags, implementation slots), entries keyed by
-  arguments or other principals without the above, raw slots, calls out with an effect, delegatecalls, ETH sent,
-  and any write the lowering may have lost (code not followed, assembly calls).
+- **own**: `k` is the caller, or a hash whose first input is the caller and whose other inputs name nobody; and the
+  value is a debit `E - d` or zero. Anything else written there (a raise, a flag set) is shared.
+- **authorized**: `k` names no identity and the exit's path condition requires the caller to hold it: a conjunct
+  `caller == O[..k..]`; or a disjunction with such a branch whose other branches each require an entry
+  `G[O[..k..]][caller]` set (the holder's grant); or `k` is an address argument and a conjunct requires
+  `G[k][caller]` set (`G`, `G != 0`, or `x < G` / `x <= G`). The value is a debit, zero, or a plain replacement
+  that reads no storage (an approval, a new owner).
+- **credit**: `E[x] = E[x] + d` matched by one debit of `d`, on the same exit, of an own or authorized entry of the
+  same variable and fields; each debit pays for one credit.
+- **unchanged**: a constant the same path condition requires the location to already hold (`locked == 1` then
+  `locked = 1`). Read off the condition, never off the chain.
+- **shared**: everything else: globals, entries keyed by arguments or other principals, raw slots, a call out with
+  an effect, ether sent, a contract created, `selfdestruct`, delegatecalls, assembly calls, and any write the
+  lowering may have lost.
 
-Self-scoped means no shared write on any exit and at least one write that changes something. Its gate is reported
-as a condition (`Verdict.gate`) with `scope="self"` and the classified writes; holders are not enumerated (no
-per-candidate tests, storage dumps or traces), so the row is restricted with gap `self_scoped`, never a complete
-list. Open and undetermined are still decided as for any function; a state where a stranger may pass, or an unseen
-address not shown to fail like a stranger, falls back to full enumeration. Shared functions, and `none` (nothing
-written that the lowering sees, which is no proof of no effect), keep full enumeration.
+Then every own, authorized or credit write to a variable that any entry point's caller checks read (any conjunct
+of its success condition that involves who calls, the function itself included) becomes shared: writing it changes
+who passes some check (`approvedHashes[caller][h]`, `roles[r][caller]`). If an entry point can't be lowered, all
+writes are shared.
+
+`self`: no shared write and at least one that isn't unchanged. `none`: nothing written besides unchanged. Only
+`self` changes the decision: holders aren't enumerated, and the row is restricted with gap `self_scoped` and its
+gate (`Verdict.gate`). A stranger who may pass in some state, or unseen addresses not shown to fail like a
+stranger, sends it to full enumeration. `shared` and `none` keep full enumeration.
