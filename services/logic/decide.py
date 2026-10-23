@@ -1011,6 +1011,8 @@ class World:
     # What a storage dump accounted for (``_snapshot_plan``): the lookups and cut histories it lists whole, and the
     # addresses that are all their holders who may pass; read by the builder where the events don't list them.
     dumped: dict = field(default_factory=dict)
+    # Whose positions the function's effects touch (``scope.Scope``), when known.
+    scope: Any = None
 
 
 class Evaluator:
@@ -1698,6 +1700,12 @@ class Verdict:
     # (what the arguments decide), ``holdings`` (and the amounts in their own entries). A complete list is these
     # and the principals together.
     conditions: dict[int, str] = field(default_factory=dict)
+    # Whose positions its effects touch (``scope.py``): ``self`` when every write stays in entries the caller holds,
+    # ``none`` when it writes nothing, else ``shared``; with each write's class and where (``("own", "balances")``).
+    scope: str = "shared"
+    scope_writes: tuple[tuple[str, str], ...] = ()
+    # For a self-scoped function, whose holders aren't enumerated: the conditions on who calls, as read.
+    gate: tuple[str, ...] = ()
 
 
 def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
@@ -1791,6 +1799,13 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if prior is not None:
         signature, before, arguments = prior
         return Verdict("open", frozenset(), True, witnesses={FRESH: arguments}, after=((signature, before),))
+    if world.scope is not None and world.scope.kind == "self" and not world.arrange_unknown:
+        # Its effects stay in the caller's own positions: the gate is the answer, not who holds it. A stranger
+        # failing in every state, with unseen addresses failing alike, is all "restricted" needs; anything less
+        # is decided in full below.
+        fresh = [_outcome(formula, world, anyone, set(), fixed=state) for state in states]
+        if all(f is False for f in fresh) and (coverage.representative or _decisive(formula, world)):
+            return Verdict("restricted", frozenset(), False, gaps=("self_scoped",), gate=_gate(formula))
     # Precompiles and sentinels (``address(1)``) never send a transaction.
     # Who may be singled out, built from the identity checks (``holders``): a list shown to hold everyone, one
     # drawn from what the chain shows without that proof, or none, each with why.
@@ -2995,6 +3010,14 @@ def _built(formula: Term, world: World) -> tuple[set[int], bool, list[str]]:
     world.ranking = {c: (c not in world.named, fewest.get(c, len(members)), c) for c in members}
     world.hints = dict(who.members) if who.finite else {}
     return members, proven, why
+
+
+def _gate(formula: Term) -> tuple[str, ...]:
+    """The conditions of ``formula`` on who calls, as read (``scope.render``)."""
+    from .scope import render
+
+    parts = formula[1] if formula[0] == "and" else (formula,)
+    return tuple(sorted(render(c) for c in parts if contains(c, IDENTITY_KINDS)))
 
 
 def _ranked(candidates: set[int], world: World) -> list[int]:

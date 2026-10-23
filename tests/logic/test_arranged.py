@@ -459,6 +459,7 @@ pragma solidity 0.8.27;
 contract Burner {
     address burner;
     mapping(address => uint256) shares;
+    uint256 total;
     event TransferShares(address indexed from, address indexed to, uint256 amount);
 
     function stake() external payable {
@@ -470,6 +471,7 @@ contract Burner {
         require(msg.sender == burner);
         require(shares[msg.sender] >= amount);
         shares[msg.sender] -= amount;
+        total -= amount;
         emit TransferShares(msg.sender, address(0), amount);
     }
 }

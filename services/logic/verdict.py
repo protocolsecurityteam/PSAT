@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from eth_utils.crypto import keccak
@@ -27,6 +28,7 @@ from .decide import _size as _size_of
 from .immutables import immutable_offsets, immutable_value
 from .logged import keyed_by, logged, logged_raw, members, written_by
 from .lower import Lowerer, parameter
+from .scope import classify
 from .snapshot import creation_keys
 from .terms import CALLER, FALSE, IDENTITY_KINDS, THIS, TRUE, Term, assume_conjuncts, mk, mk_and, substitute, unknown
 
@@ -1760,4 +1762,7 @@ def function_verdict(
     world.cover = lambda term: coverage(term, keyed, lower_call, listed, settled, valued)
     world.arrange = lambda term: arranged_within_budget(term, world, contracts.get(address, contract))
     world.prior = lambda term: after_own_call(term, world, contracts.get(address, contract))
-    return decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued)), formula
+    stranger = Evaluator(world, {"caller": FRESH, "signer": FRESH})
+    world.scope = classify(lowerer.exits, lowerer.lost, function, stranger.eval)
+    verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))
+    return replace(verdict, scope=world.scope.kind, scope_writes=world.scope.writes), formula
