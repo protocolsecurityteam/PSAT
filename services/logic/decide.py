@@ -1571,6 +1571,17 @@ class Evaluator:
                     return value
             return ASSUMED
         request = self.call_input(t)
+        if request is not None and self._guessed(t, request):
+            # Over arguments the caller picks, each guess would be a call of its own: the callee's own code, where it
+            # is followed and settles the answer, then the chain.
+            lowered = self._callee(t)
+            if lowered is not None and index < len(lowered[1]):
+                returned = self.truth(lowered[0])
+                if returned is False:
+                    return REVERTED
+                value = self.eval(lowered[1][index]) if returned is True else UNK
+                if isinstance(value, (int, bool)) and not isinstance(value, FreeHash):
+                    return value
         if request is None:
             # Not every argument is known: answer with the callee's own code, lowered over these arguments.
             lowered = self._callee(t)
@@ -1591,6 +1602,12 @@ class Evaluator:
         if len(raw) < 32 * (index + 1):
             return UNK
         return int.from_bytes(raw[32 * index : 32 * (index + 1)], "big")
+
+    def _guessed(self, call: Term, request: tuple) -> bool:
+        """Whether a view call's input depends on arguments the caller picks and its answer isn't read yet."""
+        if not any(contains(a, _FREE_KINDS) for a in call[3]):
+            return False
+        return ("c", request[0], request[1], self.world.this) not in self.world.chain._memo
 
     def _returned_size(self, call: Term) -> Any:
         """Bytes of return data ``call`` leaves when it returns: a view call's as the chain answers, an action's as
@@ -1618,6 +1635,11 @@ class Evaluator:
             address = self.eval(call[1])
             return "failed" if isinstance(address, int) and self.world.chain.code(address) == b"" else UNK
         request = self.call_input(call)
+        if request is not None and self._guessed(call, request):
+            lowered = self._callee(call)
+            returned = self.truth(lowered[0]) if lowered is not None else UNK
+            if returned is not UNK:
+                return "returned" if returned else "reverted"
         if request is None:
             lowered = self._callee(call)
             if lowered is None:
@@ -3013,9 +3035,24 @@ def _decide_one(
                     return True
         return False
 
+    # A conjunct a guess fails, over the guessed values it reads alone, fails every guess that agrees on those values
+    # (``amount <= balance`` refuting an amount whatever the recipient): such guesses are skipped, not asked again.
+    nogoods: list[tuple] = []
+    reads: dict[Term, tuple] = {}
+
     def assess(values: tuple) -> Any:
+        if any(all(values[i] == v for i, v in nogood) for nogood in nogoods):
+            return False
         guess = Evaluator(world, identity, {**fixed, **dict(zip(free, values))}, blind, when, settled)
         answer = guess.truth(formula)
+        if answer is False and formula[0] == "and" and not world.chain.pending:
+            for conjunct in cheapest_first(formula):
+                if guess.truth(conjunct) is not False:
+                    continue
+                if conjunct not in reads:
+                    reads[conjunct] = tuple(i for i, t in enumerate(free) if contains_term(conjunct, t))
+                nogoods.append(tuple((i, values[i]) for i in reads[conjunct]))
+                break
         return _free_sat(formula, guess, free_when) if answer is UNK and relaxed else answer
 
     # The likeliest guesses (zeros, the identity itself, recorded keys) first: they settle most questions outright.

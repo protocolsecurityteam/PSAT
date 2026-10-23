@@ -208,7 +208,7 @@ enum, 0 APPROXIMATED; builtins 85 HANDLED, 38 REJECTED, 0 APPROXIMATED; special 
 | A15 | encodings hashed wrongly | HANDLED: ``bytesN`` left-aligned in ``abi.encode``, 4-byte selector for ``encodeWithSelector``/``encodeWithSignature``, other kinds not encoded | ``test_language`` (``hashed*``, ``concatenated``) |
 | A16 | Vyper builtins dropped | REJECTED: ``unsupported:vyper:<name>`` on the path, writes lost | ``test_ir_coverage::test_each_rejected_builtin_lowers_to_its_label`` |
 | A17 | ``tx.gasprice`` read as base fee | REJECTED: ``unsupported:tx.gasprice`` | ``test_ir_coverage`` (``viaGasprice``) |
-| A18 | calldata slices dropped | REJECTED: in a statement slicing anything but ``msg.data[4:]``/``bytes4(msg.data[:4])``, dynamic calldata reads ``unsupported:slice`` | ``test_ir_coverage`` (``viaSlice``) |
+| A18 | calldata slices dropped | HANDLED for ``msg.data[4:]`` and ``bytesN(x[:N])`` (``bytesN(x)``, with ``N <= x.length`` on the path); REJECTED otherwise: in a statement slicing anything else, dynamic calldata reads ``unsupported:slice`` | ``test_ir_coverage`` (``viaSlice``) |
 | A19 | nested memory writes lost | HANDLED: an item or field written in place is written back where its holder lives | ``test_elements::test_nested_memory_writes_reach_the_outer_value`` |
 | A20 | loop-carried values kept from unrolled iterations | HANDLED: the widened state forgets every local, object and storage variable the body's operations (and callees) may write; storage reads past it are ``opaque(loop:N, ...)`` (``havoc`` marks) | ``test_elements::test_a_variable_a_later_iteration_writes_is_forgotten``, ``test_what_only_a_later_iteration_writes_is_never_taken_as_unwritten`` |
 | A21 | exits from later iterations | HANDLED: a loop that may return (or halt) also exits with unknown values | ``test_elements::test_a_member_past_the_iterations_followed_is_never_left_out_of_a_complete_list`` |
@@ -244,3 +244,19 @@ Found while working, not in the before table:
   callee's code where followed.
 * ``logged.py`` (outside the lowering) argues that every iteration of a loop writes as the unrolled ones do; the
   lowering's ``havoc`` marks are not read there.
+
+### Bounds and decision costs the exact lowering brought (found on the 177-row regression subset)
+
+* Value operations (``element``, ``update``, ``length_of``, ``project``, ``byte_at``) are remembered per argument
+  tuple and share a step budget per lowering (``VALUE_STEPS``); past it they answer ``opaque(budget:value_steps)``
+  (a named gap), never a value. Reading memory objects out (``_deep``) is remembered per value and the objects it
+  reaches; ``substitute`` skips subterms holding none of the kind replaced.
+* A loop's forgotten values carry which identities they depended on, not every identity subterm (the same taint).
+* ``decide._decide_one``: a conjunct a guess fails, over the guessed values it reads alone, refutes every guess that
+  agrees on them (``amount <= balance`` refuting an amount whatever the recipient); a view call over guessed
+  arguments whose callee is followed is answered by the callee's own code first, the chain only when that is unknown.
+  Without these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s read budget on one
+  ``hasPermission`` call per guessed recipient.
+* A delegatecall or a call into this contract's own entry point inside a loop marks storage unknown past the loop
+  (``*elsewhere``) without counting as lost writes: those writes are that code's (``logged.py`` and the latch account
+  for them there).

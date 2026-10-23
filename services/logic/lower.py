@@ -88,10 +88,9 @@ from .terms import (
     mk_or,
     mk_slice,
     packed_width,
-    replace_terms,
-    stable,
     substitute,
     subterms,
+    term_epoch,
     unknown,
 )
 
@@ -598,7 +597,7 @@ def read_store(store: dict, key: tuple) -> Term:
     for k, written in store.items():
         head = k[0]
         if head == "havoc":
-            if k[1] == contract and k[2] in (name, "*"):
+            if k[1] == contract and k[2] in (name, "*", "*elsewhere"):
                 value = mk_ite(written, _forgotten(k, mk("load", contract, name, path)), value)
             continue
         if head == "raw" and k[1] == contract:
@@ -633,7 +632,7 @@ def _read_slot(store: dict, key: tuple) -> Term:
     kind, contract, slot = key
     value: Term = mk("rawload", contract, slot) if kind == "raw" else mk("const", 0, "uint256")
     for k, written in store.items():
-        if k[0] == "havoc" and k[1] == contract and k[2] in (kind, "*"):
+        if k[0] == "havoc" and k[1] == contract and k[2] in (kind, "*", "*elsewhere"):
             value = mk_ite(written, _forgotten(k, mk("rawload", contract, slot)), value)
         elif k[0] == kind and k[1] == contract:
             value = mk_ite(mk_cmp("eq", k[2], slot), written, value)
@@ -669,11 +668,50 @@ def _forgotten(mark: tuple, load: Term) -> Term:
     return mk("opaque", tag, (load, unknown(tag)) if steered else (load,))
 
 
+_SHARED: dict = {}
+# Steps the value operations below (``element``, ``update``, ...) may take for one lowering: past it each answers
+# unknown by name (``budget:value_steps``) instead of unfolding further.
+VALUE_STEPS = 50_000
+_STEPS = [VALUE_STEPS]
+
+
+def _spent() -> bool:
+    _STEPS[0] -= 1
+    return _STEPS[0] < 0
+
+
+def _shared(fn: Callable) -> Callable:
+    """``fn`` remembered per argument tuple (within one intern table): values are DAGs whose shared parts a plain
+    recursion would visit once per path."""
+
+    def call(*args: Any) -> Any:
+        key = (fn.__name__, term_epoch(), *args)
+        try:
+            return _SHARED[key]
+        except KeyError:
+            pass
+        except TypeError:
+            return fn(*args)  # an unhashable argument: computed every time
+        if len(_SHARED) > 200_000:
+            _SHARED.clear()
+        value = fn(*args)
+        if _STEPS[0] >= 0:
+            _SHARED[key] = value  # an answer cut short by the budget is this lowering's alone
+        return value
+
+    call.__name__ = fn.__name__
+    call.__doc__ = fn.__doc__
+    return call
+
+
+@_shared
 def project(value: Term, steps: tuple) -> Term:
     """The part ``steps`` (``("f", field)``, ``("k", key)``) names of a whole value written to storage."""
     if not steps:
         return value
     kind = value[0]
+    if _spent():
+        return mk("opaque", "budget:value_steps", (value, mk("const", repr(steps), "string")))
     if kind == "ite":
         return mk_ite(value[1], project(value[2], steps), project(value[3], steps))
     if kind == "load":
@@ -700,10 +738,13 @@ def project(value: Term, steps: tuple) -> Term:
     return mk("opaque", f"unsupported:part:{kind}", (value, mk("const", repr(steps), "string")))
 
 
+@_shared
 def element(container: Term, key: Term, zero: Term | None = None) -> Term:
     """Item ``key`` of an array value (a memory array, a storage array copied to memory, an argument, an array
     updated in place), in range by the caller's bound. ``zero`` is what an item of a freshly allocated array holds."""
     kind = container[0]
+    if _spent():
+        return mk("opaque", "budget:value_steps", (container, key))
     if kind == "ite":
         return mk_ite(container[1], element(container[2], key, zero), element(container[3], key, zero))
     if kind == "array" and len(container) == 3:
@@ -734,8 +775,11 @@ def element(container: Term, key: Term, zero: Term | None = None) -> Term:
     return mk("elem", container, key)
 
 
+@_shared
 def update(container: Term, key: Term, value: Term) -> Term:
     """``container`` with item ``key`` set to ``value``: item by item where its items are known, else ``upd``."""
+    if _spent():
+        return mk("opaque", "budget:value_steps", (container, key, value))
     if container[0] == "array" and len(container) == 3:
         items = container[2]
         if key[0] == "const" and isinstance(key[1], int) and not isinstance(key[1], bool):
@@ -750,9 +794,12 @@ def update(container: Term, key: Term, value: Term) -> Term:
     return mk("upd", container, (("k", key),), value)
 
 
+@_shared
 def length_of(container: Term) -> Term | None:
     """The length of an array value, ``None`` when it has no term."""
     kind = container[0]
+    if _spent():
+        return mk("opaque", "budget:value_steps", (container,))
     if kind == "array":
         return container[1]
     if kind == "ite":
@@ -769,9 +816,12 @@ def length_of(container: Term) -> Term | None:
     return mk("len", container)
 
 
+@_shared
 def byte_at(container: Term, key: Term) -> Term:
     """Byte ``key`` of a ``bytes`` value: the first byte of the word at that offset (``calldataload``'s word)."""
     kind = container[0]
+    if _spent():
+        return mk("opaque", "budget:value_steps", (container, key))
     if kind == "ite":
         return mk_ite(container[1], byte_at(container[2], key), byte_at(container[3], key))
     if kind == "upd" and container[2][0][0] == "k":
@@ -929,7 +979,8 @@ class Lowerer:
             else (k[0], k[1])
             for e in exits
             for k in e.store
-            if k[0] not in ("act", "transient", "emit", "heap") and not (k[0] == "havoc" and k[2] in ("transient", "*"))
+            if k[0] not in ("act", "transient", "emit", "heap")
+            and not (k[0] == "havoc" and k[2] in ("transient", "*", "*elsewhere"))
         )
         self.exits = exits
         return mk_or([e.pc for e in exits])
@@ -957,6 +1008,8 @@ class Lowerer:
         return out
 
     def run(self, function: Function, state: State, depth: int) -> list[Exit]:
+        if depth == 0:
+            _STEPS[0] = VALUE_STEPS
         getter = self._getter(function, state) if function.entry_point is None else None
         if getter is not None:
             return [getter]
@@ -1112,10 +1165,13 @@ class Lowerer:
         owner = getattr(function, "canonical_name", "")
 
         def forget(label: str, value: Any) -> Term:
+            # Which identities it depended on (their presence is what makes it depend on who calls).
             roots: tuple = ()
-            if isinstance(value, tuple) and value and isinstance(value[0], str):
+            if isinstance(value, tuple) and contains(value, _IDENTITIES):
                 roots = tuple(
-                    sorted({t for k in ("caller", "origin", "signer") for t in subterms(value, k)}, key=stable)
+                    root
+                    for root, kind in ((CALLER, "caller"), (ORIGIN, "origin"), (unknown(tag), "signer"))
+                    if contains(value, frozenset({kind}))
                 )
             return mk("opaque", tag, (mk("const", f"{owner}.{label}", "string"), *(roots or steered)))
 
@@ -1148,9 +1204,11 @@ class Lowerer:
             else:
                 store[k] = mk("opaque", tag, (unwritten(k), *steered))
         marks = [(c, name) for c, name in sorted(effects["storage"], key=repr)]
-        if effects["everything"]:
-            marks.append((self.this, "*"))
-            self.lost = True
+        if effects["everything"] or effects["elsewhere"]:
+            marks.append((self.this, "*" if effects["everything"] else "*elsewhere"))
+            # Writes this lowering can't place are lost; code run on this storage elsewhere (a delegatecall, its own
+            # entry point again) writes as that code does, which is that code's to account for.
+            self.lost = self.lost or effects["everything"]
         if effects["raw"]:
             marks.append((self.this, "raw"))
         if effects["transient"]:
@@ -1183,6 +1241,7 @@ class Lowerer:
             "locals": [],
             "storage": set(),
             "everything": False,
+            "elsewhere": False,
             "raw": False,
             "transient": False,
             "calls": False,
@@ -1233,7 +1292,7 @@ class Lowerer:
             elif base == "tstore":
                 out["transient"] = True
             elif base in ("delegatecall", "callcode"):
-                out["everything"] = out["raw"] = out["calls"] = True
+                out["elsewhere"] = out["raw"] = out["calls"] = True
             elif base in ("call", "create", "create2", "selfdestruct", "suicide"):
                 out["calls"] = True
             if base in ("return", "stop", "selfdestruct", "suicide"):
@@ -1269,11 +1328,11 @@ class Lowerer:
                     if not (getattr(fn, "view", False) or getattr(fn, "pure", False)):
                         out["calls"] = True
                     if self.val(ir.destination, st) == self.this:
-                        out["everything"] = True  # its own entry point, run again: any of its storage
+                        out["elsewhere"] = True  # its own entry point, run again: any of its storage
                 elif isinstance(ir, LowLevelCall):
                     out["calls"] = True
                     if str(getattr(ir.function_name, "value", ir.function_name)) == "delegatecall":
-                        out["everything"] = out["raw"] = True
+                        out["elsewhere"] = out["raw"] = True
                 elif isinstance(ir, (Transfer, Send, NewContract)):
                     out["calls"] = True
                 elif isinstance(ir, InternalDynamicCall):
@@ -1289,6 +1348,7 @@ class Lowerer:
         cache = self.__dict__.setdefault("_callee_cache", {})
         if id(callee) not in cache:
             names, raw, transient, everything, calls, caller = set(), False, False, False, False, False
+            elsewhere = False
             try:
                 names = {v.name for v in callee.all_state_variables_written() if not (v.is_constant or v.is_immutable)}
                 reads = {v.name for v in callee.all_solidity_variables_read()}
@@ -1297,7 +1357,7 @@ class Lowerer:
                     base = str(getattr(getattr(c, "function", c), "name", c)).split("(", 1)[0]
                     raw = raw or base == "sstore"
                     transient = transient or base == "tstore"
-                    everything = everything or base in ("delegatecall", "callcode")
+                    elsewhere = elsewhere or base in ("delegatecall", "callcode")
                     calls = calls or base in ("call", "create", "create2", "selfdestruct", "suicide", "delegatecall")
                     caller = caller or base == "ecrecover"
                 for n in callee.all_nodes():
@@ -1313,8 +1373,9 @@ class Lowerer:
                 if isinstance(exc, TimeoutError):
                     raise
                 everything = raw = calls = caller = True
-            cache[id(callee)] = (names, raw, transient, everything, calls, caller)
-        names, raw, transient, everything, calls, caller = cache[id(callee)]
+            cache[id(callee)] = (names, raw, transient, everything, calls, caller, elsewhere)
+        names, raw, transient, everything, calls, caller, elsewhere = cache[id(callee)]
+        out["elsewhere"] = out["elsewhere"] or elsewhere
         out["storage"].update((self.this, n) for n in names)
         out["raw"] = out["raw"] or raw
         out["transient"] = out["transient"] or transient
@@ -1337,7 +1398,8 @@ class Lowerer:
         if header.type != NodeType.IFLOOP:
             return unknown("not_a_loop")
         self._node = header
-        self._sliced = _sliced(header)
+        bad, cuts = _sliced(header)
+        self._sliced = bad or bool(cuts)
         for ir in header.irs:
             if isinstance(ir, Condition):
                 return self.val(ir.value, st)
@@ -1347,7 +1409,17 @@ class Lowerer:
     def _step(self, function: Function, node: Any, st: State, depth: int, exits: list[Exit], body: Any):
         """Run one node; yield (successor, state) pairs. Exits and dead paths yield nothing."""
         self._node = node
-        self._sliced = _sliced(node)
+        self._sliced, cuts = _sliced(node)
+        for base, size in cuts:
+            if base == "msg.data":
+                continue  # at least the selector's four bytes, or the call wouldn't be here
+            held = next((v for v in [*function.parameters, *function.variables] if v.name == base), None)
+            if held is None:
+                self._sliced = True
+                break
+            # ``bytesN(x[:N])`` reverts unless ``x`` holds N bytes.
+            length = self._length(self.val(held, st), getattr(held, "type", None))
+            st = replace(st, pc=mk_and([st.pc, mk_cmp("le", const(size), length)]))
         if node.type == NodeType.THROW:
             return
         declared = getattr(node, "variable_declaration", None)
@@ -1734,7 +1806,7 @@ class Lowerer:
                 # run on this storage, which reads unknown after it.
                 success = mk("delegate", target) if data == CALLDATA else mk("delegate", target, data)
                 returned = mk("opaque", "returndata", inputs)
-                st = replace(st, store=stored(st.store, ("havoc", self.this, "*", "delegatecall"), TRUE))
+                st = replace(st, store=stored(st.store, ("havoc", self.this, "*elsewhere", "delegatecall"), TRUE))
             elif name == "staticcall":
                 # A query, not an action: the view call its data encodes, or unknown.
                 call = self._encoded_call(target, data, True)
@@ -1886,7 +1958,7 @@ class Lowerer:
             # an effect whether or not its success is used.
             value = mk("delegate", args[1] if len(args) > 1 else unknown("delegate_target"))
             st = _acted(st, mk("assumed", "delegatecall"))
-            st = replace(st, store=stored(st.store, ("havoc", self.this, "*", "delegatecall"), TRUE))
+            st = replace(st, store=stored(st.store, ("havoc", self.this, "*elsewhere", "delegatecall"), TRUE))
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
         if base in ("create", "create2"):
             # Assembly ``create``: code deployed by this call, like ``new C()``.
@@ -2073,7 +2145,9 @@ class Lowerer:
             st = _acted(st, value)
             if target == self.this:
                 # One of this contract's own entry points, run again: what it writes here isn't followed.
-                st = replace(st, store=stored(st.store, ("havoc", self.this, "*", f"selfcall:{signature}"), TRUE))
+                st = replace(
+                    st, store=stored(st.store, ("havoc", self.this, "*elsewhere", f"selfcall:{signature}"), TRUE)
+                )
         if ir.lvalue is None:
             # A call whose result goes unused still has to return: a view call is there for whether it reverts
             # (``registry.onlyAdmin(sender)``), and so may an action be (``supplyControl.canMintToAddress(to, v,
@@ -2627,10 +2701,7 @@ class Lowerer:
         if isinstance(value, tuple) and value and value[0] == "ptr":
             return st.store.get(("heap", value[1]), unknown("unallocated"))
         if isinstance(value, tuple) and value and value[0] == "ite" and _pointer(value):
-            # Each side under its own branch: an object only one branch allocated is unallocated on the other.
-            a = replace_terms(self._object(value[2], st), {value[1]: TRUE})
-            b = replace_terms(self._object(value[3], st), {value[1]: FALSE})
-            return mk_ite(value[1], a, b)
+            return mk_ite(value[1], self._object(value[2], st), self._object(value[3], st))
         return value
 
     def _mutate(self, holder: Any, change: Callable[[Term], Term], st: State) -> State:
@@ -2656,7 +2727,7 @@ class Lowerer:
 
     def _deep(self, value: Any, st: State, depth: int = 0) -> Any:
         """``value`` with every object it points to read out, to a bounded depth."""
-        if not isinstance(value, tuple) or not contains(value, frozenset({"ptr"})):
+        if not self._objects or not isinstance(value, tuple) or not contains(value, frozenset({"ptr"})):
             return value
         if depth > 8:
             return unknown("memory_depth")
@@ -2665,7 +2736,27 @@ class Lowerer:
             return self._deep(st.store.get(("heap", p[1]), unknown("unallocated")), st, depth + 1)
 
         if isinstance(value, Term):
-            return substitute(value, "ptr", out)
+            # The same value over the same objects reads out the same: remembered, since a value holding pointers is
+            # read again and again while the objects stay as they are.
+            pointed: list = []
+            seen: set = set()
+            pending = list(_pointers(value))
+            while pending:  # every object it reaches, through objects holding pointers too
+                p = pending.pop()
+                if p[1] in seen:
+                    continue
+                seen.add(p[1])
+                held = st.store.get(("heap", p[1]))
+                pointed.append((p[1], held))
+                if isinstance(held, Term):
+                    pending.extend(_pointers(held))
+            key = (value, tuple(sorted(pointed, key=lambda x: x[0])), depth)
+            memo = self.__dict__.setdefault("_deep_memo", {})
+            if key not in memo:
+                if len(memo) > 50_000:
+                    memo.clear()
+                memo[key] = substitute(value, "ptr", out)
+            return memo[key]
         return tuple(self._deep(x, st, depth) if isinstance(x, tuple) else x for x in value)
 
     # Values -----------------------------------------------------------------------------------------------------------
@@ -2864,6 +2955,38 @@ def _address_typed(type_: Any) -> bool:
     )
 
 
+def _pointers(term: Term) -> frozenset:
+    """The pointers anywhere in ``term``, remembered on each node (bottom-up: a value read again and again, and the
+    new values built over it, walk only what is new)."""
+    from .terms import _children
+
+    local: dict[int, frozenset] = {}
+    stack: list[tuple[Any, bool]] = [(term, False)]
+    while stack:
+        node, expanded = stack.pop()
+        if id(node) in local:
+            continue
+        cached = node.__dict__.get("_ptrs") if isinstance(node, Term) else None
+        if cached is not None:
+            local[id(node)] = cached
+            continue
+        if isinstance(node, Term) and not contains(node, frozenset({"ptr"})):
+            local[id(node)] = frozenset()
+            continue
+        children = [c for c in _children(node) if isinstance(c, tuple)]
+        if not expanded:
+            stack.append((node, True))
+            stack.extend((c, False) for c in children if id(c) not in local)
+            continue
+        found = frozenset().union(*(local[id(c)] for c in children))
+        if node and node[0] == "ptr":
+            found = found | {node}
+        local[id(node)] = found
+        if isinstance(node, Term):
+            node.__dict__["_ptrs"] = found
+    return local[id(term)]
+
+
 def _pointer(value: Any) -> bool:
     """A pointer to an object in memory, or a choice between pointers (a branch that set none leaves it unknown)."""
     if not isinstance(value, tuple) or not value:
@@ -2946,24 +3069,25 @@ def _enum_size(type_: Any) -> int | None:
 _SLICE = re.compile(r"([A-Za-z_$][\w.$]*)\s*\[\s*([^\[\]:]*?)\s*:\s*([^\[\]:]*?)\s*\]")
 
 
-def _sliced(node: Any) -> bool:
-    """Whether ``node``'s source slices a value (``x[a:b]``, which Slither's IR renders as ``x``), past the two
-    slices of the call's own data that are read back from the source: ``msg.data[4:]`` and ``bytes4(msg.data[:4])``.
-    A conditional expression inside an index reads as one too: never fewer."""
-    text = _source(node, lambda t: ":" in t) if node is not None else ""
+def _sliced(node: Any) -> tuple[bool, list]:
+    """Whether ``node``'s source slices a value (``x[a:b]``, which Slither's IR renders as ``x``) other than as read
+    back exactly: ``msg.data[4:]`` (the arguments), and ``bytesN(x[:N])``, the first N bytes, which is ``bytesN(x)``
+    once ``x`` holds N bytes (returned as (x, N): the slice reverts otherwise). A conditional expression inside an
+    index reads as a slice too: never fewer."""
+    # The statement's own expression: a node's source spans what it opens too (an ``if``'s whole body).
+    expression = getattr(node, "expression", None)
+    text = _source(expression, lambda t: ":" in t) if expression is not None else ""
+    cuts = []
     for found in _SLICE.finditer(text):
         base, start, end = found.groups()
         if base == "msg.data" and start in ("4", "0x4", "0x04") and not end:
             continue
-        if (
-            base == "msg.data"
-            and start in ("", "0")
-            and end == "4"
-            and text[: found.start()].rstrip().endswith("bytes4(")
-        ):
+        cast = re.search(r"bytes(\d+)\(\s*$", text[: found.start()])
+        if cast and start in ("", "0") and end == cast.group(1) and text[found.end() :].lstrip().startswith(")"):
+            cuts.append((base, int(end)))
             continue
-        return True
-    return False
+        return True, []
+    return False, cuts
 
 
 def _dynamic_abi(type_: Any) -> bool:

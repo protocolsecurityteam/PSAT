@@ -486,13 +486,14 @@ def subterms(term: tuple, kind: str) -> tuple[Term, ...]:
 
 def substitute(term: Term, kind: str, replace: Any) -> Term:
     """``term`` with every subterm of ``kind`` replaced by ``replace(subterm)``, rebuilt through the simplifying
-    constructors so the result folds."""
+    constructors so the result folds. A subterm holding none of ``kind`` is kept as it is, unwalked."""
     memo: dict[int, Any] = {}
+    kinds = frozenset({kind})
 
     def go(t: Any) -> Any:
         if isinstance(t, frozenset):
             return frozenset(go(x) for x in t)
-        if not isinstance(t, tuple):
+        if not isinstance(t, tuple) or (isinstance(t, Term) and not contains(t, kinds)):
             return t
         key = id(t)
         if key in memo:

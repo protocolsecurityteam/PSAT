@@ -156,6 +156,8 @@ def _written_values(contract: Any, loads: list[Term]) -> dict[tuple, list | None
             return None
         for pc, store in exits:
             for loc, value in store.items():
+                if loc[0] == "havoc" and loc[2] == "*elsewhere":
+                    continue  # code run elsewhere on this storage (an entry point, a delegate): its own writes
                 if loc[0] == "havoc" and loc[1] == THIS:
                     # A loop writing past what was followed: every entry of that variable (or of all of them, or
                     # every raw slot) may be anything.

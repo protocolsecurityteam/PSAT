@@ -76,6 +76,7 @@ contract C {
     function calldataFixed(uint256[2] calldata ys, uint256 i) external pure { require(ys[i] == 5); }
     function calldataByte(bytes calldata d) external pure { require(d[0] == 0x01); }
     function dataByte() external pure { require(msg.data[0] == 0x01); }
+    function firstBytes(bytes calldata d, bytes4 want) external pure { require(bytes4(d[:4]) == want); }
     function mapped(address who) external view { require(balances[who] > 0); }
     function stored(uint256 i) external view { require(list[i] > 0); }
     function storedFixed(uint256 i) external view { require(fixedList[i] > 0); }
@@ -196,6 +197,14 @@ def test_a_bytes_index_is_one_byte_not_a_word(contract):
     assert mk("slice", mk("elem", d, const(0)), 0, 1) in subterms(_formula(contract, "calldataByte"), "slice")
     data = _formula(contract, "dataByte")
     assert subterms(data, "slice") and subterms(data, "calldatasize")
+
+
+def test_the_first_bytes_of_a_slice_are_the_first_bytes_once_there_are_that_many(contract):
+    d = mk("arg", "d", "bytes")
+    formula = _formula(contract, "firstBytes")
+    assert mk("slice", mk("elem", d, const(0)), 0, 4) in subterms(formula, "slice")
+    assert mk("cmp", "le", const(4), mk("len", d)) in subterms(formula, "cmp")
+    assert not subterms(formula, "unknown")
 
 
 def test_storage_items_are_bounded_by_their_arrays_length_and_mappings_are_not(contract):
