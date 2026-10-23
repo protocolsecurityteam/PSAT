@@ -125,6 +125,8 @@ def _tracked(logs: Callable) -> Callable:
 class Chain:
     """Reads at one pinned block."""
 
+    failed = 0  # see ``__init__``
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if "logs" in cls.__dict__:
@@ -166,6 +168,8 @@ class Chain:
         self.truncated: set[int] = set()
         # Per read of logs (address, topics): whether it came back partial (see ``_tracked``).
         self.partial: dict[tuple[int, frozenset], bool] = {}
+        # Single reads that failed, or weren't sent for the budget: a decision that met one can't drop what it read.
+        self.failed = 0
 
     def cut(self, address: int, topics: frozenset[str]) -> bool:
         """Whether that history was read partial, or not read at all."""
@@ -232,6 +236,7 @@ class Chain:
             return UNK
         if key not in self._memo:
             if not self._affordable():
+                self.failed += 1
                 return UNK
             self.sent += 1
             try:
@@ -240,6 +245,7 @@ class Chain:
                 raise
             except Exception as exc:  # a revert is a revert; any transport or node error reads as unknown, unremembered
                 if not _is_revert(str(exc)):
+                    self.failed += 1
                     return UNK
                 self._memo[key] = REVERTED
         return self._memo[key]
@@ -1710,7 +1716,9 @@ class Verdict:
     # amount needed: ``"any"`` for some, ``"chosen"`` for what the caller's own arguments ask, else a number).
     requires: tuple[tuple[int | None, str, Any], ...] = ()
     # For an open function: ``now`` when a stranger's call goes through as the chain stands, ``later`` when only once
-    # its conditions allow (unpaused, a vote passed and waiting, a hash scheduled and its timelock run out).
+    # its conditions allow (unpaused, a vote passed and waiting, a hash scheduled and its timelock run out);
+    # ``conditional`` (``later_conditional``) when that holds only with conditions every caller faces alike set
+    # aside, unsettled (``decide``'s second pass), until a stranger's call is run and goes through.
     allowed: str = "now"
     # Calls a stranger makes first for an open function to let it through: (signature, arguments) each.
     after: tuple[tuple[str, dict], ...] = ()
@@ -1750,23 +1758,29 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     than a reason not to say who. Such conjuncts are dropped only when the whole formula left the answer open, and
     only those that read unknown for what the lowering couldn't express: one false now (a pause) stays and decides
     as before, and one a failed read or the budget left open keeps blocking."""
+    failed = world.chain.failed
     verdict = _decide(formula, world, coverage)
     core, free = split(formula)
     if verdict.openness == "not_determined":
-        opaque = _opaque_conditions(free, world)
+        opaque = _opaque_conditions(free, world, failed)
         if opaque:
             verdict = _on_conditions(formula, world, coverage, opaque) or verdict
-    if verdict.openness == "not_determined" and any(subterms(c, "unknown") or subterms(c, "opaque") for c in core):
-        # What the lowering couldn't express keeps the stranger undecided: its call, run once on the chain, settles
-        # it when it goes through. One that fails proves nothing (other arguments, another state) and changes nothing.
+    shown = verdict.openness == "open" and verdict.allowed == "conditional"
+    if shown or (
+        verdict.openness == "not_determined" and any(subterms(c, "unknown") or subterms(c, "opaque") for c in core)
+    ):
+        # What the lowering couldn't express keeps the stranger undecided, or open only on conditions: its call, run
+        # once on the chain, settles it when it goes through. One that fails proves nothing (other arguments, another
+        # state) and changes nothing.
         found = _executes(formula, world, FRESH, set(), tries=1)
         if found is not None:
             verdict = Verdict("open", frozenset(), True, witnesses={FRESH: found})
     if verdict.openness == "not_determined" and free:
-        # What only the conditions leave open is theirs to report, not a reason the answer is open.
+        # What only the conditions leave open is theirs to report, not a reason the answer is open; a failed read and
+        # a callee not followed (never set aside as a condition) always are.
         probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
         theirs = {r for c in free for r in _open_parts(c, probe)} - {r for c in core for r in _open_parts(c, probe)}
-        kept = tuple(g for g in verdict.gaps if g not in theirs)
+        kept = tuple(g for g in verdict.gaps if g not in theirs or g.startswith(("read_failed:", "unfollowed:")))
         verdict = replace(verdict, gaps=kept or verdict.gaps)
     if verdict.openness == "not_determined":
         tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
@@ -1794,10 +1808,13 @@ def _quantified(core: tuple[Term, ...]) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _opaque_conditions(free: tuple[Term, ...], world: World) -> list[Term]:
-    """The conjuncts every caller faces alike that read unknown now only for what the lowering couldn't express or
-    a callee not followed: no read failed in them and no budget ran out."""
-    if world.exhausted():
+def _opaque_conditions(free: tuple[Term, ...], world: World, failed: int) -> list[Term]:
+    """The conjuncts every caller faces alike that read unknown now only for what the lowering couldn't express,
+    here or in a callee followed into: none once any read of the decision failed (``failed``: the chain's count when
+    it began) or the work or the reads ran out, where the whole formula's answer stands. A callee not followed is
+    never one: its code may read ``tx.origin``, which every callee sees as the caller's."""
+    chain = world.chain
+    if world.exhausted() or chain.failed > failed or (chain.limit is not None and chain.sent >= chain.limit):
         return []
     probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
     out = []
@@ -1805,15 +1822,16 @@ def _opaque_conditions(free: tuple[Term, ...], world: World) -> list[Term]:
         if probe.truth(part) is not UNK:
             continue
         reasons = _open_parts(part, probe)
-        if reasons and all(r.startswith(("unknown:", "unfollowed:")) for r in reasons):
+        if reasons and all(r.startswith("unknown:") for r in reasons):
             out.append(part)
     return out
 
 
 def _on_conditions(formula: Term, world: World, coverage: Coverage, opaque: list[Term]) -> Verdict | None:
-    """The verdict on ``formula`` without the ``opaque`` conjuncts, as holding only on them: whoever it lists is
-    shown to pass with those conditions freed (``conditions``), and an open answer names no witness, since no call
-    was shown to go through. ``None`` when that too is left open."""
+    """The verdict on ``formula`` without the ``opaque`` conjuncts, as holding only on them: ``allowed`` reads
+    ``conditional``, the list is never complete, and a gap names each condition dropped (``conditional:<why>``).
+    Whoever it lists is shown to pass with those conditions freed (``conditions``), and an open answer names no
+    witness, since no call was shown to go through. ``None`` when that too is left open."""
     reduced = mk_and([c for c in conjuncts(formula) if c not in opaque])
     effective = world.effective
     if effective is not None:
@@ -1826,12 +1844,17 @@ def _on_conditions(formula: Term, world: World, coverage: Coverage, opaque: list
         return None
     shown = again.principals | again.signers | set(again.conditions)
     freed = {who: again.conditions.get(who, "business") for who in shown}
+    probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
+    dropped = tuple(f"conditional:{r}" for c in opaque for r in _open_parts(c, probe))
     return replace(
         again,
         principals=frozenset(),
         signers=frozenset(),
         conditions=freed,
         witnesses={} if again.openness == "open" else again.witnesses,
+        complete=False,
+        allowed="conditional" if again.allowed == "now" else f"{again.allowed}_conditional",
+        gaps=again.gaps + dropped,
     )
 
 
@@ -2312,10 +2335,11 @@ def _unread_gaps(when: frozenset, probe: "Evaluator") -> list[str]:
     return list(dict.fromkeys(out)) or ["read_failed:condition"]
 
 
-def _open_parts(atom: Term, probe: "Evaluator") -> list[str]:
+def _open_parts(atom: Term, probe: "Evaluator", depth: int = 0) -> list[str]:
     """What leaves ``atom`` unknown: a term the lowering couldn't express (``unknown:<its label>``), a call whose
     callee isn't followed and whose arguments the caller picks (``call:...`` when the caller's identity reaches it,
-    see ``call_gap``, else ``unfollowed:<signature>``), a read the chain didn't answer (``read_failed:<what>``)."""
+    see ``call_gap``, else ``unfollowed:<signature>``), a read the chain didn't answer (``read_failed:<what>``). A
+    followed callee left unknown is looked into the same way, a few contracts deep (past that, ``depth:<sig>``)."""
     out = [f"unknown:{u[1]}" for u in subterms(atom, "unknown")]
     out += [f"unknown:{o[1]}" for o in subterms(atom, "opaque")]
     for call in subterms(atom, "call"):
@@ -2333,8 +2357,14 @@ def _open_parts(atom: Term, probe: "Evaluator") -> list[str]:
             if lowered is None:
                 out.append(call_gap(call, probe) if tainted(call) else f"unfollowed:{call[2]}")
             elif probe.eval(call) is UNK:
+                if depth >= IDENTITY_DEPTH:
+                    out.append(f"depth:{call[2]}")
+                    continue
                 out += [
-                    g for part in (lowered[0], *lowered[1]) if isinstance(part, tuple) for g in unknown_labels(part)
+                    g
+                    for part in (lowered[0], *lowered[1])
+                    if isinstance(part, tuple) and part and isinstance(part[0], str)
+                    for g in _open_parts(part, probe, depth + 1)
                 ]
     for load in subterms(atom, "load"):
         where = probe.storage_cell(load)
@@ -3462,7 +3492,21 @@ def _free_sat(formula: Term, ev: "Evaluator", free: frozenset) -> Any:
 def _may_single_out(formula: Term, world: World, depth: int = 0) -> bool:
     """Whether who calls can matter: the caller or signer appears, other than as an argument of a view call whose code,
     lowered over its arguments, doesn't use it either (Maple's ``canCall(id, msg.sender, data)`` checking only the
-    deposit's receiver), or something unknown appears that the lowering didn't mark as the same for everyone."""
+    deposit's receiver), a followed callee reads ``tx.origin`` (the caller's, whatever it is handed), or something
+    unknown appears that the lowering didn't mark as the same for everyone. Remembered per world, unless a callee's
+    address was still unread (asked again once it is)."""
+    memo = world.__dict__.setdefault("_singling", {})
+    key = (formula, depth)
+    if key in memo:
+        return memo[key]
+    unread: list[bool] = []
+    answer = _singles_out(formula, world, depth, unread)
+    if not unread:
+        memo[key] = answer
+    return answer
+
+
+def _singles_out(formula: Term, world: World, depth: int, unread: list[bool]) -> bool:
     if any(not singles_out_nobody(u) for u in subterms(formula, "unknown")):
         return True
     calls = [c for c in subterms(formula, "call") if any(contains(a, IDENTITY_KINDS) for a in c[3])]
@@ -3473,9 +3517,27 @@ def _may_single_out(formula: Term, world: World, depth: int = 0) -> bool:
         if not call[4] or contains(call[1], IDENTITY_KINDS) or depth >= IDENTITY_DEPTH:
             return True  # an action, or a check on a contract the caller picks
         lowered = world.callee(call)
-        if lowered is None or any(
-            isinstance(part, tuple) and _may_single_out(part, world, depth + 1) for part in (lowered[0], *lowered[1])
-        ):
+        if lowered is None:
+            unread.append(True)
+            return True
+        if any(isinstance(p, tuple) and _may_single_out(p, world, depth + 1) for p in (lowered[0], *lowered[1])):
+            return True
+    return _reads_origin(formula, world, depth)
+
+
+def _reads_origin(term: Term, world: World, depth: int) -> bool:
+    """Whether a view call in ``term`` that no identity is handed to reaches code reading ``tx.origin``, through
+    followed callees a few contracts deep."""
+    if depth >= IDENTITY_DEPTH:
+        return False
+    for call in subterms(term, "call"):
+        if not call[4] or any(contains(a, IDENTITY_KINDS) for a in call[3]):
+            continue
+        lowered = world.callee(call)
+        if lowered is None:
+            continue
+        parts = [p for p in (lowered[0], *lowered[1]) if isinstance(p, tuple)]
+        if any(contains(p, frozenset({"origin"})) or _reads_origin(p, world, depth + 1) for p in parts):
             return True
     return False
 

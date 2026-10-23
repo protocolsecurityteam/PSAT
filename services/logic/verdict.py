@@ -13,6 +13,7 @@ from eth_utils.crypto import keccak
 from .decide import (
     ANY_KEY,
     FRESH,
+    IDENTITY_DEPTH,
     LOG_SECONDS,
     LOG_TOTAL_SECONDS,
     NODE_WORK,
@@ -32,7 +33,23 @@ from .logged import keyed_by, logged, logged_raw, members, written_by
 from .lower import Lowerer, parameter
 from .scope import classify, contract_facts
 from .snapshot import creation_keys
-from .terms import CALLER, FALSE, IDENTITY_KINDS, THIS, TRUE, Term, assume_conjuncts, mk, mk_and, substitute, unknown
+from .terms import (
+    CALLER,
+    FALSE,
+    IDENTITY_KINDS,
+    THIS,
+    TRUE,
+    Term,
+    assume_conjuncts,
+    contains,
+    mk,
+    mk_and,
+    mk_not,
+    replace_terms,
+    substitute,
+    subterms,
+    unknown,
+)
 
 
 def _event_args(spec: dict, topics: list[int], data: list[int]) -> dict[int, int]:
@@ -1222,6 +1239,8 @@ def _spec_name(var: Any) -> Any:
     return var
 
 
+_ORIGIN = frozenset({"origin"})
+
 # Chain reads one function's decision may send; past it, reads answer unknown (sound, never wrong).
 READS_PER_FUNCTION = 2000
 
@@ -1774,9 +1793,37 @@ def function_verdict(
             isinstance(address, int) and not isinstance(address, bool) and chain.code(address % 2**160) == b""
         )
 
-    formula = substitute(formula, "delegate", delegate)
+    def origin_inline(term: Term, depth: int = 0) -> Term:
+        """``term`` with each view call whose followed callee reads ``tx.origin`` replaced by that code, in this
+        call's terms: the origin a callee reads is the caller's own, whatever it is handed, so the call is no condition
+        every caller faces alike. Its other calls are left for the chain to answer."""
+        if depth >= IDENTITY_DEPTH:
+            return term
+        mapping: dict[Term, Term] = {}
+        for call in subterms(term, "call"):
+            lowered = callee(call) if call[4] else None
+            if lowered is None:
+                continue
+            pc = origin_inline(lowered[0], depth + 1)
+            ret = tuple(origin_inline(r, depth + 1) if isinstance(r, Term) else r for r in lowered[1])
+            if not any(isinstance(p, Term) and contains(p, _ORIGIN) for p in (pc, *ret)):
+                continue
+            for x in subterms(term, "ok"):
+                if x[1] == call:
+                    mapping[x] = pc
+            for x in subterms(term, "caught"):
+                if x[1] == call:
+                    mapping[x] = mk_not(pc)
+            for x in subterms(term, "item"):
+                if x[1] == call and x[2] < len(ret):
+                    mapping[x] = ret[x[2]]
+            if ret:
+                mapping[call] = ret[0]
+        return replace_terms(term, mapping) if mapping else term
+
+    formula = origin_inline(substitute(formula, "delegate", delegate))
     formula = assume_conjuncts(formula)
-    world.effective = assume_conjuncts(substitute(world.effective, "delegate", delegate))
+    world.effective = assume_conjuncts(origin_inline(substitute(world.effective, "delegate", delegate)))
     world.callee = callee
     world.action_open = action_open
     world.credited = credited

@@ -1,5 +1,7 @@
-"""Who may call is decided on the core: conjuncts no caller's identity reaches are conditions on the call, never a
-reason not to say who, unless they read false now or a read failed in them."""
+"""Who may call is decided on the core: conjuncts no caller's identity reaches, left unknown only for what the
+lowering couldn't express, are conditions on the call, reported as such (``allowed`` ``conditional``, a
+``conditional:`` gap, never complete). Not when they read false now, a read failed, or the callee isn't followed: its
+code may read ``tx.origin``, which is the caller's."""
 
 from __future__ import annotations
 
@@ -38,6 +40,14 @@ contract C {
     function pausable(uint256 x) external { require(!paused); require(hub.math(x) > 0); total += x; }
     function handed() external { require(hub.check(msg.sender)); total += 1; }
     function paired(uint256 x) external { require(hub.pair(x, msg.sender)); total += x; }
+    function screenedGas(uint256 x) external { require(gasleft() > x); require(!blocked[msg.sender]); total += x; }
+    function pausableGas(uint256 x) external { require(!paused); require(gasleft() > x); total += x; }
+    function listedFixed() external {
+        bool ok;
+        for (uint256 i; i < admins.length; i++) { if (admins[i] == msg.sender) ok = true; }
+        require(ok);
+        require(hub.math(5) > 0);
+    }
     function listed(uint256 x) external {
         bool ok;
         for (uint256 i; i < admins.length; i++) { if (admins[i] == msg.sender) ok = true; }
@@ -116,24 +126,29 @@ def test_a_role_beside_an_unfollowed_call_lists_its_holders_on_that_condition(co
     assert CALL in verdict.condition_terms
 
 
-def test_an_unfollowed_call_no_identity_reaches_is_a_condition(contract):
-    verdict = _verdict(contract, "free")
-    assert verdict.openness == "open"
-    assert verdict.allowed == "now"
-    assert CALL in verdict.condition_terms
-    assert verdict.witnesses == {}  # no call was shown to go through
+def test_an_unfollowed_callee_is_never_set_aside(contract):
+    # Its code may read tx.origin, the caller's: the conjunct may single someone out.
+    for name in ("free", "screened"):
+        verdict = _verdict(contract, name)
+        assert verdict.openness == "not_determined"
+        assert "unfollowed:math(uint256)" in verdict.gaps
+        assert CALL in verdict.condition_terms
 
 
-def test_a_screen_beside_it_lets_strangers_through_on_that_condition(contract):
-    verdict = _verdict(contract, "screened")
+def test_a_screen_beside_an_unknown_is_open_only_on_it(contract):
+    verdict = _verdict(contract, "screenedGas")
     assert verdict.openness == "open"
-    assert CALL in verdict.condition_terms
+    assert verdict.allowed == "conditional"
+    assert not verdict.complete
+    assert "conditional:unknown:gasleft()" in verdict.gaps
+    assert verdict.witnesses == {}  # the stranger's own call reverts on this chain: no witness
 
 
 def test_a_pause_still_holds_everyone_back_now(contract):
-    verdict = _verdict(contract, "pausable", _Deployed(paused=True))
+    verdict = _verdict(contract, "pausableGas", _Deployed(paused=True))
     assert verdict.openness == "open"
-    assert verdict.allowed == "later"
+    assert verdict.allowed == "later_conditional"
+    assert not verdict.complete
 
 
 def test_a_call_handed_the_caller_stays_undecided(contract):
@@ -152,6 +167,11 @@ def test_an_unknown_that_may_hide_the_caller_still_blocks(contract):
     verdict = _verdict(contract, "listed")
     assert verdict.openness == "not_determined"
     assert any(g.startswith("unknown:loop:") for g in verdict.gaps)
-    # The unfollowed call no identity reaches is a condition, not a reason the answer is open.
-    assert not any("math(uint256)" in g for g in verdict.gaps)
+    assert "unfollowed:math(uint256)" in verdict.gaps
     assert CALL in verdict.condition_terms
+
+
+def test_a_failed_read_in_a_condition_stays_a_gap(contract):
+    verdict = _verdict(contract, "listedFixed", _Deployed(call_error="upstream timeout"))
+    assert verdict.openness == "not_determined"
+    assert "read_failed:call:math(uint256)" in verdict.gaps
