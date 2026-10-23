@@ -116,3 +116,16 @@ def test_a_verdict_reports_its_core_and_the_conditions_beside_it(contract):
     verdict, _ = function_verdict(contract, fn, AT, _Deployed({0: HUB_AT, 2: ADMIN, role: 1}), {AT: contract})
     assert verdict.core == ("roles[caller]",)
     assert verdict.condition_terms == (("business", "0 lt hub.math(uint256)(x)"),)
+
+
+def test_conditions_that_read_alike_keep_their_own_unknowns():
+    from services.logic.decide import _business
+
+    def deep(label):
+        t = unknown(label)
+        for _ in range(7):
+            t = mk("op", "add", (t, X))
+        return mk_cmp("lt", const(0), t)
+
+    labels = {text for _, text in _business((deep("a:nobody"), deep("b:nobody")))}
+    assert {"unknown:a:nobody", "unknown:b:nobody"} <= labels
