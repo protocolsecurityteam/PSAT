@@ -313,7 +313,7 @@ def test_a_choice_compared_with_a_fixed_value_is_guessed_at_and_around_it():
     formula = mk_and([mk_cmp("le", mk("const", 1000, "uint256"), deadline), mk_cmp("lt", X, OWNER)])
     world = World(_Chain(coded=set()), this=0xC0DE << 100, selector=0)
     found = _comparands(formula, Evaluator(world, {"caller": FRESH, "signer": FRESH}), frozenset({deadline, X}))
-    assert found == {deadline: {999, 1000, 1001}}  # ``owner`` isn't read here: no value to guess around
+    assert found == {deadline: [1000, 1001, 999]}  # the value first; ``owner`` isn't read here: nothing to guess
 
 
 def test_a_stranger_is_in_no_slot_and_nothing_is_stored_under_it():

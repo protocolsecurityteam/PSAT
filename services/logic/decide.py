@@ -82,7 +82,9 @@ LOG_WINDOW = 1_000_000
 # scan stops there rather than splitting its way through it.
 LOG_MIN_WINDOW = LOG_WINDOW // 64
 LOG_CALLS = 400
-LOG_SECONDS = 90.0  # history scanning per function
+# History scanning per history read: each history gets its own time, so a crowded one (a token's transfers) read
+# first takes nothing from a short one (its role grants) read after it, whatever order the reads come in.
+LOG_SECONDS = 45.0
 LOG_BATCH = 50
 SNAPSHOT_SLOTS = 400_000  # storage dumped whole, at most (Maker's Vat holds about 135k slots)
 SNAPSHOT_PAGE = 10_000
@@ -149,6 +151,8 @@ class Chain:
         # Seconds of history scanning one function may still spend (``function_verdict`` sets it per function):
         # past it a history is partial, so a slow node costs completeness, never the whole verdict.
         self.scan_left: float | None = None
+        # When set, the seconds each history scan starts with (``scan_left`` reset per read): see ``LOG_SECONDS``.
+        self.history_seconds: float | None = None
         self.limit: int | None = None
         # Addresses whose logs were cut to ``LOG_ROWS``: anything enumerated from them is partial.
         self.truncated: set[int] = set()
@@ -283,6 +287,8 @@ class Chain:
             elif self.batch is not None:
                 # Partial for these events only: the address's other events (its role grants) are still read.
                 self._memo[key] = None  # until read: a scan the budget cuts off stays partial, not re-read
+                if self.history_seconds is not None:
+                    self.scan_left = self.history_seconds
                 self._memo[key] = self._scan_logs(address, flt)
             else:
                 try:
@@ -1000,7 +1006,8 @@ class World:
     # The address holding the code that runs at an address (a proxy's implementation).
     code_of: Callable[[int], int] = lambda address: address
     # Keys whose current value at (address, variable, fields) is ``value``, from the writer events' history.
-    inverse: Callable[[int, str, tuple, int], set[int] | None] = lambda address, var, fields, value: set()
+    # ``proof=False``: keys only to try, each checked on the chain (see ``verdict.inverse``).
+    inverse: Callable[..., set[int] | None] = lambda address, var, fields, value, proof=True: set()
     # Key -> the value it was last left holding at (address, variable, fields), from the value events' history;
     # ``None`` when that history was cut or isn't complete.
     latest: Callable[[int, str, tuple], dict[int, int] | None] = lambda address, var, fields: None
@@ -2608,16 +2615,19 @@ def _decide_one(
     owned = _owned_keys(formula, world, identity)
     recorded = _recorded_keys(formula, world) if recorded_ok else {}
     compared = _comparands(formula, base, frozenset(free))
-    # An argument that keys an identity lookup is only worth the keys where that identity is stored; one that keys
-    # any other mapping, first the keys its writers recorded (role ids from ``RoleGranted``).
+    targets = _call_targets(formula, base, frozenset(free))
+    # An argument that keys an identity lookup is only worth the keys where that identity is stored, when the
+    # history shows any; one that keys any other mapping, first the keys its writers recorded (role ids from
+    # ``RoleGranted``).
     domains = [
         [False, True]
         if term in chosen
         else sorted(owned[term])[:_MAX_OWNED_KEYS] + [0]
-        if term in owned
+        if owned.get(term)
         else _first_zero(
-            [v for v in identity.values() if isinstance(v, int) and _domain_takes(term, v)]
-            + sorted(compared.get(term, ()))
+            compared.get(term, [])
+            + [v for v in identity.values() if isinstance(v, int) and _domain_takes(term, v)]
+            + targets.get(term, [])
             + recorded.get(term, [])[:_MAX_OWNED_KEYS]
             + _domain(term, formula, candidates | set(identity.values()))
         )
@@ -2833,7 +2843,7 @@ def _owned_keys(formula: Term, world: World, identity: dict[str, int]) -> dict[T
             # Named as its writers name it: a namespaced root's first field (``$.nodeOperators[id].manager``).
             var, path = _named_lookup(other[2], other[3])
             fields = tuple(step for kind, step in path if kind == "f")
-            out.setdefault(free[0], set()).update(world.inverse(address, var, fields, who) or ())
+            out.setdefault(free[0], set()).update(world.inverse(address, var, fields, who, proof=False) or ())
     return out
 
 
@@ -2938,18 +2948,59 @@ def _domain(term: Term, formula: Term, addresses: set[int]) -> list[Any]:
     return sorted(numbers | addresses | {2**256 - 1})
 
 
-def _comparands(formula: Term, ground: Evaluator, free: frozenset) -> dict[Term, set[int]]:
+def _comparands(formula: Term, ground: Evaluator, free: frozenset) -> dict[Term, list[int]]:
     """For each caller-chosen term compared with something it can't change (``deadline >= block.timestamp``,
     ``signature.length == 65``, ``nonce == nonces[owner]``): that value and its neighbours, the guesses most likely to
-    meet the comparison either way."""
-    out: dict[Term, set[int]] = {}
-    for t in subterms(formula, "cmp"):
+    meet the comparison either way; every value itself before any neighbour, since equality wants it exactly."""
+    exact: dict[Term, list[int]] = {}
+    near: dict[Term, list[int]] = {}
+    for t in sorted(subterms(formula, "cmp"), key=stable):
         for side, other in ((t[2], t[3]), (t[3], t[2])):
             if side not in free or contains(other, _FREE_KINDS | IDENTITY_KINDS | {"unknown"}):
                 continue
             value = ground.eval(other)
             if isinstance(value, int) and not isinstance(value, bool):
-                out.setdefault(side, set()).update(v % 2**256 for v in (value, value + 1, value - 1))
+                exact.setdefault(side, []).append(value % 2**256)
+                near.setdefault(side, []).extend(v % 2**256 for v in (value + 1, value - 1))
+    return {side: list(dict.fromkeys(exact[side] + near[side])) for side in exact}
+
+
+_HELD_ADDRESSES = 16  # addresses the code holds, tried for an address the caller picks to be called
+
+
+def _call_targets(formula: Term, ground: Evaluator, free: frozenset) -> dict[Term, list[int]]:
+    """For each caller-chosen address a call is made to (``_core.isGovernor(caller)``): the contracts the formula
+    calls at addresses the caller can't change, those asked the same question first, then the addresses it holds
+    (an implementation slot, an immutable): what it names is a contract to ask, and those are the contracts the code
+    already knows."""
+    calls = subterms(formula, "call")
+    fixed = _FREE_KINDS | IDENTITY_KINDS | {"unknown"}
+    held: list[int] | None = None
+    out: dict[Term, list[int]] = {}
+    for call in calls:
+        target = _strip_conv(call[1])
+        if target not in free:
+            continue
+        found: list[int] = []
+        for other in sorted(calls, key=lambda c: (c[2] != call[2], stable(c))):
+            if contains(other[1], fixed):
+                continue
+            value = ground.eval(other[1])
+            if isinstance(value, int) and not isinstance(value, bool) and value % 2**160 not in found:
+                found.append(value % 2**160)
+        if held is None:
+            held = []
+            stored = [t for kind in ("load", "rawload", "immutable") for t in subterms(formula, kind)]
+            for t in sorted(stored, key=stable):
+                if contains(t, fixed):
+                    continue
+                value = ground.eval(t)
+                if isinstance(value, int) and not isinstance(value, bool) and _LOWEST_SENDER <= value < 2**160:
+                    held.append(value)
+                if len(held) >= _HELD_ADDRESSES:
+                    break
+        found.extend(v for v in held if v not in found)
+        out.setdefault(target, []).extend(v for v in found if v not in out.get(target, []))
     return out
 
 

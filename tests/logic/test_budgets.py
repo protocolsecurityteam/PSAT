@@ -182,3 +182,31 @@ def test_a_history_cut_short_lists_what_it_read_as_a_lower_bound(roles, monkeypa
     assert "history_truncated" in verdict.gaps
     # A contract-wide sample of log words doesn't stand in for the writer history that was cut.
     assert DECOY not in verdict.principals
+
+
+def test_a_crowded_history_read_first_takes_no_time_from_a_short_one():
+    # Which history a function reads first follows set order: a token's transfers refused window after window must
+    # not spend the time a role history read after them needs.
+    import time
+
+    crowd, short = 0xC1 << 150, 0xC2 << 150
+    transfers, grants = frozenset({"0x" + "11" * 32}), frozenset({"0x" + "22" * 32})
+
+    def batch(calls):
+        out = []
+        for method, params in calls:
+            if method != "eth_getLogs":
+                out.append("0x60")
+            elif int(params[0]["address"], 16) == crowd:
+                time.sleep(0.01)
+                out.append(None)  # refused
+            else:
+                out.append([])
+        return out
+
+    chain = Chain(lambda m, p: None, 19_999_999, batch)
+    chain.scan_left = chain.history_seconds = 0.005
+    chain.logs(crowd, transfers)
+    chain.logs(short, grants)
+    assert chain.cut(crowd, transfers)
+    assert not chain.cut(short, grants)

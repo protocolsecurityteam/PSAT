@@ -1236,7 +1236,7 @@ def function_verdict(
     """``contracts`` maps addresses to Slither contracts the formula may read or call (``address`` included), the
     code that runs there; ``code_of`` maps an address to the one holding that code (a proxy's implementation)."""
     chain.limit = chain.sent + READS_PER_FUNCTION
-    chain.scan_left = LOG_SECONDS
+    chain.scan_left = chain.history_seconds = LOG_SECONDS
     lowerer = Lowerer(contract)
     formula = lowerer.success(function)
     selector = int.from_bytes(keccak(text=function.solidity_signature)[:4], "big")
@@ -1326,6 +1326,17 @@ def function_verdict(
             and tuple(spec.get("member_path") or ()) == tuple(fields)
         ]
         return found or every(target, written_by, var, tuple(fields)) or []
+
+    def running_specs(target: int, var: Any, fields: tuple) -> list:
+        """``valued_specs`` from the running code alone: events that name a key and its value as it writes them."""
+        found = [
+            spec
+            for spec in writer_specs(target)
+            if spec["mapping_name"] == var
+            and spec.get("value_position") is not None
+            and tuple(spec.get("member_path") or ()) == tuple(fields)
+        ]
+        return found or written_by(contracts[target], var, tuple(fields)) or []
 
     def complete(contract_term: Term, var: Any, keys: int, fields: tuple) -> bool:
         var = _spec_name(var)
@@ -1580,12 +1591,19 @@ def function_verdict(
         return lowerer.returns(fn, args)[0]
 
     replayed: dict[tuple, dict[int, int]] = {}
+    guessed: dict[tuple, dict[int, int]] = {}
 
-    def inverse(target: int, var: str, fields: tuple, value: int) -> set[int] | None:
+    def inverse(target: int, var: str, fields: tuple, value: int, proof: bool = True) -> set[int] | None:
         """Keys whose latest written value at ``var`` (under ``fields``) is ``value``, replaying the writer events
-        once per mapping; ``None`` when that history was cut or unread, so whose value it is isn't known."""
+        once per mapping; ``None`` when that history was cut or unread, so whose value it is isn't known.
+        ``proof=False``: keys to try only, each checked on the chain: the running code's events, however the
+        earlier implementations logged, and a history read partial for what it holds."""
         if target not in contracts:
             return set()
+        if not proof:
+            if (target, var, fields) not in guessed:
+                guessed[(target, var, fields)] = _latest_written(target, var, fields, proof=False) or {}
+            return {key for key, written in guessed[(target, var, fields)].items() if written % 2**160 == value % 2**160}
         if (target, var, fields) not in replayed:
             replayed[(target, var, fields)] = _latest_written(target, var, fields)
         latest = replayed[(target, var, fields)]
@@ -1601,15 +1619,13 @@ def function_verdict(
             replayed[(target, var, fields)] = _latest_written(target, var, fields)
         return replayed[(target, var, fields)]
 
-    def _latest_written(target: int, var: str, fields: tuple) -> dict[int, int] | None:
-        by_topic = {
-            int.from_bytes(keccak(text=spec["event_signature"]), "big"): spec
-            for spec in valued_specs(target, _spec_name(var), fields)
-        }
+    def _latest_written(target: int, var: str, fields: tuple, proof: bool = True) -> dict[int, int] | None:
+        specs = valued_specs(target, _spec_name(var), fields) if proof else running_specs(target, _spec_name(var), fields)
+        by_topic = {int.from_bytes(keccak(text=spec["event_signature"]), "big"): spec for spec in specs}
         topics = frozenset("0x" + format(t, "064x") for t in by_topic)
         latest: dict[int, int] = {}
         logs = chain.logs(target, topics)
-        if chain.cut(target, topics):
+        if proof and chain.cut(target, topics):
             return None
         for log_topics, data in logs:
             spec = by_topic.get(log_topics[0]) if log_topics else None
