@@ -119,8 +119,10 @@ def test_runtime_code_is_walked_by_opcode():
     assert _runtime_reach(bytes([0x60, 0x32, 0x00])) is None  # 0x32 as PUSH1 data
     assert _runtime_reach(bytes([0x32, 0x00])) == "origin"
     assert _runtime_reach(bytes([0x5B, 0xFA, 0x00])) == "unfollowed"
-    metadata = bytes([0xA2, 0x32, 0xF1]) + (3).to_bytes(2, "big")
-    assert _runtime_reach(bytes([0x00]) + metadata) is None  # the compiler's metadata is never run
+    metadata = bytes([0xA1, 0x64]) + b"ipfs" + bytes([0x42, 0x32, 0xF1])
+    assert _runtime_reach(bytes([0x00]) + metadata + len(metadata).to_bytes(2, "big")) is None  # never run
+    # A tail that only looks like a size pointing at a map byte, no metadata key in it: all of it is code.
+    assert _runtime_reach(bytes([0xA1, 0x32, 0x00, 0x00, 0x03])) == "origin"
 
 
 def test_every_verdict_reports_how_it_is_allowed(monkeypatch):
@@ -152,3 +154,7 @@ def test_every_verdict_reports_how_it_is_allowed(monkeypatch):
     monkeypatch.setattr(deployment, "function_verdict", lambda *args, **kwargs: (conditional, None))
     out = deployment.deployment_verdicts(None, "0x" + "11" * 20, 1, "http://127.0.0.1:9", block=1)
     assert out["functions"]["f()"]["allowed"] == "conditional"
+    undecided = Verdict("not_determined", frozenset(), False, gaps=("now_unknown",))
+    monkeypatch.setattr(deployment, "function_verdict", lambda *args, **kwargs: (undecided, None))
+    out = deployment.deployment_verdicts(None, "0x" + "11" * 20, 1, "http://127.0.0.1:9", block=1)
+    assert out["functions"]["f()"]["allowed"] is None

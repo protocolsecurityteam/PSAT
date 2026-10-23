@@ -1262,13 +1262,15 @@ class Evaluator:
         return UNK
 
     def _coded(self, value: Any) -> bool:
-        """Whether ``value`` is this contract or an address with code: never a transaction's origin."""
+        """Whether ``value`` is this contract or an address with code (an EIP-7702 designator aside): never a
+        transaction's origin."""
         if not isinstance(value, int) or isinstance(value, bool) or value in _STRANGERS:
             return False
         if value % 2**160 == self.world.this:
             return True
         code = self.world.chain.code(value % 2**160)
-        return isinstance(code, bytes) and bool(code)
+        # An account delegating by EIP-7702 holds only its designator (0xef0100 and an address) and still sends.
+        return isinstance(code, bytes) and bool(code) and not (len(code) == 23 and code[:3] == b"\xef\x01\x00")
 
     def _compare(self, op: str, a: Any, b: Any) -> Any:
         for x, y in ((a, b), (b, a)):

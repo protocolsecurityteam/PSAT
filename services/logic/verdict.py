@@ -1246,6 +1246,8 @@ _ORIGIN = frozenset({"origin"})
 _CHOSEN = frozenset({"arg", "len", "elem", "callvalue", "calldatasize"})
 _ORIGIN_OP = 0x32
 _CALL_OPS = frozenset({0xF1, 0xF2, 0xF4, 0xFA})  # CALL, CALLCODE, DELEGATECALL, STATICCALL
+# The keys a compiler's metadata map holds, as CBOR text strings: only a trailer naming one is skipped.
+_METADATA_KEYS = (b"\x64ipfs", b"\x65bzzr0", b"\x65bzzr1", b"\x64solc")
 
 
 def _runtime_reach(code: bytes) -> str | None:
@@ -1253,7 +1255,8 @@ def _runtime_reach(code: bytes) -> str | None:
     may read the origin), else ``None``: a walk over the opcodes, skipping push data and the trailing metadata."""
     if len(code) >= 2:
         size = int.from_bytes(code[-2:], "big")
-        if size + 2 <= len(code) and code[-size - 2] & 0xF0 == 0xA0:
+        meta = code[-size - 2 : -2] if size + 2 <= len(code) else b""
+        if meta and 0xA0 <= meta[0] <= 0xBF and any(key in meta for key in _METADATA_KEYS):
             code = code[: -size - 2]  # the compiler's CBOR metadata: data, never run
     seen: set[int] = set()
     i = 0
@@ -1264,9 +1267,19 @@ def _runtime_reach(code: bytes) -> str | None:
     return "origin" if _ORIGIN_OP in seen else "unfollowed" if seen & _CALL_OPS else None
 
 
+def _hidden_calls(term: Term) -> bool:
+    """Whether ``term`` holds a call's outcome its lowering doesn't show: a low-level call's (``assumed``, its return
+    data ``opaque``), an action's, or a delegatecall's."""
+    if subterms(term, "assumed") or subterms(term, "delegate"):
+        return True
+    if any(str(o[1]).startswith(("returndata", "dynamic:")) for o in subterms(term, "opaque")):
+        return True
+    return any(not c[4] for c in subterms(term, "call"))
+
+
 def _unconditional(formula: Term, call: Term) -> bool:
     """Whether every use of ``call``'s value in ``formula`` is reached on every path that passes: inside a top-level
-    conjunct under no ``ite`` or ``or`` (whether it returns, ``ok``/``caught``, is exact anywhere)."""
+    conjunct under no ``ite``, ``or`` or ``and`` (whether it returns, ``ok``/``caught``, is exact anywhere)."""
 
     def plain(t: Any) -> bool:
         if isinstance(t, frozenset):
@@ -1275,11 +1288,11 @@ def _unconditional(formula: Term, call: Term) -> bool:
             return True
         if isinstance(t[0], str) and t[0] in ("ok", "caught") and t[1] == call:
             return True
-        if isinstance(t[0], str) and t[0] in ("ite", "or"):
-            return False
+        if isinstance(t[0], str) and t[0] in ("ite", "or", "and"):
+            return False  # short-circuits: below the top level, a conjunction may stop before the call
         return all(plain(x) for x in (t[1:] if isinstance(t[0], str) else t))
 
-    return plain(formula)
+    return all(plain(c) for c in (formula[1] if formula[0] == "and" else (formula,)))
 
 
 # Chain reads one function's decision may send; past it, reads answer unknown (sound, never wrong).
@@ -1863,6 +1876,12 @@ def function_verdict(
             else:
                 parts = [p for p in (lowered[0], *lowered[1]) if isinstance(p, Term)]
                 why = "origin" if any(contains(p, _ORIGIN) for p in parts) else None
+                if why is None and any(_hidden_calls(p) for p in parts):
+                    # Code it runs that its lowering doesn't show (a low-level call, an action): its own opcodes say
+                    # whether the origin may be read behind them.
+                    code = chain.code(address % 2**160)
+                    reach = _runtime_reach(code) if isinstance(code, bytes) else "unfollowed"
+                    why = "hidden" if reach == "origin" else "unfollowed"
                 for inner in sorted({c for p in parts for c in subterms(p, "call") if c[4]}, key=stable):
                     if why is not None:
                         break
@@ -1890,7 +1909,9 @@ def function_verdict(
                 if not contains_term(term, call):
                     continue  # inlined already, inside another's place
                 why = caller_bound(call)
-                if why is None or (tainted(call) and why not in ("origin", "nested", "read_failed:call_target")):
+                if why is None or (
+                    tainted(call) and why not in ("origin", "nested", "hidden", "read_failed:call_target")
+                ):
                     continue
                 lowered = callee(call) if why in ("origin", "nested") else None
                 uses = [x for x in subterms(term, "item") if x[1] == call]
@@ -1913,7 +1934,7 @@ def function_verdict(
                     if uses or bare:
                         term = mk_and([term, pc])
                 else:
-                    label = "origin" if why in ("origin", "nested") else why
+                    label = "origin" if why in ("origin", "nested", "hidden") else why
                     term = replace_terms(term, {call: unknown(f"{label}:{call[2]}")})
                 changed = True
             if not changed:

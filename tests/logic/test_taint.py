@@ -123,7 +123,11 @@ def test_a_verdict_reports_its_core_and_the_conditions_beside_it(contract):
     fn = next(f for f in contract.functions_entry_points if f.name == "gated")
     verdict, _ = function_verdict(contract, fn, AT, _Deployed({0: HUB_AT, 2: ADMIN, role: 1}), {AT: contract})
     assert verdict.core == ("roles[caller]",)
-    assert verdict.condition_terms == (("business", "0 lt hub.math(uint256)(x)"),)
+    # The call returning at all, and what it returns.
+    assert set(verdict.condition_terms) == {
+        ("business", "0 lt hub.math(uint256)(x)"),
+        ("business", "hub.math(uint256)(x)"),
+    }
 
 
 def test_conditions_that_read_alike_keep_their_own_unknowns():

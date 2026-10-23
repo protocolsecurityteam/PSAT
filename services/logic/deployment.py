@@ -298,7 +298,7 @@ def deployment_verdicts(
                 "conditional": {_hex20(p): freed for p, freed in sorted(verdict.conditions.items())},
                 "signers": sorted(_hex20(p) for p in verdict.signers),
                 "complete": verdict.complete,
-                "allowed": verdict.allowed,
+                "allowed": verdict.allowed if verdict.openness != "not_determined" else None,
                 "after": [{"function": sig, "arguments": _jsonable(args)} for sig, args in verdict.after],
                 "requires": [
                     {"contract": _hex20(at) if at is not None else None, "holding": what, "least": need}

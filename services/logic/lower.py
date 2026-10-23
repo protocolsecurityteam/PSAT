@@ -1142,9 +1142,10 @@ class Lowerer:
             return State(mk_and([st.pc, mk("ok", value, self._last_returns)]), st.env, st.store, st.ret)
         if not view:
             st = _acted(st, value)
-            # An action has to return whether or not its result is read (``token.transferFrom`` returns a bool few
-            # check): the same revert point as above.
-            st = State(mk_and([st.pc, mk("ok", value, self._last_returns)]), st.env, st.store, st.ret)
+        # Any call has to return whether or not its result is read (``token.transferFrom`` returns a bool few check),
+        # or read only where the path condition never looks (a view call's value stored, ``total += cap()``): the
+        # same revert point as above, on this path.
+        st = State(mk_and([st.pc, mk("ok", value, self._last_returns)]), st.env, st.store, st.ret)
         if len(returns) > 1:
             value = ("tuple", tuple(mk("item", value, i) for i in range(len(returns))))
         return self._write(ir.lvalue, value, st)
