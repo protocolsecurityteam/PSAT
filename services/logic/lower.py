@@ -52,6 +52,7 @@ from slither.slithir.operations import (
     LowLevelCall,
     Member,
     NewArray,
+    NewContract,
     NewElementaryType,
     NewStructure,
     Return,
@@ -911,6 +912,10 @@ class Lowerer:
             # What an arranged action returns is arranged with it (``SafeERC20`` decoding ``true``).
             returned = mk("assumed", "returndata") if success[0] == "assumed" else mk("opaque", "returndata", inputs)
             return self._write(ir.lvalue, ("tuple", (success, returned)), st)
+        if isinstance(ir, NewContract):
+            # Code deployed by this call: an effect whatever the new contract's constructor does.
+            st = _acted(st, mk("assumed", f"create:{id(ir)}"))
+            return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
         if isinstance(ir, InternalDynamicCall):
             if ir.lvalue is not None:
                 inputs = tuple(self.val(a, st) for a in ir.arguments)
@@ -926,8 +931,12 @@ class Lowerer:
         args = [self.val(a, st) for a in ir.arguments]
         if base in ("require", "assert"):
             return replace(st, pc=mk_and([st.pc, args[0]]))  # a condition leaves memory as it was
-        if base.startswith("revert") or base in ("invalid", "selfdestruct", "suicide"):
+        if base.startswith("revert") or base == "invalid":
             return State(FALSE, st.env, st.store, st.ret)
+        if base in ("selfdestruct", "suicide"):
+            # Ends the call successfully, sending the contract's ether away: an effect, not a refusal.
+            acted = _acted(st, mk("assumed", "selfdestruct"))
+            return State(acted.pc, acted.env, acted.store, st.ret, halted=True, mem=st.mem)
         if base in ("return", "stop"):
             # Assembly ``return(p, n)`` ends the whole call successfully (a proxy forwarding its delegate's result).
             ret = st.ret if st.ret is not None else (unknown("assembly_return"),)
