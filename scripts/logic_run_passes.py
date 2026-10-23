@@ -15,8 +15,10 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
     completeness, never the answer: openness and the listed set must be identical; ``complete`` and gaps may differ.
 (d) Always: a new row claiming "provably nobody" (restricted, complete, nobody listed) where the harness replayed a
     holder prod names and its call returned (``nobody_refuted``, filled by ``corpus_parity.py``): the chain refutes
-    the strongest claim the engine makes. (A holder that only reverts differently from a stranger, ``nobody_differs``,
-    passed the access check but not the call: no refutation.)
+    the strongest claim the engine makes. A holder that only reverts differently from a stranger (``nobody_differs``:
+    past the access check, stopped later, for the argument shapes tried) fails the row too, unless the engine's
+    formula is identically false (``lego_formula_false``: WBTC's ``renounceOwnership``, which always reverts), where
+    getting further than a stranger is no way through.
 (m) Rows the old run has and the new one lacks fail too, unless ``--only-new`` (a subset run) is given.
 A row that appears twice within the old files, or within the new ones, stops the comparison with an error.
 
@@ -96,9 +98,12 @@ def failures(
             )
     for key in sorted(new):
         refuted = new[key].get("nobody_refuted") or []
+        where = f"{key[0]} {new[key].get('contract')}.{key[2]} @ {key[1]}"
         if refuted:
-            where = f"{key[0]} {new[key].get('contract')}.{key[2]} @ {key[1]}"
             out.append(f"(d) nobody claimed but prod holder passes {refuted[:4]}: {where}")
+        differs = new[key].get("nobody_differs") or []
+        if differs and new[key].get("lego_formula_false") is not True:
+            out.append(f"(d) nobody claimed but prod holder gets past the gate {differs[:4]}: {where}")
     if faulty:
         for key in sorted(new.keys() - old.keys()):
             if new[key].get("lego_complete") and verdict(new[key]) != "open":
