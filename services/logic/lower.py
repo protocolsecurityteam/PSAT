@@ -476,6 +476,8 @@ class Lowerer:
         self._arguments: tuple = ()
         # Whether some storage write may have gone unrecorded (code not followed, assembly not read).
         self.lost = False
+        # Whether assembly read storage this lowering may not place (``sload`` in text it couldn't parse).
+        self.raw_reads = False
         self.exits: list = []
 
     def success(self, function: Function) -> Term:
@@ -948,7 +950,7 @@ class Lowerer:
                 inputs = tuple(self.val(a, st) for a in ir.arguments[1])
                 value = mk("enc", "abi.encodeWithSignature", (const(function[1], "string"), *inputs))
                 return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
-        if base in ("log1", "log2", "log3", "log4") and len(args) >= 3:
+        if base in ("log0", "log1", "log2", "log3", "log4") and len(args) >= 2:
             # An event written in assembly (DSS's ``note``): a mark like ``emit``'s, its topics as the arguments.
             topics = tuple(mk("sig") if _selector_word(t) else t for t in args[2:])
             return State(st.pc, st.env, {**st.store, ("emit", base, topics): TRUE}, st.ret, mem=st.mem)
@@ -974,12 +976,18 @@ class Lowerer:
             if out is not None and size is not None and size % 32 == 0:
                 kept = tuple((o, w) for o, w in st.mem if not out - 31 <= o < out + size)
                 mem = (*kept, *((out + 32 * i, mk("assumed", "returndata")) for i in range(size // 32)))
-            after = State(st.pc, st.env, st.store, st.ret, mem=mem)
+            after = _acted(State(st.pc, st.env, st.store, st.ret, mem=mem), mk("assumed", base))
             return self._write(ir.lvalue, mk("assumed", base), after) if ir.lvalue is not None else after
         if base == "delegatecall":
-            # ``delegatecall(gas, target, ...)``: the target's code for this call, on this storage, for this caller.
+            # ``delegatecall(gas, target, ...)``: the target's code for this call, on this storage, for this caller;
+            # an effect whether or not its success is used.
             value = mk("delegate", args[1] if len(args) > 1 else unknown("delegate_target"))
+            st = _acted(st, mk("assumed", "delegatecall"))
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        if base in ("create", "create2"):
+            # Assembly ``create``: code deployed by this call, like ``new C()``.
+            st = _acted(st, mk("assumed", base))
+            return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
         if base == "returndatacopy" and len(args) == 3:
             # The last call's return data copied out: its first word, when that call is known and copied from the
             # start (GPv2's ``returndatacopy(0, 0, returndatasize())`` before ``mload(0)``); else memory unknown.
@@ -1271,6 +1279,11 @@ class Lowerer:
             # Storage this reading doesn't follow may be written, here or by code run on it: unrecorded. (A call
             # out writes the callee's storage; an event missed only makes a lookup look less logged.)
             self.lost = True
+        acts = re.findall(r"\b(call|callcode|delegatecall|create|create2|selfdestruct)\s*\(", asm)
+        for act in sorted(set(acts)):
+            st = _acted(st, mk("assumed", act))
+        if re.search(r"\bsload\s*\(", asm):
+            self.raw_reads = True
         assigned = set(re.findall(r"(\w+)\s*:=", asm)) | set(re.findall(r"let\s+(\w+)", asm))
         for name in assigned:
             if name in names:

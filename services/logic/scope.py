@@ -1,20 +1,14 @@
 """Whose positions a function's effects touch, read off its lowered writes (see ``SCOPE.md``): ``self`` only when
-every write on every way it returns is shown to stay inside entries the caller holds, ``none`` when it writes
-nothing, else ``shared``. Whatever can't be shown is shared: a false "shared" costs enumeration time, a false
-"self" hides holders."""
+every write on every way it returns is shown to stay in an entry the caller holds or to move value out of one with
+the total conserved, ``none`` when it writes nothing, else ``shared``. Whatever can't be shown is shared: a false
+"shared" costs enumeration time, a false "self" would hide holders."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from .terms import CALLER, FALSE, IDENTITY_KINDS, THIS, Term, conjuncts, contains, stable, subterms
-
-# Inline assembly that acts outside the lowering's view: a call out, code created or destroyed, a delegatecall.
-_ASSEMBLY_ACTS = re.compile(r"\b(call|callcode|delegatecall|create|create2|selfdestruct)\s*\(")
-# Inline assembly that reads storage the lowering may not place: any check may then read any slot.
-_ASSEMBLY_READS = re.compile(r"\bsload\s*\(")
 
 
 @dataclass(frozen=True)
@@ -28,12 +22,13 @@ class Scope:
 class Facts:
     """What the whole contract tells about its storage, for classing one function's writes."""
 
-    # (``var_key``, fields) read by any entry point's success condition (its guards, early returns included).
+    # (``var_key``, fields) read by any entry point's success condition (its guards, early returns included) or by
+    # the values it writes elsewhere (``balances[u] = balances[u] * price[r]`` reads ``price``): value flow.
     checked: frozenset = frozenset()
     # Every slot counts as checked: a check reads raw or assembly storage, or an entry point couldn't be lowered.
     everything: bool = True
     # ``var_key`` of what other contracts can read, and so check: public state variables (their getters) and
-    # whatever a view or pure entry point reads (``getApproved`` returning ``_tokenApprovals``).
+    # whatever any entry point returns (``getApproved`` returning ``_tokenApprovals``).
     public: frozenset = frozenset()
     # ``var_key`` of variables some entry point writes keyed first by anything but the caller: an entry
     # ``G[k][caller]`` of any other is set only by ``k``, if at all. ``None``: writes not all known, so none is.
@@ -103,20 +98,20 @@ def _truthy(c: Term, wanted: Any) -> bool:
     return c[0] == "cmp" and c[1] == "lt" and _load(c[3]) is not None and wanted(_load(c[3]))
 
 
-def _holds(t: Any, key: Term) -> bool:
+def _holds(t: Any, key: Term, facts: Facts) -> bool:
     """A stored value read at ``key``, its other keys fixed or the caller (``_owners[id]``, ``roles[R][id]``), never
-    picked by the caller: who holds ``key``."""
+    picked by the caller, and set only by whoever holds ``key`` (not forgeable): who holds ``key``."""
     t = _load(t)
-    if t is None or key not in _keys(t[3]):
+    if t is None or key not in _keys(t[3]) or not _granted(facts, t[2]):
         return False
     return all(k == key or _is_caller(k) or _strip(k)[0] == "const" for k in _keys(t[3]))
 
 
-def _holder_is_caller(c: Term, key: Term) -> bool:
+def _holder_is_caller(c: Term, key: Term, facts: Facts) -> bool:
     return (
         c[0] == "cmp"
         and c[1] == "eq"
-        and ((_is_caller(c[2]) and _holds(c[3], key)) or (_is_caller(c[3]) and _holds(c[2], key)))
+        and ((_is_caller(c[2]) and _holds(c[3], key, facts)) or (_is_caller(c[3]) and _holds(c[2], key, facts)))
     )
 
 
@@ -129,7 +124,7 @@ def _granted_by_holder(c: Term, key: Term, facts: Facts) -> bool:
 
     def grant(load: Term) -> bool:
         ks = _keys(load[3])
-        return len(ks) == 2 and _holds(ks[0], key) and _is_caller(ks[1]) and _granted(facts, load[2])
+        return len(ks) == 2 and _holds(ks[0], key, facts) and _is_caller(ks[1]) and _granted(facts, load[2])
 
     return _truthy(c, grant)
 
@@ -148,10 +143,10 @@ def _granted_by_argument(c: Term, key: Term, facts: Facts) -> bool:
 
 def _authorized(pc: Term, key: Term, facts: Facts) -> bool:
     for c in conjuncts(pc):
-        if _holder_is_caller(c, key) or _granted_by_argument(c, key, facts):
+        if _holder_is_caller(c, key, facts) or _granted_by_argument(c, key, facts):
             return True
-        if c[0] == "or" and any(_holder_is_caller(b, key) for b in c[1]):
-            if all(_holder_is_caller(b, key) or _granted_by_holder(b, key, facts) for b in c[1]):
+        if c[0] == "or" and any(_holder_is_caller(b, key, facts) for b in c[1]):
+            if all(_holder_is_caller(b, key, facts) or _granted_by_holder(b, key, facts) for b in c[1]):
                 return True
     return False
 
@@ -175,14 +170,11 @@ def _credit(value: Term, old: Term, written: set) -> Term | None:
     return None
 
 
-def _guarded(pc: Term, d: Term, old: Term) -> bool:
-    """The path requires ``d <= old``: a subtraction that can't wrap whatever the arithmetic."""
-    for c in conjuncts(pc):
-        if c[0] == "cmp" and c[1] == "le" and c[2] == d and c[3] == old:
-            return True
-        if c[0] == "not" and c[1][0] == "cmp" and c[1][1] == "lt" and c[1][2] == old and c[1][3] == d:
-            return True
-    return False
+def _guarded(c: Term, d: Term, old: Term) -> bool:
+    """Whether conjunct ``c`` is ``d <= old``: a subtraction it guards can't wrap, whatever the arithmetic."""
+    if c[0] == "cmp" and c[1] == "le" and c[2] == d and c[3] == old:
+        return True
+    return c[0] == "not" and c[1][0] == "cmp" and c[1][1] == "lt" and c[1][2] == old and c[1][3] == d
 
 
 def _cleared(value: Term) -> bool:
@@ -203,10 +195,6 @@ def _nodes(function: Any) -> list | None:
         if isinstance(exc, TimeoutError):
             raise
         return None
-
-
-def _asm(nodes: list) -> str:
-    return "\n".join(str(getattr(n, "inline_asm", "") or "") for n in nodes)
 
 
 def _checked_arithmetic(function: Any) -> bool:
@@ -242,41 +230,66 @@ def _unsigned(contract: Any, var: Any, path: tuple) -> bool:
     return isinstance(type_, ElementaryType) and str(type_).startswith("uint")
 
 
+def _bounds(exit_: Any) -> set:
+    """Conjuncts ``d <= E`` of an exit that debits ``E`` by ``d`` itself: a bound on the debited entry, no check of
+    anyone else's (``require(a <= dep[caller]); unchecked { dep[caller] -= a; }``)."""
+    from .lower import unwritten
+
+    out = set()
+    for key, value in exit_.store.items():
+        if key[0] != THIS:
+            continue
+        old = unwritten(key)
+        d = _debit(value, old)
+        if d is None or contains(d, frozenset({"load", "rawload"})):
+            continue
+        out.update(c for c in conjuncts(exit_.pc) if _guarded(c, d, old))
+    return out
+
+
 def contract_facts(contract: Any) -> Facts:
-    """``Facts`` for ``contract``, from every entry point (views, pure functions and the constructor included)."""
+    """``Facts`` for ``contract``, from every entry point (views, pure functions and the constructor included).
+    Facts that can't be had (a lowering that raises, or runs out of time) are cached as "everything checked"."""
     cache = contract.__dict__.setdefault("_psat_scope_facts", {})
     if "facts" in cache:
         return cache["facts"]
     from .lower import Lowerer
 
+    cache["facts"] = Facts()  # until known: everything checked, also when the lowering below times out
     public = {v.name for v in contract.state_variables if v.visibility == "public"}
-    facts = Facts(public=frozenset(public))
     try:
         reads: set[tuple] = set()
+        flows: set[tuple] = set()
         forgeable: set = set()
-        everything = any(_ASSEMBLY_READS.search(_asm(_nodes(f) or [])) for f in contract.functions)
+        everything = False
         writes_known = True
         for fn in contract.functions_entry_points:
             lowerer = Lowerer(contract)
             lowerer.success(fn)
+            # A check not followed whole (recursion, depth, assembly it couldn't place) may read anything.
+            everything = everything or lowerer.lost or lowerer.raw_reads
+            writes_known = writes_known and not lowerer.lost
             # Each way it returns, not their union: ``if (blocked[caller]) return;`` leaves ``blocked`` in both
             # paths' conditions and in neither's disjunction (``p or not p``).
             for exit_ in lowerer.exits:
-                reads.update((t[2], t[3]) for t in subterms(exit_.pc, "load") if t[1] == THIS)
-                everything = everything or bool(subterms(exit_.pc, "rawload"))
-                if fn.view or fn.pure:
-                    public.update(var_key(t[2]) for t in subterms(exit_.ret or (), "load") if t[1] == THIS)
-            writes_known = writes_known and not lowerer.lost
-            for exit_ in lowerer.exits:
-                for key in exit_.store:
+                bounds = _bounds(exit_)
+                for c in conjuncts(exit_.pc):
+                    if c in bounds:
+                        continue
+                    reads.update((t[2], t[3]) for t in subterms(c, "load") if t[1] == THIS)
+                    everything = everything or bool(subterms(c, "rawload"))
+                    everything = everything or any(str(u[1]).startswith("unanalysed") for u in subterms(c, "unknown"))
+                public.update(var_key(t[2]) for t in subterms(exit_.ret or (), "load") if t[1] == THIS)
+                for key, value in exit_.store.items():
                     if key[0] == "raw":
                         writes_known = False
                     elif key[0] == THIS:
                         first = next(iter(_keys(key[2])), None)
                         if first is None or not _owned_key(first):
                             forgeable.add(var_key(key[1]))
+                        flows.update((t[2], t[3]) for t in subterms(value, "load") if t[1] == THIS and t[2] != key[1])
         facts = Facts(
-            checked=frozenset((var_key(v), _fields(p)) for v, p in reads),
+            checked=frozenset((var_key(v), _fields(p)) for v, p in reads | flows),
             everything=everything,
             public=frozenset(public),
             forgeable=frozenset(forgeable) if writes_known else None,
@@ -284,6 +297,7 @@ def contract_facts(contract: Any) -> Facts:
     except Exception as exc:
         if isinstance(exc, TimeoutError):
             raise
+        return cache["facts"]
     cache["facts"] = facts
     return facts
 
@@ -305,8 +319,6 @@ def classify(exits: list, lost: bool, function: Any, facts: Facts) -> Scope:
     nodes = _nodes(function) if function is not None else []
     if lost or nodes is None:
         writes.append(("shared", "<writes not followed>"))
-    elif _ASSEMBLY_ACTS.search(_asm(nodes)):
-        writes.append(("shared", "<assembly call>"))
     wraps = function is None or not _checked_arithmetic(function)
     for exit_ in exits:
         if exit_.pc == FALSE:
@@ -341,10 +353,12 @@ def classify(exits: list, lost: bool, function: Any, facts: Facts) -> Scope:
             keys = _keys(key[2])
             first = keys[0] if keys else None
             own = first is not None and _owned_key(first)
+            # A fixed key is one protocol-wide position, never the caller's.
             held = (
                 not own
                 and first is not None
                 and not contains(first, IDENTITY_KINDS)
+                and _strip(first)[0] != "const"
                 and _authorized(exit_.pc, first, facts)
             )
             d = _debit(value, old)
@@ -352,7 +366,7 @@ def classify(exits: list, lost: bool, function: Any, facts: Facts) -> Scope:
                 d is not None
                 and contract is not None
                 and _unsigned(contract, key[1], key[2])
-                and (not wraps or _guarded(exit_.pc, d, old))
+                and (not wraps or any(_guarded(c, d, old) for c in conjuncts(exit_.pc)))
             )
             public = var_key(key[1]) in facts.public
             if (own or held) and decrease:
@@ -363,7 +377,7 @@ def classify(exits: list, lost: bool, function: Any, facts: Facts) -> Scope:
             elif (
                 held
                 and not public
-                and not contains(value, frozenset({"load"}))
+                and not contains(value, frozenset({"load", "rawload"}))
                 and _credit(value, old, written) is None
             ):
                 # What the holder of ``first`` sets on its own entry (an approval, an owner): a replacement, no sum.
