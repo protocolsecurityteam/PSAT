@@ -156,6 +156,14 @@ def _written_values(contract: Any, loads: list[Term]) -> dict[tuple, list | None
             return None
         for pc, store in exits:
             for loc, value in store.items():
+                if loc[0] == "havoc" and loc[1] == THIS:
+                    # A loop writing past what was followed: every entry of that variable (or of all of them, or
+                    # every raw slot) may be anything.
+                    if loc[2] in ("*", "raw") and pointer:
+                        return None
+                    for name in names if loc[2] == "*" else {loc[2]} & names:
+                        out[(name, _ANYWHERE)] = None
+                    continue
                 if loc[0] == "raw":
                     if loc[1] != THIS:
                         continue
@@ -264,6 +272,10 @@ def _all_subterms(t: Any) -> list[Term]:
     return out
 
 
+# The path a loop's writes past what was followed land at: any entry of the variable.
+_ANYWHERE = (("*", None),)
+
+
 def _values_at(writes: dict[tuple, list | None], load: Term) -> list | None:
     """The writes that may land at ``load`` (see ``_written_values``): those to a path that may be the same one (fields
     equal, keys equal unless either isn't a fixed value)."""
@@ -271,14 +283,18 @@ def _values_at(writes: dict[tuple, list | None], load: Term) -> list | None:
         return writes.get(("raw", load[2]), [])
     out: list = []
     for (name, path), values in writes.items():
-        if name != load[2] or len(path) != len(load[3]):
+        if name != load[2]:
             continue
+        if path == _ANYWHERE:
+            return None  # a loop writes it past what was followed: anything
         if any(
             ka != kb or (ka == "f" and a != b) or (ka == "k" and _settled(a) and _settled(b) and a != b)
             for (ka, a), (kb, b) in zip(path, load[3])
         ):
             continue
-        if values is None:
+        if values is None or len(path) != len(load[3]):
+            # A write within what is read (an item pushed onto an array read whole) or around it (a whole struct
+            # written over a field read): what it leaves there isn't any one of these values.
             return None
         out.extend(values)
     return out
@@ -492,13 +508,26 @@ def _getter(contract: Any, call: Term) -> tuple[Term, tuple] | None:
 
 
 def _codeless(probe: Evaluator, call: Term) -> bool:
-    """Whether a call's target has no code: every call to it ends the same way, whatever anyone does here."""
-    if call[0] != "call":
+    """Whether a call's target has no code and never will: every call to it ends the same way, whatever anyone does
+    here. Only for a target fixed in the code (a constant, an immutable, this contract): one computed from storage, an
+    argument or another call may come to be an address with code, so "no code there now" is how the condition reads
+    now, never a latch."""
+    if call[0] != "call" or not _fixed_target(call[1]):
         return False
     target = probe.eval(call[1])
     if not isinstance(target, int) or isinstance(target, bool):
         return False
     return probe.world.chain.code(target % 2**160) == b""
+
+
+def _fixed_target(target: Term) -> bool:
+    """Whether an address term is fixed by the code itself: constants, immutables, this contract, and conversions."""
+    kind = target[0]
+    if kind == "conv":
+        return _fixed_target(target[2])
+    if kind == "op":
+        return all(_fixed_target(a) for a in target[2])
+    return kind in ("const", "immutable", "this", "constant")
 
 
 # Block fields that only grow; the others (base fee, coinbase, randomness) are anything in a later block.
