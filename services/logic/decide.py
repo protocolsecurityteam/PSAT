@@ -31,7 +31,7 @@ from typing import Any, cast
 from eth_abi.abi import decode, encode
 from eth_utils.crypto import keccak
 
-from .taint import singles_out_nobody, split, unknown_labels
+from .taint import singles_out_nobody, split, tainted, unknown_labels
 from .terms import (
     CALLDATA,
     FALSE,
@@ -1756,6 +1756,12 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         opaque = _opaque_conditions(free, world)
         if opaque:
             verdict = _on_conditions(formula, world, coverage, opaque) or verdict
+    if verdict.openness == "not_determined" and free:
+        # What only the conditions leave open is theirs to report, not a reason the answer is open.
+        probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
+        theirs = {r for c in free for r in _open_parts(c, probe)} - {r for c in core for r in _open_parts(c, probe)}
+        kept = tuple(g for g in verdict.gaps if g not in theirs)
+        verdict = replace(verdict, gaps=kept or verdict.gaps)
     if verdict.openness == "not_determined":
         tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
         tainted_unknowns += [o for c in core for o in subterms(c, "opaque") if contains(o, IDENTITY_KINDS)]
@@ -1774,7 +1780,7 @@ def _opaque_conditions(free: tuple[Term, ...], world: World) -> list[Term]:
         if probe.truth(part) is not UNK:
             continue
         reasons = _open_parts(part, probe)
-        if reasons and all(r.startswith(("unknown:", "call:")) for r in reasons):
+        if reasons and all(r.startswith(("unknown:", "unfollowed:")) for r in reasons):
             out.append(part)
     return out
 
@@ -2224,7 +2230,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # whoever no source named, whatever the stranger's failure shows.
         complete = proven and blind and not undecided and not untested
         if not blind:
-            gaps += _blind_gaps(coverage.blind) or ["others_unproven"]
+            gaps += _blind_gaps(coverage.blind, formula, world) or ["others_unproven"]
         if undecided:
             gaps.append("undecided_candidates")
         return Verdict(
@@ -2281,8 +2287,8 @@ def _unread_gaps(when: frozenset, probe: "Evaluator") -> list[str]:
 
 def _open_parts(atom: Term, probe: "Evaluator") -> list[str]:
     """What leaves ``atom`` unknown: a term the lowering couldn't express (``unknown:<its label>``), a call whose
-    callee isn't followed and whose arguments the caller picks (``call:<signature>``), a read the chain didn't
-    answer (``read_failed:<what>``)."""
+    callee isn't followed and whose arguments the caller picks (``call:...`` when the caller's identity reaches it,
+    see ``call_gap``, else ``unfollowed:<signature>``), a read the chain didn't answer (``read_failed:<what>``)."""
     out = [f"unknown:{u[1]}" for u in subterms(atom, "unknown")]
     out += [f"unknown:{o[1]}" for o in subterms(atom, "opaque")]
     for call in subterms(atom, "call"):
@@ -2298,7 +2304,7 @@ def _open_parts(atom: Term, probe: "Evaluator") -> list[str]:
         else:
             lowered = probe.world.callee(call, address % 2**160)
             if lowered is None:
-                out.append(f"call:{call[2]}")
+                out.append(call_gap(call, probe) if tainted(call) else f"unfollowed:{call[2]}")
             elif probe.eval(call) is UNK:
                 out += [
                     g for part in (lowered[0], *lowered[1]) if isinstance(part, tuple) for g in unknown_labels(part)
@@ -2495,17 +2501,33 @@ def _runtime_code(contract: Any) -> bytes:
         return b""
 
 
-def _blind_gaps(blind: frozenset) -> list[str]:
-    """Each unlisted lookup as ``storage:<variable>`` (``namespaced:`` for ERC-7201 storage) or ``call:<signature>``."""
+def _blind_gaps(blind: frozenset, formula: Term, world: World) -> list[str]:
+    """Each unlisted lookup as ``storage:<variable>`` (``namespaced:`` for ERC-7201 storage) or, for a call handed
+    the caller whose callee can't be listed, as ``call_gap`` names it."""
     out = []
-    for _, what in sorted(blind, key=repr):
+    calls = [c for part in _with_callees(formula, world, IDENTITY_KINDS) for c in subterms(part, "call")]
+    probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
+    for target, what in sorted(blind, key=repr):
         if isinstance(what, tuple) and what and what[0] == "slot":
             out.append(f"namespaced:{what[-1]}")
         elif isinstance(what, str) and "(" in what:
-            out.append(f"call:{what}")
+            named = [call_gap(c, probe) for c in calls if c[1] == target and c[2] == what and tainted(c)]
+            out.extend(named or [f"call:{what}"])
         else:
             out.append(f"storage:{what}")
     return out
+
+
+def call_gap(call: Term, probe: "Evaluator") -> str:
+    """A call the caller's identity reaches, whose callee isn't followed: ``call:<signature>``, then each argument
+    the identity reaches (``:arg<i>``, ``:target`` for the address called), then ``@<address>`` once it is read."""
+    text = f"call:{call[2]}" + "".join(f":arg{i}" for i, a in enumerate(call[3]) if tainted(a))
+    if tainted(call[1]):
+        text += ":target"
+    address = probe.eval(call[1])
+    if isinstance(address, int) and not isinstance(address, bool):
+        text += f"@0x{address % 2**160:040x}"
+    return text
 
 
 def _acts_once_allowed(formula: Term, world: World, anyone: dict, candidates: set, states: list, fresh: list) -> bool:

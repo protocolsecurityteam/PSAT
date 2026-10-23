@@ -16,6 +16,7 @@ pragma solidity 0.8.27;
 interface IHub {
     function math(uint256 x) external view returns (uint256);
     function check(address who) external view returns (bool);
+    function pair(uint256 x, address who) external view returns (bool);
 }
 
 contract C {
@@ -36,6 +37,7 @@ contract C {
     function free(uint256 x) external { require(hub.math(x) > 0); total += x; }
     function pausable(uint256 x) external { require(!paused); require(hub.math(x) > 0); total += x; }
     function handed() external { require(hub.check(msg.sender)); total += 1; }
+    function paired(uint256 x) external { require(hub.pair(x, msg.sender)); total += x; }
     function listed(uint256 x) external {
         bool ok;
         for (uint256 i; i < admins.length; i++) { if (admins[i] == msg.sender) ok = true; }
@@ -137,10 +139,19 @@ def test_a_pause_still_holds_everyone_back_now(contract):
 def test_a_call_handed_the_caller_stays_undecided(contract):
     verdict = _verdict(contract, "handed", _Deployed(call_error="upstream timeout"))
     assert verdict.openness == "not_determined"
-    assert any(g.startswith("call:check(address)") for g in verdict.gaps)
+    assert f"call:check(address):arg0@0x{HUB:040x}" in verdict.gaps
+
+
+def test_the_gap_names_the_argument_the_caller_reaches(contract):
+    verdict = _verdict(contract, "paired")
+    assert verdict.openness == "not_determined"
+    assert f"call:pair(uint256,address):arg1@0x{HUB:040x}" in verdict.gaps
 
 
 def test_an_unknown_that_may_hide_the_caller_still_blocks(contract):
     verdict = _verdict(contract, "listed")
     assert verdict.openness == "not_determined"
     assert any(g.startswith("unknown:loop:") for g in verdict.gaps)
+    # The unfollowed call no identity reaches is a condition, not a reason the answer is open.
+    assert not any("math(uint256)" in g for g in verdict.gaps)
+    assert CALL in verdict.condition_terms

@@ -131,7 +131,7 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
     Conjunctive (``and`` asked true, ``or`` asked false): ``P = ∩ Pᵢ``, ``S = ∪ⱼ (Sⱼ ∩ ∩ᵢ Pᵢ)``, since where the
     stranger fails the whole it fails some part. Disjunctive: ``P = ∪ Pᵢ``, ``S = ∪ Sᵢ``, since where the stranger
     fails the whole it fails every part."""
-    from .decide import FRESH, UNK, Evaluator
+    from .decide import FRESH, UNK, Evaluator, call_gap
 
     probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
     memo: dict[tuple, tuple[Who, Who]] = {}
@@ -239,7 +239,7 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
                 bare = c in subterms(replace_terms(t, {**asked, **items}), "call")
                 if lowered is None or (bare and not lowered[1]):
                     # Code not followed: the addresses this code names, unproven to be all it lets through.
-                    guess = _unproven({**_logged_words(c[1], THIS), **_named_members()}, f"call:{c[2]}")
+                    guess = _unproven({**_logged_words(c[1], THIS), **_named_members()}, call_gap(c, probe))
                     return guess, guess
                 returned.update(asked)
                 returned.update(items)
