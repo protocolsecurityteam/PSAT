@@ -1,6 +1,7 @@
-"""Budgets cost completeness, never the answer: the same function under a full and a reduced budget names the same
-holders, a candidate list is asked about in batches rather than cut by address, a budget that runs out says how many
-candidates went untested, and a history read partial is reported as cut, its holders a lower bound."""
+"""What a budget may cost: a smaller one never makes a verdict more open, names only holders the full one names, and
+accounts for any it misses with a gap (untested candidates, an undetermined "now"). Batching and windowing alone
+change nothing; a candidate list is asked about in batches rather than cut by address; a history read partial is
+reported as cut, its holders a lower bound."""
 
 from __future__ import annotations
 
@@ -66,9 +67,10 @@ class _Scanned(Chain):
     def __init__(self, sample: frozenset = frozenset()):
         self.sample = sample
         self.words = {_slot(m, _slot(_MINTER, 0)): 1 for m in [*MINTERS, DECOY] if m != REVOKED}
-        self.grants = [
-            ((i + 1) * 200_000, [_GRANTED, _MINTER, m]) for i, m in enumerate(MINTERS)
-        ] + [(9_000_000, [_REVOKED, _MINTER, REVOKED]), (9_500_000, [_GRANTED, _MINTER, DECOY])]
+        self.grants = [((i + 1) * 200_000, [_GRANTED, _MINTER, m]) for i, m in enumerate(MINTERS)] + [
+            (9_000_000, [_REVOKED, _MINTER, REVOKED]),
+            (9_500_000, [_GRANTED, _MINTER, DECOY]),
+        ]
         super().__init__(self._answer, BLOCK, lambda calls: [self._safe(m, p) for m, p in calls])
 
     def _safe(self, method, params):
@@ -129,9 +131,7 @@ def _verdict(roles, chain=None):
 
 
 def _small_batches(monkeypatch, size: int) -> None:
-    # Every name a candidate limit has gone by: the old cut (``_MAX_CANDIDATES``, ``_BUILT_LIMIT``) and the batch.
-    for name in ("_CANDIDATE_BATCH", "_MAX_CANDIDATES", "_BUILT_LIMIT"):
-        monkeypatch.setattr(decide, name, size, raising=False)
+    monkeypatch.setattr(decide, "_CANDIDATE_BATCH", size)
 
 
 def test_every_holder_the_history_names_is_found_in_full(roles):
@@ -141,15 +141,39 @@ def test_every_holder_the_history_names_is_found_in_full(roles):
     assert verdict.complete
 
 
-def test_a_reduced_budget_names_the_same_holders(roles, monkeypatch):
+def test_batching_and_windowing_alone_change_nothing(roles, monkeypatch):
     full = _verdict(roles)
     _small_batches(monkeypatch, 7)
     monkeypatch.setattr(decide, "LOG_WINDOW", 100_000)
     monkeypatch.setattr(decide, "LOG_MIN_WINDOW", 100_000 // 64)
     monkeypatch.setattr(decide, "LOG_BATCH", 9)
-    monkeypatch.setattr(decide, "DECISION_WORK", decide.DECISION_WORK / 4)
     reduced = _verdict(roles)
-    assert (reduced.openness, reduced.principals) == (full.openness, full.principals)
+    assert (reduced.openness, reduced.principals, reduced.complete) == (full.openness, full.principals, full.complete)
+
+
+_OPENNESS = {"not_determined": 0, "restricted": 1, "open": 2}
+
+
+@pytest.mark.parametrize("work", [1, 4, 8, 12, 20, 40, 80])
+def test_a_smaller_budget_costs_holders_only_with_a_gap_saying_so(roles, monkeypatch, work):
+    full = _verdict(roles)
+    assert full.openness == "restricted" and full.complete
+    _small_batches(monkeypatch, 4)
+    monkeypatch.setattr(decide, "DECISION_WORK", work * decide.QUESTION_WORK)
+    reduced = _verdict(roles)
+    assert _OPENNESS[reduced.openness] <= _OPENNESS[full.openness]
+    assert reduced.principals <= full.principals
+    if (reduced.openness, reduced.principals) != (full.openness, full.principals):
+        assert not reduced.complete
+        assert any(g.startswith(("untested_candidates:", "now_unknown")) for g in reduced.gaps)
+
+
+def test_the_budgets_above_do_bind(roles, monkeypatch):
+    # Otherwise the property above would hold vacuously.
+    full = _verdict(roles)
+    _small_batches(monkeypatch, 4)
+    monkeypatch.setattr(decide, "DECISION_WORK", 40 * decide.QUESTION_WORK)
+    assert len(_verdict(roles).principals) < len(full.principals)
 
 
 def test_candidates_past_a_batch_are_asked_about_not_cut_by_address(roles, monkeypatch):
