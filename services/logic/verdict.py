@@ -29,7 +29,7 @@ from .decide import _size as _size_of
 from .immutables import immutable_offsets, immutable_value
 from .logged import keyed_by, logged, logged_raw, members, written_by
 from .lower import Lowerer, parameter
-from .scope import caller_checked, classify
+from .scope import classify, contract_facts
 from .snapshot import creation_keys
 from .terms import CALLER, FALSE, IDENTITY_KINDS, THIS, TRUE, Term, assume_conjuncts, mk, mk_and, substitute, unknown
 
@@ -1784,6 +1784,6 @@ def function_verdict(
     world.cover = lambda term: coverage(term, keyed, lower_call, listed, settled, valued)
     world.arrange = lambda term: arranged_within_budget(term, world, contracts.get(address, contract))
     world.prior = lambda term: after_own_call(term, world, contracts.get(address, contract))
-    world.scope = classify(lowerer.exits, lowerer.lost, function, caller_checked(contract))
+    world.scope = classify(lowerer.exits, lowerer.lost, function, contract_facts(contract))
     verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))
     return replace(verdict, scope=world.scope.kind, scope_writes=world.scope.writes), formula
