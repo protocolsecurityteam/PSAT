@@ -171,9 +171,6 @@ def conjuncts(term: Term) -> frozenset:
     return term[1] if term[0] == "and" else frozenset({term})
 
 
-_conjuncts = conjuncts
-
-
 def mk_or(items: Any) -> Term:
     parts = set(_parts("or", items))
     parts.discard(FALSE)
@@ -185,14 +182,14 @@ def mk_or(items: Any) -> Term:
         return next(iter(parts))
     # Factor shared conjuncts: (P and A) or (P and B) is P and (A or B); a residual that is empty means the branch
     # adds nothing over P, so the whole disjunction is P.
-    conj = [_conjuncts(p) for p in parts]
+    conj = [conjuncts(p) for p in parts]
     common = frozenset.intersection(*conj)
     if common:
         rest = mk_or([mk_and(c - common) for c in conj])
         return mk_and([*common, rest])
     # A or (not A and B) is A or B.
     for p in list(parts):
-        stripped = {q: mk_and(_conjuncts(q) - {mk_not(p)}) for q in parts if q != p and mk_not(p) in _conjuncts(q)}
+        stripped = {q: mk_and(conjuncts(q) - {mk_not(p)}) for q in parts if q != p and mk_not(p) in conjuncts(q)}
         if stripped:
             return mk_or([*(q for q in parts if q not in stripped), *stripped.values()])
     # Absorption: A or (A and B) is A.

@@ -2628,7 +2628,7 @@ def _decide_one(
         free = sorted(set(subterms(formula, "arg")) | _free_compounds(formula), key=stable) + sorted(chosen, key=stable)
     owned = _owned_keys(formula, world, identity)
     recorded = _recorded_keys(formula, world) if recorded_ok else {}
-    compared = _comparands(formula, base, frozenset(free))
+    compared = comparands(formula, base, frozenset(free))
     targets = _call_targets(formula, base, frozenset(free))
     # An argument that keys an identity lookup is only worth the keys where that identity is stored, when the
     # history shows any; one that keys any other mapping, first the keys its writers recorded (role ids from
@@ -2962,7 +2962,7 @@ def _domain(term: Term, formula: Term, addresses: set[int]) -> list[Any]:
     return sorted(numbers | addresses | {2**256 - 1})
 
 
-def _comparands(formula: Term, ground: Evaluator, free: frozenset) -> dict[Term, list[int]]:
+def comparands(formula: Term, ground: Evaluator, free: frozenset) -> dict[Term, list[int]]:
     """For each caller-chosen term compared with something it can't change (``deadline >= block.timestamp``,
     ``signature.length == 65``, ``nonce == nonces[owner]``): that value and its neighbours, the guesses most likely to
     meet the comparison either way. A value an equality names comes first, since only it can meet it; an
