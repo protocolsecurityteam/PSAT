@@ -33,11 +33,11 @@ from .terms import (
     mk_cmp,
     mk_ite,
     replace_terms,
+    stable,
     subterms,
 )
 
 _BINDINGS = 64  # argument bindings kept per member; past it, "any" (bindings only steer the search)
-_DEPTH = 3  # callees followed into, for a check handed the caller
 _WALK_STEPS = 256  # entries followed per linked list kept in a lookup; the walk only names likely members
 _STORED_ROWS = 256  # key tuples whose stored address is read to list ``caller == E[k...]``; past it, left unlisted
 
@@ -145,7 +145,7 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
     Conjunctive (``and`` asked true, ``or`` asked false): ``P = ∩ Pᵢ``, ``S = ∪ⱼ (Sⱼ ∩ ∩ᵢ Pᵢ)``, since where the
     stranger fails the whole it fails some part. Disjunctive: ``P = ∪ Pᵢ``, ``S = ∪ Sᵢ``, since where the stranger
     fails the whole it fails every part."""
-    from .decide import FRESH, UNK, Evaluator, call_gap
+    from .decide import FRESH, IDENTITY_DEPTH, UNK, Evaluator, call_gap
 
     probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
     memo: dict[tuple, tuple[Who, Who]] = {}
@@ -237,7 +237,11 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
         if found is not None:
             return leaf(t, positive, found)
         calls = [c for c in subterms(t, "call") if any(contains(a, kinds) for a in c[3])]
-        if calls and depth < _DEPTH:
+        if calls and depth >= IDENTITY_DEPTH:
+            # Handed on further than it is followed: whoever the last callee lets through goes unlisted.
+            guess = _unproven(_named_members(), "depth:" + call_gap(min(calls, key=stable), probe))
+            return guess, guess
+        if calls:
             # A check handed the caller (``acl.hasRole(role, msg.sender)``): what the callee returns, in this
             # call's terms, in the call's place.
             returned: dict = {}

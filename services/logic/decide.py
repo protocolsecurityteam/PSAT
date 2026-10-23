@@ -2666,7 +2666,10 @@ _LOWEST_SENDER = 2**16
 _OTHER_STRANGERS = tuple(FRESH ^ bit for bit in (1, 2, 4, 8))
 _STRANGERS = frozenset({FRESH, *_OTHER_STRANGERS})
 _CANDIDATE_BATCH = 256  # candidates whose reads are fetched and questions asked together; all are asked in turn
-_CALLEE_DEPTH = 3  # contracts deep that a check's callees are read for candidates
+_CALLEE_DEPTH = 3  # contracts deep that callees handed the arguments are read for the keys to try
+# Contracts deep that a check handed the caller is followed. Depth is spent only on calls the identity reaches: a
+# callee handed none of it is a condition every caller faces alike and is never followed for who may call.
+IDENTITY_DEPTH = 4
 # Wall-clock budget for one function's decision; past it every open question is answered "unknown".
 DECISION_SECONDS = 120.0  # a safety net only: the work budget decides, so a busy machine doesn't change verdicts
 # Deterministic effort, a unit being roughly 13ms: every term evaluated or encoded (so a formula a thousand times
@@ -3456,7 +3459,7 @@ def _may_single_out(formula: Term, world: World, depth: int = 0) -> bool:
     if contains(outside, IDENTITY_KINDS) or contains(formula, frozenset({"signer"})):
         return True
     for call in calls:
-        if not call[4] or contains(call[1], IDENTITY_KINDS) or depth >= _CALLEE_DEPTH:
+        if not call[4] or contains(call[1], IDENTITY_KINDS) or depth >= IDENTITY_DEPTH:
             return True  # an action, or a check on a contract the caller picks
         lowered = world.callee(call)
         if lowered is None or any(
@@ -3473,9 +3476,10 @@ def _with_callees(formula: Term, world: World, kinds: frozenset) -> list[Term]:
     out: list[Term] = [formula]
     seen: set[Term] = set()
     frontier = [(formula, 0)]
+    limit = IDENTITY_DEPTH if kinds <= IDENTITY_KINDS else _CALLEE_DEPTH
     while frontier:
         term, depth = frontier.pop()
-        if depth >= _CALLEE_DEPTH:
+        if depth >= limit:
             continue
         for call in subterms(term, "call"):
             if call in seen or not any(contains(a, kinds) for a in call[3]):
