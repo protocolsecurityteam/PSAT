@@ -1728,6 +1728,10 @@ class Verdict:
     def __post_init__(self) -> None:
         # Several parts can name the same reason (one callee asked three times): each once, in order.
         self.gaps = tuple(dict.fromkeys(self.gaps))
+        if self.openness == "not_determined" and not self.gaps:
+            if os.environ.get("PSAT_LOGIC_STRICT_GAPS") == "1":
+                raise ValueError("a not_determined verdict must say why")
+            self.gaps = ("unexplained",)
 
 
 def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
@@ -1773,14 +1777,20 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # exist in the state that passes (a vote ready to execute): open once one does, shown by a state of them
         # that lets a stranger through.
         if now is not True and (unread or (now is not False and not records)):
-            return Verdict("not_determined", frozenset(), False)
+            gaps = _unread_gaps(when, probe) if unread else _unsettled(formula, world, anyone, {})
+            return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps))
         if now is not True:
             fresh = [_outcome(formula, world, anyone, set(), fixed=state) for state in states]
             if now is not False and not any(f is True for f in fresh):
-                return Verdict("not_determined", frozenset(), False)
-            if _acts_once_allowed(formula, world, anyone, set(), states, fresh) is not True:
+                gaps = [g for st, f in zip(states, fresh) if f is UNK for g in _unsettled(formula, world, anyone, st)]
+                return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps or ["now_unknown"]))
+            acts = _acts_once_allowed(formula, world, anyone, set(), states, fresh)
+            if acts is not True:
                 # Allowed only where it does nothing (disabling what is already disabled): no power to anyone.
-                return Verdict("not_determined", frozenset(), False)
+                gaps = ["inert_when_allowed"] if acts is False else ["effect_unknown"]
+                if acts is UNK and world.effective is not None:
+                    gaps += _unsettled(world.effective, world, anyone, None)
+                return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps))
         if now is True:
             return Verdict("open", frozenset(), True, witnesses={FRESH: _argument_values(found)})
         return Verdict("open", frozenset(), True, allowed="later")
@@ -2071,6 +2081,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # Nobody known passes now, and whether a stranger would in some state of the conditions is unknown: "open
         # once they allow" can't be ruled out.
         gaps.append("now_unknown")
+        gaps += [g for state, f in zip(states, fresh) if f is UNK for g in _unsettled(formula, world, anyone, state)]
         return Verdict(
             "not_determined",
             callers,
@@ -2139,6 +2150,8 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     callers |= frozenset(known["caller"])
     signers |= frozenset(known.get("signer", ()))
     gaps.append("now_unknown" if now is UNK else "unrepresentative" if not coverage.representative else "other")
+    if now is UNK:
+        gaps += _unsettled(formula, world, anyone, {})
     return Verdict(
         "not_determined",
         callers,
@@ -2149,6 +2162,58 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         tuple(gaps),
         conditions=conditions,
     )
+
+
+def _unsettled(formula: Term, world: World, identity: dict[str, int], fixed: dict[Term, bool] | None) -> list[str]:
+    """Why ``formula`` reads neither true nor false for ``identity`` (``fixed`` sets ``when`` conditions, ``None``
+    leaves them all free): each condition still open, by what in it went unread. ``budget`` when the work or the
+    reads ran out, ``unsolved`` when only the arguments are left and no search settled them."""
+    out: list[str] = []
+    if world.exhausted():
+        out.append("budget")
+    chain = world.chain
+    if chain.limit is not None and chain.sent >= chain.limit:
+        out.append("budget:reads")
+    when = frozenset(fixed) if fixed is not None else when_atoms(formula)
+    probe = Evaluator(world, identity, dict(fixed or {}), frozenset(), when)
+    for atom in sorted(_atoms_of(formula), key=stable):
+        if atom in when or probe.truth(atom) is not UNK:
+            continue
+        out.extend(_open_parts(atom, probe))
+    return list(dict.fromkeys(out)) or ["unsolved"]
+
+
+def _unread_gaps(when: frozenset, probe: "Evaluator") -> list[str]:
+    """The ``when`` conditions whose current value couldn't be read, by what in each went unread."""
+    out = [g for atom in sorted(when, key=stable) if probe.truth(atom) is UNK for g in _open_parts(atom, probe)]
+    return list(dict.fromkeys(out)) or ["read_failed:condition"]
+
+
+def _open_parts(atom: Term, probe: "Evaluator") -> list[str]:
+    """What leaves ``atom`` unknown: a term the lowering couldn't express (``unknown:<its label>``), a call whose
+    callee isn't followed and whose arguments the caller picks (``call:<signature>``), a read the chain didn't
+    answer (``read_failed:<what>``)."""
+    out = [f"unknown:{u[1]}" for u in subterms(atom, "unknown")]
+    out += [f"unknown:{o[1]}" for o in subterms(atom, "opaque")]
+    for call in subterms(atom, "call"):
+        address = probe.eval(call[1])
+        if not isinstance(address, int) or isinstance(address, bool):
+            out.append(f"read_failed:target:{call[2]}")
+        elif not call[4]:
+            if probe.eval(call) is UNK:
+                out.append(f"action:{call[2]}")  # an action handed the caller, its callee's check unsettled
+        elif probe.call_input(call) is not None:
+            if probe.eval(call) is UNK:
+                out.append(f"read_failed:call:{call[2]}")
+        elif probe.world.callee(call, address % 2**160) is None:
+            out.append(f"call:{call[2]}")
+    for load in subterms(atom, "load"):
+        where = probe.storage_cell(load)
+        if where is not None and probe.word(where[0], where[1]) is UNK:
+            out.append(f"read_failed:storage:{_named_lookup(load[2], load[3])[0]}")
+    if any(t[1] for t in subterms(atom, "time")) and probe.world.chain.block_field("timestamp") is UNK:
+        out.append("read_failed:block")
+    return out
 
 
 _SNAPSHOT_TRIES = 128  # stranger entries tried from a storage dump's unaccounted words (all lookups combined)
