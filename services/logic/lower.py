@@ -352,7 +352,7 @@ def merge(states: list[State]) -> State:
     return State(
         pc,
         _merge_maps(states, "env"),
-        _merge_maps(states, "store"),
+        _merge_store(states),
         _merge_ret(states),
         mem=states[0].mem if all(s.mem == states[0].mem for s in states) else (),
     )
@@ -364,11 +364,271 @@ def _merge_maps(states: list[Any], attr: str) -> dict:
         keys.update(dict.fromkeys(getattr(s, attr)))
     out = {}
     for key in keys:
-        # Storage a branch left alone still holds what it held before the call; a local it never set is unset.
-        missing = unwritten(key) if attr == "store" else unknown("unset")
-        values = [getattr(s, attr).get(key, missing) for s in states]
+        # A local a branch never set is unset.
+        values = [getattr(s, attr).get(key, unknown("unset")) for s in states]
         out[key] = _select([s.pc for s in states], values)
     return out
+
+
+def _merge_store(states: list[Any]) -> dict:
+    """The writes of several paths as one store. A store is read in write order (``read_store``: the last write whose
+    location may be the one read wins), so each merged entry is, on every path, the value its location holds at the end
+    of that path: the path's own entry when nothing it wrote later may land there, else what the path reads back there
+    (a location one branch left alone reads back as that branch left it, earlier writes at keys that may equal it
+    included). Two writes two paths made in opposite orders are both read back that way, so no order is taken from
+    either path."""
+    keys: dict = {}
+    for s in states:
+        keys.update(dict.fromkeys(s.store))
+    positions = [{k: i for i, k in enumerate(s.store)} for s in states]
+    reread: set = set()
+    by_place: dict = {}
+    for key in keys:
+        if key[0] not in ("act", "emit", "havoc"):
+            by_place.setdefault((key[0], key[1]), []).append(key)
+    for group in by_place.values():
+        if len(group) < 2:
+            continue
+        for i, a in enumerate(group):
+            for b in group[i + 1 :]:
+                if not _may_alias(a, b):
+                    continue
+                orders = {pos[a] < pos[b] for pos in positions if a in pos and b in pos}
+                if len(orders) > 1:
+                    reread.update((a, b))
+    out = {}
+    for key in keys:
+        values = [s.store[key] if key in s.store and key not in reread else read_store(s.store, key) for s in states]
+        out[key] = _select([s.pc for s in states], values)
+    return out
+
+
+def stored(store: dict, key: tuple, value: Term) -> dict:
+    """``store`` with ``key`` written last: a store is read in write order, so a location written again moves to the
+    end (a later write at a key that may equal it no longer hides it)."""
+    out = {k: v for k, v in store.items() if k != key}
+    out[key] = value
+    return out
+
+
+def _may_alias(a: tuple, b: tuple) -> bool:
+    """Whether two store keys of one place may name overlapping storage: a path and one inside it, or keys that
+    aren't two different fixed values."""
+    if a[0] in ("raw", "transient"):
+        return not (_fixed(a[2]) and _fixed(b[2]) and a[2] != b[2])
+    for (ka, x), (kb, y) in zip(a[2], b[2]):
+        if ka != kb or (ka == "f" and x != y):
+            return False
+        if ka == "k" and _fixed(x) and _fixed(y) and x != y:
+            return False
+    return True
+
+
+def _fixed(t: Any) -> bool:
+    return isinstance(t, tuple) and bool(t) and t[0] == "const"
+
+
+def read_store(store: dict, key: tuple) -> Term:
+    """What ``key`` (a store key: a location, a raw or transient slot, or a mark) reads in a call whose writes so far
+    are ``store``: each write whose location may be this one, in order, over the value before the call. A write of the
+    whole of what is read inside of (``cfg = Cfg(..)`` then ``cfg.live``) gives the part of it read; a write inside of
+    what is read whole (``list.push(x)`` then ``list`` copied to memory) gives the whole with that part replaced
+    (``upd``). A loop that may have written the variable further (``havoc``) leaves it unknown from there."""
+    kind = key[0]
+    if kind in ("act", "emit", "havoc"):
+        value = FALSE
+        for k, written in store.items():
+            if k == key:
+                value = written
+        return value
+    if kind in ("raw", "transient"):
+        return _read_slot(store, key)
+    contract, name, path = key
+    value: Term = mk("load", contract, name, path)
+    for k, written in store.items():
+        head = k[0]
+        if head == "havoc":
+            if k[1] == contract and k[2] in (name, "*"):
+                value = mk_ite(written, _forgotten(k, mk("load", contract, name, path)), value)
+            continue
+        if head == "raw" and k[1] == contract:
+            if _may_hold_named(k[2]):
+                value = _raw_named(mk("load", contract, name, path))  # an assembly write that may land in it
+            continue
+        if head in ("act", "emit", "transient", "raw") or head != contract or k[1] != name:
+            continue
+        kpath = k[2]
+        n = min(len(kpath), len(path))
+        same = []
+        for (ka, a), (kb, b) in zip(kpath[:n], path[:n]):
+            if ka != kb:
+                same = [FALSE]
+                break
+            same.append(mk_cmp("eq", a, b) if ka == "k" else (TRUE if a == b else FALSE))
+        cond = mk_and(same)
+        if cond == FALSE:
+            continue
+        if len(kpath) == len(path):
+            part = written
+        elif len(kpath) < len(path):
+            part = project(written, path[len(kpath) :])
+        else:
+            part = mk("upd", value, kpath[len(path) :], written)
+        value = mk_ite(cond, part, value)
+    return value
+
+
+def _read_slot(store: dict, key: tuple) -> Term:
+    """A raw (``sload``) or transient (``tload``) slot as this call's writes leave it."""
+    kind, contract, slot = key
+    value: Term = mk("rawload", contract, slot) if kind == "raw" else mk("const", 0, "uint256")
+    for k, written in store.items():
+        if k[0] == "havoc" and k[1] == contract and k[2] in (kind, "*"):
+            value = mk_ite(written, _forgotten(k, mk("rawload", contract, slot)), value)
+        elif k[0] == kind and k[1] == contract:
+            value = mk_ite(mk_cmp("eq", k[2], slot), written, value)
+        elif kind == "raw" and k[0] == contract and _may_hold_named(slot):
+            # A named variable written, then a slot read that may be its own: which bytes it changed isn't placed.
+            value = _raw_named(mk("rawload", contract, slot))
+    return value
+
+
+def _may_hold_named(slot: Term) -> bool:
+    """Whether a raw slot may be one a named variable occupies: anything but a hash, or a constant derived from one
+    (namespaced storage, ERC-1967 slots), which no declared variable's slot collides with."""
+    if slot[0] == "const":
+        return isinstance(slot[1], int) and not isinstance(slot[1], bool) and slot[1] < 2**64
+    return not _hash_based(slot)
+
+
+def _hash_based(slot: Term) -> bool:
+    if slot[0] == "hash":
+        return True
+    return slot[0] == "op" and slot[1] in ("add", "sub", "xor") and any(_hash_based(a) for a in slot[2])
+
+
+def _raw_named(load: Term) -> Term:
+    return mk("opaque", "unsupported:raw_named_alias", (load,))
+
+
+def _forgotten(mark: tuple, load: Term) -> Term:
+    """A location a loop may have written in iterations not followed: unknown, one value per location, depending on
+    whoever the loop's iterations did."""
+    tag = mark[3]
+    steered = not tag.endswith((":anyone", ":nobody"))
+    return mk("opaque", tag, (load, unknown(tag)) if steered else (load,))
+
+
+def project(value: Term, steps: tuple) -> Term:
+    """The part ``steps`` (``("f", field)``, ``("k", key)``) names of a whole value written to storage."""
+    if not steps:
+        return value
+    kind = value[0]
+    if kind == "ite":
+        return mk_ite(value[1], project(value[2], steps), project(value[3], steps))
+    if kind == "load":
+        return mk("load", value[1], value[2], (*value[3], *steps))
+    if kind == "rawload":
+        return mk("opaque", "unsupported:raw_struct", (value,))
+    step, rest = steps[0], steps[1:]
+    if kind == "struct" and step[0] == "f" and step[1] in value[1]:
+        return project(value[2][value[1].index(step[1])], rest)
+    if kind == "upd":
+        base, inner, written = value[1], value[2], value[3]
+        first, deeper = inner[0], inner[1:]
+        if first[0] != step[0] or (step[0] == "f" and first[1] != step[1]):
+            return project(base, steps)  # another part was written
+        hit = TRUE if step[0] == "f" else mk_cmp("eq", step[1], first[1])
+        here = written if not deeper else mk("upd", project(base, (step,)), deeper, written)
+        return project(mk_ite(hit, here, project(base, (step,))), rest)
+    if kind == "array" and step == ("f", "length"):
+        return value[1]
+    if kind == "array" and step[0] == "k":
+        return project(element(value, step[1]), rest)
+    if kind == "const" and value[1] == 0:
+        return value  # a deleted (zeroed) value: every part of it zero
+    return mk("opaque", f"unsupported:part:{kind}", (value, mk("const", repr(steps), "string")))
+
+
+def element(container: Term, key: Term, zero: Term | None = None) -> Term:
+    """Item ``key`` of an array value (a memory array, a storage array copied to memory, an argument, an array
+    updated in place), in range by the caller's bound. ``zero`` is what an item of a freshly allocated array holds."""
+    kind = container[0]
+    if kind == "ite":
+        return mk_ite(container[1], element(container[2], key, zero), element(container[3], key, zero))
+    if kind == "array" and len(container) == 3:
+        items = container[2]
+        if key[0] == "const" and isinstance(key[1], int) and not isinstance(key[1], bool):
+            return items[key[1]] if 0 <= key[1] < len(items) else unknown("out_of_bounds")
+        if not items:
+            return unknown("out_of_bounds")
+        value = items[-1]
+        for i in range(len(items) - 2, -1, -1):
+            value = mk_ite(mk_cmp("eq", key, const(i)), items[i], value)
+        return value
+    if kind == "array":
+        return zero if zero is not None else mk("elem", container, key)  # ``new T[](n)``: zeroed
+    if kind == "load":
+        return mk("load", container[1], container[2], (*container[3], ("k", key)))
+    if kind == "upd":
+        steps = container[2]
+        if steps[0][0] != "k":
+            return element(container[1], key, zero)  # its length set: the items are the base's
+        hit = mk_cmp("eq", key, steps[0][1])
+        inner = (
+            container[3] if len(steps) == 1 else mk("upd", element(container[1], key, zero), steps[1:], container[3])
+        )
+        return mk_ite(hit, inner, element(container[1], key, zero))
+    if kind == "const" and container[1] == 0:
+        return zero if zero is not None else const(0)
+    return mk("elem", container, key)
+
+
+def update(container: Term, key: Term, value: Term) -> Term:
+    """``container`` with item ``key`` set to ``value``: item by item where its items are known, else ``upd``."""
+    if container[0] == "array" and len(container) == 3:
+        items = container[2]
+        if key[0] == "const" and isinstance(key[1], int) and not isinstance(key[1], bool):
+            if not 0 <= key[1] < len(items):
+                return container  # out of range: the bound already ended this path
+            return mk("array", container[1], (*items[: key[1]], value, *items[key[1] + 1 :]))
+        return mk(
+            "array", container[1], tuple(mk_ite(mk_cmp("eq", key, const(i)), value, x) for i, x in enumerate(items))
+        )
+    if container[0] == "ite":
+        return mk_ite(container[1], update(container[2], key, value), update(container[3], key, value))
+    return mk("upd", container, (("k", key),), value)
+
+
+def length_of(container: Term) -> Term | None:
+    """The length of an array value, ``None`` when it has no term."""
+    kind = container[0]
+    if kind == "array":
+        return container[1]
+    if kind == "ite":
+        a, b = length_of(container[2]), length_of(container[3])
+        return None if a is None or b is None else mk_ite(container[1], a, b)
+    if kind == "upd":
+        if container[2] == (("f", "length"),):
+            return container[3]
+        return length_of(container[1])
+    if kind == "load":
+        return mk("load", container[1], container[2], (*container[3], ("f", "length")))
+    if kind == "const" and container[1] == 0:
+        return const(0)
+    return mk("len", container)
+
+
+def byte_at(container: Term, key: Term) -> Term:
+    """Byte ``key`` of a ``bytes`` value: the first byte of the word at that offset (``calldataload``'s word)."""
+    kind = container[0]
+    if kind == "ite":
+        return mk_ite(container[1], byte_at(container[2], key), byte_at(container[3], key))
+    if kind == "upd" and container[2][0][0] == "k":
+        return mk_ite(mk_cmp("eq", key, container[2][0][1]), container[3], byte_at(container[1], key))
+    if kind == "array" and len(container) == 2:
+        return const(0, "bytes1")  # ``new bytes(n)``: zeroed
+    return mk_slice(mk("elem", container, key), 0, 1)
 
 
 def _acted(st: State, call: Term) -> State:
@@ -389,8 +649,8 @@ def _changes(exit_: Exit) -> Term:
 
 
 def unwritten(key: tuple) -> Term:
-    if key[0] in ("act", "emit"):
-        return FALSE  # no call out, and no event, on a path that didn't make it
+    if key[0] in ("act", "emit", "havoc"):
+        return FALSE  # no call out, no event, no loop's writes on a path that didn't make them
     if key[0] == "transient":
         return mk("const", 0, "uint256")
     if key[0] == "raw":
@@ -472,6 +732,8 @@ class Lowerer:
         self._last_returns: int | None = None
         # Memory structs whose fields a reference names (``("sref", id(struct), field)``), by id.
         self._structs: dict[int, Any] = {}
+        # Values in memory or calldata whose items a reference names (``("mref", id(holder), key, kind)``), by id.
+        self._vars: dict[int, Any] = {}
         # The arguments this call came with, in order: what ``msg.data[4:]`` encodes.
         self._arguments: tuple = ()
         # Whether some storage write may have gone unrecorded (code not followed, assembly not read).
@@ -491,10 +753,14 @@ class Lowerer:
         self.effective = mk_or([mk_and([e.pc, _changes(e)]) for e in exits])
         # (contract, variable) or ("raw", contract) of everything it may write.
         self.written = frozenset(
-            ("raw", k[1]) if k[0] == "raw" else (k[0], k[1])
+            ("raw", k[1])
+            if k[0] == "raw" or (k[0] == "havoc" and k[2] == "raw")
+            else (k[1], k[2])
+            if k[0] == "havoc"
+            else (k[0], k[1])
             for e in exits
             for k in e.store
-            if k[0] not in ("act", "transient", "emit")
+            if k[0] not in ("act", "transient", "emit") and not (k[0] == "havoc" and k[2] in ("transient", "*"))
         )
         self.exits = exits
         return mk_or([e.pc for e in exits])
@@ -573,7 +839,7 @@ class Lowerer:
     ) -> list[Exit]:
         order, edges = _schedule(start)
         incoming: dict[int, list[State]] = {id(start): [state]}
-        loop_entry: dict[int, State] = {}
+        arrival: dict[int, State] = {}
         exits: list[Exit] = []
         for node in order:
             arrived = incoming.pop(id(node), None)
@@ -581,34 +847,280 @@ class Lowerer:
                 continue
             st = merge(arrived)
             self._steps += 1
-            if node.type == NodeType.IFLOOP:
-                loop_entry[id(node)] = st
+            arrival.setdefault(id(node), st)
             for target, out in self._step(function, node, st, depth, exits, body):
                 for succ, kind in edges[id(node)]:
                     if succ is not target:
                         continue
-                    if kind == "back":
-                        again = self._loop_condition(succ, out, depth)
-                        if again == FALSE and succ.son_false is not None:
-                            # The loop is done after this iteration: exact, no forgetting.
-                            incoming.setdefault(id(succ.son_false), []).append(out)
-                        elif again == TRUE and unrolled < MAX_UNROLL and self._steps < UNROLL_BUDGET:
-                            # Another iteration whose condition is known: run it, and the rest of the function after it.
-                            exits.extend(self._run_from(function, succ, out, depth, body, unrolled + 1))
-                        elif succ.son_false is not None and id(succ) in loop_entry:
-                            # Either the loop stops here, exactly, or it goes on: for a few more iterations exactly,
-                            # then with everything it changes forgotten.
-                            stop = State(mk_and([out.pc, mk_not(again)]), out.env, out.store, out.ret)
-                            incoming.setdefault(id(succ.son_false), []).append(stop)
-                            more = State(mk_and([out.pc, again]), out.env, out.store, out.ret)
-                            if unrolled < MAX_SYMBOLIC_UNROLL and self._steps < UNROLL_BUDGET:
-                                exits.extend(self._run_from(function, succ, more, depth, body, unrolled + 1))
-                            else:
-                                more = _havoc(more, loop_entry[id(succ)], succ)
-                                incoming.setdefault(id(succ.son_false), []).append(more)
-                    else:
+                    if kind != "back":
                         incoming.setdefault(id(succ), []).append(out)
+                        continue
+                    if succ.type == NodeType.IFLOOP:
+                        leave, again = succ.son_false, self._loop_condition(succ, out, depth)
+                    else:
+                        # ``do { } while (c)``: the condition node's true son is the body, ``out`` already carries
+                        # ``c``, and the loop leaves through the condition node's false son.
+                        leave, again = (node.son_false if node.type == NodeType.IFLOOP else None), None
+                    entry = arrival.get(id(succ))
+                    if leave is None or entry is None:
+                        exits.append(self._unfollowed(function, out, "unsupported:loop_shape"))
+                        continue
+                    if again == FALSE:
+                        # The loop is done after this iteration: exact, no forgetting.
+                        incoming.setdefault(id(leave), []).append(out)
+                        continue
+                    if again == TRUE and unrolled < MAX_UNROLL and self._steps < UNROLL_BUDGET:
+                        # Another iteration whose condition is known: run it, and the rest of the function after it.
+                        exits.extend(self._run_from(function, succ, out, depth, body, unrolled + 1))
+                        continue
+                    more = out
+                    if again is not None:
+                        # Either the loop stops here, exactly, or it goes on: for a few more iterations exactly, then
+                        # with everything it may change forgotten.
+                        stop = State(mk_and([out.pc, mk_not(again)]), out.env, out.store, out.ret)
+                        incoming.setdefault(id(leave), []).append(stop)
+                        more = State(mk_and([out.pc, again]), out.env, out.store, out.ret)
+                    if again != TRUE and unrolled < MAX_SYMBOLIC_UNROLL and self._steps < UNROLL_BUDGET:
+                        exits.extend(self._run_from(function, succ, more, depth, body, unrolled + 1))
+                    else:
+                        after, leaving = self._widen(function, more, entry, succ, leave)
+                        incoming.setdefault(id(leave), []).append(after)
+                        exits.extend(leaving)
+        for pending in incoming.values():
+            # Nodes the schedule never reached (control flow no loop header explains): unknown, never dropped.
+            for st in pending:
+                exits.append(self._unfollowed(function, st, "unsupported:irreducible_cfg"))
         return exits
+
+    def _unfollowed(self, function: Function, st: State, label: str) -> Exit:
+        """A path this lowering can't follow further: it may return, with unknown values, and write anything."""
+        self.lost = True
+        ret = None if isinstance(function, Modifier) else tuple(unknown(label) for _ in function.returns)
+        return Exit(mk_and([st.pc, unknown(label)]), st.store, ret)
+
+    def _widen(self, function: Function, more: State, entry: State, start: Any, leave: Any) -> tuple[State, list]:
+        """The loop entered at ``start`` (its header, or a ``do``'s body) after more iterations than were run: every
+        variable and storage its body may write (whatever an iteration that ran left them) is forgotten, from the
+        body's own operations, not from what the iterations run happened to change; it leaves through ``leave``, or
+        returns from inside with unknown values. The path carries an ``unknown`` conjunct, so it can widen what may
+        pass but never proves anything passes."""
+        nodes = _loop_nodes(start, leave)
+        effects = self._loop_effects(nodes, more)
+        changed = [v for k, v in more.env.items() if entry.env.get(k) != v]
+        changed += [v for k, v in more.store.items() if entry.store.get(k) != v]
+        added = _conjuncts(more.pc) - _conjuncts(entry.pc)
+        # A loop whose iterations neither the caller nor the arguments steer (a sum over a stored list) ends the same
+        # way whoever calls: its remainder is unknown, but singles out nobody. One the arguments steer but not who
+        # calls (running a proposal's calls): how it ends depends on what is asked, never on who asks.
+        read = [more.env.get(id(v)) for v in effects["reads"]]
+        values = [v for v in [*changed, *added, *read] if isinstance(v, tuple)]
+        anyone = not effects["caller"] and not effects["arguments"] and not any(contains(v, _STEERING) for v in values)
+        nobody = not effects["caller"] and not any(contains(v, _IDENTITIES) for v in values)
+        tag = f"loop:{start.node_id}" + (":anyone" if anyone else ":nobody" if nobody else "")
+        steered = () if anyone or nobody else (unknown(tag),)
+        owner = getattr(function, "canonical_name", "")
+
+        def forget(label: str, value: Any) -> Term:
+            roots: tuple = ()
+            if isinstance(value, tuple) and value and isinstance(value[0], str):
+                roots = tuple(
+                    sorted({t for k in ("caller", "origin", "signer") for t in subterms(value, k)}, key=stable)
+                )
+            return mk("opaque", tag, (mk("const", f"{owner}.{label}", "string"), *(roots or steered)))
+
+        env = dict(more.env)
+        done = set()
+        for var in effects["locals"]:
+            env[id(var)] = forget(str(getattr(var, "name", "")), more.env.get(id(var)))
+            done.add(id(var))
+        for k, v in more.env.items():
+            if k not in done and entry.env.get(k) != v:
+                env[k] = forget(f"#{len(done)}", v)
+                done.add(k)
+        store: dict = {}
+        for k, v in more.store.items():
+            if entry.store.get(k) == v or k[0] in ("act", "emit", "havoc"):
+                store[k] = v  # a call out stays made, however many times the loop runs
+            else:
+                store[k] = mk("opaque", tag, (unwritten(k), *steered))
+        marks = [(c, name) for c, name in sorted(effects["storage"], key=repr)]
+        if effects["everything"]:
+            marks.append((self.this, "*"))
+            self.lost = True
+        if effects["raw"]:
+            marks.append((self.this, "raw"))
+        if effects["transient"]:
+            marks.append((self.this, "transient"))
+        for c, name in marks:
+            store = stored(store, ("havoc", c, name, tag), TRUE)
+        if effects["calls"]:
+            store[("act", mk("assumed", f"{tag}:call"), ())] = TRUE
+        pc = mk_and([more.pc, unknown(tag)])
+        after = State(pc, env, store, more.ret)
+        leaving = []
+        if effects["returns"]:
+            ret = None
+            if not isinstance(function, Modifier):
+                ret = tuple(
+                    mk("opaque", tag, (mk("const", f"{owner}.return{i}", "string"), *steered))
+                    for i in range(len(function.returns))
+                )
+            leaving.append(Exit(pc, store, ret))
+        return after, leaving
+
+    def _loop_effects(self, nodes: list, st: State) -> dict:
+        """What the operations of a loop's nodes may write (locals, storage variables, raw or transient slots, or
+        anything), whether they call out or return, and whether they read who calls or the arguments."""
+        from slither.core.variables.local_variable import LocalVariable
+
+        out: dict = {
+            "locals": [],
+            "storage": set(),
+            "everything": False,
+            "raw": False,
+            "transient": False,
+            "calls": False,
+            "returns": False,
+            "caller": False,
+            "arguments": False,
+            "reads": [],
+        }
+        seen_locals: set = set()
+        pointers: list = []
+
+        def local(var: Any) -> None:
+            if id(var) not in seen_locals:
+                seen_locals.add(id(var))
+                out["locals"].append(var)
+
+        def lvalue(var: Any) -> None:
+            if isinstance(var, StateVariable):
+                if not (var.is_constant or var.is_immutable):
+                    out["storage"].add((self.this, var.name))
+                return
+            if isinstance(var, ReferenceVariable):
+                local(var)
+                origin = getattr(var, "points_to_origin", None)
+                if isinstance(origin, StateVariable):
+                    out["storage"].add((self.this, origin.name))
+                elif origin is not None and getattr(origin, "is_storage", False):
+                    loc = self._location(origin, st)
+                    if loc is None:
+                        out["everything"] = True
+                    else:
+                        out["storage"].add((loc[0], loc[1]))
+                    pointers.append(origin)
+                elif origin is not None:
+                    local(origin)
+                else:
+                    out["everything"] = True
+                return
+            local(var)
+
+        def solidity(name: str) -> None:
+            base = name.split("(", 1)[0]
+            if base == "sstore":
+                out["raw"] = True
+            elif base == "tstore":
+                out["transient"] = True
+            elif base in ("delegatecall", "callcode"):
+                out["everything"] = out["raw"] = out["calls"] = True
+            elif base in ("call", "create", "create2", "selfdestruct", "suicide"):
+                out["calls"] = True
+            if base in ("return", "stop", "selfdestruct", "suicide"):
+                out["returns"] = True
+            if base == "ecrecover":
+                out["caller"] = True
+
+        for node in nodes:
+            if node.type in (NodeType.RETURN, NodeType.PLACEHOLDER):
+                out["returns"] = True
+                if node.type == NodeType.PLACEHOLDER:
+                    out["everything"] = out["calls"] = True
+            if node.type == NodeType.ASSEMBLY and not node.irs and isinstance(getattr(node, "inline_asm", None), str):
+                out["everything"] = out["raw"] = out["calls"] = out["returns"] = True
+            for ir in node.irs:
+                for var in getattr(ir, "read", None) or []:
+                    if isinstance(var, SolidityVariableComposed) and var.name in ("msg.sender", "tx.origin"):
+                        out["caller"] = True
+                    elif isinstance(var, SolidityVariableComposed) and var.name in ("msg.data", "msg.value"):
+                        out["arguments"] = True
+                    elif isinstance(var, LocalVariable) and not isinstance(var, ReferenceVariable):
+                        out["reads"].append(var)
+                if getattr(ir, "lvalue", None) is not None:
+                    lvalue(ir.lvalue)
+                if isinstance(ir, Delete):
+                    lvalue(ir.variable)
+                if isinstance(ir, SolidityCall):
+                    solidity(ir.function.name)
+                elif isinstance(ir, (InternalCall, LibraryCall)) and isinstance(ir.function, Function):
+                    self._callee_effects(ir, st, out, local)
+                elif isinstance(ir, HighLevelCall):
+                    fn = ir.function
+                    if not (getattr(fn, "view", False) or getattr(fn, "pure", False)):
+                        out["calls"] = True
+                    if self.val(ir.destination, st) == self.this:
+                        out["everything"] = True  # its own entry point, run again: any of its storage
+                elif isinstance(ir, LowLevelCall):
+                    out["calls"] = True
+                    if str(getattr(ir.function_name, "value", ir.function_name)) == "delegatecall":
+                        out["everything"] = out["raw"] = True
+                elif isinstance(ir, (Transfer, Send, NewContract)):
+                    out["calls"] = True
+                elif isinstance(ir, InternalDynamicCall):
+                    out["everything"] = out["calls"] = True
+        if any(id(p) in seen_locals for p in pointers):
+            out["everything"] = True  # a storage pointer moved within the loop: where its writes land isn't known
+        return out
+
+    def _callee_effects(self, ir: Any, st: State, out: dict, local: Callable) -> None:
+        """What an internal or library call in a loop may write: the state variables its code writes, what it is handed
+        by ``storage`` reference, memory it is handed; and whether it calls out or reads who calls."""
+        callee = ir.function
+        cache = self.__dict__.setdefault("_callee_cache", {})
+        if id(callee) not in cache:
+            names, raw, transient, everything, calls, caller = set(), False, False, False, False, False
+            try:
+                names = {v.name for v in callee.all_state_variables_written() if not (v.is_constant or v.is_immutable)}
+                reads = {v.name for v in callee.all_solidity_variables_read()}
+                caller = bool(reads & {"msg.sender", "tx.origin"})
+                for c in callee.all_solidity_calls():
+                    base = str(getattr(getattr(c, "function", c), "name", c)).split("(", 1)[0]
+                    raw = raw or base == "sstore"
+                    transient = transient or base == "tstore"
+                    everything = everything or base in ("delegatecall", "callcode")
+                    calls = calls or base in ("call", "create", "create2", "selfdestruct", "suicide", "delegatecall")
+                    caller = caller or base == "ecrecover"
+                for n in callee.all_nodes():
+                    if n.type == NodeType.ASSEMBLY and not n.irs and isinstance(getattr(n, "inline_asm", None), str):
+                        everything = raw = calls = True
+                    for op in n.irs:
+                        if isinstance(op, (LowLevelCall, Transfer, Send, NewContract, InternalDynamicCall)):
+                            calls = True
+                        elif isinstance(op, HighLevelCall) and not isinstance(op, LibraryCall):
+                            fn = op.function
+                            calls = calls or not (getattr(fn, "view", False) or getattr(fn, "pure", False))
+            except Exception as exc:  # a callee Slither can't summarize: anything
+                if isinstance(exc, TimeoutError):
+                    raise
+                everything = raw = calls = caller = True
+            cache[id(callee)] = (names, raw, transient, everything, calls, caller)
+        names, raw, transient, everything, calls, caller = cache[id(callee)]
+        out["storage"].update((self.this, n) for n in names)
+        out["raw"] = out["raw"] or raw
+        out["transient"] = out["transient"] or transient
+        out["everything"] = out["everything"] or everything
+        out["calls"] = out["calls"] or calls
+        out["caller"] = out["caller"] or caller
+        for p, a in zip(callee.parameters, ir.arguments):
+            if getattr(p, "location", None) == "storage":
+                loc = self._location(a, st)
+                if loc is None:
+                    out["everything"] = True
+                else:
+                    out["storage"].add((loc[0], loc[1]))
+            elif not isinstance(a, (Constant, StateVariable)) and _reference_typed(getattr(p, "type", None)):
+                local(a)  # memory handed by reference: the callee may write into it
 
     def _loop_condition(self, header: Any, st: State, depth: int) -> Term:
         """The header's condition evaluated in ``st``, or ``None`` when it isn't a loop header."""
@@ -864,24 +1376,33 @@ class Lowerer:
                 pointed = self._location(ir.init_values[0], st)
                 if pointed is not None:
                     return self._bind(ir.lvalue, ("loc", pointed), st)
+            # Slither renders both ``T[] memory xs = ys`` (a copy) and ``[a, b]`` (a literal) as an array literal; the
+            # ranks tell them apart: a copy is an array of the same rank, a literal's items have one fewer.
+            rank = _rank(getattr(ir.lvalue, "type", None))
+            ranks = {_rank(getattr(v, "type", None)) for v in ir.init_values}
+            if len(ir.init_values) == 1 and rank is not None and ranks == {rank}:
+                return self._write(ir.lvalue, self.val(ir.init_values[0], st), st)
+            if rank is None or ranks != {rank - 1}:
+                return self._write(ir.lvalue, unknown("unsupported:InitArray"), st)
             values = [self.val(v, st) for v in ir.init_values]
-            if len(values) == 1 and _array_shaped(values[0]):
-                return self._write(ir.lvalue, values[0], st)  # ``T[] memory r = new T[](n)``, as Slither renders it
             return self._write(ir.lvalue, mk("array", const(len(values), "uint256"), tuple(values)), st)
         if isinstance(ir, Length):
-            held = self.val(ir.value, st) if self._location(ir.value, st) is None else None
-            if held is not None and held[0] == "array":
-                return self._write(ir.lvalue, held[1], st)
-            if held is not None and held[0] == "code":
-                return self._write(ir.lvalue, mk("codesize", held[1]), st)
-            if held == CALLDATA:
-                return self._write(ir.lvalue, mk("calldatasize", self._calldata_min), st)
+            type_ = getattr(ir.value, "type", None)
             base = self._location(ir.value, st)
             if base is not None:
+                if _bytes_typed(type_):
+                    # A ``bytes``/``string`` in storage keeps its length in its encoding: read off the value.
+                    return self._write(ir.lvalue, mk("len", self._read_at(base, st)), st)
                 # A storage array's length is a slot of its own, read and (before solc 0.6, ``a.length++``) written
                 # through this reference.
                 return self._bind(ir.lvalue, ("loc", _extend(base, ("f", "length"))), st)
-            return self._write(ir.lvalue, mk("len", self.val(ir.value, st)), st)
+            held = self.val(ir.value, st)
+            if held[0] == "code":
+                return self._write(ir.lvalue, mk("codesize", held[1]), st)
+            fixed = _fixed_length(type_)
+            if fixed is not None:
+                return self._write(ir.lvalue, const(fixed), st)
+            return self._write(ir.lvalue, self._length(held, type_), st)
         if isinstance(ir, CodeSize):
             return self._write(ir.lvalue, mk("codesize", self.val(ir.value, st)), st)  # ``a.code.length``
         if isinstance(ir, EventCall):
@@ -1044,22 +1565,16 @@ class Lowerer:
         elif base == "ecrecover":
             value = mk("signer", *args)
         elif base == "sload":
-            value = mk("rawload", self.this, args[0])
+            value = read_store(st.store, ("raw", self.this, args[0]))
         elif base == "sstore":
-            store = dict(st.store)
-            store[("raw", self.this, args[0])] = args[1]
-            return State(st.pc, st.env, store, st.ret)
+            return State(st.pc, st.env, stored(st.store, ("raw", self.this, args[0]), args[1]), st.ret)
         elif base == "tstore" and len(args) == 2:
-            store = dict(st.store)
-            store[("transient", self.this, args[0])] = args[1]
+            store = stored(st.store, ("transient", self.this, args[0]), args[1])
             return State(st.pc, st.env, store, st.ret, mem=st.mem)
         elif base == "tload" and len(args) == 1:
             # Transient storage is empty when a transaction starts (a reentrancy lock reads zero), save what this call
             # stored there itself.
-            value = mk("const", 0, "uint256")
-            for key, written in st.store.items():
-                if key[0] == "transient":
-                    value = mk_ite(mk_cmp("eq", key[2], args[0]), written, value)
+            value = read_store(st.store, ("transient", self.this, args[0]))
         elif base == "calldataload":
             offset = _small_const(args[0])
             value = (self._calldata_word(offset) if offset is not None else None) or mk("elem", CALLDATA, args[0])
@@ -1302,9 +1817,7 @@ class Lowerer:
         if len(re.findall(r"\bsstore\(", asm)) > len(re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", asm)):
             self.lost = True
         for slot, written in re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", asm):
-            store = dict(st.store)
-            store[("raw", self.this, value(slot))] = value(written)
-            st = State(st.pc, st.env, store, st.ret)
+            st = State(st.pc, st.env, stored(st.store, ("raw", self.this, value(slot)), value(written)), st.ret)
         for found in re.finditer(r"\blog([1-4])\s*\(", asm):
             parts = _call_arguments(asm, found.end())
             if parts is not None:
@@ -1418,7 +1931,7 @@ class Lowerer:
             call = statement.call
             if call.name == "sstore" and len(call.args) == 2:
                 slot, written = ev(call.args[0]), ev(call.args[1])
-                st = State(st.pc, st.env, {**st.store, ("raw", self.this, slot): written}, st.ret)
+                st = State(st.pc, st.env, stored(st.store, ("raw", self.this, slot), written), st.ret)
             elif call.name in ("mstore", "mstore8", "calldatacopy", "codecopy", "returndatacopy"):
                 for a in call.args:
                     ev(a)
@@ -1479,15 +1992,58 @@ class Lowerer:
     # A location is (contract, variable, path); a reference variable holds ``("loc", location)``.
 
     def _index(self, ir: Index, st: State) -> State:
-        base = self._location(ir.variable_left, st)
+        """``a[k]``: a storage location one step further, or an item of a value held in memory or calldata (read and
+        written through an ``mref``). Either reverts out of range (Panic 0x32) for an array: the bound is part of
+        the path. ``bytes`` index to a byte, not to a word."""
+        left = ir.variable_left
+        type_ = getattr(left, "type", None)
+        base = self._location(left, st)
         key = self.val(ir.variable_right, st)
         if base is not None:
+            if _bytes_typed(type_):
+                # A byte of a ``bytes``/``string`` in storage: its encoding (length in the slot, long data hashed)
+                # isn't a path this lowering places.
+                st = replace(st, pc=mk_and([st.pc, unknown("unsupported:storage_bytes_index")]))
+            else:
+                bound = self._storage_bound(type_, base, key, st)
+                if bound is not None:
+                    st = replace(st, pc=mk_and([st.pc, bound]))
             return self._bind(ir.lvalue, ("loc", _extend(base, ("k", key))), st)
-        held = self.val(ir.variable_left, st)
-        if _items(held) is not None and key[0] == "const" and 0 <= key[1] < len(held[2]):
-            # An element of a memory array this call made: reads and writes go to the array's own items.
-            return self._bind(ir.lvalue, ("mref", id(ir.variable_left), key[1]), st)
-        return self._write(ir.lvalue, mk("elem", held, key), st)
+        container = self.val(left, st)
+        kind = "byte" if _bytes_typed(type_) or container == CALLDATA else "elem"
+        length = _fixed_length(type_)
+        size = const(length) if length is not None else self._length(container, type_)
+        st = replace(st, pc=mk_and([st.pc, mk_cmp("lt", key, size)]))
+        self._vars[id(left)] = left
+        return self._bind(ir.lvalue, ("mref", id(left), key, kind), st)
+
+    def _length(self, container: Term, type_: Any = None) -> Term:
+        if container == CALLDATA:
+            return mk("calldatasize", self._calldata_min)
+        if _bytes_typed(type_) and container[0] == "load":
+            return mk("len", container)  # a ``bytes``/``string`` copied from storage: its length is in its encoding
+        found = length_of(container)
+        return found if found is not None else mk("len", container)
+
+    def _storage_bound(self, type_: Any, base: tuple, key: Term, st: State) -> Term | None:
+        """``key`` within a storage array at ``base``: below its length slot (dynamic) or its declared length."""
+        from slither.core.solidity_types import ArrayType
+
+        if not isinstance(type_, ArrayType):
+            return None  # a mapping: every key is there
+        fixed = _fixed_length(type_)
+        if fixed is not None:
+            return mk_cmp("lt", key, const(fixed))
+        size = self._read_at(_extend(base, ("f", "length")), st)
+        if (
+            size[:2] == ("op", "add")
+            and key in size[2]
+            and key[0] == "load"
+            and key[3][-1:] == (("f", "length"),)
+            and any(_small_const(x) is not None and x != key for x in size[2])
+        ):
+            return None  # ``push``: the old length below the new one (a storage array's length stays below 2**64)
+        return mk_cmp("lt", key, size)
 
     def _member(self, ir: Member, st: State) -> State:
         field_name = str(getattr(ir.variable_right, "value", ir.variable_right))
@@ -1541,20 +2097,8 @@ class Lowerer:
         return None
 
     def _read_at(self, loc: tuple, st: State) -> Term:
-        """Storage at ``loc`` as this call sees it: earlier writes whose keys may equal it, over the pre-call value."""
-        contract, name, path = loc
-        value: Term = mk("load", contract, name, path)
-        for key, written in st.store.items():
-            if key[0] == "raw" or key[0] != contract or key[1] != name or len(key[2]) != len(path):
-                continue
-            same = []
-            for (kind_a, a), (kind_b, b) in zip(key[2], path):
-                if kind_a != kind_b:
-                    same = [FALSE]
-                    break
-                same.append(mk_cmp("eq", a, b) if kind_a == "k" else (TRUE if a == b else FALSE))
-            value = mk_ite(mk_and(same), written, value)
-        return value
+        """Storage at ``loc`` as this call sees it (``read_store``)."""
+        return read_store(st.store, loc)
 
     def _bind(self, lvalue: Any, value: Any, st: State) -> State:
         env = dict(st.env)
@@ -1564,12 +2108,15 @@ class Lowerer:
     def _write(self, lvalue: Any, value: Any, st: State) -> State:
         ref = st.env.get(id(lvalue))
         if isinstance(ref, tuple) and ref and ref[0] == "mref":
-            array = st.env.get(ref[1])
-            if _items(array) is not None:
-                items = (*array[2][: ref[2]], value, *array[2][ref[2] + 1 :])
-                env = {**st.env, ref[1]: mk("array", array[1], items)}
-                return State(st.pc, env, st.store, st.ret, mem=st.mem)
-            return self._bind(lvalue, value, st)
+            # An item written in place: the value holding it, updated, written back where that value lives (a
+            # variable, or an item or field of another value: ``g[1][0] = x``, ``s.xs[i] = x``).
+            holder = self._vars[ref[1]]
+            container = self.val(holder, st)
+            if ref[3] == "byte":
+                new = mk("upd", container, (("k", ref[2]),), value)
+            else:
+                new = update(container, ref[2], value)
+            return self._write(holder, new, st)
         if isinstance(ref, tuple) and ref and ref[0] == "sref":
             struct = self._structs[ref[1]]
             whole = self.val(struct, st)
@@ -1579,9 +2126,7 @@ class Lowerer:
             return self._bind(lvalue, value, st)
         loc = self._location(lvalue, st)
         if loc is not None:
-            store = dict(st.store)
-            store[loc] = value
-            return State(st.pc, st.env, store, st.ret, mem=st.mem)
+            return State(st.pc, st.env, stored(st.store, loc, value), st.ret, mem=st.mem)
         return self._bind(lvalue, value, st)
 
     # Values -----------------------------------------------------------------------------------------------------------
@@ -1618,8 +2163,11 @@ class Lowerer:
         if isinstance(held, tuple) and held and held[0] == "loc":
             return self._read_at(held[1], st)
         if isinstance(held, tuple) and held and held[0] == "mref":
-            array = st.env.get(held[1])
-            return array[2][held[2]] if _items(array) is not None else unknown("memory")
+            holder = self._vars[held[1]]
+            container = self.val(holder, st)
+            if held[3] == "byte":
+                return byte_at(container, held[2])
+            return element(container, held[2], _zero_item(getattr(holder, "type", None)))
         if isinstance(held, tuple) and held and held[0] == "sref":
             whole = self.val(self._structs[held[1]], st)
             if isinstance(whole, tuple) and whole and whole[0] == "struct" and held[2] in whole[1]:
@@ -1658,12 +2206,13 @@ def _schedule(start: Any) -> tuple[list[Any], dict[int, list[tuple[Any, str]]]]:
             edges[id(son)] = []
             on_stack.add(id(son))
             stack.append((son, iter(son.sons)))
-    # A back edge to a loop header delivers to the header's exit, so it orders the latch before the exit.
+    # A back edge to a loop header delivers to the header's exit, so it orders the latch before the exit. One into a
+    # ``do`` body comes from the condition node, whose own false son is the exit.
     indegree = dict.fromkeys(nodes, 0)
     successors: dict[int, list[Any]] = {k: [] for k in nodes}
     for key, out in edges.items():
         for son, kind in out:
-            target = son if kind == "forward" else son.son_false
+            target = son if kind == "forward" else son.son_false if son.type == NodeType.IFLOOP else None
             if target is None or id(target) not in nodes:
                 continue
             successors[key].append(target)
@@ -1735,6 +2284,40 @@ def _address_typed(type_: Any) -> bool:
     return str(type_) in ("address", "address payable") or (
         isinstance(type_, UserDefinedType) and isinstance(type_.type, Contract)
     )
+
+
+def _bytes_typed(type_: Any) -> bool:
+    return str(type_) in ("bytes", "string")
+
+
+def _fixed_length(type_: Any) -> int | None:
+    """The declared length of a fixed-size array type (``T[3]``)."""
+    from slither.core.solidity_types import ArrayType
+
+    if not isinstance(type_, ArrayType) or not type_.is_fixed_array:
+        return None
+    length = type_.length_value
+    text = str(getattr(length, "value", "")) if length is not None else ""
+    return int(text) if text.isdigit() else None
+
+
+def _rank(type_: Any) -> int | None:
+    """How many array dimensions a type has (``bytes`` and ``string`` none); ``None`` when the type isn't one."""
+    from slither.core.solidity_types import ArrayType, Type
+
+    if not isinstance(type_, Type):
+        return None
+    rank = 0
+    while isinstance(type_, ArrayType):
+        type_, rank = type_.type, rank + 1
+    return rank
+
+
+def _zero_item(type_: Any) -> Term | None:
+    """What an item of a freshly allocated array of ``type_`` holds."""
+    from slither.core.solidity_types import ArrayType
+
+    return _zero(type_.type) if isinstance(type_, ArrayType) else None
 
 
 def _array_shaped(term: Any) -> bool:
@@ -1872,39 +2455,38 @@ def _extend(loc: tuple, step: tuple) -> tuple:
     return (contract, name, (*path, step))
 
 
-def _havoc(state: State, entry: State | None, header: Any) -> State:
-    """The state after more iterations of the loop at ``header``: what the body changed is unknown from here, though
-    still dependent on whichever identities one iteration made it depend on."""
-    if entry is None:
-        return state
-    changed = [v for k, v in state.env.items() if entry.env.get(k) != v]
-    changed += [v for k, v in state.store.items() if entry.store.get(k) != v]
-    added = _conjuncts(state.pc) - _conjuncts(entry.pc)
-    # A loop whose iterations neither the caller nor the arguments steer (a sum over a stored list) ends the same way
-    # whoever calls: its remainder is unknown, but singles out nobody.
-    anyone = not any(isinstance(v, tuple) and contains(v, _STEERING) for v in [*changed, *added])
-    # One the arguments steer but not who calls (running a proposal's calls): how it ends depends on what is asked,
-    # never on who asks.
-    nobody = not any(isinstance(v, tuple) and contains(v, _IDENTITIES) for v in [*changed, *added])
-    tag = f"loop:{header.node_id}" + (":anyone" if anyone else ":nobody" if nobody else "")
-
-    def forget(value: Any) -> Any:
-        if not isinstance(value, tuple) or not value or not isinstance(value[0], str) or value[0] == "loc":
-            return unknown(tag)
-        roots = tuple(sorted({t for kind in ("caller", "origin", "signer") for t in subterms(value, kind)}, key=stable))
-        return mk("opaque", tag, roots)
-
-    env = {k: (v if entry.env.get(k) == v else forget(v)) for k, v in state.env.items()}
-    # A call out stays made, however many times the loop runs.
-    store = {
-        k: (v if entry.store.get(k) == v or k[0] in ("act", "emit") else forget(v)) for k, v in state.store.items()
-    }
-    return State(mk_and([state.pc, unknown(tag)]), env, store, state.ret)
-
-
 # What a caller steers: who they are and what they send.
 _STEERING = frozenset({"caller", "origin", "signer", "arg", "len", "elem", "callvalue", "calldatasize", "sig"})
 _IDENTITIES = frozenset({"caller", "origin", "signer"})
+
+
+def _loop_nodes(start: Any, leave: Any) -> list:
+    """The nodes of the loop entered at ``start`` and left through ``leave``: everything reachable from ``start``
+    without passing ``leave`` (a ``break`` jumps there, a ``return`` ends the path inside)."""
+    seen = {id(start)}
+    out = [start]
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        for son in node.sons:
+            if son is leave or id(son) in seen:
+                continue
+            seen.add(id(son))
+            out.append(son)
+            stack.append(son)
+    return out
+
+
+def _reference_typed(type_: Any) -> bool:
+    """An array, ``bytes``/``string`` or struct: a value memory holds by reference."""
+    from slither.core.declarations import Structure
+    from slither.core.solidity_types import ArrayType, UserDefinedType
+
+    return (
+        isinstance(type_, ArrayType)
+        or _bytes_typed(type_)
+        or (isinstance(type_, UserDefinedType) and isinstance(type_.type, Structure))
+    )
 
 
 def _conjuncts(pc: Term) -> set:

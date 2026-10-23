@@ -950,7 +950,7 @@ def after_own_call(formula: Term, world: World, contract: Any) -> tuple | None:
     signature, the arguments of that call and of this one; ``None`` when none does. Each write is worked out on
     the chain as it stands and read back in its place, so the pair is a run of two calls, not a rule."""
     from .decide import _OTHER_STRANGERS, _argument_values, _outcome
-    from .terms import contains, subterms
+    from .terms import conjuncts, contains, subterms
 
     names = {
         t[2]
@@ -999,6 +999,14 @@ def after_own_call(formula: Term, world: World, contract: Any) -> tuple | None:
                 continue
             found: dict = {}
             first = _outcome(pc, world, {"caller": FRESH, "signer": FRESH}, set(), fixed={}, witness=found)
+            if first is UNK:
+                # Unsettled for the parts no identity reaches (an index below a length read under a key the stranger
+                # picks): the arguments the parts it does reach take (``account == msg.sender``) are what decide
+                # where its writes land; a stranger those parts refuse can't make the call at all.
+                own = mk_and([c for c in conjuncts(pc) if contains(c, IDENTITY_KINDS)])
+                found = {}
+                if _outcome(own, world, {"caller": FRESH, "signer": FRESH}, set(), fixed={}, witness=found) is False:
+                    continue
             if first is False:
                 continue
             saved = world.overlay
