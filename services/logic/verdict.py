@@ -23,6 +23,7 @@ from .decide import (
     Evaluator,
     Verdict,
     World,
+    contains_term,
     coverage,
     decide,
     gate_of,
@@ -33,6 +34,7 @@ from .logged import keyed_by, logged, logged_raw, members, written_by
 from .lower import Lowerer, parameter
 from .scope import classify, contract_facts
 from .snapshot import creation_keys
+from .taint import tainted
 from .terms import (
     CALLER,
     FALSE,
@@ -46,6 +48,7 @@ from .terms import (
     mk_and,
     mk_not,
     replace_terms,
+    stable,
     substitute,
     subterms,
     unknown,
@@ -1240,6 +1243,44 @@ def _spec_name(var: Any) -> Any:
 
 
 _ORIGIN = frozenset({"origin"})
+_CHOSEN = frozenset({"arg", "len", "elem", "callvalue", "calldatasize"})
+_ORIGIN_OP = 0x32
+_CALL_OPS = frozenset({0xF1, 0xF2, 0xF4, 0xFA})  # CALL, CALLCODE, DELEGATECALL, STATICCALL
+
+
+def _runtime_reach(code: bytes) -> str | None:
+    """``origin`` when runtime code has an ``ORIGIN`` opcode, ``unfollowed`` when it has a call opcode (what it calls
+    may read the origin), else ``None``: a walk over the opcodes, skipping push data and the trailing metadata."""
+    if len(code) >= 2:
+        size = int.from_bytes(code[-2:], "big")
+        if size + 2 <= len(code) and code[-size - 2] & 0xF0 == 0xA0:
+            code = code[: -size - 2]  # the compiler's CBOR metadata: data, never run
+    seen: set[int] = set()
+    i = 0
+    while i < len(code):
+        op = code[i]
+        seen.add(op)
+        i += 1 + (op - 0x5F if 0x60 <= op <= 0x7F else 0)
+    return "origin" if _ORIGIN_OP in seen else "unfollowed" if seen & _CALL_OPS else None
+
+
+def _unconditional(formula: Term, call: Term) -> bool:
+    """Whether every use of ``call``'s value in ``formula`` is reached on every path that passes: inside a top-level
+    conjunct under no ``ite`` or ``or`` (whether it returns, ``ok``/``caught``, is exact anywhere)."""
+
+    def plain(t: Any) -> bool:
+        if isinstance(t, frozenset):
+            return all(plain(x) for x in t)
+        if not isinstance(t, tuple) or not t or t == call or not contains_term(t, call):
+            return True
+        if isinstance(t[0], str) and t[0] in ("ok", "caught") and t[1] == call:
+            return True
+        if isinstance(t[0], str) and t[0] in ("ite", "or"):
+            return False
+        return all(plain(x) for x in (t[1:] if isinstance(t[0], str) else t))
+
+    return plain(formula)
+
 
 # Chain reads one function's decision may send; past it, reads answer unknown (sound, never wrong).
 READS_PER_FUNCTION = 2000
@@ -1256,6 +1297,7 @@ def function_verdict(
 ) -> tuple[Verdict, Term]:
     """``contracts`` maps addresses to Slither contracts the formula may read or call (``address`` included), the
     code that runs there; ``code_of`` maps an address to the one holding that code (a proxy's implementation)."""
+    failed_at = chain.failed  # failed reads before this function: see ``World.failed_at``
     chain.limit = chain.sent + READS_PER_FUNCTION
     chain.scan_left = chain.history_seconds = LOG_SECONDS
     chain.scan_total = LOG_TOTAL_SECONDS
@@ -1793,37 +1835,96 @@ def function_verdict(
             isinstance(address, int) and not isinstance(address, bool) and chain.code(address % 2**160) == b""
         )
 
-    def origin_inline(term: Term, depth: int = 0) -> Term:
-        """``term`` with each view call whose followed callee reads ``tx.origin`` replaced by that code, in this
-        call's terms: the origin a callee reads is the caller's own, whatever it is handed, so the call is no condition
-        every caller faces alike. Its other calls are left for the chain to answer."""
-        if depth >= IDENTITY_DEPTH:
-            return term
-        mapping: dict[Term, Term] = {}
-        for call in subterms(term, "call"):
-            lowered = callee(call) if call[4] else None
-            if lowered is None:
-                continue
-            pc = origin_inline(lowered[0], depth + 1)
-            ret = tuple(origin_inline(r, depth + 1) if isinstance(r, Term) else r for r in lowered[1])
-            if not any(isinstance(p, Term) and contains(p, _ORIGIN) for p in (pc, *ret)):
-                continue
-            for x in subterms(term, "ok"):
-                if x[1] == call:
-                    mapping[x] = pc
-            for x in subterms(term, "caught"):
-                if x[1] == call:
-                    mapping[x] = mk_not(pc)
-            for x in subterms(term, "item"):
-                if x[1] == call and x[2] < len(ret):
-                    mapping[x] = ret[x[2]]
-            if ret:
-                mapping[call] = ret[0]
-        return replace_terms(term, mapping) if mapping else term
+    bound: dict[tuple, str | None] = {}
 
-    formula = origin_inline(substitute(formula, "delegate", delegate))
+    def caller_bound(call: Term, depth: int = 0) -> str | None:
+        """Why a view call handed nothing of the caller may still answer otherwise for another caller, else
+        ``None``. Inside any callee ``tx.origin`` is the caller's, and the chain answers such a call with this
+        contract as the origin, so its answer is trusted only where no code it may run reads the origin: ``origin``
+        when its followed code does, ``nested`` when a callee it asks does; ``unfollowed`` when code not followed has
+        a call opcode (it may reach one) or can't be read, or the callees go deeper than followed (``origin`` when it
+        has an ``ORIGIN`` opcode); ``read_failed:call_target`` when where it goes can't be read."""
+        key = (call, depth)
+        if key in bound:
+            return bound[key]
+        bound[key] = "unfollowed"  # while being worked out: a callee reached again inside itself
+        if contains(call[1], _CHOSEN):
+            # Code the caller picks: asked about per guess, as any call to an address the caller names.
+            bound[key] = None
+            return None
+        address = address_of(call[1])
+        if not isinstance(address, int) or isinstance(address, bool):
+            why: str | None = "read_failed:call_target"
+        else:
+            lowered = callee(call)
+            if lowered is None:
+                code = chain.code(address % 2**160)
+                why = "unfollowed" if not isinstance(code, bytes) else _runtime_reach(code)
+            else:
+                parts = [p for p in (lowered[0], *lowered[1]) if isinstance(p, Term)]
+                why = "origin" if any(contains(p, _ORIGIN) for p in parts) else None
+                for inner in sorted({c for p in parts for c in subterms(p, "call") if c[4]}, key=stable):
+                    if why is not None:
+                        break
+                    if depth + 1 >= IDENTITY_DEPTH:
+                        why = "unfollowed"
+                    else:
+                        deeper = caller_bound(inner, depth + 1)
+                        why = "nested" if deeper in ("origin", "nested") else deeper
+        bound[key] = why
+        return why
+
+    def bind_callers(term: Term, top: bool) -> Term:
+        """``term`` with each view call ``caller_bound`` names kept from being read as the same for everyone. One
+        whose followed code reads ``tx.origin`` (itself, or a callee it asks) is inlined in the formula itself
+        (``top``): asked whether it returns (``ok``, ``caught``), its success condition stands in; used for its
+        value, its return value does, and its success condition joins the formula, which holds only where every use
+        of it is reached unconditionally (in a top-level conjunct, under no ``ite`` or ``or``). The calls that brings
+        in are asked about in turn, a few rounds deep. Every other such call becomes an unknown no caller is marked
+        alike for, named ``origin:``, ``unfollowed:`` or ``read_failed:call_target:`` and the signature. A call
+        handed the caller is asked about the origin (and where it goes) only: whatever else its callee does, the
+        caller it is handed already keeps it out of what every caller faces alike."""
+        for round_ in range(IDENTITY_DEPTH + 1):
+            changed = False
+            for call in sorted({c for c in subterms(term, "call") if c[4]}, key=stable):
+                if not contains_term(term, call):
+                    continue  # inlined already, inside another's place
+                why = caller_bound(call)
+                if why is None or (tainted(call) and why not in ("origin", "nested", "read_failed:call_target")):
+                    continue
+                lowered = callee(call) if why in ("origin", "nested") else None
+                uses = [x for x in subterms(term, "item") if x[1] == call]
+                bare = call in subterms(replace_terms(term, {x: TRUE for x in uses}, keep_subjects=True), "call")
+                inline = lowered is not None and top and round_ < IDENTITY_DEPTH
+                if inline and (not (uses or bare) or _unconditional(term, call)):
+                    pc, ret = lowered
+                    mapping: dict[Term, Term] = {}
+                    for x in subterms(term, "ok"):
+                        if x[1] == call:
+                            mapping[x] = pc
+                    for x in subterms(term, "caught"):
+                        if x[1] == call:
+                            mapping[x] = mk_not(pc)
+                    for x in uses:
+                        mapping[x] = ret[x[2]] if x[2] < len(ret) else unknown(f"origin:{call[2]}")
+                    if bare:
+                        mapping[call] = ret[0] if ret else unknown(f"origin:{call[2]}")
+                    term = replace_terms(term, mapping)
+                    if uses or bare:
+                        term = mk_and([term, pc])
+                else:
+                    label = "origin" if why in ("origin", "nested") else why
+                    term = replace_terms(term, {call: unknown(f"{label}:{call[2]}")})
+                changed = True
+            if not changed:
+                break
+        return term
+
+    world.failed_at = failed_at
+    formula = bind_callers(substitute(formula, "delegate", delegate), True)
     formula = assume_conjuncts(formula)
-    world.effective = assume_conjuncts(origin_inline(substitute(world.effective, "delegate", delegate)))
+    effective = substitute(world.effective, "delegate", delegate)
+    world.effective = assume_conjuncts(bind_callers(effective, False))
     world.callee = callee
     world.action_open = action_open
     world.credited = credited

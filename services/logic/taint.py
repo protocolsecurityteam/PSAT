@@ -75,6 +75,13 @@ def split(formula: Term) -> tuple[tuple[Term, ...], tuple[Term, ...]]:
     return tuple(c for c in parts if tainted(c)), tuple(c for c in parts if not tainted(c))
 
 
+def unknown_gap(label: Any) -> str:
+    """An unknown's label as a gap: ``unknown:<label>``, but a call ``verdict`` kept from being read as the same for
+    everyone by its own name (``origin:<sig>``, ``unfollowed:<sig>``, ``read_failed:call_target:<sig>``)."""
+    text = str(label)
+    return text if text.startswith(("origin:", "unfollowed:", "read_failed:")) else f"unknown:{text}"
+
+
 def unknown_labels(t: Term) -> list[str]:
     """What the lowering couldn't express in ``t``, by its labels."""
-    return [f"unknown:{u[1]}" for u in subterms(t, "unknown")] + [f"unknown:{o[1]}" for o in subterms(t, "opaque")]
+    return [unknown_gap(u[1]) for u in subterms(t, "unknown")] + [f"unknown:{o[1]}" for o in subterms(t, "opaque")]

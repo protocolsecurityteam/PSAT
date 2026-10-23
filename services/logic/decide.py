@@ -31,7 +31,7 @@ from typing import Any, cast
 from eth_abi.abi import decode, encode
 from eth_utils.crypto import keccak
 
-from .taint import singles_out_nobody, split, tainted, unknown_labels
+from .taint import singles_out_nobody, split, tainted, unknown_gap, unknown_labels
 from .terms import (
     CALLDATA,
     FALSE,
@@ -1038,6 +1038,9 @@ class World:
     dumped: dict = field(default_factory=dict)
     # Whose positions the function's effects touch (``scope.Scope``), when known.
     scope: Any = None
+    # The chain's failed reads before this function began (``verdict`` reads callees' addresses before ``decide``):
+    # a decision that met a later one sets nothing aside.
+    failed_at: int | None = None
 
 
 class Evaluator:
@@ -1109,7 +1112,10 @@ class Evaluator:
         if kind == "const":
             return t[1]
         if kind in ("caller", "origin"):
-            return self.identity["caller"]
+            who = self.identity["caller"]
+            if kind == "origin" and self._coded(who):
+                return UNK  # a contract calling: the origin is some account behind it, never the contract itself
+            return who
         if kind == "signer":
             return self.identity["signer"]
         if kind == "this":
@@ -1204,6 +1210,10 @@ class Evaluator:
                 a, b = self.eval(t[2]), self.eval(t[3])
                 return a if a == b and a is not UNK else UNK
             return self.eval(t[2] if c else t[3])
+        if kind == "cmp" and t[1] == "eq":
+            for side, other in ((t[2], t[3]), (t[3], t[2])):
+                if _strip_conv(side)[0] == "origin" and self._coded(self.eval(other)):
+                    return False  # a transaction's origin is an account with no code
         if kind == "cmp":
             value = self._compare(t[1], self.eval(t[2]), self.eval(t[3]))
             if value is UNK and t[1] == "eq":
@@ -1250,6 +1260,15 @@ class Evaluator:
             bits = {"address": 160, "uint160": 160, "uint8": 8, "uint32": 32, "uint64": 64, "uint128": 128}.get(t[1])
             return v % 2**bits if bits else v
         return UNK
+
+    def _coded(self, value: Any) -> bool:
+        """Whether ``value`` is this contract or an address with code: never a transaction's origin."""
+        if not isinstance(value, int) or isinstance(value, bool) or value in _STRANGERS:
+            return False
+        if value % 2**160 == self.world.this:
+            return True
+        code = self.world.chain.code(value % 2**160)
+        return isinstance(code, bytes) and bool(code)
 
     def _compare(self, op: str, a: Any, b: Any) -> Any:
         for x, y in ((a, b), (b, a)):
@@ -1758,7 +1777,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     than a reason not to say who. Such conjuncts are dropped only when the whole formula left the answer open, and
     only those that read unknown for what the lowering couldn't express: one false now (a pause) stays and decides
     as before, and one a failed read or the budget left open keeps blocking."""
-    failed = world.chain.failed
+    failed = world.chain.failed if world.failed_at is None else world.failed_at
     verdict = _decide(formula, world, coverage)
     core, free = split(formula)
     if verdict.openness == "not_determined":
@@ -1785,7 +1804,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if verdict.openness == "not_determined":
         tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
         tainted_unknowns += [o for c in core for o in subterms(c, "opaque") if contains(o, IDENTITY_KINDS)]
-        verdict = replace(verdict, gaps=verdict.gaps + tuple(f"unknown:{u[1]}" for u in tainted_unknowns))
+        verdict = replace(verdict, gaps=verdict.gaps + tuple(unknown_gap(u[1]) for u in tainted_unknowns))
     chosen = tuple(("arguments", name) for name in _quantified(core))
     return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
 
@@ -2340,7 +2359,7 @@ def _open_parts(atom: Term, probe: "Evaluator", depth: int = 0) -> list[str]:
     callee isn't followed and whose arguments the caller picks (``call:...`` when the caller's identity reaches it,
     see ``call_gap``, else ``unfollowed:<signature>``), a read the chain didn't answer (``read_failed:<what>``). A
     followed callee left unknown is looked into the same way, a few contracts deep (past that, ``depth:<sig>``)."""
-    out = [f"unknown:{u[1]}" for u in subterms(atom, "unknown")]
+    out = [unknown_gap(u[1]) for u in subterms(atom, "unknown")]
     out += [f"unknown:{o[1]}" for o in subterms(atom, "opaque")]
     for call in subterms(atom, "call"):
         address = probe.eval(call[1])

@@ -112,7 +112,7 @@ def test_an_unfollowed_callee_is_never_taken_free_of_the_origin(anvil):  # noqa:
     for name, signature in (("viaOrigin", "ok(uint256)"), ("viaOriginOr", "okOr(uint256)")):
         verdict = _verdict(d, name, followed=False)
         assert verdict.openness == "not_determined"
-        assert f"unfollowed:{signature}" in verdict.gaps
+        assert f"origin:{signature}" in verdict.gaps  # its runtime code has an ORIGIN opcode
 
 
 def test_open_on_an_unsettled_condition_is_never_plain_open(anvil):  # noqa: F811
