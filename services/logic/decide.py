@@ -1843,9 +1843,11 @@ def _readings(parts: tuple[Term, ...]) -> tuple[str, ...]:
 
 def _business(parts: tuple[Term, ...]) -> tuple[tuple[str, str], ...]:
     """Conjuncts that hold for every caller alike, as business conditions: each as read, then each unknown in it."""
+    from .report import render
+
     out: list[tuple[str, str]] = []
-    for reading, part in zip(_readings(parts), parts):
-        out.append(("business", reading))
+    for part in parts:
+        out.append(("business", render(part)))
         out.extend(("business", label) for label in unknown_labels(part))
     return tuple(dict.fromkeys(out))
 
