@@ -20,7 +20,7 @@ address has run (``verdict.every``), the history read whole.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .terms import (
@@ -39,6 +39,7 @@ from .terms import (
 _BINDINGS = 64  # argument bindings kept per member; past it, "any" (bindings only steer the search)
 _DEPTH = 3  # callees followed into, for a check handed the caller
 _WALK_STEPS = 256  # entries followed per linked list kept in a lookup; the walk only names likely members
+_STORED_ROWS = 256  # key tuples whose stored address is read to list ``caller == E[k...]``; past it, left unlisted
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ class Who:
     why: frozenset = frozenset()
     # The hints as each source named them: the fewer a source names, the likelier its addresses.
     groups: frozenset = frozenset()
+    # Hints with the argument bindings each was found under, as (address, frozenset of (argument, value)).
+    hinted: frozenset = frozenset()
 
     @property
     def finite(self) -> bool:
@@ -66,9 +69,15 @@ ANYONE = Who(None)
 NOBODY = Who({})
 
 
-def _anyone(reason: str, hints: Any = frozenset()) -> Who:
+def _anyone(reason: str, hints: Any = frozenset(), hinted: frozenset = frozenset()) -> Who:
     hints = frozenset(hints)
-    return Who(None, why=frozenset({reason}), hints=hints, groups=frozenset({hints}) if hints else frozenset())
+    groups = frozenset({hints}) if hints else frozenset()
+    return Who(None, why=frozenset({reason}), hints=hints, groups=groups, hinted=hinted)
+
+
+def _hinted(members: dict) -> frozenset:
+    """The bindings of a list's members, as ``Who.hinted`` keeps them."""
+    return frozenset((m % 2**160, frozenset(b.items())) for m, bound in members.items() for b in bound if b)
 
 
 def _bindings(items: list[dict]) -> tuple[dict, ...]:
@@ -84,7 +93,9 @@ def _bindings(items: list[dict]) -> tuple[dict, ...]:
 def _meet(a: Who, b: Who) -> Who:
     sources = a.sources | b.sources
     if a.members is None and b.members is None:
-        return Who(None, a.excluded | b.excluded, sources, a.hints | b.hints, a.why | b.why, a.groups | b.groups)
+        excluded = a.excluded | b.excluded
+        hinted = a.hinted | b.hinted
+        return Who(None, excluded, sources, a.hints | b.hints, a.why | b.why, a.groups | b.groups, hinted)
     if a.members is None:
         a, b = b, a
     if b.members is None:
@@ -103,14 +114,17 @@ def _meet(a: Who, b: Who) -> Who:
 def _join(a: Who, b: Who) -> Who:
     sources = a.sources | b.sources
     if a.members is None and b.members is None:
-        return Who(None, a.excluded & b.excluded, sources, a.hints | b.hints, a.why | b.why, a.groups | b.groups)
+        excluded = a.excluded & b.excluded
+        hinted = a.hinted | b.hinted
+        return Who(None, excluded, sources, a.hints | b.hints, a.why | b.why, a.groups | b.groups, hinted)
     if a.members is None:
         a, b = b, a
     if b.members is None:
         # A list joining everyone: everyone, the list's members kept as likely ones.
         listed = frozenset(a.members)
         groups = b.groups | {listed} if listed else b.groups
-        return Who(None, b.excluded - a.members.keys(), sources, b.hints | listed, b.why, groups)
+        hinted = b.hinted | _hinted(a.members)
+        return Who(None, b.excluded - a.members.keys(), sources, b.hints | listed, b.why, groups, hinted)
     out = dict(a.members)
     for k, v in b.members.items():
         out[k] = _bindings([*out.get(k, ()), *v]) if k in out else v
@@ -283,12 +297,12 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
         return out
 
     def _unproven(members: Any, reason: str) -> Who:
-        """Everyone, as far as is shown, with ``members`` the likely ones."""
-        found = _anyone(reason, {m % 2**160 for m in members})
+        """Everyone, as far as is shown, with ``members`` the likely ones (and the bindings each was found under,
+        when ``members`` maps them)."""
+        hinted = _hinted(members) if isinstance(members, dict) else frozenset()
+        found = _anyone(reason, {m % 2**160 for m in members}, hinted)
         if sampled[0]:
-            found = Who(
-                None, found.excluded, found.sources, found.hints, found.why | {"history_truncated"}, found.groups
-            )
+            found = replace(found, why=found.why | {"history_truncated"})
         return found
 
     def _walked(x: Term, keys: list) -> set[int]:
@@ -335,6 +349,10 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
                     for k, value in latest.items():
                         members.setdefault(value % 2**160, []).append({chosen[0]: k})
                     return Who({w: _bindings(b) for w, b in members.items()}, sources=frozenset({("lookup", var)}))
+        if positive and stripped[0] == "load" and not contains(stripped, IDENTITY_KINDS):
+            held = stored(stripped)
+            if held is not None:
+                return held
         if stripped[0] == "load" and not contains(stripped, IDENTITY_KINDS):
             # A stored value at keys the caller picks, its every value not shown: whoever its writers' logs name.
             from .decide import _named_lookup, _unlisted
@@ -342,6 +360,62 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
             found, _ = _unlisted(world, stripped[1], _named_lookup(stripped[2], stripped[3])[0])
             return _unproven({**{m % 2**160: ({},) for m in found}, **_named_members()}, "chosen_identity")
         return _unproven(_named_members(), "chosen_identity")  # compared with what the caller sends (``from``)
+
+    def stored(load: Term) -> Who | None:
+        """``caller == E[k...]`` with some keys the caller's to choose and the rest fixed: every address stored at
+        any key tuple an entry was ever set at, each with the keys it is stored at. The chosen keys are quantified
+        away rather than guessed: listed whole when every write logs its keys and the history was read whole, else
+        what the logged writes name, unproven to be all."""
+        from .decide import ANY_KEY, _caller_chosen, _named_lookup, _unlisted
+
+        var, path = _named_lookup(load[2], load[3])
+        keys = [step for kind, step in path if kind == "k"]
+        chosen = [k for k in keys if k[0] == "arg" and _caller_chosen(k) and _one_word(k)]
+        if not chosen or not isinstance(probe.eval(load[1]), int):
+            return None
+        fixed: dict[int, int] = {}
+        for i, k in enumerate(keys):
+            if k in chosen:
+                continue
+            value = probe.eval(k) if not contains(k, _CHOSEN) else None
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+            fixed[i] = value % 2**256
+        fields = tuple(step for kind, step in path if kind == "f")
+        for whole in (True, False):
+            rows = world.entries(load[1], var, len(keys), fields, whole)
+            if rows is None:
+                continue
+            if len(rows) > _STORED_ROWS:
+                return None  # read one by one, a crowd's entries would spend the reads the decision needs
+            cells = []
+            complete = whole
+            for row in rows:
+                if any(w is ANY_KEY or isinstance(w, tuple) for w in row):
+                    complete = False  # a key the history leaves unread: whose entry it is goes unread
+                    continue
+                if any(row[i] != v for i, v in fixed.items()):
+                    continue
+                binding = {k: row[i] for i, k in enumerate(keys) if k in chosen}
+                at = replace_terms(load, {k: mk("const", w, k[2]) for k, w in binding.items()})
+                cells.append((binding, at))
+            anyone = {"caller": FRESH, "signer": FRESH}
+            world.chain.gather(lambda: [Evaluator(world, anyone).eval(at) for _, at in cells])
+            reader = Evaluator(world, anyone)  # reads deferred while gathering were remembered as unknown
+            found: dict[int, list[dict]] = {}
+            for binding, at in cells:
+                value = reader.eval(at)
+                if not isinstance(value, int) or isinstance(value, bool):
+                    complete = False
+                    continue
+                if value % 2**160:
+                    found.setdefault(value % 2**160, []).append(binding)
+            members = {w: _bindings(b) for w, b in found.items()}
+            if complete:
+                return Who(members, sources=frozenset({("lookup", var)}))
+            reason = _unlisted(world, load[1], var)[1] if not whole else f"read_failed:storage:{var}"
+            return _unproven({**members, **{m: b for m, b in _named_members().items() if m not in members}}, reason)
+        return None
 
     def entries_of(t: Term, positive: bool) -> Who | None:
         """For a condition whose every mention of the caller keys an entry (as the key, or a part hashed into it):

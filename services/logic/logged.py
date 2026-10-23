@@ -303,23 +303,26 @@ def written_by(contract: Any, var: Any, fields: tuple) -> list[dict] | None:
     return specs
 
 
-def keyed_by(contract: Any, var: Any, keys: int, fields: tuple, constructors: bool = True) -> list[dict] | None:
+def keyed_by(
+    contract: Any, var: Any, keys: int, fields: tuple, constructors: bool = True, whole: bool = True
+) -> list[dict] | None:
     """Where the events that log ``var``'s writes (read under ``keys`` keys, at ``fields``) name each key, so that
     their history lists every key tuple an entry was ever set at: per event, its signature, indexed positions and
     the place of each key (``("at", position)``, or ``("is", value)`` for a key the write fixes, a role constant).
     ``None`` unless every write that can set an entry has such an event on its path. An emission that comes with
-    no such write lists a tuple never set: one more to read, never one missed."""
+    no such write lists a tuple never set: one more to read, never one missed. ``whole=False``: the events of the
+    writes that do log their keys, however many don't, for keys to try only."""
     from .decide import _named_lookup
     from .verdict import _spec_name
 
     answers = contract.__dict__.setdefault("_psat_logged_answers", {})
-    query = ("keyed_by", repr(var), keys, tuple(fields), constructors)
+    query = ("keyed_by", repr(var), keys, tuple(fields), constructors, whole)
     if query in answers:
         return answers[query]
     answers[query] = None
     entries = _entries(contract)
     # Asked as for a hashed key, which counts only through its parts; a plain key the same either way.
-    if entries is None or logged(contract, var, keys, fields, True, constructors=constructors) is None:
+    if entries is None or (whole and logged(contract, var, keys, fields, True, constructors=constructors) is None):
         return None
     declared = _declarations(contract)
     places: dict[tuple, set] = {}
@@ -341,6 +344,8 @@ def keyed_by(contract: Any, var: Any, keys: int, fields: tuple, constructors: bo
             if sets == FALSE:
                 continue
             if len(written) != keys:
+                if not whole:
+                    continue
                 return None
             events = set()
             for mark, made in store.items():
@@ -383,7 +388,7 @@ def keyed_by(contract: Any, var: Any, keys: int, fields: tuple, constructors: bo
     if not covered:
         answers[query] = []
         return []  # never set: no entry to list
-    if any(not (c & usable) for c in covered):
+    if whole and any(not (c & usable) for c in covered):
         return None
     from slither.utils.type import convert_type_for_solidity_signature_to_string
 

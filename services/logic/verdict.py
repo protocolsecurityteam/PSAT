@@ -1389,18 +1389,23 @@ def function_verdict(
             return events is not None
         return every(target, logged, _spec_name(var), 1, tuple(fields), True) is not None
 
-    def entries(contract_term: Term, var: Any, keys: int, fields: tuple) -> list[tuple[int, ...]] | None:
+    def entries(
+        contract_term: Term, var: Any, keys: int, fields: tuple, whole: bool = True
+    ) -> list[tuple[int, ...]] | None:
         """Every key tuple an entry of ``var`` (read under ``keys`` keys, at ``fields``) was ever set at, read off
         the events that log each write's keys, when every such write does and that history was read whole: a list
-        of all that can be set there, some since cleared. ``None`` otherwise."""
+        of all that can be set there, some since cleared. ``None`` otherwise. ``whole=False``: the tuples the
+        running code's logged writes name, as far as the history was read: keys to try, never all of them."""
         var = _spec_name(var)
         found = contract_at(contract_term)
         if found is None:
             return None
         target, target_contract = found
-        specs = every(target, keyed_by, var, keys, tuple(fields))
+        specs = every(target, keyed_by, var, keys, tuple(fields)) if whole else None
+        if not whole:
+            specs = keyed_by(target_contract, var, keys, tuple(fields), whole=False)
         made: frozenset = frozenset()
-        if specs is None and chain.debug is not None:
+        if specs is None and chain.debug is not None and whole:
             # Every write logged but the constructor's, whose keys the creating transaction accounts for: under more
             # than one key, each such address may be at any of them, the others unread.
             specs = every(target, keyed_by, var, keys, tuple(fields), constructors=False)
@@ -1415,7 +1420,7 @@ def function_verdict(
         }
         topics = frozenset("0x" + format(t, "064x") for t in by_topic)
         logs = chain.logs(target, topics)
-        if chain.cut(target, topics):
+        if whole and chain.cut(target, topics):
             return None
         out: set[tuple[int, ...]] = set()
         for log_topics, data in logs:
@@ -1426,6 +1431,8 @@ def function_verdict(
             args = _event_args({**spec, "value_position": max(at, default=0)}, log_topics, data)
             row = [_read_place(kind, place, args) for kind, place in spec["keys"]]
             if any(word is None for word in row):
+                if not whole:
+                    continue
                 return None  # a log shorter than its declaration: not read as listed
             out.add(tuple(row))
         out |= {tuple(k if i == at else ANY_KEY for i in range(keys)) for k in made for at in range(keys)}

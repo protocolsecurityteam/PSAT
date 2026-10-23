@@ -970,7 +970,7 @@ class World:
     recorded: dict | None = None  # per formula: argument -> keys its mapping's writers recorded
     # Every key tuple an entry of (contract, variable, key count, fields) was ever set at, from the events that log
     # each write's keys; ``None`` when not known whole (see ``verdict.entries``).
-    entries: Callable[[Term, Any, int, tuple], list[tuple[int, ...]] | None] = lambda contract, var, keys, fields: None
+    entries: Callable[..., list[tuple[int, ...]] | None] = lambda contract, var, keys, fields, whole=True: None
     latched: frozenset = frozenset()  # ``when`` conditions the code can never flip: read as they are
     cut: set = field(default_factory=set)  # addresses of lookups whose writer histories were read partial
     # ``coverage`` of a subformula (see ``_decisive``).
@@ -1766,7 +1766,26 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
         tainted_unknowns += [o for c in core for o in subterms(c, "opaque") if contains(o, IDENTITY_KINDS)]
         verdict = replace(verdict, gaps=verdict.gaps + tuple(f"unknown:{u[1]}" for u in tainted_unknowns))
-    return replace(verdict, core=_readings(core), condition_terms=_business(free))
+    chosen = tuple(("arguments", name) for name in _quantified(core))
+    return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
+
+
+def _quantified(core: tuple[Term, ...]) -> list[str]:
+    """Arguments the caller picks that key an identity lookup (``ops[id].manager == msg.sender``,
+    ``approved[id][msg.sender]``): who may call is whoever is stored there for some value of them, a condition on
+    the arguments rather than on who calls."""
+    out: list[str] = []
+    for atom in sorted({a for c in core for a in _identity_atoms(c)}, key=stable):
+        loads = [x for x in subterms(atom, "load") if contains(x, IDENTITY_KINDS)]
+        if atom[0] == "cmp" and atom[1] == "eq":
+            loads += [
+                _strip_conv(other)
+                for side, other in ((atom[2], atom[3]), (atom[3], atom[2]))
+                if _is_identity(side) and _strip_conv(other)[0] == "load" and not contains(other, IDENTITY_KINDS)
+            ]
+        for load in loads:
+            out += [k[1] for k in _chosen_steps(_named_lookup(load[2], load[3])[1]) if k[0] == "arg"]
+    return list(dict.fromkeys(out))
 
 
 def _opaque_conditions(free: tuple[Term, ...], world: World) -> list[Term]:
@@ -3262,7 +3281,10 @@ def _built(formula: Term, world: World) -> tuple[set[int], bool, list[str]]:
         for c in group:
             fewest[c] = min(fewest.get(c, len(group)), len(group))
     world.ranking = {c: (c not in world.named, fewest.get(c, len(members)), c) for c in members}
-    world.hints = dict(who.members) if who.finite else {}
+    hinted: dict[int, list[dict]] = {}
+    for member, binding in sorted(who.hinted, key=repr) if not who.finite else ():
+        hinted.setdefault(member, []).append(dict(binding))
+    world.hints = dict(who.members) if who.finite else {m: tuple(b) for m, b in hinted.items()}
     return members, proven, why
 
 
