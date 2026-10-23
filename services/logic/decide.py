@@ -987,6 +987,9 @@ class World:
     cover: Callable[[Term], Any] | None = None
     # A call's callee lowered in its caller's terms: (returns-condition, return values), or None when not lowerable.
     callee: Callable[..., tuple[Term, tuple] | None] = lambda call, address=None: None
+    # Whether a call made by followed code answers the same whoever makes it (``verdict.asker_free``): then it is
+    # asked of the chain as this contract, an answer any asker shares.
+    asker_free: Callable[[Term], bool] = lambda call: False
     # Whether a state-changing call its callee refuses for the caller (as that condition, in caller terms) fails only
     # on the caller's own entries there, which open code lets the caller bring about (see ``verdict.action_open``).
     action_open: Callable[[Term, Term], bool | frozenset] = lambda call, refused: True
@@ -1433,7 +1436,7 @@ class Evaluator:
 
     def sender(self, call: Term) -> Any:
         """Who makes ``call``: this contract, or the callee whose own code makes it (``Lowerer._from_here``)."""
-        if len(call) <= 5:
+        if len(call) <= 5 or self.world.asker_free(call):
             return self.world.this
         who = self.eval(call[5])
         return who % 2**160 if isinstance(who, int) and not isinstance(who, bool) else UNK

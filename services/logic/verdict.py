@@ -1696,6 +1696,33 @@ def function_verdict(
                         lowered[key] = (FALSE, ())  # no such function and no fallback: the call reverts
         return lowered[key]
 
+    asked: dict[tuple, bool] = {}
+
+    def asker_free(call: Term) -> bool:
+        """Whether what a call made by followed code answers can't depend on who makes it: the callee's own code,
+        lowered with a stand-in for its ``msg.sender``, never shows the stand-in, reads nothing it couldn't express,
+        and neither it nor anything it asks reads ``tx.origin`` (``caller_bound``). Then this contract asking gets the
+        same answer as the callee that makes the call would."""
+        address = address_of(call[1])
+        if len(call) <= 5 or not isinstance(address, int) or isinstance(address, bool):
+            return len(call) <= 5
+        key = (call, address % 2**160)
+        if key not in asked:
+            asked[key] = False
+            contract_ = contracts.get(address % 2**160)
+            target = contract_.get_function_from_signature(call[2]) if contract_ is not None else None
+            if target is not None and target.entry_point is not None and caller_bound(call) is None:
+                stand_in = mk("arg", "frame:asker", "address")
+                pc, ret = Lowerer(contract_, sender=stand_in, this=call[1]).called(target, list(call[3]), call[4])
+                parts = [p for p in (pc, *ret) if isinstance(p, Term)]
+                asked[key] = not any(
+                    stand_in in subterms(p, "arg") or contains(p, frozenset({"unknown", "opaque", "delegate"}))
+                    for p in parts
+                )
+            elif contract_ is not None and (target is None or target.entry_point is None):
+                asked[key] = _getter(contract_, call) is not None  # a public variable's getter reads only storage
+        return asked[key]
+
     def lower_call(call: Term) -> Term | None:
         found = callee(call)
         if found is None:
@@ -2011,6 +2038,7 @@ def function_verdict(
     effective = substitute(world.effective, "delegate", delegate)
     world.effective = assume_conjuncts(bind_callers(effective, False))
     world.callee = callee
+    world.asker_free = asker_free
     world.action_open = action_open
     world.credited = credited
     world.writer_topics = writer_topics
