@@ -31,6 +31,7 @@ from typing import Any, cast
 from eth_abi.abi import decode, encode
 from eth_utils.crypto import keccak
 
+from .taint import singles_out_nobody, split, unknown_labels
 from .terms import (
     CALLDATA,
     FALSE,
@@ -1724,6 +1725,11 @@ class Verdict:
     # how many the builder's list names when it is shown whole (``None`` otherwise).
     gate: tuple[str, ...] = ()
     members: int | None = None
+    # The success condition split by who calls (``taint.py``): what depends on the caller (``core``), as read, and
+    # what holds for every caller alike, as (level, reading): ``business`` for such a conjunct, with each unknown in
+    # it by its label (``unknown:<label>``). ``conditions`` says which holders passed only with them freed.
+    core: tuple[str, ...] = ()
+    condition_terms: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         # Several parts can name the same reason (one callee asked three times): each once, in order.
@@ -1735,6 +1741,28 @@ class Verdict:
 
 
 def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
+    """``_decide``, with the formula's core and the conditions every caller faces alike reported beside it."""
+    verdict = _decide(formula, world, coverage)
+    core, free = split(formula)
+    return replace(verdict, core=_readings(core), condition_terms=_business(free))
+
+
+def _readings(parts: tuple[Term, ...]) -> tuple[str, ...]:
+    from .report import render
+
+    return tuple(dict.fromkeys(render(c) for c in parts))
+
+
+def _business(parts: tuple[Term, ...]) -> tuple[tuple[str, str], ...]:
+    """Conjuncts that hold for every caller alike, as business conditions: each as read, then each unknown in it."""
+    out: list[tuple[str, str]] = []
+    for reading, part in zip(_readings(parts), parts):
+        out.append(("business", reading))
+        out.extend(("business", label) for label in unknown_labels(part))
+    return tuple(dict.fromkeys(out))
+
+
+def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     """Who and whether anyone, separating the ``when`` conditions (pauses, deadlines, flags) from who holds power.
 
     Principals are identities singled out: in some state of the ``when`` conditions they pass where an unconfigured
@@ -4021,12 +4049,6 @@ def _chosen_keys(load: Term) -> bool:
     return any(_caller_chosen(x) for k in keys for kind in _FREE_KINDS for x in subterms(k, kind)) and not any(
         contains(k, IDENTITY_KINDS) for k in keys
     )
-
-
-def singles_out_nobody(unknown_term: Term) -> bool:
-    """An unknown the lowering marked as the same for every caller (``loop:N:anyone``, the same for every argument
-    too; ``loop:N:nobody``, steered by the arguments alone)."""
-    return isinstance(unknown_term[1], str) and unknown_term[1].endswith((":anyone", ":nobody"))
 
 
 def _named_lookup(var: Any, path: tuple) -> tuple[Any, tuple]:
