@@ -36,8 +36,10 @@ from .terms import (
     CALLDATA,
     FALSE,
     IDENTITY_KINDS,
+    TRUE,
     Term,
     cheapest_first,
+    conjuncts,
     contains,
     mk,
     mk_and,
@@ -1741,10 +1743,65 @@ class Verdict:
 
 
 def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
-    """``_decide``, with the formula's core and the conditions every caller faces alike reported beside it."""
+    """``_decide``, with the formula's core and the conditions every caller faces alike reported beside it.
+
+    Who may call is decided on the core: a conjunct no caller's identity reaches is the same for everyone, so where
+    the engine can't settle it (an unknown, a callee whose code isn't followed), it is a condition on the call rather
+    than a reason not to say who. Such conjuncts are dropped only when the whole formula left the answer open, and
+    only those that read unknown for what the lowering couldn't express: one false now (a pause) stays and decides
+    as before, and one a failed read or the budget left open keeps blocking."""
     verdict = _decide(formula, world, coverage)
     core, free = split(formula)
+    if verdict.openness == "not_determined":
+        opaque = _opaque_conditions(free, world)
+        if opaque:
+            verdict = _on_conditions(formula, world, coverage, opaque) or verdict
+    if verdict.openness == "not_determined":
+        tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
+        tainted_unknowns += [o for c in core for o in subterms(c, "opaque") if contains(o, IDENTITY_KINDS)]
+        verdict = replace(verdict, gaps=verdict.gaps + tuple(f"unknown:{u[1]}" for u in tainted_unknowns))
     return replace(verdict, core=_readings(core), condition_terms=_business(free))
+
+
+def _opaque_conditions(free: tuple[Term, ...], world: World) -> list[Term]:
+    """The conjuncts every caller faces alike that read unknown now only for what the lowering couldn't express or
+    a callee not followed: no read failed in them and no budget ran out."""
+    if world.exhausted():
+        return []
+    probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
+    out = []
+    for part in free:
+        if probe.truth(part) is not UNK:
+            continue
+        reasons = _open_parts(part, probe)
+        if reasons and all(r.startswith(("unknown:", "call:")) for r in reasons):
+            out.append(part)
+    return out
+
+
+def _on_conditions(formula: Term, world: World, coverage: Coverage, opaque: list[Term]) -> Verdict | None:
+    """The verdict on ``formula`` without the ``opaque`` conjuncts, as holding only on them: whoever it lists is
+    shown to pass with those conditions freed (``conditions``), and an open answer names no witness, since no call
+    was shown to go through. ``None`` when that too is left open."""
+    reduced = mk_and([c for c in conjuncts(formula) if c not in opaque])
+    effective = world.effective
+    if effective is not None:
+        world.effective = replace_terms(effective, {c: TRUE for c in opaque})
+    try:
+        again = _decide(reduced, world, world.cover(reduced) if world.cover is not None else coverage)
+    finally:
+        world.effective = effective
+    if again.openness == "not_determined":
+        return None
+    shown = again.principals | again.signers | set(again.conditions)
+    freed = {who: again.conditions.get(who, "business") for who in shown}
+    return replace(
+        again,
+        principals=frozenset(),
+        signers=frozenset(),
+        conditions=freed,
+        witnesses={} if again.openness == "open" else again.witnesses,
+    )
 
 
 def _readings(parts: tuple[Term, ...]) -> tuple[str, ...]:
@@ -1815,7 +1872,12 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             acts = _acts_once_allowed(formula, world, anyone, set(), states, fresh)
             if acts is not True:
                 # Allowed only where it does nothing (disabling what is already disabled): no power to anyone.
-                gaps = ["inert_when_allowed"] if acts is False else ["effect_unknown"]
+                if not any(f is True for f in fresh):
+                    gaps = [
+                        g for st, f in zip(states, fresh) if f is UNK for g in _unsettled(formula, world, anyone, st)
+                    ]
+                else:
+                    gaps = ["inert_when_allowed"] if acts is False else ["effect_unknown"]
                 if acts is UNK and world.effective is not None:
                     gaps += _unsettled(world.effective, world, anyone, None)
                 return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps))
@@ -2233,8 +2295,14 @@ def _open_parts(atom: Term, probe: "Evaluator") -> list[str]:
         elif probe.call_input(call) is not None:
             if probe.eval(call) is UNK:
                 out.append(f"read_failed:call:{call[2]}")
-        elif probe.world.callee(call, address % 2**160) is None:
-            out.append(f"call:{call[2]}")
+        else:
+            lowered = probe.world.callee(call, address % 2**160)
+            if lowered is None:
+                out.append(f"call:{call[2]}")
+            elif probe.eval(call) is UNK:
+                out += [
+                    g for part in (lowered[0], *lowered[1]) if isinstance(part, tuple) for g in unknown_labels(part)
+                ]
     for load in subterms(atom, "load"):
         where = probe.storage_cell(load)
         if where is not None and probe.word(where[0], where[1]) is UNK:
