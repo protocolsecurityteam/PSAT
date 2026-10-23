@@ -1005,7 +1005,7 @@ class Lowerer:
                 _memory_word(st.mem, _small_const(args[0]))
                 or _packed_item(args[0], 32)
                 or (const(_FREE_MEMORY) if _small_const(args[0]) == 0x40 else None)
-                or mk("opaque", name, tuple(args))
+                or _lost_word(name, args)
             )
         elif (
             base == "byte"
@@ -1398,7 +1398,9 @@ class Lowerer:
                 "balance",
                 "msize",
             ):
-                return mk("opaque", f"{name}(uint256)" if name == "mload" else name, tuple(args))
+                if name == "mload":
+                    return _lost_word("mload(uint256)", args)
+                return mk("opaque", name, tuple(args))
             raise Unsupported(f"builtin {name}")
 
         for statement in statements:
@@ -1856,6 +1858,12 @@ def _view_call(target: Term, data: Term) -> Term | None:
     if not isinstance(signature, str) or "(" not in signature:
         return None
     return mk("call", target, signature, tuple(data[2][1:]), True)
+
+
+def _lost_word(name: str, args: Any) -> Term:
+    """A memory word read back where the lowering lost track of what was written (an ``mstore`` at an offset it
+    can't place): anything, the caller's address included, so an unknown it marks for no one rides along."""
+    return mk("opaque", name, (*args, unknown("memory")))
 
 
 def _extend(loc: tuple, step: tuple) -> tuple:
