@@ -68,7 +68,8 @@ def _role(who: int) -> int:
 
 
 class _Deployed(Chain):
-    """The hub's calls revert (``call_error`` a node's error instead); the admin list holds five entries, more than a loop over it is followed exactly."""
+    """The hub's calls revert (``call_error`` a node's error instead); the admin list holds five entries, more than a
+    loop over it is followed exactly."""
 
     def __init__(self, paused: bool = False, call_error: str = "execution reverted"):
         self.words = {0: HUB, 3: ADMIN | int(paused) << 160, 4: 5, **{_role(h): 1 for h in HOLDERS}}

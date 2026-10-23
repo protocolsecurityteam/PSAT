@@ -511,10 +511,10 @@ def _getter(contract: Any, call: Term) -> tuple[Term, tuple] | None:
 
 def _codeless(probe: Evaluator, call: Term) -> bool:
     """Whether a call's target has no code and never will: every call to it ends the same way, whatever anyone does
-    here. Only for a target fixed in the code (a constant, an immutable, this contract): one computed from storage, an
-    argument or another call may come to be an address with code, so "no code there now" is how the condition reads
-    now, never a latch."""
-    if call[0] != "call" or not _fixed_target(call[1]):
+    here. Only for an address no code can come to (``_permanent``): any other address with no code now, a constant
+    or an immutable included, may come to hold code (a contract created there later, at an address worked out in
+    advance), so "no code there now" is how the condition reads now, never a latch."""
+    if call[0] != "call" or not _permanent(probe, call[1]):
         return False
     target = probe.eval(call[1])
     if not isinstance(target, int) or isinstance(target, bool):
@@ -522,14 +522,35 @@ def _codeless(probe: Evaluator, call: Term) -> bool:
     return probe.world.chain.code(target % 2**160) == b""
 
 
+_PRECOMPILES = range(1, 0x12)  # 0x01-0x11: addresses the protocol reserves, where no contract is ever created
+
+
+def _permanent(probe: Evaluator, target: Term) -> bool:
+    """Whether whether code sits at an address term can never change: this contract, or a precompile the code
+    fixes (a constant), which no contract is ever created at."""
+    if _strip(target) == THIS:
+        return True
+    if not _fixed_target(target):
+        return False
+    value = probe.eval(target)
+    return isinstance(value, int) and not isinstance(value, bool) and value % 2**160 in _PRECOMPILES
+
+
+def _strip(term: Term) -> Term:
+    while term[0] == "conv":
+        term = term[2]
+    return term
+
+
 def _fixed_target(target: Term) -> bool:
-    """Whether an address term is fixed by the code itself: constants, immutables, this contract, and conversions."""
+    """Whether an address term is fixed by the code itself: constants, this contract, and conversions of them. Not an
+    immutable: whose it is (a callee's, at an address read from storage) and what it holds are set at deployment."""
     kind = target[0]
     if kind == "conv":
         return _fixed_target(target[2])
     if kind == "op":
         return all(_fixed_target(a) for a in target[2])
-    return kind in ("const", "immutable", "this", "constant")
+    return kind in ("const", "this", "constant")
 
 
 # Block fields that only grow; the others (base fee, coinbase, randomness) are anything in a later block.
@@ -576,6 +597,8 @@ def latched_atoms(formula: Term, world: World, contract: Any) -> frozenset:
         calls = {t if t[0] == "call" else t[1] for t in reads}
         if subterms(atom, "balance") or not all(_codeless(probe, call) for call in calls):
             continue  # another contract's answer, or ether: changeable from outside this code
+        if not all(_permanent(probe, t[1]) for kind in ("codesize", "codehash", "code") for t in subterms(atom, kind)):
+            continue  # code at an address code may yet be created at
         if _time_flips(world, atom, current, probe):
             continue  # a start not yet reached: time alone gets there
         loads = [*subterms(atom, "load"), *subterms(atom, "rawload")]

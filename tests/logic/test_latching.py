@@ -1,7 +1,9 @@
 """A ``when`` condition is read as it stands ("latched") only when nothing this contract's code writes can flip it, and
-a call into an address with no code only when that address is fixed by the code itself. A target read from storage
-(or a write around or within what a condition reads: a whole struct over the field it checks, an item pushed onto an
-array it reads whole) may change: never latched, so a closed condition is never "nobody, ever"."""
+"no code at an address" only where no code can ever come to be: this contract, or a precompile. A constant or an
+immutable with no code now may be where a contract is created later (an address worked out in advance), and a target
+read from storage (or a write around or within what a condition reads: a whole struct over the field it checks, an
+item pushed onto an array it reads whole) may change: never latched, so a closed condition is never "nobody, ever",
+and whoever passes once it opens is still named."""
 
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ contract Ping {
 
 contract C {
     struct Config { bool live; uint64 version; }
+    struct Route { address target; uint64 version; }
 
     address owner;
     Config config;
@@ -33,6 +36,7 @@ contract C {
     address constant NOWHERE = address(0xdead);
     address fixedAtDeploy;
     mapping(uint256 => bool) flags;
+    Route route;
 
     constructor() { owner = msg.sender; }
 
@@ -58,6 +62,15 @@ contract C {
     function flagged() external { require(msg.sender == owner); require(flags[0]); count += 1; }
     function pingedStored() external { require(msg.sender == owner); count += IPing(fixedAtDeploy).ping(); }
     function pingedNowhere() external { require(msg.sender == owner); count += IPing(NOWHERE).ping(); }
+    function codedNowhere() external { require(msg.sender == owner); require(NOWHERE.code.length > 0); count += 1; }
+    function setRoute(address t) external { require(msg.sender == owner); route = Route(t, 1); }
+    function pingedRoute() external { require(msg.sender == owner); count += IPing(route.target).ping(); }
+    // The identity precompile: no contract is ever created there.
+    function codedPrecompile() external {
+        require(msg.sender == owner);
+        require(address(4).code.length > 0);
+        count += 1;
+    }
 }
 """
 
@@ -97,10 +110,11 @@ def test_an_array_read_whole_and_pushed_onto_is_not_latched(anvil):  # noqa: F81
 
 def test_a_codeless_target_read_from_writable_storage_is_not_latched(anvil):  # noqa: F811
     # ``target`` is zero now (no code: every call reverts), but the owner can point it at code.
-    assert not _nobody_ever(_verdict(anvil, "pinged"))
+    assert _verdict(anvil, "pinged").principals == {OWNER}
     # A codeless item of a stored list likewise: the owner can add one with code.
-    verdict = _verdict(anvil, "pingedEach", setup=[("addTarget(address)", 0xBEEF)])
-    assert not _nobody_ever(verdict)
+    assert _verdict(anvil, "pingedEach", setup=[("addTarget(address)", 0xBEEF)]).principals == {OWNER}
+    # A field a whole struct write sets.
+    assert _verdict(anvil, "pingedRoute").principals == {OWNER}
 
 
 def test_a_codeless_target_in_storage_no_entry_point_writes_is_not_latched_either(anvil):  # noqa: F811
@@ -113,5 +127,31 @@ def test_a_flag_only_a_later_loop_iteration_sets_is_not_latched(anvil):  # noqa:
     assert not _nobody_ever(verdict)
 
 
-def test_a_codeless_target_fixed_in_the_code_stays_latched(anvil):  # noqa: F811
-    assert _nobody_ever(_verdict(anvil, "pingedNowhere"))  # a constant with no code: nobody, ever
+def test_a_codeless_constant_target_is_how_the_condition_reads_now(anvil):  # noqa: F811
+    # No code at a constant now: code may be created there later, and the owner passes then.
+    for name in ("pingedNowhere", "codedNowhere"):
+        verdict = _verdict(anvil, name)
+        assert not _nobody_ever(verdict), name
+        assert verdict.principals == {OWNER}, name
+
+
+def test_a_codeless_immutable_target_is_never_latched():
+    # Whose immutable it is (an inlined callee's, its address read from storage) and what it holds are set at
+    # deployment: an address with no code now is no more fixed than a constant.
+    from services.logic.decide import Chain, Evaluator, World
+    from services.logic.terms import THIS, mk
+    from services.logic.verdict import _codeless
+
+    class Codeless(Chain):
+        def code(self, address):
+            return b""
+
+    world = World(Codeless(lambda method, params: None, 1), 0xC0DE, 0, values={"gate": 0xBEEF})
+    probe = Evaluator(world, {"caller": 1, "signer": 1})
+    assert probe.eval(mk("immutable", THIS, "gate")) == 0xBEEF
+    assert not _codeless(probe, mk("call", mk("immutable", THIS, "gate"), "ping()", (), True))
+    assert _codeless(probe, mk("call", mk("const", 4, "address"), "ping()", (), True))  # a precompile
+
+
+def test_no_code_at_a_precompile_stays_latched(anvil):  # noqa: F811
+    assert _nobody_ever(_verdict(anvil, "codedPrecompile"))  # no contract is ever created there: nobody, ever

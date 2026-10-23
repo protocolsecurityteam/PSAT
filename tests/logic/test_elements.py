@@ -295,6 +295,18 @@ contract C {
         require(found);
         total += 1;
     }
+    // A later iteration decides, whoever calls: past the iterations followed, the loop may return or set the flag.
+    function laterReturn() external { require(_reaches(3)); total += 1; }
+    function _reaches(uint256 at) internal view returns (bool) {
+        for (uint256 i; i < members.length; i++) { if (i == at) return true; }
+        return false;
+    }
+    function laterBreak() external {
+        bool found;
+        for (uint256 i; i < members.length; i++) { if (i == 3) { found = true; break; } }
+        require(found);
+        total += 1;
+    }
     function viaDoWhile() external {
         bool ok;
         uint256 i;
@@ -364,12 +376,19 @@ def test_a_loop_over_an_empty_list_never_calls_and_the_admin_passes(anvil):  # n
         assert verdict.openness == "restricted" and verdict.principals == {int(ACCOUNT0, 16)}
 
 
-@pytest.mark.parametrize("name", ["viaReturn", "viaBreak", "viaDoWhile"])
+@pytest.mark.parametrize("name", ["viaDoWhile"])
 def test_a_member_past_the_iterations_followed_is_never_left_out_of_a_complete_list(anvil, name):  # noqa: F811
     verdict = _verdict(_deployed(anvil, sources=0, members=5), name)
     listed = set(verdict.principals) | set(verdict.conditions)
     assert not (verdict.complete and not set(MEMBERS) <= listed)
     assert set(MEMBERS[:3]) <= listed or verdict.openness == "not_determined"
+
+
+@pytest.mark.parametrize("name", ["laterReturn", "laterBreak"])
+def test_a_return_or_break_past_the_iterations_followed_is_never_dropped(anvil, name):  # noqa: F811
+    # Five members: the fourth iteration lets anyone through, never "nobody, ever".
+    verdict = _verdict(_deployed(anvil, sources=0, members=5), name)
+    assert not (verdict.openness == "restricted" and verdict.complete and not verdict.principals)
 
 
 def test_what_only_a_later_iteration_writes_is_never_taken_as_unwritten(anvil):  # noqa: F811
