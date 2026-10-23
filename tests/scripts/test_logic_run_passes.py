@@ -30,10 +30,11 @@ def test_a_row_turning_self_scoped_doesnt_hide_lost_holders(tmp_path, capsys):
     assert "scope None -> self, 1 replay-confirmed" in out
 
 
-def test_rows_self_scoped_in_both_runs_are_exempt(tmp_path, capsys):
+def test_rows_self_scoped_in_both_runs_are_exempt_only_when_both_skipped_enumerating(tmp_path, capsys):
     old = [_row(lego="restricted", lego_principals=[A], checks={A: True}, lego_scope="self")]
     new = [_row(lego="restricted", lego_principals=[], lego_scope="self")]
-    assert _run(tmp_path, old, new, capsys=capsys)[0] == 0
+    assert _run(tmp_path, old, new, capsys=capsys)[0] == 1
+    assert _run(tmp_path, old, new, "--scope-skip", capsys=capsys)[0] == 0
 
 
 def test_failing_reads_may_not_open_an_undetermined_row_or_change_a_complete_list(tmp_path, capsys):

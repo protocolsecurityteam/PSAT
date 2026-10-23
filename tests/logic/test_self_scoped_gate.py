@@ -1,11 +1,13 @@
-"""A self-scoped function still says who can pass: nobody, when the list of holders is shown empty; else its whole
-condition (not only the part about who calls) and how many the list names."""
+"""A self-scoped function, with enumeration skipping on, still says who can pass: nobody, when the list of holders is
+shown empty; else its whole condition (not only the part about who calls) and how many the list names. With
+skipping off (the default) its holders are enumerated as for any function, scope and gate reported beside them."""
 
 from __future__ import annotations
 
 import pytest
 from eth_utils import keccak
 
+from services.logic import decide
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
@@ -13,30 +15,36 @@ from tests.fuzz.authority import solc_path
 SOURCE = """
 pragma solidity 0.8.27;
 
-// Lido CSM's ``changeNodeOperatorRewardAddress``: an operator's manager names its reward address.
-contract Operators {
-    struct Op { address manager; address reward; bool active; }
-    address owner;
-    mapping(uint256 => Op) ops;
-    event ManagerSet(uint256 indexed id, address manager);
+// Allowlisted senders move their own balance, only to receivers an admin accepts.
+contract Gated {
+    address admin;
+    mapping(address => bool) allowed;
+    mapping(address => bool) accepts;
+    mapping(address => uint256) balances;
+    event Allowed(address indexed who);
 
-    function setManager(uint256 id, address manager) external {
-        require(msg.sender == owner);
-        ops[id].manager = manager;
-        ops[id].active = true;
-        emit ManagerSet(id, manager);
+    function allow(address who) external {
+        require(msg.sender == admin);
+        allowed[who] = true;
+        emit Allowed(who);
     }
 
-    function changeReward(uint256 id, address reward) external {
-        require(ops[id].active && ops[id].manager == msg.sender);
-        ops[id].reward = reward;
+    function accept(address who) external {
+        require(msg.sender == admin);
+        accepts[who] = true;
+    }
+
+    function send(address to, uint256 d) external {
+        require(allowed[msg.sender] && accepts[to]);
+        balances[msg.sender] -= d;
+        balances[to] += d;
     }
 }
 """
 
 AT = 0xA1 << 152
-MANAGER = 0xB1 << 152
-_SET = int.from_bytes(keccak(b"ManagerSet(uint256,address)"), "big")
+SENDER, RECEIVER = 0xB1 << 152, 0xB2 << 152
+_ALLOWED = int.from_bytes(keccak(b"Allowed(address)"), "big")
 
 
 def _slot(key: int, base: int) -> int:
@@ -44,14 +52,12 @@ def _slot(key: int, base: int) -> int:
 
 
 class _Deployed(Chain):
-    """``managers``: operator id -> manager, set (and logged) through ``setManager``."""
+    """``senders`` allowlisted (and logged); ``RECEIVER`` accepted."""
 
-    def __init__(self, managers: dict):
-        self.managers = managers
-        self.words = {}
-        for i, who in managers.items():
-            self.words[_slot(i, 1)] = who
-            self.words[_slot(i, 1) + 1] = 1 << 160  # ``active``, packed after ``reward``
+    def __init__(self, senders: list):
+        self.senders = senders
+        self.words = {_slot(who, 1): 1 for who in senders}
+        self.words[_slot(RECEIVER, 2)] = 1
         super().__init__(self._answer, 100, lambda calls: [self._safe(m, p) for m, p in calls])
 
     def _safe(self, method, params):
@@ -71,38 +77,47 @@ class _Deployed(Chain):
         return b"\x60" if address == AT else b""
 
     def logs(self, address, topics):
-        return [([_SET, i], [who]) for i, who in self.managers.items()] if address == AT else []
+        return [([_ALLOWED, who], []) for who in self.senders] if address == AT else []
 
 
 @pytest.fixture(scope="module")
-def operators(tmp_path_factory):
+def gated(tmp_path_factory):
     solc = solc_path("0.8.27")
     if solc is None:
         pytest.skip("solc 0.8.27 not installed")
     from slither import Slither
 
-    path = tmp_path_factory.mktemp("operators") / "O.sol"
+    path = tmp_path_factory.mktemp("gated") / "G.sol"
     path.write_text(SOURCE)
-    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Operators")
+    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Gated")
 
 
 def _verdict(contract, chain):
     from services.logic.terms import reset_terms
 
     reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "changeReward")
+    fn = next(f for f in contract.functions_entry_points if f.name == "send")
     verdict, _ = function_verdict(contract, fn, AT, chain, {AT: contract})
     return verdict
 
 
-def test_with_no_operator_ever_set_nobody_can_name_a_reward(operators):
-    verdict = _verdict(operators, _Deployed({}))
+def test_with_nobody_ever_allowlisted_nobody_can_send(gated, monkeypatch):
+    monkeypatch.setattr(decide, "SKIP_SELF_SCOPED", True)
+    verdict = _verdict(gated, _Deployed([]))
     assert verdict.scope == "self"
     assert verdict.openness == "restricted" and verdict.complete and not verdict.principals
 
 
-def test_the_gate_reported_is_the_whole_condition_with_the_count_of_holders(operators):
-    verdict = _verdict(operators, _Deployed({7: MANAGER}))
+def test_the_gate_reported_is_the_whole_condition_with_the_count_of_holders(gated, monkeypatch):
+    monkeypatch.setattr(decide, "SKIP_SELF_SCOPED", True)
+    verdict = _verdict(gated, _Deployed([SENDER]))
     assert verdict.scope == "self" and verdict.gaps == ("self_scoped",)
-    assert any("active" in g for g in verdict.gate) and any("caller" in g for g in verdict.gate)
-    assert verdict.members == 1
+    assert any("accepts" in g for g in verdict.gate) and any("caller" in g for g in verdict.gate)
+    assert verdict.members == 1 and not verdict.principals
+
+
+def test_by_default_a_self_scoped_function_is_still_enumerated(gated):
+    assert decide.SKIP_SELF_SCOPED is False
+    verdict = _verdict(gated, _Deployed([SENDER]))
+    assert verdict.scope == "self" and verdict.gate
+    assert "self_scoped" not in verdict.gaps and verdict.principals == {SENDER}

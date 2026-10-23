@@ -144,14 +144,20 @@ def _verdict(token, name, chain=None):
     return verdict
 
 
-def test_a_transfer_behind_an_allowlist_is_self_scoped_and_reports_its_gate(token):
-    chain = _Deployed()
-    verdict = _verdict(token, "transfer", chain)
+def test_a_transfer_behind_an_allowlist_is_self_scoped_its_holders_still_enumerated_by_default(token):
+    verdict = _verdict(token, "transfer")
     assert verdict.scope == "self"
     assert set(verdict.scope_writes) == {("own", "balances"), ("credit", "balances")}
-    assert verdict.openness == "restricted" and not verdict.complete
-    assert verdict.gaps == ("self_scoped",)
     assert any("allowed[caller]" in g for g in verdict.gate)
+    assert verdict.openness == "restricted" and verdict.complete and verdict.principals == set(ALLOWED)
+
+
+def test_with_skipping_on_a_self_scoped_transfer_reports_its_gate_instead_of_holders(token, monkeypatch):
+    from services.logic import decide
+
+    monkeypatch.setattr(decide, "SKIP_SELF_SCOPED", True)
+    verdict = _verdict(token, "transfer")
+    assert verdict.openness == "restricted" and not verdict.complete and verdict.gaps == ("self_scoped",)
     # Not asked about one by one; the allowlist's history still counts them.
     assert verdict.principals == frozenset() and verdict.members == len(ALLOWED)
 
@@ -179,7 +185,6 @@ def test_a_role_grant_is_shared_and_enumerated(token):
 def test_a_lock_set_and_reset_leaves_a_transfer_self_scoped(token):
     verdict = _verdict(token, "transferLocked")
     assert verdict.scope == "self" and ("unchanged", "locked") in verdict.scope_writes
-    assert verdict.gaps == ("self_scoped",)
 
 
 def test_approving_for_a_token_one_holds_or_operates_is_self_scoped(token):

@@ -24,6 +24,7 @@ from .decide import (
     World,
     coverage,
     decide,
+    gate_of,
 )
 from .decide import _size as _size_of
 from .immutables import immutable_offsets, immutable_value
@@ -1786,4 +1787,5 @@ def function_verdict(
     world.prior = lambda term: after_own_call(term, world, contracts.get(address, contract))
     world.scope = classify(lowerer.exits, lowerer.lost, function, contract_facts(contract))
     verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))
-    return replace(verdict, scope=world.scope.kind, scope_writes=world.scope.writes), formula
+    gate = verdict.gate or (gate_of(formula) if world.scope.kind == "self" else ())
+    return replace(verdict, scope=world.scope.kind, scope_writes=world.scope.writes, gate=gate), formula

@@ -6,9 +6,11 @@ any check fails (0 otherwise). Rows are matched by (corpus, address, function, c
     evidence, so no row may gain confidence from it: any non-open row turning open, partial -> complete, a complete
     row whose listed set changed, or a complete row the old run did not have.
 (b) Always: a holder whose own replayed ``eth_call`` succeeded in the old run (``checks[p] is True``) must still be
-    listed (principal or conditional) in the new one, unless the new row is open (it subsumes everyone) or both
-    rows say the function is self-scoped (``lego_scope == "self"``: members not enumerated in either). A row that
-    turns self-scoped doesn't hide what it stopped listing. A new row that errored counts as losing them.
+    listed (principal or conditional) in the new one, unless the new row is open (it subsumes everyone) or, with
+    ``--scope-skip`` (both runs skipped enumerating self-scoped functions, ``PSAT_LOGIC_SCOPE_SKIP=1``), both rows
+    say the function is self-scoped. Without it a self-scoped row is enumerated like any other and must keep its
+    holders. A row that turns self-scoped never hides what it stopped listing. A new row that errored counts as
+    losing them.
 (c) ``--budget-only``: the two runs differ only in budgets (work, history caps, candidate limits). A budget may cost
     completeness, never the answer: openness and the listed set must be identical; ``complete`` and gaps may differ.
 (m) Rows the old run has and the new one lacks fail too, unless ``--only-new`` (a subset run) is given.
@@ -65,7 +67,9 @@ def _confirmed_lost(a: dict, b: dict) -> list[str]:
     return sorted((confirmed & listed(a)) - listed(b))
 
 
-def failures(old: dict[tuple, dict], new: dict[tuple, dict], faulty: bool, budget_only: bool) -> list[str]:
+def failures(
+    old: dict[tuple, dict], new: dict[tuple, dict], faulty: bool, budget_only: bool, scope_skip: bool = False
+) -> list[str]:
     out: list[str] = []
     for key in sorted(old.keys() & new.keys()):
         a, b = old[key], new[key]
@@ -77,7 +81,7 @@ def failures(old: dict[tuple, dict], new: dict[tuple, dict], faulty: bool, budge
                 out.append(f"(a) gained completeness under failing reads: {where}")
             if a.get("lego_complete") and b.get("lego_complete") and listed(a) != listed(b):
                 out.append(f"(a) a complete list changed under failing reads: {where}")
-        exempt = a.get("lego_scope") == "self" and b.get("lego_scope") == "self"
+        exempt = scope_skip and a.get("lego_scope") == "self" and b.get("lego_scope") == "self"
         if verdict(b) != "open" and not exempt:
             lost = _confirmed_lost(a, b)
             if lost:
@@ -116,11 +120,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--faulty", action="store_true", help="the new run injected read failures")
     parser.add_argument("--budget-only", action="store_true", help="the runs differ only in budgets")
     parser.add_argument("--only-new", action="store_true", help="compare only rows the new run has")
+    parser.add_argument("--scope-skip", action="store_true", help="both runs skipped enumerating self-scoped functions")
     args = parser.parse_args(argv)
     old, new = load(args.old), load(args.new)
     if args.only_new:
         old = {k: v for k, v in old.items() if k in new}
-    found = failures(old, new, args.faulty, args.budget_only)
+    found = failures(old, new, args.faulty, args.budget_only, args.scope_skip)
     found += [f"(m) missing from the new run: {k}" for k in sorted(old.keys() - new.keys())]
     flips = scope_flips(old, new)
     print(f"scope changes: {len(flips)}")

@@ -21,6 +21,7 @@ the committed set isn't known.
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import time
 from collections.abc import Callable, Iterator
@@ -1820,7 +1821,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if prior is not None:
         signature, before, arguments = prior
         return Verdict("open", frozenset(), True, witnesses={FRESH: arguments}, after=((signature, before),))
-    if world.scope is not None and world.scope.kind == "self" and not world.arrange_unknown:
+    if SKIP_SELF_SCOPED and world.scope is not None and world.scope.kind == "self" and not world.arrange_unknown:
         # Its effects stay in the caller's own positions: the gate is the answer, not who holds it. A stranger
         # failing in every state, with unseen addresses failing alike, is all "restricted" needs; anything less
         # is decided in full below.
@@ -1835,7 +1836,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 frozenset(),
                 False,
                 gaps=("self_scoped",),
-                gate=_gate(formula),
+                gate=gate_of(formula),
                 members=len(members) if proven else None,
             )
     # Precompiles and sentinels (``address(1)``) never send a transaction.
@@ -2470,6 +2471,9 @@ DECISION_SECONDS = 120.0  # a safety net only: the work budget decides, so a bus
 # larger runs out a thousand times sooner instead of taking a thousand times as long), z3's own resource count, and a
 # little per question asked.
 DECISION_WORK = 1200.0
+# Whether a self-scoped function's holders go unenumerated (``scope.py``). Off by default: scope and gate are still
+# reported, and holders are enumerated as for any function.
+SKIP_SELF_SCOPED = os.environ.get("PSAT_LOGIC_SCOPE_SKIP", "0") == "1"
 NODE_WORK = 1 / 1000
 RLIMIT_PER_WORK = 300_000  # z3 spends about as long on this many units as evaluation does on one work unit
 QUESTION_WORK = 0.1
@@ -3079,7 +3083,7 @@ def _built(formula: Term, world: World) -> tuple[set[int], bool, list[str]]:
     return members, proven, why
 
 
-def _gate(formula: Term) -> tuple[str, ...]:
+def gate_of(formula: Term) -> tuple[str, ...]:
     """What a caller must satisfy, as read (``report.render``): every conjunct of ``formula`` but the pure ``when``
     conditions (a pause, a deadline: none reads what the caller sends), which hold for everyone alike."""
     from .report import render
