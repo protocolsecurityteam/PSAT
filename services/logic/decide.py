@@ -1724,6 +1724,10 @@ class Verdict:
     gate: tuple[str, ...] = ()
     members: int | None = None
 
+    def __post_init__(self) -> None:
+        # Several parts can name the same reason (one callee asked three times): each once, in order.
+        self.gaps = tuple(dict.fromkeys(self.gaps))
+
 
 def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     """Who and whether anyone, separating the ``when`` conditions (pauses, deadlines, flags) from who holds power.

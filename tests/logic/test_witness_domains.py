@@ -175,6 +175,7 @@ def test_a_core_the_caller_names_is_guessed_among_the_cores_the_code_asks(built)
     assert verdict.openness == "restricted"
     assert verdict.principals == set(GOVERNORS)
     assert all(int(str(verdict.witnesses[g]["next"]), 0) == CORE for g in GOVERNORS)
+    assert len(verdict.gaps) == len(set(verdict.gaps))  # ``call:isGovernor(address)`` once, not per call
 
 
 def test_an_implementation_the_caller_names_is_guessed_among_the_addresses_the_code_holds(built):
