@@ -1657,8 +1657,10 @@ def function_verdict(
             if found is not None:
                 target = found[1].get_function_from_signature(call[2])
                 if target is not None and target.entry_point is not None:
-                    # Inside the callee, ``msg.sender`` is this contract and ``this`` is the callee.
-                    pc, ret = Lowerer(found[1], sender=THIS, this=call[1]).returns(target, list(call[3]))
+                    # Inside the callee, ``msg.sender`` is whoever makes the call (this contract, or the callee that
+                    # asks it in turn), ``this`` is the callee, and the frame is its own (see ``Lowerer.called``).
+                    sender = call[5] if len(call) > 5 else THIS
+                    pc, ret = Lowerer(found[1], sender=sender, this=call[1]).called(target, list(call[3]), call[4])
                     # What it declares it returns: solc 0.4 lets ``return f()`` stand in a function returning nothing.
                     lowered[key] = (pc, _words(ret) if target.returns else ())
                 else:

@@ -234,6 +234,10 @@ Found while working, not in the before table:
 | A36 | ``abi.decode`` of an encoded word as a narrower type | REJECTED: ``unsupported:abi.decode:<from>-><to>``; same or wider integer types decode exactly | ``test_lower_shapes`` |
 | A37 | a field of any other value read as an unnamed ``op field`` | REJECTED: ``unsupported:member:<field>``; a field of an item of a calldata struct array is the caller's per-item choice | ``test_ir_coverage`` (``viaMember``) |
 | A38 | ``this.balance``, ``codehash(a)``, Yul ``address()``/``timestamp()``/... opaque; ``bytes.concat``/``string.concat`` opaque | HANDLED: their values (``balance``, ``codehash``, ``this``, ``time``), concat as ``encodePacked`` | ``test_ir_coverage::test_handled_environment_builtins_are_their_values``, ``test_language`` (``concatenated``) |
+| A39 | a followed callee read ``msg.value``, ``msg.data``, ``msg.sig`` and ``calldatasize`` as the outer call's (its guessed ``msg.value`` let a stranger through a view callee that sees none) | HANDLED: ``Lowerer.called`` lowers a callee in its own frame: ``msg.value`` zero for a view call, ``unknown:callee:msg.value`` for an action, ``msg.sig`` its own selector, ``msg.data`` (but ``msg.data[4:]``, its arguments) and ``calldatasize`` ``unknown:callee:*``; what the caller hands it keeps the caller's terms | ``test_callee_frame`` (``a_view_callee_reads_no_value``, ``a_callee_reads_its_own_selector``) |
+| A40 | a callee's own calls were lowered and asked of the chain as made by the contract decided (``msg.sender`` two levels down was the outer contract) | HANDLED: a call made by followed code carries who makes it (``("call", ..., view, sender)``); its callee is lowered with that sender and the chain asked from it | ``test_callee_frame::test_a_callee_of_a_callee_sees_the_callee_asking_as_its_sender`` |
+| A41 | a word or the size of the call's own ``msg.data`` was guessed apart from the arguments it encodes (``calldataload`` at an offset an argument picks) | HANDLED: inside the arguments' encoding a word is what the guessed arguments put there (every argument guessed with it); past it, bytes the caller may append, guessed; the size never below the encoding | ``test_callee_frame::test_a_word_of_the_call_data_inside_the_arguments_is_what_they_encode`` |
+| A42 | a ``bytesN`` Slither computes (``f.selector``, ``type(I).interfaceId``) kept as the text of its decimal number, never equal to a number | HANDLED: read as the number (a literal is typed ``string`` until converted); text compared with a number evaluates unknown, never false | ``test_callee_frame::test_a_callee_reads_its_own_selector`` |
 
 ### Stated assumptions (not constructs)
 
@@ -252,11 +256,14 @@ Found while working, not in the before table:
   (a named gap), never a value. Reading memory objects out (``_deep``) is remembered per value and the objects it
   reaches; ``substitute`` skips subterms holding none of the kind replaced.
 * A loop's forgotten values carry which identities they depended on, not every identity subterm (the same taint).
-* ``decide._decide_one``: a conjunct a guess fails, over the guessed values it reads alone, refutes every guess that
-  agrees on them (``amount <= balance`` refuting an amount whatever the recipient); a view call over guessed
-  arguments whose callee is followed is answered by the callee's own code first, the chain only when that is unknown.
-  Without these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s read budget on one
-  ``hasPermission`` call per guessed recipient.
+* ``decide._decide_one``: a conjunct a guess fails refutes every guess that agrees on the assignment entries its
+  evaluation actually consulted (``_Reads``; ``msg.data`` consults every argument, followed callee code whatever it is
+  handed), never just those it names (``amount <= balance`` refuting an amount whatever the recipient). A view call over
+  guessed arguments whose callee is followed is answered by the callee's own code (in its own frame, A39/A40) first,
+  the chain only when that is unknown; the code only ranks and skips guesses: a pass resting on it is asked again with
+  every such call put to the chain (``confirmed``), and the choice never depends on what the chain has cached. Without
+  these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s read budget on one ``hasPermission``
+  call per guessed recipient (``test_callee_frame``).
 * A delegatecall or a call into this contract's own entry point inside a loop marks storage unknown past the loop
   (``*elsewhere``) without counting as lost writes: those writes are that code's (``logged.py`` and the latch account
   for them there).

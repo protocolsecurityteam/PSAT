@@ -66,6 +66,7 @@ _ARITHMETIC = frozenset({"op", "hash"})
 _FREE_KINDS = frozenset({"arg", "len", "elem", "callvalue", "calldatasize"})
 _STORED_BYTES = 8192  # longest ``bytes`` read back from storage, in bytes
 _EARLY_GUESSES = 32  # of them, tried before asking the solver
+_MAX_CALLDATA = 2**32  # bytes of call data no transaction reaches (each costs gas)
 
 
 @dataclass(frozen=True)
@@ -1046,6 +1047,49 @@ class World:
     failed_at: int | None = None
 
 
+class _Reads(dict):
+    """An assignment noting every entry evaluation consults (``seen``); anything that walks it whole reads it all."""
+
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        self.seen: set = set()
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        self.seen.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key: Any) -> Any:
+        self.seen.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: object) -> bool:
+        self.seen.add(key)
+        return super().__contains__(key)
+
+    def _whole(self) -> None:
+        self.seen.update(super().keys())
+
+    def keys(self) -> Any:
+        self._whole()
+        return super().keys()
+
+    def items(self) -> Any:
+        self._whole()
+        return super().items()
+
+    def values(self) -> Any:
+        self._whole()
+        return super().values()
+
+    def __iter__(self) -> Any:
+        self._whole()
+        return super().__iter__()
+
+    def copy(self) -> dict:
+        self._whole()
+        return dict(super().items())
+
+
 class Evaluator:
     def __init__(
         self,
@@ -1058,7 +1102,7 @@ class Evaluator:
     ):
         self.world = world
         self.identity = identity
-        self.assignment = assignment or {}
+        self.assignment = assignment if assignment is not None else {}
         # Conditions read as free rather than from state (``when`` atoms, see ``when_atoms``).
         # The solver leaves arranged conditions free; a witness it finds is checked here, where they are free only
         # on the caller's own entries.
@@ -1066,6 +1110,17 @@ class Evaluator:
         # Lookups keyed by an identity whose members can't be listed: read as unknown, as if anything had been written.
         self.blind = blind
         self._memo: dict[Term, Any] = dict(settled) if settled else {}
+        # Whether a view call over arguments the caller picks is answered by its followed callee's code before the
+        # chain (each guess a call of its own), and whether any answer so far rested on that: shared with the
+        # evaluators this one makes, so a pass resting on it is asked of the chain again (``confirmed``).
+        self.code_first = True
+        self.coded = [False]
+
+    def nested(self, when: frozenset) -> "Evaluator":
+        """An evaluator over the same identity and arguments with ``when`` free, sharing how calls are answered."""
+        inner = Evaluator(self.world, self.identity, self.assignment, self.blind, when)
+        inner.code_first, inner.coded = self.code_first, self.coded
+        return inner
 
     def truth(self, term: Term) -> Any:
         """True, False or UNK (``PREIMAGE`` and ``ASSUMED`` count as true; a path that reverts, as false)."""
@@ -1139,6 +1194,8 @@ class Evaluator:
             return UNK
         if kind == "len" and t[1][0] == "assumed":
             return 32  # what an arranged call returns: a standard success, one word (``true``)
+        if kind in ("elem", "len", "calldatasize") and (t[1] == CALLDATA or kind == "calldatasize"):
+            return self._own_data(t)
         if kind in _FREE_KINDS:
             return self.assignment.get(t, UNK) if _caller_chosen(t) else UNK
         if kind == "time":
@@ -1289,6 +1346,8 @@ class Evaluator:
                 return y == 1  # an arranged success is true: ``success == false`` doesn't hold
         if a is ASSUMED or b is ASSUMED or a is UNK or b is UNK or isinstance(a, FreeHash) or isinstance(b, FreeHash):
             return UNK
+        if op == "eq" and isinstance(a, str) != isinstance(b, str):
+            return UNK  # text against a number: a constant this reading couldn't place as either
         if op == "eq":
             return a == b
         if not isinstance(a, int) or not isinstance(b, int):
@@ -1372,10 +1431,20 @@ class Evaluator:
             return self.world.callee(call, address % 2**160)
         return self.world.callee(call)
 
-    def _chain_call(self, address: int, data: bytes, overrides: dict | None) -> Any:
+    def sender(self, call: Term) -> Any:
+        """Who makes ``call``: this contract, or the callee whose own code makes it (``Lowerer._from_here``)."""
+        if len(call) <= 5:
+            return self.world.this
+        who = self.eval(call[5])
+        return who % 2**160 if isinstance(who, int) and not isinstance(who, bool) else UNK
+
+    def _chain_call(self, call: Term, address: int, data: bytes, overrides: dict | None) -> Any:
+        sender = self.sender(call)
+        if sender is UNK:
+            return UNK
         if overrides is None:
-            return self.world.chain.call(address, data, self.world.this)
-        return self.world.chain.call(address, data, self.world.this, overrides)
+            return self.world.chain.call(address, data, sender)
+        return self.world.chain.call(address, data, sender, overrides)
 
     def overrides(self) -> dict | None:
         """The overlay as state overrides for the node, per address; ``None`` without one. An overlay word that is
@@ -1527,7 +1596,7 @@ class Evaluator:
         if refused is UNK:
             # Unsettled there (a read failed, business logic): what involves who calls decides, the rest left free.
             loosened = relaxed_atoms(lowered[0])
-            refused = Evaluator(self.world, self.identity, self.assignment, self.blind, loosened).truth(lowered[0])
+            refused = self.nested(loosened).truth(lowered[0])
             if refused is UNK:
                 return UNK
         if refused is not False:
@@ -1540,10 +1609,18 @@ class Evaluator:
             memo = self.world.__dict__.setdefault("_brought", {})
             fixed = frozenset((k, v) for k, v in self.assignment.items() if k[0] != "arg")
             overlay = tuple(sorted(self.world.overlay.items())) if self.world.overlay else ()
-            key = (t, values, tuple(sorted(self.identity.items())), frozenset(self.when), fixed, overlay)
+            key = (
+                t,
+                values,
+                tuple(sorted(self.identity.items())),
+                frozenset(self.when),
+                fixed,
+                overlay,
+                self.code_first,
+            )
             if key not in memo:
                 free = frozenset(a for a in _atoms_of(lowered[0]) if any(contains_term(a, load) for load in opened))
-                loosened = Evaluator(self.world, self.identity, self.assignment, self.blind, free)
+                loosened = self.nested(free)
                 if not free or loosened.truth(lowered[0]) is False:
                     memo[key] = UNK
                 else:
@@ -1552,7 +1629,7 @@ class Evaluator:
         return ASSUMED if opened else UNK
 
     def _call(self, t: Term, index: int) -> Any:
-        _, target, signature, args, view = t
+        _, target, signature, args, view = t[:5]
         if (target, signature) in self.blind and any(contains(a, IDENTITY_KINDS) for a in args):
             address = self.eval(target) if view else UNK
             if isinstance(address, int) and self.world.chain.code(address) == b"":
@@ -1571,16 +1648,18 @@ class Evaluator:
                     return value
             return ASSUMED
         request = self.call_input(t)
-        if request is not None and self._guessed(t, request):
+        if request is not None and self._guessed(t):
             # Over arguments the caller picks, each guess would be a call of its own: the callee's own code, where it
-            # is followed and settles the answer, then the chain.
+            # is followed and settles the answer, then the chain. A pass resting on it is asked again of the chain.
             lowered = self._callee(t)
             if lowered is not None and index < len(lowered[1]):
                 returned = self.truth(lowered[0])
                 if returned is False:
+                    self.coded[0] = True
                     return REVERTED
                 value = self.eval(lowered[1][index]) if returned is True else UNK
                 if isinstance(value, (int, bool)) and not isinstance(value, FreeHash):
+                    self.coded[0] = True
                     return value
         if request is None:
             # Not every argument is known: answer with the callee's own code, lowered over these arguments.
@@ -1594,7 +1673,7 @@ class Evaluator:
         overrides = self.overrides()
         if overrides is False:
             return UNK
-        raw = self._chain_call(address, data, overrides)
+        raw = self._chain_call(t, address, data, overrides)
         if raw is REVERTED or raw is UNK:
             return raw
         if not raw and self.world.chain.code(address) == b"":
@@ -1603,11 +1682,9 @@ class Evaluator:
             return UNK
         return int.from_bytes(raw[32 * index : 32 * (index + 1)], "big")
 
-    def _guessed(self, call: Term, request: tuple) -> bool:
-        """Whether a view call's input depends on arguments the caller picks and its answer isn't read yet."""
-        if not any(contains(a, _FREE_KINDS) for a in call[3]):
-            return False
-        return ("c", request[0], request[1], self.world.this) not in self.world.chain._memo
+    def _guessed(self, call: Term) -> bool:
+        """Whether a view call's input depends on arguments the caller picks, and its callee's code answers first."""
+        return self.code_first and any(contains(a, _FREE_KINDS) for a in call[3])
 
     def _returned_size(self, call: Term) -> Any:
         """Bytes of return data ``call`` leaves when it returns: a view call's as the chain answers, an action's as
@@ -1619,7 +1696,7 @@ class Evaluator:
             overrides = self.overrides()
             if request is None or overrides is False:
                 return UNK
-            raw = self._chain_call(request[0], request[1], overrides)
+            raw = self._chain_call(call, request[0], request[1], overrides)
             return len(raw) if isinstance(raw, bytes) else UNK
         lowered = self._callee(call)
         if lowered is None or any(_dynamic(str(r[2])) for r in lowered[1] if len(r) > 2 and isinstance(r[2], str)):
@@ -1635,10 +1712,11 @@ class Evaluator:
             address = self.eval(call[1])
             return "failed" if isinstance(address, int) and self.world.chain.code(address) == b"" else UNK
         request = self.call_input(call)
-        if request is not None and self._guessed(call, request):
+        if request is not None and self._guessed(call):
             lowered = self._callee(call)
             returned = self.truth(lowered[0]) if lowered is not None else UNK
             if returned is not UNK:
+                self.coded[0] = True
                 return "returned" if returned else "reverted"
         if request is None:
             lowered = self._callee(call)
@@ -1649,7 +1727,7 @@ class Evaluator:
         overrides = self.overrides()
         if overrides is False:
             return UNK
-        raw = self._chain_call(request[0], request[1], overrides)
+        raw = self._chain_call(call, request[0], request[1], overrides)
         if raw is UNK:
             return UNK
         if raw is REVERTED:
@@ -1693,6 +1771,25 @@ class Evaluator:
             return UNK
         return self.world.selector.to_bytes(4, "big") + body
 
+    def _own_data(self, t: Term) -> Any:
+        """A word of this call's own ``msg.data``, or its size. Inside the encoding of the arguments a word is what the
+        guessed arguments put there; past it, bytes the caller may append (ABI decoding ignores them), guessed like
+        an argument. The size is guessed too, never below what the arguments take."""
+        data = self._calldata()
+        guess = self.assignment.get(t, UNK)
+        if t[0] != "elem":
+            if not isinstance(data, bytes) or not isinstance(guess, int) or isinstance(guess, bool):
+                return UNK
+            return guess if guess >= len(data) else UNK
+        offset = self.eval(t[2])
+        if not isinstance(offset, int) or isinstance(offset, bool) or not isinstance(data, bytes):
+            return UNK
+        if offset + 32 <= len(data):
+            return int.from_bytes(data[offset : offset + 32], "big")
+        if offset >= _MAX_CALLDATA:
+            return 0  # past any data a transaction can carry: the zeros reading past the end gives
+        return guess if offset >= len(data) else UNK
+
     def _argument(self, a: Term, type_: str) -> Any:
         if a == CALLDATA and type_ == "bytes":
             return self._calldata()
@@ -1708,7 +1805,7 @@ class Evaluator:
 
     def call_input(self, t: Term) -> tuple[int, bytes] | None:
         """(target, calldata) of a view call whose target and arguments are all known."""
-        _, target, signature, args, _ = t
+        _, target, signature, args, _ = t[:5]
         address = self.eval(target)
         types = signature[signature.index("(") + 1 : -1].split(",") if "()" not in signature else []
         if len(types) != len(args):
@@ -2804,7 +2901,7 @@ def _executes(
 
 
 def _argument_values(found: dict[Term, Any]) -> dict[str, Any]:
-    return {t[1]: v for t, v in found.items() if t[0] == "arg"} | {
+    return {t[1]: v for t, v in found.items() if t[0] == "arg" and t != CALLDATA} | {
         "msg.value": v for t, v in found.items() if t[0] == "callvalue"
     }
 
@@ -2981,11 +3078,12 @@ def _decide_one(
         # Only what the conditions still read decides: arguments a freed condition alone reads can be anything.
         kept = [a for a in _atoms_of(formula) if a not in free_when]
         chosen = chosen - free_when
-        free = sorted({x for a in kept for x in (*subterms(a, "arg"), *_free_compounds(a))}, key=stable) + sorted(
-            chosen, key=stable
-        )
+        free = sorted(
+            _with_encoded({x for a in kept for x in (*subterms(a, "arg"), *_free_compounds(a))}, world), key=stable
+        ) + sorted(chosen, key=stable)
     else:
-        free = sorted(set(subterms(formula, "arg")) | _free_compounds(formula), key=stable) + sorted(chosen, key=stable)
+        free = sorted(_with_encoded(set(subterms(formula, "arg")) | _free_compounds(formula), world), key=stable)
+        free += sorted(chosen, key=stable)
     owned = _owned_keys(formula, world, identity)
     recorded = _recorded_keys(formula, world) if recorded_ok else {}
     compared = comparands(formula, base, frozenset(free))
@@ -3035,25 +3133,30 @@ def _decide_one(
                     return True
         return False
 
-    # A conjunct a guess fails, over the guessed values it reads alone, fails every guess that agrees on those values
-    # (``amount <= balance`` refuting an amount whatever the recipient): such guesses are skipped, not asked again.
+    # A conjunct a guess fails, over the guessed values its evaluation read, fails every guess that agrees on those
+    # values (``amount <= balance`` refuting an amount whatever the recipient): such guesses are skipped, not asked
+    # again. What was read is what the evaluation consulted, not what the conjunct names: ``msg.data`` reads every
+    # argument, and a callee's code reads whatever its frame is handed.
     nogoods: list[tuple] = []
-    reads: dict[Term, tuple] = {}
+    place = {t: i for i, t in enumerate(free)}
 
     def assess(values: tuple) -> Any:
         if any(all(values[i] == v for i, v in nogood) for nogood in nogoods):
             return False
         guess = Evaluator(world, identity, {**fixed, **dict(zip(free, values))}, blind, when, settled)
         answer = guess.truth(formula)
+        if answer is not False:
+            return confirmed(guess, formula, free_when if relaxed else None, answer)
         if answer is False and formula[0] == "and" and not world.chain.pending:
             for conjunct in cheapest_first(formula):
                 if guess.truth(conjunct) is not False:
                     continue
-                if conjunct not in reads:
-                    reads[conjunct] = tuple(i for i, t in enumerate(free) if contains_term(conjunct, t))
-                nogoods.append(tuple((i, values[i]) for i in reads[conjunct]))
+                consulted = _Reads({**fixed, **dict(zip(free, values))})
+                if Evaluator(world, identity, consulted, blind, when, settled).truth(conjunct) is False:
+                    read = sorted(place[t] for t in consulted.seen if t in place)
+                    nogoods.append(tuple((i, values[i]) for i in read))
                 break
-        return _free_sat(formula, guess, free_when) if answer is UNK and relaxed else answer
+        return answer
 
     # The likeliest guesses (zeros, the identity itself, recorded keys) first: they settle most questions outright.
     if reads_only:
@@ -3081,6 +3184,24 @@ def _decide_one(
         return UNK
     # Valid whatever the arguments and every unknown are (``(not (a and m) or a) and m`` with ``m`` true).
     return True if solve(mk_not(formula), ground) is None else UNK
+
+
+def confirmed(ev: Evaluator, formula: Term, free: frozenset | None = None, answer: Any = None) -> Any:
+    """``ev``'s answer on ``formula`` (``answer``, when already asked), with the ``free`` atoms left to the
+    connectives when given (``_free_sat``). A pass that rests on a followed callee's code standing in for a call over
+    guessed arguments is asked again with every such call put to the chain: the code ranks and skips guesses, the
+    chain proves the one that passes."""
+
+    def ask(e: Evaluator, given: Any = None) -> Any:
+        result = e.truth(formula) if given is None else given
+        return _free_sat(formula, e, free) if result is UNK and free is not None else result
+
+    result = ask(ev, answer)
+    if result is True and ev.coded[0]:
+        again = Evaluator(ev.world, ev.identity, ev.assignment, ev.blind, ev.when)
+        again.code_first = False
+        result = ask(again)
+    return result
 
 
 def _decisive(formula: Term, world: World) -> bool:
@@ -3143,8 +3264,9 @@ def _prefetch(formula: Term, world: World, candidates: set[int]) -> None:
                         requests.append(world.chain.storage_request(cell[0], cell[1]))
                 for t in calls:
                     call = probe.call_input(t)
-                    if call is not None:
-                        requests.append(world.chain.call_request(call[0], call[1], world.this))
+                    sender = probe.sender(t)
+                    if call is not None and sender is not UNK:
+                        requests.append(world.chain.call_request(call[0], call[1], sender))
         return requests
 
     # The keys and arguments themselves may need reads (a call's argument read from another call): batched first,
@@ -3234,6 +3356,14 @@ def _owned_keys(formula: Term, world: World, identity: dict[str, int]) -> dict[T
             fields = tuple(step for kind, step in path if kind == "f")
             out.setdefault(free[0], set()).update(world.inverse(address, var, fields, who, proof=False) or ())
     return out
+
+
+def _with_encoded(free: set[Term], world: World) -> set[Term]:
+    """``free`` with every argument of the function where it holds ``msg.data``, which encodes them all: what such a
+    guess passes along is the whole call, so each of them is guessed with it."""
+    if CALLDATA not in free and not any(t[0] == "calldatasize" for t in free):
+        return free
+    return free | {p for p in world.parameters if p[0] == "arg"}
 
 
 def _free_compounds(formula: Term) -> set[Term]:
@@ -4146,9 +4276,10 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
             value = model.eval(z3.Bool(name), model_completion=True)
             values[term] = z3.is_true(value)
             blocking.append(z3.Bool(name) != value)  # these arguments may pass with the conditions otherwise
-        checked = Evaluator(
-            ground.world, ground.identity, {**ground.assignment, **values}, ground.blind, ground.when
-        ).truth(formula)
+        checked = confirmed(
+            Evaluator(ground.world, ground.identity, {**ground.assignment, **values}, ground.blind, ground.when),
+            formula,
+        )
         if checked is True:
             return values
         unsettled = unsettled or checked is not False

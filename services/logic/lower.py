@@ -88,6 +88,7 @@ from .terms import (
     mk_or,
     mk_slice,
     packed_width,
+    replace_terms,
     substitute,
     subterms,
     term_epoch,
@@ -401,6 +402,14 @@ def _one_word(type_: str) -> bool:
     if "[" in type_ or type_.startswith("(") or type_ in ("bytes", "string"):
         return False
     return type_ in ("address", "bool") or type_.startswith(("uint", "int", "bytes"))
+
+
+_FRAME_KINDS = frozenset({"sig", "callvalue", "calldatasize"})
+
+
+def _frame_bound(term: Term) -> bool:
+    """Whether ``term`` reads the call frame it was written in (its ``msg.data``, ``msg.sig``, ``msg.value``)."""
+    return contains(term, _FRAME_KINDS) or CALLDATA in subterms(term, "arg")
 
 
 def _selector_word(t: Term) -> bool:
@@ -926,6 +935,7 @@ class Lowerer:
         self.contract = contract
         self.sender = sender
         self.this = this
+        self._outer_this = this
         # The address whose code this is, which holds its immutables: ``this``, unless it runs by delegatecall.
         self.code = code if code is not None else this
         self._stack: list[Any] = []
@@ -996,6 +1006,51 @@ class Lowerer:
             return FALSE, ()
         merged = merge([State(e.pc, {}, e.store, e.ret) for e in exits])
         return merged.pc, merged.ret or ()
+
+    def called(self, function: Function, args: list[Term], view: bool) -> tuple[Term, tuple]:
+        """``returns`` for ``function`` run as a call another contract makes: in its own frame, where ``msg.value`` is
+        zero for a view call (a ``staticcall`` carries none) and unknown for an action, and ``msg.data``, ``msg.sig``
+        and ``calldatasize`` are the callee's own, never the outer call's. ``args``, ``sender`` and ``this`` stay as
+        the caller's terms give them, whatever of the outer frame they read (``check(msg.data)``)."""
+        shield: dict[Term, Term] = {}
+
+        def shielded(term: Term, name: str, type_: str) -> Term:
+            if not _frame_bound(term):
+                return term
+            stand_in = mk("arg", f"frame:{name}", type_)
+            shield[stand_in] = term
+            return stand_in
+
+        given = [shielded(a, str(i), parameter(p, i)[2]) for i, (p, a) in enumerate(zip(function.parameters, args))]
+        self.sender = shielded(self.sender, "sender", "address")
+        self.this = shielded(self.this, "this", "address")
+        if self.code == self._outer_this:
+            self.code = self.this
+        pc, ret = self.returns(function, given + list(args[len(given) :]))
+        signature = function.solidity_signature or f"{function.name}()"
+        own = {
+            CALLDATA: unknown("callee:msg.data"),
+            mk("sig"): const(int.from_bytes(keccak(text=signature)[:4], "big"), "bytes4"),
+            mk("callvalue"): const(0) if view else unknown("callee:msg.value"),
+        }
+        parts = [pc, *(r for r in ret if isinstance(r, Term))]
+        for part in parts:
+            own.update({t: unknown("callee:calldatasize") for t in subterms(part, "calldatasize")})
+
+        def framed(t: Any) -> Any:
+            if not isinstance(t, Term):
+                return t
+            t = replace_terms(t, own) if contains(t, frozenset({"arg", "sig", "callvalue", "calldatasize"})) else t
+            return replace_terms(t, shield) if shield else t
+
+        return framed(pc), tuple(framed(r) for r in ret)
+
+    def _from_here(self, call: Term | None) -> Term | None:
+        """A call this code makes, carrying who makes it where that isn't the contract decided: a callee's own calls
+        come from the callee (``msg.sender`` there), so they are asked of the chain and lowered from it."""
+        if call is None or call[0] != "call" or len(call) > 5 or self.this == THIS:
+            return call
+        return mk(*call, self.this)
 
     def paths(self, function: Function, state: State) -> list[Exit]:
         """Each way a call of ``function`` from ``state`` returns, memory left behind: the values it returns read out of
@@ -1920,7 +1975,7 @@ class Lowerer:
         if base == "staticcall" and len(args) == 6:
             return self._static_call(ir, args, st)
         if base == "call" and len(args) == 7:
-            action = _encoded_action(args[1], args[3], args[2]) or self._scratch_action(st.mem, args)
+            action = self._from_here(_encoded_action(args[1], args[3], args[2])) or self._scratch_action(st.mem, args)
             out, size = _small_const(args[5]), _small_const(args[6])
             if action is not None and out is not None and size is not None and size % 32 == 0:
                 # ``call(gas, token, 0, add(data, 0x20), mload(data), out, size)`` of ``abi.encodeCall`` data
@@ -2092,7 +2147,7 @@ class Lowerer:
         signature = _signature_of(self.contract, selector, len(words))
         if signature is None:
             return None
-        return mk("call", args[1], signature, tuple(_unmasked(w) for w in words), False)
+        return self._from_here(mk("call", args[1], signature, tuple(_unmasked(w) for w in words), False))
 
     def _encoded_call(self, target: Term, data: Term, view: bool) -> Term | None:
         """The call ``abi.encodeWithSignature`` / ``abi.encodeWithSelector`` data names, made to ``target``."""
@@ -2100,7 +2155,7 @@ class Lowerer:
             return None
         head, rest = data[2][0], tuple(data[2][1:])
         if data[1] == "abi.encodeWithSignature" and head[0] == "const" and isinstance(head[1], str) and "(" in head[1]:
-            return mk("call", target, head[1], rest, view)
+            return self._from_here(mk("call", target, head[1], rest, view))
         if data[1] == "abi.encodeWithSelector" and head[0] == "const":
             value = int(head[1], 0) if isinstance(head[1], str) and head[1][:2] in ("0x", "0X") else head[1]
             if isinstance(head[1], str) and head[1].isdigit():
@@ -2108,7 +2163,7 @@ class Lowerer:
             if not isinstance(value, int) or isinstance(value, bool):
                 return None
             signature = _signature_of(self.contract, value % 2**32, len(rest))
-            return None if signature is None else mk("call", target, signature, rest, view)
+            return None if signature is None else self._from_here(mk("call", target, signature, rest, view))
         return None
 
     def _static_call(self, ir: SolidityCall, args: list, st: State) -> State:
@@ -2120,7 +2175,7 @@ class Lowerer:
         if data[0] == "op" and data[1] == "add":
             encoded = [a for a in data[2] if a[0] == "enc"]
             if len(encoded) == 1 and any(a[0] == "const" and a[1] == 32 for a in data[2]):
-                call = _view_call(args[1], encoded[0])
+                call = self._from_here(_view_call(args[1], encoded[0]))
         out, size = _small_const(args[4]), _small_const(args[5])
         if call is None or out is None or size is None or size % 32:
             cleared = State(st.pc, st.env, st.store, st.ret)  # whatever it returned is somewhere in memory
@@ -2137,7 +2192,7 @@ class Lowerer:
         signature = getattr(fn, "solidity_signature", None) or f"{ir.function_name}()"
         view = bool(getattr(fn, "view", False) or getattr(fn, "pure", False) or not isinstance(fn, Function))
         args = tuple(self.val(a, st) for a in ir.arguments)
-        value = mk("call", target, signature, args, view)
+        value = self._from_here(mk("call", target, signature, args, view))
         returns = getattr(fn, "returns", None) or []
         self._last_call = value
         self._last_returns = len(returns) if isinstance(fn, Function) else None
@@ -3312,6 +3367,10 @@ def _constant(var: Constant) -> Term:
                 return const(int(value, 16), type_)
             except ValueError:
                 return const(value, type_)
+        if type_.startswith("bytes") and type_[5:].isdigit() and value.isdigit():
+            # A ``bytesN`` Slither computed (a selector, an interface id) is written as its decimal number; a literal
+            # is typed ``string`` until converted.
+            return const(int(value), type_)
         aligned = _fixed_bytes(value.encode(), type_)
         return const(aligned, type_) if aligned is not None else const(value, type_)
     return const(int(value), type_)
