@@ -208,32 +208,60 @@ def test_a_history_cut_short_lists_what_it_read_as_a_lower_bound(roles, monkeypa
     assert DECOY not in verdict.principals
 
 
-def test_a_crowded_history_read_first_takes_no_time_from_a_short_one():
-    # Which history a function reads first follows set order: a token's transfers refused window after window must
-    # not spend the time a role history read after them needs.
-    import time
+class _Clock:
+    """``time`` as ``decide`` reads it, advanced by the fake node: what a scan spends, without waiting."""
 
-    crowd, short = 0xC1 << 150, 0xC2 << 150
-    transfers, grants = frozenset({"0x" + "11" * 32}), frozenset({"0x" + "22" * 32})
+    def __init__(self):
+        self.now = 0.0
 
+    def monotonic(self):
+        return self.now
+
+
+def _crowded_chain(clock, crowds: set, seconds_per_round: float):
     def batch(calls):
         out = []
         for method, params in calls:
             if method != "eth_getLogs":
                 out.append("0x60")
-            elif int(params[0]["address"], 16) == crowd:
-                time.sleep(0.01)
+            elif int(params[0]["address"], 16) in crowds:
                 out.append(None)  # refused
             else:
                 out.append([])
+        if any(m == "eth_getLogs" and int(p[0]["address"], 16) in crowds for m, p in calls):
+            clock.now += seconds_per_round
         return out
 
-    chain = Chain(lambda m, p: None, 19_999_999, batch)
-    chain.scan_left = chain.history_seconds = 0.005
+    return Chain(lambda m, p: None, 19_999_999, batch)
+
+
+def test_a_crowded_history_read_first_takes_no_more_than_its_share(monkeypatch):
+    # Which history a function reads first follows set order: a token's transfers refused window after window must
+    # not spend the time a role history read after them needs.
+    clock = _Clock()
+    monkeypatch.setattr(decide, "time", clock)
+    crowd, short = 0xC1 << 150, 0xC2 << 150
+    transfers, grants = frozenset({"0x" + "11" * 32}), frozenset({"0x" + "22" * 32})
+    chain = _crowded_chain(clock, {crowd}, seconds_per_round=5.0)
+    chain.scan_left = chain.history_seconds = 20.0
+    chain.scan_total = 90.0
     chain.logs(crowd, transfers)
     chain.logs(short, grants)
-    assert chain.cut(crowd, transfers)
+    assert chain.cut(crowd, transfers) and clock.now <= 25.0
     assert not chain.cut(short, grants)
+
+
+def test_a_functions_history_scanning_is_bounded_in_total_and_what_it_cuts_is_cut(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(decide, "time", clock)
+    crowds = [(0xD0 + i) << 150 for i in range(6)]
+    chain = _crowded_chain(clock, set(crowds), seconds_per_round=5.0)
+    chain.scan_left = chain.history_seconds = 20.0
+    chain.scan_total = 50.0
+    for i, crowd in enumerate(crowds):
+        chain.logs(crowd, frozenset({"0x" + format(i + 1, "064x")}))
+    assert clock.now <= 50.0 + 5.0  # one round past the line at most, never 6 x 20 s
+    assert all(chain.cut(c, frozenset({"0x" + format(i + 1, "064x")})) for i, c in enumerate(crowds))
 
 
 class _SomeUnreadable(_Scanned):

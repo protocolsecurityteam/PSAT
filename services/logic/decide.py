@@ -82,9 +82,11 @@ LOG_WINDOW = 1_000_000
 # scan stops there rather than splitting its way through it.
 LOG_MIN_WINDOW = LOG_WINDOW // 64
 LOG_CALLS = 400
-# History scanning per history read: each history gets its own time, so a crowded one (a token's transfers) read
-# first takes nothing from a short one (its role grants) read after it, whatever order the reads come in.
-LOG_SECONDS = 45.0
+# History scanning, per history read and per function: each history gets up to ``LOG_SECONDS`` of what the
+# function has left of ``LOG_TOTAL_SECONDS``, so a crowded one (a token's transfers) read first can't take a short
+# one's (its role grants) whole share, and the total stays bounded. A scan stopped either way is partial (cut).
+LOG_SECONDS = 20.0
+LOG_TOTAL_SECONDS = 90.0
 LOG_BATCH = 50
 SNAPSHOT_SLOTS = 400_000  # storage dumped whole, at most (Maker's Vat holds about 135k slots)
 SNAPSHOT_PAGE = 10_000
@@ -151,8 +153,10 @@ class Chain:
         # Seconds of history scanning one function may still spend (``function_verdict`` sets it per function):
         # past it a history is partial, so a slow node costs completeness, never the whole verdict.
         self.scan_left: float | None = None
-        # When set, the seconds each history scan starts with (``scan_left`` reset per read): see ``LOG_SECONDS``.
+        # When set, the seconds each history scan starts with (``scan_left`` reset per read), out of what is left of
+        # ``scan_total`` for the function: see ``LOG_SECONDS``.
         self.history_seconds: float | None = None
+        self.scan_total: float | None = None
         self.limit: int | None = None
         # Addresses whose logs were cut to ``LOG_ROWS``: anything enumerated from them is partial.
         self.truncated: set[int] = set()
@@ -288,8 +292,12 @@ class Chain:
                 # Partial for these events only: the address's other events (its role grants) are still read.
                 self._memo[key] = None  # until read: a scan the budget cuts off stays partial, not re-read
                 if self.history_seconds is not None:
-                    self.scan_left = self.history_seconds
+                    total = self.scan_total if self.scan_total is not None else self.history_seconds
+                    self.scan_left = min(self.history_seconds, total)
+                    given = self.scan_left
                 self._memo[key] = self._scan_logs(address, flt)
+                if self.history_seconds is not None and self.scan_total is not None:
+                    self.scan_total -= given - max(self.scan_left, 0.0)
             else:
                 try:
                     self._memo[key] = self.history("eth_getLogs", [flt])

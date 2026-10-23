@@ -14,6 +14,7 @@ from .decide import (
     ANY_KEY,
     FRESH,
     LOG_SECONDS,
+    LOG_TOTAL_SECONDS,
     NODE_WORK,
     RAW_SLOT,
     UNK,
@@ -1237,6 +1238,7 @@ def function_verdict(
     code that runs there; ``code_of`` maps an address to the one holding that code (a proxy's implementation)."""
     chain.limit = chain.sent + READS_PER_FUNCTION
     chain.scan_left = chain.history_seconds = LOG_SECONDS
+    chain.scan_total = LOG_TOTAL_SECONDS
     lowerer = Lowerer(contract)
     formula = lowerer.success(function)
     selector = int.from_bytes(keccak(text=function.solidity_signature)[:4], "big")
