@@ -1857,7 +1857,6 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     # isn't known, so neither is "open once the conditions allow".
     now_maybe = False
     loosened = relaxed_atoms(formula)
-    record: dict[Any, list[int]] = {}
     loose_stranger: list[Any] = []
 
     def stranger_loose() -> Any:
@@ -1875,15 +1874,6 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             freed_stranger[level] = _outcome(formula, world, anyone, candidates, relaxed=level)
         return freed_stranger[level]
 
-    def asked(question: Any, ask: Callable[[], Any]) -> Any:
-        """``ask()``, unless the same question has gone unanswered for several candidates and been answered for none:
-        the candidate changes the values read, rarely what leaves the question open (a loop, assembly)."""
-        tally = record.setdefault(question, [0, 0])
-        if tally[0] >= _SOLVER_GIVE_UPS and not tally[1]:
-            return UNK
-        answer = ask()
-        tally[0 if answer is UNK else 1] += 1
-        return answer
 
     # A batch of candidates' first questions at once, so their reads go out in a few batches rather than one round trip
     # per candidate: the state as it is, then the guessed arguments' reads for those it leaves open.
@@ -1939,7 +1929,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             if loose is False:
                 continue
             # Anyone known passing now keeps a currently blocked stranger from making it "open when allowed".
-            passes_now = asked("now", lambda: _outcome(formula, world, identity, candidates, fixed={}, refute_ok=False))
+            passes_now = _outcome(formula, world, identity, candidates, fixed={}, refute_ok=False)
             now_passes = now_passes or passes_now is True
             now_maybe = now_maybe or passes_now is UNK
             singled = False
@@ -1949,18 +1939,18 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 found: dict[Term, Any] = {}
                 # Where a stranger fails, the builder's bindings are every argument value it can be singled out under.
                 bound = _exact_bindings(world, candidate) if fresh_outcome is False else None
-                outcome = asked(
-                    index,
-                    lambda: _outcome(
-                        formula,
-                        world,
-                        identity,
-                        candidates,
-                        fixed=state,
-                        refute_ok=refutable,
-                        witness=found,
-                        bound=bound,
-                    ),
+                # Asked of every candidate, whatever earlier ones left open: skipping it after a few unanswered ones
+                # would make who is found depend on the order they are asked in (z3 itself still gives up early, in
+                # ``solve``, while the guesses are tried for each).
+                outcome = _outcome(
+                    formula,
+                    world,
+                    identity,
+                    candidates,
+                    fixed=state,
+                    refute_ok=refutable,
+                    witness=found,
+                    bound=bound,
                 )
                 freed = None
                 if outcome is UNK and fresh_outcome is False and stranger_loose() is False:

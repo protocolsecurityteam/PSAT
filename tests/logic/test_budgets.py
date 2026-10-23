@@ -210,3 +210,24 @@ def test_a_crowded_history_read_first_takes_no_time_from_a_short_one():
     chain.logs(short, grants)
     assert chain.cut(crowd, transfers)
     assert not chain.cut(short, grants)
+
+
+class _SomeUnreadable(_Scanned):
+    """The lowest-addressed minters' role entries fail to read, as a node timing out."""
+
+    def __init__(self, failing: set):
+        super().__init__()
+        self.failing = {_slot(m, _slot(_MINTER, 0)) for m in failing}
+
+    def _answer(self, method, params):
+        if method == "eth_getStorageAt" and int(params[1], 16) in self.failing:
+            raise RuntimeError("timeout")
+        return super()._answer(method, params)
+
+
+def test_candidates_left_open_first_dont_stop_the_rest_being_asked(roles):
+    # Asked lowest address first: a few unanswered ones must not make every later candidate unanswered too.
+    failing = set(sorted([*MINTERS, DECOY])[:6])
+    verdict = _verdict(roles, _SomeUnreadable(failing))
+    assert verdict.principals == (set(MINTERS) | {DECOY}) - {REVOKED} - failing
+    assert failing <= verdict.undecided and not verdict.complete
