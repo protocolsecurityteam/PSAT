@@ -499,12 +499,23 @@ class Chain:
         return self._memo[key]
 
     def _scan_logs(self, address: int, flt: dict) -> list | None:
-        """The logs ``flt`` matches up to the block, read window by window in batches; ``None`` past ``LOG_CALLS``
-        or when a window refuses even at ``LOG_MIN_WINDOW`` blocks. Refused windows wait while the earliest is halved
-        until a width answers, then are all cut to that width: one descent, not a split of every one."""
+        """The logs ``flt`` matches up to the block, read window by window in batches; ``None`` for a crowd (a window
+        refusing even at ``LOG_MIN_WINDOW`` blocks, more than ``LOG_ROWS``). Past ``LOG_CALLS`` or the scanning time,
+        the windows read so far, with the address marked truncated: what they name is a lower bound, never the list.
+        Refused windows wait while the earliest is halved until a width answers, then are all cut to that width: one
+        descent, not a split of every one."""
 
         def cut(lo: int, hi: int, width: int) -> list[tuple[int, int]]:
             return [(a, min(a + width - 1, hi)) for a in range(lo, hi + 1, width)]
+
+        def partial() -> list:
+            self.truncated.add(address)
+            return in_order(found)
+
+        def in_order(logs: list) -> list:
+            return sorted(
+                logs, key=lambda log: (int(log.get("blockNumber", "0x0"), 16), int(log.get("logIndex", "0x0"), 16))
+            )
 
         self.crowded = False  # set when the scan stops for a crowd, not for a refusal or the clock
         width = LOG_WINDOW
@@ -515,7 +526,7 @@ class Chain:
         calls = 0
         while todo or refused:
             if self.scan_left is not None and self.scan_left <= 0:
-                return None  # this function's scanning time spent: the rest of the history stays unread
+                return partial()  # this function's scanning time spent: the rest of the history stays unread
             if not todo:
                 if not probing:
                     width //= 2
@@ -527,7 +538,7 @@ class Chain:
             chunk, todo = todo[:LOG_BATCH], todo[LOG_BATCH:]
             calls += len(chunk)
             if calls > LOG_CALLS:
-                return None
+                return partial()
             started = time.monotonic()
             try:
                 answers = self.batch(
@@ -556,9 +567,7 @@ class Chain:
                 if probing:
                     probing = False  # this width is refused too: halve again
                     refused, todo = sorted(refused + todo), []
-        return sorted(
-            found, key=lambda log: (int(log.get("blockNumber", "0x0"), 16), int(log.get("logIndex", "0x0"), 16))
-        )
+        return in_order(found)
 
     def _bounded(self, address: int, rows: list) -> list:
         """The earliest and latest ``LOG_ROWS`` halves of a history too long to read whole (a token's transfers):
@@ -997,6 +1006,8 @@ class World:
     latest: Callable[[int, str, tuple], dict[int, int] | None] = lambda address, var, fields: None
     # Per candidate the builder listed (``holders.listed``): the argument bindings it may pass under.
     hints: dict = field(default_factory=dict)
+    # Candidate -> its place in the order they are asked about (``_built``): the order only, never a cut.
+    ranking: dict = field(default_factory=dict)
     # What a storage dump accounted for (``_snapshot_plan``): the lookups and cut histories it lists whole, and the
     # addresses that are all their holders who may pass; read by the builder where the events don't list them.
     dumped: dict = field(default_factory=dict)
@@ -1789,7 +1800,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if proven:
         # Nobody outside the list can pass, by construction: the lookups' blind spots don't apply.
         coverage = replace(coverage, representative=True, blind=frozenset(), values=frozenset())
-    _prefetch(formula, world, candidates)
+    _prefetch(formula, world, set(_ranked(candidates, world)[:_CANDIDATE_BATCH]))
     roots = ["caller"] + (["signer"] if contains(formula, frozenset({"signer"})) else [])
     fresh = [_outcome(formula, world, anyone, candidates, fixed=state) for state in states]
     # Lookups the events can't list, or whose histories were cut: listed from storage when a dump accounts for them,
@@ -1801,7 +1812,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     )
     if snapshot is not None and snapshot.found:
         candidates |= snapshot.found
-        _prefetch(formula, world, candidates)
+        _prefetch(formula, world, set(_ranked(snapshot.found, world)[:_CANDIDATE_BATCH]))
     if not proven and snapshot is not None and (snapshot.listed or snapshot.cleared):
         # The dump lists what the events couldn't: the builder again, with those lookups' holders in hand.
         world.dumped = {
@@ -1812,7 +1823,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         rebuilt, proven, gaps = _built(formula, world)
         candidates |= rebuilt
         truncated, capped = bool(world.cut) and not proven, not proven
-        _prefetch(formula, world, candidates)
+        _prefetch(formula, world, set(_ranked(candidates, world)[:_CANDIDATE_BATCH]))
     # Proving a candidate fails only matters for a complete list, which needs an unconfigured address proven to fail.
     refutable = any(f is False for f in fresh)
     passes: dict[str, set[int]] = {root: set() for root in roots}
@@ -1852,10 +1863,12 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         tally[0 if answer is UNK else 1] += 1
         return answer
 
-    # Every candidate's first questions at once, so their reads go out in a few batches rather than one round trip per
-    # candidate: the state as it is, then the guessed arguments' reads for those it leaves open.
-    identities = [{**anyone, root: candidate} for root in roots for candidate in sorted(candidates)]
+    # A batch of candidates' first questions at once, so their reads go out in a few batches rather than one round trip
+    # per candidate: the state as it is, then the guessed arguments' reads for those it leaves open.
+    identities: list[dict[str, int]] = []
     unsettled: list[dict[str, int]] = []
+    # Candidates never asked about because the budget ran out first: the list is partial, by this many.
+    untested: set[int] = set()
 
     loose_open: list[dict[str, int]] = []
 
@@ -1876,13 +1889,21 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         for identity in unsettled:
             _decide_one(formula, world, identity, candidates, fixed={}, refute_ok=False, reads_only=True)
 
-    world.chain.gather(as_they_are)
-    world.chain.gather(guessed, rounds=2)
-    for root in roots:
-        for candidate in sorted(candidates):
+    order = _ranked(candidates, world)
+    batches = [order[i : i + _CANDIDATE_BATCH] for i in range(0, len(order), _CANDIDATE_BATCH)]
+    for number, batch in enumerate(batches):
+        if world.exhausted():
+            untested.update(batch)
+            continue
+        if number:
+            _prefetch(formula, world, set(batch))
+        identities[:] = [{**anyone, root: candidate} for root in roots for candidate in batch]
+        world.chain.gather(as_they_are)
+        world.chain.gather(guessed, rounds=2)
+        pairs = [(root, candidate) for root in roots for candidate in batch]
+        for root, candidate in pairs:
             if world.exhausted():
-                undecided.add(candidate)
-                now_maybe = True
+                untested.add(candidate)
                 continue
             identity = {**anyone, root: candidate}
             # Every condition not about who calls left open, and still failing: refused whatever the arguments, the
@@ -1951,6 +1972,10 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                     undecided.add(candidate)
             if singled and candidate not in conditions:
                 passes[root].add(candidate)
+    if untested:
+        # Someone never asked about may pass now: neither "nobody known passes now" nor a complete list holds.
+        now_maybe = True
+        gaps.append(f"untested_candidates:{len(untested)}")
     now_index = next((i for i, state in enumerate(states) if state == {}), None)
     if now_index is not None and fresh[now_index] is False:
         # Undecided where the reasoning stops (a callee's check it can't settle): the call itself, run from the
@@ -2059,7 +2084,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                     gaps = [g for g in gaps if g != "history_truncated"]
         # Complete only as built from the identity checks (``holders``): candidates gathered any other way may miss
         # whoever no source named, whatever the stranger's failure shows.
-        complete = proven and blind and not undecided
+        complete = proven and blind and not undecided and not untested
         if not blind:
             gaps += _blind_gaps(coverage.blind) or ["others_unproven"]
         if undecided:
@@ -2401,7 +2426,7 @@ _SOLVER_GIVE_UPS = 3
 _LOWEST_SENDER = 2**16
 _OTHER_STRANGERS = tuple(FRESH ^ bit for bit in (1, 2, 4, 8))
 _STRANGERS = frozenset({FRESH, *_OTHER_STRANGERS})
-_MAX_CANDIDATES = 256
+_CANDIDATE_BATCH = 256  # candidates whose reads are fetched and questions asked together; all are asked in turn
 _CALLEE_DEPTH = 3  # contracts deep that a check's callees are read for candidates
 # Wall-clock budget for one function's decision; past it every open question is answered "unknown".
 DECISION_SECONDS = 120.0  # a safety net only: the work budget decides, so a busy machine doesn't change verdicts
@@ -2921,12 +2946,11 @@ def _exact_bindings(world: World, candidate: int) -> tuple[dict, ...] | None:
     return tuple(bindings)
 
 
-_BUILT_LIMIT = 4096  # members of a built list asked about; past it, the list is cut to the likeliest and partial
-
-
 def _unlisted(world: World, contract_term: Term, var: Any) -> tuple[set[int], str]:
     """For a lookup the events don't list whole: the addresses its writers' logs name (and the constructor's keys a
-    creating trace showed), else the address-shaped words of all its contract's logs; with why it isn't whole."""
+    creating trace showed), else, where it has no writer events at all, the address-shaped words of all its
+    contract's logs; with why it isn't whole. A writer history read partial is reported as cut and stands as read:
+    what it names is a lower bound, and another contract-wide sample in its place would be no more the list."""
     probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
     address = probe.eval(contract_term)
     name = f"namespaced:{var[-1]}" if isinstance(var, tuple) else f"storage:{var}"
@@ -2937,9 +2961,9 @@ def _unlisted(world: World, contract_term: Term, var: Any) -> tuple[set[int], st
     found |= world.created.get(address, set())
     topics = frozenset("0x" + format(t, "064x") for t in events)
     cut = bool(events) and world.chain.cut(address, topics)
-    if not found:
+    if not found and not cut:
         found = {w for w in world.chain.all_log_words(address) if 2**150 <= w < 2**160}
-        cut = cut or address in world.chain.truncated
+        cut = address in world.chain.truncated
     if cut:
         world.cut.add(address)
     return found, "history_truncated" if cut else name
@@ -2962,15 +2986,20 @@ def _built(formula: Term, world: World) -> tuple[set[int], bool, list[str]]:
     found = set(who.members) if who.finite else set(who.hints)
     members = {m for m in found if m >= _LOWEST_SENDER} - {FRESH}
     why = [] if proven else sorted(who.why) or ["unlisted"]
-    limit = _BUILT_LIMIT if proven else _MAX_CANDIDATES
-    if len(members) > limit:
-        # Too many to ask about one by one (a token's every holder): the likeliest, and partial. The likeliest
-        # are named by the code, then by the sources naming fewest (a role's 31 holders over a lender list's 277).
-        fewest = {c: min((len(g) for g in who.groups if c in g), default=len(members)) for c in members}
-        members = set(sorted(members, key=lambda c: (c not in world.named, fewest[c], c))[:limit])
-        proven, why = False, [*why, "too_many_candidates"]
+    # Every member is asked about, the likeliest first, so a budget that runs out leaves the unlikeliest untested
+    # (and says how many): named by the code, then by the sources naming fewest (a role's 31 over a lender list's 277).
+    fewest: dict[int, int] = {}
+    for group in who.groups:
+        for c in group:
+            fewest[c] = min(fewest.get(c, len(group)), len(group))
+    world.ranking = {c: (c not in world.named, fewest.get(c, len(members)), c) for c in members}
     world.hints = dict(who.members) if who.finite else {}
     return members, proven, why
+
+
+def _ranked(candidates: set[int], world: World) -> list[int]:
+    """``candidates`` in the order they are asked about (see ``_built``)."""
+    return sorted(candidates, key=lambda c: world.ranking.get(c, (True, len(candidates), c)))
 
 
 def _requirements(formula: Term, world: World) -> tuple:

@@ -38,6 +38,7 @@ from .terms import (
 
 _BINDINGS = 64  # argument bindings kept per member; past it, "any" (bindings only steer the search)
 _DEPTH = 3  # callees followed into, for a check handed the caller
+_WALK_STEPS = 256  # entries followed per linked list kept in a lookup; the walk only names likely members
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,7 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
 
     named: list = []
     t_atom: list = [None]  # the atom ``entries_of`` is reading
+    sampled: list = [False]  # whether a contract's log words were read partial: hints drawn from a sample
 
     def _named_members() -> dict[int, tuple[dict, ...]]:
         """The addresses the code names (``World.named``)."""
@@ -277,16 +279,20 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
             if isinstance(address, int) and not isinstance(address, bool):
                 words = world.chain.all_log_words(address % 2**160)
                 out.update({w: ({},) for w in words if 2**150 <= w < 2**160})
+                sampled[0] = sampled[0] or address % 2**160 in world.chain.truncated
         return out
 
     def _unproven(members: Any, reason: str) -> Who:
         """Everyone, as far as is shown, with ``members`` the likely ones."""
-        return _anyone(reason, {m % 2**160 for m in members})
+        found = _anyone(reason, {m % 2**160 for m in members})
+        if sampled[0]:
+            found = Who(None, found.excluded, found.sources, found.hints, found.why | {"history_truncated"}, found.groups)
+        return found
 
     def _walked(x: Term, keys: list) -> set[int]:
         """A list kept in the lookup itself (Safe's ``owners[SENTINEL] -> owner -> ... -> SENTINEL``): the entries
         followed from each small constant the condition names, as likely members."""
-        from .decide import _LOWEST_SENDER, _MAX_CANDIDATES
+        from .decide import _LOWEST_SENDER
 
         if len(keys) != 1:
             return set()
@@ -294,7 +300,7 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
         out: set[int] = set()
         for start in sorted(starts | {1}):
             at = start
-            for _ in range(_MAX_CANDIDATES):
+            for _ in range(_WALK_STEPS):
                 entry = replace_terms(x, {keys[0]: mk("const", at, "address")})
                 value = probe.eval(entry)
                 if not isinstance(value, int) or isinstance(value, bool) or value < _LOWEST_SENDER or value in out:
