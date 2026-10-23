@@ -19,12 +19,15 @@ every write; nothing is matched by name, interface or token shape. Exits whose p
   an effect, ether sent, a contract created, `selfdestruct`, delegatecalls, assembly calls, and any write the
   lowering may have lost.
 
-Then every own, authorized or credit write to a variable that any entry point's caller checks read (any conjunct
-of its success condition that involves who calls, the function itself included) becomes shared: writing it changes
-who passes some check (`approvedHashes[caller][h]`, `roles[r][caller]`). If an entry point can't be lowered, all
-writes are shared.
+Then every own, authorized or credit write to storage that any entry point's caller checks read (any conjunct of
+its success condition that involves who calls, the function itself included) becomes shared: writing it changes
+who passes some check (`approvedHashes[caller][h]`, `roles[r][caller]`). Storage is compared by variable and field
+path, one path a prefix of the other (`ops[id].reward` is not `ops[id].manager`; a whole `ops[id]` is both). If an
+entry point can't be lowered, all writes are shared.
 
 `self`: no shared write and at least one that isn't unchanged. `none`: nothing written besides unchanged. Only
-`self` changes the decision: holders aren't enumerated, and the row is restricted with gap `self_scoped` and its
-gate (`Verdict.gate`). A stranger who may pass in some state, or unseen addresses not shown to fail like a
+`self` changes the decision: holders aren't tested one by one. The builder still runs: when it proves the list
+empty the verdict is restricted, complete, nobody; otherwise the row is restricted with gap `self_scoped`, its
+gate (`Verdict.gate`, the success condition minus `when` conditions that read nothing the caller sends) and, when the list is proven, how many
+it names (`Verdict.members`). A stranger who may pass in some state, or unseen addresses not shown to fail like a
 stranger, sends it to full enumeration. `shared` and `none` keep full enumeration.

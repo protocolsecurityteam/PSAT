@@ -172,7 +172,7 @@ def _assembly_acts(function: Any) -> bool:
 
 
 def caller_checked(contract: Any) -> frozenset | None:
-    """The storage variables (``var_key``) that any entry point's caller checks read: every conjunct of its success
+    """The storage that any entry point's caller checks read, as (``var_key``, fields): every conjunct of its success
     condition that involves who calls. A write there changes who passes some check, so it is never the caller's own
     business. ``None`` when an entry point can't be lowered: what it checks is unknown."""
     cache = contract.__dict__.setdefault("_psat_caller_checked", {})
@@ -180,7 +180,7 @@ def caller_checked(contract: Any) -> frozenset | None:
         return cache["vars"]
     from .lower import Lowerer
 
-    found: set[str] = set()
+    found: set[tuple] = set()
     out: frozenset | None
     try:
         for fn in contract.functions_entry_points:
@@ -190,8 +190,8 @@ def caller_checked(contract: Any) -> frozenset | None:
             for conjunct in conjuncts(formula):
                 if not contains(conjunct, IDENTITY_KINDS):
                     continue
-                found.update(var_key(t[2]) for t in subterms(conjunct, "load") if t[1] == THIS)
-                found.update(f"raw:{t[2]!r}" for t in subterms(conjunct, "rawload") if t[1] == THIS)
+                found.update((var_key(t[2]), _fields(t[3])) for t in subterms(conjunct, "load") if t[1] == THIS)
+                found.update((f"raw:{t[2]!r}", ()) for t in subterms(conjunct, "rawload") if t[1] == THIS)
         out = frozenset(found)
     except Exception as exc:
         if isinstance(exc, TimeoutError):
@@ -199,6 +199,13 @@ def caller_checked(contract: Any) -> frozenset | None:
         out = None
     cache["vars"] = out
     return out
+
+
+def _checked(checked: frozenset, key: tuple) -> bool:
+    """Whether a caller check reads what ``key`` writes: the same variable, one field path a prefix of the other
+    (a whole struct written, one of its fields read)."""
+    var, fields = var_key(key[1]), _fields(key[2])
+    return any(v == var and (f[: len(fields)] == fields or fields[: len(f)] == f) for v, f in checked)
 
 
 def classify(exits: list, lost: bool, function: Any, checked: frozenset | None) -> Scope:
@@ -261,7 +268,7 @@ def classify(exits: list, lost: bool, function: Any, checked: frozenset | None) 
             else:
                 writes.append(("shared", _where(key)))
         for cls, key in kept:
-            if checked is None or var_key(key[1]) in checked:
+            if checked is None or _checked(checked, key):
                 writes.append(("shared", _where(key)))  # read by some caller check: changes who passes it
             else:
                 writes.append((cls, _where(key)))

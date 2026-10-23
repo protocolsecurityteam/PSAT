@@ -116,4 +116,5 @@ def test_a_write_that_only_looks_like_the_callers_own_is_shared(probe, name):
 
 def test_a_balance_moved_out_of_ones_own_entry_stays_self_scoped(probe):
     verdict = _verdict(probe, "transfer")
-    assert verdict.scope == "self" and verdict.gaps[:1] == ("self_scoped",)
+    # Nothing ever writes the allowlist here: shown empty, nobody passes, which a self-scoped row still says.
+    assert verdict.scope == "self" and verdict.openness == "restricted" and verdict.complete

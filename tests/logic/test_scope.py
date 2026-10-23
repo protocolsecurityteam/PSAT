@@ -152,8 +152,8 @@ def test_a_transfer_behind_an_allowlist_is_self_scoped_and_reports_its_gate(toke
     assert verdict.openness == "restricted" and not verdict.complete
     assert verdict.gaps == ("self_scoped",)
     assert any("allowed[caller]" in g for g in verdict.gate)
-    assert verdict.principals == frozenset()
-    assert chain.read_logs == []  # no holder history read: nobody enumerated
+    # Not asked about one by one; the allowlist's history still counts them.
+    assert verdict.principals == frozenset() and verdict.members == len(ALLOWED)
 
 
 def test_the_same_transfer_counting_into_a_global_is_shared_and_enumerated(token):
@@ -185,4 +185,5 @@ def test_a_lock_set_and_reset_leaves_a_transfer_self_scoped(token):
 def test_approving_for_a_token_one_holds_or_operates_is_self_scoped(token):
     verdict = _verdict(token, "approve")
     assert verdict.scope == "self" and verdict.scope_writes == (("authorized", "approvals"),)
-    assert verdict.openness == "restricted" and verdict.gaps == ("self_scoped",)
+    # Nobody holds a token here: the owners' list is shown empty, so nobody can approve.
+    assert verdict.openness == "restricted" and verdict.complete and not verdict.principals

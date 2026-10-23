@@ -1711,8 +1711,10 @@ class Verdict:
     # ``none`` when it writes nothing, else ``shared``; with each write's class and where (``("own", "balances")``).
     scope: str = "shared"
     scope_writes: tuple[tuple[str, str], ...] = ()
-    # For a self-scoped function, whose holders aren't enumerated: the conditions on who calls, as read.
+    # For a self-scoped function, whose holders aren't tested one by one: what a caller must satisfy, as read, and
+    # how many the builder's list names when it is shown whole (``None`` otherwise).
     gate: tuple[str, ...] = ()
+    members: int | None = None
 
 
 def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
@@ -1812,7 +1814,18 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # is decided in full below.
         fresh = [_outcome(formula, world, anyone, set(), fixed=state) for state in states]
         if all(f is False for f in fresh) and (coverage.representative or _decisive(formula, world)):
-            return Verdict("restricted", frozenset(), False, gaps=("self_scoped",), gate=_gate(formula))
+            # Who holds the gate is still built (not tested one by one): a list shown empty means nobody, ever.
+            members, proven, _ = _built(formula, world)
+            if proven and not members:
+                return Verdict("restricted", frozenset(), True)
+            return Verdict(
+                "restricted",
+                frozenset(),
+                False,
+                gaps=("self_scoped",),
+                gate=_gate(formula),
+                members=len(members) if proven else None,
+            )
     # Precompiles and sentinels (``address(1)``) never send a transaction.
     # Who may be singled out, built from the identity checks (``holders``): a list shown to hold everyone, one
     # drawn from what the chain shows without that proof, or none, each with why.
@@ -3053,11 +3066,14 @@ def _built(formula: Term, world: World) -> tuple[set[int], bool, list[str]]:
 
 
 def _gate(formula: Term) -> tuple[str, ...]:
-    """The conditions of ``formula`` on who calls, as read (``report.render``)."""
+    """What a caller must satisfy, as read (``report.render``): every conjunct of ``formula`` but the pure ``when``
+    conditions (a pause, a deadline: none reads what the caller sends), which hold for everyone alike."""
     from .report import render
 
+    when = frozenset(a for a in when_atoms(formula) if not contains(a, _FREE_KINDS))
     parts = formula[1] if formula[0] == "and" else (formula,)
-    return tuple(sorted(render(c) for c in parts if contains(c, IDENTITY_KINDS)))
+    kept = [c for c in parts if c not in when and not (c[0] == "not" and c[1] in when)]
+    return tuple(sorted(render(c) for c in kept))
 
 
 def _ranked(candidates: set[int], world: World) -> list[int]:
