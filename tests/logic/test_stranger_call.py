@@ -38,7 +38,7 @@ contract Loopy {
 }
 """
 
-ADMINS = [0xC3 << 140, 0xD4 << 140, 0xE5 << 140]
+ADMINS = [0xC3 << 140, 0xD4 << 140, 0xE5 << 140, 0xF6 << 140, 0xA7 << 140]  # more than a loop is followed exactly
 
 
 def _verdict(anvil, name):  # noqa: F811

@@ -1134,9 +1134,21 @@ class Lowerer:
     # Graph walk -------------------------------------------------------------------------------------------------------
 
     def _run_from(
-        self, function: Function, start: Any, state: State, depth: int, body: Any = None, unrolled: int = 0
+        self,
+        function: Function,
+        start: Any,
+        state: State,
+        depth: int,
+        body: Any = None,
+        unrolled: int = 0,
+        stop: Any = None,
+        left: list | None = None,
     ) -> list[Exit]:
-        order, edges = _schedule(start)
+        """The paths from ``start``. With ``stop`` (a loop's exit, for one more iteration of that loop run from its
+        header), the states reaching ``stop`` go to ``left`` for the run that asked, which goes on from there: the
+        iteration is a region of the graph, never the rest of the function, so an enclosing loop is never entered
+        half way through."""
+        order, edges = _schedule(start, stop)
         incoming: dict[int, list[State]] = {id(start): [state]}
         arrival: dict[int, State] = {}
         exits: list[Exit] = []
@@ -1156,6 +1168,9 @@ class Lowerer:
                         continue
                     if succ.type == NodeType.IFLOOP:
                         leave, again = succ.son_false, self._loop_condition(succ, out, depth)
+                    elif succ.type == NodeType.STARTLOOP and node.type != NodeType.IFLOOP:
+                        # ``for (;;)``: a loop without a condition, left only through a ``break``.
+                        leave, again = _loop_end(succ), TRUE
                     else:
                         # ``do { } while (c)``: the condition node's true son is the body, ``out`` already carries
                         # ``c``, and the loop leaves through the condition node's false son.
@@ -1169,26 +1184,51 @@ class Lowerer:
                         incoming.setdefault(id(leave), []).append(out)
                         continue
                     if again == TRUE and unrolled < MAX_UNROLL and self._steps < UNROLL_BUDGET:
-                        # Another iteration whose condition is known: run it, and the rest of the function after it.
-                        exits.extend(self._run_from(function, succ, out, depth, body, unrolled + 1))
+                        # Another iteration whose condition is known: run it, then on from where it leaves the loop.
+                        exits.extend(self._iterate(function, succ, out, depth, body, unrolled, leave, incoming))
                         continue
                     more = out
                     if again is not None:
                         # Either the loop stops here, exactly, or it goes on: for a few more iterations exactly, then
                         # with everything it may change forgotten.
-                        stop = State(mk_and([out.pc, mk_not(again)]), out.env, out.store, out.ret)
-                        incoming.setdefault(id(leave), []).append(stop)
+                        ends = State(mk_and([out.pc, mk_not(again)]), out.env, out.store, out.ret)
+                        incoming.setdefault(id(leave), []).append(ends)
                         more = State(mk_and([out.pc, again]), out.env, out.store, out.ret)
                     if again != TRUE and unrolled < MAX_SYMBOLIC_UNROLL and self._steps < UNROLL_BUDGET:
-                        exits.extend(self._run_from(function, succ, more, depth, body, unrolled + 1))
+                        exits.extend(self._iterate(function, succ, more, depth, body, unrolled, leave, incoming))
                     else:
                         after, leaving = self._widen(function, more, entry, succ, leave)
                         incoming.setdefault(id(leave), []).append(after)
                         exits.extend(leaving)
+        if stop is not None and left is not None:
+            left.extend(incoming.pop(id(stop), []))
         for pending in incoming.values():
             # Nodes the schedule never reached (control flow no loop header explains): unknown, never dropped.
             for st in pending:
                 exits.append(self._unfollowed(function, st, "unsupported:irreducible_cfg"))
+        return exits
+
+    def _iterate(
+        self,
+        function: Function,
+        header: Any,
+        st: State,
+        depth: int,
+        body: Any,
+        unrolled: int,
+        leave: Any,
+        incoming: dict[int, list[State]],
+    ) -> list[Exit]:
+        """One more iteration of the loop at ``header``, then the rest of the function after it, each iteration count
+        a path of its own. A loop inside another (its exit leads back to its header) is run as a region instead: its
+        exits returned and the states leaving it delivered to ``leave`` in the asking run, which goes on from there,
+        since running on from its header would enter the enclosing loop half way through."""
+        if not _reenters(leave, header):
+            return self._run_from(function, header, st, depth, body, unrolled + 1)
+        left: list[State] = []
+        exits = self._run_from(function, header, st, depth, body, unrolled + 1, stop=leave, left=left)
+        if left:
+            incoming.setdefault(id(leave), []).extend(left)
         return exits
 
     def _unfollowed(self, function: Function, st: State, label: str) -> Exit:
@@ -1477,10 +1517,20 @@ class Lowerer:
             st = replace(st, pc=mk_and([st.pc, mk_cmp("le", const(size), length)]))
         if node.type == NodeType.THROW:
             return
+        if node.type == NodeType.CONTINUE:
+            target = _continue_target(node)
+            if target is None:
+                exits.append(self._unfollowed(function, st, "unsupported:continue"))
+            else:
+                yield target, st
+            return
         declared = getattr(node, "variable_declaration", None)
         if node.type == NodeType.VARIABLE and not node.irs and declared is not None and self._memory_var(declared):
             # ``S memory s;``: a fresh zeroed object each time the declaration runs.
             st = self._allocate(declared, _zero(declared.type), st)
+        elif node.type == NodeType.VARIABLE and not node.irs and declared is not None and _local_value(declared):
+            # ``uint256 j;``: zero each time the declaration runs (an inner loop's counter, entered again).
+            st = replace(st, env={**st.env, id(declared): _zero(declared.type)})
         if node.type == NodeType.PLACEHOLDER and body is not None:
             # A modifier's ``_``: the rest of the function, then the modifier's own tail with its locals.
             for done in body(st):
@@ -2878,13 +2928,13 @@ class Lowerer:
         return _zero(getattr(var, "type", None))
 
 
-def _schedule(start: Any) -> tuple[list[Any], dict[int, list[tuple[Any, str]]]]:
-    """Nodes reachable from ``start`` in topological order of forward edges, and each node's out-edges tagged
-    ``forward`` or ``back`` (to a node still on the depth-first stack)."""
+def _schedule(start: Any, stop: Any = None) -> tuple[list[Any], dict[int, list[tuple[Any, str]]]]:
+    """Nodes reachable from ``start`` (not past ``stop``) in topological order of forward edges, and each node's
+    out-edges tagged ``forward`` or ``back`` (to a node still on the depth-first stack)."""
     edges: dict[int, list[tuple[Any, str]]] = {}
     nodes: dict[int, Any] = {}
     on_stack: set[int] = set()
-    stack = [(start, iter(start.sons))]
+    stack = [(start, iter(_sons(start)))]
     nodes[id(start)] = start
     on_stack.add(id(start))
     edges[id(start)] = []
@@ -2899,18 +2949,28 @@ def _schedule(start: Any) -> tuple[list[Any], dict[int, list[tuple[Any, str]]]]:
             edges[id(node)].append((son, "back"))
             continue
         edges[id(node)].append((son, "forward"))
+        if son is stop:
+            continue  # where the run that asked goes on
         if id(son) not in nodes:
             nodes[id(son)] = son
             edges[id(son)] = []
             on_stack.add(id(son))
-            stack.append((son, iter(son.sons)))
+            stack.append((son, iter(_sons(son))))
     # A back edge to a loop header delivers to the header's exit, so it orders the latch before the exit. One into a
     # ``do`` body comes from the condition node, whose own false son is the exit.
     indegree = dict.fromkeys(nodes, 0)
     successors: dict[int, list[Any]] = {k: [] for k in nodes}
     for key, out in edges.items():
         for son, kind in out:
-            target = son if kind == "forward" else son.son_false if son.type == NodeType.IFLOOP else None
+            target = (
+                son
+                if kind == "forward"
+                else son.son_false
+                if son.type == NodeType.IFLOOP
+                else _loop_end(son)
+                if son.type == NodeType.STARTLOOP and node.type != NodeType.IFLOOP
+                else None
+            )
             if target is None or id(target) not in nodes:
                 continue
             successors[key].append(target)
@@ -2928,6 +2988,124 @@ def _schedule(start: Any) -> tuple[list[Any], dict[int, list[tuple[Any, str]]]]:
         # An irreducible cycle (not an IFLOOP header): its nodes never run, and the caller sees no exit through them.
         pass
     return order, edges
+
+
+def _sons(node: Any) -> list:
+    """``node``'s successors, with ``continue`` sent where the language sends it (``_continue_target``)."""
+    if node.type != NodeType.CONTINUE:
+        return node.sons
+    target = _continue_target(node)
+    return [target] if target is not None else []
+
+
+_CONTINUES: dict[int, tuple[Any, Any]] = {}
+
+
+def _span(node: Any) -> tuple[int, int] | None:
+    mapping = getattr(node, "source_mapping", None)
+    start, length = getattr(mapping, "start", None), getattr(mapping, "length", None)
+    return (start, start + length) if isinstance(start, int) and isinstance(length, int) else None
+
+
+def _continue_target(node: Any) -> Any:
+    """Where a ``continue`` goes: the increment of a ``for`` loop that has one, else the loop's condition (``while``,
+    ``do``/``while``, a ``for`` without an increment), else the loop's start (``for (;;)``); ``None`` where the
+    loop can't be told apart. Slither takes any statement leading into a loop's condition for a ``for``'s increment, so
+    its own edge sends a ``continue`` in a ``while`` or ``do``/``while`` body, or a ``for`` without an increment, to the
+    body's last statement, and one in a ``for`` without a condition past the increment. The loop is the innermost
+    ``STARTLOOP`` whose source holds the ``continue``; its increment, a statement of the loop's own that sits before the
+    body in the source (the header)."""
+    cached = _CONTINUES.get(id(node))
+    if cached is not None and cached[0] is node:
+        return cached[1]
+    target = _find_continue_target(node)
+    _CONTINUES[id(node)] = (node, target)
+    return target
+
+
+def _find_continue_target(node: Any) -> Any:
+    function = getattr(node, "function", None)
+    where = _span(node)
+    if function is None or where is None:
+        return None
+    nodes = list(function.nodes)
+
+    def innermost(position: int) -> Any:
+        holding = [n for n in nodes if n.type == NodeType.STARTLOOP and (s := _span(n)) and s[0] <= position < s[1]]
+        return max(holding, key=lambda n: _span(n)[0], default=None)
+
+    loop = innermost(where[0])
+    if loop is None or len(loop.sons) != 1:
+        return None
+    heads = [n for n in nodes if n.type == NodeType.IFLOOP and _span(n) and innermost(_span(n)[0]) is loop]
+    if len(heads) > 1:
+        return None
+    head = heads[0] if heads else None
+    if head is not None and loop.sons[0] is not head:
+        return head  # ``do { } while (c)``: the body runs first, and ``continue`` goes to the condition
+    body = head.son_true if head is not None else loop.sons[0]
+    begins = _span(body)
+    if body is None or begins is None:
+        return None
+    ends = next((n for n in nodes if n.type == NodeType.ENDLOOP and _span(n) == _span(loop)), None)
+    increments = [
+        n
+        for n in _loop_nodes_raw(body, ends)
+        if n.type == NodeType.EXPRESSION and (s := _span(n)) and s[0] < begins[0] and innermost(s[0]) is loop
+    ]
+    if len(increments) > 1:
+        return None
+    return increments[0] if increments else head if head is not None else loop
+
+
+_REENTERS: dict[tuple[int, int], tuple[Any, Any, bool]] = {}
+
+
+def _reenters(leave: Any, header: Any) -> bool:
+    """Whether the graph leads from a loop's exit back to its header: the loop sits inside another."""
+    key = (id(leave), id(header))
+    cached = _REENTERS.get(key)
+    if cached is not None and cached[0] is leave and cached[1] is header:
+        return cached[2]
+    seen = {id(leave)}
+    stack = [leave]
+    found = False
+    while stack and not found:
+        for son in _sons(stack.pop()):
+            if son is header:
+                found = True
+                break
+            if id(son) not in seen:
+                seen.add(id(son))
+                stack.append(son)
+    _REENTERS[key] = (leave, header, found)
+    return found
+
+
+def _loop_end(start: Any) -> Any:
+    """The ``ENDLOOP`` of the loop ``start`` begins (the same source), where a ``break`` leaves it."""
+    where = _span(start)
+    function = getattr(start, "function", None)
+    if where is None or function is None:
+        return None
+    ends = [n for n in function.nodes if n.type == NodeType.ENDLOOP and _span(n) == where]
+    return ends[0] if len(ends) == 1 else None
+
+
+def _loop_nodes_raw(start: Any, leave: Any) -> list:
+    """``_loop_nodes`` over Slither's own edges (a ``continue`` leads somewhere inside the loop either way)."""
+    seen = {id(start)}
+    out = [start]
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        for son in node.sons:
+            if son is leave or id(son) in seen:
+                continue
+            seen.add(id(son))
+            out.append(son)
+            stack.append(son)
+    return out
 
 
 def _has_require_with_error(node: Any) -> bool:
@@ -3176,6 +3354,15 @@ def _rank(type_: Any) -> int | None:
     return rank
 
 
+def _local_value(var: Any) -> bool:
+    """A local variable of a value type (not a storage pointer, not memory or calldata)."""
+    from slither.core.variables.local_variable import LocalVariable
+
+    if not isinstance(var, LocalVariable) or getattr(var, "location", None) in ("storage", "calldata", "memory"):
+        return False
+    return not _reference_typed(getattr(var, "type", None)) and not isinstance(getattr(var, "type", None), MappingType)
+
+
 def _zero_item(type_: Any) -> Term | None:
     """What an item of a freshly allocated array of ``type_`` holds."""
     from slither.core.solidity_types import ArrayType
@@ -3331,7 +3518,7 @@ def _loop_nodes(start: Any, leave: Any) -> list:
     stack = [start]
     while stack:
         node = stack.pop()
-        for son in node.sons:
+        for son in _sons(node):
             if son is leave or id(son) in seen:
                 continue
             seen.add(id(son))
