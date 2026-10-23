@@ -1756,6 +1756,12 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         opaque = _opaque_conditions(free, world)
         if opaque:
             verdict = _on_conditions(formula, world, coverage, opaque) or verdict
+    if verdict.openness == "not_determined" and any(subterms(c, "unknown") or subterms(c, "opaque") for c in core):
+        # What the lowering couldn't express keeps the stranger undecided: its call, run once on the chain, settles
+        # it when it goes through. One that fails proves nothing (other arguments, another state) and changes nothing.
+        found = _executes(formula, world, FRESH, set(), tries=1)
+        if found is not None:
+            verdict = Verdict("open", frozenset(), True, witnesses={FRESH: found})
     if verdict.openness == "not_determined" and free:
         # What only the conditions leave open is theirs to report, not a reason the answer is open.
         probe = Evaluator(world, {"caller": FRESH, "signer": FRESH})
@@ -2600,9 +2606,12 @@ def _acts_once_allowed(formula: Term, world: World, anyone: dict, candidates: se
 _EXECUTED_CANDIDATES = 8  # undecided candidates per function whose call is run on the chain
 
 
-def _executes(formula: Term, world: World, candidate: int, candidates: set) -> dict[str, Any] | None:
+def _executes(
+    formula: Term, world: World, candidate: int, candidates: set, tries: int | None = None
+) -> dict[str, Any] | None:
     """The arguments with which a call from ``candidate`` returns when the chain runs it (``eth_call``), else
-    ``None``: guesses from the search with the conditions the engine can't settle left free, then all zero."""
+    ``None``: guesses from the search with the conditions the engine can't settle left free, then all zero; the
+    first ``tries`` of them only, when given."""
     identity = {"caller": candidate, "signer": FRESH}
     found: dict[Term, Any] = {}
     # Plausible values besides: an amount of one, a flag set, the candidate's own address, a short name.
@@ -2627,7 +2636,7 @@ def _executes(formula: Term, world: World, candidate: int, candidates: set) -> d
     guesses = [{}, plausible]
     if _outcome(formula, world, identity, candidates, relaxed=True, witness=found) is True and found:
         guesses.insert(0, {**plausible, **found})
-    for guess in guesses:
+    for guess in guesses[:tries]:
         if any(t[0] == "callvalue" and v for t, v in guess.items()):
             continue  # a call sending value the candidate may not hold: not run
         assignment = dict(guess)
