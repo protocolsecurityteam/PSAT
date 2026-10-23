@@ -286,7 +286,9 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
         """Everyone, as far as is shown, with ``members`` the likely ones."""
         found = _anyone(reason, {m % 2**160 for m in members})
         if sampled[0]:
-            found = Who(None, found.excluded, found.sources, found.hints, found.why | {"history_truncated"}, found.groups)
+            found = Who(
+                None, found.excluded, found.sources, found.hints, found.why | {"history_truncated"}, found.groups
+            )
         return found
 
     def _walked(x: Term, keys: list) -> set[int]:

@@ -1874,7 +1874,6 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             freed_stranger[level] = _outcome(formula, world, anyone, candidates, relaxed=level)
         return freed_stranger[level]
 
-
     # A batch of candidates' first questions at once, so their reads go out in a few batches rather than one round trip
     # per candidate: the state as it is, then the guessed arguments' reads for those it leaves open.
     identities: list[dict[str, int]] = []

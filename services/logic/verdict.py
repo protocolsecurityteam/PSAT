@@ -1603,7 +1603,9 @@ def function_verdict(
         if not proof:
             if (target, var, fields) not in guessed:
                 guessed[(target, var, fields)] = _latest_written(target, var, fields, proof=False) or {}
-            return {key for key, written in guessed[(target, var, fields)].items() if written % 2**160 == value % 2**160}
+            return {
+                key for key, written in guessed[(target, var, fields)].items() if written % 2**160 == value % 2**160
+            }
         if (target, var, fields) not in replayed:
             replayed[(target, var, fields)] = _latest_written(target, var, fields)
         latest = replayed[(target, var, fields)]
@@ -1620,7 +1622,9 @@ def function_verdict(
         return replayed[(target, var, fields)]
 
     def _latest_written(target: int, var: str, fields: tuple, proof: bool = True) -> dict[int, int] | None:
-        specs = valued_specs(target, _spec_name(var), fields) if proof else running_specs(target, _spec_name(var), fields)
+        specs = (
+            valued_specs(target, _spec_name(var), fields) if proof else running_specs(target, _spec_name(var), fields)
+        )
         by_topic = {int.from_bytes(keccak(text=spec["event_signature"]), "big"): spec for spec in specs}
         topics = frozenset("0x" + format(t, "064x") for t in by_topic)
         latest: dict[int, int] = {}
