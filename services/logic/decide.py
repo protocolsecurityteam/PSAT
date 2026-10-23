@@ -33,6 +33,7 @@ from eth_utils.crypto import keccak
 
 from .taint import singles_out_nobody, split, tainted, unknown_gap, unknown_labels
 from .terms import (
+    _EXACT,
     CALLDATA,
     FALSE,
     IDENTITY_KINDS,
@@ -41,11 +42,13 @@ from .terms import (
     cheapest_first,
     conjuncts,
     contains,
+    fits,
     mk,
     mk_and,
     mk_not,
     packed_width,
     replace_terms,
+    signed,
     stable,
     subterms,
 )
@@ -1257,8 +1260,7 @@ class Evaluator:
             v = self.eval(t[2])
             if isinstance(v, bool) or not isinstance(v, int):
                 return v
-            bits = {"address": 160, "uint160": 160, "uint8": 8, "uint32": 32, "uint64": 64, "uint128": 128}.get(t[1])
-            return v % 2**bits if bits else v
+            return converted(t[1], v)
         return UNK
 
     def _coded(self, value: Any) -> bool:
@@ -1464,9 +1466,28 @@ class Evaluator:
         if item[0] == "const" and isinstance(item[1], str):
             return item[1].encode()
         if item[0] == "enc":
+            kind, args = item[1], list(item[2])
             words = []
-            for arg in item[2]:
-                if item[1] == "abi.encodePacked" and arg[0] == "const" and isinstance(arg[1], str):
+            if kind in ("abi.encodeWithSelector", "abi.encodeWithSignature"):
+                # Four selector bytes, then the arguments as ``abi.encode`` lays them out.
+                head = args.pop(0) if args else None
+                if head is None or head[0] != "const":
+                    return None
+                if kind == "abi.encodeWithSignature":
+                    if not isinstance(head[1], str):
+                        return None
+                    words.append(keccak(text=head[1])[:4])
+                else:
+                    selector = self.eval(head)
+                    if isinstance(selector, str):
+                        selector = int(selector, 0) if selector[:2] in ("0x", "0X") else int(selector)
+                    if not isinstance(selector, int) or isinstance(selector, bool):
+                        return None
+                    words.append((selector % 2**32).to_bytes(4, "big"))
+            elif kind not in ("abi.encode", "abi.encodePacked"):
+                return None  # an encoding not laid out here (``abi.encodeCall`` left unresolved)
+            for arg in args:
+                if kind == "abi.encodePacked" and arg[0] == "const" and isinstance(arg[1], str):
                     words.append(arg[1].encode())  # a string packs as its bytes (Aragon's ``"PERMISSION"`` tag)
                     continue
                 v = self.eval(arg)
@@ -1474,11 +1495,15 @@ class Evaluator:
                     v = int(v)
                 if not isinstance(v, int):
                     return None
-                if item[1] == "abi.encodePacked":
-                    width = packed_width(arg)
+                width = packed_width(arg)
+                fixed = _fixed_bytes_type(arg)
+                if kind == "abi.encodePacked":
                     if width is None:
                         return None
                     words.append((v % 2 ** (8 * width)).to_bytes(width, "big"))
+                elif fixed is not None:
+                    # A ``bytesN`` sits at the left of its word; its value here is right-aligned in N bytes.
+                    words.append((v % 2 ** (8 * fixed)).to_bytes(fixed, "big").ljust(32, b"\0"))
                 else:
                     words.append((v % 2**256).to_bytes(32, "big"))
             return b"".join(words)
@@ -1680,6 +1705,11 @@ class Evaluator:
 
     @staticmethod
     def _op(name: str, args: list[Any]) -> Any:
+        if name == "fits":
+            # Checked arithmetic's range: the operation computed exactly, within its type.
+            if len(args) == 5 and all(isinstance(a, int) and not isinstance(a, bool) for a in args[1:3]):
+                return fits(str(args[0]), int(args[1]), int(args[2]), int(args[3]), bool(args[4]))
+            return UNK
         if name in ("and", "or") and any(a is ASSUMED for a in args):
             # An assembly call's success the caller arranges is the word 1: ``and(success, ok)``.
             args = [1 if a is ASSUMED else a for a in args]
@@ -1700,9 +1730,46 @@ class Evaluator:
                 "shr": lambda: a[0] >> a[1] if a[1] < 256 else 0,
                 "pow": lambda: pow(a[0], a[1], 2**256),
                 "bnot": lambda: 2**256 - 1 - a[0],
+                "sdiv": lambda: _EXACT["sdiv"](a[0], a[1]),
+                "smod": lambda: _EXACT["smod"](a[0], a[1]),
+                "sar": lambda: _EXACT["sar"](a[0], a[1]),
+                "byte": lambda: _EXACT["byte"](a[0], a[1]),
+                "signextend": lambda: _EXACT["signextend"](a[0], a[1]),
+                "clz": lambda: 256 - (a[0] % 2**256).bit_length(),
             }[name]()
         except (KeyError, IndexError):
             return UNK
+
+
+def _fixed_bytes_type(term: Term) -> int | None:
+    """N when ``term`` is typed ``bytesN`` (N < 32): a value the ABI left-aligns in its word."""
+    type_ = term[2] if term[0] in ("const", "arg") else term[1] if term[0] == "conv" else None
+    found = re.fullmatch(r"bytes(\d+)", type_) if isinstance(type_, str) else None
+    return int(found.group(1)) if found and int(found.group(1)) < 32 else None
+
+
+def conversion_width(type_: str) -> tuple[int, bool] | None:
+    """(bits, signed) a conversion to ``type_`` keeps: an integer type's width, an address's 160 bits, a ``bytesN``'s
+    ``8N`` (its value right-aligned); ``None`` for a type whose values pass through (a contract, an enum, a value type
+    alias)."""
+    found = re.fullmatch(r"(u?)int(\d*)", type_)
+    if found:
+        return int(found.group(2) or 256), found.group(1) == ""
+    if type_ in ("address", "address payable"):
+        return 160, False
+    found = re.fullmatch(r"bytes(\d+)", type_)
+    if found and 1 <= int(found.group(1)) <= 32:
+        return 8 * int(found.group(1)), False
+    return None
+
+
+def converted(type_: str, value: int) -> int:
+    """``value`` converted to the integer-like ``type_``: kept to its width, read as signed for a signed type."""
+    width = conversion_width(type_)
+    if width is None:
+        return value
+    bits, is_signed = width
+    return signed(value, bits) if is_signed else value % 2**bits
 
 
 def _abi_value(value: Any, type_: str) -> Any:
@@ -3967,10 +4034,28 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
             r = _W - 1 - go(t[2][0], "int")
             return r if sort == "int" else r != 0
         if kind == "conv":
-            bits = {"address": 160, "uint160": 160, "uint8": 8, "uint32": 32, "uint64": 64, "uint128": 128}.get(t[1])
             inner = go(t[2], "int")
-            r = inner % 2**bits if bits else inner
+            width = conversion_width(t[1])
+            if width is None:
+                r = inner
+            elif width[1]:
+                low = inner % 2 ** width[0]
+                r = z3.If(low >= 2 ** (width[0] - 1), low - 2 ** width[0], low)
+            else:
+                r = inner % 2 ** width[0]
             return r if sort == "int" else r != 0
+        if kind == "op" and t[1] == "fits" and len(t[2]) == 5 and t[2][0][0] == "const":
+            # Checked arithmetic's range, exact where the operation is linear.
+            name, bits, is_signed = t[2][0][1], t[2][3][1], t[2][4][1]
+            x, y = go(t[2][1], "int"), go(t[2][2], "int")
+            exact = {"add": lambda: x + y, "sub": lambda: x - y}.get(name)
+            if exact is None and name == "mul" and (number(t[2][1]) is not None or number(t[2][2]) is not None):
+                exact = lambda: x * y  # noqa: E731
+            if exact is not None and isinstance(bits, int):
+                lo, hi = (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) if is_signed else (0, 2**bits - 1)
+                r = exact()
+                inside = z3.And(r >= lo, r <= hi)
+                return inside if sort == "bool" else as_int(inside)
         if kind == "hash":
             return lit(FreeHash(identity=True), sort)
         if kind in ("call", "item"):

@@ -50,6 +50,28 @@ contract C {
         b[i] = 1;
         require(b[0] == 1);
     }
+    function aliased(uint256 i) external pure {
+        uint256[] memory a = new uint256[](2);
+        uint256[] memory b = a;
+        b[i] = 1;
+        require(a[0] == 1);
+    }
+    function filled() external pure { uint256[] memory a = new uint256[](2); _fill(a); require(a[0] == 7); }
+    function _fill(uint256[] memory x) internal pure { x[0] = 7; }
+    function rebound() external pure { uint256[] memory a = new uint256[](2); _rebind(a); require(a[0] == 0); }
+    function _rebind(uint256[] memory x) internal pure { x = new uint256[](1); x[0] = 7; }
+    function fieldAlias() external pure {
+        uint256[] memory a = new uint256[](2);
+        S memory s;
+        s.xs = a;
+        a[1] = 5;
+        require(s.xs[1] == 5);
+    }
+    function fresh(uint256 n) external pure {
+        uint256 total;
+        for (uint256 i; i < 2; i++) { S memory s; total += s.a; s.a = 3; }
+        require(total == 0);
+    }
     function calldataArray(uint256[] calldata xs, uint256 i) external pure { require(xs[i] == 5); }
     function calldataFixed(uint256[2] calldata ys, uint256 i) external pure { require(ys[i] == 5); }
     function calldataByte(bytes calldata d) external pure { require(d[0] == 0x01); }
@@ -68,6 +90,18 @@ contract C {
         address back;
         assembly { back := sload(5) }
         require(back == msg.sender);
+    }
+    struct P { uint256 a; }
+    P pa;
+    P pb;
+    uint256 x;
+    function setX(uint256 v) external { x = v; }
+    function selfCalled() external { x = 1; this.setX(2); require(x == 1); }
+    function chosen(bool c) external {
+        P storage p;
+        if (c) p = pa; else p = pb;
+        p.a = 5;
+        require(pa.a == 5 || !c);
     }
     function later(uint256 n) external pure {
         bool flag;
@@ -133,6 +167,21 @@ def test_nested_memory_writes_reach_the_outer_value(contract):
     assert _at(_formula(contract, "member"), i=0) == FALSE
 
 
+def test_two_names_for_one_memory_object_see_each_others_writes(contract):
+    assert _at(_formula(contract, "aliased"), i=0) == TRUE
+    assert _at(_formula(contract, "aliased"), i=1) == FALSE
+    assert _formula(contract, "fieldAlias") == TRUE
+
+
+def test_a_callee_writes_into_the_callers_object_but_reassigning_its_parameter_does_not(contract):
+    assert _formula(contract, "filled") == TRUE
+    assert _formula(contract, "rebound") == TRUE
+
+
+def test_a_declaration_in_a_loop_makes_a_fresh_object_each_time(contract):
+    assert _formula(contract, "fresh") == TRUE
+
+
 def test_calldata_items_are_the_callers_items_within_their_length(contract):
     xs, i = mk("arg", "xs", "uint256[]"), mk("arg", "i", "uint256")
     formula = _formula(contract, "calldataArray")
@@ -171,6 +220,17 @@ def test_writes_two_branches_make_in_opposite_orders_read_back_per_branch(contra
         assert _at(formula, c=c, x=7, y=7, want=same) == TRUE
         assert _at(formula, c=c, x=7, y=7, want=apart + same) == FALSE
         assert _at(formula, c=c, x=7, y=8, want=apart) == TRUE
+
+
+def test_storage_after_a_call_into_this_contracts_own_code_reads_unknown(contract):
+    formula = _formula(contract, "selfCalled")
+    assert formula != TRUE and "selfcall:setX(uint256)" in {o[1] for o in subterms(formula, "opaque")}
+
+
+def test_a_storage_pointer_chosen_by_branch_reads_and_writes_unknown(contract):
+    formula = _formula(contract, "chosen")
+    assert formula not in (TRUE, FALSE)
+    assert "unsupported:storage_pointer_choice" in {t[1] for k in ("unknown", "opaque") for t in subterms(formula, k)}
 
 
 def test_a_raw_slot_reads_back_what_this_call_stored_there(contract):

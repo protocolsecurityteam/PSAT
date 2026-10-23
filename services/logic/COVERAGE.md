@@ -169,3 +169,78 @@ Yul builtins (Solidity >= 0.6 assembly, lowered by Slither to ``SolidityCall``):
 * special variables (30 names): **15 HANDLED, 9 REJECTED, 1 APPROXIMATED** (tx.gasprice), 5 namespaces.
 * 25 distinct approximations (A1-A25) across operations, builtins, variables, conversions, storage/memory/loops,
   latching and the legacy Yul reader.
+
+## 2026-10-23: after
+
+Every entry is HANDLED or REJECTED; the explicit sets are ``HANDLED_OPERATIONS``/``REJECTED_OPERATIONS``,
+``HANDLED_BUILTINS``/``REJECTED_BUILTINS``, ``HANDLED_VARIABLES``/``REJECTED_VARIABLES`` and the ``LEGACY_YUL_*`` sets in
+``lower.py``. ``tests/logic/test_ir_coverage.py`` computes Slither's own enumeration at test time and fails on anything
+unclassified (a new Slither); it also exercises every REJECTED entry and checks its label reaches the verdict's gaps
+(not complete) where Solidity 0.8.27 can express it, else the term the lowering builds. Anything outside every set is
+rejected by default as ``unsupported:<name>``. ``tests/logic/test_language.py`` evaluates the lowered formula of ~80
+probes with the decision's own evaluator and compares each with ``eth_call`` on anvil (arithmetic, conversions,
+builtins, encodings, custom errors, halting assembly); ``tests/logic/test_elements.py`` pins element reads, memory,
+storage and loops; ``tests/logic/test_latching.py`` the latch.
+
+**Count (after):** operation classes 25 HANDLED, 4 REJECTED (Phi, PhiCallback, InternalDynamicCall, Send), 5 abstract or
+enum, 0 APPROXIMATED; builtins 85 HANDLED, 38 REJECTED, 0 APPROXIMATED; special variables 15 HANDLED, 15 REJECTED
+(namespaces now rejected by name too), 0 APPROXIMATED; legacy Yul builtins 50 HANDLED, 5 REJECTED as named unknowns,
+33 REJECTED to the fallback reader.
+
+### What each approximation became
+
+| # | was | now | pinned by |
+|---|---|---|---|
+| A1 | memory aliasing copied | HANDLED: values memory keeps by reference are objects (``("heap", n)``) behind pointers; every name sees every write | ``test_elements::test_two_names_for_one_memory_object_see_each_others_writes`` |
+| A2 | narrow unsigned wrap at 2^256, ``~`` 256-bit | HANDLED: unchecked results converted to their width; ``~`` in its width | ``test_language`` (``wrapped``, ``wrappedShift``, ``flipped``) |
+| A3 | signed read as unsigned | HANDLED: operands and results sign-normalized (``conv("intN")``), ``sdiv``/``smod``/``sar`` exact, signed compares, Yul ``slt``/``sgt``/``sdiv`` as Slither renders them; evaluator and solver convert by width | ``test_language`` (``negative``, ``signedDiv``, ``signedMod``, ``signedShift``, ``signedAdd``, ``yulSigned``, ``negativeConstant``) |
+| A4 | checked overflow, division by zero not in the path | HANDLED: unsigned ``a - b`` requires ``b <= a``; other checked operations ``fits(op, a, b, bits, signed)`` (exact, evaluated and encoded for z3); ``/``, ``%`` require a nonzero divisor outside Yul | ``test_language`` (``checked*``, ``divided``, ``remainder``, ``yulDivZero``) |
+| A5 | storage read under / around a whole write | HANDLED: ``read_store`` projects a whole write onto the part read, and reads a whole value written in part as ``upd`` | ``test_elements::test_a_field_reads_back_what_a_whole_struct_write_or_delete_left``, ``test_an_item_pushed_then_copied_reads_back_as_pushed`` |
+| A6 | lido: memory copy of a storage array indexed as the array | HANDLED: copy vs literal by type rank; item ``k`` of a copy is ``load(..., k)`` | ``test_elements::test_a_storage_list_copied_to_memory_calls_each_item_not_the_list`` and the lido row |
+| A7 | symbolic-index write into a tracked memory array lost | HANDLED: ``update`` item by item (``ite``), else ``upd`` | ``test_elements::test_a_write_at_a_symbolic_index_lands_on_that_item`` |
+| A8 | bytes index as a word | HANDLED: one byte (``slice(elem(x, k), 0, 1)``) | ``test_elements::test_a_bytes_index_is_one_byte_not_a_word`` |
+| A9 | Panics not in the path | HANDLED: index out of range (0x32, memory, calldata and storage arrays; not mappings), enum conversion and enum arguments (0x21), allocation past 2**64 (0x41), pop on empty (through checked ``-``) | ``test_elements`` (literal, storage), ``test_language`` (``member``, ``enumArgument``, ``allocated``) |
+| A10 | callee writes into memory parameters lost | HANDLED: parameters hold the caller's object; reassigning a parameter points it elsewhere | ``test_elements::test_a_callee_writes_into_the_callers_object_but_reassigning_its_parameter_does_not`` |
+| A11 | function pointer call assumed to succeed | REJECTED: ``unsupported:InternalDynamicCall`` on the path, value and writes unknown | ``test_ir_coverage`` (``viaPointer``) |
+| A12 | ``.staticcall`` and caller-naming ``.call`` assumed | HANDLED: the view call / action the ``abi.encodeWith*`` data names (``ok``, decoded words); undecodable staticcall data ``unsupported:staticcall``, undecodable call data naming the caller ``unsupported:call_data`` | ``test_language::test_a_low_level_call_is_the_call_its_data_encodes``, ``test_origin_shapes::test_a_low_level_staticcall_in_followed_code_is_the_view_call_its_data_encodes`` |
+| A13 | conversions unmasked / bytes misaligned | HANDLED: every integer width, address, ``bytesM`` -> ``bytesN`` as a shift, ``bytes`` -> ``bytesN`` its first N bytes; same in evaluator and solver (``converted``) | ``test_language`` (``narrowed``, ``cut``, ``padded``, ``unsignedOf``, ``signedOf``, ``tiny``) |
+| A14 | Solidity mulmod/addmod by zero | HANDLED: nonzero modulus required outside Yul (>= 0.5) | ``test_language`` (``modulus``) |
+| A15 | encodings hashed wrongly | HANDLED: ``bytesN`` left-aligned in ``abi.encode``, 4-byte selector for ``encodeWithSelector``/``encodeWithSignature``, other kinds not encoded | ``test_language`` (``hashed*``, ``concatenated``) |
+| A16 | Vyper builtins dropped | REJECTED: ``unsupported:vyper:<name>`` on the path, writes lost | ``test_ir_coverage::test_each_rejected_builtin_lowers_to_its_label`` |
+| A17 | ``tx.gasprice`` read as base fee | REJECTED: ``unsupported:tx.gasprice`` | ``test_ir_coverage`` (``viaGasprice``) |
+| A18 | calldata slices dropped | REJECTED: in a statement slicing anything but ``msg.data[4:]``/``bytes4(msg.data[:4])``, dynamic calldata reads ``unsupported:slice`` | ``test_ir_coverage`` (``viaSlice``) |
+| A19 | nested memory writes lost | HANDLED: an item or field written in place is written back where its holder lives | ``test_elements::test_nested_memory_writes_reach_the_outer_value`` |
+| A20 | loop-carried values kept from unrolled iterations | HANDLED: the widened state forgets every local, object and storage variable the body's operations (and callees) may write; storage reads past it are ``opaque(loop:N, ...)`` (``havoc`` marks) | ``test_elements::test_a_variable_a_later_iteration_writes_is_forgotten``, ``test_what_only_a_later_iteration_writes_is_never_taken_as_unwritten`` |
+| A21 | exits from later iterations | HANDLED: a loop that may return (or halt) also exits with unknown values | ``test_elements::test_a_member_past_the_iterations_followed_is_never_left_out_of_a_complete_list`` |
+| A22 | ``do``/``while`` back edges dropped | HANDLED: unrolled, then widened like any loop; the scheduler orders them | same test (``viaDoWhile``) |
+| A23 | irreducible flow dropped | REJECTED: ``unsupported:irreducible_cfg`` / ``unsupported:loop_shape`` exits | (no Solidity probe produces one) |
+| A24 | codeless storage-computed target latched | HANDLED: only constants, immutables and this latch; ``_values_at`` counts writes around, within, and past loops | ``test_latching`` |
+| A25 | legacy regex bindings past control flow | HANDLED: bindings and writes only from text before any control flow; past it, unknown and ``lost`` | ``test_language::test_legacy_assembly_assigns_nothing_for_sure_past_control_flow`` |
+
+Found while working, not in the before table:
+
+| # | was | now | pinned by |
+|---|---|---|---|
+| A26 | ``sload`` ignored an earlier ``sstore`` in the same call; named and raw writes never aliased | HANDLED: raw and transient slots read through earlier writes; a small or unhashed raw slot written makes named reads ``unsupported:raw_named_alias`` (and back) | ``test_elements::test_a_raw_slot_reads_back_what_this_call_stored_there`` |
+| A27 | a location written again kept its first position; merges took one path's write order | HANDLED: writes move to the end; merges reread each path's final value where orders differ or a path left the key alone | ``test_elements::test_writes_two_branches_make_in_opposite_orders_read_back_per_branch`` |
+| A28 | ``delete a[i]`` in memory zeroed the whole array | HANDLED | ``test_language`` (``deletedItem``) |
+| A29 | a struct built without its mapping fields left its variable unset (zero) | REJECTED: ``unsupported:NewStructure`` | (Solidity >= 0.7 refuses to compile one) |
+| A30 | a storage pointer chosen by branch merged into a value; writes through it lost | REJECTED: ``unsupported:storage_pointer_choice``, writes mark all storage unknown | ``test_elements::test_a_storage_pointer_chosen_by_branch_reads_and_writes_unknown`` |
+| A31 | storage after a call into this contract's own entry point (``this.f()``) or a delegatecall read as before | HANDLED: reads unknown past it (``selfcall:<sig>``, ``delegatecall``) | ``test_elements::test_storage_after_a_call_into_this_contracts_own_code_reads_unknown`` |
+| A32 | ``msg.value`` free in a function that isn't payable | HANDLED: zero (a call with ether reverts) | ``test_language`` (``sent``) |
+| A33 | an assembly ``return`` inside an internal function returned to its caller | HANDLED: it ends the whole call (``Exit.halted``) | ``test_language`` (``halted``) |
+| A34 | a short-circuit operand not separable from the rest ran unconditionally | REJECTED: ``unsupported:short_circuit`` | (no probe found that Slither renders so) |
+| A35 | operations after an internal call in the same statement took the callee's last node (checked/Yul scope, slices) | HANDLED: the statement's node restored | the checked-arithmetic probes |
+| A36 | ``abi.decode`` of an encoded word as a narrower type | REJECTED: ``unsupported:abi.decode:<from>-><to>``; same or wider integer types decode exactly | ``test_lower_shapes`` |
+| A37 | a field of any other value read as an unnamed ``op field`` | REJECTED: ``unsupported:member:<field>``; a field of an item of a calldata struct array is the caller's per-item choice | ``test_ir_coverage`` (``viaMember``) |
+| A38 | ``this.balance``, ``codehash(a)``, Yul ``address()``/``timestamp()``/... opaque; ``bytes.concat``/``string.concat`` opaque | HANDLED: their values (``balance``, ``codehash``, ``this``, ``time``), concat as ``encodePacked`` | ``test_ir_coverage::test_handled_environment_builtins_are_their_values``, ``test_language`` (``concatenated``) |
+
+### Stated assumptions (not constructs)
+
+* An external call does not re-enter this contract's state-changing code before it returns (reentrancy is not
+  modelled); gas is the caller's to supply (out-of-gas is not a condition).
+* A non-view external call not shown to hand the callee the caller's identity is an action the caller arranges
+  (``assumed``, ``decide._action``), whatever value it forwards; one shown to hand it the caller is checked against the
+  callee's code where followed.
+* ``logged.py`` (outside the lowering) argues that every iteration of a loop writes as the unrolled ones do; the
+  lowering's ``havoc`` marks are not read there.

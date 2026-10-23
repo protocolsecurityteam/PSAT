@@ -114,11 +114,14 @@ def test_a_stored_value_from_a_call_that_always_reverts_lets_no_one_through(depl
         assert _verdict(deployed, "a15", followed).openness != "open"
 
 
-def test_a_low_level_call_in_followed_code_is_not_taken_at_the_chains_word(deployed):
-    for followed in (("Guard",), ("Guard", "Deep")):
-        verdict = _verdict(deployed, "a10", followed)
-        assert verdict.openness == "not_determined"
-        assert "origin:lowStatic()" in verdict.gaps
+def test_a_low_level_staticcall_in_followed_code_is_the_view_call_its_data_encodes(deployed):
+    # ``staticcall(abi.encodeWithSignature("okAdmin(address)", ...))`` asks ``Deep.okAdmin``: its origin check is the
+    # caller's when followed, an unfollowed callee reading the origin otherwise; never the chain's word.
+    verdict = _verdict(deployed, "a10", ("Guard",))
+    assert verdict.openness == "not_determined"
+    assert "origin:okAdmin(address)" in verdict.gaps
+    verdict = _verdict(deployed, "a10", ("Guard", "Deep"))
+    assert verdict.openness == "restricted" and verdict.principals == {ADMIN} and verdict.complete
 
 
 def test_an_action_in_followed_code_is_not_taken_at_the_chains_word(deployed):

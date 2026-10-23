@@ -55,6 +55,7 @@ from slither.slithir.operations import (
     NewContract,
     NewElementaryType,
     NewStructure,
+    Nop,
     Return,
     Send,
     SolidityCall,
@@ -65,13 +66,13 @@ from slither.slithir.operations import (
     Unpack,
 )
 from slither.slithir.operations.codesize import CodeSize
-from slither.slithir.operations.lvalue import OperationWithLValue
 from slither.slithir.variables import Constant, ReferenceVariable
 
 from .terms import (
     CALLDATA,
     CALLER,
     FALSE,
+    IDENTITY_KINDS,
     ORIGIN,
     THIS,
     TRUE,
@@ -87,7 +88,9 @@ from .terms import (
     mk_or,
     mk_slice,
     packed_width,
+    replace_terms,
     stable,
+    substitute,
     subterms,
     unknown,
 )
@@ -154,9 +157,149 @@ _ENVIRONMENT = {
     "block.difficulty": mk("time", "prevrandao"),
     "block.coinbase": mk("time", "coinbase"),
     "block.gaslimit": mk("time", "gaslimit"),
-    "tx.gasprice": mk("time", "basefee"),  # at least the base fee; the caller may pay more
 }
-_HASHES = ("keccak256", "sha256", "ripemd160", "sha3")
+_HASHES = ("keccak256", "sha256", "sha3")
+
+# What the lowering does with each construct of the language Slither can hand it (``COVERAGE.md``): lowered with
+# defined semantics (HANDLED), or rejected by name, its value (and, where it has effects, the path) an ``unknown`` whose
+# label is the gap a verdict reports (REJECTED). Anything in neither, from a newer Slither, is rejected the same way
+# (``tests/logic/test_ir_coverage.py`` fails until it is classified).
+HANDLED_OPERATIONS = frozenset(
+    (
+        "Assignment Binary CodeSize Condition Delete EventCall HighLevelCall Index InitArray InternalCall Length "
+        "LibraryCall LowLevelCall Member NewArray NewContract NewElementaryType NewStructure Nop Return SolidityCall "
+        "Transfer TypeConversion Unary Unpack"
+    ).split()
+)
+REJECTED_OPERATIONS = {
+    "Phi": "unsupported:Phi",  # SSA only: never in a node's IR
+    "PhiCallback": "unsupported:PhiCallback",
+    "InternalDynamicCall": "unsupported:InternalDynamicCall",  # which function a pointer holds isn't followed
+    "Send": "Send",  # whether the recipient accepts
+}
+# Names in ``slither.slithir.operations`` that are no operation of their own.
+ABSTRACT_OPERATIONS = frozenset({"Call", "Operation", "OperationWithLValue", "BinaryType", "UnaryType"})
+
+HANDLED_BUILTINS = frozenset(
+    [
+        "assert(bool)", "require(bool)", "require(bool,string)", "require(bool,error)", "revert()", "revert(string)",
+        "revert ", "addmod(uint256,uint256,uint256)", "mulmod(uint256,uint256,uint256)", "keccak256()",
+        "keccak256(bytes)", "sha256()", "sha256(bytes)", "sha3()", "ecrecover(bytes32,uint8,bytes32,bytes32)",
+        "selfdestruct(address)", "suicide(address)", "log0(bytes32)", "log1(bytes32,bytes32)",
+        "log2(bytes32,bytes32,bytes32)", "log3(bytes32,bytes32,bytes32,bytes32)", "prevrandao()", "this.balance()",
+        "abi.encode()", "abi.encodePacked()", "abi.encodeWithSelector()", "abi.encodeWithSignature()",
+        "abi.encodeCall()", "bytes.concat()", "string.concat()", "abi.decode()", "balance(address)", "code(address)",
+        "codehash(address)", "byte(uint256,uint256)", "clz(uint256)", "signextend(uint256,uint256)",
+        "keccak256(uint256,uint256)", "pop(uint256)", "mload(uint256)", "mstore(uint256,uint256)",
+        "mstore8(uint256,uint256)", "sload(uint256)", "sstore(uint256,uint256)", "tload(uint256)",
+        "tstore(uint256,uint256)", "address()", "balance(uint256)", "selfbalance()", "basefee()", "caller()",
+        "callvalue()", "calldataload(uint256)", "calldatasize()", "calldatacopy(uint256,uint256,uint256)",
+        "codesize()", "codecopy(uint256,uint256,uint256)", "extcodesize(uint256)",
+        "extcodecopy(uint256,uint256,uint256,uint256)", "returndatasize()", "returndatacopy(uint256,uint256,uint256)",
+        "mcopy(uint256,uint256,uint256)", "extcodehash(uint256)", "create(uint256,uint256,uint256)",
+        "create2(uint256,uint256,uint256,uint256)", "call(uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
+        "callcode(uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
+        "delegatecall(uint256,uint256,uint256,uint256,uint256,uint256)",
+        "staticcall(uint256,uint256,uint256,uint256,uint256,uint256)", "return(uint256,uint256)",
+        "revert(uint256,uint256)", "selfdestruct(uint256)", "invalid()", "stop()", "log0(uint256,uint256)",
+        "log1(uint256,uint256,uint256)", "log2(uint256,uint256,uint256,uint256)",
+        "log3(uint256,uint256,uint256,uint256,uint256)", "log4(uint256,uint256,uint256,uint256,uint256,uint256)",
+        "chainid()", "origin()", "coinbase()", "timestamp()", "number()", "difficulty()", "gaslimit()",
+    ]
+)  # fmt: skip
+# Vyper's builtins: its semantics (bounds, checked arithmetic, calls that revert on failure) aren't this lowering's.
+_VYPER = (
+    "create_from_blueprint() create_minimal_proxy_to() empty() convert() len() method_id() unsafe_sub() unsafe_add() "
+    "unsafe_div() unsafe_mul() pow_mod256() max_value() min_value() concat() ecrecover() isqrt() range() min() max() "
+    "shift() abs() raw_call() _abi_encode() slice() uint2str() send()"
+).split()
+REJECTED_BUILTINS = {
+    "gasleft()": "gasleft()",  # the gas the caller sends
+    "gas()": "unsupported:gas()",
+    "msize(uint256)": "unsupported:msize(uint256)",
+    "pc()": "unsupported:pc()",
+    "blockhash(uint256)": "unsupported:blockhash(uint256)",
+    "blobhash(uint256)": "unsupported:blobhash(uint256)",
+    "blobbasefee()": "unsupported:blobbasefee()",
+    "gasprice()": "unsupported:gasprice()",  # any price the caller pays at or above the base fee
+    "type(address)": "unsupported:type(address)",
+    "type()": "unsupported:type()",
+    "ripemd160()": "unsupported:ripemd160()",  # no implementation to evaluate it with
+    "ripemd160(bytes)": "unsupported:ripemd160(bytes)",
+    **{name: f"unsupported:vyper:{name}" for name in _VYPER},
+}
+_YUL_ENVIRONMENT = {
+    "timestamp": mk("time", "timestamp"),
+    "number": mk("time", "number"),
+    "chainid": mk("time", "chainid"),
+    "basefee": mk("time", "basefee"),
+    "coinbase": mk("time", "coinbase"),
+    "gaslimit": mk("time", "gaslimit"),
+    "difficulty": mk("time", "prevrandao"),
+    "prevrandao": mk("time", "prevrandao"),
+    "origin": ORIGIN,
+    "callvalue": mk("callvalue"),
+}
+
+# The legacy Yul reader (``_yul``, for assembly Slither leaves as text before Solidity 0.6), by builtin: read with the
+# meaning the same operation has in Solidity, read as an unknown by name, or refused (``yul.Unsupported``: the text
+# falls back to ``_legacy_assembly``, which forgets what the block assigns and marks what it may write or call).
+LEGACY_YUL_HANDLED = frozenset(
+    (
+        "add sub mul div mod exp and or xor shl shr lt gt eq slt sgt iszero not sload caller address callvalue "
+        "timestamp number extcodesize calldataload sdiv smod sar byte signextend calldatasize chainid selfbalance "
+        "balance addmod mulmod sstore mstore mstore8 calldatacopy codecopy returndatacopy pop log1 log2 log3 log4 "
+        "revert invalid"
+    ).split()
+)
+LEGACY_YUL_OPAQUE = {
+    "mload": "mload(uint256)",  # memory this reading doesn't track: a lost word
+    "keccak256": "keccak256",
+    "gas": "gas",
+    "returndatasize": "returndatasize",
+    "msize": "msize",
+}
+LEGACY_YUL_UNSUPPORTED = frozenset(
+    (
+        "basefee blobbasefee blobhash blockhash call callcode clz codesize coinbase create create2 datacopy "
+        "dataoffset datasize delegatecall difficulty extcodecopy extcodehash gaslimit gasprice loadimmutable log0 "
+        "mcopy origin pc prevrandao return selfdestruct setimmutable staticcall stop tload tstore"
+    ).split()
+)
+LEGACY_YUL_STATEMENTS = frozenset(
+    "sstore mstore mstore8 calldatacopy codecopy returndatacopy pop log1 log2 log3 log4 revert invalid".split()
+)
+LEGACY_YUL_ARITY = {
+    **dict.fromkeys("iszero not sload extcodesize calldataload balance mload pop".split(), 1),
+    **dict.fromkeys(
+        "caller address callvalue timestamp number calldatasize chainid selfbalance gas returndatasize msize "
+        "invalid".split(),
+        0,
+    ),
+    **dict.fromkeys("addmod mulmod calldatacopy codecopy returndatacopy log1".split(), 3),
+    "log2": 4,
+    "log3": 5,
+    "log4": 6,
+}
+
+HANDLED_VARIABLES = frozenset(
+    (
+        "now this msg.sender tx.origin msg.value msg.sig msg.data block.timestamp block.number block.chainid "
+        "block.basefee block.prevrandao block.difficulty block.coinbase block.gaslimit"
+    ).split()
+)
+REJECTED_VARIABLES = {
+    "tx.gasprice": "unsupported:tx.gasprice",  # any price the caller pays at or above the base fee
+    "block.blobbasefee": "unsupported:block.blobbasefee",
+    "block.blockhash": "unsupported:block.blockhash",
+    "msg.gas": "unsupported:msg.gas",
+    # Vyper's, and namespaces that are never a value.
+    **{
+        name: f"unsupported:{name}"
+        for name in ("self", "chain", "ZERO_ADDRESS", "chain.id", "block.prevhash", "self.balance")
+        + ("abi", "msg", "tx", "block", "super")
+    },
+}
 
 # Assembly builtins that leave memory as it was (``mstore`` and the calls track what they write themselves).
 _MEMORY_NEUTRAL = frozenset(
@@ -343,6 +486,7 @@ class Exit:
     pc: Term
     store: dict
     ret: tuple | None
+    halted: bool = False  # an assembly ``return``/``stop``: the whole call ends here, whichever function ran it
 
 
 def merge(states: list[State]) -> State:
@@ -366,6 +510,10 @@ def _merge_maps(states: list[Any], attr: str) -> dict:
     for key in keys:
         # A local a branch never set is unset.
         values = [getattr(s, attr).get(key, unknown("unset")) for s in states]
+        if any(isinstance(v, tuple) and v[:1] == ("loc",) for v in values) and len(set(values)) > 1:
+            # A storage pointer that points at one place or another by branch: not one location (``_write``).
+            out[key] = unknown("unsupported:storage_pointer_choice")
+            continue
         out[key] = _select([s.pc for s in states], values)
     return out
 
@@ -384,7 +532,7 @@ def _merge_store(states: list[Any]) -> dict:
     reread: set = set()
     by_place: dict = {}
     for key in keys:
-        if key[0] not in ("act", "emit", "havoc"):
+        if key[0] not in ("act", "emit", "havoc", "heap"):
             by_place.setdefault((key[0], key[1]), []).append(key)
     for group in by_place.values():
         if len(group) < 2:
@@ -435,6 +583,8 @@ def read_store(store: dict, key: tuple) -> Term:
     what is read whole (``list.push(x)`` then ``list`` copied to memory) gives the whole with that part replaced
     (``upd``). A loop that may have written the variable further (``havoc``) leaves it unknown from there."""
     kind = key[0]
+    if kind == "heap":
+        return store.get(key, unknown("unallocated"))  # an object one path never allocated: never reached there
     if kind in ("act", "emit", "havoc"):
         value = FALSE
         for k, written in store.items():
@@ -455,7 +605,7 @@ def read_store(store: dict, key: tuple) -> Term:
             if _may_hold_named(k[2]):
                 value = _raw_named(mk("load", contract, name, path))  # an assembly write that may land in it
             continue
-        if head in ("act", "emit", "transient", "raw") or head != contract or k[1] != name:
+        if head in ("act", "emit", "transient", "raw", "heap") or head != contract or k[1] != name:
             continue
         kpath = k[2]
         n = min(len(kpath), len(path))
@@ -643,12 +793,14 @@ def _changes(exit_: Exit) -> Term:
         [
             mk_not(mk_cmp("eq", value, unwritten(key)))
             for key, value in exit_.store.items()
-            if key[0] not in ("transient", "emit")
+            if key[0] not in ("transient", "emit", "heap")
         ]
     )
 
 
 def unwritten(key: tuple) -> Term:
+    if key[0] == "heap":
+        return unknown("unallocated")
     if key[0] in ("act", "emit", "havoc"):
         return FALSE  # no call out, no event, no loop's writes on a path that didn't make them
     if key[0] == "transient":
@@ -708,6 +860,8 @@ def _short_circuits(irs: list[Any]) -> dict[int, tuple[int, Any]]:
         start = min(right)
         if set(range(start, b)) == right and all(i < start for i in left):
             spans[start] = (b, ir)
+        else:
+            spans[-1] = (b, ir)  # a right operand interleaved with the left: not separable, see ``_step``
     return spans
 
 
@@ -734,6 +888,14 @@ class Lowerer:
         self._structs: dict[int, Any] = {}
         # Values in memory or calldata whose items a reference names (``("mref", id(holder), key, kind)``), by id.
         self._vars: dict[int, Any] = {}
+        # Objects allocated so far (``("heap", n)``), numbered in the order the lowering meets them.
+        self._objects = 0
+        # Whether the statement being lowered slices calldata in a way Slither's IR drops (``data[4:]``).
+        self._sliced = False
+        # Whether the call may carry ether: an entry point that isn't payable reverts on any (``success``).
+        self._payable = True
+        # Ends of the whole call reached inside callees (an assembly ``return``), gathered for the top level.
+        self._halts: list = []
         # The arguments this call came with, in order: what ``msg.data[4:]`` encodes.
         self._arguments: tuple = ()
         # Whether some storage write may have gone unrecorded (code not followed, assembly not read).
@@ -748,7 +910,14 @@ class Lowerer:
         args = {id(p): parameter(p, i) for i, p in enumerate(function.parameters)}
         self._calldata_min = _calldata_min(function)
         self._arguments = tuple(args.values())
-        exits = self.run(function, State(TRUE, args), 0)
+        self._payable = bool(getattr(function, "payable", True))
+        # An enum argument out of its range doesn't decode: the call reverts (Panic 0x21).
+        bounds = [
+            mk_cmp("lt", args[id(p)], const(count))
+            for p in function.parameters
+            if (count := _enum_size(getattr(p, "type", None))) is not None
+        ]
+        exits = self.paths(function, State(mk_and(bounds), args))
         # The calls that do something: a write that may change what storage held, or a call out.
         self.effective = mk_or([mk_and([e.pc, _changes(e)]) for e in exits])
         # (contract, variable) or ("raw", contract) of everything it may write.
@@ -760,7 +929,7 @@ class Lowerer:
             else (k[0], k[1])
             for e in exits
             for k in e.store
-            if k[0] not in ("act", "transient", "emit") and not (k[0] == "havoc" and k[2] in ("transient", "*"))
+            if k[0] not in ("act", "transient", "emit", "heap") and not (k[0] == "havoc" and k[2] in ("transient", "*"))
         )
         self.exits = exits
         return mk_or([e.pc for e in exits])
@@ -768,13 +937,24 @@ class Lowerer:
     def returns(self, function: Function, args: list[Term], pc: Term = TRUE) -> tuple[Term, tuple]:
         """The condition under which ``function`` returns and its return values, ``args`` bound to its parameters."""
         self._steps = 0
+        self._payable = True
         env = {id(p): a for p, a in zip(function.parameters, args)}
         self._arguments = tuple(args)
-        exits = self.run(function, State(pc, env), 0)
+        exits = self.paths(function, State(pc, env))
         if not exits:
             return FALSE, ()
         merged = merge([State(e.pc, {}, e.store, e.ret) for e in exits])
         return merged.pc, merged.ret or ()
+
+    def paths(self, function: Function, state: State) -> list[Exit]:
+        """Each way a call of ``function`` from ``state`` returns, memory left behind: the values it returns read out of
+        the objects they point to, its writes storage's alone."""
+        out = []
+        for e in self.run(function, state, 0):
+            heap = State(e.pc, {}, e.store)
+            ret = None if e.ret is None else tuple(self._deep(v, heap) for v in e.ret)
+            out.append(Exit(e.pc, {k: v for k, v in e.store.items() if k[0] != "heap"}, ret))
+        return out
 
     def run(self, function: Function, state: State, depth: int) -> list[Exit]:
         getter = self._getter(function, state) if function.entry_point is None else None
@@ -787,11 +967,22 @@ class Lowerer:
             return [Exit(mk_and([state.pc, unknown(f"unanalysed:{function.canonical_name}")]), state.store, ret)]
         for r in function.returns:
             state.env.setdefault(id(r), _zero(r.type))
+        for v in [*function.parameters, *function.returns]:
+            # Memory parameters and return values handed a value (not an object): an object of their own from the
+            # start, so every branch below writes into the same one.
+            if self._memory_var(v) and not _pointer(state.env.get(id(v))) and not _reference(state.env.get(id(v))):
+                state = self._allocate(v, state.env.get(id(v), _zero(v.type)), state)
         self._stack.append(function)
+        if depth == 0:
+            self._halts = []
         try:
-            return self._run_from(function, function.entry_point, state, depth)
+            exits = self._run_from(function, function.entry_point, state, depth)
         finally:
             self._stack.pop()
+        if depth == 0:
+            exits = [*exits, *self._halts]  # callees that ended the whole call, as this call's own ends
+            self._halts = []
+        return exits
 
     def _implementation(self, function: Function, after: Any = None) -> Function | None:
         """The body a call to a bodiless declaration runs in this contract: the first implementation in its
@@ -937,9 +1128,22 @@ class Lowerer:
             if k not in done and entry.env.get(k) != v:
                 env[k] = forget(f"#{len(done)}", v)
                 done.add(k)
+        # Objects in memory the body may write into, and those they hold: their contents forgotten too.
+        objects: set = set()
+        pending = [more.env.get(id(var)) for var in effects["objects"]]
+        while pending:
+            value = pending.pop()
+            if not isinstance(value, tuple):
+                continue
+            for p in subterms(value, "ptr") if isinstance(value, Term) else ():
+                if p[1] not in objects:
+                    objects.add(p[1])
+                    pending.append(more.store.get(("heap", p[1])))
         store: dict = {}
         for k, v in more.store.items():
-            if entry.store.get(k) == v or k[0] in ("act", "emit", "havoc"):
+            if k[0] == "heap" and (k[1] in objects or entry.store.get(k) != v):
+                store[k] = mk("opaque", tag, (mk("const", f"{owner}.object{k[1]}", "string"), *steered))
+            elif entry.store.get(k) == v or k[0] in ("act", "emit", "havoc", "heap"):
                 store[k] = v  # a call out stays made, however many times the loop runs
             else:
                 store[k] = mk("opaque", tag, (unwritten(k), *steered))
@@ -958,6 +1162,8 @@ class Lowerer:
         pc = mk_and([more.pc, unknown(tag)])
         after = State(pc, env, store, more.ret)
         leaving = []
+        if effects["halts"]:
+            leaving.append(Exit(pc, store, (unknown(tag),), halted=True))  # an assembly ``return`` inside
         if effects["returns"]:
             ret = None
             if not isinstance(function, Modifier):
@@ -984,6 +1190,8 @@ class Lowerer:
             "caller": False,
             "arguments": False,
             "reads": [],
+            "objects": [],
+            "halts": False,
         }
         seen_locals: set = set()
         pointers: list = []
@@ -1012,6 +1220,7 @@ class Lowerer:
                     pointers.append(origin)
                 elif origin is not None:
                     local(origin)
+                    out["objects"].append(origin)
                 else:
                     out["everything"] = True
                 return
@@ -1028,7 +1237,7 @@ class Lowerer:
             elif base in ("call", "create", "create2", "selfdestruct", "suicide"):
                 out["calls"] = True
             if base in ("return", "stop", "selfdestruct", "suicide"):
-                out["returns"] = True
+                out["halts"] = True
             if base == "ecrecover":
                 out["caller"] = True
 
@@ -1038,7 +1247,7 @@ class Lowerer:
                 if node.type == NodeType.PLACEHOLDER:
                     out["everything"] = out["calls"] = True
             if node.type == NodeType.ASSEMBLY and not node.irs and isinstance(getattr(node, "inline_asm", None), str):
-                out["everything"] = out["raw"] = out["calls"] = out["returns"] = True
+                out["everything"] = out["raw"] = out["calls"] = out["returns"] = out["halts"] = True
             for ir in node.irs:
                 for var in getattr(ir, "read", None) or []:
                     if isinstance(var, SolidityVariableComposed) and var.name in ("msg.sender", "tx.origin"):
@@ -1121,11 +1330,14 @@ class Lowerer:
                     out["storage"].add((loc[0], loc[1]))
             elif not isinstance(a, (Constant, StateVariable)) and _reference_typed(getattr(p, "type", None)):
                 local(a)  # memory handed by reference: the callee may write into it
+                out["objects"].append(a)
 
     def _loop_condition(self, header: Any, st: State, depth: int) -> Term:
         """The header's condition evaluated in ``st``, or ``None`` when it isn't a loop header."""
         if header.type != NodeType.IFLOOP:
             return unknown("not_a_loop")
+        self._node = header
+        self._sliced = _sliced(header)
         for ir in header.irs:
             if isinstance(ir, Condition):
                 return self.val(ir.value, st)
@@ -1134,11 +1346,20 @@ class Lowerer:
 
     def _step(self, function: Function, node: Any, st: State, depth: int, exits: list[Exit], body: Any):
         """Run one node; yield (successor, state) pairs. Exits and dead paths yield nothing."""
+        self._node = node
+        self._sliced = _sliced(node)
         if node.type == NodeType.THROW:
             return
+        declared = getattr(node, "variable_declaration", None)
+        if node.type == NodeType.VARIABLE and not node.irs and declared is not None and self._memory_var(declared):
+            # ``S memory s;``: a fresh zeroed object each time the declaration runs.
+            st = self._allocate(declared, _zero(declared.type), st)
         if node.type == NodeType.PLACEHOLDER and body is not None:
             # A modifier's ``_``: the rest of the function, then the modifier's own tail with its locals.
             for done in body(st):
+                if done.halted:
+                    exits.append(done)  # the function ended the whole call: the modifier's tail never runs
+                    continue
                 after = State(done.pc, st.env, done.store, done.ret)
                 if node.sons:
                     yield from self._succeed(node, after, node.sons)
@@ -1148,7 +1369,7 @@ class Lowerer:
         if node.type == NodeType.ASSEMBLY and not node.irs and isinstance(getattr(node, "inline_asm", None), str):
             st = self._legacy_assembly(function, node.inline_asm, st)
             if st.halted:
-                exits.append(Exit(st.pc, st.store, st.ret))
+                exits.append(Exit(st.pc, st.store, st.ret, halted=True))
                 return
             yield from self._succeed(node, st, node.sons)
             return
@@ -1173,7 +1394,6 @@ class Lowerer:
                 yield son, State(mk_and([st.pc, caught, which]), dict(st.env), st.store, st.ret)
             return
         cond: Term | None = None
-        self._node = node
         custom = self._require_with_error(node, st)
         if custom is not None:
             # Slither lowers ``require(cond, Error())`` to an unconditional revert; the expression keeps the condition.
@@ -1184,6 +1404,10 @@ class Lowerer:
         error_argument = _has_require_with_error(node)
         irs = list(node.irs) if custom is None else []
         spans = _short_circuits(irs)
+        if -1 in spans:
+            # An operand that runs only when the other doesn't decide, its operations not separable from the rest:
+            # whether they run (a call, a check) is unknown.
+            st = replace(st, pc=mk_and([st.pc, unknown("unsupported:short_circuit")]))
         skip_to = 0
         for index, ir in enumerate(irs):
             if index < skip_to:
@@ -1216,7 +1440,7 @@ class Lowerer:
             if st.pc == FALSE:
                 return
             if st.halted:
-                exits.append(Exit(st.pc, st.store, st.ret))
+                exits.append(Exit(st.pc, st.store, st.ret, halted=True))
                 return
         if node.type in (NodeType.IF, NodeType.IFLOOP) and cond is not None:
             if node.son_true is not None:
@@ -1225,16 +1449,56 @@ class Lowerer:
                 yield node.son_false, replace(st, pc=mk_and([st.pc, mk_not(cond)]))
             return
         if not node.sons:
-            ret = st.ret if st.ret is not None else tuple(self.val(r, st) for r in function.returns)
+            ret = st.ret if st.ret is not None else tuple(self._value(r, st) for r in function.returns)
             exits.append(Exit(st.pc, st.store, ret))
             return
         yield from self._succeed(node, st, node.sons)
+
+    def _arithmetic(self, ir: Binary, a: Term, b: Term) -> tuple[Term, list]:
+        """An arithmetic operation in its operands' type: a narrower type wraps at its own width, a signed one
+        divides, shifts and compares as signed; checked arithmetic (Solidity >= 0.8 outside ``unchecked``) reverts
+        out of range, and Solidity's division and remainder by zero always (Panic 0x11, 0x12): those are conditions
+        on the path. Yul's arithmetic is unchecked, 256-bit, and divides by zero to zero."""
+        op = _BINARY.get(ir.type)
+        if op is None:
+            return unknown(f"unsupported:binary:{ir.type}"), []
+        node = self._node
+        yul = bool(getattr(getattr(node, "scope", None), "is_yul", False))
+        bits, is_signed = _integer(_operand_type(ir))
+        conditions: list = []
+        if op in ("div", "mod") and not yul:
+            conditions.append(mk_not(mk_cmp("eq", b, const(0))))
+        constants = isinstance(ir.variable_left, Constant) and isinstance(ir.variable_right, Constant)
+        checked = (
+            op in ("add", "sub", "mul", "pow")
+            and not yul
+            and not constants  # literals are folded by the compiler, rationally: never a runtime overflow
+            and bool(getattr(getattr(node, "scope", None), "is_checked", False))
+            and _checked_version(self.contract)
+        )
+        if is_signed:
+            name = f"int{bits}"
+            x = _convert(name, a)
+            y = b if op in ("shl", "shr", "pow") else _convert(name, b)
+            value = _convert(name, mk_op({"div": "sdiv", "mod": "smod", "shr": "sar"}.get(op, op), (x, y)))
+        else:
+            x, y = a, b
+            value = mk_op(op, (a, b))
+            if bits < 256 and not checked and op in ("add", "sub", "mul", "pow", "shl"):
+                value = _convert(f"uint{bits}", value)  # wraps at its own width
+        if checked and op == "sub" and not is_signed:
+            conditions.append(mk_cmp("le", y, x))  # an unsigned difference in range: exactly ``b <= a``
+        elif checked:
+            conditions.append(mk_op("fits", (const(op, "string"), x, y, const(bits), const(is_signed, "bool"))))
+        return value, conditions
 
     def _short_circuit(self, irs: list[Any], binary: Any, st: State, depth: int) -> State:
         left = self.val(binary.variable_left, st)
         guard = mk_not(left) if binary.type == BinaryType.OROR else left
         ran = replace(st, pc=mk_and([st.pc, guard]))
         spans = _short_circuits(irs)
+        if -1 in spans:
+            ran = replace(ran, pc=mk_and([ran.pc, unknown("unsupported:short_circuit")]))
         skip_to = 0
         for index, ir in enumerate(irs):
             if index < skip_to or ran.pc == FALSE:
@@ -1270,7 +1534,7 @@ class Lowerer:
         def body(at: State) -> list[Exit]:
             inner = State(at.pc, caller_env, at.store, at.ret)
             if rest is None:
-                ret = tuple(self.val(r, inner) for r in function.returns)
+                ret = tuple(self._value(r, inner) for r in function.returns)
                 return [Exit(at.pc, at.store, ret)]
             return self._run_from(function, rest, inner, depth)
 
@@ -1281,11 +1545,17 @@ class Lowerer:
         out = self._run_from(modifier, modifier.entry_point, State(st.pc, env, st.store, None), depth + 1, body)
         # A modifier that returns before ``_`` returns the function's defaults.
         defaults = tuple(_zero(r.type) for r in function.returns)
-        return [Exit(e.pc, e.store, e.ret if e.ret is not None else defaults) for e in out]
+        return [Exit(e.pc, e.store, e.ret if e.ret is not None else defaults, e.halted) for e in out]
 
     # Operations -------------------------------------------------------------------------------------------------------
 
     def _exec(self, ir: Any, st: State, depth: int) -> State:
+        for var in getattr(ir, "read", None) or []:
+            # A value in memory read through a variable first gets an object, so every later name for it is that one.
+            if self._memory_var(var):
+                held = st.env.get(id(var))
+                if not _pointer(held) and not _reference(held):
+                    st = self._allocate(var, held if held is not None else _zero(var.type), st)
         out = self._exec_ir(ir, st, depth)
         if out.mem and not _keeps_memory(ir):
             out = replace(out, mem=())
@@ -1296,9 +1566,12 @@ class Lowerer:
             return self._solidity_call(ir, st)
         if isinstance(ir, (InternalCall, LibraryCall)) and isinstance(ir.function, Function):
             # A ``storage`` parameter is the caller's location, not a copy (``EnumerableSet.contains(set, x)``).
+            # A ``memory`` one is the caller's object, which the callee may write into.
             args = [
                 ("loc", loc)
                 if getattr(p, "location", None) == "storage" and (loc := self._location(a, st)) is not None
+                else self._value(a, st)
+                if self._memory_var(p)
                 else self.val(a, st)
                 for p, a in zip(ir.function.parameters, ir.arguments)
             ]
@@ -1310,7 +1583,14 @@ class Lowerer:
                     self._stack[-1].contract_declarer if f"super.{target.name}(" in written and self._stack else None
                 )
                 target = self._implementation(target, above) or target
-            exits = self.run(target, State(st.pc, env, st.store), depth + 1)
+            node, sliced = self._node, self._sliced
+            try:
+                exits = self.run(target, State(st.pc, env, st.store), depth + 1)
+            finally:
+                self._node, self._sliced = node, sliced  # the rest of this statement is this statement's
+            # A callee that ends the whole call (an assembly ``return``) ends it here too: not a return to this caller.
+            self._halts.extend(e for e in exits if e.halted)
+            exits = [e for e in exits if not e.halted]
             if not exits:
                 return State(FALSE, st.env, st.store, st.ret)
             done = merge([State(e.pc, {}, e.store, e.ret) for e in exits])
@@ -1332,10 +1612,13 @@ class Lowerer:
                 # ``$.slot := LOCATION`` (namespaced storage, OZ 5): the pointer is the struct rooted at that slot.
                 root = mk("slot", self.val(ir.rvalue, st), str(getattr(ir.lvalue, "type", "")))
                 return self._bind(ir.lvalue, ("loc", (self.this, root, ())), st)
-            return self._write(ir.lvalue, self.val(ir.rvalue, st), st)
+            # A value memory holds by reference names the same object (``b = a``); storage takes a copy (``_write``).
+            return self._write(ir.lvalue, self._value(ir.rvalue, st), st)
         if isinstance(ir, Delete):
-            # ``delete m[k]``: Slither's lvalue is ``m`` itself; the entry cleared is ``variable``.
-            target = ir.variable if self._location(ir.variable, st) is not None else ir.lvalue
+            # ``delete m[k]``: Slither's lvalue is ``m`` itself; the entry cleared is ``variable`` (an item or field in
+            # memory likewise).
+            held = st.env.get(id(ir.variable))
+            target = ir.variable if self._location(ir.variable, st) is not None or _reference(held) else ir.lvalue
             return self._write(target, _zero(getattr(target, "type", None)), st)
         if isinstance(ir, Binary):
             a, b = self.val(ir.variable_left, st), self.val(ir.variable_right, st)
@@ -1344,32 +1627,51 @@ class Lowerer:
             elif ir.type == BinaryType.OROR:
                 value = mk_or([a, _ran_under(b, mk_not(a))])
             elif ir.type in _COMPARE:
+                bits, is_signed = _integer(_operand_type(ir))
+                if is_signed:
+                    # Compared as the signed numbers they are (Yul's ``slt``/``sgt`` too, as Slither renders them).
+                    a, b = _convert(f"int{bits}", a), _convert(f"int{bits}", b)
                 value = mk_cmp(_COMPARE[ir.type], a, b)
             else:
-                value = mk_op(_BINARY.get(ir.type, str(ir.type)), (a, b))
+                value, conditions = self._arithmetic(ir, a, b)
+                if conditions:
+                    st = replace(st, pc=mk_and([st.pc, *conditions]))
             return self._write(ir.lvalue, value, st)
         if isinstance(ir, Unary):
             a = self.val(ir.rvalue, st)
-            return self._write(ir.lvalue, mk_not(a) if ir.type == UnaryType.BANG else mk_op("bnot", (a,)), st)
+            if ir.type == UnaryType.BANG:
+                return self._write(ir.lvalue, mk_not(a), st)
+            # ``~x`` flips the bits of ``x``'s own width.
+            type_ = str(getattr(ir.rvalue, "type", "") or "")
+            flipped = mk_op("bnot", (a,))
+            return self._write(ir.lvalue, flipped if type_ in ("uint256", "bytes32") else _convert(type_, flipped), st)
         if isinstance(ir, TypeConversion):
-            return self._write(ir.lvalue, _convert(str(ir.type), self.val(ir.variable, st)), st)
+            source = getattr(ir.variable, "type", None)
+            value = _convert(str(ir.type), self.val(ir.variable, st), source)
+            count = _enum_size(ir.type)
+            if count is not None:
+                # A number converted to an enum it has no member for reverts (Panic 0x21).
+                st = replace(st, pc=mk_and([st.pc, mk_cmp("lt", self.val(ir.variable, st), const(count))]))
+            return self._write(ir.lvalue, value, st)
         if isinstance(ir, Index):
             return self._index(ir, st)
         if isinstance(ir, Member):
             return self._member(ir, st)
-        if isinstance(ir, NewArray):
+        if isinstance(ir, (NewArray, NewElementaryType)):
+            # ``new T[](n)``, ``new bytes(n)``: n zeroed items, whose length is what code reads back. A length past
+            # 2**64 - 1 reverts (Panic 0x41).
             length = self.val(ir.arguments[0], st) if ir.arguments else unknown("array_length")
-            return self._write(ir.lvalue, _new_array(length), st)
-        if isinstance(ir, NewElementaryType):
-            # ``new bytes(n)``: n zero bytes, whose length is what code reads back.
-            length = self.val(ir.arguments[0], st) if ir.arguments else unknown("bytes_length")
-            return self._write(ir.lvalue, mk("array", length), st)
+            st = replace(st, pc=mk_and([st.pc, mk_cmp("lt", length, const(2**64))]))
+            fresh = _new_array(length) if isinstance(ir, NewArray) else mk("array", length)
+            return self._write(ir.lvalue, fresh, st)
         if isinstance(ir, NewStructure):
             # ``S(a, b)``: its fields by name, so reading one back gives what was put there.
             names = tuple(m.name for m in ir.structure.elems_ordered)
-            values = tuple(self.val(a, st) for a in ir.arguments)
+            values = tuple(self._value(a, st) for a in ir.arguments)
             if len(names) == len(values):
                 return self._write(ir.lvalue, mk("struct", names, values), st)
+            # A struct holding a mapping, built without it: which argument is which field isn't placed.
+            return self._write(ir.lvalue, unknown("unsupported:NewStructure"), st)
         if isinstance(ir, InitArray):
             if len(ir.init_values) == 1 and getattr(ir.lvalue, "location", None) == "storage":
                 # ``T[] storage list = s.items``, which Slither renders as an array literal: a pointer to storage.
@@ -1381,10 +1683,10 @@ class Lowerer:
             rank = _rank(getattr(ir.lvalue, "type", None))
             ranks = {_rank(getattr(v, "type", None)) for v in ir.init_values}
             if len(ir.init_values) == 1 and rank is not None and ranks == {rank}:
-                return self._write(ir.lvalue, self.val(ir.init_values[0], st), st)
+                return self._write(ir.lvalue, self._value(ir.init_values[0], st), st)
             if rank is None or ranks != {rank - 1}:
                 return self._write(ir.lvalue, unknown("unsupported:InitArray"), st)
-            values = [self.val(v, st) for v in ir.init_values]
+            values = [self._value(v, st) for v in ir.init_values]
             return self._write(ir.lvalue, mk("array", const(len(values), "uint256"), tuple(values)), st)
         if isinstance(ir, Length):
             type_ = getattr(ir.value, "type", None)
@@ -1412,7 +1714,7 @@ class Lowerer:
         if isinstance(ir, HighLevelCall) and not isinstance(ir, LibraryCall):
             return self._external_call(ir, st)
         if isinstance(ir, Unpack):
-            whole = self.val(ir.tuple, st)
+            whole = self._value(ir.tuple, st)
             item = _item(whole, ir.index)
             return self._write(ir.lvalue, item, st)
         if isinstance(ir, (Transfer, Send)):
@@ -1424,34 +1726,102 @@ class Lowerer:
             if ir.lvalue is None:
                 return st
             name = str(getattr(ir.function_name, "value", ir.function_name))
+            target = self.val(ir.destination, st)
+            data = self.val(ir.arguments[0], st) if ir.arguments else CALLDATA
+            inputs = (target, *(self.val(a, st) for a in ir.arguments))
             if name == "delegatecall":
-                target = self.val(ir.destination, st)
-                data = self.val(ir.arguments[0], st) if ir.arguments else CALLDATA
-                # Forwarding this call's own data (a proxy), or calling something else with data of its own.
+                # Forwarding this call's own data (a proxy), or calling something else with data of its own: code
+                # run on this storage, which reads unknown after it.
                 success = mk("delegate", target) if data == CALLDATA else mk("delegate", target, data)
+                returned = mk("opaque", "returndata", inputs)
+                st = replace(st, store=stored(st.store, ("havoc", self.this, "*", "delegatecall"), TRUE))
+            elif name == "staticcall":
+                # A query, not an action: the view call its data encodes, or unknown.
+                call = self._encoded_call(target, data, True)
+                if call is None:
+                    label = "unsupported:staticcall"
+                    st = replace(st, pc=mk_and([st.pc, unknown(label)])) if contains(data, IDENTITY_KINDS) else st
+                    success, returned = unknown(label), unknown(label)
+                else:
+                    success, returned = mk("ok", call, None), mk("opaque", "returndata", (call,))
             else:
-                success = mk("assumed", name)  # an action the caller arranges, like a transfer
-            inputs = (self.val(ir.destination, st), *(self.val(a, st) for a in ir.arguments))
-            # What an arranged action returns is arranged with it (``SafeERC20`` decoding ``true``).
-            returned = mk("assumed", "returndata") if success[0] == "assumed" else mk("opaque", "returndata", inputs)
+                # An action the caller arranges, like a transfer; one handed the caller is the action its data
+                # encodes, so the callee's own check of who that is counts (an unreadable one: unknown).
+                action = self._encoded_call(target, data, False)
+                if action is not None:
+                    success = mk("ok", action, None)
+                    st = _acted(st, action)
+                elif contains(data, IDENTITY_KINDS):
+                    success = unknown("unsupported:call_data")
+                else:
+                    success = mk("assumed", name)
+                returned = mk("assumed", "returndata")  # what an arranged action returns is arranged with it
             return self._write(ir.lvalue, ("tuple", (success, returned)), st)
         if isinstance(ir, NewContract):
-            # Code deployed by this call: an effect whatever the new contract's constructor does.
+            # Code deployed by this call: an effect whatever the new contract's constructor does, an action the caller
+            # arranges like any call out, unless it hands the constructor who calls.
             st = _acted(st, mk("assumed", f"create:{id(ir)}"))
+            if any(contains(self.val(a, st), IDENTITY_KINDS) for a in ir.arguments):
+                st = replace(st, pc=mk_and([st.pc, unknown("unsupported:NewContract")]))
             return self._write(ir.lvalue, unknown("created"), st) if ir.lvalue is not None else st
-        if isinstance(ir, InternalDynamicCall):
-            if ir.lvalue is not None:
-                inputs = tuple(self.val(a, st) for a in ir.arguments)
-                return self._write(ir.lvalue, mk("opaque", f"dynamic:{id(ir)}", inputs), st)
+        if isinstance(ir, Nop):
             return st
-        if isinstance(ir, OperationWithLValue) and ir.lvalue is not None:
-            return self._write(ir.lvalue, unknown(type(ir).__name__), st)
+        label = REJECTED_OPERATIONS.get(type(ir).__name__)
+        if label is None and type(ir).__name__ not in HANDLED_OPERATIONS:
+            label = f"unsupported:{type(ir).__name__}"
+        if label is not None:
+            # An operation not lowered (a call through a function pointer): the path, what it writes and what it
+            # returns, all unknown by name.
+            self.lost = True
+            st = _acted(replace(st, pc=mk_and([st.pc, unknown(label)])), mk("assumed", label))
+            lvalue = getattr(ir, "lvalue", None)
+            return self._write(lvalue, unknown(label), st) if lvalue is not None else st
         return st
 
     def _solidity_call(self, ir: SolidityCall, st: State) -> State:
         name = ir.function.name
         base = name.split("(", 1)[0]
         args = [self.val(a, st) for a in ir.arguments]
+        # ``revert Error(...)`` names the custom error it reverts with: one builtin, ``revert ``.
+        known = "revert " if name.startswith("revert ") else name
+        rejected = REJECTED_BUILTINS.get(known, None if known in HANDLED_BUILTINS else f"unsupported:{name}")
+        if rejected is not None:
+            if name in _VYPER or known not in REJECTED_BUILTINS:
+                # Semantics not this lowering's (a call out that reverts on failure, bounds): the path itself unknown.
+                self.lost = True
+                st = _acted(replace(st, pc=mk_and([st.pc, unknown(rejected)])), mk("assumed", rejected))
+                return self._write(ir.lvalue, unknown(rejected), st) if ir.lvalue is not None else st
+            # A value of the environment, the same for every caller: unknown by name.
+            return self._write(ir.lvalue, mk("opaque", rejected, tuple(args)), st) if ir.lvalue is not None else st
+        if base in ("addmod", "mulmod") and not getattr(getattr(self._node, "scope", None), "is_yul", False):
+            # Solidity's form reverts on a zero modulus (Panic 0x12, since 0.5); Yul's returns zero.
+            version = str(getattr(self.contract.compilation_unit, "solc_version", "") or "")
+            parts = [int(x) for x in version.split(".")[:2] if x.isdigit()]
+            if len(parts) == 2 and parts >= [0, 5] and len(args) == 3:
+                st = replace(st, pc=mk_and([st.pc, mk_not(mk_cmp("eq", args[2], const(0)))]))
+        if base in _YUL_ENVIRONMENT and not args:
+            value = _YUL_ENVIRONMENT[base] if base != "callvalue" or self._payable else const(0)
+            return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        if base in ("address", "caller", "codesize", "this.balance") and not args:
+            value = {"address": self.this, "caller": self.sender, "codesize": mk("codesize", self.code)}.get(
+                base, mk("balance", self.this)
+            )
+            return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        packed_v = (
+            base == "byte"
+            and len(args) == 2
+            and _small_const(args[0]) == 0
+            and args[1][:2] == ("opaque", "mload(uint256)")
+        )
+        if base in ("byte", "signextend", "clz") and not packed_v:
+            value = mk_op(base, tuple(args))
+            return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        if base in ("bytes.concat", "string.concat"):
+            # The same bytes ``abi.encodePacked`` makes of them.
+            value = mk("enc", "abi.encodePacked", tuple(args))
+            return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
+        if base == "codehash" and len(args) == 1:
+            return self._write(ir.lvalue, mk("codehash", args[0]), st) if ir.lvalue is not None else st
         if base in ("require", "assert"):
             return replace(st, pc=mk_and([st.pc, args[0]]))  # a condition leaves memory as it was
         if base.startswith("revert") or base == "invalid":
@@ -1498,12 +1868,25 @@ class Lowerer:
                 kept = tuple((o, w) for o, w in st.mem if not out - 31 <= o < out + size)
                 mem = (*kept, *((out + 32 * i, mk("assumed", "returndata")) for i in range(size // 32)))
             after = _acted(State(st.pc, st.env, st.store, st.ret, mem=mem), mk("assumed", base))
-            return self._write(ir.lvalue, mk("assumed", base), after) if ir.lvalue is not None else after
+            # Data this reading couldn't decode that holds who calls: the callee's check of that caller is unread.
+            start, length = (_small_const(args[3]), _small_const(args[4])) if len(args) == 7 else (None, None)
+            named = (
+                start is not None
+                and length is not None
+                and any(
+                    start - 31 <= o < start + length and contains(w, IDENTITY_KINDS)
+                    for o, w in st.mem
+                    if isinstance(w, tuple)
+                )
+            )
+            success = unknown("unsupported:call_data") if named else mk("assumed", base)
+            return self._write(ir.lvalue, success, after) if ir.lvalue is not None else after
         if base == "delegatecall":
             # ``delegatecall(gas, target, ...)``: the target's code for this call, on this storage, for this caller;
             # an effect whether or not its success is used.
             value = mk("delegate", args[1] if len(args) > 1 else unknown("delegate_target"))
             st = _acted(st, mk("assumed", "delegatecall"))
+            st = replace(st, store=stored(st.store, ("havoc", self.this, "*", "delegatecall"), TRUE))
             return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
         if base in ("create", "create2"):
             # Assembly ``create``: code deployed by this call, like ``new C()``.
@@ -1552,6 +1935,19 @@ class Lowerer:
             value = mk("enc", base, tuple(args))
         elif base.startswith("abi.decode") and args and args[0][0] == "assumed":
             value = args[0]  # decoding what an arranged action returned: arranged too
+        elif (
+            base.startswith("abi.decode")
+            and args
+            and args[0][:2] == ("opaque", "returndata")
+            and args[0][2][0][0] == "call"
+        ):
+            # What a view call returned, decoded: its words, when each decoded value is one.
+            types = _decoded_types(ir.lvalue)
+            if types is None:
+                value = mk("opaque", name, tuple(args))
+            else:
+                items = [mk("item", args[0][2][0], i) for i in range(len(types))]
+                value = items[0] if len(items) == 1 else ("tuple", tuple(items))
         elif base.startswith("abi.decode") and args and args[0][0] == "enc" and args[0][1] == "abi.encode":
             words = _static_words(args[0][2])
             types = _decoded_types(ir.lvalue)
@@ -1560,7 +1956,12 @@ class Lowerer:
             elif len(types) > len(words):
                 return State(FALSE, st.env, st.store, st.ret)  # fewer words than it decodes: abi.decode reverts
             else:
-                decoded = [_convert(str(t), w) for t, w in zip(types, words)]
+                # The word as encoded, when decoded as its own type; decoded as another, strict decoding reverts out of
+                # that type's range, which isn't followed.
+                decoded = [
+                    w if _decodes_as(_type_of(w), str(t)) else unknown(f"unsupported:abi.decode:{_type_of(w)}->{t}")
+                    for t, w in zip(types, words)
+                ]
                 value = decoded[0] if len(decoded) == 1 else ("tuple", tuple(decoded))
         elif base == "ecrecover":
             value = mk("signer", *args)
@@ -1588,6 +1989,8 @@ class Lowerer:
             value = mk("codehash", args[0])
         elif base == "returndatasize" and self._last_call is not None:
             value = mk("retsize", self._last_call)
+        elif base == "returndatasize":
+            value = mk("opaque", "unsupported:returndatasize()", ())  # no call this lowering placed before it
         else:
             value = mk("opaque", name, tuple(args))  # a builtin the lowering doesn't model, still a function of these
         if ir.lvalue is not None:
@@ -1619,6 +2022,23 @@ class Lowerer:
             return None
         return mk("call", args[1], signature, tuple(_unmasked(w) for w in words), False)
 
+    def _encoded_call(self, target: Term, data: Term, view: bool) -> Term | None:
+        """The call ``abi.encodeWithSignature`` / ``abi.encodeWithSelector`` data names, made to ``target``."""
+        if not (isinstance(data, tuple) and data and data[0] == "enc" and data[2]):
+            return None
+        head, rest = data[2][0], tuple(data[2][1:])
+        if data[1] == "abi.encodeWithSignature" and head[0] == "const" and isinstance(head[1], str) and "(" in head[1]:
+            return mk("call", target, head[1], rest, view)
+        if data[1] == "abi.encodeWithSelector" and head[0] == "const":
+            value = int(head[1], 0) if isinstance(head[1], str) and head[1][:2] in ("0x", "0X") else head[1]
+            if isinstance(head[1], str) and head[1].isdigit():
+                value = int(head[1])
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+            signature = _signature_of(self.contract, value % 2**32, len(rest))
+            return None if signature is None else mk("call", target, signature, rest, view)
+        return None
+
     def _static_call(self, ir: SolidityCall, args: list, st: State) -> State:
         """Assembly ``staticcall(gas, to, add(data, 0x20), mload(data), out, size)`` of data an ``abi.encode*`` built:
         the view call it makes, succeeding when the call returns, its return words left at ``out``. OpenZeppelin's
@@ -1649,14 +2069,16 @@ class Lowerer:
         returns = getattr(fn, "returns", None) or []
         self._last_call = value
         self._last_returns = len(returns) if isinstance(fn, Function) else None
+        if not view:
+            st = _acted(st, value)
+            if target == self.this:
+                # One of this contract's own entry points, run again: what it writes here isn't followed.
+                st = replace(st, store=stored(st.store, ("havoc", self.this, "*", f"selfcall:{signature}"), TRUE))
         if ir.lvalue is None:
             # A call whose result goes unused still has to return: a view call is there for whether it reverts
             # (``registry.onlyAdmin(sender)``), and so may an action be (``supplyControl.canMintToAddress(to, v,
             # msg.sender)``), which the decision assumes unless it is handed the caller.
-            st = _acted(st, value) if not view else st
             return State(mk_and([st.pc, mk("ok", value, self._last_returns)]), st.env, st.store, st.ret)
-        if not view:
-            st = _acted(st, value)
         # Any call has to return whether or not its result is read (``token.transferFrom`` returns a bool few check),
         # or read only where the path condition never looks (a view call's value stored, ``total += cap()``): the
         # same revert point as above, on this path.
@@ -1675,7 +2097,7 @@ class Lowerer:
             loc = self._location(var, st)
             if loc is not None:
                 return ("loc", loc)
-        return self.val(var, st)
+        return self._value(var, st)  # a value memory holds by reference: the object itself
 
     def _require_with_error(self, node: Any, st: State) -> Term | None:
         """The condition of ``require(cond, Error())`` when Slither's IR dropped the ``require`` (it keeps only the
@@ -1777,7 +2199,7 @@ class Lowerer:
 
         def value(token: str) -> Term:
             if token in names:
-                return self.val(names[token], st)
+                return self._value(names[token], st)
             if token in constants:
                 return _constant_initializer(constants[token])
             try:
@@ -1804,22 +2226,25 @@ class Lowerer:
         for name in assigned:
             if name in names:
                 st = self._bind(names[name], unknown(f"asm:{name}"), st)
-        for target, source in re.findall(r"(\w+)\s*:=\s*(\w+)\s*(?=$|\n|\}|let\b|\w+\s*:=|mstore|sstore)", asm):
+        # What runs before any control flow runs unconditionally; past it, an assignment or a write may not happen.
+        flow = re.search(r"\b(if|switch|for|case|default|function|leave|break|continue)\b", asm)
+        straight = asm[: flow.start()] if flow else asm
+        for target, source in re.findall(r"(\w+)\s*:=\s*(\w+)\s*(?=$|\n|\}|let\b|\w+\s*:=|mstore|sstore)", straight):
             # A plain copy (``output := _input``): the value itself, unless the target is assigned again elsewhere.
             if target in names and len(re.findall(rf"\b{target}\s*:=", asm)) == 1:
                 st = self._bind(names[target], value(source), st)
-        for target, slot in re.findall(r"(\w+)\s*:=\s*sload\(\s*(\w+)\s*\)", asm):
-            if target in names:
+        for target, slot in re.findall(r"(\w+)\s*:=\s*sload\(\s*(\w+)\s*\)", straight):
+            if target in names and len(re.findall(rf"\b{target}\s*:=", asm)) == 1:
                 st = self._bind(names[target], mk("rawload", self.this, value(slot)), st)
-        for target, account in re.findall(r"(\w+)\s*:=\s*extcodesize\(\s*(\w+)\s*\)", asm):
-            if target in names:
+        for target, account in re.findall(r"(\w+)\s*:=\s*extcodesize\(\s*(\w+)\s*\)", straight):
+            if target in names and len(re.findall(rf"\b{target}\s*:=", asm)) == 1:
                 st = self._bind(names[target], mk("codesize", value(account)), st)
-        if len(re.findall(r"\bsstore\(", asm)) > len(re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", asm)):
-            self.lost = True
-        for slot, written in re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", asm):
+        if len(re.findall(r"\bsstore\(", asm)) > len(re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", straight)):
+            self.lost = True  # a store this reading doesn't place, or one that may not run
+        for slot, written in re.findall(r"sstore\(\s*(\w+)\s*,\s*(\w+)\s*\)", straight):
             st = State(st.pc, st.env, stored(st.store, ("raw", self.this, value(slot)), value(written)), st.ret)
-        for found in re.finditer(r"\blog([1-4])\s*\(", asm):
-            parts = _call_arguments(asm, found.end())
+        for found in re.finditer(r"\blog([1-4])\s*\(", straight):
+            parts = _call_arguments(straight, found.end())
             if parts is not None:
                 topics = tuple(self._asm_topic(part, value) for part in parts[2:])
                 st = State(st.pc, st.env, {**st.store, ("emit", f"log{found.group(1)}", topics): TRUE}, st.ret)
@@ -1850,7 +2275,7 @@ class Lowerer:
             "or": "or",
             "xor": "xor",
         }
-        compare = {"lt": "lt", "gt": "gt", "eq": "eq", "slt": None, "sgt": None}
+        compare = {"lt": "lt", "gt": "gt", "eq": "eq", "slt": "lt", "sgt": "gt"}
 
         def ev(e: Any) -> Term:
             if isinstance(e, Number):
@@ -1869,8 +2294,23 @@ class Lowerer:
                 return mk_op(binary[name], tuple(args))
             if name in ("shl", "shr") and len(args) == 2:
                 return mk_op(name, (args[1], args[0]))  # Yul shifts by its first argument
-            if name in compare and len(args) == 2 and compare[name]:
+            if name in compare and len(args) == 2:
+                if name in ("slt", "sgt"):
+                    args = [_convert("int256", a) for a in args]  # the words read as signed
                 return mk_cmp(compare[name], args[0], args[1])
+            if name in ("sdiv", "smod", "sar") and len(args) == 2:
+                if name == "sar":
+                    return _convert("int256", mk_op("sar", (_convert("int256", args[1]), args[0])))
+                x, y = (_convert("int256", a) for a in args)
+                return _convert("int256", mk_op(name, (x, y)))
+            if name in ("byte", "signextend") and len(args) == 2:
+                return mk_op(name, tuple(args))
+            if name == "calldatasize" and not args:
+                return mk("calldatasize", self._calldata_min)
+            if name == "chainid" and not args:
+                return mk("time", "chainid")
+            if name in ("selfbalance", "balance") and len(args) == (0 if name == "selfbalance" else 1):
+                return mk("balance", args[0] if args else self.this)
             if name == "iszero" and len(args) == 1:
                 inner = args[0]
                 return mk_not(inner) if inner[0] in ("cmp", "not", "and", "or") else mk_cmp("eq", inner, const(0))
@@ -1894,24 +2334,9 @@ class Lowerer:
                 offset = _small_const(args[0])
                 word = self._calldata_word(offset) if offset is not None else None
                 return word if word is not None else mk("elem", CALLDATA, args[0])
-            if name in (
-                "mload",
-                "byte",
-                "keccak256",
-                "sar",
-                "signextend",
-                "addmod",
-                "mulmod",
-                "sdiv",
-                "smod",
-                "gas",
-                "returndatasize",
-                "calldatasize",
-                "chainid",
-                "selfbalance",
-                "balance",
-                "msize",
-            ):
+            if name in ("mload", "keccak256", "addmod", "mulmod", "gas", "returndatasize", "msize"):
+                # Memory this reading doesn't track, what the gas or the last call leave: unknown by name (``addmod``
+                # and ``mulmod`` are evaluated exactly from it).
                 if name == "mload":
                     return _lost_word("mload(uint256)", args)
                 return mk("opaque", name, tuple(args))
@@ -1922,7 +2347,14 @@ class Lowerer:
                 if len(statement.targets) != 1:
                     raise Unsupported("several targets")
                 target = statement.targets[0]
-                term = const(0) if statement.value is None else ev(statement.value)
+                if (
+                    isinstance(statement.value, Name)
+                    and statement.value.name in names
+                    and statement.value.name not in local
+                ):
+                    term = self._value(names[statement.value.name], st)  # a plain copy: the same object, if one
+                else:
+                    term = const(0) if statement.value is None else ev(statement.value)
                 if target in local or target not in names:
                     local[target] = term
                 else:
@@ -1999,6 +2431,8 @@ class Lowerer:
         type_ = getattr(left, "type", None)
         base = self._location(left, st)
         key = self.val(ir.variable_right, st)
+        if base is None and self._unplaced_pointer(left, st):
+            return self._unplaced(ir.lvalue, st)
         if base is not None:
             if _bytes_typed(type_):
                 # A byte of a ``bytes``/``string`` in storage: its encoding (length in the slot, long data hashed)
@@ -2048,6 +2482,8 @@ class Lowerer:
     def _member(self, ir: Member, st: State) -> State:
         field_name = str(getattr(ir.variable_right, "value", ir.variable_right))
         base = self._location(ir.variable_left, st)
+        if base is None and self._unplaced_pointer(ir.variable_left, st):
+            return self._unplaced(ir.lvalue, st)
         if base is not None:
             return self._bind(ir.lvalue, ("loc", _extend(base, ("f", field_name))), st)
         enum = _enum_of(ir.variable_left)
@@ -2071,22 +2507,49 @@ class Lowerer:
         if word is not None and isinstance(whole, tuple) and whole and whole[0] == "call":
             # A field of a struct a call returns: a struct of plain values is encoded as their words, in order.
             return self._write(ir.lvalue, mk("item", whole, word), st)
-        if isinstance(whole, tuple) and whole and whole[0] == "struct" and field_name in whole[1]:
+        if _struct_shaped(whole, field_name):
             if ir.lvalue is not None:
                 # A field of a memory struct: read from, and written back into, the struct this call holds.
                 self._structs[id(ir.variable_left)] = ir.variable_left
                 return self._bind(ir.lvalue, ("sref", id(ir.variable_left), field_name), st)
-            return self._write(ir.lvalue, whole[2][whole[1].index(field_name)], st)
+            return self._write(ir.lvalue, _field_of(whole, field_name), st)
         if isinstance(whole, tuple) and whole and whole[0] == "load":
             # A field of a struct read whole from storage (``Config memory c = _config; c.epoch``): that field's slot.
             return self._write(ir.lvalue, mk("load", whole[1], whole[2], (*whole[3], ("f", field_name))), st)
         if isinstance(whole, tuple) and whole and whole[0] == "arg" and ir.lvalue is not None:
             # A field of a struct the caller passes is a value the caller picks, like any argument.
             return self._write(ir.lvalue, _typed_arg(f"{whole[1]}.{field_name}", ir.lvalue.type), st)
+        if (
+            isinstance(whole, tuple)
+            and whole[:1] == ("elem",)
+            and whole[1][0] == "arg"
+            and ir.lvalue is not None
+            and not _reference_typed(getattr(ir.lvalue, "type", None))
+        ):
+            # A field of an item of an array of structs the caller passes: the caller picks it for each item.
+            column = mk("arg", f"{whole[1][1]}[].{field_name}", f"{ir.lvalue.type}[]")
+            return self._write(ir.lvalue, mk("elem", column, whole[2]), st)
         if field_name in ("codesize", "codehash") and _address_typed(getattr(ir.variable_left, "type", None)):
             return self._write(ir.lvalue, mk(field_name, whole), st)  # ``address(token).code.length``
-        value = mk("op", "field", (whole, const(field_name, "string")))
-        return self._write(ir.lvalue, value, st)
+        # A field of any other value (one another contract returned, encoded with dynamic parts): unknown by name.
+        return self._write(ir.lvalue, mk("opaque", f"unsupported:member:{field_name}", (whole,)), st)
+
+    def _unplaced_pointer(self, var: Any, st: State) -> bool:
+        """A storage pointer (a local, or a reference into one) with no one location: a choice by branch."""
+        if isinstance(var, StateVariable) or not getattr(var, "is_storage", False):
+            return False
+        held = st.env.get(id(var))
+        return isinstance(held, tuple) and held[:2] == ("unknown", "unsupported:storage_pointer_choice")
+
+    def _unplaced(self, lvalue: Any, st: State) -> State:
+        """A part of storage through such a pointer: read unknown, and any write through it may land anywhere in
+        this contract's storage, which reads unknown from here."""
+        self.lost = True
+        label = "unsupported:storage_pointer_choice"
+        st = State(st.pc, st.env, stored(st.store, ("havoc", self.this, "*", label), TRUE), st.ret, mem=st.mem)
+        env = dict(st.env)
+        env[id(lvalue)] = unknown(label)
+        return State(st.pc, env, st.store, st.ret, mem=st.mem)
 
     def _location(self, var: Any, st: State) -> tuple | None:
         if isinstance(var, StateVariable) and not (var.is_constant or var.is_immutable):
@@ -2101,6 +2564,8 @@ class Lowerer:
         return read_store(st.store, loc)
 
     def _bind(self, lvalue: Any, value: Any, st: State) -> State:
+        if self._memory_var(lvalue) and not _pointer(value) and not _reference(value):
+            return self._allocate(lvalue, value, st)  # a new value in memory: an object of its own
         env = dict(st.env)
         env[id(lvalue)] = value
         return State(st.pc, env, st.store, st.ret, mem=st.mem)
@@ -2108,26 +2573,100 @@ class Lowerer:
     def _write(self, lvalue: Any, value: Any, st: State) -> State:
         ref = st.env.get(id(lvalue))
         if isinstance(ref, tuple) and ref and ref[0] == "mref":
-            # An item written in place: the value holding it, updated, written back where that value lives (a
-            # variable, or an item or field of another value: ``g[1][0] = x``, ``s.xs[i] = x``).
-            holder = self._vars[ref[1]]
-            container = self.val(holder, st)
-            if ref[3] == "byte":
-                new = mk("upd", container, (("k", ref[2]),), value)
-            else:
-                new = update(container, ref[2], value)
-            return self._write(holder, new, st)
+            # An item written in place: in the object holding it, or in the value holding it, written back where that
+            # value lives (an item or field of another value: ``g[1][0] = x``, ``s.xs[i] = x``).
+            key, byte = ref[2], ref[3] == "byte"
+            return self._mutate(
+                self._vars[ref[1]],
+                lambda c: mk("upd", c, (("k", key),), value) if byte else update(c, key, value),
+                st,
+            )
         if isinstance(ref, tuple) and ref and ref[0] == "sref":
-            struct = self._structs[ref[1]]
-            whole = self.val(struct, st)
-            if isinstance(whole, tuple) and whole and whole[0] == "struct" and ref[2] in whole[1]:
-                at = whole[1].index(ref[2])
-                return self._write(struct, mk("struct", whole[1], (*whole[2][:at], value, *whole[2][at + 1 :])), st)
-            return self._bind(lvalue, value, st)
+            name = ref[2]
+
+            def field(c: Term) -> Term:
+                if isinstance(c, tuple) and c and c[0] == "struct" and name in c[1]:
+                    at = c[1].index(name)
+                    return mk("struct", c[1], (*c[2][:at], value, *c[2][at + 1 :]))
+                return unknown("memory")
+
+            return self._mutate(self._structs[ref[1]], field, st)
         loc = self._location(lvalue, st)
         if loc is not None:
-            return State(st.pc, st.env, stored(st.store, loc, value), st.ret, mem=st.mem)
+            # Storage holds a copy: whatever objects the value points to, read out.
+            return State(st.pc, st.env, stored(st.store, loc, self._deep(value, st)), st.ret, mem=st.mem)
+        if getattr(lvalue, "is_storage", False) and not isinstance(lvalue, (StateVariable, ReferenceVariable)):
+            # Written through a storage pointer whose location isn't one place: any of this contract's storage.
+            self.lost = True
+            return State(
+                st.pc, st.env, stored(st.store, ("havoc", self.this, "*", "unsupported:pointer"), TRUE), st.ret
+            )
         return self._bind(lvalue, value, st)
+
+    # Memory -----------------------------------------------------------------------------------------------------------
+    # A value memory holds by reference (an array, ``bytes``, a struct) is an object in the store, ``("heap", n)``; a
+    # variable holds ``("ptr", n)``. Every name for one object (``b = a``, a parameter, a struct field holding it) sees
+    # every write into it; reassigning a name points it elsewhere. ``val`` reads values with every object read out.
+
+    def _memory_var(self, var: Any) -> bool:
+        """A local, parameter or temporary holding a value memory keeps by reference."""
+        if isinstance(var, (StateVariable, ReferenceVariable, Constant, SolidityVariable)):
+            return False
+        if getattr(var, "is_storage", False) or getattr(var, "location", None) in ("storage", "calldata"):
+            return False
+        return _reference_typed(getattr(var, "type", None))
+
+    def _allocate(self, var: Any, value: Any, st: State) -> State:
+        self._objects += 1
+        env = dict(st.env)
+        env[id(var)] = mk("ptr", self._objects)
+        return State(st.pc, env, stored(st.store, ("heap", self._objects), value), st.ret, mem=st.mem)
+
+    def _object(self, value: Any, st: State) -> Any:
+        """What a pointer points to (each pointer of a choice between them); anything else as it is."""
+        if isinstance(value, tuple) and value and value[0] == "ptr":
+            return st.store.get(("heap", value[1]), unknown("unallocated"))
+        if isinstance(value, tuple) and value and value[0] == "ite" and _pointer(value):
+            # Each side under its own branch: an object only one branch allocated is unallocated on the other.
+            a = replace_terms(self._object(value[2], st), {value[1]: TRUE})
+            b = replace_terms(self._object(value[3], st), {value[1]: FALSE})
+            return mk_ite(value[1], a, b)
+        return value
+
+    def _mutate(self, holder: Any, change: Callable[[Term], Term], st: State) -> State:
+        """``holder``'s value changed in place: the objects it points to, else the value written back to ``holder``."""
+        current = self._value(holder, st)
+        if not _pointer(current):
+            return self._write(holder, change(current), st)
+        conditions: dict[int, list] = {}
+
+        def leaves(t: Any, cond: Term) -> None:
+            if t[0] == "ptr":
+                conditions.setdefault(t[1], []).append(cond)
+            elif t[0] == "ite":
+                leaves(t[2], mk_and([cond, t[1]]))
+                leaves(t[3], mk_and([cond, mk_not(t[1])]))
+
+        leaves(current, TRUE)
+        store = st.store
+        for oid, conds in sorted(conditions.items()):
+            old = store.get(("heap", oid), unknown("unallocated"))
+            store = stored(store, ("heap", oid), mk_ite(mk_or(conds), change(old), old))
+        return State(st.pc, st.env, store, st.ret, mem=st.mem)
+
+    def _deep(self, value: Any, st: State, depth: int = 0) -> Any:
+        """``value`` with every object it points to read out, to a bounded depth."""
+        if not isinstance(value, tuple) or not contains(value, frozenset({"ptr"})):
+            return value
+        if depth > 8:
+            return unknown("memory_depth")
+
+        def out(p: Term) -> Term:
+            return self._deep(st.store.get(("heap", p[1]), unknown("unallocated")), st, depth + 1)
+
+        if isinstance(value, Term):
+            return substitute(value, "ptr", out)
+        return tuple(self._deep(x, st, depth) if isinstance(x, tuple) else x for x in value)
 
     # Values -----------------------------------------------------------------------------------------------------------
 
@@ -2139,6 +2678,11 @@ class Lowerer:
         return uses > 0 and len(_ARGUMENTS_SLICE.findall(source)) == uses
 
     def val(self, var: Any, st: State) -> Any:
+        """``var``'s value, every object it points to read out."""
+        return self._deep(self._value(var, st), st)
+
+    def _value(self, var: Any, st: State) -> Any:
+        """``var``'s value as it is held: a value memory keeps by reference is its pointer."""
         if isinstance(var, Constant):
             return _constant(var)
         if isinstance(var, (SolidityVariableComposed, SolidityVariable)):
@@ -2148,7 +2692,15 @@ class Lowerer:
                 return self.this
             if var.name == "msg.data" and self._arguments_only():
                 return mk("enc", "abi.encode", self._arguments)
-            return _ENVIRONMENT.get(var.name, unknown(var.name))
+            if var.name == "msg.data" and self._sliced:
+                return unknown("unsupported:slice")  # Slither drops ``x[a:b]``: what is read isn't the whole
+            if var.name == "msg.value" and not self._payable:
+                return const(0)  # a call to a function that isn't payable carrying ether reverts
+            if var.name in _ENVIRONMENT:
+                return _ENVIRONMENT[var.name]
+            label = REJECTED_VARIABLES.get(var.name, f"unsupported:{var.name}")
+            # A value of the environment nobody's identity is in (Vyper's ``self`` aside): unknown by name.
+            return mk("opaque", label, ()) if var.name in REJECTED_VARIABLES and "." in var.name else unknown(label)
         if isinstance(var, Contract):
             return unknown(f"contract:{var.name}")
         if isinstance(var, TopLevelVariable):
@@ -2164,15 +2716,15 @@ class Lowerer:
             return self._read_at(held[1], st)
         if isinstance(held, tuple) and held and held[0] == "mref":
             holder = self._vars[held[1]]
-            container = self.val(holder, st)
+            container = self._object(self._value(holder, st), st)
             if held[3] == "byte":
-                return byte_at(container, held[2])
+                return byte_at(self._deep(container, st), held[2])
             return element(container, held[2], _zero_item(getattr(holder, "type", None)))
         if isinstance(held, tuple) and held and held[0] == "sref":
-            whole = self.val(self._structs[held[1]], st)
-            if isinstance(whole, tuple) and whole and whole[0] == "struct" and held[2] in whole[1]:
-                return whole[2][whole[1].index(held[2])]
-            return unknown("memory")
+            whole = self._object(self._value(self._structs[held[1]], st), st)
+            return _field_of(whole, held[2])
+        if self._sliced and isinstance(held, tuple) and held[:1] == ("arg",) and _dynamic_abi(held[2]):
+            return unknown("unsupported:slice")  # Slither drops ``x[a:b]``: what is read isn't the whole
         if held is not None:
             return held
         if isinstance(var, ReferenceVariable):
@@ -2265,6 +2817,32 @@ def _static_words(values: tuple) -> list[Term] | None:
     return words
 
 
+def _decodes_as(encoded: str | None, decoded: str) -> bool:
+    """Whether a word ``abi.encode`` made of an ``encoded`` value decodes as ``decoded`` to the same number: the same
+    type, or an integer type whose range holds the encoded one's (an address read as ``uint256``)."""
+    if encoded == decoded:
+        return True
+
+    def range_of(type_: str | None) -> tuple[int, bool] | None:
+        if type_ in ("address", "address payable"):
+            return 160, False
+        if type_ == "bool":
+            return 1, False
+        found = re.fullmatch(r"(u?)int(\d*)", type_ or "")
+        return (int(found.group(2) or 256), found.group(1) == "") if found else None
+
+    a, b = range_of(encoded), range_of(decoded)
+    if a is None or b is None or (b[0] == 1 and a[0] != 1):
+        return False
+    return (a[1] == b[1] and a[0] <= b[0]) or (not a[1] and b[1] and a[0] < b[0])
+
+
+def _type_of(value: Term) -> str | None:
+    if value[0] in ("arg", "const") and isinstance(value[2], str):
+        return value[2]
+    return value[1] if value[0] == "conv" else None
+
+
 def _decoded_types(lvalue: Any) -> list[Any] | None:
     """The types an ``abi.decode`` produces, when each is a one-word value."""
     type_ = getattr(lvalue, "type", None)  # a tuple variable's is the list of its items' types
@@ -2284,6 +2862,112 @@ def _address_typed(type_: Any) -> bool:
     return str(type_) in ("address", "address payable") or (
         isinstance(type_, UserDefinedType) and isinstance(type_.type, Contract)
     )
+
+
+def _pointer(value: Any) -> bool:
+    """A pointer to an object in memory, or a choice between pointers (a branch that set none leaves it unknown)."""
+    if not isinstance(value, tuple) or not value:
+        return False
+    if value[0] == "ptr":
+        return True
+    if value[0] == "ite":
+        sides = (value[2], value[3])
+        return any(_pointer(x) for x in sides) and all(_pointer(x) or x[0] in ("unknown", "opaque") for x in sides)
+    return False
+
+
+def _reference(value: Any) -> bool:
+    """A reference the lowering binds a variable to: a storage location, an item, a field."""
+    return isinstance(value, tuple) and bool(value) and value[0] in ("loc", "mref", "sref")
+
+
+def _struct_shaped(value: Any, name: str) -> bool:
+    """A struct value with field ``name``, or a choice between such."""
+    if not isinstance(value, tuple) or not value:
+        return False
+    if value[0] == "ite":
+        return _struct_shaped(value[2], name) and _struct_shaped(value[3], name)
+    return value[0] == "struct" and name in value[1]
+
+
+def _field_of(whole: Any, name: str) -> Term:
+    """Field ``name`` of a struct value (each side of a choice between them)."""
+    if isinstance(whole, tuple) and whole and whole[0] == "struct" and name in whole[1]:
+        return whole[2][whole[1].index(name)]
+    if isinstance(whole, tuple) and whole and whole[0] == "ite":
+        return mk_ite(whole[1], _field_of(whole[2], name), _field_of(whole[3], name))
+    return unknown("memory")
+
+
+def _operand_type(ir: Binary) -> Any:
+    """The type an operation computes in: its left operand's (a shift's always), else its right's where the left
+    is a literal Slither may have typed loosely."""
+    left, right = ir.variable_left, ir.variable_right
+    if (
+        isinstance(left, Constant)
+        and not isinstance(right, Constant)
+        and ir.type
+        not in (
+            BinaryType.LEFT_SHIFT,
+            BinaryType.RIGHT_SHIFT,
+        )
+    ):
+        return getattr(right, "type", None)
+    return getattr(left, "type", None) or getattr(ir.lvalue, "type", None)
+
+
+def _integer(type_: Any) -> tuple[int, bool]:
+    """(bits, signed) of an integer-like type (a ``bytesN`` its ``8N`` bits, anything else a 256-bit word)."""
+    name = str(type_ or "")
+    found = re.fullmatch(r"(u?)int(\d*)", name)
+    if found:
+        return int(found.group(2) or 256), found.group(1) == ""
+    found = re.fullmatch(r"bytes(\d+)", name)
+    if found:
+        return 8 * int(found.group(1)), False
+    return 256, False
+
+
+def _checked_version(contract: Any) -> bool:
+    version = str(getattr(contract.compilation_unit, "solc_version", "") or "")
+    parts = [int(x) for x in version.split(".")[:2] if x.isdigit()]
+    return len(parts) == 2 and parts >= [0, 8]
+
+
+def _enum_size(type_: Any) -> int | None:
+    from slither.core.declarations import Enum
+    from slither.core.solidity_types import UserDefinedType
+
+    if isinstance(type_, UserDefinedType) and isinstance(type_.type, Enum):
+        return len(type_.type.values)
+    return None
+
+
+_SLICE = re.compile(r"([A-Za-z_$][\w.$]*)\s*\[\s*([^\[\]:]*?)\s*:\s*([^\[\]:]*?)\s*\]")
+
+
+def _sliced(node: Any) -> bool:
+    """Whether ``node``'s source slices a value (``x[a:b]``, which Slither's IR renders as ``x``), past the two
+    slices of the call's own data that are read back from the source: ``msg.data[4:]`` and ``bytes4(msg.data[:4])``.
+    A conditional expression inside an index reads as one too: never fewer."""
+    text = _source(node, lambda t: ":" in t) if node is not None else ""
+    for found in _SLICE.finditer(text):
+        base, start, end = found.groups()
+        if base == "msg.data" and start in ("4", "0x4", "0x04") and not end:
+            continue
+        if (
+            base == "msg.data"
+            and start in ("", "0")
+            and end == "4"
+            and text[: found.start()].rstrip().endswith("bytes4(")
+        ):
+            continue
+        return True
+    return False
+
+
+def _dynamic_abi(type_: Any) -> bool:
+    return isinstance(type_, str) and (type_ in ("bytes", "string") or type_.endswith("]"))
 
 
 def _bytes_typed(type_: Any) -> bool:
@@ -2560,6 +3244,8 @@ def _literal_bytes(value: str, source: str) -> bytes | None:
 def _constant_initializer(var: StateVariable) -> Term:
     """A ``constant``'s value: its initializer folded when it's literal arithmetic, else a named placeholder."""
     value = _fold_expression(var.expression, str(var.type), 0)
+    if value is not None and str(var.type).startswith("int") and isinstance(value[1], int):
+        return _convert(str(var.type), value)  # a signed constant as the signed number it is
     return value if value is not None else mk("constant", var.name)
 
 
@@ -2670,17 +3356,58 @@ def _fold_expression(expr: Any, type_: str, depth: int) -> Term | None:
     return None
 
 
-def _convert(type_: str, value: Term) -> Term:
+def _convert(type_: str, value: Term, source: Any = None) -> Term:
+    """``value`` converted to ``type_`` (from ``source``'s type when known): an integer kept to the new width (read as
+    signed for a signed type), a ``bytesM`` cut or padded on the right to ``bytesN`` (its value right-aligned, so a
+    shift), the first ``N`` bytes of a ``bytes`` value; any other conversion leaves the value as it is."""
+    from slither.core.solidity_types import ElementaryType
+
+    src = str(source) if source is not None else None
     if type_ == "bytes4" and value == CALLDATA:
         return mk("sig")  # ``bytes4(msg.data[0:4])``: the selector this call came in with
-    if value[0] == "const" and isinstance(value[1], int):
-        width = {"address": 160, "uint160": 160, "bytes4": 32, "uint8": 8, "uint32": 32, "uint64": 64}.get(type_)
-        if width:
-            return const(value[1] % (2**width), type_)
+    target = _integer(type_) if re.fullmatch(r"u?int\d*|bytes\d+", type_) else None
+    shift = None
+    if target is not None and src is not None and type_.startswith("bytes") and re.fullmatch(r"bytes\d+", src):
+        shift = 8 * (int(type_[5:]) - int(src[5:]))  # a ``bytesM`` to ``bytesN``: positive pads, negative cuts
+    if target is not None and src in ("bytes", "string"):
+        if type_.startswith("bytes"):
+            return mk_slice(mk("elem", value, const(0)), 0, int(type_[5:]))  # its first N bytes
+        return unknown(f"unsupported:conversion:{src}->{type_}")
+    if value[0] == "const" and isinstance(value[1], int) and not isinstance(value[1], bool):
+        if shift is not None:
+            moved = value[1] << shift if shift >= 0 else value[1] >> -shift
+            return const(moved % 2 ** target[0], type_)
+        if target is not None:
+            bits, is_signed = target
+            return const(_signed(value[1], bits) if is_signed else value[1] % 2**bits, type_)
+        if type_ in ("address", "address payable"):
+            return const(value[1] % 2**160, type_)
         return const(value[1], type_)
-    if type_ in ("uint256", "bytes32", "int256") or value[0] in ("caller", "origin", "this"):
+    if shift is not None:
+        if shift == 0:
+            return value
+        if shift > 0:
+            return mk_op("shl", (value, const(shift)))
+        return mk("conv", type_, mk_op("shr", (value, const(-shift))))
+    unsigned_wide = target is None or (target[0] >= 160 and not target[1])
+    if value[0] in ("caller", "origin", "this") and unsigned_wide:
+        return value
+    if target is not None and src is not None and isinstance(source, ElementaryType):
+        widened = _integer(src)
+        bits, is_signed = target
+        same_kind = src.startswith("bytes") == type_.startswith("bytes")
+        if same_kind and widened[0] <= bits and (widened[1] == is_signed or (not widened[1] and widened[0] < bits)):
+            return value  # wider, or unsigned into a wider signed type: every value fits as it is
+    if type_ in ("uint256", "bytes32") and (src is None or not str(src).startswith("int")):
+        return value  # a word read as a word
+    if type_ == "int256" and src is not None and re.fullmatch(r"int\d*", str(src)):
         return value
     return mk("conv", type_, value)
+
+
+def _signed(x: int, bits: int) -> int:
+    r = x % 2**bits
+    return r - 2**bits if r >= 2 ** (bits - 1) else r
 
 
 def _zero(type_: Any, depth: int = 0) -> Term:

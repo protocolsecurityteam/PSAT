@@ -177,6 +177,12 @@ def _guarded(c: Term, d: Term, old: Term) -> bool:
     return c[0] == "not" and c[1][0] == "cmp" and c[1][1] == "lt" and c[1][2] == old and c[1][3] == d
 
 
+def _range_condition(c: Term) -> bool:
+    """Checked arithmetic's range (``fits``): that a sum stays below the type's maximum reads the entries summed, but
+    checks no one's standing."""
+    return c[0] == "op" and c[1] == "fits"
+
+
 def _cleared(value: Term) -> bool:
     return value[0] == "const" and value[1] in (0, False)
 
@@ -274,7 +280,7 @@ def contract_facts(contract: Any) -> Facts:
             for exit_ in lowerer.exits:
                 bounds = _bounds(exit_)
                 for c in conjuncts(exit_.pc):
-                    if c in bounds:
+                    if c in bounds or _range_condition(c):
                         continue
                     reads.update((t[2], t[3]) for t in subterms(c, "load") if t[1] == THIS)
                     everything = everything or bool(subterms(c, "rawload"))

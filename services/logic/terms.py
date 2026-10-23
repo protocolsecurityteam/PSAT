@@ -261,13 +261,108 @@ _FOLD = {
 }
 
 
+def _sdiv(x: int, y: int) -> int:
+    """Signed division, truncating toward zero (Solidity's ``/`` and Yul's ``sdiv``); by zero, zero (the revert is the
+    path's own condition)."""
+    if y == 0:
+        return 0
+    q = abs(x) // abs(y)
+    return q if (x < 0) == (y < 0) else -q
+
+
+def _smod(x: int, y: int) -> int:
+    """Signed remainder, taking the dividend's sign."""
+    if y == 0:
+        return 0
+    r = abs(x) % abs(y)
+    return r if x >= 0 else -r
+
+
+def signed(x: int, bits: int = 256) -> int:
+    """``x`` read as a two's complement integer of ``bits`` bits."""
+    r = x % 2**bits
+    return r - 2**bits if r >= 2 ** (bits - 1) else r
+
+
+def _byte(i: int, x: int) -> int:
+    return (x % WORD >> (248 - 8 * i)) & 0xFF if 0 <= i < 32 else 0
+
+
+def _signextend(b: int, x: int) -> int:
+    if b >= 31:
+        return x % WORD
+    bits = 8 * b + 8
+    return signed(x, bits) % WORD
+
+
+def fits(name: str, a: int, b: int, bits: int, is_signed: bool) -> bool:
+    """Whether ``a <name> b`` computed exactly lies in the range of a ``bits``-bit integer type: what checked
+    arithmetic (Solidity >= 0.8) requires to not revert."""
+    lo, hi = (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) if is_signed else (0, 2**bits - 1)
+    if name == "add":
+        r = a + b
+    elif name == "sub":
+        r = a - b
+    elif name == "mul":
+        r = a * b
+    elif name == "pow":
+        if b < 0:
+            return False
+        if a in (0, 1) or b == 0:
+            r = 1 if b == 0 else a
+        elif a == -1:
+            r = -1 if b % 2 else 1
+        else:
+            r = 1
+            for _ in range(b):
+                r *= a
+                if not lo <= r <= hi:
+                    return False
+    else:
+        return False
+    return lo <= r <= hi
+
+
+def _identity_operand(name: str, a: Term, b: Term) -> bool:
+    def value(t: Term) -> Any:
+        return t[1] if is_const(t) and _comparable(t[1], 0) else None
+
+    if name == "add":
+        return value(a) == 0 or value(b) == 0
+    if name == "sub":
+        return value(b) == 0
+    if name == "mul":
+        return value(a) in (0, 1) or value(b) in (0, 1)
+    return False
+
+
+# Exact operations past the word arithmetic above, on values read as their types say (a signed operand already
+# sign-extended): signed division and remainder, the arithmetic shift, a byte of a word, sign extension, leading zeros.
+_EXACT = {
+    "sdiv": _sdiv,
+    "smod": _smod,
+    "sar": lambda x, s: x >> s if s < 256 else (-1 if x < 0 else 0),
+    "byte": _byte,
+    "signextend": _signextend,
+}
+
+
 def mk_op(name: str, args: tuple) -> Term:
+    if name == "fits" and all(is_const(a) for a in args):
+        values = [a[1] for a in args]
+        return TRUE if fits(values[0], int(values[1]), int(values[2]), values[3], values[4]) else FALSE
+    if name == "fits" and _identity_operand(args[0][1], args[1], args[2]):
+        return TRUE  # adding or subtracting zero, multiplying by zero or one: the other operand, in range by its type
     if all(is_const(a) and _comparable(a[1], 0) for a in args):
         values = [_num(a[1]) for a in args]
         if name in _FOLD and len(values) == 2:
             return const(_FOLD[name](*values))
+        if name in _EXACT and len(values) == 2:
+            return const(_EXACT[name](*values))
         if name == "bnot" and len(values) == 1:
             return const(WORD - 1 - values[0])
+        if name == "clz" and len(values) == 1:
+            return const(256 - (values[0] % WORD).bit_length())
     return mk("op", name, tuple(args))
 
 
