@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .terms import CALLER, FALSE, IDENTITY_KINDS, THIS, Term, conjuncts, contains, subterms
+from .terms import CALLER, FALSE, IDENTITY_KINDS, THIS, Term, conjuncts, contains, stable, subterms
 
 # Inline assembly that acts outside the lowering's view: a call out, code created or destroyed, a delegatecall.
 _ASSEMBLY_ACTS = re.compile(r"\b(call|callcode|delegatecall|create|create2|selfdestruct)\s*\(")
@@ -149,9 +149,10 @@ def _cleared(value: Term) -> bool:
     return value[0] == "const" and value[1] in (0, False)
 
 
-def var_key(var: Any) -> str:
-    """A storage variable as both reads and writes name it, the same across term tables."""
-    return var if isinstance(var, str) else repr(tuple(var)) if isinstance(var, tuple) else str(var)
+def var_key(var: Any) -> Any:
+    """A storage variable as both reads and writes name it, the same across term tables (a digest for a
+    namespaced root or a raw slot, whose terms can be large)."""
+    return var if isinstance(var, str) else stable(var)
 
 
 def _where(key: tuple) -> str:
@@ -180,7 +181,7 @@ def caller_checked(contract: Any) -> frozenset | None:
         return cache["vars"]
     from .lower import Lowerer
 
-    found: set[tuple] = set()
+    reads: set[tuple] = set()
     out: frozenset | None
     try:
         for fn in contract.functions_entry_points:
@@ -190,8 +191,9 @@ def caller_checked(contract: Any) -> frozenset | None:
             for conjunct in conjuncts(formula):
                 if not contains(conjunct, IDENTITY_KINDS):
                     continue
-                found.update((var_key(t[2]), _fields(t[3])) for t in subterms(conjunct, "load") if t[1] == THIS)
-                found.update((f"raw:{t[2]!r}", ()) for t in subterms(conjunct, "rawload") if t[1] == THIS)
+                reads.update((t[2], t[3]) for t in subterms(conjunct, "load") if t[1] == THIS)
+                reads.update(("raw", t[2]) for t in subterms(conjunct, "rawload") if t[1] == THIS)
+        found = {(var_key(v), _fields(p) if v != "raw" else ()) for v, p in reads}
         out = frozenset(found)
     except Exception as exc:
         if isinstance(exc, TimeoutError):
