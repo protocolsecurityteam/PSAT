@@ -3495,6 +3495,8 @@ def _decide_one(
         free_when = relaxed_atoms(formula)
     else:
         free_when = when_atoms(formula) - world.latched
+    if relaxed and free_when:
+        free_when = _jointly_freed(formula, free_when)
     if world.records_free and world.records and relaxed != "arguments":
         free_when = free_when | (world.records & _atoms_of(formula))  # see ``decide``: named, never set
     fixed = fixed or {}
@@ -4413,6 +4415,34 @@ def _hash_inputs(key: Term) -> list[Term]:
     if key[0] != "hash":
         return []
     return [x for i in key[2] for x in (i[2] if i[0] == "enc" else (i,))]
+
+
+def _chosen_reads(atom: Term) -> frozenset:
+    """The values the caller chooses that ``atom`` reads: its arguments, the ether it sends, the call data's size."""
+    return frozenset(x for kind in ("arg", "callvalue", "calldatasize") for x in subterms(atom, kind))
+
+
+def _jointly_freed(formula: Term, free: frozenset) -> frozenset:
+    """``free`` less every condition reading a value the caller chooses that a condition kept reads too: a condition
+    on an argument is set aside only with every other condition on that argument, never on its own while the same
+    argument is chosen to satisfy the rest (``a > 0`` freed while ``balance >= a`` is met with ``a = 0``)."""
+    kept: set[Term] = set()
+    for atom in _atoms_of(formula):
+        if atom not in free:
+            kept |= _chosen_reads(atom)
+    if not kept:
+        return free
+    out = set(free)
+    changed = True
+    while changed:
+        changed = False
+        for atom in sorted(out, key=stable):
+            reads = _chosen_reads(atom)
+            if reads & kept:
+                out.discard(atom)
+                kept |= reads
+                changed = True
+    return frozenset(out)
 
 
 def relaxed_atoms(formula: Term) -> frozenset:

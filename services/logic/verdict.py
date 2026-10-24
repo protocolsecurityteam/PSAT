@@ -913,7 +913,7 @@ def _arrangeable(world: World, contract: Any, load: Term, depth: int, valued: bo
     past a guard a stranger passes (business conditions left free). ``valued``: a value the caller supplies, not only
     constants (a constant never equals the hash the entry is compared with)."""
     from .decide import _is_identity, _outcome
-    from .terms import mk_cmp
+    from .terms import const, mk_cmp, mk_not
 
     writes = _written_values(contract, [load])
     stranger = {"caller": FRESH, "signer": FRESH}
@@ -936,12 +936,16 @@ def _arrangeable(world: World, contract: Any, load: Term, depth: int, valued: bo
             elif not (written == read or written[0] == "arg"):
                 break
         else:
-            for condition, leaves, _ in entries:
+            for condition, leaves, value in entries:
                 if leaves is not None and not any(v not in (0, False) for v in leaves):
                     continue  # writes only zero: takes away, never grants
                 if valued and leaves is not None:
                     continue  # writes only constants where a hash is wanted
                 guard = mk_and([condition, *bound])
+                if leaves is None:
+                    # A grant turns the stranger's entry, zero now, into something else: a checked decrement of it
+                    # (``bal[msg.sender] -= a``) reverts or leaves zero, while an unchecked one wraps into a grant.
+                    guard = mk_and([guard, mk_not(mk_cmp("eq", value, const(0)))])
                 saved = world.arranged
                 if depth < _ARRANGE_DEPTH:
                     world.arranged = {**saved, **arranged_atoms(guard, world, contract, depth + 1)}
