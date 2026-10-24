@@ -1,12 +1,20 @@
-"""State a caller can bring about for itself through open code is no privilege; state only others can grant is."""
+"""State a caller can bring about for itself through open code is no privilege; state only others can grant is. Each
+probe is deployed on anvil and each verdict checked against ``eth_call`` (``_oracle.check``): an "open" verdict's own
+first calls (``after``) run for every stranger before its call; listed holders pass from their own address; the
+arrangements a verdict rests on (an unpause, time passing) are run for real. Fault-injected runs (a node failing
+reads) must never be bolder than the chain allows."""
 
 from __future__ import annotations
 
 import pytest
+from eth_utils import keccak
 
-from services.logic.decide import Chain
-from services.logic.verdict import function_verdict
-from tests.fuzz.authority import solc_path
+from services.logic.decide import FRESH
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
+
+OWNER = O.OWNER
+ADMIN, OPERATOR = O.ACCOUNTS[1], O.ACCOUNTS[2]
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -18,6 +26,8 @@ contract C {
     mapping(address => bool) members;
     mapping(address => mapping(address => bool)) operators;
     mapping(address => mapping(address => bool)) approved;
+
+    constructor() { owner = msg.sender; }
 
     function deposit(uint256 amount) external {
         require(amount > 0);
@@ -73,74 +83,6 @@ contract C {
 }
 """
 
-THIS, OWNER = 0xC0DE << 100, 0x0E1E << 100
-
-
-class _Fresh(Chain):
-    """Initialized, and otherwise as deployed: every slot zero but the owner's and the flag packed beside it."""
-
-    def __init__(self):
-        super().__init__(self._answer, 1, lambda calls: [self._answer(m, p) for m, p in calls])
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt":
-            return hex(OWNER | 1 << 160 if int(params[1], 16) == 0 and int(params[0], 16) == THIS else 0)
-        if method == "eth_getLogs":
-            return []
-        raise RuntimeError("execution reverted")
-
-    def code(self, address):
-        return b"\x60" if address == THIS else b""
-
-    def logs(self, address, topics):
-        return []
-
-
-@pytest.fixture(scope="module")
-def contract(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("arranged") / "C.sol"
-    path.write_text(SOURCE)
-    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "C")
-
-
-def _verdict(contract, name):
-    fn = next(f for f in contract.functions_entry_points if f.name == name)
-    verdict, _ = function_verdict(contract, fn, THIS, _Fresh(), {THIS: contract})
-    return verdict
-
-
-def test_withdrawing_what_anyone_may_deposit_is_open(contract):
-    assert _verdict(contract, "withdraw").openness == "open"
-
-
-def test_acting_for_an_account_is_open_to_that_account(contract):
-    assert _verdict(contract, "withdrawFor").openness == "open"
-
-
-def test_membership_only_an_owner_grants_stays_a_gate(contract):
-    assert _verdict(contract, "membersOnly").openness != "open"
-
-
-def test_an_approval_only_someone_else_can_give_stays_a_gate(contract):
-    assert _verdict(contract, "pull").openness != "open"
-
-
-def test_a_gate_stays_a_gate_after_other_analyses_of_the_same_code(contract):
-    # Lowered writers are kept per contract across analyses whose terms are interned apart (another deployment of
-    # the same code): ``renounce`` still only takes membership away.
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    _verdict(contract, "withdraw")
-    reset_terms()
-    assert _verdict(contract, "membersOnly").openness != "open"
-
-
 NFTS = """
 pragma solidity 0.8.27;
 
@@ -166,6 +108,8 @@ contract Badges {
     address admin;
     address owner;
 
+    constructor(address o) { admin = msg.sender; owner = o; }
+
     // Anyone may become owner of nothing in particular: still the one owner, taken from whoever held it.
     function claim() external {
         require(owner == address(0));
@@ -189,97 +133,12 @@ contract Badges {
         approvals[id] = to;
     }
 }
+
+// The same badges with the owner never set: whoever claims first is it.
+contract Unclaimed is Badges {
+    constructor() Badges(address(0)) {}
+}
 """
-
-
-@pytest.fixture(scope="module")
-def nfts(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("held") / "N.sol"
-    path.write_text(NFTS)
-    return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
-
-
-def test_a_token_anyone_can_have_minted_to_them_is_theirs_to_approve(nfts):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in nfts["Tickets"].functions_entry_points if f.name == "approve")
-    verdict, _ = function_verdict(nfts["Tickets"], fn, THIS, _Fresh(), {THIS: nfts["Tickets"]})
-    assert verdict.openness == "open"
-
-
-def test_a_token_only_an_admin_mints_stays_a_gate(nfts):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in nfts["Badges"].functions_entry_points if f.name == "approve")
-    verdict, _ = function_verdict(nfts["Badges"], fn, THIS, _Fresh(), {THIS: nfts["Badges"]})
-    assert verdict.openness != "open"
-
-
-def test_a_lone_owner_anyone_could_once_claim_is_still_a_gate(nfts):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in nfts["Badges"].functions_entry_points if f.name == "ownerOnly")
-    verdict, _ = function_verdict(nfts["Badges"], fn, THIS, _Fresh(), {THIS: nfts["Badges"]})
-    assert verdict.openness != "open"
-
-
-class _Unreadable(_Fresh):
-    """A node failing every storage read (a timeout under load)."""
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt":
-            raise RuntimeError("upstream timeout")
-        return super()._answer(method, params)
-
-
-def test_an_initializer_whose_flag_cannot_be_read_is_never_open(contract):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "initialize")
-    verdict, _ = function_verdict(contract, fn, THIS, _Unreadable(), {THIS: contract})
-    assert verdict.openness != "open"
-
-
-class _Flaky(_Fresh):
-    """The owner's slot fails while the candidates are drawn (a node timing out then), and reads at other times."""
-
-    def __init__(self):
-        super().__init__()
-        self._memo = _Unremembered()
-
-    def _answer(self, method, params):
-        import traceback
-
-        drawing = any(frame.name == "_candidates" for frame in traceback.extract_stack())
-        if method == "eth_getStorageAt" and int(params[1], 16) == 0 and drawing:
-            raise RuntimeError("upstream timeout")
-        return super()._answer(method, params)
-
-
-class _Unremembered(dict):
-    """The owner's slot asked again each time, as a node failing intermittently is."""
-
-    def __contains__(self, key):
-        return not (isinstance(key, tuple) and key[:1] == ("s",) and key[2:] == (0,)) and super().__contains__(key)
-
-
-def test_an_owner_the_node_failed_to_read_is_never_left_out_of_a_complete_list(contract):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "grant")
-    verdict, _ = function_verdict(contract, fn, THIS, _Flaky(), {THIS: contract})
-    assert OWNER in verdict.principals or not verdict.complete
-
 
 GATES = """
 pragma solidity 0.8.27;
@@ -291,6 +150,11 @@ contract Gates {
     mapping(address => bool) managers;
     uint8 initialized;
     uint256 deadline;
+
+    constructor(uint256 s, uint256 d) {
+        quorum = 5; start = s; deadline = d; initialized = 1;
+        managers[msg.sender] = true;
+    }
 
     function addManager(address who) external {
         require(managers[msg.sender]);
@@ -320,71 +184,6 @@ contract Gates {
         initialized = 1;
     }
 }
-"""
-
-NOW, LATER = 1_700_000_000, 1_900_000_000
-
-
-class _Configured(_Fresh):
-    """Quorum 5, a start time still to come, a deadline just passed, initialized once; no logs."""
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and int(params[0], 16) == THIS:
-            return hex({0: 5, 1: LATER, 3: 1, 4: NOW - 1}.get(int(params[1], 16), 0))
-        if method == "eth_getBlockByNumber":
-            return {"timestamp": hex(NOW), "number": hex(1)}
-        return super()._answer(method, params)
-
-
-class _CodeUnreadable(_Configured):
-    def code(self, address):
-        from services.logic.decide import UNK
-
-        return UNK
-
-
-@pytest.fixture(scope="module")
-def gates(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("gates") / "G.sol"
-    path.write_text(GATES)
-    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Gates")
-
-
-def _gate(gates, name, chain):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    fn = next(f for f in gates.functions_entry_points if f.name == name)
-    verdict, _ = function_verdict(gates, fn, THIS, chain, {THIS: gates})
-    return verdict
-
-
-def test_a_no_op_for_anyone_is_no_proof_nobody_holds_the_role_that_acts(gates):
-    # Open "once allowed" needs nobody passing now; holders no event lists may.
-    assert _gate(gates, "disable", _Configured()).openness != "open"
-
-
-def test_a_start_still_to_come_is_a_wait_not_a_refusal_for_ever(gates):
-    verdict = _gate(gates, "report", _Configured())
-    assert not (verdict.openness == "restricted" and verdict.complete and not verdict.principals)
-
-
-def test_an_initializer_is_never_open_on_code_that_could_not_be_read(gates):
-    assert _gate(gates, "initialize", _CodeUnreadable()).openness != "open"
-
-
-def test_a_deadline_already_passed_stays_passed(gates):
-    verdict = _gate(gates, "presale", _Configured())
-    assert verdict.openness == "restricted" and verdict.complete
-
-
-NAMESPACED = """
-pragma solidity 0.8.27;
 
 // OpenZeppelin 5's layout: roles in an ERC-7201 struct, granted without an event.
 contract Spaced {
@@ -395,6 +194,8 @@ contract Spaced {
     uint256 quorum;
 
     bytes32 private constant SLOT = 0x02dd7bc7dec4dceedda775e58dd541e08a116c6c53815c0bd028192f7b626800;
+
+    constructor() { quorum = 5; _roles().managers[msg.sender] = true; }
 
     function _roles() private pure returns (Roles storage $) {
         assembly {
@@ -419,41 +220,6 @@ contract Spaced {
         }
     }
 }
-"""
-
-
-class _HistoryRefused(_Configured):
-    """Quorum 5; the node gives up on the contract's event history."""
-
-    def logs(self, address, topics):
-        self.truncated.add(address)
-        return []
-
-
-def test_holders_of_a_namespaced_role_no_event_lists_leave_the_list_partial(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    from services.logic.terms import reset_terms
-
-    path = tmp_path_factory.mktemp("spaced") / "S.sol"
-    path.write_text(NAMESPACED)
-    spaced = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Spaced")
-    reset_terms()
-    fn = next(f for f in spaced.functions_entry_points if f.name == "act")
-    verdict, _ = function_verdict(spaced, fn, THIS, _Fresh(), {THIS: spaced})
-    assert verdict.openness == "restricted" and not verdict.complete
-    # Holders the history couldn't list may act now: no "open once allowed".
-    reset_terms()
-    fn = next(f for f in spaced.functions_entry_points if f.name == "disable")
-    verdict, _ = function_verdict(spaced, fn, THIS, _HistoryRefused(), {THIS: spaced})
-    assert verdict.openness != "open"
-
-
-BURNER = """
-pragma solidity 0.8.27;
 
 // Lido's ``burnShares``: one address may burn, and only shares it holds; the holders are every staker.
 contract Burner {
@@ -461,6 +227,8 @@ contract Burner {
     mapping(address => uint256) shares;
     uint256 total;
     event TransferShares(address indexed from, address indexed to, uint256 amount);
+
+    constructor() { burner = msg.sender; }
 
     function stake() external payable {
         shares[msg.sender] += msg.value;
@@ -475,90 +243,25 @@ contract Burner {
         emit TransferShares(msg.sender, address(0), amount);
     }
 }
-"""
-
-
-class _Watched(_Fresh):
-    def __init__(self):
-        super().__init__()
-        self.asked: list = []
-
-    def logs(self, address, topics):
-        self.asked.append(topics)
-        return []
-
-
-def test_a_gate_on_one_named_address_reads_no_holder_history(tmp_path_factory):
-    # Every passer of ``msg.sender == burner`` is the burner: the stakers' history names nobody else worth asking.
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    from services.logic.terms import reset_terms
-
-    path = tmp_path_factory.mktemp("burner") / "B.sol"
-    path.write_text(BURNER)
-    burner = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Burner")
-    reset_terms()
-    chain = _Watched()
-    fn = next(f for f in burner.functions_entry_points if f.name == "burn")
-    verdict, _ = function_verdict(burner, fn, THIS, chain, {THIS: burner})
-    assert verdict.openness == "restricted" and verdict.principals == {OWNER} and verdict.complete
-    assert chain.asked == []
-
-
-COUNTED = """
-pragma solidity 0.8.27;
 
 interface ICounter {
     function count() external view returns (uint256);
+}
+
+contract Counter {
+    function count() external pure returns (uint256) { return 3; }
 }
 
 // Lido CSM's ``depositETH``: nobody is singled out, and an id must be below another contract's count.
 contract Counted {
     ICounter counter;
 
+    constructor(ICounter c) { counter = c; }
+
     function act(uint256 id) external view {
         require(id < counter.count());
     }
 }
-"""
-
-
-class _CountUnread(_Fresh):
-    """The counter's code is there, but the node times out on every call to it."""
-
-    def _answer(self, method, params):
-        if method == "eth_call":
-            raise RuntimeError("timeout")
-        return super()._answer(method, params)
-
-    def code(self, address):
-        return b"\x60" if address in (THIS, OWNER) else b""
-
-
-def test_nobody_singled_out_is_not_open_on_a_check_that_could_not_be_read(tmp_path_factory):
-    # With no count read, whether any id passes is unknown: "open" needs a call known to pass, or one known to fail
-    # only on conditions that can change (a pause).
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    from services.logic.terms import reset_terms
-
-    path = tmp_path_factory.mktemp("counted") / "N.sol"
-    path.write_text(COUNTED)
-    counted = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Counted")
-    reset_terms()
-    fn = next(f for f in counted.functions_entry_points if f.name == "act")
-    verdict, _ = function_verdict(counted, fn, THIS, _CountUnread(), {THIS: counted})
-    assert verdict.openness == "not_determined"
-
-
-SWITCH = """
-pragma solidity 0.8.27;
 
 // A switch only managers turn off, which anyone may "turn off" again once it is off, and a deposit a manager pauses.
 contract Switch {
@@ -567,6 +270,8 @@ contract Switch {
     mapping(address => bool) managers;
     mapping(address => uint256) balances;
     event ManagerAdded(address indexed who);
+
+    constructor() { quorum = 5; paused = true; managers[msg.sender] = true; emit ManagerAdded(msg.sender); }
 
     function addManager(address who) external {
         require(managers[msg.sender]);
@@ -591,46 +296,6 @@ contract Switch {
         balances[msg.sender] += msg.value;
     }
 }
-"""
-
-
-class _Switched(_Fresh):
-    """Quorum 5 and paused; no manager ever added."""
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and int(params[0], 16) == THIS:
-            return hex({0: 5, 1: 1}.get(int(params[1], 16), 0))
-        return super()._answer(method, params)
-
-
-@pytest.fixture(scope="module")
-def switch(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("switch") / "S.sol"
-    path.write_text(SWITCH)
-    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Switch")
-
-
-def test_what_anyone_may_redo_once_holders_did_it_is_not_open(switch):
-    # Strangers pass only once the quorum is already off, a state ``disable`` itself brings about, and then do nothing:
-    # never open. "Nobody, ever" only where no entry point can write that state, which latching would show; ``disable``
-    # can (for a manager), so it is not determined, ``inert_when_allowed``, as where nobody can be singled out
-    # (``test_consumed_conditions``).
-    verdict = _gate(switch, "disable", _Switched())
-    assert verdict.openness == "not_determined" and not verdict.principals and not verdict.complete
-    assert "inert_when_allowed" in verdict.gaps
-
-
-def test_a_paused_public_function_is_still_open_once_unpaused(switch):
-    assert _gate(switch, "deposit", _Switched()).openness == "open"
-
-
-WINDOW = """
-pragma solidity 0.8.27;
 
 // EtherFi's ``finalizeWithdrawalsWhenStale``: anyone once a block window passes, unless paused or blocked.
 contract Window {
@@ -638,6 +303,8 @@ contract Window {
     bool paused;
     mapping(address => bool) blocked;
     event Blocked(address indexed who);
+
+    constructor(uint256 s) { start = s; }
 
     function block_(address who) external {
         require(!blocked[msg.sender]);
@@ -651,40 +318,6 @@ contract Window {
         require(!blocked[msg.sender]);
     }
 }
-"""
-
-
-class _PauseUnread(_Fresh):
-    """A start block still to come; the node times out on the pause flag."""
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and int(params[0], 16) == THIS:
-            slot = int(params[1], 16)
-            if slot == 1:
-                raise RuntimeError("timeout")
-            return hex({0: 100}.get(slot, 0))
-        if method == "eth_getBlockByNumber":
-            return {"timestamp": hex(NOW), "number": hex(1)}
-        return super()._answer(method, params)
-
-
-def test_a_wait_with_a_condition_unread_is_undetermined_not_nobody(tmp_path_factory):
-    # A stranger gets through once block 100 comes, unless paused: the pause unread, it may or may not; "nobody,
-    # and that is everyone" would claim the pause is on.
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("window") / "W.sol"
-    path.write_text(WINDOW)
-    window = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Window")
-    verdict = _gate(window, "go", _PauseUnread())
-    assert verdict.openness == "not_determined"
-
-
-BANK = """
-pragma solidity 0.8.27;
 
 // WeETH's ``unwrap``: only a holder may withdraw, and anyone becomes one by depositing, unless deposits are closed.
 contract Bank {
@@ -702,32 +335,6 @@ contract Bank {
         paid[msg.sender] = amount;
     }
 }
-"""
-
-
-class _ClosedUnread(_Fresh):
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and int(params[0], 16) == THIS and int(params[1], 16) == 0:
-            raise RuntimeError("timeout")
-        return super()._answer(method, params)
-
-
-def test_a_holding_whose_way_in_could_not_be_read_is_undetermined(tmp_path_factory):
-    # Whether deposits are closed is unread, so whether a stranger can become a holder is unknown: not "only holders".
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("bank") / "K.sol"
-    path.write_text(BANK)
-    bank = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Bank")
-    assert _gate(bank, "withdraw", _ClosedUnread()).openness == "not_determined"
-    assert _gate(bank, "withdraw", _Fresh()).openness == "open"
-
-
-ROLES_SOURCE = """
-pragma solidity 0.8.27;
 
 // OpenZeppelin's AccessControl, trimmed: each role's holders and the role that administers it.
 contract Roles {
@@ -780,77 +387,6 @@ contract Roles {
         emit RoleAdminChanged(role, previous, adminRole);
     }
 }
-"""
-
-
-def _slot(*words):
-    from eth_utils import keccak
-
-    return int.from_bytes(keccak(b"".join(w.to_bytes(32, "big") for w in words)), "big")
-
-
-class _RolesChain(_Fresh):
-    """A holds the default admin role; B holds OPERATOR, whose admin is MANAGER, which nobody holds."""
-
-    def __init__(self, admin, operator, manager_role, operator_role):
-        self.who = (admin, operator)
-        self.roles = (manager_role, operator_role)
-        super().__init__()
-
-    def _storage(self):
-        admin, operator = self.who
-        manager_role, operator_role = self.roles
-        roles = {0: [admin], operator_role: [operator]}
-        out = {}
-        for role, members in roles.items():
-            base = _slot(role, 0)
-            for m in members:
-                out[_slot(m, base)] = 1
-        out[_slot(operator_role, 0) + 1] = manager_role
-        return out
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and int(params[0], 16) == THIS:
-            return hex(self._storage().get(int(params[1], 16), 0))
-        return super()._answer(method, params)
-
-    def logs(self, address, topics):
-        from eth_utils import keccak
-
-        admin, operator = self.who
-        manager_role, operator_role = self.roles
-        granted = int.from_bytes(keccak(text="RoleGranted(bytes32,address,address)"), "big")
-        changed = int.from_bytes(keccak(text="RoleAdminChanged(bytes32,bytes32,bytes32)"), "big")
-        rows = [
-            ([granted, 0, admin, admin], []),
-            ([granted, operator_role, operator, admin], []),
-            ([changed, operator_role, 0, manager_role], []),
-        ]
-        wanted = {int(t, 16) for t in topics}
-        return [r for r in rows if r[0][0] in wanted]
-
-
-def test_a_role_held_only_below_its_admin_is_refused_for_every_role(tmp_path_factory):
-    # ``grantRole(role, ...)`` needs the role's admin, and a role's admin is zero or one ``RoleAdminChanged`` set:
-    # B, holding only OPERATOR, administers no role, so the list of who may grant is complete.
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from eth_utils import keccak
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("roles") / "R.sol"
-    path.write_text(ROLES_SOURCE)
-    roles = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Roles")
-    manager_role = int.from_bytes(keccak(text="MANAGER"), "big")
-    operator_role = int.from_bytes(keccak(text="OPERATOR"), "big")
-    admin, operator = 0xAD << 140, 0x0B << 152
-    verdict = _gate(roles, "grantRole", _RolesChain(admin, operator, manager_role, operator_role))
-    assert verdict.openness == "restricted" and verdict.principals == {admin} and verdict.complete
-
-
-TETHER = """
-pragma solidity 0.8.27;
 
 // USDT's ``approve``: an allowance must be zeroed before it is changed.
 contract Tether {
@@ -864,30 +400,12 @@ contract Tether {
         emit Approval(msg.sender, spender, value);
     }
 }
-"""
-
-
-def test_a_guess_that_already_passes_reads_no_history(tmp_path_factory):
-    # Any spender passes: the approvals' history, a token's crowd, is never read for spenders to try.
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("tether") / "T.sol"
-    path.write_text(TETHER)
-    tether = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Tether")
-    chain = _Watched()
-    assert _gate(tether, "approve", chain).openness == "open"
-    assert chain.asked == []
-
-
-LOCKED = """
-pragma solidity 0.8.27;
 
 // A transient reentrancy lock (OpenZeppelin's ReentrancyGuardTransient) and OpenZeppelin's ``mulDiv`` remainder.
 contract Locked {
     address owner;
+
+    constructor() { owner = msg.sender; }
 
     modifier nonReentrant() {
         assembly {
@@ -910,36 +428,15 @@ contract Locked {
         require(amount > 0 && mulmod(amount, 3, 7) == 3);
     }
 }
-"""
-
-
-@pytest.fixture(scope="module")
-def locked(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("locked") / "L.sol"
-    path.write_text(LOCKED)
-    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Locked")
-
-
-def test_a_transient_lock_reads_unlocked_when_a_transaction_starts(locked):
-    assert _gate(locked, "poke", _Fresh()).openness == "open"
-    verdict = _gate(locked, "sweep", _Fresh())
-    assert verdict.openness == "restricted" and verdict.principals == {OWNER} and verdict.complete
-
-
-def test_a_remainder_the_evm_computes_is_computed(locked):
-    assert _gate(locked, "split", _Fresh()).openness == "open"
-
-
-GASSY = """
-pragma solidity 0.8.27;
 
 interface IRegistry {
     function allowed(address who) external view returns (bool);
+}
+
+contract Registry {
+    address owner;
+    constructor() { owner = msg.sender; }
+    function allowed(address who) external view returns (bool) { return who == owner; }
 }
 
 // The owner's check, beside a registry's check of the caller the node can't answer: only running the call settles it.
@@ -947,53 +444,20 @@ contract Gassy {
     address owner;
     IRegistry registry;
 
+    constructor(IRegistry r) { owner = msg.sender; registry = r; }
+
     function act(uint256 amount) external view {
         require(msg.sender == owner && amount > 0);
         require(registry.allowed(msg.sender));
     }
 }
-"""
-
-
-REGISTRY_AT = 0x7E9 << 140
-
-
-class _OwnerRuns(_Fresh):
-    """The owner's ``act`` returns when the chain runs it; anyone else's reverts."""
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and int(params[0], 16) == THIS and int(params[1], 16) == 1:
-            return hex(REGISTRY_AT)
-        if method == "eth_call" and int(params[0]["to"], 16) == REGISTRY_AT:
-            raise RuntimeError("timeout")
-        if method == "eth_call" and int(params[0]["from"], 16) == OWNER and int(params[0]["to"], 16) == THIS:
-            return "0x"
-        return super()._answer(method, params)
-
-    def code(self, address):
-        return b"\x60" if address in (THIS, REGISTRY_AT) else b""
-
-
-def test_a_candidate_the_reasoning_leaves_open_is_settled_by_running_its_call(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("gassy") / "G.sol"
-    path.write_text(GASSY)
-    gassy = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Gassy")
-    verdict = _gate(gassy, "act", _OwnerRuns())
-    assert verdict.openness == "restricted" and verdict.principals == {OWNER}
-
-
-INBOX = """
-pragma solidity 0.8.27;
 
 // LayerZero's ``nilify`` / ``clear``: anyone can mark its own entry nil, but only a payload's hash clears it.
 contract Inbox {
     address admin;
     mapping(address => bytes32) stored;
+
+    constructor() { admin = msg.sender; }
 
     function nilify() external {
         stored[msg.sender] = bytes32(type(uint256).max);
@@ -1009,23 +473,6 @@ contract Inbox {
         stored[msg.sender] = 0;
     }
 }
-"""
-
-
-def test_an_entry_one_can_only_mark_never_comes_to_hold_a_hash(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("inbox") / "I.sol"
-    path.write_text(INBOX)
-    inbox = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Inbox")
-    assert _gate(inbox, "clear", _Fresh()).openness != "open"
-
-
-QUEUE = """
-pragma solidity 0.8.27;
 
 // Lido's withdrawal queue: a request is its owner's to claim, and anyone files one, unless requests are closed.
 contract Queue {
@@ -1046,17 +493,373 @@ contract Queue {
     }
 }
 """
+DAY = 86_400
 
 
-def test_a_request_whose_filing_could_not_be_read_is_undetermined(tmp_path_factory):
+def _now(d) -> int:
+    return int(O.rpc(d.url, "eth_getBlockByNumber", ["latest", False])["timestamp"], 16)
+
+
+def _setup_c(d):
+    d.deploy("C")
+    assert O.transact(d, "C", "initialize()")
+
+
+def _setup_nfts(d):
+    d.deploy("Tickets")
+    d.deploy("Badges", ("address",), (OWNER,))
+    d.deploy("Unclaimed")
+
+
+def _setup_gates(d):
+    now = _now(d)
+    d.deploy("Gates", ("uint256", "uint256"), (now + 30 * DAY, now - 1))
+    d.deploy("Spaced")
+    d.deploy("Burner")
+    d.deploy("Counter")
+    d.deploy("Counted", ("address",), (d.at["Counter"],))
+    d.deploy("Switch")
+    d.deploy("Window", ("uint256",), (int(O.rpc(d.url, "eth_blockNumber", []), 16) + 100,))
+    d.deploy("Bank")
+    d.deploy("Roles")
+    assert O.transact(d, "Roles", "initialize(address)", ("address",), (ADMIN,))
+    for signature, role, who in (("grantRole", _MANAGER, ADMIN), ("grantRole", _OPERATOR, OPERATOR),
+                                 ("revokeRole", _MANAGER, ADMIN)):  # fmt: skip
+        assert O.transact(d, "Roles", signature + "(bytes32,address)", ("bytes32", "address"), (role, who), ADMIN)
+    d.deploy("Tether")
+    d.deploy("Locked")
+    d.deploy("Registry")
+    d.deploy("Gassy", ("address",), (d.at["Registry"],))
+    d.deploy("Inbox")
+    d.deploy("Queue")
+
+
+_OPERATOR = keccak(text="OPERATOR")
+_MANAGER = keccak(text="MANAGER")
+
+PROBES = [
+    O.Probe(SOURCE, _setup_c, tuple(("C", f, ()) for f in ("withdraw", "withdrawFor", "membersOnly", "pull", "grant"))),
+    O.Probe(
+        NFTS,
+        _setup_nfts,
+        (
+            ("Tickets", "approve", ()),
+            ("Badges", "approve", ()),
+            ("Badges", "ownerOnly", ()),
+            ("Unclaimed", "ownerOnly", ()),
+        ),
+    ),  # fmt: skip
+    O.Probe(
+        GATES,
+        _setup_gates,
+        (
+            ("Gates", "disable", ()),
+            ("Gates", "report", ()),
+            ("Gates", "presale", ()),
+            ("Gates", "initialize", ()),
+            ("Spaced", "act", ()),
+            ("Spaced", "disable", ()),
+            ("Burner", "burn", ()),
+            ("Counted", "act", ("Counter",)),
+            ("Switch", "disable", ()),
+            ("Switch", "deposit", ()),
+            ("Window", "go", ()),
+            ("Bank", "withdraw", ()),
+            ("Roles", "grantRole", ()),
+            ("Tether", "approve", ()),
+            ("Locked", "poke", ()),
+            ("Locked", "sweep", ()),
+            ("Locked", "split", ()),
+            ("Gassy", "act", ("Registry",)),
+            ("Inbox", "clear", ()),
+            ("Queue", "claim", ()),
+        ),
+    ),  # fmt: skip
+]
+
+
+@pytest.fixture(scope="module")
+def c(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE)
+    _setup_c(d)
+    return d
+
+
+@pytest.fixture(scope="module")
+def nfts(anvil):  # noqa: F811
+    d = O.deployment(*anvil, NFTS)
+    _setup_nfts(d)
+    return d
+
+
+@pytest.fixture(scope="module")
+def g(anvil):  # noqa: F811
+    d = O.deployment(*anvil, GATES)
+    _setup_gates(d)
+    return d
+
+
+def test_withdrawing_what_anyone_may_deposit_is_open(c):
+    v = O.check(c, "C", "withdraw", O.verdict(c, "C", "withdraw"), arrange=_deposit_c, open_at={"amount": 1})
+    assert v.openness == "open"
+
+
+def test_acting_for_an_account_is_open_to_that_account(c):
+    v = O.verdict(c, "C", "withdrawFor")
+    O.check(c, "C", "withdrawFor", v, arrange=_deposit_c, open_at={"account": FRESH, "amount": 1})
+    assert v.openness == "open"
+
+
+def test_membership_only_an_owner_grants_stays_a_gate(c):
+    v = O.check(c, "C", "membersOnly", O.verdict(c, "C", "membersOnly"), open_at=False)
+    assert v.openness != "open"
+    assert not O.transact(c, "C", "initialize()", sender=O.STRANGERS[0])  # already spent
+
+
+def test_an_approval_only_someone_else_can_give_stays_a_gate(c):
+    v = O.verdict(c, "C", "pull")
+    O.check(c, "C", "pull", v, samples=({"from": OWNER}, {"from": FRESH}, {}), open_at=False)
+    assert v.openness != "open"
+
+
+def test_a_gate_stays_a_gate_after_other_analyses_of_the_same_code(c):
+    # Lowered writers are kept per contract across analyses whose terms are interned apart (another deployment of
+    # the same code): ``renounce`` still only takes membership away.
+    clean = O.verdict(c, "C", "membersOnly")
+    O.verdict(c, "C", "withdraw")
+    again = O.verdict(c, "C", "membersOnly")
+    assert (again.openness, again.principals, again.complete) == (clean.openness, clean.principals, clean.complete)
+
+
+def _deposit_c(d, who):
+    assert O.transact(d, "C", "deposit(uint256)", ("uint256",), (5,), sender=who)
+
+
+def test_a_token_anyone_can_have_minted_to_them_is_theirs_to_approve(nfts):
+    v = O.verdict(nfts, "Tickets", "approve")
+    O.check(nfts, "Tickets", "approve", v, arrange=_request_ticket, open_at={"to": OWNER, "id": 1})
+    assert v.openness == "open"
+
+
+def test_a_token_only_an_admin_mints_stays_a_gate(nfts):
+    v = O.verdict(nfts, "Badges", "approve")
+    O.check(nfts, "Badges", "approve", v, samples=({"id": 0}, {"id": 1}), open_at=False)
+    assert v.openness != "open"
+
+
+def _request_ticket(d, who):
+    assert O.transact(d, "Tickets", "request(address)", ("address",), (0,), sender=who)
+
+
+def test_a_lone_owner_once_claimed_is_still_a_gate(nfts):
+    v = O.check(nfts, "Badges", "ownerOnly", O.verdict(nfts, "Badges", "ownerOnly"), open_at=False)
+    assert v.openness == "restricted" and set(v.principals) == {OWNER}
+    assert not O.transact(nfts, "Badges", "claim()", sender=O.STRANGERS[0])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="G4: identity state nobody holds now, which a stranger's own claim() sets, "
+    "is reported 'restricted, complete, nobody'",
+)
+def test_a_lone_owner_anyone_may_still_claim_is_each_strangers_to_take(nfts):
+    # Owner never set: every stranger's own ``claim`` lets it through, so "restricted" would be false.
+    v = O.check(nfts, "Unclaimed", "ownerOnly", O.verdict(nfts, "Unclaimed", "ownerOnly"))
+    O.sound(v, anyone=True)
+    for who in O.STRANGERS:
+        with O.snapshot(nfts):
+            assert O.transact(nfts, "Unclaimed", "claim()", sender=who)
+            assert O.passes(nfts, "Unclaimed", O.function(nfts, "Unclaimed", "ownerOnly"), sender=who)
+
+
+def test_an_initializer_whose_flag_cannot_be_read_is_never_open(c):
+    clean = O.verdict(c, "C", "initialize")
+    faulted = O.verdict(c, "C", "initialize", chain=O.Faulty(c, storage=True))
+    assert faulted.openness != "open"
+    O.never_bolder(clean, faulted)
+
+
+class _Unremembered(dict):
+    """The owner's slot asked again each time, as a node failing intermittently is."""
+
+    def __contains__(self, key):
+        return not (isinstance(key, tuple) and key[:1] == ("s",) and key[2:] == (0,)) and super().__contains__(key)
+
+
+def test_an_owner_the_node_failed_to_read_is_never_left_out_of_a_complete_list(c):
+    import traceback
+
+    def drawing(method, params):  # the owner's slot fails while the candidates are drawn, and reads otherwise
+        return int(params[1], 16) == 0 and any(f.name == "_candidates" for f in traceback.extract_stack())
+
+    chain = O.Faulty(c, storage=drawing)
+    chain._memo = _Unremembered()
+    v = O.verdict(c, "C", "grant", chain=chain)
+    assert OWNER in v.principals or not v.complete
+    O.check(c, "C", "grant", v, samples=({"who": OWNER},))
+
+
+def test_a_no_op_for_anyone_is_no_proof_nobody_holds_the_role_that_acts(g):
+    # Open "once allowed" needs nobody passing now; holders no event lists may (the deployer is a manager).
+    v = O.check(g, "Gates", "disable", O.verdict(g, "Gates", "disable"), open_at=False)
+    assert v.openness != "open"
+    assert O.passes(g, "Gates", O.function(g, "Gates", "disable"), sender=OWNER)
+
+
+def test_a_start_still_to_come_is_a_wait_not_a_refusal_for_ever(g):
+    v = O.check(g, "Gates", "report", O.verdict(g, "Gates", "report"), open_at=False)
+    assert not O.nobody(v)
+    report = O.function(g, "Gates", "report")
+    with O.snapshot(g):  # once the start comes, the manager passes
+        O.rpc(g.url, "evm_increaseTime", [31 * DAY])
+        O.rpc(g.url, "evm_mine", [])
+        assert O.passes(g, "Gates", report, sender=OWNER)
+        assert O.strangers_passing(g, "Gates", report) == {False}
+
+
+def test_an_initializer_is_never_open_on_code_that_could_not_be_read(g):
+    clean = O.check(g, "Gates", "initialize", O.verdict(g, "Gates", "initialize"))
+    faulted = O.verdict(g, "Gates", "initialize", chain=O.Faulty(g, code=True))
+    assert faulted.openness != "open"
+    O.never_bolder(clean, faulted)
+
+
+def test_a_deadline_already_passed_stays_passed(g):
+    v = O.check(g, "Gates", "presale", O.verdict(g, "Gates", "presale"))
+    assert O.nobody(v)
+    with O.snapshot(g):  # time only moves on
+        O.rpc(g.url, "evm_increaseTime", [365 * DAY])
+        O.rpc(g.url, "evm_mine", [])
+        assert O.strangers_passing(g, "Gates", O.function(g, "Gates", "presale")) == {False}
+
+
+def test_holders_of_a_namespaced_role_no_event_lists_leave_the_list_partial(g):
+    v = O.check(g, "Spaced", "act", O.verdict(g, "Spaced", "act"))
+    assert v.openness == "restricted" and not v.complete
+    assert O.passes(g, "Spaced", O.function(g, "Spaced", "act"), sender=OWNER)  # the unlisted manager
+    # Holders the history couldn't list may act now: no "open once allowed".
+    clean = O.verdict(g, "Spaced", "disable")
+    faulted = O.verdict(g, "Spaced", "disable", chain=O.Faulty(g, logs=True))
+    assert faulted.openness != "open"
+    O.never_bolder(clean, faulted)
+
+
+def test_a_gate_on_one_named_address_lists_it_whole(g):
+    # Every passer of ``msg.sender == burner`` is the burner: the stakers' history names nobody else worth asking.
+    v = O.check(g, "Burner", "burn", O.verdict(g, "Burner", "burn"), samples=({"amount": 0},))
+    assert v.openness == "restricted" and set(v.principals) == {OWNER} and v.complete
+
+
+def test_nobody_singled_out_is_not_open_on_a_check_that_could_not_be_read(g):
+    # With no count read, whether any id passes is unknown: "open" needs a call known to pass, or one known to fail
+    # only on conditions that can change (a pause).
+    clean = O.check(g, "Counted", "act", O.verdict(g, "Counted", "act", "Counter"), open_at={"id": 1})
+    faulted = O.verdict(g, "Counted", "act", "Counter", chain=O.Faulty(g, calls=True))
+    assert faulted.openness == "not_determined"
+    O.never_bolder(clean, faulted)
+
+
+def test_what_anyone_may_redo_once_holders_did_it_is_not_open(g):
+    # Strangers pass only once the quorum is already off, a state ``disable`` itself brings about (for a manager),
+    # and then do nothing: never open now, and never "nobody, ever".
+    v = O.check(g, "Switch", "disable", O.verdict(g, "Switch", "disable"), open_at=False)
+    O.sound(v, {OWNER})
+    assert not O.nobody(v)
+    disable = O.function(g, "Switch", "disable")
+    with O.snapshot(g):
+        assert O.transact(g, "Switch", "disable()", sender=OWNER)
+        assert O.strangers_passing(g, "Switch", disable) == {True}
+
+
+def test_a_paused_public_function_is_still_open_once_unpaused(g):
+    v = O.check(g, "Switch", "deposit", O.verdict(g, "Switch", "deposit"), open_at=False)
+    assert v.openness == "open" and v.allowed != "now"
+    deposit = O.function(g, "Switch", "deposit")
+    with O.snapshot(g):  # the manager unpauses
+        assert O.transact(g, "Switch", "pause(bool)", ("bool",), (False,), sender=OWNER)
+        assert O.strangers_passing(g, "Switch", deposit) == {True}
+
+
+def test_a_wait_with_a_condition_unread_is_undetermined_not_nobody(g):
+    # A stranger gets through once block 100 comes, unless paused: the pause unread, it may or may not; "nobody,
+    # and that is everyone" would claim the pause is on.
+    window = g.at["Window"]
+
+    def pause_slot(method, params):
+        return int(params[0], 16) == window and int(params[1], 16) == 1
+
+    clean = O.check(g, "Window", "go", O.verdict(g, "Window", "go"), open_at=False)
+    faulted = O.verdict(g, "Window", "go", chain=O.Faulty(g, storage=pause_slot))
+    assert faulted.openness == "not_determined"
+    O.never_bolder(clean, faulted)
+
+
+def _closed_slot(d, name):
+    at = d.at[name]
+    return lambda method, params: int(params[0], 16) == at and int(params[1], 16) == 0
+
+
+def test_a_holding_whose_way_in_could_not_be_read_is_undetermined(g):
+    # Whether deposits are closed is unread, so whether a stranger can become a holder is unknown: not "only holders".
+    clean = O.check(g, "Bank", "withdraw", O.verdict(g, "Bank", "withdraw"), arrange=_deposit, open_at={"amount": 1})
+    assert clean.openness == "open"
+    faulted = O.verdict(g, "Bank", "withdraw", chain=O.Faulty(g, storage=_closed_slot(g, "Bank")))
+    assert faulted.openness == "not_determined"
+    O.never_bolder(clean, faulted)
+
+
+def _deposit(d, who):
+    assert O.transact(d, "Bank", "deposit()", sender=who, value=10)
+
+
+def test_a_role_held_only_below_its_admin_is_refused_for_every_role(g):
+    # ``grantRole(role, ...)`` needs the role's admin, and a role's admin is zero or one ``RoleAdminChanged`` set:
+    # the operator, holding only OPERATOR, administers no role, so the list of who may grant is complete.
+    samples = [{"role": r, "account": OPERATOR} for r in (bytes(32), _OPERATOR, _MANAGER)]
+    v = O.check(g, "Roles", "grantRole", O.verdict(g, "Roles", "grantRole"), samples=samples)
+    assert v.openness == "restricted" and set(v.principals) == {ADMIN} and v.complete
+
+
+def test_a_guess_that_already_passes_is_open(g):
+    v = O.verdict(g, "Tether", "approve")
+    O.check(g, "Tether", "approve", v, open_at={"spender": OWNER, "value": 5})
+
+
+def test_a_transient_lock_reads_unlocked_when_a_transaction_starts(g):
+    O.check(g, "Locked", "poke", O.verdict(g, "Locked", "poke"), open_at={})
+    v = O.check(g, "Locked", "sweep", O.verdict(g, "Locked", "sweep"))
+    assert v.openness == "restricted" and set(v.principals) == {OWNER} and v.complete
+
+
+def test_a_remainder_the_evm_computes_is_computed(g):
+    O.check(g, "Locked", "split", O.verdict(g, "Locked", "split"), open_at={"amount": 1})
+
+
+def test_a_candidate_the_reasoning_leaves_open_is_settled_by_running_its_call(g):
+    v = O.verdict(g, "Gassy", "act", "Registry", chain=O.Faulty(g, calls={g.at["Registry"]}))
+    O.check(g, "Gassy", "act", v, samples=({"amount": 1},))
+    assert v.openness == "restricted" and set(v.principals) == {OWNER}
+
+
+def test_an_entry_one_can_only_mark_never_comes_to_hold_a_hash(g):
+    v = O.verdict(g, "Inbox", "clear")
+    O.check(g, "Inbox", "clear", v, samples=({"message": b""}, {"message": b"x"}), open_at=False)
+    assert v.openness != "open"
+    clear = O.function(g, "Inbox", "clear")
+    with O.snapshot(g):  # a stranger's own nilify is no way in
+        for who in O.STRANGERS:
+            assert O.transact(g, "Inbox", "nilify()", sender=who)
+        assert O.strangers_passing(g, "Inbox", clear, {"message": b""}) == {False}
+
+
+def _file(d, who):
+    assert O.transact(d, "Queue", "request()", sender=who)
+
+
+def test_a_request_whose_filing_could_not_be_read_is_undetermined(g):
     # Whether requests are closed is unread, so whether a stranger can file one to claim is unknown: not "nobody".
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("queue") / "Q.sol"
-    path.write_text(QUEUE)
-    queue = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Queue")
-    assert _gate(queue, "claim", _ClosedUnread()).openness == "not_determined"
-    assert _gate(queue, "claim", _Fresh()).openness == "open"
+    clean = O.check(g, "Queue", "claim", O.verdict(g, "Queue", "claim"), arrange=_file, open_at={"id": 1})
+    assert clean.openness == "open"
+    faulted = O.verdict(g, "Queue", "claim", chain=O.Faulty(g, storage=_closed_slot(g, "Queue")))
+    assert faulted.openness == "not_determined"
+    O.never_bolder(clean, faulted)

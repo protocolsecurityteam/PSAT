@@ -11,6 +11,7 @@ from services.logic.lower import Lowerer
 from services.logic.terms import FALSE, TRUE, const, contains, mk, replace_terms, subterms
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 from tests.logic._anvil import Deployment, anvil  # noqa: F401
 
 PURE = """
@@ -388,12 +389,14 @@ def test_a_member_past_the_iterations_followed_is_never_left_out_of_a_complete_l
 def test_a_list_is_followed_exactly_up_to_the_bound_and_never_past_it(anvil, name):  # noqa: F811
     # Three entries are followed exactly: each member named, nothing forgotten. A fourth is past what is followed:
     # the loop's remainder is forgotten (``unknown:loop``), and the answer is left open rather than cut at three.
-    at = _verdict(_deployed(anvil, sources=0, members=3), name)
+    d = _deployed(anvil, sources=0, members=3)
+    at = O.check(d, "C", name, _verdict(d, name))
     assert at.openness == "restricted" and set(at.principals) == set(MEMBERS[:3]), at
     assert not any(g.startswith("unknown:loop") for g in at.gaps)
-    past = _verdict(_deployed(anvil, sources=0, members=4), name)
-    assert past.openness == "not_determined" and not past.complete, past
-    assert any(g.startswith("unknown:loop") for g in past.gaps)
+    d = _deployed(anvil, sources=0, members=4)
+    past = O.check(d, "C", name, _verdict(d, name), open_at=False)
+    O.sound(past, set(MEMBERS[:4]))
+    assert all(O.passes(d, "C", O.function(d, "C", name), sender=m) for m in MEMBERS[:4])
 
 
 @pytest.mark.parametrize("name", ["laterReturn", "laterBreak"])

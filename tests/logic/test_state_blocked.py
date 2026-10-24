@@ -8,13 +8,9 @@ entry point writes still refutes everyone. Against anvil."""
 from __future__ import annotations
 
 import pytest
-from eth_abi.abi import encode
-from eth_utils import keccak
 
-from services.logic.terms import reset_terms
-from services.logic.verdict import function_verdict
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import ACCOUNT0, rpc
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -38,55 +34,65 @@ contract C {
 }
 """
 
-OWNER = int(ACCOUNT0, 16)
+OWNER = O.OWNER
+AMOUNTS = [{"amount": a} for a in (0, 5, 7, 10, 50)]
+
+
+def _setup(d):
+    d.deploy("C")
+
+
+PROBES = [O.Probe(SOURCE, _setup, tuple(("C", f, ()) for f in ("act", "actOwner", "actConstant", "actFixed", "paus")))]
 
 
 @pytest.fixture(scope="module")
 def d(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
-    d.deploy("C")
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
     return d
 
 
-def _verdict(d, name):
-    reset_terms()
-    c = d.slither["C"]
-    fn = next(f for f in c.functions_entry_points if f.name == name)
-    return function_verdict(c, fn, d.at["C"], d.chain(), d.contracts("C"))[0]
-
-
-def _passes(d, name, amount, sender="0x" + "00" * 19 + "aa") -> bool:
-    data = "0x" + (keccak(text=f"{name}(uint256)")[:4] + encode(["uint256"], [amount])).hex()
-    try:
-        rpc(d.url, "eth_call", [{"from": sender, "to": "0x%040x" % d.at["C"], "data": data}, "latest"])
-        return True
-    except RuntimeError:
-        return False
+def _set_range(d):
+    assert O.transact(d, "C", "setRange(uint256,uint256)", ("uint256", "uint256"), (0, 100))
 
 
 def test_a_business_condition_on_settable_state_blocks_everyone_only_as_things_stand(d):
-    assert not any(_passes(d, "act", a) for a in (0, 5, 7, 10))
-    verdict = _verdict(d, "act")
-    assert verdict.openness == "not_determined" and not verdict.complete
-    assert {"state_blocks_everyone:lo", "state_blocks_everyone:hi"} <= set(verdict.gaps)
+    v = O.check(d, "C", "act", O.verdict(d, "C", "act"), samples=AMOUNTS, open_at=False)
+    assert not O.nobody(v), v
+    with O.snapshot(d):  # the owner widens the range: every stranger passes
+        _set_range(d)
+        assert O.strangers_passing(d, "C", O.function(d, "C", "act"), {"amount": 50}) == {True}
+    if v.openness == "not_determined":
+        assert {"state_blocks_everyone:lo", "state_blocks_everyone:hi"} <= set(v.gaps)
 
 
 def test_an_identity_core_behind_such_a_condition_names_its_holders_on_it(d):
-    assert not any(_passes(d, "actOwner", a, sender=ACCOUNT0) for a in (0, 5, 7, 10))
-    verdict = _verdict(d, "actOwner")
-    assert verdict.openness == "restricted" and not verdict.complete
-    assert verdict.conditions == {OWNER: "business"} and verdict.allowed == "conditional"
-    assert {"state_blocks_everyone:lo", "state_blocks_everyone:hi"} <= set(verdict.gaps)
+    v = O.check(d, "C", "actOwner", O.verdict(d, "C", "actOwner"), samples=AMOUNTS, open_at=False)
+    O.sound(v, {OWNER})
+    assert not O.nobody(v), v
+    act_owner = O.function(d, "C", "actOwner")
+    with O.snapshot(d):  # the owner widens the range: the owner passes, no stranger does
+        _set_range(d)
+        assert O.passes(d, "C", act_owner, {"amount": 50}, sender=OWNER)
+        assert O.strangers_passing(d, "C", act_owner, {"amount": 50}) == {False}
+    if v.conditions:
+        assert v.conditions == {OWNER: "business"} and v.allowed == "conditional"
 
 
 @pytest.mark.parametrize("name", ["actConstant", "actFixed"])
 def test_a_condition_on_what_never_changes_still_refutes_everyone(d, name):
-    verdict = _verdict(d, name)
-    assert verdict.openness == "restricted" and verdict.complete and not verdict.principals, verdict
-    assert not any(g.startswith("state_blocks_everyone") for g in verdict.gaps)
+    v = O.check(d, "C", name, O.verdict(d, "C", name), samples=AMOUNTS)
+    assert O.nobody(v), v
+    assert not any(g.startswith("state_blocks_everyone") for g in v.gaps)
+    with O.snapshot(d):  # what the owner may set changes nothing here
+        _set_range(d)
+        for amount in AMOUNTS:
+            assert O.strangers_passing(d, "C", O.function(d, "C", name), amount) == {False}
 
 
 def test_a_pause_is_open_once_it_allows(d):
-    verdict = _verdict(d, "paus")
-    assert verdict.openness == "open" and verdict.allowed == "later"
+    v = O.check(d, "C", "paus", O.verdict(d, "C", "paus"), open_at=False, samples=AMOUNTS)
+    assert v.openness == "open" and v.allowed == "later"
+    with O.snapshot(d):
+        assert O.transact(d, "C", "setPaused(bool)", ("bool",), (False,))
+        assert O.strangers_passing(d, "C", O.function(d, "C", "paus"), {"amount": 1}) == {True}

@@ -4,10 +4,10 @@ memory word it lost track of as the same for everyone. Each against what the cha
 
 from __future__ import annotations
 
-from services.logic.decide import Chain
-from services.logic.verdict import function_verdict
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import rpc
+import pytest
+
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -44,89 +44,67 @@ contract C {
 ADMIN = 0xAB << 152 | int("ab" * 19, 16)
 
 
-def _deployed(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
-    guard = d.deploy("Guard", ("address",), (ADMIN,))
-    d.deploy("C", ("address", "address"), (ADMIN, guard))
+def _setup(d):
+    d.deploy("Guard", ("address",), (ADMIN,))
+    d.deploy("C", ("address", "address"), (ADMIN, d.at["Guard"]))
+
+
+PROBES = [O.Probe(SOURCE, _setup, tuple(("C", f, ("Guard",)) for f in ("viaOrigin", "viaOriginOr", "viaPause",
+                                                                        "viaFlag", "viaMem")))]  # fmt: skip
+X = ({"x": 0}, {"x": 1}, {"x": 10**9})
+
+
+@pytest.fixture(scope="module")
+def d(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
     return d
 
 
-def _chain(d, failing: int | None = None) -> Chain:
-    """``d``'s chain, with every storage read of ``failing`` answered by a node error."""
-    block = int(rpc(d.url, "eth_blockNumber", []), 16)
-
-    def read(method, params):
-        if failing is not None and method == "eth_getStorageAt" and int(params[0], 16) == failing:
-            raise RuntimeError("upstream timeout")
-        return rpc(d.url, method, params)
-
-    def batch(calls):
-        out = []
-        for method, params in calls:
-            try:
-                out.append(read(method, params))
-            except RuntimeError:
-                out.append(None)
-        return out
-
-    return Chain(read, block, batch)
-
-
-def _verdict(d, name, followed=True, failing=None):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    contract = d.slither["C"]
-    fn = next(f for f in contract.functions_entry_points if f.name == name)
-    contracts = d.contracts("C", "Guard") if followed else d.contracts("C")
-    return function_verdict(contract, fn, d.at["C"], _chain(d, failing), contracts)[0]
-
-
-def test_a_failed_read_in_a_followed_callee_never_opens_it(anvil):  # noqa: F811
-    d = _deployed(anvil)
-    verdict = _verdict(d, "viaFlag", failing=d.at["Guard"])
-    assert verdict.openness == "not_determined"
-    assert "read_failed:storage:flag" in verdict.gaps
+def test_a_failed_read_in_a_followed_callee_never_opens_it(d):
+    whole = O.check(d, "C", "viaFlag", O.verdict(d, "C", "viaFlag", "Guard"), samples=X, open_at=False)
+    v = O.verdict(d, "C", "viaFlag", "Guard", chain=O.Faulty(d, storage={d.at["Guard"]}))
+    assert v.openness == "not_determined"
+    assert "read_failed:storage:flag" in v.gaps
+    O.never_bolder(whole, v)
     # Read whole: nobody passes, the flag being unset, but over every ``x`` only Guard's code shows it, which never
     # refutes on its own: unknown, never open.
-    whole = _verdict(d, "viaFlag")
     assert whole.openness == "not_determined" and "callee_code_refutation" in whole.gaps
 
 
-def test_a_spent_read_budget_never_opens_it(anvil, monkeypatch):  # noqa: F811
+def test_a_spent_read_budget_never_opens_it(d, monkeypatch):
     import services.logic.verdict as verdict_module
 
-    d = _deployed(anvil)
+    clean = O.verdict(d, "C", "viaFlag", "Guard")
     monkeypatch.setattr(verdict_module, "READS_PER_FUNCTION", 1)
-    assert _verdict(d, "viaFlag").openness == "not_determined"
+    v = O.verdict(d, "C", "viaFlag", "Guard")
+    assert v.openness == "not_determined"
+    O.never_bolder(clean, v)
 
 
-def test_a_followed_callee_reading_the_origin_singles_out_its_admin(anvil):  # noqa: F811
-    d = _deployed(anvil)
-    verdict = _verdict(d, "viaOrigin")
+def test_a_followed_callee_reading_the_origin_singles_out_its_admin(d):
+    v = O.check(d, "C", "viaOrigin", O.verdict(d, "C", "viaOrigin", "Guard"), samples=X, open_at=False)
     # Inlined, the guard's code only proposes: the admin's own call goes through on the chain; over every ``x`` no
     # run settles the list, so it is not complete.
-    assert verdict.openness != "open" and not verdict.complete
-    assert verdict.principals == {ADMIN}
-    assert "inlined_callee:ok(uint256)" in verdict.gaps
-    assert _verdict(d, "viaOriginOr").openness != "open"
+    assert not v.complete and set(v.principals) == {ADMIN}
+    assert "inlined_callee:ok(uint256)" in v.gaps
+    O.check(d, "C", "viaOriginOr", O.verdict(d, "C", "viaOriginOr", "Guard"), samples=X, open_at=False)
 
 
-def test_an_unfollowed_callee_is_never_taken_free_of_the_origin(anvil):  # noqa: F811
-    d = _deployed(anvil)
-    for name, signature in (("viaOrigin", "ok(uint256)"), ("viaOriginOr", "okOr(uint256)")):
-        verdict = _verdict(d, name, followed=False)
-        assert verdict.openness == "not_determined"
-        assert f"origin:{signature}" in verdict.gaps  # its runtime code has an ORIGIN opcode
+@pytest.mark.parametrize(("name", "signature"), [("viaOrigin", "ok(uint256)"), ("viaOriginOr", "okOr(uint256)")])
+def test_an_unfollowed_callee_is_never_taken_free_of_the_origin(d, name, signature):
+    v = O.check(d, "C", name, O.verdict(d, "C", name), samples=X, open_at=False)
+    O.sound(v, {ADMIN})
+    assert v.openness == "not_determined"
+    assert f"origin:{signature}" in v.gaps  # its runtime code has an ORIGIN opcode
 
 
-def test_open_on_an_unsettled_condition_is_never_plain_open(anvil):  # noqa: F811
-    d = _deployed(anvil)
-    verdict = _verdict(d, "viaPause", followed=False)  # paused() is always true: everyone reverts on the chain
-    assert not (verdict.openness == "open" and verdict.allowed == "now")
+def test_open_on_an_unsettled_condition_is_never_plain_open(d):
+    # paused() is always true: everyone reverts on the chain
+    O.check(d, "C", "viaPause", O.verdict(d, "C", "viaPause"), samples=X, open_at=False)
 
 
-def test_a_memory_word_lost_track_of_may_be_the_caller(anvil):  # noqa: F811
-    d = _deployed(anvil)
-    assert _verdict(d, "viaMem").openness == "not_determined"
+def test_a_memory_word_lost_track_of_may_be_the_caller(d):
+    v = O.check(d, "C", "viaMem", O.verdict(d, "C", "viaMem"), samples=X, open_at=False)
+    O.sound(v, {ADMIN})
+    assert O.passes(d, "C", O.function(d, "C", "viaMem"), sender=ADMIN)

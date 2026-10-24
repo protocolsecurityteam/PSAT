@@ -23,7 +23,7 @@ from eth_abi.abi import encode
 from eth_utils import keccak
 
 import tests.logic._anvil as A
-from services.logic.decide import _STRANGERS, FRESH, Evaluator, World
+from services.logic.decide import _STRANGERS, FRESH, Chain, Evaluator, World
 from services.logic.lower import Lowerer, parameter
 from services.logic.terms import reset_terms
 from services.logic.verdict import function_verdict
@@ -135,8 +135,10 @@ def eth_call(url: str, to: int, data: bytes, sender: int, value: int = 0) -> boo
         return False
 
 
-def passes(d: A.Deployment, at: int | str, fn: Any, args: Any = (), sender: int = OWNER, value: int = 0) -> bool:
-    """Whether ``sender``'s call of ``fn`` at ``at`` (an address, or a deployed contract's name) goes through now."""
+def passes(d: A.Deployment, at: int | str, fn: Any, args: Any = None, sender: int = OWNER, value: int = 0) -> bool:
+    """Whether ``sender``'s call of ``fn`` at ``at`` (an address, or a deployed contract's name) goes through now:
+    ``args`` by name (zero for the rest) or in order."""
+    args = {} if args is None else args
     to = d.at[at] if isinstance(at, str) else at
     if isinstance(args, dict) and args.get("msg.value"):
         value = args["msg.value"]
@@ -151,9 +153,9 @@ def passes(d: A.Deployment, at: int | str, fn: Any, args: Any = (), sender: int 
     return eth_call(d.url, to, data, sender, value)
 
 
-def strangers_passing(d: A.Deployment, at: int | str, fn: Any, args: Any = ()) -> set[bool]:
+def strangers_passing(d: A.Deployment, at: int | str, fn: Any, args: Any = None) -> set[bool]:
     """What the five strangers' calls come to (``FRESH`` in the arguments replaced by each one's own address)."""
-    out = set()
+    out, args = set(), {} if args is None else args
     for who in STRANGERS:
         own = {k: who if v == FRESH else v for k, v in args.items()} if isinstance(args, dict) else args
         out.add(passes(d, at, fn, own, sender=who))
@@ -172,13 +174,16 @@ def snapshot(d: A.Deployment):
 
 def transact(d: A.Deployment, at: int | str, signature: str, types=(), values=(), sender: int = OWNER, value=0) -> bool:
     """A mined transaction from ``sender`` (impersonated and funded); whether it succeeded."""
-    to = d.at[at] if isinstance(at, str) else at
     values = [_abi_value(v, t) for v, t in zip(values, types)]
-    data = "0x" + (keccak(text=signature)[:4] + encode(list(types), values)).hex()
+    return transact_data(d, at, keccak(text=signature)[:4] + encode(list(types), values), sender, value)
+
+
+def transact_data(d: A.Deployment, at: int | str, data: bytes, sender: int = OWNER, value: int = 0) -> bool:
+    to = d.at[at] if isinstance(at, str) else at
     if sender not in ACCOUNTS:
         rpc(d.url, "anvil_impersonateAccount", [hex20(sender)])
         rpc(d.url, "anvil_setBalance", [hex20(sender), hex(10**21)])
-    receipt = send(d.url, hex20(sender), data, to=hex20(to), value=value)
+    receipt = send(d.url, hex20(sender), "0x" + data.hex(), to=hex20(to), value=value)
     return receipt["status"] == "0x1"
 
 
@@ -215,6 +220,43 @@ def engine_says(d: A.Deployment, fn: Any, values: Iterable[Any], contract: str =
     return formula, Evaluator(world, {"caller": sender, "signer": sender}, assignment).truth(formula)
 
 
+class Faulty(Chain):
+    """The deployment's chain with reads failing as a node under load fails them: ``storage``, ``calls`` and ``code``
+    each ``True`` (every such read), a set of addresses (reads at those) or a predicate of the request; ``logs``
+    cuts every history in half and marks it partial."""
+
+    def __init__(self, d: A.Deployment, *, storage=False, calls=False, code=False, logs=False):
+        self.faults = {"eth_getStorageAt": storage, "eth_call": calls, "eth_getCode": code}
+        self.cut_logs = logs
+        url = d.url
+
+        def one(method, params):
+            fault = self.faults.get(method)
+            if fault:
+                target = int(params[0]["to"] if method == "eth_call" else params[0], 16)
+                if fault is True or (fault(method, params) if callable(fault) else target in fault):
+                    raise RuntimeError("injected: upstream timeout")
+            return rpc(url, method, params)
+
+        def batch(calls_):
+            out = []
+            for method, params in calls_:
+                try:
+                    out.append(one(method, params))
+                except RuntimeError:
+                    out.append(None)
+            return out
+
+        super().__init__(one, int(rpc(url, "eth_blockNumber", []), 16), batch)
+
+    def logs(self, address, topics):
+        out = super().logs(address, topics)
+        if self.cut_logs and topics:
+            self.truncated.add(address)
+            return out[: len(out) // 2]
+        return out
+
+
 # --- the verdict oracle ----------------------------------------------------------------------------------------------
 
 
@@ -224,23 +266,38 @@ def nobody(v: Any) -> bool:
 
 
 def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None = None, samples=({},),
-          known: Iterable[int] = (), open_at: Any = None) -> Any:  # fmt: skip
+          known: Iterable[int] = (), open_at: Any = None, arrange: Callable | None = None) -> Any:  # fmt: skip
     """``v`` against the chain as it stands (see the module's docstring).
 
     ``samples``: argument sets (by name) at which a refused caller must fail; ``known``: addresses beyond the strangers
-    and anvil's accounts the probe knows of; ``open_at``: arguments at which the author knows every stranger passes
-    (the verdict must then be "open"), or ``False`` where none can (never "open now")."""
+    and anvil's accounts the probe knows of; ``arrange(d, stranger)``: what a stranger does for itself first (a
+    deposit, a request, coming to hold what ``requires`` names), run with the verdict's own ``after`` calls before
+    that stranger's call; ``open_at``: arguments at which, so arranged, every stranger passes (the verdict must then
+    be "open"; checked whatever the verdict), or ``False`` where none can (never "open now"). An "open now" verdict
+    is checked at its own witness unless ``open_at`` is given."""
     fn = function(d, contract, name)
     where = at if at is not None else d.at[contract]
     for holder in v.principals:
         assert passes(d, where, fn, v.witnesses.get(holder, {}), sender=holder), (name, hex(holder), v)
-    if v.openness == "open" and v.allowed == "now":
-        assert strangers_passing(d, where, fn, v.witnesses.get(FRESH, {})) == {True}, (name, v)
+    if v.openness == "open" and v.allowed == "now" or isinstance(open_at, dict):
+        assert arrange is not None or not v.requires, (name, "say how a stranger comes to hold", v.requires)
+        for who in STRANGERS:  # each on its own: what one stranger arranges may stand in another's way
+            with snapshot(d):
+                if arrange is not None:
+                    arrange(d, who)
+                if v.openness == "open":
+                    for signature, args in v.after:  # the calls a stranger makes first, its own
+                        first = next(f for f in d.slither[contract].functions_entry_points
+                                     if f.solidity_signature == signature)  # fmt: skip
+                        own = {k: who if x == FRESH else x for k, x in args.items()}
+                        assert transact_data(d, where, calldata(first, own), who), (name, signature, own)
+                args = open_at if isinstance(open_at, dict) else v.witnesses.get(FRESH, {})
+                own = {k: who if x == FRESH else x for k, x in args.items()}
+                assert passes(d, where, fn, own, sender=who), (name, hex(who), own, v)
     if open_at is False:
         assert not (v.openness == "open" and v.allowed == "now"), (name, v)
     elif open_at is not None:
-        assert strangers_passing(d, where, fn, open_at) == {True}, (name, "the probe's open arguments", open_at)
-        assert v.openness == "open", (name, v)
+        assert v.openness == "open", (name, "every stranger passes", open_at, v)
     if v.openness == "restricted":
         for args in samples:
             assert True not in strangers_passing(d, where, fn, args), (name, "a stranger passes", args, v)
