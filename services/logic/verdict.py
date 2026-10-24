@@ -1531,9 +1531,9 @@ def function_verdict(
 
     def writer_specs(target: int) -> list:
         if target not in specs:
-            from services.static.contract_analysis_pipeline.mapping_events import discover_mapping_writer_events
+            from .writer_events import writer_specs as discover
 
-            specs[target] = discover_mapping_writer_events(contracts[target], per_writer=True, fields=True)
+            specs[target] = discover(contracts[target], per_writer=True, fields=True)
         return specs[target]
 
     histories: dict[int, list | None] = {}
@@ -1605,9 +1605,9 @@ def function_verdict(
             return False
         target, target_contract = found
         if target not in relations:
-            from services.static.contract_analysis_pipeline.mapping_events import complete_writer_relations
+            from .writer_events import complete_relations
 
-            relations[target] = complete_writer_relations(target_contract, writer_specs(target))
+            relations[target] = complete_relations(target_contract, writer_specs(target))
         if (var, keys, tuple(fields)) in relations[target] and versions(target) == [target_contract]:
             return True  # the static pipeline's relations know only the code running now
         return every(target, logged, var, keys, tuple(fields), False) is not None

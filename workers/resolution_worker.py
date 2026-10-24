@@ -26,9 +26,10 @@ from db.models import (
     derive_job_chain_id,
 )
 from db.nested_artifacts import store_bundle as store_nested_artifacts
-from db.queue import get_artifact, store_artifact, usable_semantic_artifact
+from db.queue import LeaseLost, get_artifact, store_artifact, usable_semantic_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
+from services.compute_isolation import run_isolated, static_budget
 from services.discovery.perimeter import queue_discovered_contracts
 from services.monitoring.balance_observation import (
     observation_contract,
@@ -68,6 +69,20 @@ from workers.base import BaseWorker
 logger = logging.getLogger("workers.resolution_worker")
 
 RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
+
+
+def logic_engine_enabled() -> bool:
+    """``PSAT_LOGIC_ENGINE=1`` adds the logic engine's ``logic_verdicts`` artifact to each resolution."""
+    return os.environ.get("PSAT_LOGIC_ENGINE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _logic_verdicts_isolated(address: str, chain_id: int, rpc_url: str) -> dict:
+    """In the budgeted child: its own session, never the parent's connection."""
+    from db.models import SessionLocal
+    from services.logic.deployment import deployment_verdicts
+
+    with SessionLocal() as session:
+        return deployment_verdicts(session, address.lower(), chain_id, rpc_url)
 
 
 def _rpc_url_for_job(job: Job) -> str:
@@ -409,6 +424,9 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
+        if logic_engine_enabled():
+            self._store_logic_verdicts(session, job, proxy_address or job.address, chain_id, rpc_url)
+
         self.update_detail(
             session,
             job,
@@ -420,6 +438,25 @@ class ResolutionWorker(BaseWorker):
             job.address or "0x0",
             job.name or "Contract",
         )
+
+    def _store_logic_verdicts(
+        self, session: Session, job: Job, address: str | None, chain_id: int, rpc_url: str
+    ) -> None:
+        """The logic engine's verdict per function (``services/logic``), beside the pipeline's own: an artifact only,
+        read by nothing yet, so it can be compared before anything relies on it."""
+        if not address:
+            return
+        self.update_detail(session, job, "Deciding authority with the logic engine")
+        try:
+            data = run_isolated(
+                _logic_verdicts_isolated, address, chain_id, rpc_url, budget=static_budget(), label="logic_engine"
+            )
+        except LeaseLost:
+            raise
+        except Exception as exc:  # an extra artifact: its failure never fails the resolution
+            record_degraded(phase="resolution_logic_engine", exc=exc, context={"address": address})
+            return
+        store_artifact(session, job.id, "logic_verdicts", data=data)
 
     def _resolve_role_holder_plane(
         self,
