@@ -9,14 +9,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from eth_abi.abi import encode
-from eth_utils import keccak
 
-from services.logic.decide import UNK, Evaluator, World
-from services.logic.lower import Lowerer, parameter
-from services.logic.terms import reset_terms, subterms
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import ACCOUNT0, rpc
+from services.logic.decide import UNK
+from services.logic.lower import Lowerer
+from services.logic.terms import subterms
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -61,35 +59,65 @@ contract C {
 """
 NAMES = ["sibUnset", "sibValue", "sibThree", "sibInLoop"]
 
+# A Solidity local declared again under a name in use: Slither renames the later one ``x_scope_0`` and binds an
+# assembly use of ``x`` to the first, whichever is in scope (review 5, ``q4``).
+SOLIDITY_LOCALS = """
+pragma solidity 0.8.27;
+
+contract S {
+    function solSolYul(uint256 n, uint256 want) external pure {
+        uint256 acc;
+        { uint256 x = n + 9; acc = x; }
+        { uint256 x = 3; assembly { acc := add(acc, x) } }
+        require(acc == want);
+    }
+    function solYulSol(uint256 n, uint256 want) external pure {
+        uint256 acc;
+        { uint256 x = n + 9; assembly { acc := x } }
+        { uint256 x = 3; acc = acc + x; }
+        require(acc == want);
+    }
+    function yulWritesSecond(uint256 n, uint256 want) external pure {
+        uint256 acc;
+        { uint256 x = n + 9; acc = x; }
+        { uint256 x = 3; assembly { x := add(x, 1) } acc = acc + x; }
+        require(acc == want);
+    }
+    function solThenYul(uint256 n, uint256 want) external pure {
+        uint256 acc;
+        { uint256 x = n + 1; acc = x; }
+        assembly { let x := 2 acc := add(acc, x) }
+        require(acc == want);
+    }
+    function solSol(uint256 n, uint256 want) external pure {
+        uint256 acc;
+        { uint256 x = n + 9; acc = x; }
+        { uint256 x = 3; acc = acc + x; }
+        require(acc == want);
+    }
+}
+"""
+SHADOWED = ["solSolYul", "solYulSol", "yulWritesSecond"]
+
 
 @pytest.fixture(scope="module")
 def deployed(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
+    d = O.deployment(*anvil, SOURCE + SOLIDITY_LOCALS.split("\n", 2)[2])
     d.deploy("C")
+    d.deploy("S")
     return d
 
 
-def _fn(d, name):
-    return next(f for f in d.slither["C"].functions_entry_points if f.name == name)
+def _fn(d, name, contract="C"):
+    return O.function(d, contract, name)
 
 
-def _chain_says(d, fn, values) -> bool:
-    data = keccak(text=fn.solidity_signature)[:4] + encode(["uint256", "uint256"], list(values))
-    try:
-        rpc(d.url, "eth_call", [{"from": ACCOUNT0, "to": "0x%040x" % d.at["C"], "data": "0x" + data.hex()}, "latest"])
-        return True
-    except RuntimeError:
-        return False
+def _chain_says(d, fn, values, contract="C") -> bool:
+    return O.chain_says(d, fn, values, contract)
 
 
-def _engine_says(d, fn, values):
-    reset_terms()
-    formula = Lowerer(d.slither["C"]).success(fn)
-    world = World(d.chain(), d.at["C"], int.from_bytes(keccak(text=fn.solidity_signature)[:4], "big"), {})
-    assignment = {parameter(p, i): v for i, (p, v) in enumerate(zip(fn.parameters, values))}
-    caller = int(ACCOUNT0, 16)
-    return formula, Evaluator(world, {"caller": caller, "signer": caller}, assignment).truth(formula)
+def _engine_says(d, fn, values, contract="C"):
+    return O.engine_says(d, fn, values, contract)
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -146,3 +174,23 @@ def test_same_named_locals_one_cell_unknown_or_told_apart():
         SimpleNamespace(_named={}), SimpleNamespace(nodes=[_node(a, [a], yul=False), _node(b, yul=False)])
     )
     assert not cells and unknown == {id(a), id(b)}
+
+
+@pytest.mark.parametrize("name", [*SHADOWED, "solThenYul", "solSol"])
+def test_assembly_naming_a_solidity_local_declared_twice_reads_it_or_says_it_cannot(deployed, name):
+    # Slither's binding of the assembly's ``x`` can't be trusted where two Solidity locals are named ``x``: every
+    # read of either is ``unknown:shadowed:x``, never the other one's value. Without assembly naming one (``solSol``),
+    # or with a Yul ``let x`` of its own (``solThenYul``), the answer is definite and the chain's.
+    fn = _fn(deployed, name, "S")
+    passing = 0
+    for n in range(4):
+        for want in range(20):
+            chain = _chain_says(deployed, fn, (n, want), "S")
+            formula, engine = _engine_says(deployed, fn, (n, want), "S")
+            passing += chain
+            if name in SHADOWED:
+                assert engine is UNK, (name, n, want, chain)
+                assert "shadowed:x" in {u[1] for u in subterms(formula, "unknown")}
+            else:
+                assert engine == chain, (name, n, want, chain, engine)
+    assert passing == 4

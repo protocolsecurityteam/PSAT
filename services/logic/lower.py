@@ -309,6 +309,7 @@ _MEMORY_NEUTRAL = frozenset(
         "balance selfbalance gas chainid timestamp number caller address origin callvalue byte signextend"
     ).split()
 )
+_SCOPED = re.compile(r"_scope_\d+$")  # Slither's suffix for a local declared again under a name in use
 _MEMORY_SPAN = 0x400  # how far above zero constant-offset assembly memory is followed
 # Where assembly that reads the free memory pointer (``mload(0x40)``) before writing it finds free memory: a window of
 # its own, followed like the one above zero (GPv2's ``safeTransferFrom`` building its call there).
@@ -1668,31 +1669,43 @@ class Lowerer:
         declaration starts again (Yul forbids shadowing a name still in scope, so their lifetimes never overlap): a map
         from each variable to the one its uses name. Otherwise, unless the uses name each variable (Solidity's own
         scoping, resolved by declaration), which variable a use reads isn't known: those variables (by id), read as
-        ``unknown:shadowed:<name>``."""
+        ``unknown:shadowed:<name>``; likewise every one of them where assembly names one of two or more Solidity
+        locals declared under one name (Slither renames the later ones ``<name>_scope_<n>`` and may bind the
+        assembly's use to the wrong one)."""
         found = self._named.get(id(function))
         if found is not None and found[0] is function:
             return found[1], found[2]
         declared: dict[str, list[Any]] = {}
         yul_declared: set[int] = set()
         used: set[int] = set()
+        yul_used: set[int] = set()
         for node in getattr(function, "nodes", None) or []:
+            yul = getattr(getattr(node, "scope", None), "is_yul", False)
             var = getattr(node, "variable_declaration", None)
             if var is not None and getattr(var, "name", None):
-                group = declared.setdefault(var.name, [])
+                # Slither renames a Solidity local declared again under a name already used (``x_scope_0``).
+                group = declared.setdefault(_SCOPED.sub("", var.name), [])
                 if not any(v is var for v in group):
                     group.append(var)
-                if getattr(getattr(node, "scope", None), "is_yul", False):
+                if yul:
                     yul_declared.add(id(var))
             for ir in node.irs or ():
                 for operand in (*getattr(ir, "read", ()), getattr(ir, "lvalue", None)):
                     used.add(id(operand))
+                    if yul:
+                        yul_used.add(id(operand))
         cells: dict[int, Any] = {}
         unknown_ids: set[int] = set()
         for group in declared.values():
             if len(group) < 2:
                 continue
             named = [v for v in group if id(v) in used]
-            if all(id(v) in yul_declared for v in group) and len(named) <= 1:
+            solidity = [v for v in group if id(v) not in yul_declared]
+            if len(solidity) > 1 and any(id(v) in yul_used for v in solidity):
+                # Assembly naming a Solidity local declared more than once: Slither binds the name to one of them,
+                # not always the one in scope, so which one it reads or writes isn't known.
+                unknown_ids.update(id(v) for v in group)
+            elif all(id(v) in yul_declared for v in group) and len(named) <= 1:
                 cell = named[0] if named else group[0]
                 cells.update({id(v): cell for v in group})
             elif len(named) < len(group) or any(id(v) in yul_declared for v in group):
@@ -3041,7 +3054,7 @@ class Lowerer:
             return self._read_at((self.this, var.name, ()), st)
         owner = getattr(var, "function", None)
         if owner is not None and id(var) in self._same_named(owner)[1]:
-            return unknown(f"shadowed:{var.name}")  # which of the same-named locals is read isn't known
+            return unknown(f"shadowed:{_SCOPED.sub('', var.name)}")  # which same-named local is read isn't known
         held = st.env.get(id(var))
         if isinstance(held, tuple) and held and held[0] == "loc":
             return self._read_at(held[1], st)
