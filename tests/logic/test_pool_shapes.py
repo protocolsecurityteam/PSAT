@@ -1,14 +1,20 @@
 """Pool shapes: a token pull through assembly to a token with a blacklist, and a deposit gated on the receiver by
-another contract's allowlist."""
+another contract's allowlist. Deployed on anvil (the legacy token compiled with solc 0.4.19 beside the rest) and
+checked against ``eth_call`` (``_oracle.check``): an "open" pull passes for each stranger once a holder has handed it
+tokens and it has approved the puller; a gate fails for every stranger; listed holders pass from their own address."""
 
 from __future__ import annotations
 
 import pytest
-from eth_utils import keccak
 
-from services.logic.decide import Chain
+from services.logic.terms import reset_terms
 from services.logic.verdict import function_verdict
-from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
+
+ADMIN = O.ACCOUNTS[1]
+LENDER = 0xF6 << 140
+MANAGERS = {i: (0x5EED << 140) + i for i in range(40)}  # forty operators, each with its manager
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -23,6 +29,8 @@ contract Blacklisting {
     mapping(address => bool) isBlackListed;
     mapping(address => uint256) balances;
     mapping(address => mapping(address => uint256)) allowed;
+
+    constructor() { owner = msg.sender; balances[msg.sender] = 1e24; }
 
     function addBlackList(address who) external {
         require(msg.sender == owner);
@@ -55,6 +63,8 @@ contract Listing {
     mapping(address => uint256) balances;
     mapping(address => mapping(address => uint256)) allowed;
 
+    constructor() { owner = msg.sender; balances[msg.sender] = 1e24; }
+
     function list(address who) external {
         require(msg.sender == owner);
         sender[who] = true;
@@ -84,6 +94,8 @@ contract Answering {
     mapping(address => uint256) balances;
     mapping(address => mapping(address => uint256)) allowed;
 
+    constructor() { balances[msg.sender] = 1e24; }
+
     function approve(address spender, uint256 amount) external returns (bool) {
         allowed[msg.sender][spender] = amount;
         return true;
@@ -110,6 +122,8 @@ contract Managed {
     address admin;
     mapping(uint256 => address) managers;
 
+    constructor() { admin = msg.sender; }
+
     event ManagerSet(uint256 indexed id, address manager);
 
     function setManager(uint256 id, address manager) external {
@@ -131,6 +145,8 @@ contract Cached {
     }
 
     Config config;
+
+    constructor(address a) { config.admin = a; }
 
     function _cache() internal view returns (Config memory cached) {
         cached.admin = config.admin;
@@ -155,6 +171,8 @@ contract Cached {
 // OpenZeppelin 5's ``SafeERC20._safeTransferFrom``, as Aave v4's spokes pull.
 contract Puller {
     address token;
+
+    constructor(address t) { token = t; }
 
     function deposit(uint256 amount) external {
         require(amount > 0);
@@ -183,6 +201,8 @@ contract Puller {
 // back in another function.
 contract GPv2Puller {
     address token;
+
+    constructor(address t) { token = t; }
 
     function supply(uint256 amount) external {
         require(amount > 0);
@@ -227,6 +247,8 @@ contract Permissions {
     address admin;
     mapping(address => bool) allowlist;
 
+    constructor() { admin = msg.sender; }
+
     event AllowlistSet(address indexed lender, bool allowed);
 
     function setAllowed(address lender, bool allowed) external {
@@ -242,6 +264,8 @@ contract Permissions {
 
 contract Manager {
     Permissions permissions;
+
+    constructor(Permissions p) { permissions = p; }
 
     function canCall(address, bytes calldata data) external view returns (bool) {
         uint256[3] memory words = _decode(data);
@@ -268,6 +292,9 @@ contract Bitmaps {
 
     event LenderBitmapSet(address indexed lender, uint256 bitmap);
     event AllowlistSet(address indexed lender, bool allowed);
+
+    // A bitmap per function, each requiring bit 0.
+    constructor() { admin = msg.sender; level = 2; poolBitmaps["P:deposit"] = 1; poolBitmaps["P:transfer"] = 1; }
 
     function setLenderBitmap(address lender, uint256 bitmap) external {
         require(msg.sender == admin);
@@ -299,6 +326,8 @@ contract Bitmaps {
 contract Router {
     Bitmaps permissions;
 
+    constructor(Bitmaps b) { permissions = b; }
+
     function deposit() external {
         require(permissions.hasPermission(msg.sender, "P:deposit"));
     }
@@ -316,165 +345,29 @@ contract Pool {
     Manager manager;
     mapping(address => uint256) shares;
 
+    constructor(Manager m) { manager = m; }
+
     function deposit(uint256 assets, address receiver) external {
         require(manager.canCall(msg.sender, abi.encode(assets, receiver)));
         shares[receiver] += assets;
     }
+
+    // Three words: the manager's other branch fills ``words`` differently, ``words[1]`` the receiver still.
+    function deposit3(uint256 assets, address receiver) external {
+        require(manager.canCall(msg.sender, abi.encode(assets, receiver, uint256(0))));
+        shares[receiver] += assets;
+    }
 }
+
+// One puller per token (each keeps its token at deployment).
+contract PullerBlacklisting is Puller { constructor(address t) Puller(t) {} }
+contract PullerListing is Puller { constructor(address t) Puller(t) {} }
+contract PullerTether is Puller { constructor(address t) Puller(t) {} }
+contract GPv2Blacklisting is GPv2Puller { constructor(address t) GPv2Puller(t) {} }
+contract GPv2Answering is GPv2Puller { constructor(address t) GPv2Puller(t) {} }
+contract GPv2Tether is GPv2Puller { constructor(address t) GPv2Puller(t) {} }
+contract GPv2Listing is GPv2Puller { constructor(address t) GPv2Puller(t) {} }
 """
-
-PULLER, TOKEN = 0xA1 << 140, 0xB2 << 140
-POOL, MANAGER, PERMISSIONS, LENDER = 0xC3 << 140, 0xD4 << 140, 0xE5 << 140, 0xF6 << 140
-ROUTER, BITMAPS, GPV2, CACHED, ADMIN = 0xA7 << 140, 0xB8 << 140, 0xC9 << 140, 0xDA << 140, 0xEB << 140
-MANAGED = 0xFC << 140
-_ALLOWED_SLOT = int.from_bytes(keccak(LENDER.to_bytes(32, "big") + (1).to_bytes(32, "big")), "big")
-_STORED = {(PULLER, 0): TOKEN, (POOL, 0): MANAGER, (MANAGER, 0): PERMISSIONS, (PERMISSIONS, _ALLOWED_SLOT): 1}
-_STORED[(ROUTER, 0)] = BITMAPS
-_STORED[(GPV2, 0)] = TOKEN
-_STORED[(CACHED, 0)] = ADMIN
-_MANAGERS = {i: (0x5EED << 140) + i for i in range(40)}  # forty operators, each with its manager
-_MANAGER_SET = int.from_bytes(keccak(b"ManagerSet(uint256,address)"), "big")
-for _id, _manager in _MANAGERS.items():
-    _STORED[(MANAGED, int.from_bytes(keccak(_id.to_bytes(32, "big") + (1).to_bytes(32, "big")), "big"))] = _manager
-_STORED[(BITMAPS, 1)] = 2  # a bitmap per function, each requiring bit 0
-for _function in (b"P:deposit", b"P:transfer"):
-    _STORED[(BITMAPS, int.from_bytes(keccak(_function.ljust(32, b"\0") + (2).to_bytes(32, "big")), "big"))] = 1
-
-
-class _Deployed(Chain):
-    """Each outer contract's first slot points at its callee; the permission manager allowlists one lender, as its
-    one event says; nothing else is stored."""
-
-    def __init__(self):
-        super().__init__(self._answer, 1, lambda calls: [self._answer(m, p) for m, p in calls])
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt":
-            at, slot = int(params[0], 16), int(params[1], 16)
-            return hex(_STORED.get((at, slot), 0))
-        if method == "eth_call":
-            # The views, as their code answers on this storage: whether the receiver is the allowlisted lender.
-            to, data = int(params[0]["to"], 16), bytes.fromhex(params[0]["data"][2:])
-            if to == PERMISSIONS:
-                return "0x" + (int.from_bytes(data[4:36], "big") == LENDER).to_bytes(32, "big").hex()
-            if to == BITMAPS:
-                return "0x" + "00" * 32  # no lender holds the bit
-            if to == MANAGER:
-                receiver = int.from_bytes(data[4 + 128 : 4 + 160], "big")
-                return "0x" + (receiver == LENDER).to_bytes(32, "big").hex()
-        if method == "eth_getLogs":
-            return []
-        if method == "eth_getBlockByNumber":
-            return {"timestamp": hex(1_700_000_000), "number": hex(1)}
-        raise RuntimeError("execution reverted")
-
-    def code(self, address):
-        return (
-            b"\x60"
-            if address in (PULLER, TOKEN, POOL, MANAGER, PERMISSIONS, ROUTER, BITMAPS, GPV2, CACHED, MANAGED)
-            else b""
-        )
-
-    def logs(self, address, topics):
-        if address == MANAGED:
-            return [([_MANAGER_SET, i], [manager]) for i, manager in _MANAGERS.items()]
-        return [([0, LENDER], [1])] if address == PERMISSIONS else []
-
-
-@pytest.fixture(scope="module")
-def built(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("pools") / "P.sol"
-    path.write_text(SOURCE)
-    return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
-
-
-def _verdict(built, name, fn_name, at, contracts):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    contract = built[name]
-    fn = next(f for f in contract.functions_entry_points if f.name == fn_name)
-    verdict, _ = function_verdict(contract, fn, at, _Deployed(), contracts)
-    return verdict
-
-
-def test_a_pull_from_a_token_whose_blacklist_a_stranger_is_not_on_stays_open(built):
-    # The stranger can't bring about its blacklist entry, but needn't: its balance and allowance are what it lacks.
-    contracts = {PULLER: built["Puller"], TOKEN: built["Blacklisting"]}
-    assert _verdict(built, "Puller", "deposit", PULLER, contracts).openness == "open"
-
-
-def test_a_pull_from_a_token_only_listed_senders_move_is_never_open(built):
-    contracts = {PULLER: built["Puller"], TOKEN: built["Listing"]}
-    assert _verdict(built, "Puller", "deposit", PULLER, contracts).openness != "open"
-
-
-@pytest.mark.parametrize("token", ["Blacklisting", "Tether", "Answering"])
-def test_a_pull_built_at_the_free_memory_pointer_is_the_transfer_it_encodes(built, legacy, token):
-    # Open to whoever holds and approves the token, whether it returns a bool or nothing.
-    contracts = {GPV2: built["GPv2Puller"], TOKEN: {**built, **legacy}[token]}
-    assert _verdict(built, "GPv2Puller", "supply", GPV2, contracts).openness == "open"
-
-
-def test_a_pull_built_at_the_free_memory_pointer_from_a_listing_token_is_never_open(built):
-    contracts = {GPV2: built["GPv2Puller"], TOKEN: built["Listing"]}
-    assert _verdict(built, "GPv2Puller", "supply", GPV2, contracts).openness != "open"
-
-
-@pytest.mark.parametrize("name", ["setCap", "raiseCap"])
-def test_a_memory_struct_filled_field_by_field_reads_back_what_was_put_there(built, name):
-    verdict = _verdict(built, "Cached", name, CACHED, {CACHED: built["Cached"]})
-    assert verdict.openness == "restricted" and set(verdict.principals) == {ADMIN}
-
-
-def test_a_stranger_failing_is_kept_when_candidates_spend_the_budget(built, monkeypatch):
-    # The stranger's question is answered before the candidates'; running out of work on them leaves the list
-    # partial, not the verdict unknown.
-    from services.logic import decide
-
-    monkeypatch.setattr(decide, "DECISION_WORK", 40 * decide.QUESTION_WORK)
-    verdict = _verdict(built, "Managed", "act", MANAGED, {MANAGED: built["Managed"]})
-    assert verdict.openness == "restricted" and not verdict.complete
-
-
-def test_a_deposit_for_a_receiver_another_contract_allowlists_is_open(built):
-    # Anyone deposits for the allowlisted lender: the receiver is tried from the allowlist's own events.
-    contracts = {POOL: built["Pool"], MANAGER: built["Manager"], PERMISSIONS: built["Permissions"]}
-    assert _verdict(built, "Pool", "deposit", POOL, contracts).openness == "open"
-
-
-def test_a_bitmap_read_at_a_key_the_lender_only_picks_between_is_a_gate(built):
-    # ``poolBitmaps[allowlisted ? ... : level == 1 ? 0 : id]``: the caller picks between fixed keys, the same for
-    # every address no lookup names, so a stranger failing stands for them all.
-    contracts = {ROUTER: built["Router"], BITMAPS: built["Bitmaps"]}
-    assert _verdict(built, "Router", "deposit", ROUTER, contracts).openness == "restricted"
-
-
-def test_a_check_handed_the_caller_in_an_array_is_a_gate(built):
-    contracts = {ROUTER: built["Router"], BITMAPS: built["Bitmaps"]}
-    assert _verdict(built, "Router", "transferIn", ROUTER, contracts).openness == "restricted"
-
-
-def test_a_fixed_array_set_per_branch_is_read_back_item_by_item(built):
-    # ``uint256[3] memory words`` filled differently per branch: ``words[1]`` is the receiver either way, not an
-    # unreadable choice between two arrays.
-    from services.logic.lower import Lowerer
-    from services.logic.terms import mk, reset_terms, subterms
-
-    reset_terms()
-    manager = built["Manager"]
-    can_call = next(f for f in manager.functions_entry_points if f.name == "canCall")
-    receiver = mk("arg", "receiver", "address")
-    data = mk("enc", (mk("arg", "assets", "uint256"), receiver))
-    _, returned = Lowerer(manager).returns(can_call, [mk("arg", "caller", "address"), data])
-    asked = {c[3][0] for r in returned for c in subterms(r, "call") if c[2] == "hasPermission(address)"}
-    assert asked and not any(subterms(a, "array") or subterms(a, "elem") for a in asked)
-
 
 LEGACY = """
 pragma solidity 0.4.19;
@@ -482,6 +375,8 @@ pragma solidity 0.4.19;
 contract Moves {
     mapping(address => uint256) balances;
     mapping(address => mapping(address => uint256)) allowed;
+
+    function Moves() public { balances[msg.sender] = 10 ** 24; }
 
     function approve(address spender, uint256 amount) public {
         allowed[msg.sender][spender] = amount;
@@ -510,20 +405,146 @@ contract Tether is Moves {
 """
 
 
+def _setup(d):
+    tether = O.deployment(d.url, d.root, LEGACY, "0.4.19")
+    tether.deploy("Tether")
+    d.legacy = tether
+    for token in ("Blacklisting", "Listing", "Answering"):
+        d.deploy(token)
+    tokens = {"Blacklisting": d.at["Blacklisting"], "Listing": d.at["Listing"], "Answering": d.at["Answering"],
+              "Tether": tether.at["Tether"]}  # fmt: skip
+    for puller in ("PullerBlacklisting", "PullerListing", "PullerTether", "GPv2Blacklisting", "GPv2Answering",
+                   "GPv2Tether", "GPv2Listing"):  # fmt: skip
+        d.deploy(puller, ("address",), (tokens[puller.removeprefix("Puller").removeprefix("GPv2")],))
+    d.deploy("Cached", ("address",), (ADMIN,))
+    d.deploy("Managed")
+    for i, manager in MANAGERS.items():
+        assert O.transact(d, "Managed", "setManager(uint256,address)", ("uint256", "address"), (i, manager))
+    d.deploy("Permissions")
+    assert O.transact(d, "Permissions", "setAllowed(address,bool)", ("address", "bool"), (LENDER, True))
+    d.deploy("Manager", ("address",), (d.at["Permissions"],))
+    d.deploy("Pool", ("address",), (d.at["Manager"],))
+    d.deploy("Bitmaps")
+    d.deploy("Router", ("address",), (d.at["Bitmaps"],))
+
+
+PROBES = [
+    O.Probe(
+        SOURCE,
+        _setup,
+        (
+            ("PullerBlacklisting", "deposit", ("Blacklisting",)), ("PullerListing", "deposit", ("Listing",)),
+            ("PullerTether", "deposit", ()), ("GPv2Blacklisting", "supply", ("Blacklisting",)),
+            ("GPv2Answering", "supply", ("Answering",)), ("GPv2Tether", "supply", ()),
+            ("GPv2Listing", "supply", ("Listing",)), ("Cached", "setCap", ()), ("Cached", "raiseCap", ()),
+            ("Managed", "act", ()), ("Pool", "deposit", ("Manager", "Permissions")),
+            ("Pool", "deposit3", ("Manager", "Permissions")), ("Router", "deposit", ("Bitmaps",)),
+            ("Router", "transferIn", ("Bitmaps",)),
+        ),
+    )
+]  # fmt: skip
+
+
 @pytest.fixture(scope="module")
-def legacy(tmp_path_factory):
-    solc = solc_path("0.4.19")
-    if solc is None:
-        pytest.skip("solc 0.4.19 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("legacy_pools") / "L.sol"
-    path.write_text(LEGACY)
-    return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
+def d(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
+    return d
 
 
-def test_a_pull_from_a_token_returning_nothing_reads_its_empty_return_data(built, legacy):
-    # OpenZeppelin's pull passes on empty return data from code: a function declared to return nothing returns none,
-    # whatever its ``return`` statements say.
-    contracts = {PULLER: built["Puller"], TOKEN: legacy["Tether"]}
-    assert _verdict(built, "Puller", "deposit", PULLER, contracts).openness == "open"
+def _verdict(d, contract, name, token):
+    """``contract.name`` with its token followed (the legacy ``Tether`` from its own compilation)."""
+    if token != "Tether":
+        return O.verdict(d, contract, name, token)
+    reset_terms()
+    c, at, tether = d.slither[contract], d.at[contract], d.legacy.at["Tether"]
+    contracts = {at: c, tether: d.legacy.slither["Tether"]}
+    return function_verdict(c, O.function(d, contract, name), at, d.chain(), contracts)[0]
+
+
+def _token_at(d, token):
+    return d.legacy.at["Tether"] if token == "Tether" else d.at[token]
+
+
+def _funded(token, puller, amount=5):
+    """A stranger handed ``amount`` of ``token`` by its holder, approving ``puller`` for it."""
+
+    def arrange(d, who):
+        at = _token_at(d, token)
+        assert O.transact(d, at, "transfer(address,uint256)", ("address", "uint256"), (who, amount))
+        assert O.transact(d, at, "approve(address,uint256)", ("address", "uint256"), (d.at[puller], amount), who)
+
+    return arrange
+
+
+@pytest.mark.parametrize("token", ["Blacklisting", "Tether"])
+def test_a_pull_from_a_token_whose_blacklist_a_stranger_is_not_on_stays_open(d, token):
+    # The stranger can't bring about its blacklist entry, but needn't: its balance and allowance are what it lacks.
+    # ``Tether`` returns nothing: OpenZeppelin's pull passes on empty return data from code, whatever its legacy
+    # ``return`` statements say.
+    puller = "Puller" + token
+    v = O.check(d, puller, "deposit", _verdict(d, puller, "deposit", token), arrange=_funded(token, puller),
+                open_at={"amount": 5})  # fmt: skip
+    assert v.openness == "open"
+
+
+def test_a_pull_from_a_token_only_listed_senders_move_is_never_open(d):
+    v = O.verdict(d, "PullerListing", "deposit", "Listing")
+    O.check(d, "PullerListing", "deposit", v, samples=({"amount": 0}, {"amount": 1}), open_at=False)
+    assert v.openness != "open"
+
+
+@pytest.mark.parametrize("token", ["Blacklisting", "Tether", "Answering"])
+def test_a_pull_built_at_the_free_memory_pointer_is_the_transfer_it_encodes(d, token):
+    # Open to whoever holds and approves the token, whether it returns a bool or nothing.
+    puller = "GPv2" + token
+    v = O.check(d, puller, "supply", _verdict(d, puller, "supply", token), arrange=_funded(token, puller),
+                open_at={"amount": 5})  # fmt: skip
+    assert v.openness == "open"
+
+
+def test_a_pull_built_at_the_free_memory_pointer_from_a_listing_token_is_never_open(d):
+    v = O.verdict(d, "GPv2Listing", "supply", "Listing")
+    O.check(d, "GPv2Listing", "supply", v, samples=({"amount": 1},), open_at=False)
+    assert v.openness != "open"
+
+
+@pytest.mark.parametrize("name", ["setCap", "raiseCap"])
+def test_a_memory_struct_filled_field_by_field_reads_back_what_was_put_there(d, name):
+    v = O.check(d, "Cached", name, O.verdict(d, "Cached", name), samples=({"cap": 0}, {"cap": 7}))
+    assert v.openness == "restricted" and set(v.principals) == {ADMIN}
+
+
+def test_a_stranger_failing_is_kept_when_candidates_spend_the_budget(d, monkeypatch):
+    # The stranger's question is answered before the candidates'; running out of work on them leaves the list
+    # partial, not the verdict unknown.
+    from services.logic import decide
+
+    samples = ({"id": 0}, {"id": 39})
+    clean = O.check(d, "Managed", "act", O.verdict(d, "Managed", "act"), samples=samples)
+    monkeypatch.setattr(decide, "DECISION_WORK", 40 * decide.QUESTION_WORK)
+    v = O.check(d, "Managed", "act", O.verdict(d, "Managed", "act"), samples=samples)
+    assert v.openness == "restricted" and not v.complete
+    O.never_bolder(clean, v)
+
+
+@pytest.mark.parametrize("name", ["deposit", "deposit3"])
+def test_a_deposit_for_a_receiver_another_contract_allowlists_is_open(d, name):
+    # Anyone deposits for the allowlisted lender: the receiver is tried from the allowlist's own events. With three
+    # words of data, ``words[1]`` is still the receiver, read item by item.
+    v = O.verdict(d, "Pool", name, "Manager", "Permissions")
+    O.check(d, "Pool", name, v, open_at={"assets": 1, "receiver": LENDER})
+    deposit = O.function(d, "Pool", name)
+    assert O.strangers_passing(d, "Pool", deposit, {"assets": 1, "receiver": O.STRANGERS[0]}) == {False}
+
+
+def test_a_bitmap_read_at_a_key_the_lender_only_picks_between_is_a_gate(d):
+    # ``poolBitmaps[allowlisted ? ... : level == 1 ? 0 : id]``: the caller picks between fixed keys, the same for
+    # every address no lookup names, so a stranger failing stands for them all.
+    v = O.check(d, "Router", "deposit", O.verdict(d, "Router", "deposit", "Bitmaps"), open_at=False)
+    assert v.openness == "restricted"
+
+
+def test_a_check_handed_the_caller_in_an_array_is_a_gate(d):
+    v = O.check(d, "Router", "transferIn", O.verdict(d, "Router", "transferIn", "Bitmaps"), open_at=False)
+    assert v.openness == "restricted"

@@ -1,13 +1,22 @@
 """A state-changing call handed the caller is an action the caller arranges only when what its callee checks is the
-caller's own to bring about there."""
+caller's own to bring about there. Deployed on anvil and checked against ``eth_call`` (``_oracle.check``): for an
+"open" verdict each stranger first brings about what the action needs for itself (tokens from a holder, an approval),
+then its own call goes through; for "never open", no stranger's does."""
 
 from __future__ import annotations
 
 import pytest
+from eth_abi.abi import encode
+from eth_account import Account
+from eth_utils import keccak
 
-from services.logic.decide import Chain
-from services.logic.verdict import function_verdict
-from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
+
+# anvil's second funded account, whose key is public: a signer for ``depositSigned``.
+SIGNER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+SIGNER = O.ACCOUNTS[1]
+DEADLINE = 2**64
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -41,6 +50,8 @@ contract Token {
 
 contract Vault {
     Token token;
+
+    constructor(Token t) { token = t; }
 
     function deposit(uint256 amount) external {
         require(amount > 0);
@@ -84,6 +95,8 @@ contract Supply {
     mapping(address => bool) controllers;
     mapping(address => uint256) minted;
 
+    constructor() { admin = msg.sender; }
+
     function addController(address who) external {
         require(msg.sender == admin);
         controllers[who] = true;
@@ -99,6 +112,8 @@ contract Minter {
     Supply supply;
     uint256 total;
 
+    constructor(Supply s) { supply = s; }
+
     function mint(uint256 amount) external {
         supply.canMint(msg.sender, amount);
         total += amount;
@@ -106,102 +121,94 @@ contract Minter {
 }
 """
 
-VAULT, TOKEN, MINTER, SUPPLY = 0xA1 << 140, 0xB2 << 140, 0xC3 << 140, 0xD4 << 140
+
+def _setup(d):
+    d.deploy("Token")
+    d.deploy("Vault", ("address",), (d.at["Token"],))
+    d.deploy("Supply")
+    d.deploy("Minter", ("address",), (d.at["Supply"],))
 
 
-class _Deployed(Chain):
-    """Each outer contract's first slot points at its callee; everything else as deployed and empty."""
-
-    def __init__(self):
-        super().__init__(self._answer, 1, lambda calls: [self._answer(m, p) for m, p in calls])
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt":
-            at, slot = int(params[0], 16), int(params[1], 16)
-            return hex({(VAULT, 0): TOKEN, (MINTER, 0): SUPPLY}.get((at, slot), 0))
-        if method == "eth_getLogs":
-            return []
-        if method == "eth_getBlockByNumber":
-            return {"timestamp": hex(1_700_000_000), "number": hex(1)}
-        raise RuntimeError("execution reverted")
-
-    def code(self, address):
-        return b"\x60" if address in (VAULT, TOKEN, MINTER, SUPPLY) else b""
-
-    def logs(self, address, topics):
-        return []
+VAULT = ("deposit", "payFee", "depositSigned", "refund", "payOut")
+PROBES = [O.Probe(SOURCE, _setup, (*(("Vault", f, ("Token",)) for f in VAULT), ("Minter", "mint", ("Supply",))))]
 
 
 @pytest.fixture(scope="module")
-def built(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("actions") / "A.sol"
-    path.write_text(SOURCE)
-    return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
+def d(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
+    return d
 
 
-def _verdict(built, name, fn_name, at, contracts):
-    from services.logic.terms import reset_terms
+def _funded(amount):
+    """A stranger handed ``amount`` tokens by the holder, approving the vault for them."""
 
-    reset_terms()
-    contract = built[name]
-    fn = next(f for f in contract.functions_entry_points if f.name == fn_name)
-    verdict, _ = function_verdict(contract, fn, at, _Deployed(), contracts)
-    return verdict
+    def arrange(d, who):
+        assert O.transact(d, "Token", "transfer(address,uint256)", ("address", "uint256"), (who, amount))
+        assert O.transact(d, "Token", "approve(address,uint256)", ("address", "uint256"), (d.at["Vault"], amount), who)
 
-
-def test_a_deposit_pulling_the_callers_own_tokens_stays_open(built):
-    contracts = {VAULT: built["Vault"], TOKEN: built["Token"]}
-    assert _verdict(built, "Vault", "deposit", VAULT, contracts).openness == "open"
+    return arrange
 
 
-def test_a_mint_its_supply_contract_allows_only_controllers_is_never_open(built):
-    contracts = {MINTER: built["Minter"], SUPPLY: built["Supply"]}
-    assert _verdict(built, "Minter", "mint", MINTER, contracts).openness != "open"
+def _vault(d, name):
+    return O.verdict(d, "Vault", name, "Token")
 
 
-def test_a_fixed_fee_in_tokens_anyone_can_obtain_stays_open(built):
-    contracts = {VAULT: built["Vault"], TOKEN: built["Token"]}
-    assert _verdict(built, "Vault", "payFee", VAULT, contracts).openness == "open"
+def test_a_deposit_pulling_the_callers_own_tokens_stays_open(d):
+    v = O.check(d, "Vault", "deposit", _vault(d, "deposit"), arrange=_funded(5), open_at={"amount": 5})
+    assert O.strangers_passing(d, "Vault", O.function(d, "Vault", "deposit"), {"amount": 5}) == {False}  # unfunded
+    assert v.openness == "open"
 
 
-def test_a_checked_action_is_still_a_revert_point_of_its_own(built):
+def test_a_mint_its_supply_contract_allows_only_controllers_is_never_open(d):
+    v = O.verdict(d, "Minter", "mint", "Supply")
+    O.check(d, "Minter", "mint", v, samples=({"amount": 0}, {"amount": 1}), open_at=False)
+    assert v.openness != "open"
+    with O.snapshot(d):  # no stranger can make itself a controller
+        assert not O.transact(d, "Supply", "addController(address)", ("address",), (O.STRANGERS[0],), O.STRANGERS[0])
+
+
+def test_a_fixed_fee_in_tokens_anyone_can_obtain_stays_open(d):
+    v = O.check(d, "Vault", "payFee", _vault(d, "payFee"), arrange=_funded(100), open_at={})
+    assert v.openness == "open"
+
+
+def test_a_checked_action_is_still_a_revert_point_of_its_own(d):
     # ``require(token.transfer(...))``: the call holding is a fact, and whether it returns is still asked of the call.
-    contracts = {VAULT: built["Vault"], TOKEN: built["Token"]}
-    assert _verdict(built, "Vault", "payOut", VAULT, contracts).openness == "open"
+    O.check(d, "Vault", "payOut", _vault(d, "payOut"), open_at={"amount": 0})
 
 
-def test_paying_ether_out_lowers_as_an_action(built):
-    contracts = {VAULT: built["Vault"], TOKEN: built["Token"]}
-    assert _verdict(built, "Vault", "refund", VAULT, contracts).openness == "open"
+def test_paying_ether_out_lowers_as_an_action(d):
+    O.check(d, "Vault", "refund", _vault(d, "refund"), open_at={})
 
 
-class _SupplyUnread(_Deployed):
-    """The node times out on the slot holding the minter's supply contract."""
-
-    def _answer(self, method, params):
-        if method == "eth_getStorageAt" and (int(params[0], 16), int(params[1], 16)) == (MINTER, 0):
-            raise RuntimeError("timeout")
-        return super()._answer(method, params)
-
-
-def test_a_check_handed_the_caller_by_a_contract_whose_address_went_unread_is_never_open(built):
+def test_a_check_handed_the_caller_by_a_contract_whose_address_went_unread_is_never_open(d):
     # Lido CSM's gate handing ``msg.sender`` to a module whose address the node failed to read: not "assumed".
-    from services.logic.terms import reset_terms
+    minter = d.at["Minter"]
+    clean = O.verdict(d, "Minter", "mint", "Supply")
+    faulted = O.verdict(
+        d, "Minter", "mint", "Supply",
+        chain=O.Faulty(d, storage=lambda m, p: int(p[0], 16) == minter and int(p[1], 16) == 0),
+    )  # fmt: skip
+    assert faulted.openness != "open"
+    O.never_bolder(clean, faulted)
 
-    reset_terms()
-    fn = next(f for f in built["Minter"].functions_entry_points if f.name == "mint")
-    contracts = {MINTER: built["Minter"], SUPPLY: built["Supply"]}
-    verdict, _ = function_verdict(built["Minter"], fn, MINTER, _SupplyUnread(), contracts)
-    assert verdict.openness != "open"
+
+def _signed(amount, nonce=0):
+    digest = keccak(encode(["address", "uint256", "uint256", "uint256"], [O.hex20(SIGNER), amount, nonce, DEADLINE]))
+    sig = Account.unsafe_sign_hash(digest, SIGNER_KEY)
+    return {
+        "owner": SIGNER, "amount": amount, "nonce": nonce, "deadline": DEADLINE,
+        "v": sig.v, "r": sig.r.to_bytes(32, "big"), "s": sig.s.to_bytes(32, "big"),
+    }  # fmt: skip
 
 
-def test_a_signed_deposit_pulling_chosen_amounts_is_open_to_any_signer(built):
+def test_a_signed_deposit_pulling_chosen_amounts_is_open_to_any_signer(d):
     # The token pull is an action the signer arranges (an approval): a search that pins what it can't model must
-    # still let it return.
-    contracts = {VAULT: built["Vault"], TOKEN: built["Token"]}
-    assert _verdict(built, "Vault", "depositSigned", VAULT, contracts).openness == "open"
+    # still let it return. Any relayer submits the signer's deposit.
+    def signer_ready(d, who):
+        assert O.transact(d, "Token", "transfer(address,uint256)", ("address", "uint256"), (SIGNER, 5))
+        assert O.transact(d, "Token", "approve(address,uint256)", ("address", "uint256"), (d.at["Vault"], 5), SIGNER)
+
+    v = O.check(d, "Vault", "depositSigned", _vault(d, "depositSigned"), arrange=signer_ready, open_at=_signed(5))
+    assert v.openness == "open"

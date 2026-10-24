@@ -69,7 +69,9 @@ def deployment(url: str, root: Path, source: str, version: str = A.SOLC) -> A.De
         n = len(list(sub.iterdir()))
         sub = sub / str(n)
         sub.mkdir()
-        return A.Deployment(url, sub, source)
+        d = A.Deployment(url, sub, source)
+        d.root = root  # where a setup compiles another source (``deployment(d.url, d.root, ...)``)
+        return d
     finally:
         A.SOLC = old
 
