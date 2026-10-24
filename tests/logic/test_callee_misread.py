@@ -63,11 +63,21 @@ contract C {
     Guard guard;
     Bits bits;
     Supply supply;
+    address rev;
     uint256 total;
-    constructor(address g, address b, address s) { guard = Guard(g); bits = Bits(b); supply = Supply(s); }
+    constructor(address g, address b, address s, address r) {
+        guard = Guard(g); bits = Bits(b); supply = Supply(s); rev = r;
+    }
     function shadowOrigin(uint256 x) external { x; require(guard.ok()); total += 1; }
     function lowBit(uint256 x) external { x; require(bits.check(msg.sender)); total += 1; }
     function mint(uint256 amount) external { supply.canMint(msg.sender, amount); total += amount; }
+    // The contract's own call into code that always reverts, read as a success (A52): nobody ever passes.
+    function selfCall(uint256 x) external {
+        x;
+        address r = rev;
+        assembly { let ok := call(gas(), r, 0, 0, 0, 0, 0) if iszero(ok) { revert(0, 0) } }
+        total += 1;
+    }
 }
 """
 
@@ -82,12 +92,14 @@ def _setup(d):
     d.deploy("Odd")
     d.deploy("Bits", ("address",), (d.at["Odd"],))
     d.deploy("Supply", ("address",), (d.at["Rev"],))
-    d.deploy("C", ("address", "address", "address"), (d.at["Guard"], d.at["Bits"], d.at["Supply"]))
+    d.deploy("C", ("address",) * 4, (d.at["Guard"], d.at["Bits"], d.at["Supply"], d.at["Rev"]))
     assert O.transact(d, "Supply", "addController(address)", ("address",), (CONTROLLER,))
 
 
 FOLLOWED = {"shadowOrigin": "Guard", "lowBit": "Bits", "mint": "Supply"}
-PROBES = [O.Probe(SOURCE, _setup, tuple(("C", n, f) for n, c in FOLLOWED.items() for f in ((c,), ())))]
+PROBES = [
+    O.Probe(SOURCE, _setup, (*(("C", n, f) for n, c in FOLLOWED.items() for f in ((c,), ())), ("C", "selfCall", ())))
+]
 
 
 @pytest.fixture(scope="module")
@@ -133,3 +145,13 @@ def test_an_action_handed_the_caller_is_open_only_where_every_strangers_call_goe
     v = O.verdict(d, "C", "mint", *(("Supply",) if followed else ()))
     _never_open(d, "mint", v)
     assert O.passes(d, "C", O.function(d, "C", "mint"), {"amount": 1}, sender=CONTROLLER)
+
+
+def test_an_open_now_the_chain_does_not_confirm_is_never_reported(d):
+    # Whatever the lowering gets wrong (here the contract's own Yul call, A52), "open now" stands only once every
+    # stranger's own call goes through on the chain: nobody's does.
+    v = O.verdict(d, "C", "selfCall")
+    O.check(d, "C", "selfCall", v, samples=SAMPLES, open_at=False)
+    assert v.openness == "not_determined" and "open_unconfirmed" in v.gaps
+    fn = O.function(d, "C", "selfCall")
+    assert not any(O.passes(d, "C", fn, {"x": 0}, sender=who) for who in {*O.ACCOUNTS, *O.STRANGERS})

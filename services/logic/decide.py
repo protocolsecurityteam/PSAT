@@ -1709,6 +1709,7 @@ class Evaluator:
         where a decision rests on it). A callee not followed leaves it unknown: only every stranger's own call, run
         on the chain, shows it passes (``decide``)."""
         if not any(contains(a, IDENTITY_KINDS) for a in t[3]):
+            self.world.__dict__["_arranged_open"] = True  # assumed: whatever it needs, the caller arranges first
             return ASSUMED
         if self.eval(t[1]) is UNK:
             return UNK  # handed the caller by a contract whose address went unread: whose check it is is unknown
@@ -1730,6 +1731,8 @@ class Evaluator:
         # Refused there only on entries the caller can bring about (a balance, an allowance) is no pass but what the
         # caller must hold (``requires``), asked as it stands with or without callee code answering.
         opened = self.world.action_open(t, lowered[0])
+        if opened is not False:
+            self.world.__dict__["_arranged_open"] = True  # a pass on entries the caller brings about first
         if isinstance(opened, frozenset):
             # Some of the entries it reads the caller can bring about, not all (a balance, not a blacklist): an action
             # the caller arranges if those alone, set as needed, let it through, the rest as they stand.
@@ -2048,6 +2051,10 @@ def _abi_value(value: Any, type_: str) -> Any:
         return "0x" + format(int(value) % 2**160, "040x")
     if type_.startswith("bytes") and type_ != "bytes":
         return (int(value) % 2 ** (8 * int(type_[5:]))).to_bytes(int(type_[5:]), "big")
+    if type_.startswith("int") and type_[3:].isdigit() or type_ == "int":
+        bits = int(type_[3:] or 256)
+        signed = int(value) % 2**bits  # a negative value as its two's complement word, or as itself
+        return signed - 2**bits if signed >= 2 ** (bits - 1) else signed
     return int(value)
 
 
@@ -2155,8 +2162,32 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         verdict = replace(verdict, gaps=verdict.gaps + ("callee_code_pass",))
     if world.__dict__.get("confirm_spent") and not verdict.complete:
         verdict = replace(verdict, gaps=verdict.gaps + ("budget:confirm",))
+    verdict = _confirmed_open(formula, world, verdict)
     chosen = tuple(("arguments", name) for name in _quantified(core))
     return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
+
+
+def _confirmed_open(formula: Term, world: World, verdict: Verdict) -> Verdict:
+    """``verdict``, unless it is plainly "open now" (nothing to hold first, no call of its own first, no ether sent,
+    no entry of its own to arrange first) and the chain doesn't confirm it: every stranger's own call, run as the
+    chain stands (``runs`` with the witness, else a search of its own, then ``strangers_run``), must go through.
+    Otherwise whatever the lowering said, a callee's code or a mis-lowered construct of the contract's own, is not
+    determined, ``open_unconfirmed``."""
+    if verdict.openness != "open" or verdict.allowed != "now" or verdict.requires or verdict.after:
+        return verdict
+    if world.__dict__.pop("_arranged_open", False):
+        return verdict  # open once each stranger arranges its own entries (an approval, a deposit): checked that way
+    witness = verdict.witnesses.get(FRESH, {})
+    if witness.get("msg.value"):
+        return verdict
+    if runs(world, FRESH, witness) is True:
+        if strangers_run(formula, world, witness):
+            return verdict
+    else:
+        found = _executes(formula, world, FRESH, set(), tries=2)
+        if found is not None and strangers_run(formula, world, found):
+            return replace(verdict, witnesses={**verdict.witnesses, FRESH: found})
+    return Verdict("not_determined", frozenset(), False, gaps=("open_unconfirmed",))
 
 
 def _handed_actions(t: Term) -> list[Term]:
@@ -2325,6 +2356,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     address doesn't, so a paused owner-only function still names its owner. Open means an unconfigured address passes
     now, or would once the ``when`` conditions allow while nobody known passes now either (a paused public function).
     """
+    world.__dict__.pop("_arranged_open", None)
     if formula == FALSE:
         return Verdict("restricted", frozenset(), True)  # always reverts: nobody, ever
     world.deadline = time.monotonic() + DECISION_SECONDS
@@ -2372,7 +2404,8 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             if now is not False and not any(f is True for f in fresh):
                 gaps = [g for st, f in zip(states, fresh) if f is UNK for g in _unsettled(formula, world, anyone, st)]
                 return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps or ["now_unknown"]))
-            acts = _acts_once_allowed(formula, world, anyone, set(), states, fresh)
+            later: list[str] = []
+            acts = _acts_once_allowed(formula, world, anyone, set(), states, fresh, later)
             if acts is not True:
                 # Allowed only where it does nothing (disabling what is already disabled): no power to anyone.
                 if not any(f is True for f in fresh):
@@ -2380,7 +2413,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                         g for st, f in zip(states, fresh) if f is UNK for g in _unsettled(formula, world, anyone, st)
                     ]
                 else:
-                    gaps = ["inert_when_allowed"] if acts is False else ["effect_unknown"]
+                    gaps = ["inert_when_allowed"] if acts is False else later or ["effect_unknown"]
                 if acts is UNK and world.effective is not None:
                     gaps += _unsettled(world.effective, world, anyone, None)
                 return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps))
@@ -2418,6 +2451,9 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         found_early.clear()
         allowed = _strangers_allowed(formula, world, found_early)
         if allowed is not None:
+            # Open on entries each stranger brings about first: no call of its own as the chain stands shows it, so
+            # ``_confirmed_open`` leaves it to what the stranger must hold or arrange.
+            world.__dict__["_arranged_open"] = True
             requires = _requirements(formula, world)
             if any(need == "unknown" for _, _, need in requires):
                 return Verdict("not_determined", frozenset(), False, gaps=("holding_unread",), requires=requires)
@@ -2721,10 +2757,13 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         unlisted = coverage.lookups if capped else coverage.blind
         now_passes = bool(unlisted) and _outcome(formula, world, anyone, candidates, unlisted, fixed={}) is not False
     allowed: Any = None  # asked only where a stranger gets through in some state of the conditions
+    later: list[str] = []
     if now is False and not now_passes and any(f is True for f in fresh):
         # A stranger gets through in some state of the conditions: open once they allow it, unless that call does
         # nothing; with a condition unread, whether it can come about at all is unknown.
-        allowed = UNK if unread or now_maybe else _acts_once_allowed(formula, world, anyone, candidates, states, fresh)
+        allowed = (
+            UNK if unread or now_maybe else _acts_once_allowed(formula, world, anyone, candidates, states, fresh, later)
+        )
     if now is True:
         return Verdict("open", frozenset(), True, witnesses={FRESH: _argument_values(found_now)})
     if allowed is True:
@@ -2747,6 +2786,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if allowed is UNK:
         # Strangers get through once the conditions allow, and whether that call does anything is unknown.
         gaps.append("now_unknown")
+        gaps += later
         return Verdict(
             "not_determined",
             callers,
@@ -3123,13 +3163,21 @@ def call_gap(call: Term, probe: "Evaluator") -> str:
     return text
 
 
-def _acts_once_allowed(formula: Term, world: World, anyone: dict, candidates: set, states: list, fresh: list) -> bool:
+def _acts_once_allowed(
+    formula: Term, world: World, anyone: dict, candidates: set, states: list, fresh: list, reasons: list | None = None
+) -> bool:
     """Whether a stranger, in some state of the conditions that lets it through, gets a call with an effect through:
     "open once allowed" means the power, not a no-op (``disableConsensus`` once consensus is already disabled). A
     condition the function writes itself (``disableConsensus`` setting the quorum it checks, an initializer its flag)
     is where its holders leave it, not a gate that may open: it stays as it is. ``False`` is no "nobody, ever": that
     holds only where no entry point can write the condition back, which latching shows (such a condition reads as it
-    stands and never gets here); ``_decide`` reports it as not determined (``inert_when_allowed``), in both branches."""
+    stands and never gets here); ``_decide`` reports it as not determined (``inert_when_allowed``), in both branches.
+
+    Nor does "open once allowed" rest on a callee's answer: a state that lets the stranger through only with a
+    condition reading a call answering otherwise than it does now (``require(g.ok())`` with ``ok()`` false) claims the
+    callee can come to answer so, which nothing here shows (it may be a flag nothing writes, a ``pure`` false). Such
+    a state shows nothing: unknown, each call named in ``reasons`` (``later_on_callee:<signature>``); with every
+    condition free, those conditions read as they stand."""
 
     def own(atom: Term) -> bool:
         return any(
@@ -3139,18 +3187,20 @@ def _acts_once_allowed(formula: Term, world: World, anyone: dict, candidates: se
         )
 
     probe = Evaluator(world, anyone)
+    plain = probe.without_code()
     # A record the caller names is each created in its own state, not left by the function where it found it.
     owned = frozenset(a for a in when_atoms(formula) if own(a) and not contains(a, _FREE_KINDS | {"unknown"}))
+    answered = frozenset(a for a in when_atoms(formula) if subterms(a, "call"))
     answer: Any = False
     for state, passes in zip(states, fresh):
         if passes is not True:
             continue
         if state is None:
-            # Every condition free: those the function writes are read as they are instead.
+            # Every condition free: those the function writes, and those a callee answers, are read as they are.
             saved = world.latched
-            world.latched = saved | owned
+            world.latched = saved | owned | answered
             try:
-                through = True if not owned else _outcome(formula, world, anyone, candidates, fixed=None)
+                through = True if not owned | answered else _outcome(formula, world, anyone, candidates, fixed=None)
                 acts = through
                 if through is True and world.effective is not None:
                     acts = _outcome(world.effective, world, anyone, candidates, fixed=None)
@@ -3161,9 +3211,13 @@ def _acts_once_allowed(formula: Term, world: World, anyone: dict, candidates: se
             flipped = [
                 a
                 for a, value in state.items()
-                if not contains(a, _FREE_KINDS | {"unknown"}) and probe.truth(a) is not value
+                if not contains(a, _FREE_KINDS | {"unknown"})
+                and (plain if a in answered else probe).truth(a) is not value
             ]
-            acts = False if any(a in owned for a in flipped) else True
+            on_callee = [a for a in flipped if a in answered]
+            acts = False if any(a in owned for a in flipped) else UNK if on_callee else True
+            if on_callee and reasons is not None:
+                reasons += [f"later_on_callee:{c[2]}" for a in on_callee for c in subterms(a, "call")]
             if acts is True and world.effective is not None:
                 acts = _outcome(world.effective, world, anyone, candidates, fixed=state)
         if acts is True:

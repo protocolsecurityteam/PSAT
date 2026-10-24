@@ -162,13 +162,20 @@ def test_g4_a_role_nobody_holds_now_beside_a_cap_is_not_complete(d):
     assert not O.nobody(v)
 
 
+def _unblock(d):
+    assert O.transact(d, "Blocklist", "setBad(bytes32,bool)", ("bytes32", "bool"), (TAG_HASH, False))
+
+
 @FOLLOWED
-def test_g1_extended_a_callee_answer_its_owner_can_change_opens_later(d, followed):
+def test_g1_extended_a_callee_answer_its_owner_can_change_is_never_open_later_on_its_word(d, followed):
+    # The blocklist's owner can unblock the tag, and then every stranger passes: "open later" would be true here,
+    # but it would rest on the callee coming to answer otherwise, which nothing shows (G6: one that never can): not
+    # determined, the call named.
     v = O.verdict(d, "Tagged", "e9", *(("Blocklist",) if followed else ()))
     O.check(d, "Tagged", "e9", v, samples=({"v": 7},), open_at=False)
-    assert v.openness == "open" and v.allowed == "later"
-    with O.snapshot(d):  # the blocklist's owner unblocks the tag: every stranger passes
-        assert O.transact(d, "Blocklist", "setBad(bytes32,bool)", ("bytes32", "bool"), (TAG_HASH, False))
+    assert v.openness == "not_determined" and "later_on_callee:blocked(bytes)" in v.gaps, v
+    with O.snapshot(d):
+        _unblock(d)
         assert O.strangers_passing(d, "Tagged", O.function(d, "Tagged", "e9"), {"v": 7}) == {True}
 
 
@@ -214,14 +221,12 @@ def test_g3_extension_strangers_run_first_settle_open_where_reads_fail(d, follow
     assert v.allowed == "now"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G6: 'open later' on a callee no transaction can make pass (a flag nothing "
-    "writes, a pure false): nobody ever passes",
-)
 @FOLLOWED
-@pytest.mark.parametrize("name", ["viaState", "viaPure"])
-def test_g6_a_callee_nothing_can_make_pass_is_never_open_later(d, name, followed):
+@pytest.mark.parametrize(("name", "signature"), [("viaState", "ok()"), ("viaPure", "never()")])
+def test_g6_a_callee_nothing_can_make_pass_is_never_open_later(d, name, signature, followed):
+    # "Open later" never rests on a callee's answer changing: a flag nothing writes, a pure false.
     assert O.strangers_passing(d, "ViaNever", O.function(d, "ViaNever", name), {"v": 1}) == {False}
     v = O.verdict(d, "ViaNever", name, *(("Never",) if followed else ()))
+    O.check(d, "ViaNever", name, v, samples=({"v": 1},), open_at=False)
     assert v.openness != "open", v
+    assert f"later_on_callee:{signature}" in v.gaps, v

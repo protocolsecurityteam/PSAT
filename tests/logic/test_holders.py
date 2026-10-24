@@ -57,6 +57,7 @@ _REVOKED = int.from_bytes(keccak(b"RoleRevoked(bytes32,address)"), "big")
 _BLOCKED = int.from_bytes(keccak(b"Blocked(address)"), "big")
 MINTERS = [(0xB0 << 150) + i for i in range(300)]
 REVOKED, BLOCKED = MINTERS[7], MINTERS[11]
+_TRANSFER = keccak(b"transfer()")[:4].hex()
 
 
 class _Deployed(Chain):
@@ -81,6 +82,11 @@ class _Deployed(Chain):
             return {"timestamp": hex(1_700_000_000), "number": hex(100)}
         if method == "eth_getLogs":
             return []
+        call = params[0] if method == "eth_call" else {}
+        if int(call.get("to", "0x0"), 16) == AT and call.get("data", "").startswith("0x" + _TRANSFER):
+            # ``transfer()`` as deployed: it returns for whoever is not blocked.
+            if int(call["from"], 16) != BLOCKED and not self.words.get(O.slot(int(call["from"], 16), 1)):
+                return "0x"
         raise RuntimeError("execution reverted")
 
     def code(self, address):
