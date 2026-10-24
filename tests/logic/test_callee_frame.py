@@ -52,6 +52,13 @@ contract E {
     constructor(D x) { d = x; }
     function ok(uint256 v) external view returns (bool) { return d.val(7) == v; }
 }
+contract W { function who() external view returns (address) { return msg.sender; } }
+contract F {
+    W public w;
+    constructor(W x) { w = x; }
+    // W answers each asker with itself: only F asking gets F back.
+    function ok(uint256 v) external view returns (bool) { return w.who() == address(this) && v == 4; }
+}
 contract Strict { function ok(uint256 v) external pure returns (bool) { return v == 3 && false; } }
 contract Lax { function ok(uint256 v) external pure returns (bool) { return v == 3; } }
 contract C {
@@ -66,8 +73,12 @@ contract C {
     constructor(A y, V z, S w, Checker k, Strict t, E u) {
         (a, vv, s, checker, strict, e, owner) = (y, z, w, k, t, u, msg.sender);
     }
+    F public f;
+    function setF(F z) external { f = z; }
     // E asks D, whose answer is the same whoever asks: asked of the chain as this contract.
     function asked(uint256 v) external { require(e.ok(v)); x = v; }
+    // F asks W, whose answer is who asks: asked of the chain as F. Anyone passing v = 4.
+    function askedBy(uint256 v) external { require(f.ok(v)); x = v; }
     // Anyone passing v = 7 gets through: A asks B, which lets A ask.
     function nested(uint256 v) external { require(a.ok(v)); x = v; }
     // V.ok is false under every staticcall (msg.value is 0 there): only the owner passes.
@@ -105,12 +116,15 @@ def d(anvil):  # noqa: F811
     for name in ("V", "S", "Checker", "Strict", "Lax", "D"):
         d.deploy(name)
     d.deploy("E", ("address",), (d.at["D"],))
+    d.deploy("W")
+    d.deploy("F", ("address",), (d.at["W"],))
     d.deploy(
         "C",
         ("address",) * 6,
         tuple(d.at[n] for n in ("A", "V", "S", "Checker", "Strict", "E")),
     )
     d.send("B", "0x" + (keccak(text="setA(address)")[:4] + encode(["address"], ["0x%040x" % d.at["A"]])).hex())
+    d.send("C", "0x" + (keccak(text="setF(address)")[:4] + encode(["address"], ["0x%040x" % d.at["F"]])).hex())
     return d
 
 
@@ -118,7 +132,8 @@ def _verdict(d, name, contracts=None, chain=None):
     reset_terms()
     c = d.slither["C"]
     fn = next(f for f in c.functions_entry_points if f.name == name)
-    known = contracts if contracts is not None else d.contracts("C", "A", "B", "V", "S", "Checker", "Strict", "E", "D")
+    every = ("C", "A", "B", "V", "S", "Checker", "Strict", "E", "D", "W", "F")
+    known = contracts if contracts is not None else d.contracts(*every)
     return function_verdict(c, fn, d.at["C"], chain or d.chain(), known)[0]
 
 
@@ -163,10 +178,18 @@ def test_a_word_of_the_call_data_inside_the_arguments_is_what_they_encode(d):
     assert verdict.openness != "open", verdict
 
 
+def _senders(chain, to: int) -> set[int]:
+    return {key[3] for key in chain._memo if isinstance(key, tuple) and key[:1] == ("c",) and key[1] == to}
+
+
 def test_a_callee_answering_alike_for_every_asker_is_asked_as_this_contract(d):
     # D's code never reads who asks: E's call to it goes to the chain from this contract, an answer already shared.
     chain = d.chain()
     verdict = _verdict(d, "asked", chain=chain)
     assert verdict.openness == "open" and list(verdict.witnesses.values())[0].get("v") == 14
-    senders = {key[3] for key in chain._memo if isinstance(key, tuple) and key[:1] == ("c",)}
-    assert senders == {d.at["C"]}
+    assert _senders(chain, d.at["D"]) == {d.at["C"]}
+    # W's answer is who asks: F's call to it goes to the chain from F, and v = 4 passes as it does on the chain.
+    chain = d.chain()
+    verdict = _verdict(d, "askedBy", chain=chain)
+    assert verdict.openness == "open" and list(verdict.witnesses.values())[0].get("v") == 4
+    assert _senders(chain, d.at["W"]) == {d.at["F"]}

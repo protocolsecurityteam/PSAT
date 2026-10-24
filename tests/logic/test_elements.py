@@ -376,12 +376,24 @@ def test_a_loop_over_an_empty_list_never_calls_and_the_admin_passes(anvil):  # n
         assert verdict.openness == "restricted" and verdict.principals == {int(ACCOUNT0, 16)}
 
 
-@pytest.mark.parametrize("name", ["viaDoWhile"])
+@pytest.mark.parametrize("name", ["viaReturn", "viaBreak", "viaDoWhile"])
 def test_a_member_past_the_iterations_followed_is_never_left_out_of_a_complete_list(anvil, name):  # noqa: F811
     verdict = _verdict(_deployed(anvil, sources=0, members=5), name)
     listed = set(verdict.principals) | set(verdict.conditions)
     assert not (verdict.complete and not set(MEMBERS) <= listed)
     assert set(MEMBERS[:3]) <= listed or verdict.openness == "not_determined"
+
+
+@pytest.mark.parametrize("name", ["viaReturn", "viaBreak"])
+def test_a_list_is_followed_exactly_up_to_the_bound_and_never_past_it(anvil, name):  # noqa: F811
+    # Three entries are followed exactly: each member named, nothing forgotten. A fourth is past what is followed:
+    # the loop's remainder is forgotten (``unknown:loop``), and the answer is left open rather than cut at three.
+    at = _verdict(_deployed(anvil, sources=0, members=3), name)
+    assert at.openness == "restricted" and set(at.principals) == set(MEMBERS[:3]), at
+    assert not any(g.startswith("unknown:loop") for g in at.gaps)
+    past = _verdict(_deployed(anvil, sources=0, members=4), name)
+    assert past.openness == "not_determined" and not past.complete, past
+    assert any(g.startswith("unknown:loop") for g in past.gaps)
 
 
 @pytest.mark.parametrize("name", ["laterReturn", "laterBreak"])
