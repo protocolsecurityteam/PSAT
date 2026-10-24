@@ -210,3 +210,21 @@ def test_a_slot_an_external_library_can_write_is_never_nobody_ever(d, monkeypatc
     with O.snapshot(d):  # the owner has the library write the slot: every stranger passes
         assert O.transact(d, "ViaExt", "rawFixed(uint256)", ("uint256",), (0,))
         assert O.strangers_passing(d, "ViaExt", O.function(d, "ViaExt", "actRaw"), {"amount": 5}) == {True}
+
+
+def test_a_starved_solver_never_makes_the_owners_list_more_complete_than_the_clean_run(d, monkeypatch):
+    # With the range set aside the owner is the whole list, holding on it; a solver given no work reaches the same
+    # list another way, and neither may be more complete than the other.
+    import services.logic.decide as decide_module
+
+    clean = O.check(d, "C", "actOwner", O.verdict(d, "C", "actOwner"), samples=AMOUNTS, open_at=False)
+    monkeypatch.setattr(decide_module, "SOLVER_RLIMIT", 1)
+    starved = O.verdict(d, "C", "actOwner")
+    O.never_bolder(clean, starved)
+    with O.snapshot(d):  # the owner widens the range: the owner passes, nobody else known does
+        _set_range(d)
+        act_owner = O.function(d, "C", "actOwner")
+        assert O.passes(d, "C", act_owner, {"amount": 50}, sender=OWNER)
+        assert not any(
+            O.passes(d, "C", act_owner, {"amount": 50}, sender=w) for w in {*O.ACCOUNTS, *O.STRANGERS} - {OWNER}
+        )

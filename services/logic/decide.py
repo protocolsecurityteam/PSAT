@@ -2320,12 +2320,13 @@ def _state_blocked(formula: Term, world: World, coverage: Coverage, verdict: Ver
     if again.openness == "restricted" and again.complete and not shown:
         return verdict  # nobody even with them set aside: who they are refutes them
     if contains(reduced, IDENTITY_KINDS) and again.openness == "restricted" and shown:
+        # Whoever passes the whole formula passes it with those conditions set aside: a list complete there is
+        # complete here, each holding on them (as a holder freed of business conditions is in ``_decide``).
         return replace(
             again,
             principals=frozenset(),
             signers=frozenset(),
             conditions={who: again.conditions.get(who, "business") for who in shown},
-            complete=False,
             allowed="conditional",
             gaps=again.gaps + gaps,
         )
