@@ -1012,6 +1012,10 @@ class World:
     # Whether a call made by followed code answers the same whoever makes it (``verdict.asker_free``): then it is
     # asked of the chain as this contract, an answer any asker shares.
     asker_free: Callable[[Term], bool] = lambda call: False
+    # Why a view call handed nothing of the caller may still answer otherwise for another caller (``origin``,
+    # ``hidden``, ``unfollowed``, ...), else ``None``: see ``verdict.caller_bound``. ``None`` where no such check is
+    # supplied: then only the callees' lowerings are read (``_reads_origin``).
+    caller_bound: Callable[[Term], str | None] | None = None
     # Whether a state-changing call its callee refuses for the caller (as that condition, in caller terms) fails only
     # on the caller's own entries there, which open code lets the caller bring about (see ``verdict.action_open``).
     action_open: Callable[[Term, Term], bool | frozenset] = lambda call, refused: True
@@ -4238,7 +4242,13 @@ def _singles_out(formula: Term, world: World, depth: int, unread: list[bool], co
 
 def _reads_origin(term: Term, world: World, depth: int) -> bool:
     """Whether a view call in ``term`` that no identity is handed to reaches code reading ``tx.origin``, through
-    followed callees a few contracts deep."""
+    followed callees a few contracts deep: as ``World.caller_bound`` says (which asks the callee's runtime code too,
+    and names a call whose code it can't show reads nothing of the origin), where it is supplied."""
+    if world.caller_bound is not None:
+        return any(
+            call[4] and not any(contains(a, IDENTITY_KINDS) for a in call[3]) and world.caller_bound(call) is not None
+            for call in subterms(term, "call")
+        )
     if depth >= IDENTITY_DEPTH:
         return False
     for call in subterms(term, "call"):

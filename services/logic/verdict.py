@@ -27,6 +27,7 @@ from .decide import (
     Evaluator,
     Verdict,
     World,
+    _runtime_code,
     contains_term,
     coverage,
     decide,
@@ -573,8 +574,6 @@ def _delegating(contract: Any, chain: Chain, address: int, code_of: Callable[[in
     proxy whose implementation ``code_of`` names, or whose deployed code delegates where the compiled contract
     doesn't, or is a different length from it; an EIP-7702 delegation); or that code can't be read."""
     from slither.core.cfg.node import NodeType
-
-    from .decide import _runtime_code
 
     for fn in contract.functions_and_modifiers:
         calls = [str(c) for c in [*fn.low_level_calls, *fn.solidity_calls]]
@@ -2060,7 +2059,10 @@ def function_verdict(
         contract as the origin, so its answer is trusted only where no code it may run reads the origin: ``origin``
         when its followed code does, ``nested`` when a callee it asks does; ``unfollowed`` when code not followed has
         a call opcode (it may reach one) or can't be read, or the callees go deeper than followed (``origin`` when it
-        has an ``ORIGIN`` opcode); ``read_failed:call_target`` when where it goes can't be read."""
+        has an ``ORIGIN`` opcode); ``read_failed:call_target`` when where it goes can't be read. A followed callee's
+        lowering never shows on its own that the origin goes unread (a mis-lowered read of it is no ``origin`` term):
+        that takes its runtime code too, deployed and compiled, holding no ``ORIGIN`` opcode (``hidden`` when one
+        does, ``unfollowed`` when that code can't be read)."""
         bound = world.__dict__.setdefault("_caller_bound", {})
         key = (call, depth)
         if key in bound:
@@ -2081,12 +2083,14 @@ def function_verdict(
             else:
                 parts = [p for p in (lowered[0], *lowered[1]) if isinstance(p, Term)]
                 why = "origin" if any(contains(p, _ORIGIN) for p in parts) else None
-                if why is None and any(_hidden_calls(p) for p in parts):
-                    # Code it runs that its lowering doesn't show (a low-level call, an action): its own opcodes say
-                    # whether the origin may be read behind them.
-                    code = chain.code(address % 2**160)
-                    reach = _runtime_reach(code) if isinstance(code, bytes) else "unfollowed"
-                    why = "hidden" if reach == "origin" else "unfollowed"
+                if why is None:
+                    reach = _code_reach(address % 2**160)
+                    if reach == "origin":
+                        why = "hidden"  # its code reads the origin where its lowering shows none
+                    elif reach == "unreadable" or any(_hidden_calls(p) for p in parts):
+                        # Code it runs that its lowering doesn't show (a low-level call, an action), or code that
+                        # can't be read: the origin may be read behind it.
+                        why = "unfollowed"
                 for inner in sorted({c for p in parts for c in subterms(p, "call") if c[4]}, key=stable):
                     if why is not None:
                         break
@@ -2097,6 +2101,24 @@ def function_verdict(
                         why = "nested" if deeper in ("origin", "nested") else deeper
         bound[key] = why
         return why
+
+    def _code_reach(address: int) -> str:
+        """``origin`` when code that runs at ``address`` (as deployed there, at the address whose code it runs, or
+        as the followed contract was compiled) has an ``ORIGIN`` opcode, ``unreadable`` when the deployed code can't
+        be read, else ``none``."""
+        held = world.__dict__.setdefault("_code_reach", {})
+        if address not in held:
+            codes = [chain.code(address)]
+            running = code_of(address) % 2**160 if code_of is not None else address
+            if running != address:
+                codes.append(chain.code(running))
+            if not all(isinstance(code, bytes) for code in codes):
+                held[address] = "unreadable"
+                return held[address]
+            if address in contracts:
+                codes.append(_runtime_code(contracts[address]))
+            held[address] = "origin" if any(_ORIGIN_OP in _opcodes(code) for code in codes) else "none"
+        return held[address]
 
     inlined: list[str] = []  # signatures of the calls ``bind_callers`` put its callee's code in place of
 
@@ -2159,6 +2181,7 @@ def function_verdict(
     world.effective = assume_conjuncts(bind_callers(effective, False))
     world.callee = callee
     world.asker_free = asker_free
+    world.caller_bound = caller_bound
     world.action_open = action_open
     world.credited = credited
     world.writer_topics = writer_topics

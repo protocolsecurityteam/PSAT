@@ -31,6 +31,12 @@ contract Guard {
     constructor(address a, address d) { admin = a; deep = Deep(d); }
     function originReq() external view returns (bool) { require(tx.origin == admin); return true; }
     function capFor() external view returns (uint256) { require(tx.origin == admin); return 100; }
+}
+
+// Apart from Guard: code with an ``ORIGIN`` opcode anywhere is never read as the same for every caller.
+contract Relay {
+    Deep deep;
+    constructor(address d) { deep = Deep(d); }
     function lowStatic() external view returns (bool) {
         (bool s, bytes memory r) = address(deep).staticcall(abi.encodeWithSignature("okAdmin(address)", address(0)));
         require(s && abi.decode(r, (bool)));
@@ -51,13 +57,16 @@ contract C {
     Guard guard;
     address gnv;
     address reg;
+    Relay relay;
     uint256 total;
-    constructor(address a, address g, address n, address r) { admin = a; guard = Guard(g); gnv = n; reg = r; }
+    constructor(address a, address g, address n, address r, address l) {
+        admin = a; guard = Guard(g); gnv = n; reg = r; relay = Relay(l);
+    }
     function a7(uint256 x) external { require(!(x > 5 && guard.originReq())); total += 1; }
     function a7b(uint256 x) external { bool b = x > 5 && guard.originReq(); require(!b); total += 1; }
     function a7c(uint256 x) external { require((x > 5 && guard.originReq()) == false); total += 1; }
     function a5(uint256 x) external { require(guard.originReq()); require(guard.capFor() >= x); total += 1; }
-    function a10(uint256 x) external { x; require(guard.lowStatic()); total += 1; }
+    function a10(uint256 x) external { x; require(relay.lowStatic()); total += 1; }
     function a11(uint256 x) external { x; require(IGuardV(gnv).nv()); total += 1; }
     function a12(uint256 x) external { total += guard.capFor() + x; }
     function a15(uint256 x) external { total += Registry(reg).req() + x; }
@@ -76,16 +85,17 @@ def _setup(d):
     d.deploy("Guard", ("address", "address"), (ADMIN, d.at["Deep"]))
     d.deploy("GuardNV", ("address",), (d.at["Deep"],))
     assert O.transact(d, "Registry", "setGuard(address)", ("address",), (d.at["Guard"],))  # req() now reverts
-    d.deploy("C", ("address",) * 4, (ADMIN, d.at["Guard"], d.at["GuardNV"], d.at["Registry"]))
+    d.deploy("Relay", ("address",), (d.at["Deep"],))
+    d.deploy("C", ("address",) * 5, (ADMIN, d.at["Guard"], d.at["GuardNV"], d.at["Registry"], d.at["Relay"]))
 
 
 PROBES = [
     O.Probe(
         SOURCE,
         _setup,
-        (*(("C", n, ("Guard",)) for n in ("a7", "a7b", "a7c", "a5", "a10", "a12", "a16")),
-         ("C", "a10", ("Guard", "Deep")), ("C", "a11", ("GuardNV",)), ("C", "a15", ()), ("C", "a15", ("Registry",)),
-         ("C", "d1", ())),
+        (*(("C", n, ("Guard",)) for n in ("a7", "a7b", "a7c", "a5", "a12", "a16")),
+         ("C", "a10", ("Relay",)), ("C", "a10", ("Relay", "Deep")), ("C", "a11", ("GuardNV",)), ("C", "a15", ()),
+         ("C", "a15", ("Registry",)), ("C", "d1", ())),
     )
 ]  # fmt: skip
 
@@ -125,10 +135,10 @@ def test_a_stored_value_from_a_call_that_always_reverts_lets_no_one_through(depl
 def test_a_low_level_staticcall_in_followed_code_is_the_view_call_its_data_encodes(deployed):
     # ``staticcall(abi.encodeWithSignature("okAdmin(address)", ...))`` asks ``Deep.okAdmin``: its origin check is the
     # caller's when followed, an unfollowed callee reading the origin otherwise; never the chain's word.
-    v = O.check(deployed, "C", "a10", _verdict(deployed, "a10", ("Guard",)), samples=X, open_at=False)
+    v = O.check(deployed, "C", "a10", _verdict(deployed, "a10", ("Relay",)), samples=X, open_at=False)
     O.sound(v, {ADMIN})
     assert v.openness == "not_determined" and "origin:okAdmin(address)" in v.gaps
-    v = O.check(deployed, "C", "a10", _verdict(deployed, "a10", ("Guard", "Deep")), samples=X, open_at=False)
+    v = O.check(deployed, "C", "a10", _verdict(deployed, "a10", ("Relay", "Deep")), samples=X, open_at=False)
     assert set(v.principals) == {ADMIN} and not v.complete
 
 

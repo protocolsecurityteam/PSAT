@@ -14,10 +14,14 @@ pragma solidity 0.8.27;
 
 contract Guard {
     address public admin;
-    bool public flag;
     constructor(address a) { admin = a; }
     function ok(uint256 x) external view returns (bool) { x; return tx.origin == admin; }
     function okOr(uint256 x) external view returns (bool) { return tx.origin == admin || gasleft() == x; }
+}
+
+// Apart from Guard: code with an ``ORIGIN`` opcode anywhere is never read as the same for every caller.
+contract Flags {
+    bool public flag;
     function paused(uint256 x) external view returns (bool) { x; return true; }
     function flagged(uint256 x) external view returns (bool) { return flag && gasleft() > x; }
 }
@@ -25,13 +29,14 @@ contract Guard {
 contract C {
     address admin;
     Guard guard;
+    Flags flags;
     mapping(address => bool) isAdmin;
     uint256 total;
-    constructor(address a, address g) { admin = a; guard = Guard(g); isAdmin[a] = true; }
+    constructor(address a, address g, address f) { admin = a; guard = Guard(g); flags = Flags(f); isAdmin[a] = true; }
     function viaOrigin(uint256 x) external { require(guard.ok(x)); total += x; }
     function viaOriginOr(uint256 x) external { require(guard.okOr(x)); total += x; }
-    function viaPause(uint256 x) external { require(!guard.paused(x)); total += x; }
-    function viaFlag(uint256 x) external { require(guard.flagged(x)); total += x; }
+    function viaPause(uint256 x) external { require(!flags.paused(x)); total += x; }
+    function viaFlag(uint256 x) external { require(flags.flagged(x)); total += x; }
     function viaMem(uint256 x) external {
         address who;
         assembly { let p := mload(0x40) mstore(add(p, mul(x, 0)), caller()) who := mload(add(p, mul(x, 0))) }
@@ -46,10 +51,11 @@ ADMIN = 0xAB << 152 | int("ab" * 19, 16)
 
 def _setup(d):
     d.deploy("Guard", ("address",), (ADMIN,))
-    d.deploy("C", ("address", "address"), (ADMIN, d.at["Guard"]))
+    d.deploy("Flags")
+    d.deploy("C", ("address",) * 3, (ADMIN, d.at["Guard"], d.at["Flags"]))
 
 
-PROBES = [O.Probe(SOURCE, _setup, tuple(("C", f, ("Guard",)) for f in ("viaOrigin", "viaOriginOr", "viaPause",
+PROBES = [O.Probe(SOURCE, _setup, tuple(("C", f, ("Guard", "Flags")) for f in ("viaOrigin", "viaOriginOr", "viaPause",
                                                                         "viaFlag", "viaMem")))]  # fmt: skip
 X = ({"x": 0}, {"x": 1}, {"x": 10**9})
 
@@ -62,12 +68,12 @@ def d(anvil):  # noqa: F811
 
 
 def test_a_failed_read_in_a_followed_callee_never_opens_it(d):
-    whole = O.check(d, "C", "viaFlag", O.verdict(d, "C", "viaFlag", "Guard"), samples=X, open_at=False)
-    v = O.verdict(d, "C", "viaFlag", "Guard", chain=O.Faulty(d, storage={d.at["Guard"]}))
+    whole = O.check(d, "C", "viaFlag", O.verdict(d, "C", "viaFlag", "Flags"), samples=X, open_at=False)
+    v = O.verdict(d, "C", "viaFlag", "Flags", chain=O.Faulty(d, storage={d.at["Flags"]}))
     assert v.openness == "not_determined"
     assert "read_failed:storage:flag" in v.gaps
     O.never_bolder(whole, v)
-    # Read whole: nobody passes, the flag being unset, but over every ``x`` only Guard's code shows it, which never
+    # Read whole: nobody passes, the flag being unset, but over every ``x`` only Flags' code shows it, which never
     # refutes on its own: unknown, never open.
     assert whole.openness == "not_determined" and "callee_code_refutation" in whole.gaps
 
@@ -75,9 +81,9 @@ def test_a_failed_read_in_a_followed_callee_never_opens_it(d):
 def test_a_spent_read_budget_never_opens_it(d, monkeypatch):
     import services.logic.verdict as verdict_module
 
-    clean = O.verdict(d, "C", "viaFlag", "Guard")
+    clean = O.verdict(d, "C", "viaFlag", "Flags")
     monkeypatch.setattr(verdict_module, "READS_PER_FUNCTION", 1)
-    v = O.verdict(d, "C", "viaFlag", "Guard")
+    v = O.verdict(d, "C", "viaFlag", "Flags")
     assert v.openness == "not_determined"
     O.never_bolder(clean, v)
 
