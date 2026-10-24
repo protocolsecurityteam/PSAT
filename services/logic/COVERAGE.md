@@ -31,24 +31,24 @@ The honest starting point, written before any change. "no test" means the behavi
 | InitArray | APPROXIMATED (A6) | one init value always read as a one-item literal ``[v]``, also where it is a copy of an array of the same rank |
 | InternalCall | HANDLED, APPROXIMATED (A10) | inlined (every test). **A10** memory reference arguments passed by value: a callee's writes into a memory array/struct parameter never reach the caller |
 | InternalDynamicCall | APPROXIMATED (A11) | value ``opaque``, but the pointed-to function's reverts and writes ignored: assumed to succeed with no effect |
-| Length | HANDLED | memory array, storage length slot, calldata size, code length (``test_lower_shapes``) |
+| Length | HANDLED | memory array, storage length slot, calldata size, code length (``test_elements`` stored/calldataArray/firstBytes, ``test_lower_shapes`` made/onlyAccounts, ``test_constructs`` storageLength/calldataLength/ownCodeLength/dataLength, against the chain) |
 | LibraryCall | HANDLED | as InternalCall, ``storage`` parameters by location (``test_library_writers``) |
 | LowLevelCall | HANDLED, APPROXIMATED (A12) | ``.call``/``.delegatecall``. **A12** ``.staticcall`` (a query, no action) taken as an arranged action: success and returned data ``assumed``, so an ERC-1271 / permission check through ``staticcall`` passes for everyone; ``.call`` whose data hands the caller to the callee also assumed |
 | Member | HANDLED | storage/memory/argument/call-result/loaded struct fields, enum members, library constants, ``I.f``, ``.code``/``.codehash`` (``test_lower_shapes``); anything else ``op field`` (evaluates unknown) |
 | NewArray | HANDLED | zeroed items for small constant lengths (``test_lower_shapes``); Panic 0x41 (too large) not modelled (A9 family) |
-| NewContract | HANDLED | action mark, address ``unknown:created`` (no test) |
+| NewContract | HANDLED | action mark, address ``unknown:created`` (``test_constructs`` created/created2/createdOk: the address rejected by name, success against the chain) |
 | NewElementaryType | HANDLED | ``new bytes(n)`` length (``test_lower_shapes``) |
-| NewStructure | HANDLED | fields by name; arity mismatch ``unknown:NewStructure`` (``test_lower_shapes``) |
-| Nop | HANDLED | no effect (implicit, no test) |
+| NewStructure | HANDLED | fields by name; arity mismatch ``unknown:NewStructure`` (``test_constructs`` built, against the chain; an arity mismatch no longer compiles, A29) |
+| Nop | HANDLED | no effect (Slither emits it only in a constructor calling a base without one: never in an entry point decided) |
 | Phi, PhiCallback | REJECTED (implicit) | SSA-only, never in ``node.irs``; would fall to ``unknown:<class>`` (implicit) |
 | Return | HANDLED | every test |
-| Send | REJECTED | result ``unknown:Send`` (``test_origin_shapes``) |
+| Send | REJECTED | result ``unknown:Send`` (``test_ir_coverage`` viaSend) |
 | SolidityCall | see builtins | |
-| Transfer | HANDLED | arranged action (``test_actions``) |
+| Transfer | HANDLED | arranged action (``test_actions::test_paying_ether_out_lowers_as_an_action``, against ``eth_call``) |
 | TypeConversion | APPROXIMATED (A13) | see conversion kinds |
 | Unary | HANDLED, APPROXIMATED (A2) | ``!`` exact; ``~`` 256-bit whatever the width |
 | Unpack | HANDLED | tuple items (``test_lower_shapes``) |
-| CodeSize (``operations.codesize``) | HANDLED | ``a.code.length`` (``test_pool_shapes``) |
+| CodeSize (``operations.codesize``) | HANDLED | ``a.code.length`` (``test_pool_shapes::test_a_pull_built_at_the_free_memory_pointer_is_the_transfer_it_encodes``, ``test_constructs`` otherCodeLength/eoaCodeLength, against the chain) |
 | Call, Operation, OperationWithLValue | n/a | abstract bases; anything unmatched falls to ``unknown:<class>`` |
 | BinaryType, UnaryType | n/a | enums (members covered under Binary/Unary) |
 
@@ -59,15 +59,15 @@ Solidity-level:
 | builtin | state | |
 |---|---|---|
 | ``require(bool)``, ``require(bool,string)``, ``assert(bool)`` | HANDLED | path condition (every test) |
-| ``require(bool,error)`` | HANDLED | IR form, or the expression when the IR drops it (``test_lower_shapes``) |
+| ``require(bool,error)`` | HANDLED | IR form, or the expression when the IR drops it (``test_language`` requiredError) |
 | ``revert()``, ``revert(string)``, ``revert `` | HANDLED | path ends |
-| ``keccak256(bytes)``, ``sha256(bytes)``, ``ripemd160(bytes)``, ``keccak256()``, ``sha256()``, ``ripemd160()``, ``sha3()`` | HANDLED | ``hash`` (``test_logged``, ``test_engine_pieces``); ripemd160 evaluates unknown |
-| ``ecrecover(bytes32,uint8,bytes32,bytes32)`` | HANDLED | ``signer`` (``test_lower_shapes``, ``test_actions``) |
+| ``keccak256(bytes)``, ``sha256(bytes)``, ``ripemd160(bytes)``, ``keccak256()``, ``sha256()``, ``ripemd160()``, ``sha3()`` | HANDLED | ``hash`` (``test_language`` hashed*, ``test_engine_pieces``); ripemd160 rejected by name (``test_constructs`` ripemd); sha256 of known bytes unknown unnamed: A54 |
+| ``ecrecover(bytes32,uint8,bytes32,bytes32)`` | HANDLED | ``signer`` (``test_lower_shapes::test_a_packed_signature_reads_back_as_the_signer_check``, ``test_actions::test_a_signed_deposit_pulling_chosen_amounts_is_open_to_any_signer``, ``test_constructs`` recovered; a signature of another digest still recovers the sender: A53) |
 | ``addmod``, ``mulmod`` | HANDLED, APPROXIMATED (A14) | evaluated exactly; **A14** Solidity's form reverts (Panic 0x12) on a zero modulus, Yul's returns 0: both read as 0 |
-| ``selfdestruct(address)``, ``suicide(address)`` | HANDLED | halts successfully, action (``test_selfdestruct``) |
+| ``selfdestruct(address)``, ``suicide(address)`` | HANDLED | halts successfully, action (``test_selfdestruct``, ``test_constructs`` destroyed, against the chain) |
 | ``gasleft()`` | REJECTED | ``unknown:gasleft()`` (``test_core``) |
 | ``blockhash(uint256)``, ``blobhash(uint256)`` | REJECTED | ``opaque`` (no test) |
-| ``log0..log3(bytes32...)`` (Solidity's) | HANDLED | no effect on success (no test) |
+| ``log0..log3(bytes32...)`` (Solidity's) | HANDLED | no effect on success (``test_constructs::test_solidity_s_own_logs_change_nothing_about_success``, 0.4.19) |
 | ``abi.encode()``, ``abi.encodePacked()`` | HANDLED, APPROXIMATED (A15) | ``enc`` (``test_logged``, ``test_lower_shapes``). **A15** hashing ``abi.encode`` of a ``bytesN`` (N < 32) right-aligns it (the ABI left-aligns) |
 | ``abi.encodeWithSelector()``, ``abi.encodeWithSignature()`` | APPROXIMATED (A15) | ``enc``; hashed, the selector/signature is encoded as a whole word instead of 4 bytes |
 | ``abi.encodeCall()`` | HANDLED, APPROXIMATED (A15) | as ``encodeWithSignature``; the fallback ``enc("abi.encodeCall")`` hashes as plain words |
@@ -75,8 +75,8 @@ Solidity-level:
 | ``bytes.concat()``, ``string.concat()`` | REJECTED | ``opaque`` (no test) |
 | ``type(address)``, ``type()`` | REJECTED | ``opaque`` (constants are folded by Slither) |
 | ``this.balance()`` | REJECTED | ``opaque`` |
-| ``balance(address)`` | HANDLED | ``balance`` (``test_actions``) |
-| ``code(address)`` | HANDLED | ``code`` |
+| ``balance(address)`` | HANDLED | ``balance`` (``test_constructs`` ownBalance/otherBalance, against the chain) |
+| ``code(address)`` | HANDLED | ``code`` (``test_constructs`` ownCodeLength) |
 | ``codehash(address)`` | REJECTED | ``opaque`` |
 | Vyper builtins: ``create_from_blueprint()``, ``create_minimal_proxy_to()``, ``empty()``, ``convert()``, ``len()``, ``method_id()``, ``unsafe_sub()``, ``unsafe_add()``, ``unsafe_div()``, ``unsafe_mul()``, ``pow_mod256()``, ``max_value()``, ``min_value()``, ``concat()``, ``ecrecover()``, ``isqrt()``, ``range()``, ``min()``, ``max()``, ``shift()``, ``abs()``, ``raw_call()``, ``_abi_encode()``, ``slice()``, ``uint2str()``, ``send()`` | APPROXIMATED (A16) | ``opaque`` values with no effect: ``raw_call``/``send``/``create_*`` (calls out, revert on failure) silently dropped; ``unsafe_*``/``convert`` values unknown but unnamed as Vyper |
 
@@ -86,22 +86,22 @@ Yul builtins (Solidity >= 0.6 assembly, lowered by Slither to ``SolidityCall``):
 |---|---|---|
 | ``mstore``, ``mload`` | HANDLED | constant-offset memory words; lost words ``opaque(mload, unknown memory)`` (``test_lower_shapes``, ``test_core_soundness``) |
 | ``mstore8``, ``calldatacopy``, ``codecopy``, ``extcodecopy``, ``mcopy`` | HANDLED | memory forgotten (later ``mload`` lost) |
-| ``returndatacopy`` | HANDLED | first word of the last call, else memory forgotten (``test_pool_shapes``) |
+| ``returndatacopy`` | HANDLED | first word of the last call, else memory forgotten (``test_pool_shapes``, ``test_constructs`` returnCopyKnown/returnCopy, against the chain) |
 | ``keccak256(uint256,uint256)`` | HANDLED | hash of the bytes earlier ``mstore`` left (``test_logged``) |
-| ``sload``, ``sstore``, ``tload``, ``tstore`` | HANDLED | ``rawload``/raw writes; transient zero at start (``test_callee_actions``, ``test_arranged``) |
-| ``calldataload``, ``calldatasize`` | HANDLED | argument words / ``elem(msg.data, off)`` (``test_snapshot``) |
-| ``extcodesize``, ``extcodehash``, ``balance(uint256)``, ``selfbalance()`` | HANDLED | ``codesize``/``codehash``/``balance`` |
-| ``returndatasize`` | HANDLED | ``retsize`` of the last call (``test_pool_shapes``) |
-| ``call``, ``callcode`` | HANDLED | arranged action, or the action ``abi.encode*`` data names (``test_pool_shapes``) |
-| ``staticcall`` | HANDLED | the view call encoded data makes, else ``opaque`` (``test_lower_shapes``) |
-| ``delegatecall`` | HANDLED | ``delegate`` (``test_versions``) |
-| ``create``, ``create2`` | HANDLED | action, ``unknown:created`` |
-| ``return``, ``stop``, ``revert(uint256,uint256)``, ``invalid()``, ``selfdestruct(uint256)`` | HANDLED | halt / path ends |
-| ``log0..log4(uint256...)`` | HANDLED | ``emit`` marks |
-| ``pop(uint256)`` | HANDLED | discarded |
+| ``sload``, ``sstore``, ``tload``, ``tstore`` | HANDLED | ``rawload``/raw writes; transient zero at start (``test_constructs`` transient/transientFresh, ``test_callee_actions``, ``test_arranged``) |
+| ``calldataload``, ``calldatasize`` | HANDLED | argument words / ``elem(msg.data, off)`` (``test_constructs`` dataLength/dataByte, ``test_callee_frame`` words, against the chain) |
+| ``extcodesize``, ``extcodehash``, ``balance(uint256)``, ``selfbalance()`` | HANDLED | ``codesize``/``codehash``/``balance`` (``test_constructs`` yulCodeSize/yulCodeHash/yulBalance/yulSelfBalance) |
+| ``returndatasize`` | HANDLED | ``retsize`` of the last call (``test_pool_shapes``, ``test_constructs`` returnSizeKnown; with no call placed before it, ``unsupported:returndatasize()``, returnSize) |
+| ``call``, ``callcode`` | HANDLED | arranged action, or the action ``abi.encode*`` data names (``test_pool_shapes``, ``test_constructs`` yulCallOk; a callee that always reverts read as success: A52) |
+| ``staticcall`` | HANDLED | the view call encoded data makes, else ``opaque`` (``test_lower_shapes::test_an_assembly_staticcall_of_encoded_data_is_the_view_call_it_makes``, ``test_constructs`` yulStaticcallEncoded/yulStaticcall) |
+| ``delegatecall`` | HANDLED | ``delegate`` (``test_versions``, ``test_constructs`` yulDelegatecall: unknown) |
+| ``create``, ``create2`` | HANDLED | action, ``unknown:created`` (``test_constructs`` created/created2) |
+| ``return``, ``stop``, ``revert(uint256,uint256)``, ``invalid()``, ``selfdestruct(uint256)`` | HANDLED | halt / path ends (``test_constructs`` yulStop/yulInvalid, ``test_language`` halted) |
+| ``log0..log4(uint256...)`` | HANDLED | ``emit`` marks (``test_constructs`` yulLogs) |
+| ``pop(uint256)`` | HANDLED | discarded (``test_constructs`` yulPop) |
 | ``byte(uint256,uint256)`` | HANDLED / REJECTED | packed-signature ``v``; else ``opaque`` |
-| ``timestamp()``, ``number()``, ``chainid()``, ``basefee()``, ``coinbase()``, ``gaslimit()``, ``difficulty()``, ``prevrandao()``, ``gasprice()``, ``blobbasefee()`` | REJECTED | ``opaque`` (same for every caller: not wrong, never resolved) |
-| ``address()`` | REJECTED | ``opaque`` (should be ``this``) |
+| ``timestamp()``, ``number()``, ``chainid()``, ``basefee()``, ``coinbase()``, ``gaslimit()``, ``difficulty()``, ``prevrandao()``, ``gasprice()``, ``blobbasefee()`` | REJECTED (since A38 HANDLED: ``test_ir_coverage::test_handled_environment_builtins_are_their_values``, ``test_constructs`` timestamp/number/chain) | ``opaque`` (same for every caller: not wrong, never resolved) |
+| ``address()`` | REJECTED | ``opaque`` (should be ``this``); since A38 ``this`` (``test_constructs`` yulAddress, ``test_ir_coverage::test_handled_environment_builtins_are_their_values``) |
 | ``caller()``, ``origin()``, ``callvalue()`` | HANDLED | Slither rewrites them to ``msg.sender``/``tx.origin``/``msg.value`` |
 | ``gas()``, ``msize(uint256)``, ``pc()``, ``codesize()``, ``clz(uint256)``, ``signextend(uint256,uint256)`` | REJECTED | ``opaque`` |
 | ``sdiv``, ``smod``, ``slt``, ``sgt``, ``sar`` | APPROXIMATED (A3) | Slither rewrites them to ``int256`` conversions around an ordinary ``Binary``: read as unsigned |
@@ -110,8 +110,8 @@ Yul builtins (Solidity >= 0.6 assembly, lowered by Slither to ``SolidityCall``):
 
 | variable | state | |
 |---|---|---|
-| ``msg.sender``, ``tx.origin``, ``this``, ``msg.value``, ``msg.sig``, ``msg.data`` | HANDLED | ``caller``/``origin``/``this``/``callvalue``/``sig``/``msg.data`` (``test_core``, ``test_origin_*``, ``test_lower_shapes``) |
-| ``now``, ``block.timestamp``, ``block.number``, ``block.chainid``, ``block.basefee``, ``block.prevrandao``, ``block.difficulty``, ``block.coinbase``, ``block.gaslimit`` | HANDLED | ``time`` terms (``test_arranged``, ``test_governance``) |
+| ``msg.sender``, ``tx.origin``, ``this``, ``msg.value``, ``msg.sig``, ``msg.data`` | HANDLED | ``caller``/``origin``/``this``/``callvalue``/``sig``/``msg.data`` (``test_constructs`` origin/self/sig/dataLength/dataByte, ``test_core``, ``test_origin_*``, ``test_lower_shapes``) |
+| ``now``, ``block.timestamp``, ``block.number``, ``block.chainid``, ``block.basefee``, ``block.prevrandao``, ``block.difficulty``, ``block.coinbase``, ``block.gaslimit`` | HANDLED | ``time`` terms (``test_constructs`` timestamp/number/chain, ``test_arranged``, ``test_governance``) |
 | ``tx.gasprice`` | APPROXIMATED (A17) | read as ``block.basefee``; the caller picks any price at or above it |
 | ``block.blobbasefee``, ``block.blockhash``, ``msg.gas`` | REJECTED | ``unknown:<name>`` |
 | ``self``, ``chain``, ``ZERO_ADDRESS``, ``chain.id``, ``block.prevhash``, ``self.balance`` (Vyper) | REJECTED | ``unknown:<name>``, but see A16 |
@@ -133,7 +133,7 @@ Yul builtins (Solidity >= 0.6 assembly, lowered by Slither to ``SolidityCall``):
 
 | construct | state | |
 |---|---|---|
-| storage read after an exact write | HANDLED | ``_read_at`` (``test_engine_pieces``) |
+| storage read after an exact write | HANDLED | ``_read_at`` (``test_elements`` wholeThenField/crossed/rawAgain) |
 | S2: field read after the whole struct/array written (``cfg = Cfg(..)``, ``delete cfg``) | APPROXIMATED (A5) | ``_read_at`` only compares paths of equal length: the pre-call value |
 | S3: whole value read after an element/field written | APPROXIMATED (A5) | same |
 | memory nested writes (``g[1][0] = x``, ``s.arr[i] = x``) | APPROXIMATED (A19) | written into the temporary reference, not the outer value |
@@ -148,7 +148,7 @@ Yul builtins (Solidity >= 0.6 assembly, lowered by Slither to ``SolidityCall``):
 | construct | state | |
 |---|---|---|
 | ``let``, assignment, blocks, call statements | HANDLED | ``test_yul`` |
-| ``add sub mul div mod exp and or xor shl shr lt gt eq iszero not`` | HANDLED | unsigned word ops |
+| ``add sub mul div mod exp and or xor shl shr lt gt eq iszero not`` | HANDLED | unsigned word ops (``test_yul::test_legacy_assembly_arithmetic_is_the_evm_s``, ``test_constructs::test_the_legacy_assembly_reader_computes_words_as_the_evm_does``, 0.4.19 and 0.5.14 against the chain) |
 | ``sload``, ``sstore``, ``caller``, ``address``, ``callvalue``, ``timestamp``, ``number``, ``extcodesize``, ``calldataload`` | HANDLED | as their Solidity forms |
 | ``log1..log4``, ``revert``, ``invalid``, ``pop`` | HANDLED | |
 | ``mstore``, ``mstore8``, ``calldatacopy``, ``codecopy``, ``returndatacopy`` | HANDLED | memory forgotten |
@@ -198,11 +198,11 @@ enum, 0 APPROXIMATED; builtins 85 HANDLED, 38 REJECTED, 0 APPROXIMATED; special 
 | A5 | storage read under / around a whole write | HANDLED: ``read_store`` projects a whole write onto the part read, and reads a whole value written in part as ``upd`` | ``test_elements::test_a_field_reads_back_what_a_whole_struct_write_or_delete_left``, ``test_an_item_pushed_then_copied_reads_back_as_pushed`` |
 | A6 | lido: memory copy of a storage array indexed as the array | HANDLED: copy vs literal by type rank; item ``k`` of a copy is ``load(..., k)`` | ``test_elements::test_a_storage_list_copied_to_memory_calls_each_item_not_the_list`` and the lido row |
 | A7 | symbolic-index write into a tracked memory array lost | HANDLED: ``update`` item by item (``ite``), else ``upd`` | ``test_elements::test_a_write_at_a_symbolic_index_lands_on_that_item`` |
-| A8 | bytes index as a word | HANDLED: one byte (``slice(elem(x, k), 0, 1)``) | ``test_elements::test_a_bytes_index_is_one_byte_not_a_word`` |
-| A9 | Panics not in the path | HANDLED: index out of range (0x32, memory, calldata and storage arrays; not mappings), enum conversion and enum arguments (0x21), allocation past 2**64 (0x41), pop on empty (through checked ``-``) | ``test_elements`` (literal, storage), ``test_language`` (``member``, ``enumArgument``, ``allocated``) |
+| A8 | bytes index as a word | HANDLED: one byte (``slice(elem(x, k), 0, 1)``) | ``test_elements::test_a_bytes_index_is_one_byte_not_a_word``, ``test_the_first_bytes_of_a_slice_*`` (against the chain) |
+| A9 | Panics not in the path | HANDLED: index out of range (0x32, memory, calldata and storage arrays; not mappings), enum conversion and enum arguments (0x21), allocation past 2**64 (0x41), pop on empty (through checked ``-``) | ``test_elements`` (literal; ``test_calldata_items_are_*``, ``test_storage_items_are_bounded_*`` against the chain), ``test_constructs`` (storageItem, calldataItem), ``test_language`` (``member``, ``enumArgument``, ``allocated``) |
 | A10 | callee writes into memory parameters lost | HANDLED: parameters hold the caller's object; reassigning a parameter points it elsewhere | ``test_elements::test_a_callee_writes_into_the_callers_object_but_reassigning_its_parameter_does_not`` |
 | A11 | function pointer call assumed to succeed | REJECTED: ``unsupported:InternalDynamicCall`` on the path, value and writes unknown | ``test_ir_coverage`` (``viaPointer``) |
-| A12 | ``.staticcall`` and caller-naming ``.call`` assumed | HANDLED: the view call / action the ``abi.encodeWith*`` data names (``ok``, decoded words); undecodable staticcall data ``unsupported:staticcall``, undecodable call data naming the caller ``unsupported:call_data`` | ``test_language::test_a_low_level_call_is_the_call_its_data_encodes``, ``test_origin_shapes::test_a_low_level_staticcall_in_followed_code_is_the_view_call_its_data_encodes`` |
+| A12 | ``.staticcall`` and caller-naming ``.call`` assumed | HANDLED: the view call / action the ``abi.encodeWith*`` data names (``ok``, decoded words); undecodable staticcall data ``unsupported:staticcall``, undecodable call data naming the caller ``unsupported:call_data`` | ``test_language::test_a_low_level_call_is_the_call_its_data_encodes`` (against a real target; a ``.call`` handing the caller to a target the caller picks is still assumed to succeed although the followed target refuses that caller: strict xfail ``viaCall-<stranger>``), ``test_an_undecodable_staticcall_is_rejected_by_name``, ``test_origin_shapes::test_a_low_level_staticcall_in_followed_code_is_the_view_call_its_data_encodes`` |
 | A13 | conversions unmasked / bytes misaligned | HANDLED: every integer width, address, ``bytesM`` -> ``bytesN`` as a shift, ``bytes`` -> ``bytesN`` its first N bytes; same in evaluator and solver (``converted``) | ``test_language`` (``narrowed``, ``cut``, ``padded``, ``unsignedOf``, ``signedOf``, ``tiny``) |
 | A14 | Solidity mulmod/addmod by zero | HANDLED: nonzero modulus required outside Yul (>= 0.5) | ``test_language`` (``modulus``) |
 | A15 | encodings hashed wrongly; an ``abi.encode`` item read from storage, computed, or handed into an inlined function no longer said its type, so a storage ``bytes4`` was right-aligned (and, handed on as ``bytes`` to an unfollowed callee, sent to the chain wrong) | HANDLED: every ``abi.encode``/``encodeWithSelector``/``encodeWithSignature``/``encodeCall`` item takes its argument's declared one-word type (a contract an address, an enum a ``uint8``; ``Lowerer``'s ``_typed_word``, as ``abi.encodePacked`` items already did): ``bytesN`` left-aligned, signed integers sign-extended, ``msg.sig`` a ``bytes4``; an item of unknown or dynamic type is refused (the encoding unknown), never laid out as a guess, and named: an item whose declared type is not one word and whose value isn't an argument or a literal (a struct, an array, ``bytes``/``string`` from storage, a function, a user-defined value type), a signature read from storage, and an ``abi.encodeCall`` Slither didn't render as its parts are ``unknown:unsupported:abi_item:<type>`` (it was an unnamed ``read_failed:condition``, review 5 ``q3b``); 4-byte selector for ``encodeWithSelector``/``encodeWithSignature``, other kinds not encoded | ``test_language`` (``hashed*``, ``concatenated``), ``test_abi_encode_types`` (storage, expression, literal and inlined-argument ``bytesN``, ``int8``/``int16``, address, bool, ``uint8``/``uint64``/``uint256``, a refused ``string``, followed and unfollowed, against the chain; review 5's sixteen item kinds and five wrong layouts, seeded and not, ``test_every_kind_of_item_is_laid_out_as_the_chain_does_or_refused_by_name``) |
@@ -215,13 +215,13 @@ enum, 0 APPROXIMATED; builtins 85 HANDLED, 38 REJECTED, 0 APPROXIMATED; special 
 | A22 | ``do``/``while`` back edges dropped | HANDLED: unrolled, then widened like any loop; the scheduler orders them | same test (``viaDoWhile``) |
 | A23 | irreducible flow dropped | REJECTED: ``unsupported:irreducible_cfg`` / ``unsupported:loop_shape`` exits, now only for flow no structured loop explains (nested loops and ``for (;;)``, which produced them, are A44/A45) | known REJECTED: none of the 177-row regression subset since the loop-control fixes (A45, A48, ``_schedule`` ordering a back edge by its own source; Lido ``proveWCAndActivate`` was the one ``unsupported:irreducible_cfg`` row), none ``loop_shape``; no Solidity probe produces one |
 | A24 | codeless storage-computed target latched | HANDLED: "no code at an address" latches only for this contract or a precompile (0x01-0x11) the code names, for a call's target and a ``code``/``codesize``/``codehash`` read alike; a constant or an immutable with no code now may be where a contract is created later, so the condition reads as it stands and whoever passes once it opens is named; ``_values_at`` counts writes around, within, and past loops | ``test_latching`` (``a_codeless_constant_target_is_how_the_condition_reads_now``, ``a_codeless_immutable_target_is_never_latched``, ``no_code_at_a_precompile_stays_latched``) |
-| A25 | legacy regex bindings past control flow | HANDLED: bindings and writes only from text before any control flow; past it, unknown and ``lost`` | ``test_language::test_legacy_assembly_assigns_nothing_for_sure_past_control_flow`` |
+| A25 | legacy regex bindings past control flow | HANDLED: bindings and writes only from text before any control flow; past it, unknown and ``lost`` | ``test_language::test_legacy_assembly_assigns_nothing_for_sure_past_control_flow`` (0.4.19 against the chain) |
 
 Found while working, not in the before table:
 
 | # | was | now | pinned by |
 |---|---|---|---|
-| A26 | ``sload`` ignored an earlier ``sstore`` in the same call; named and raw writes never aliased | HANDLED: raw and transient slots read through earlier writes; a small or unhashed raw slot written makes named reads ``unsupported:raw_named_alias`` (and back) | ``test_elements::test_a_raw_slot_reads_back_what_this_call_stored_there`` |
+| A26 | ``sload`` ignored an earlier ``sstore`` in the same call; named and raw writes never aliased | HANDLED: raw and transient slots read through earlier writes; a small or unhashed raw slot written makes named reads ``unsupported:raw_named_alias`` (and back) | ``test_elements::test_a_raw_slot_reads_back_what_this_call_stored_there`` (the ``unsupported:raw_named_alias`` direction has no test) |
 | A27 | a location written again kept its first position; merges took one path's write order | HANDLED: writes move to the end; merges reread each path's final value where orders differ or a path left the key alone | ``test_elements::test_writes_two_branches_make_in_opposite_orders_read_back_per_branch`` |
 | A28 | ``delete a[i]`` in memory zeroed the whole array | HANDLED | ``test_language`` (``deletedItem``) |
 | A29 | a struct built without its mapping fields left its variable unset (zero) | REJECTED: ``unsupported:NewStructure`` | (Solidity >= 0.7 refuses to compile one) |
@@ -231,7 +231,7 @@ Found while working, not in the before table:
 | A33 | an assembly ``return`` inside an internal function returned to its caller | HANDLED: it ends the whole call (``Exit.halted``) | ``test_language`` (``halted``) |
 | A34 | a short-circuit operand not separable from the rest ran unconditionally | REJECTED: ``unsupported:short_circuit`` | (no probe found that Slither renders so) |
 | A35 | operations after an internal call in the same statement took the callee's last node (checked/Yul scope, slices) | HANDLED: the statement's node restored | the checked-arithmetic probes |
-| A36 | ``abi.decode`` of an encoded word as a narrower type | REJECTED: ``unsupported:abi.decode:<from>-><to>``; same or wider integer types decode exactly | ``test_lower_shapes`` |
+| A36 | ``abi.decode`` of an encoded word as a narrower type | REJECTED: ``unsupported:abi.decode:<from>-><to>``; same or wider integer types decode exactly | no test of the narrowing itself (``test_lower_shapes`` deposit decodes at the same width) |
 | A37 | a field of any other value read as an unnamed ``op field`` | REJECTED: ``unsupported:member:<field>``; a field of an item of a calldata struct array is the caller's per-item choice | ``test_ir_coverage`` (``viaMember``) |
 | A38 | ``this.balance``, ``codehash(a)``, Yul ``address()``/``timestamp()``/... opaque; ``bytes.concat``/``string.concat`` opaque | HANDLED: their values (``balance``, ``codehash``, ``this``, ``time``), concat as ``encodePacked`` | ``test_ir_coverage::test_handled_environment_builtins_are_their_values``, ``test_language`` (``concatenated``) |
 | A39 | a followed callee read ``msg.value``, ``msg.data``, ``msg.sig`` and ``calldatasize`` as the outer call's (its guessed ``msg.value`` let a stranger through a view callee that sees none) | HANDLED: ``Lowerer.called`` lowers a callee in its own frame: ``msg.value`` zero for a view call, ``unknown:callee:msg.value`` for an action, ``msg.sig`` its own selector, ``msg.data`` (but ``msg.data[4:]``, its arguments) and ``calldatasize`` ``unknown:callee:*``; what the caller hands it keeps the caller's terms | ``test_callee_frame`` (``a_view_callee_reads_no_value``, ``a_callee_reads_its_own_selector``) |
@@ -243,10 +243,15 @@ Found while working, not in the before table:
 | A45 | ``for (;;)`` (no condition) rejected as ``unsupported:loop_shape``; once handled, a ``break`` in a ``for (;;)`` nested in a loop with a condition followed Slither's edge to the OUTER loop's ``ENDLOOP`` (a stranger let through read as owner-only) | HANDLED: a loop whose condition is always true; every ``break`` (Solidity's and Yul's) goes to the ``ENDLOOP`` of the innermost loop whose source (compiler offsets) holds it (``_break_target``), never Slither's edge; ``unsupported:break`` where no span tells the loop | ``test_loop_control`` (``forWithoutCondition``, ``forever``, ``foreverInFor``, ``foreverInWhileInFor``, ``foreverInForever``, ``doBreakInFor``, ``a_break_whose_loop_cant_be_told_from_the_source_is_rejected_by_name``) |
 | A46 | a value-type local declared without a value (``uint256 j;``) read as ``unknown:unset`` where branches merged, and kept the previous iteration's value when its declaration ran again (an inner loop's counter); once zeroed at every declaration, that was wrong before solc 0.5, where locals are function-scoped and the declaration emits no code | HANDLED by the compilation unit's solc version: >= 0.5 zero (a fresh zeroed object in memory) each time the declaration runs; a Yul ``let`` without a value zero each time it runs in every version (Slither marks Yul locals ``memory``; a Yul function's parameters, declared the same way, keep what they are handed); sibling Yul blocks each declaring ``let x`` get two Slither variables named alike with every use bound to one of them (a read after the second ``let x`` read the first block's value): where all the declarations are Yul's and the uses name at most one of the variables, the name is one cell each declaration starts again (Yul forbids shadowing a name in scope, so lifetimes never overlap), else a read of any of them is ``unknown:shadowed:<name>`` (also for same-named Solidity locals unless the uses name each one, ``Lowerer._same_named``; and, since review 5, for every Solidity local of a base name declared more than once, ``x`` / ``x_scope_0``, wherever assembly names one of them: Slither binds the assembly's ``x`` to the first declaration even where the second is in scope); < 0.5 every value local zero at the function's (or modifier's) entry and the declaration keeps what it holds, a modifier's ``_`` run again included (A50) (a memory local's object made on first touch, kept after); version unread: a local holding anything but zero is ``unsupported:declaration_scope`` | ``test_loop_control`` (``declaredInLoop``, ``nested*``, ``yulLet*``, ``yulFunctionLet``), ``test_declaration_scope`` (0.4.19 and 0.5.14 against the chain), ``test_yul_siblings`` (``sib*`` against the chain; the unknown-by-name rule; ``solSolYul``, ``solYulSol``, ``yulWritesSecond`` unknown and ``solThenYul``, ``solSol`` definite, against the chain) |
 | A47 | where a statement's source couldn't be read (Slither's slice cut a character in two, offsets shifted), any reading without ``:`` counted as "no slice": ``x[a:b]`` read as ``x``, ``msg.data[4:]`` as the whole ``msg.data``; likewise a Yul ``sload(SLOT)`` read as ``SLOT`` and a ``hex`` literal's bytes as its text | REJECTED by name: a reading counts only when faithful (every calldata value the statement reads named in it, brackets balanced); else its dynamic calldata reads ``unsupported:slice_source``, the Yul assignment ``unsupported:yul_source``, the literal is not folded; a statement reading no calldata needs no source | ``test_slice_source`` |
-| A48 | Yul ``for`` loops (Solidity >= 0.6 assembly, Slither's graph): the condition node's sons are ordered [exit, body], so the body never ran (``t`` stayed 0, definite); a Yul ``continue`` read as a ``do``/``while``'s (init before the condition) and skipped the post block; a Yul ``break``/``continue`` edge leads to the end of its ``if`` | HANDLED: a loop condition's exit is its loop's ``ENDLOOP`` by source, the other son the body (``_loop_exit``/``_loop_body``), for every loop; ``do``/``while`` told by its body written before the condition; ``continue`` to the post block's first statement (several chained in source order), else the condition; ``break`` as A45; ``unsupported:loop_shape`` where a condition node's sons aren't one exit and one body | ``test_loop_control`` (``yulFor``, ``yulContinueBreak``, ``yulNested``, ``yulPost``, ``yulInFor``), ``test_yul::test_a_yul_loop_slither_parses_runs_its_body`` |
+| A48 | Yul ``for`` loops (Solidity >= 0.6 assembly, Slither's graph): the condition node's sons are ordered [exit, body], so the body never ran (``t`` stayed 0, definite); a Yul ``continue`` read as a ``do``/``while``'s (init before the condition) and skipped the post block; a Yul ``break``/``continue`` edge leads to the end of its ``if`` | HANDLED: a loop condition's exit is its loop's ``ENDLOOP`` by source, the other son the body (``_loop_exit``/``_loop_body``), for every loop; ``do``/``while`` told by its body written before the condition; ``continue`` to the post block's first statement (several chained in source order), else the condition; ``break`` as A45; ``unsupported:loop_shape`` where a condition node's sons aren't one exit and one body | ``test_loop_control`` (``yulFor``, ``yulContinueBreak``, ``yulNested``, ``yulPost``, ``yulInFor``) |
 | A49 | a stranger let through only once a condition the function consumes itself is back (a spent initializer's version), or only where its call does nothing: where the formula may single someone out it fell through to a confident "nobody", where it can't it was not determined | HANDLED: a consumed condition latching proves no entry point can write back reads as it stands; otherwise not determined, ``inert_when_allowed``, whichever branch decides. "Nobody, ever" itself is meant to be claimed only on what never changes (A51), which does not yet hold for a condition inside a disjunction or behind an early exit, nor for slots a redeploy can write (KNOWN GAPS G1, G2's residue; slots a delegatecall or a proxy upgrade can write are no longer constant, D1) | ``test_consumed_conditions`` (``initAnyone``, ``initUnbanned``), ``test_arranged::test_what_anyone_may_redo_once_holders_did_it_is_not_open`` |
 | A50 | a modifier's ``_`` run more than once (``_; _;``, ``_`` in a loop) ran the function body each time from the frame at the modifier's entry: parameters and return variables an earlier run wrote were reset (every version), and before 0.5 so were the function-scoped locals | HANDLED: the function's frame (its parameters, return variables and locals, by variable) rides in the modifier's state; each run of ``_`` starts from what the last left (a ``return x`` assigns the return variables first), a local declared again zeroed there by A46's rule; a run not followed to its end (an unfollowed path, a widened loop's return) leaves the next run's frame unknown (``unknown:modifier_frame``) | ``test_declaration_scope`` (``twice*``, ``loopAcc`` on 0.4.19, 0.5.14 and 0.8.27 against the chain) |
 | A51 | a condition not about who calls that reads settable state, false now for every argument (``amount >= lo && amount <= hi`` with ``lo > hi``, both owner-settable), refuted everyone as it read now: restricted, complete, nobody | PARTIAL (see KNOWN GAPS G1, G2, G4 below: the claim below holds only for conditions that are top-level conjuncts of a single-exit formula, and only as far as ``constant_load`` sees every writer: since D1 no slot is constant where a delegatecall of the contract's own or a proxy can write it, ``verdict._delegating``): "nobody, ever" (restricted, complete, nobody listed) stands only where the conditions not about who calls that refute everyone read nothing a transaction may change: constants, immutables, ``this``, a slot of this contract no entry point can leave holding anything else from here (``verdict.constant_load``, as latching asks), or a latched condition. Otherwise those conditions are set aside: whoever the identity core then lets through is named holding only on them (``conditions``, ``allowed`` conditional, never complete); where the rest still lets nobody through, completely, the claim stands (who they are refutes them); otherwise (no core, the rest open or undetermined) not determined; each variable named, ``state_blocks_everyone:<variable>`` | ``test_state_blocked`` |
+
+| A52 | a Yul ``call`` to a callee that always reverts (no fallback, or a function that reverts) read as an arranged success: ``ok`` true where the chain returns 0 | OPEN (found 2026-10-24) | ``test_constructs`` (``yulCall``, ``yulCallFails``, strict xfail) |
+| A53 | ``ecrecover(h, v, r, s)`` evaluated as the signer identity whatever digest and signature it is handed: a signature of another digest still "recovers" the sender | OPEN (found 2026-10-24) | ``test_constructs`` (``recovered-2``, strict xfail) |
+| A54 | ``sha256`` of known bytes evaluates unknown with no label (neither computed nor rejected by name) | OPEN (found 2026-10-24) | ``test_constructs`` (``hashed``, strict xfail) |
+| A55 | ``super.transfer`` into the next body of the linearization (solc 0.4.19 ``LinkToken.transferAndCall``) lowers the base's balance check without the amount (``0 <= balances[caller]``): a pass where the chain reverts | OPEN (found 2026-10-24) | ``test_lower_shapes::test_super_runs_the_next_body_in_the_deployed_contracts_order`` (strict xfail) |
 
 ### KNOWN GAPS (open, documented 2026-10-24; reviewer probes in ``scratchpad/probe_audit4/``)
 
@@ -303,6 +308,14 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
   a followed callee's code answers ``True`` is trusted, so a candidate can be listed (over-listing, never a missed
   holder) on a mis-lowered callee's word. Fail-safe in direction (more listed, never fewer), but the list is not
   proven; ``Evaluator.passes``/``confirmed`` should be used there as elsewhere.
+* **G7. A mis-lowered followed callee can make a verdict bolder than the clean run** (found by the fail-safe sweep,
+  ``test_failsafe``, 2026-10-24). With every followed callee's code read as "nobody" (false) or "everyone" (true),
+  twelve probes come out "open" (now or later, complete) where the clean verdict was not determined or a list, and
+  the chain refuses some or all strangers: an action callee handed the caller (``Minter.mint`` over
+  ``Supply.canMint``), origin-reading inlined callees (``test_origin_callees`` p9/p9e/p9r/q4, ``test_origin_shapes``
+  a10/a11, ``test_review_probes`` mo), callees handed the caller's address bit (``test_stranger_runs`` originBit,
+  callerBit), and transfer pulls from a listing token (``test_pool_shapes``). "Callee code never decides on its own"
+  does not yet hold there. Strict xfails in ``test_failsafe`` (``G7``).
 * **G6. "Open later" on a callee no transaction can make pass** (review 5, ``probe_audit5/q7.py``). A view call
   whose answer is false now and can never change (a flag nothing anywhere writes, a ``pure`` function returning
   false) is read as a condition that may yet allow, so ``require(g.ok())`` is "open, later, complete" although nobody
@@ -386,7 +399,7 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
   candidate's questions may spend at most half the work left when it is asked (``_SHARE``); what every candidate
   shares (the stranger's chances) is asked under the decision's own limit. The order only: every candidate is asked
   about in turn, and one a budget leaves unasked is counted (``untested_candidates``)
-  (``test_budgets::test_candidates_the_state_refuses_are_asked_about_last``,
+  (the order itself has no oracle and no test;
   ``test_budgets::test_the_screen_reads_nothing_and_leaves_no_trace``).
 * Candidates of an unproven list (``decide.UNPROVEN_CANDIDATES``, ``UNPROVEN_READS``, ``UNPROVEN_BATCH``): where the
   holder list is unproven (hints: a callee's code, log words, constants) and no state of the conditions shows a
