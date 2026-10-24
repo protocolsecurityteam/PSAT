@@ -13,7 +13,8 @@ from eth_utils import keccak
 from services.logic.decide import _STRANGERS
 from services.logic.terms import reset_terms
 from services.logic.verdict import function_verdict
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 from tests.support.anvil import rpc
 
 SOURCE = """
@@ -24,6 +25,21 @@ contract G {
     function lowcaller(address who) external pure returns (bool) { return uint160(who) % 2 == 1; }
     function anyOrigin() external view returns (bool) { return tx.origin != address(0); }
     function anyCaller(address who) external pure returns (bool) { return who != address(0); }
+}
+contract H {
+    function check(address who, uint256 junk) external pure returns (bool) { junk; return uint160(who) % 2 == 1; }
+    function checkAll(address who, uint256 junk) external pure returns (bool) { junk; return who != address(0); }
+}
+// Review 5 (``q1b``): the callee is also handed what no evaluation knows (the gas left, a block hash), so the
+// engine's own search leaves it, and only the strangers' own runs can settle it.
+contract K {
+    H public h; uint256 public x;
+    constructor(H z) { h = z; }
+    function bitGas(uint256 v) external { require(h.check(msg.sender, gasleft())); x = v; }
+    function allGas(uint256 v) external { require(h.checkAll(msg.sender, gasleft())); x = v; }
+    function bitHash(uint256 v) external { require(h.check(msg.sender, _hash())); x = v; }
+    function allHash(uint256 v) external { require(h.checkAll(msg.sender, _hash())); x = v; }
+    function _hash() internal view returns (uint256) { return uint256(blockhash(block.number - 1)); }
 }
 contract C {
     G public g;
@@ -39,11 +55,26 @@ contract C {
 
 @pytest.fixture(scope="module")
 def d(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
+    return d
+
+
+def _setup(d):
     d.deploy("G")
     d.deploy("C", ("address",), (d.at["G"],))
-    return d
+    d.deploy("H")
+    d.deploy("K", ("address",), (d.at["H"],))
+
+
+PROBES = [
+    O.Probe(
+        SOURCE,
+        _setup,
+        tuple(("C", n, f) for n in ("originBit", "callerBit", "originAll", "callerAll") for f in (("G",), ()))
+        + tuple(("K", n, f) for n in ("bitGas", "allGas", "bitHash", "allHash") for f in (("H",), ())),
+    )
+]
 
 
 def _verdict(d, name, *others):
@@ -113,3 +144,14 @@ def test_an_inlined_callee_s_open_proposal_needs_every_stranger_on_the_chain(d, 
     assert verdict.openness != "open", verdict
     assert proposed, "the inlined formula was never decided"
     assert any(g.startswith("inlined_callee:") for g in verdict.gaps), verdict
+
+
+@pytest.mark.parametrize("others", [("H",), ()], ids=["followed", "unfollowed"])
+@pytest.mark.parametrize("name", ["bitGas", "allGas", "bitHash", "allHash"])
+def test_strangers_runs_settle_open_only_when_every_one_passes(d, name, others):
+    fn = O.function(d, "K", name)
+    every = O.strangers_passing(d, "K", fn, {"v": 1}) == {True}
+    assert every == name.startswith("all")
+    v = O.check(d, "K", name, O.verdict(d, "K", name, *others), open_at={"v": 1} if every else False)
+    if not every:
+        assert v.openness != "open" and "strangers_differ" in v.gaps, v

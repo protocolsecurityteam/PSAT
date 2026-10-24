@@ -260,7 +260,12 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
   ``if (msg.sender == pending) { x = 1; return; } require(a >= lo && a <= hi)``, with ``lo = 10 > hi = 5`` and
   ``setRange`` owner-only: both "restricted complete nobody"; after ``setRange(0, 100)`` a stranger passes both.
   (``act``, the plain conjunct, is handled: not determined, ``state_blocks_everyone:hi/lo``.) A51's "HANDLED" was
-  false for these shapes.
+  false for these shapes. **Extended (review 5, ``probe_audit4/f2.py``):** the same holds where the other side of a
+  disjunction is a callee's answer another contract's owner can change: ``e10`` =
+  ``require(msg.sender == owner || !g.blocked(abi.encode(tag)))`` is "restricted, complete, {owner}" though the
+  blocklist's owner can unblock the tag for every stranger. Strict xfails:
+  ``test_known_gaps::test_g1_a_settable_condition_beside_an_identity_check_is_never_nobody_ever``,
+  ``test_g1_extended_an_owner_or_a_changeable_callee_answer_is_never_a_complete_list``.
 * **G2. ``constant_load`` and writers outside the contract's own entry points** (``verdict.constant_load``).
   PARTLY FIXED 2026-10-24 (decision D1): a slot no entry point writes is changeable unless the contract makes no
   delegatecall (or callcode) of its own and runs at its own address (``verdict._delegating``: no low-level or
@@ -278,18 +283,31 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
   that returns early before its gate for some argument is "open" with that argument as the witness, though nothing
   privileged happens on that path. Probe ``b1.py``: ``f1(v)`` = ``if (v == 0) return; require(g.ok()); x = v;`` is
   "open complete" with witness ``v = 0`` while only the origin ``g`` names can set ``x`` (``f2``, the gate first, is
-  handled). A design gap: "open" should be claimed on the effect, not on not reverting.
+  handled). A design gap: "open" should be claimed on the effect, not on not reverting. Kept for now (decision
+  D3); strict xfail ``test_known_gaps::test_g3_open_is_claimed_on_the_privileged_effect``, today's meaning checked
+  by ``test_g3_an_early_return_before_the_gate_is_open_as_the_call_does_not_revert``. **Extension (review 5,
+  ``q1g3``):** with every stranger's own call run on the chain first (``strangers_run``), rows a failed read once
+  left undecided are now settled "open" on the same meaning: ``e11`` = ``if (g.exempt(msg.sender)) return;
+  require(msg.sender == owner); x = v;`` is "open" (every stranger returns early, nothing written) clean and with
+  every call to ``g`` failing (``test_g3_extension_strangers_run_first_settle_open_where_reads_fail``).
 * **G4. "Nobody, ever" vs "nobody now" for identity state.** A51 sets aside only conditions *not* about who calls.
   An identity check against settable state with nobody in it now (``msg.sender == pending`` with ``pending == 0``,
   owner-settable) is reported "restricted, complete, nobody", which reads as "nobody, ever" although the owner can
   name anyone. Probe ``c2.py``: ``accept`` and ``acceptCapped`` (``msg.sender == pending && v <= cap && v > 0``,
   ``cap == 0``): both "restricted complete nobody". The wording should be "nobody now" (or the setter's holders named
-  as able to grant it), not "nobody, ever".
+  as able to grant it), not "nobody, ever". The same where a stranger's own call sets the state (an owner never set
+  that ``claim()`` takes). Strict xfails: ``test_known_gaps::test_g4_identity_state_nobody_holds_now_is_never_nobody_
+  ever``, ``test_arranged::test_a_lone_owner_anyone_may_still_claim_is_each_strangers_to_take``.
 * **G5. ``_free_sat`` relaxed mode takes a callee-code ``True`` as given** (``decide._free_sat``: each atom read by
   ``ev.truth``, which asks a ``False`` again without callee code but not a ``True``). Freeing business logic, an atom
   a followed callee's code answers ``True`` is trusted, so a candidate can be listed (over-listing, never a missed
   holder) on a mis-lowered callee's word. Fail-safe in direction (more listed, never fewer), but the list is not
   proven; ``Evaluator.passes``/``confirmed`` should be used there as elsewhere.
+* **G6. "Open later" on a callee no transaction can make pass** (review 5, ``probe_audit5/q7.py``). A view call
+  whose answer is false now and can never change (a flag nothing anywhere writes, a ``pure`` function returning
+  false) is read as a condition that may yet allow, so ``require(g.ok())`` is "open, later, complete" although nobody
+  ever passes, followed or not. Over-claims openness. Strict xfail
+  ``test_known_gaps::test_g6_a_callee_nothing_can_make_pass_is_never_open_later``.
 
 ### Stated assumptions (not constructs)
 
