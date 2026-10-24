@@ -477,6 +477,11 @@ def _memory_word(mem: tuple, offset: int | None) -> Any:
     return piece[1] if piece[0] == "slice" else piece  # all 32 bytes of one word: the word itself
 
 
+# A key of a modifier's state, beside its variables' ids: whether the function's frame riding in it is lost (a run of
+# ``_`` not followed to its end), so a later ``_`` starts from unknowns.
+_LOST_FRAME = "lost_frame"
+
+
 @dataclass
 class State:
     pc: Term
@@ -495,6 +500,8 @@ class Exit:
     store: dict
     ret: tuple | None
     halted: bool = False  # an assembly ``return``/``stop``: the whole call ends here, whichever function ran it
+    # The frame's locals where the path ended, for a modifier running ``_`` again; ``None`` where not followed.
+    env: dict | None = None
 
 
 def merge(states: list[State]) -> State:
@@ -1543,11 +1550,14 @@ class Lowerer:
                 if done.halted:
                     exits.append(done)  # the function ended the whole call: the modifier's tail never runs
                     continue
-                after = State(done.pc, st.env, done.store, done.ret)
+                # The function's frame as the body left it rides along for a later ``_`` (its own variables only:
+                # the modifier's are the modifier's), lost where the body wasn't followed to its end.
+                frame = {**done.env, _LOST_FRAME: FALSE} if done.env is not None else {_LOST_FRAME: TRUE}
+                after = State(done.pc, {**st.env, **frame}, done.store, done.ret)
                 if node.sons:
                     yield from self._succeed(node, after, node.sons)
                 else:
-                    exits.append(Exit(after.pc, after.store, after.ret))
+                    exits.append(Exit(after.pc, after.store, after.ret, env=after.env))
             return
         if node.type == NodeType.ASSEMBLY and not node.irs and isinstance(getattr(node, "inline_asm", None), str):
             st = self._legacy_assembly(function, node.inline_asm, st)
@@ -1614,7 +1624,11 @@ class Lowerer:
                 if len(values) == 1 and len(function.returns) > 1:
                     # ``return f(...)`` handing on another function's several values.
                     values = tuple(_item(values[0], i) for i in range(len(function.returns)))
-                exits.append(Exit(st.pc, st.store, values))
+                env = st.env
+                if len(values) == len(function.returns):
+                    # ``return x`` assigns the return variables, which a modifier's later ``_`` sees.
+                    env = {**env, **{id(r): v for r, v in zip(function.returns, values)}}
+                exits.append(Exit(st.pc, st.store, values, env=env))
                 return
             if isinstance(ir, Condition):
                 cond = self.val(ir.value, st)
@@ -1641,7 +1655,7 @@ class Lowerer:
             return
         if not node.sons:
             ret = st.ret if st.ret is not None else tuple(self._value(r, st) for r in function.returns)
-            exits.append(Exit(st.pc, st.store, ret))
+            exits.append(Exit(st.pc, st.store, ret, env=st.env))
             return
         yield from self._succeed(node, st, node.sons)
 
@@ -1747,23 +1761,39 @@ class Lowerer:
         modifier = ir.function
         assert isinstance(modifier, Modifier)
         caller_env = st.env
+        frame_vars = [*function.parameters, *function.returns, *(getattr(function, "local_variables", None) or [])]
+        frame_keys = {id(v) for v in frame_vars}
+
+        def framed(e: Exit) -> Exit:
+            # Only the function's own variables go back to the modifier; a frame not followed to its end is lost.
+            if e.env is None or e.env.get(_LOST_FRAME, FALSE) != FALSE:
+                return replace(e, env=None)
+            return replace(e, env={k: v for k, v in e.env.items() if k in frame_keys})
 
         def body(at: State) -> list[Exit]:
-            inner = State(at.pc, caller_env, at.store, at.ret)
+            # The function's frame rides in the modifier's state: run again (a second ``_``, one in a loop), the body
+            # starts from what the last run left, its parameters and return variables as written and, before 0.5,
+            # its locals (function-scoped; from 0.5 one declared again is zeroed there, ``_declare``).
+            env = {**caller_env, **{k: v for k, v in at.env.items() if k in frame_keys}}
+            if at.env.get(_LOST_FRAME) != FALSE:
+                env.update({id(v): unknown("modifier_frame") for v in frame_vars})
+            inner = State(at.pc, env, at.store, None)
             if rest is None:
                 ret = tuple(self._value(r, inner) for r in function.returns)
-                return [Exit(at.pc, at.store, ret)]
-            return self._run_from(function, rest, inner, depth)
+                return [Exit(at.pc, at.store, ret, env=inner.env)]
+            return [framed(e) for e in self._run_from(function, rest, inner, depth)]
 
-        env = {id(p): self.val(a, st) for p, a in zip(modifier.parameters, ir.arguments)}
+        env = {k: v for k, v in caller_env.items() if k in frame_keys}
+        env[_LOST_FRAME] = FALSE
+        env.update({id(p): self.val(a, st) for p, a in zip(modifier.parameters, ir.arguments)})
         env = _function_scoped_locals(modifier, State(st.pc, env, st.store)).env
         if modifier.entry_point is None or depth > MAX_DEPTH:
             self.lost = True  # whatever the modifier writes goes unrecorded
-            return body(State(mk_and([st.pc, unknown(f"unanalysed:{modifier.canonical_name}")]), {}, st.store))
+            return body(State(mk_and([st.pc, unknown(f"unanalysed:{modifier.canonical_name}")]), env, st.store))
         out = self._run_from(modifier, modifier.entry_point, State(st.pc, env, st.store, None), depth + 1, body)
         # A modifier that returns before ``_`` returns the function's defaults.
         defaults = tuple(_zero(r.type) for r in function.returns)
-        return [Exit(e.pc, e.store, e.ret if e.ret is not None else defaults, e.halted) for e in out]
+        return [Exit(e.pc, e.store, e.ret if e.ret is not None else defaults, e.halted, e.env) for e in out]
 
     # Operations -------------------------------------------------------------------------------------------------------
 

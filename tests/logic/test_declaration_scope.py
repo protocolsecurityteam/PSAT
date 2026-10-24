@@ -2,7 +2,10 @@
 block-scoped: zero (a fresh zeroed object in memory) each time the declaration runs. Before, they are function-scoped:
 zeroed once at the function's entry, and the declaration emits no code, so a loop's body keeps what the previous
 iteration left and an assignment written above the declaration stands. The version is the compilation unit's. Each
-probe's lowered condition, evaluated, must be what ``eth_call`` says on anvil, and definite."""
+probe's lowered condition, evaluated, must be what ``eth_call`` says on anvil, and definite.
+
+A modifier running ``_`` more than once (twice, in a loop) runs the body again from the frame the last run left, in
+every version: parameters and return variables as written, and before 0.5 the function-scoped locals too."""
 
 from __future__ import annotations
 
@@ -42,6 +45,14 @@ contract C {
         if (n > 1) { uint256 j = 5; }
         require(j + n == want);
     }
+    uint256 private t;
+    modifier twice(uint256 n, uint256 want) { uint256 b = t; _; _; require(t - b == want); }
+    modifier loopy(uint256 n, uint256 want) {
+        uint256 b = t; for (uint256 i = 0; i < n; i++) { _; } require(t - b == want);
+    }
+    function twiceAcc(uint256 n, uint256 want) public twice(n, want) { uint256 j; j += 1; t += j; }
+    function loopAcc(uint256 n, uint256 want) public loopy(n, want) { uint256 j; j += 1; t += j; }
+    function twiceBranch(uint256 n, uint256 want) public twice(n, want) { uint256 j; if (n > 0) { j = j + n; } t += j; }
 }
 """
 
@@ -60,6 +71,28 @@ contract C {
         for (uint256 i = 0; i < n; i++) { S memory m; m.x += 1; s += m.x; }
         require(s == want);
     }
+    uint256 private t;
+    modifier twice(uint256 n, uint256 want) { uint256 b = t; _; _; require(t - b == want); }
+    modifier loopy(uint256 n, uint256 want) {
+        uint256 b = t; for (uint256 i = 0; i < n; i++) { _; } require(t - b == want);
+    }
+    function twiceAcc(uint256 n, uint256 want) public twice(n, want) { uint256 j; j += 1; t += j; }
+    function loopAcc(uint256 n, uint256 want) public loopy(n, want) { uint256 j; j += 1; t += j; }
+    function twiceBranch(uint256 n, uint256 want) public twice(n, want) { uint256 j; if (n > 0) { j = j + n; } t += j; }
+}
+"""
+
+SOURCE_08 = """
+pragma solidity 0.8.27;
+
+contract C {
+    uint256 private t;
+    modifier twice(uint256 n, uint256 want) { uint256 b = t; _; _; require(t - b == want); }
+    function twiceParameter(uint256 n, uint256 want) external twice(n, want) { n += 1; t += n; }
+    function twiceReturned(uint256 n, uint256 want) external twice(n, want) returns (uint256 q) { q += n + 1; t += q; }
+    function twiceReturn(uint256 n, uint256 want) external twice(n, want) returns (uint256) {
+        uint256 j; j += n + 1; t += j; return t;
+    }
 }
 """
 
@@ -70,8 +103,19 @@ EXPECTED = {
     ("0.4.19", "branch"): lambda n: n + (5 if n > 1 else 0),
     ("0.5.14", "acc"): lambda n: n,
     ("0.5.14", "memoryAcc"): lambda n: n,
+    # ``_`` run again: before 0.5 the body's local keeps what the last run left; from 0.5 it is zeroed again.
+    ("0.4.19", "twiceAcc"): lambda n: 3,
+    ("0.4.19", "loopAcc"): lambda n: n * (n + 1) // 2,
+    ("0.4.19", "twiceBranch"): lambda n: 3 * n,
+    ("0.5.14", "twiceAcc"): lambda n: 2,
+    ("0.5.14", "loopAcc"): lambda n: n,
+    ("0.5.14", "twiceBranch"): lambda n: 2 * n,
+    # Parameters and return variables keep what the last run wrote.
+    ("0.8.27", "twiceParameter"): lambda n: 2 * n + 3,
+    ("0.8.27", "twiceReturned"): lambda n: 3 * n + 3,
+    ("0.8.27", "twiceReturn"): lambda n: 2 * n + 2,
 }
-SOURCES = {"0.4.19": SOURCE_04, "0.5.14": SOURCE_05}
+SOURCES = {"0.4.19": SOURCE_04, "0.5.14": SOURCE_05, "0.8.27": SOURCE_08}
 CASES = [(v, name, (n, want(n) + d)) for (v, name), want in EXPECTED.items() for n in range(4) for d in (0, 2)]
 
 
@@ -107,7 +151,8 @@ def test_a_local_declared_without_a_value_is_zero_where_the_compiler_makes_it_so
         chain = False
     reset_terms()
     formula = Lowerer(d.slither["C"]).success(fn)
-    world = World(d.chain(), d.at["C"], int.from_bytes(keccak(text=fn.solidity_signature)[:4], "big"), {})
+    selector = int.from_bytes(keccak(text=fn.solidity_signature)[:4], "big")
+    world = World(d.chain(), d.at["C"], selector, {d.at["C"]: d.slither["C"]})
     assignment = {parameter(p, i): v for i, (p, v) in enumerate(zip(fn.parameters, values))}
     caller = int(ACCOUNT0, 16)
     engine = Evaluator(world, {"caller": caller, "signer": caller}, assignment).truth(formula)
