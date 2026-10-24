@@ -2414,7 +2414,16 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             identity = {**anyone, root: candidate}
             # Every condition not about who calls left open, and still failing: refused whatever the arguments, the
             # state or the business logic, so no search is owed (the cheap answer for most candidates).
-            loose = Evaluator(world, identity, {}, frozenset(), loosened).truth(formula)
+            screen = Evaluator(world, identity, {}, frozenset(), loosened)
+            loose = screen.ranked(formula)
+            if loose is False and screen.coded[0]:
+                # Refused only through a callee's code: asked without it (``Evaluator.truth``). Still refused, it is;
+                # otherwise it is undecided, and the code's refusal only spares it the search.
+                loose = screen.without_code().truth(formula)
+                if loose is not False and loose is not True:
+                    world.code_refuted += 1
+                    undecided.add(candidate)
+                    continue
             if loose is UNK:
                 # Still open with the arguments left to choose: search them, before the exact questions below
                 # spend the budget on business logic.
@@ -3190,7 +3199,8 @@ def _decide_one(
     fixed = fixed or {}
     when = frozenset(fixed) | free_when
     base = Evaluator(world, identity, dict(fixed), blind, when)
-    unknown_args = base.truth(formula)
+    # Gathering reads or asking only whether the state settles it: callee code answers as it is (``Evaluator.ranked``).
+    unknown_args = base.ranked(formula) if base_only or reads_only else base.truth(formula)
     if unknown_args is UNK and relaxed:
         # Business logic freed: once the identity's own conditions are read, whether the freed ones can let it
         # through is a question of the connectives, not of guessing each one.

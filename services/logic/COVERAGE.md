@@ -279,7 +279,10 @@ Found while working, not in the before table:
   inlined a callee's code (``solve``) is asked again with each view call a value of its own, tied to what the chain
   answers at the inputs the models reach (``_chain_lemmas``, at most ``_CHAIN_ROUNDS`` inputs): still unsatisfiable,
   the chain refuted it; a model every answer agrees with is checked like any other and may pass; anything else is
-  unknown. What only the code showed is unknown, counted (``world.code_refuted``), and a verdict left incomplete by it
+  unknown. A candidate the loosened formula refuses only through a callee's code, and not without it, is undecided and
+  never searched (the code's refusal spares the search, so it never costs the others the budget); gathering reads and
+  asking whether the state alone settles a question (``base_only``) take the code's answer as it is, since neither
+  answers. What only the code showed is unknown, counted (``world.code_refuted``), and a verdict left incomplete by it
   names ``callee_code_refutation``. Cost: "nobody, ever" over an argument the callee is handed with infinitely many
   values (``require(guard.flagged(x) || owner)``) is no longer claimed from the callee's code; one whose call inputs
   are few (the caller, a flag picked between two values) still is, from the chain (``test_callee_refutation``).
