@@ -2245,11 +2245,16 @@ class Lowerer:
             # sign-extends, which the read value itself no longer says. The selector or signature heading
             # ``encodeWithSelector``/``encodeWithSignature`` is left as it is.
             head = 1 if base in ("abi.encodeWithSelector", "abi.encodeWithSignature") else 0
-            value = mk(
-                "enc",
-                base,
-                (*args[:head], *(_typed_word(a, v) for a, v in zip(ir.arguments[head:], args[head:]))),
-            )
+            if base == "abi.encodeCall":
+                value = unknown("unsupported:abi_item:encodeCall")  # one Slither didn't render as its call's parts
+            elif base == "abi.encodeWithSignature" and args and args[0][0] != "const":
+                value = unknown("unsupported:abi_item:string")  # a signature read from storage or computed
+            else:
+                value = mk(
+                    "enc",
+                    base,
+                    (*args[:head], *(_abi_item(a, v) for a, v in zip(ir.arguments[head:], args[head:]))),
+                )
         elif base.startswith("abi.decode") and args and args[0][0] == "assumed":
             value = args[0]  # decoding what an arranged action returned: arranged too
         elif (
@@ -3347,6 +3352,20 @@ def _typed_packed(var: Any, value: Term) -> Term:
     if packed_width(value) is not None or not re.fullmatch(r"address|bool|u?int\d*|bytes\d+", type_):
         return value
     return mk("conv", type_, value)
+
+
+def _abi_item(var: Any, value: Term) -> Term:
+    """An ``abi.encode`` item: a one-word value as its declared type lays it out (``_typed_word``); an argument or a
+    literal of any other type as it is (its own term says its type); anything else of a type laid out over more than
+    one word, or none (a struct, an array, ``bytes`` read from storage, a function), refused by name,
+    ``unsupported:abi_item:<type>``, rather than left for the encoding to fail on unnamed."""
+    declared = _typed_arg("", getattr(var, "type", None))[2]
+    if re.fullmatch(r"address|bool|u?int\d*|bytes\d+", declared):
+        return _typed_word(var, value)
+    if value[0] in ("arg", "const"):
+        return value
+    label = re.sub(r"[^A-Za-z0-9_.()\[\]]", "", declared) or "unknown"
+    return unknown(f"unsupported:abi_item:{label}")
 
 
 def _typed_word(var: Any, value: Term) -> Term:
