@@ -39,6 +39,10 @@ contract C {
     function unsignedOf(int256 x, uint256 want) external pure { require(uint256(x) == want); }
     function signedOf(uint256 x, int256 want) external pure { require(int256(x) == want); }
     function tiny(int256 x, int8 want) external pure { require(int8(x) == want); }
+    function addressOf(uint256 x, address want) external pure { require(address(uint160(x)) == want); }
+    function bytesOf(uint256 x, bytes4 want) external pure { require(bytes4(uint32(x)) == want); }
+    function signedPow(int8 a, uint256 b) external pure returns (int8) { return a ** b; }
+    function signedSub(int8 a, int8 b) external pure returns (int8) { return a - b; }
     function flipped(uint8 x, uint8 want) external pure { require(~x == want); }
     function member(uint256 x) external pure returns (E) { return E(x); }
     function allocated(uint256 n) external pure returns (uint256) { return new uint256[](n).length; }
@@ -114,7 +118,11 @@ CASES = [
     ("padded", (b"\x12\x34\x56\x78", bytes(28) + b"\x12\x34\x56\x78")), ("unsignedOf", (-1, MAX)),
     ("unsignedOf", (-1, 1)), ("signedOf", (MAX, -1)), ("signedOf", (MAX, 1)), ("tiny", (255, -1)),
     ("tiny", (-129, 127)),
-    ("tiny", (255, 127)), ("flipped", (0, 255)), ("flipped", (0, 1)), ("member", (1,)), ("member", (2,)),
+    ("tiny", (255, 127)), ("addressOf", (2**160 + 5, 5)), ("addressOf", (2**160 + 5, 2**160 - 1)),
+    ("bytesOf", (0x1234567890, b"\x34\x56\x78\x90")), ("bytesOf", (0x1234567890, b"\x12\x34\x56\x78")),
+    ("signedPow", (-1, 2**200)), ("signedPow", (2, 6)), ("signedPow", (2, 7)), ("signedPow", (-2, 7)),
+    ("signedSub", (-100, 28)), ("signedSub", (-100, 29)),
+    ("flipped", (0, 255)), ("flipped", (0, 1)), ("member", (1,)), ("member", (2,)),
     ("allocated", (3,)), ("allocated", (2**64,)), ("modulus", (5,)), ("modulus", (0,)),
     ("yulSigned", (-1, 1, True, -1)), ("yulSigned", (-1, 1, False, -1)), ("yulSigned", (7, -2, False, -3)),
     ("yulBytes", (31, 0x1FF, 0xFF, MAX)), ("yulBytes", (32, 0x1FF, 0, MAX)), ("yulBytes", (31, 0x17F, 0x7F, 0x7F)),

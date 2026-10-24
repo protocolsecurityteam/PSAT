@@ -331,7 +331,7 @@ def test_a_packed_signature_reads_back_as_the_signer_check(d):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="A-row (new): super into the next body in the deployed order (0.4.19 LinkToken.transferAndCall) lowers "
+    reason="A55: super into the next body in the deployed order (0.4.19 LinkToken.transferAndCall) lowers "
     "BasicToken.transfer with value read as 0: `require(0 <= balances[caller])` passes where the chain reverts",
 )
 def test_super_runs_the_next_body_in_the_deployed_contracts_order(legacy):

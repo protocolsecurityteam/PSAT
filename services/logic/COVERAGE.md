@@ -357,6 +357,14 @@ Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say 
   later" on this contract's own state still rests on latching and ``_reachable`` (a flag written only on a path no
   transaction reaches, a time no block reaches) and on ``world.effective``, as before.
 
+* **G8. A stranger's own first call through a legacy storage array is not found** (found 2026-10-24 restoring the
+  governance coverage, ``test_governance_shapes``). ``require(balances[msg.sender].length > 0)`` on solc 0.4.19, where
+  any caller's own ``record`` raises the length in place (``checkpoints[checkpoints.length++]``) or ``add`` pushes
+  through a storage pointer, is "restricted" (not complete, ``storage:balances``) though every stranger passes once its
+  own call made the entry: ``after_own_call`` doesn't propose those writers. Under-claims openness, never "nobody,
+  ever" (the length writes are seen). Strict xfail
+  ``test_governance_shapes::test_a_strangers_own_legacy_array_write_opens_what_it_unlocks``.
+
 ### Stated assumptions (not constructs)
 
 * An external call does not re-enter this contract's state-changing code before it returns (reentrancy is not

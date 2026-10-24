@@ -178,3 +178,24 @@ def test_a_callee_answering_alike_for_every_asker_is_asked_as_this_contract(d, n
     # is asked as F. Either way the chain's answer: v = 14, v = 4 pass.
     verdict = O.check(d, "C", name, _verdict(d, name), open_at={"v": v})
     assert list(verdict.witnesses.values())[0].get("v") == v
+
+
+def test_a_pass_resting_on_callee_code_is_asked_of_the_chain(d):
+    # The code believed to sit at ``strict`` is ``Lax``'s, which lets v = 3 through; what is deployed there
+    # (``Strict``) never does. A pass resting on the believed code is asked of the chain: only the owner passes.
+    from services.logic.terms import reset_terms
+    from services.logic.verdict import function_verdict
+
+    reset_terms()
+    known = {d.at[n]: d.slither[n] for n in ("C", *EVERY)}
+    known[d.at["Strict"]] = d.slither["Lax"]
+    c = d.slither["C"]
+    v = function_verdict(c, O.function(d, "C", "confirmed"), d.at["C"], d.chain(), known)[0]
+    O.check(d, "C", "confirmed", v, samples=[{"v": 3}, {"v": 0}], open_at=False)
+    assert v.openness != "open", v
+    assert O.strangers_passing(d, "C", O.function(d, "C", "confirmed"), {"v": 3}) == {False}
+
+
+def test_a_callee_that_never_returns_true_lets_only_the_owner_through(d):
+    v = O.check(d, "C", "confirmed", _verdict(d, "confirmed"), samples=[{"v": 3}, {"v": 0}], open_at=False)
+    O.sound(v, {O.OWNER})
