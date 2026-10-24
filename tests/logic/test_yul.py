@@ -126,3 +126,42 @@ def test_assembly_that_may_write_anywhere_leaves_nothing_logged(built):
 
     reset_terms()
     assert logged(built["Branchy"], "owners", 1, (), False) is None
+
+
+LOOPS = """
+pragma solidity 0.8.27;
+contract C {
+    function u() public pure returns (uint256 t) {
+        assembly { for { let k := 0 } lt(k, 3) { k := add(k, 1) } { t := add(t, 1) } }
+    }
+    function w() public pure returns (uint256 t) {
+        assembly { let k := 0 for { } lt(k, 3) { } { k := add(k, 1) if eq(k, 2) { continue } t := add(t, 1) } }
+    }
+    function b() public pure returns (uint256 t) {
+        assembly { for { let k := 0 } lt(k, 9) { k := add(k, 1) } { if eq(k, 4) { break } t := add(t, 1) } }
+    }
+}
+"""
+
+
+@pytest.mark.parametrize(("name", "value"), [("u", 3), ("w", 2), ("b", 4)])
+def test_a_yul_loop_slither_parses_runs_its_body(tmp_path, name, value):
+    """Yul from Solidity 0.6 on is Slither's own graph, not this reader's: a loop's condition node orders its sons
+    [exit, body], and its ``break``/``continue`` edges lead to the end of their ``if``. The loop runs its body, a
+    ``continue`` goes to the post block (or the condition), a ``break`` to the loop's end; ``test_loop_control``
+    checks the same forms against the chain."""
+    solc = solc_path("0.8.27")
+    if solc is None:
+        pytest.skip("solc 0.8.27 not installed")
+    from slither import Slither
+
+    from services.logic.lower import Lowerer
+    from services.logic.terms import reset_terms
+
+    path = tmp_path / "L.sol"
+    path.write_text(LOOPS)
+    c = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "C")
+    reset_terms()
+    pc, ret = Lowerer(c).returns(next(f for f in c.functions if f.name == name), [])
+    assert pc == ("const", True, "bool")
+    assert ret == (("const", value, "uint256"),)

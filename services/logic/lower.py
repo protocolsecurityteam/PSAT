@@ -1169,14 +1169,14 @@ class Lowerer:
                         incoming.setdefault(id(succ), []).append(out)
                         continue
                     if succ.type == NodeType.IFLOOP:
-                        leave, again = succ.son_false, self._loop_condition(succ, out, depth)
+                        leave, again = _loop_exit(succ), self._loop_condition(succ, out, depth)
                     elif succ.type == NodeType.STARTLOOP and node.type != NodeType.IFLOOP:
                         # ``for (;;)``: a loop without a condition, left only through a ``break``.
                         leave, again = _loop_end(succ), TRUE
                     else:
                         # ``do { } while (c)``: the condition node's true son is the body, ``out`` already carries
                         # ``c``, and the loop leaves through the condition node's false son.
-                        leave, again = (node.son_false if node.type == NodeType.IFLOOP else None), None
+                        leave, again = (_loop_exit(node) if node.type == NodeType.IFLOOP else None), None
                     entry = arrival.get(id(succ))
                     if leave is None or entry is None:
                         exits.append(self._unfollowed(function, out, "unsupported:loop_shape"))
@@ -1526,6 +1526,13 @@ class Lowerer:
             else:
                 yield target, st
             return
+        if node.type == NodeType.BREAK:
+            target = _break_target(node)
+            if target is None:
+                exits.append(self._unfollowed(function, st, "unsupported:break"))
+            else:
+                yield target, st
+            return
         declared = getattr(node, "variable_declaration", None)
         if node.type == NodeType.VARIABLE and not node.irs and declared is not None and self._memory_var(declared):
             # ``S memory s;``: a fresh zeroed object each time the declaration runs.
@@ -1621,7 +1628,15 @@ class Lowerer:
             if st.halted:
                 exits.append(Exit(st.pc, st.store, st.ret, halted=True))
                 return
-        if node.type in (NodeType.IF, NodeType.IFLOOP) and cond is not None:
+        if node.type == NodeType.IFLOOP and cond is not None:
+            body, leave = _loop_body(node), _loop_exit(node)
+            if body is None or leave is None:
+                exits.append(self._unfollowed(function, st, "unsupported:loop_shape"))
+                return
+            yield body, replace(st, pc=mk_and([st.pc, cond]))
+            yield leave, replace(st, pc=mk_and([st.pc, mk_not(cond)]))
+            return
+        if node.type == NodeType.IF and cond is not None:
             if node.son_true is not None:
                 yield node.son_true, replace(st, pc=mk_and([st.pc, cond]))
             if node.son_false is not None:
@@ -2971,14 +2986,15 @@ def _schedule(start: Any, stop: Any = None) -> tuple[list[Any], dict[int, list[t
     indegree = dict.fromkeys(nodes, 0)
     successors: dict[int, list[Any]] = {k: [] for k in nodes}
     for key, out in edges.items():
+        source = nodes[key]
         for son, kind in out:
             target = (
                 son
                 if kind == "forward"
-                else son.son_false
+                else _loop_exit(son)
                 if son.type == NodeType.IFLOOP
                 else _loop_end(son)
-                if son.type == NodeType.STARTLOOP and node.type != NodeType.IFLOOP
+                if son.type == NodeType.STARTLOOP and source.type != NodeType.IFLOOP
                 else None
             )
             if target is None or id(target) not in nodes:
@@ -3001,14 +3017,77 @@ def _schedule(start: Any, stop: Any = None) -> tuple[list[Any], dict[int, list[t
 
 
 def _sons(node: Any) -> list:
-    """``node``'s successors, with ``continue`` sent where the language sends it (``_continue_target``)."""
-    if node.type != NodeType.CONTINUE:
+    """``node``'s successors, with ``continue`` and ``break`` sent where the language sends them (``_continue_target``,
+    ``_break_target``)."""
+    if node.type == NodeType.CONTINUE:
+        target = _continue_target(node)
+        return [target] if target is not None else []
+    return _broken_sons(node)
+
+
+def _broken_sons(node: Any) -> list:
+    """``node``'s successors, with only ``break`` sent where the language sends it."""
+    if node.type != NodeType.BREAK:
         return node.sons
-    target = _continue_target(node)
+    target = _break_target(node)
     return [target] if target is not None else []
 
 
 _CONTINUES: dict[int, tuple[Any, Any]] = {}
+_LOOP_PARTS: dict[tuple[str, int], tuple[Any, Any]] = {}
+
+
+def _cached_part(kind: str, node: Any, find: Callable[[Any], Any]) -> Any:
+    hit = _LOOP_PARTS.get((kind, id(node)))
+    if hit is not None and hit[0] is node:
+        return hit[1]
+    found = find(node)
+    _LOOP_PARTS[(kind, id(node))] = (node, found)
+    return found
+
+
+def _enclosing_loop(node: Any) -> Any:
+    """The innermost ``STARTLOOP`` whose source holds ``node``'s (compiler offsets), or ``None``."""
+
+    def find(node: Any) -> Any:
+        function, where = getattr(node, "function", None), _span(node)
+        if function is None or where is None:
+            return None
+        holding = [
+            n for n in function.nodes if n.type == NodeType.STARTLOOP and (s := _span(n)) and s[0] <= where[0] < s[1]
+        ]
+        return max(holding, key=lambda n: _span(n)[0], default=None)
+
+    return _cached_part("loop", node, find)
+
+
+def _break_target(node: Any) -> Any:
+    """Where a ``break`` goes: the ``ENDLOOP`` of the innermost loop whose source holds it; ``None`` where that can't
+    be told. Slither's own edge sends a ``break`` in a ``for (;;)`` nested in a loop with a condition to the outer
+    loop's end, and one in Yul to the end of its ``if``."""
+    return _cached_part("break", node, lambda n: _loop_end(loop) if (loop := _enclosing_loop(n)) is not None else None)
+
+
+def _loop_exit(header: Any) -> Any:
+    """The son of a loop's condition node that leaves the loop: its loop's ``ENDLOOP``, by source, never by the
+    order of the sons (Slither orders a Yul loop's sons [exit, body], a Solidity loop's [body, exit]); ``None`` where
+    exactly one son isn't that."""
+
+    def find(header: Any) -> Any:
+        loop = _enclosing_loop(header)
+        end = _loop_end(loop) if loop is not None else None
+        sons = list(header.sons)
+        if end is None or len(sons) != 2 or sum(son is end for son in sons) != 1:
+            return None
+        return end
+
+    return _cached_part("exit", header, find)
+
+
+def _loop_body(header: Any) -> Any:
+    """The son of a loop's condition node that runs the body (``_loop_exit``'s other son), or ``None``."""
+    leave = _loop_exit(header)
+    return None if leave is None else next(son for son in header.sons if son is not leave)
 
 
 def _span(node: Any) -> tuple[int, int] | None:
@@ -3051,20 +3130,26 @@ def _find_continue_target(node: Any) -> Any:
     if len(heads) > 1:
         return None
     head = heads[0] if heads else None
-    if head is not None and loop.sons[0] is not head:
-        return head  # ``do { } while (c)``: the body runs first, and ``continue`` goes to the condition
-    body = head.son_true if head is not None else loop.sons[0]
-    begins = _span(body)
+    body = _loop_body(head) if head is not None else loop.sons[0]
+    begins = _span(body) if body is not None else None
     if body is None or begins is None:
         return None
+    if head is not None and begins[0] < _span(head)[0]:
+        return head  # ``do { } while (c)``: the body, written before the condition, runs first; ``continue`` goes there
     ends = next((n for n in nodes if n.type == NodeType.ENDLOOP and _span(n) == _span(loop)), None)
-    increments = [
-        n
-        for n in _loop_nodes_raw(body, ends)
-        if n.type == NodeType.EXPRESSION and (s := _span(n)) and s[0] < begins[0] and innermost(s[0]) is loop
-    ]
+    increments = sorted(
+        (
+            n
+            for n in _loop_nodes_raw(body, ends)
+            if n.type == NodeType.EXPRESSION and (s := _span(n)) and s[0] < begins[0] and innermost(s[0]) is loop
+        ),
+        key=lambda n: _span(n)[0],
+    )
     if len(increments) > 1:
-        return None
+        # A Yul loop's post block of several statements: run in source order, the last leading to the condition.
+        chained = all(list(a.sons) == [b] for a, b in zip(increments, increments[1:]))
+        if head is None or not chained or list(increments[-1].sons) != [head]:
+            return None
     return increments[0] if increments else head if head is not None else loop
 
 
@@ -3103,13 +3188,14 @@ def _loop_end(start: Any) -> Any:
 
 
 def _loop_nodes_raw(start: Any, leave: Any) -> list:
-    """``_loop_nodes`` over Slither's own edges (a ``continue`` leads somewhere inside the loop either way)."""
+    """``_loop_nodes`` over Slither's own ``continue`` edges (a ``continue`` leads somewhere inside the loop either
+    way), with ``break`` sent where the language sends it."""
     seen = {id(start)}
     out = [start]
     stack = [start]
     while stack:
         node = stack.pop()
-        for son in node.sons:
+        for son in _broken_sons(node):
             if son is leave or id(son) in seen:
                 continue
             seen.add(id(son))
