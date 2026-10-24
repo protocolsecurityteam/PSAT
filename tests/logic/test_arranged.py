@@ -616,10 +616,13 @@ def switch(tmp_path_factory):
 
 
 def test_what_anyone_may_redo_once_holders_did_it_is_not_open(switch):
-    # Strangers pass only once the quorum is already off, a state ``disable`` itself brings about: the power to turn
-    # it off is the managers', and there are none.
+    # Strangers pass only once the quorum is already off, a state ``disable`` itself brings about, and then do nothing:
+    # never open. "Nobody, ever" only where no entry point can write that state, which latching would show; ``disable``
+    # can (for a manager), so it is not determined, ``inert_when_allowed``, as where nobody can be singled out
+    # (``test_consumed_conditions``).
     verdict = _gate(switch, "disable", _Switched())
-    assert verdict.openness == "restricted" and not verdict.principals and verdict.complete
+    assert verdict.openness == "not_determined" and not verdict.principals and not verdict.complete
+    assert "inert_when_allowed" in verdict.gaps
 
 
 def test_a_paused_public_function_is_still_open_once_unpaused(switch):

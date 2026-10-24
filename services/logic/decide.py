@@ -2515,7 +2515,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # (a role in namespaced storage, its holders unlisted) and the list wasn't cut short.
         unlisted = coverage.lookups if capped else coverage.blind
         now_passes = bool(unlisted) and _outcome(formula, world, anyone, candidates, unlisted, fixed={}) is not False
-    allowed: Any = False
+    allowed: Any = None  # asked only where a stranger gets through in some state of the conditions
     if now is False and not now_passes and any(f is True for f in fresh):
         # A stranger gets through in some state of the conditions: open once they allow it, unless that call does
         # nothing; with a condition unread, whether it can come about at all is unknown.
@@ -2524,6 +2524,21 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         return Verdict("open", frozenset(), True, witnesses={FRESH: _argument_values(found_now)})
     if allowed is True:
         return Verdict("open", frozenset(), True, allowed="later")
+    if allowed is False:
+        # Strangers get through once the conditions allow, only where the call does nothing or a condition it consumes
+        # itself is back: "nobody, ever" only where no entry point can write that back, which latching would have
+        # shown (it would read as it stands, never get here). As where nobody can be singled out: not determined.
+        gaps.append("inert_when_allowed")
+        return Verdict(
+            "not_determined",
+            callers,
+            False,
+            frozenset(undecided - callers),
+            signers,
+            witnesses,
+            tuple(gaps),
+            conditions=conditions,
+        )
     if allowed is UNK:
         # Strangers get through once the conditions allow, and whether that call does anything is unknown.
         gaps.append("now_unknown")
@@ -2905,7 +2920,9 @@ def _acts_once_allowed(formula: Term, world: World, anyone: dict, candidates: se
     """Whether a stranger, in some state of the conditions that lets it through, gets a call with an effect through:
     "open once allowed" means the power, not a no-op (``disableConsensus`` once consensus is already disabled). A
     condition the function writes itself (``disableConsensus`` setting the quorum it checks, an initializer its flag)
-    is where its holders leave it, not a gate that may open: it stays as it is."""
+    is where its holders leave it, not a gate that may open: it stays as it is. ``False`` is no "nobody, ever": that
+    holds only where no entry point can write the condition back, which latching shows (such a condition reads as it
+    stands and never gets here); ``_decide`` reports it as not determined (``inert_when_allowed``), in both branches."""
 
     def own(atom: Term) -> bool:
         return any(
