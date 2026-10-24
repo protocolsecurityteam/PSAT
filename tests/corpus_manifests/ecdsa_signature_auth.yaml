@@ -1,0 +1,30 @@
+contract_name: C
+description: |
+  Canonical ECDSA-recovery signature gate:
+  ``address recovered = ecrecover(...); require(recovered == signerAddr)``.
+  Equality between a signature_recovery operand (the ecrecover
+  output) and an address-typed operand (state-var holding the
+  expected signer) classifies as signature_auth — shape-tight by
+  construction, always caller_authority HIGH.
+
+  Complements eip1271.yaml: both produce signature_auth leaves but
+  via different structural paths (ECDSA pre-image vs external
+  contract magic-value oracle). Pinning both ensures the
+  signature_auth lift fires on the two canonical signing flows.
+
+source: |
+  pragma solidity ^0.8.19;
+  contract C {
+      address public signerAddr;
+      function f(bytes32 h, uint8 v, bytes32 r, bytes32 s) external view {
+          address recovered = ecrecover(h, v, r, s);
+          require(recovered == signerAddr);
+      }
+  }
+
+expected_functions:
+  "f(bytes32,uint8,bytes32,bytes32)":
+    authority_role: caller_authority
+    kind: signature_auth
+    operator: eq
+    confidence: high
