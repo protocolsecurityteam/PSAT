@@ -2105,6 +2105,28 @@ def function_verdict(
     world.inverse = inverse
     world.immutable = immutable
 
+    def constant_load(load: Term) -> bool:
+        """Whether this contract's slot ``load`` reads can never hold anything but what it holds now: no entry point
+        writes it, or none can leave it holding anything else from here (``_reachable``, as latching asks)."""
+        if load[1] != THIS:
+            return False
+        memo = world.__dict__.setdefault("_constant_loads", {})
+        if load not in memo:
+            writes = _written_values(contracts.get(address, contract), [load])
+            entries = _values_at(writes, load) if writes is not None else None
+            if entries is None:
+                memo[load] = False
+            elif not entries:
+                memo[load] = True
+            else:
+                now = Evaluator(world, {"caller": FRESH, "signer": FRESH}).eval(load)
+                reached = None if now is UNK else _reachable(world, load, now, entries)
+                if now is UNK or reached is None:
+                    return False  # unread, or not settled: asked again
+                memo[load] = reached[0] == {now} and not reached[1]
+        return memo[load]
+
+    world.constant_load = constant_load
     world.latched = latched_atoms(formula, world, contracts.get(address, contract))
     world.cover = lambda term: coverage(term, keyed, lower_call, listed, settled, valued)
     world.arrange = lambda term: arranged_within_budget(term, world, contracts.get(address, contract))

@@ -1056,6 +1056,9 @@ class World:
     complete: Callable[[Term, str, int, tuple], bool] = lambda contract, var, keys, fields: False
     # An immutable of the code at an address, read from that code.
     immutable: Callable[[int, str], Any] = lambda address, name: UNK
+    # Whether a storage read can never hold anything but what it holds now: this contract's slot that no entry point
+    # can leave otherwise from here (``verdict.constant_load``).
+    constant_load: Callable[[Term], bool] = lambda load: False
     # Addresses the constructor keyed entries by, from the creating transaction (see ``snapshot.creation_keys``).
     created: dict = field(default_factory=dict)
     # The address holding the code that runs at an address (a proxy's implementation).
@@ -2069,7 +2072,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     as before, and one a failed read or the budget left open keeps blocking."""
     failed = world.chain.failed if world.failed_at is None else world.failed_at
     refuted, passed = world.code_refuted, world.code_passed
-    verdict = _decide(formula, world, coverage)
+    verdict = _state_blocked(formula, world, coverage, _decide(formula, world, coverage))
     core, free = split(formula)
     if verdict.openness == "not_determined":
         opaque = _opaque_conditions(free, world, failed)
@@ -2175,6 +2178,75 @@ def _on_conditions(formula: Term, world: World, coverage: Coverage, opaque: list
         allowed="conditional" if again.allowed == "now" else f"{again.allowed}_conditional",
         gaps=again.gaps + dropped,
     )
+
+
+# What reads state a transaction may change, besides storage: another contract's answer, ether, code, the clock.
+_CHANGING_READS = ("call", "balance", "code", "codesize", "codehash", "time")
+
+
+def _changing_reads(t: Term, world: World) -> list[str]:
+    """What in ``t`` reads state a transaction may yet change, each by name (a storage variable, a call's signature,
+    ``balance``, ``time``, ...); nothing for what is provably constant: constants, immutables, ``this``, and a slot of
+    this contract no entry point can leave holding anything else from here (``World.constant_load``)."""
+    out = []
+    for kind in ("load", "rawload"):
+        for x in subterms(t, kind):
+            if not world.constant_load(x):
+                out.append(x[2] if kind == "load" and isinstance(x[2], str) else "storage")
+    for kind in _CHANGING_READS:
+        out += [x[2] if kind == "call" else kind for x in subterms(t, kind)]
+    return out
+
+
+def _state_blocked(formula: Term, world: World, coverage: Coverage, verdict: Verdict) -> Verdict:
+    """``verdict``, unless it claims "nobody, ever" (restricted, complete, nobody listed) on conditions not about who
+    calls that read state a transaction may change (``amount >= lo && amount <= hi`` with ``lo > hi`` now, both
+    owner-settable): "nobody" then holds only as things stand. With those conditions set aside, whoever the rest
+    (the identity core) lets through is named, as holding only on them (``conditions``, ``allowed`` conditional);
+    with no such core, or nobody named there either for a reason other than who they are, not determined. Each such
+    variable is named, ``state_blocks_everyone:<variable>``. Conditions that read only what is provably constant
+    (``_changing_reads``) or latched leave the claim standing."""
+    if not (
+        verdict.openness == "restricted"
+        and verdict.complete
+        and not (verdict.principals or verdict.signers or verdict.conditions)
+        and formula != FALSE
+    ):
+        return verdict
+    blocking: list[Term] = []
+    names: set[str] = set()
+    for part in conjuncts(formula):
+        if contains(part, IDENTITY_KINDS):
+            continue
+        read = [n for atom in _atoms_of(part) if atom not in world.latched for n in _changing_reads(atom, world)]
+        if read:
+            blocking.append(part)
+            names.update(str(n) for n in read)
+    if not blocking:
+        return verdict
+    gaps = tuple(f"state_blocks_everyone:{n}" for n in sorted(names))
+    reduced = mk_and([c for c in conjuncts(formula) if c not in blocking])
+    effective = world.effective
+    if effective is not None:
+        world.effective = replace_terms(effective, {c: TRUE for c in blocking})
+    try:
+        again = _decide(reduced, world, world.cover(reduced) if world.cover is not None else coverage)
+    finally:
+        world.effective = effective
+    shown = again.principals | again.signers | set(again.conditions)
+    if again.openness == "restricted" and again.complete and not shown:
+        return verdict  # nobody even with them set aside: who they are refutes them
+    if contains(reduced, IDENTITY_KINDS) and again.openness == "restricted" and shown:
+        return replace(
+            again,
+            principals=frozenset(),
+            signers=frozenset(),
+            conditions={who: again.conditions.get(who, "business") for who in shown},
+            complete=False,
+            allowed="conditional",
+            gaps=again.gaps + gaps,
+        )
+    return Verdict("not_determined", frozenset(), False, gaps=gaps)
 
 
 def _readings(parts: tuple[Term, ...]) -> tuple[str, ...]:
