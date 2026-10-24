@@ -255,7 +255,7 @@ Found while working, not in the before table:
 
 ### KNOWN GAPS (open, documented 2026-10-24; reviewer probes in ``scratchpad/probe_audit4/``)
 
-Each is a shape where a verdict is wrong or over-claims today. None is fixed; the next round starts from the probe.
+Each is a shape where a verdict is wrong or over-claims. Those marked FIXED say what was done and what remains.
 
 * **G1. ``_state_blocked`` (F6) looks only at top-level conjuncts** (``decide._state_blocked``, the
   ``for part in conjuncts(formula)`` loop). A settable condition that refutes everyone, when it sits inside a
@@ -274,8 +274,10 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
 * **G2. ``constant_load`` and writers outside the contract's own entry points** (``verdict.constant_load``).
   PARTLY FIXED 2026-10-24 (decision D1): a slot no entry point writes is changeable unless the contract makes no
   delegatecall (or callcode) of its own and runs at its own address (``verdict._delegating``: no low-level or
-  assembly delegatecall in any function or modifier; no ``code_of`` naming other code; the deployed code is
-  readable, is no EIP-7702 delegation, and has no ``DELEGATECALL``/``CALLCODE`` opcode the compiled contract lacks,
+  assembly delegatecall, nor a call to a library's external or public function (run by ``DELEGATECALL``; before
+  this an external library was caught only because crytic's unlinked ``__$...$__`` placeholder fails to parse), in
+  any function or modifier, ``test_state_blocked::test_a_slot_an_external_library_can_write_is_never_nobody_ever``;
+  no ``code_of`` naming other code; the deployed code is readable, is no EIP-7702 delegation, and has no ``DELEGATECALL``/``CALLCODE`` opcode the compiled contract lacks,
   nor a different length from it). Where it isn't, no slot is constant: "nobody, ever" never rests on one, and a
   precompile address read from storage is latched only where the slot is (``_fixed_target``). Probe ``c1.py``'s two
   rows are now not determined, ``state_blocks_everyone:hi/lo`` (``test_state_blocked::
@@ -308,19 +310,52 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
   a followed callee's code answers ``True`` is trusted, so a candidate can be listed (over-listing, never a missed
   holder) on a mis-lowered callee's word. Fail-safe in direction (more listed, never fewer), but the list is not
   proven; ``Evaluator.passes``/``confirmed`` should be used there as elsewhere.
-* **G7. A mis-lowered followed callee can make a verdict bolder than the clean run** (found by the fail-safe sweep,
-  ``test_failsafe``, 2026-10-24). With every followed callee's code read as "nobody" (false) or "everyone" (true),
-  twelve probes come out "open" (now or later, complete) where the clean verdict was not determined or a list, and
-  the chain refuses some or all strangers: an action callee handed the caller (``Minter.mint`` over
-  ``Supply.canMint``), origin-reading inlined callees (``test_origin_callees`` p9/p9e/p9r/q4, ``test_origin_shapes``
-  a10/a11, ``test_review_probes`` mo), callees handed the caller's address bit (``test_stranger_runs`` originBit,
-  callerBit), and transfer pulls from a listing token (``test_pool_shapes``). "Callee code never decides on its own"
-  does not yet hold there. Strict xfails in ``test_failsafe`` (``G7``).
-* **G6. "Open later" on a callee no transaction can make pass** (review 5, ``probe_audit5/q7.py``). A view call
-  whose answer is false now and can never change (a flag nothing anywhere writes, a ``pure`` function returning
-  false) is read as a condition that may yet allow, so ``require(g.ok())`` is "open, later, complete" although nobody
-  ever passes, followed or not. Over-claims openness. Strict xfail
-  ``test_known_gaps::test_g6_a_callee_nothing_can_make_pass_is_never_open_later``.
+* **G7. A mis-lowered followed callee could make a verdict bolder than the clean run** (found by the fail-safe
+  sweep, ``test_failsafe``, 2026-10-24; reproduced without fault injection, ``scratchpad/probe_audit6/``). FIXED
+  2026-10-24 (all thirteen probes, under every callee fault, are never bolder; the natural reproductions are oracle
+  tests in ``test_callee_misread``). The paths ran around ``strangers_run``, ``_inlined_verdict`` and ``runs``
+  altogether. Three mechanisms, and a backstop:
+  * **M1, origin decided from the lowering alone** (``verdict.caller_bound``, ``decide._reads_origin``). Whether a
+    followed callee reads ``tx.origin`` was read off its lowering, so a read the lowering missed (a local declared
+    twice and named in assembly, lowered ``unknown:shadowed:o``) made ``require(guard.ok())`` "open later, complete"
+    where only the admin passes. Now its runtime code, deployed (and at the address whose code runs there) and as
+    compiled, must hold no ``ORIGIN`` opcode too (``hidden`` where it does, ``unfollowed`` where it can't be read);
+    ``_reads_origin`` reuses ``caller_bound``. Cost: a callee contract reading the origin in any function is never
+    read as the same for every caller (``test_core_soundness``, ``test_origin_shapes`` keep their origin-free callees
+    in contracts of their own). Probes p9, p9e, p9r, q4, a10 (both), a11, mo, originBit.
+  * **M2, a callee's code alone saying it reads the caller alike** (``decide._decide``, the branch where nobody is
+    singled out). ``_singles_out`` records those calls (``coded``), but only "restricted" used it: one stranger passing
+    made it "open now", a state letting one through "open later". Now "open now" there needs ``runs(FRESH)`` and
+    ``strangers_run``; "open later" is not determined; both name ``callee_unsingled:<signature>``. Probe callerBit;
+    natural: a check made by a call in assembly whose outcome the lowering assumes (``lowBit``).
+  * **M3, an action handed the caller assumed to pass** (``Evaluator._action``, ``_returned_size``). Unfollowed, it
+    was ``ASSUMED``; followed, a pass its lowering showed was taken unmarked, so ``passes``/``confirmed`` never asked it
+    again (``Minter.mint`` open now, complete, while the chain refuses every stranger; likewise with A52 inside
+    ``Supply.canMint``). Now an unfollowed one is unknown, a followed one's pass is marked as resting on callee code
+    (unknown with no callee code answering), and ``decide`` runs every stranger's own call before opening on either
+    (``_handed_actions``); candidates left undecided where the stranger is unknown are confirmed by their own call.
+    An action's return-data size is its callee's declaration (``World.declared_size``), never its lowering. Probes
+    Minter.mint, PullerListing.deposit, GPv2Listing.supply.
+  * **Backstop** (``decide._confirmed_open``): a plain "open now" (no ``requires``, no ``after``, no ether, no entry of
+    the stranger's own to arrange first, no action assumed) stands only once every stranger's own call goes through
+    on the chain (``runs`` with its witness or a search of its own, then ``strangers_run``: five calls run);
+    otherwise not determined, ``open_unconfirmed`` (natural: the contract's own Yul call into always-reverting code,
+    A52, ``selfCall``). "Open later" never rests on a callee's answer (see G6).
+  * **Residue.** Opens resting on what the stranger arranges are not run as they stand (the stranger lacks the
+    holding): an action not handed the caller (assumed, stated below) and a refusal the callee's code makes only on
+    entries the caller can bring about (``requires`` or an arranged approval) are checked by the oracle's arrangement,
+    not by the engine, so a callee mis-lowered into a refusal on balances where it refuses on a blacklist could still
+    say "open on holding". "Restricted" and lists are untouched by the backstop (lists already never rest on callee
+    code; ``callee_code_list``).
+* **G6. "Open later" on a callee no transaction can make pass** (review 5, ``probe_audit5/q7.py``). FIXED 2026-10-24
+  for callees: "open later" never rests on a callee's answer changing (``decide._acts_once_allowed``): a state that
+  lets the stranger through only with a condition reading a call answering otherwise than it does now (asked of the
+  chain, no callee code) shows nothing, not determined, ``later_on_callee:<signature>``; with every condition free
+  (past ``_MAX_WHEN``) such conditions read as they stand. ``test_known_gaps::test_g6_*`` pass. **What remains:** the
+  cost, a callee answer that can change (a blocklist its owner can clear, ``e9``) is not determined too, where "open
+  later" was true (``test_g1_extended_a_callee_answer_its_owner_can_change_is_never_open_later_on_its_word``); and "open
+  later" on this contract's own state still rests on latching and ``_reachable`` (a flag written only on a path no
+  transaction reaches, a time no block reaches) and on ``world.effective``, as before.
 
 ### Stated assumptions (not constructs)
 
@@ -379,7 +414,8 @@ Each is a shape where a verdict is wrong or over-claims today. None is fixed; th
     stays shown whole. A callee's code saying it reads the caller it is handed alike for everyone (Maple's
     ``canCall(id, msg.sender, data)``) never makes "nobody, ever": a stranger failing in every state is restricted,
     not complete, ``callee_unsingled:<signature>``.
-  * Inlined. A view call whose followed code reads ``tx.origin`` (itself or a callee it asks, ``verdict.caller_bound``),
+  * Inlined. A view call whose followed code reads ``tx.origin`` (itself or a callee it asks, ``verdict.caller_bound``;
+    one whose runtime code has an ``ORIGIN`` opcode its lowering doesn't show is an unknown, ``origin:``, G7 M1),
     whether or not it is handed the caller, is inlined into the formula (``verdict.bind_callers``), since the chain
     would answer it with this contract as the origin. Its code is trusted for nothing: the verdict is decided on the
     formula with each such call an unknown (``verdict._inlined_verdict``); the inlined formula only proposes, and the

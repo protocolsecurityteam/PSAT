@@ -61,26 +61,6 @@ FAULTS = [
 ]
 
 
-# Known violations, by probe: a followed callee mis-lowered either way makes these verdicts bolder than the clean run
-# (open now or later, complete), though the chain refuses some or all strangers. COVERAGE.md G7.
-G7 = {
-    ("test_actions", "Minter", "mint", ("Supply",)),
-    ("test_origin_callees", "C", "p9", ("Guard",)),
-    ("test_origin_callees", "C", "p9e", ("Guard",)),
-    ("test_origin_callees", "C", "p9r", ("Guard",)),
-    ("test_origin_callees", "C", "q4", ("Guard",)),
-    ("test_origin_shapes", "C", "a10", ("Relay",)),
-    ("test_origin_shapes", "C", "a10", ("Relay", "Deep")),
-    ("test_origin_shapes", "C", "a11", ("GuardNV",)),
-    ("test_pool_shapes", "PullerListing", "deposit", ("Listing",)),
-    ("test_pool_shapes", "GPv2Listing", "supply", ("Listing",)),
-    ("test_review_probes", "C", "mo", ("G",)),
-    ("test_stranger_runs", "C", "originBit", ("G",)),
-    ("test_stranger_runs", "C", "callerBit", ("G",)),
-}
-_G7 = pytest.mark.xfail(strict=True, reason="G7: a mis-lowered followed callee makes this verdict bolder")
-
-
 def _registered():
     out = []
     for module in MODULES:
@@ -89,9 +69,7 @@ def _registered():
             for contract, function, others in probe.functions:
                 name = f"{module[5:]}-{i}-{contract}.{function}-{'+'.join(others) or 'alone'}"
                 for fault in FAULTS:
-                    known = fault.startswith("callee_") and (module, contract, function, tuple(others)) in G7
-                    out.append(pytest.param(module, i, contract, function, tuple(others), fault,
-                                            id=f"{name}-{fault}", marks=[_G7] if known else []))  # fmt: skip
+                    out.append(pytest.param(module, i, contract, function, tuple(others), fault, id=f"{name}-{fault}"))
     return out
 
 
