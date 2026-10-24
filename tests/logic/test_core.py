@@ -172,3 +172,8 @@ def test_a_failed_read_in_a_condition_stays_a_gap(d):
     assert v.openness == "not_determined"
     assert "read_failed:call:math(uint256)" in v.gaps
     O.never_bolder(clean, v)
+
+
+def test_a_fixed_question_beside_a_listed_admin_holds_against_the_chain(d):
+    v = O.check(d, "C", "listedFixed", O.verdict(d, "C", "listedFixed"), known=HOLDERS, open_at=False)
+    O.sound(v, HOLDERS)

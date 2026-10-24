@@ -548,3 +548,11 @@ def test_a_bitmap_read_at_a_key_the_lender_only_picks_between_is_a_gate(d):
 def test_a_check_handed_the_caller_in_an_array_is_a_gate(d):
     v = O.check(d, "Router", "transferIn", O.verdict(d, "Router", "transferIn", "Bitmaps"), open_at=False)
     assert v.openness == "restricted"
+
+
+@pytest.mark.parametrize(("puller", "name"), [("PullerTether", "deposit"), ("GPv2Tether", "supply")])
+def test_a_pull_from_a_token_not_followed_holds_against_the_chain(d, puller, name):
+    # Nothing shows what the token's ``transferFrom`` checks of the caller it is handed: whatever the verdict, it
+    # claims nothing a funded stranger's own call doesn't show.
+    v = O.verdict(d, puller, name)
+    O.check(d, puller, name, v, arrange=_funded("Tether", puller), samples=({"amount": 5},))

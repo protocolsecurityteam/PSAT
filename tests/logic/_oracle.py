@@ -3,8 +3,9 @@
 * Semantics (``chain_says`` / ``engine_says``): a function's lowered success formula, evaluated by the decision's own
   evaluator at concrete arguments, against ``eth_call`` of the same call.
 * Verdict (``check``): every holder a verdict lists passes ``eth_call`` from its own address (``tx.origin`` too) with
-  its witness arguments; "open now" only when each of the five strangers (``decide._STRANGERS``) passes; "restricted"
-  only when no stranger passes at the arguments the probe's author knows matter; a list said to be complete leaves
+  its witness arguments; "open now" only when each of the five strangers (``decide._STRANGERS``) passes; "open later"
+  only where the probe says how a state comes about in which they all do; "restricted" only when no stranger passes
+  at the arguments the probe's author knows matter; a list said to be complete leaves
   out no address the probe knows of that passes; "nobody" is refuted by nobody.
 * The fail-safe sweep (``test_failsafe``) reruns each probe a test module registers (``PROBES``) under injected faults
   and compares with the clean run (``never_bolder``).
@@ -215,11 +216,40 @@ def engine_says(d: A.Deployment, fn: Any, values: Iterable[Any], contract: str =
     """The lowered formula and its truth at ``values`` (bytes for a ``bytesN`` read as its number)."""
     reset_terms()
     formula = Lowerer(d.slither[contract]).success(fn)
-    world = World(d.chain(), d.at[contract], selector(fn.solidity_signature), contracts or {})
+    # The contract itself is always known: its own storage is read by its layout.
+    known = {d.at[contract]: d.slither[contract], **(contracts or {})}
+    world = World(d.chain(), d.at[contract], selector(fn.solidity_signature), known)
     assignment = {}
     for i, (p, v) in enumerate(zip(fn.parameters, values)):
         assignment[parameter(p, i)] = int.from_bytes(v, "big") if isinstance(v, bytes) else v
     return formula, Evaluator(world, {"caller": sender, "signer": sender}, assignment).truth(formula)
+
+
+def labels(formula: Any) -> set[str]:
+    """What the lowering names as left unknown in ``formula``: each ``unknown``'s label, each rejected
+    (``unsupported:``) opaque term, ``delegate`` for a delegatecall's code, and ``action:<signature>`` for an action
+    handed the caller (unknown unless its callee's code answers, which the semantics harness never wires)."""
+    from services.logic.terms import IDENTITY_KINDS, contains, subterms
+
+    named = {str(u[1]) for u in subterms(formula, "unknown")}
+    named |= {str(t[1]) for t in subterms(formula, "opaque") if str(t[1]).startswith("unsupported:")}
+    named |= {
+        f"action:{c[2]}"
+        for c in subterms(formula, "call")
+        if not c[4] and any(contains(a, IDENTITY_KINDS) for a in c[3])
+    }
+    return named | ({"delegate"} if subterms(formula, "delegate") else set())
+
+
+def agrees(formula: Any, engine: Any, chain: bool, where: Any = None) -> None:
+    """The semantics oracle at one input: the engine says what the chain says, or it says it doesn't know and the
+    lowering names why (``labels``). An unknown named nowhere compares nothing and is a failure."""
+    from services.logic.decide import UNK
+
+    if engine is UNK:
+        assert labels(formula), (where, "unknown, named nowhere", formula)
+    else:
+        assert engine == chain, (where, chain, engine, formula)
 
 
 class Faulty(Chain):
@@ -270,17 +300,20 @@ def nobody(v: Any) -> bool:
 
 def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None = None, samples=({},),
           known: Iterable[int] = (), open_at: Any = None, arrange: Callable | None = None,
-          holders_after: Callable | None = None) -> Any:  # fmt: skip
+          holders_after: Callable | None = None, later: Callable | None = None) -> Any:  # fmt: skip
     """``v`` against the chain as it stands (see the module's docstring).
 
     ``samples``: argument sets (by name) at which a refused caller must fail; ``known``: addresses beyond the strangers
     and anvil's accounts the probe knows of; ``arrange(d, stranger)``: what a stranger does for itself first (a
     deposit, a request, coming to hold what ``requires`` names), run with the verdict's own ``after`` calls before
     that stranger's call; ``open_at``: arguments at which, so arranged, every stranger passes (the verdict must then
-    be "open"; checked whatever the verdict), or ``False`` where none can (never "open now"). An "open now" verdict
-    is checked at its own witness unless ``open_at`` is given. ``holders_after(d)``: what has to happen first for the
-    listed holders to pass where the verdict lists them on a condition closed now (the owner turning it on, code
-    coming to be at an address), run before their calls."""
+    be "open"; checked whatever the verdict), or ``False`` where none can now. With ``open_at=False`` the verdict is
+    never "open later" either unless ``later(d)`` says how a state comes about in which every stranger passes (the
+    owner unpausing): "open later" claims such a state is reachable, so it is checked there,
+    each stranger's call at each of ``samples`` until one passes for all. An "open now" verdict is checked at its own
+    witness unless ``open_at`` is given. ``holders_after(d)``: what has to happen first for the listed holders to
+    pass where the verdict lists them on a condition closed now (the owner turning it on, code coming to be at an
+    address), run before their calls."""
     fn = function(d, contract, name)
     where = at if at is not None else d.at[contract]
     with snapshot(d):
@@ -306,6 +339,12 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
                 assert passes(d, where, fn, own, sender=who), (name, hex(who), own, v)
     if open_at is False:
         assert not (v.openness == "open" and v.allowed == "now"), (name, v)
+        claimed = v.openness == "open" and v.allowed == "later"  # on conditions set aside, it claims none
+        assert not claimed or later is not None, (name, "no state the probe knows lets a stranger through", v)
+        if claimed and later is not None:
+            with snapshot(d):
+                later(d)
+                assert any(strangers_passing(d, where, fn, args) == {True} for args in samples), (name, "later", v)
     elif open_at is not None:
         assert v.openness == "open", (name, "every stranger passes", open_at, v)
     if v.openness == "restricted":
@@ -316,6 +355,38 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
         for who in {*ACCOUNTS, *known, *d.at.values()} - listed:
             for args in samples:
                 assert not passes(d, where, fn, args, sender=who), (name, "unlisted passes", hex(who), args, v)
+    return v
+
+
+def chain_sound(d: A.Deployment, contract: str, name: str, v: Any, clean: Any, *, at: int | None = None) -> Any:
+    """What a verdict decided under a fault claims beyond the clean verdict ``clean`` (which its module checks against
+    the chain, with whatever arrangement the probe knows) holds on the chain as it stands: a holder only it lists
+    passes ``eth_call`` from its own address with its witness; an "open now" (nothing to hold first) at a witness of
+    its own passes for each of the five strangers, its ``after`` calls made first, unless the clean witness fails
+    for them too (an open each stranger arranges first, which the module checks that way). A fault may only lower
+    confidence: what it still claims must stand."""
+    fn = function(d, contract, name)
+    where = at if at is not None else d.at[contract]
+    for holder in set(v.principals) - listed(clean) - set(clean.undecided):
+        assert passes(d, where, fn, v.witnesses.get(holder, {}), sender=holder), (name, hex(holder), v)
+
+    def all_pass(witness: dict) -> bool:
+        for who in STRANGERS:
+            with snapshot(d):
+                for signature, args in v.after:
+                    first = next(f for f in d.slither[contract].functions_entry_points
+                                 if f.solidity_signature == signature)  # fmt: skip
+                    if not transact_data(d, where, calldata(first, {k: who if x == FRESH else x
+                                                                     for k, x in args.items()}), who):  # fmt: skip
+                        return False
+                if not passes(d, where, fn, {k: who if x == FRESH else x for k, x in witness.items()}, sender=who):
+                    return False
+        return True
+
+    if v.openness == "open" and v.allowed == "now" and not v.requires:
+        witness, clean_witness = v.witnesses.get(FRESH, {}), clean.witnesses.get(FRESH)
+        if witness != clean_witness and not all_pass(witness):
+            assert clean_witness is not None and not all_pass(clean_witness), (name, "open at its witness", v)
     return v
 
 

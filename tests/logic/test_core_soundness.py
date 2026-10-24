@@ -114,3 +114,10 @@ def test_a_memory_word_lost_track_of_may_be_the_caller(d):
     v = O.check(d, "C", "viaMem", O.verdict(d, "C", "viaMem"), samples=X, open_at=False)
     O.sound(v, {ADMIN})
     assert O.passes(d, "C", O.function(d, "C", "viaMem"), sender=ADMIN)
+
+
+@pytest.mark.parametrize("name", ["viaPause", "viaMem"])
+def test_the_followed_verdicts_hold_against_the_chain(d, name):
+    # ``paused()`` is always true (nobody passes); the memory word is the caller, so only the admin passes.
+    v = O.check(d, "C", name, O.verdict(d, "C", name, "Guard", "Flags"), samples=X, open_at=False)
+    O.sound(v, {ADMIN} if name == "viaMem" else set())

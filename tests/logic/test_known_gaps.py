@@ -172,7 +172,7 @@ def test_g1_extended_a_callee_answer_its_owner_can_change_is_never_open_later_on
     # but it would rest on the callee coming to answer otherwise, which nothing shows (G6: one that never can): not
     # determined, the call named.
     v = O.verdict(d, "Tagged", "e9", *(("Blocklist",) if followed else ()))
-    O.check(d, "Tagged", "e9", v, samples=({"v": 7},), open_at=False)
+    O.check(d, "Tagged", "e9", v, samples=({"v": 7},), open_at=False, later=_unblock)
     assert v.openness == "not_determined" and "later_on_callee:blocked(bytes)" in v.gaps, v
     with O.snapshot(d):
         _unblock(d)
@@ -230,3 +230,12 @@ def test_g6_a_callee_nothing_can_make_pass_is_never_open_later(d, name, signatur
     O.check(d, "ViaNever", name, v, samples=({"v": 1},), open_at=False)
     assert v.openness != "open", v
     assert f"later_on_callee:{signature}" in v.gaps, v
+
+
+@pytest.mark.parametrize(("contract", "name"), [("Ranged", "orPending"), ("Ranged", "branchy"),
+                                                ("Pending", "accept"), ("Pending", "acceptCapped")])  # fmt: skip
+def test_the_known_gaps_verdicts_hold_as_the_chain_stands(d, contract, name):
+    # Whatever G1 and G4 over-claim about what the owner can change, the verdicts hold as things stand: no stranger
+    # and no unlisted address passes now.
+    samples = ({"a": 5}, {"a": 12}) if contract == "Ranged" else ({"v": 1},)
+    O.check(d, contract, name, O.verdict(d, contract, name), samples=samples, known=(STRANGER,), open_at=False)

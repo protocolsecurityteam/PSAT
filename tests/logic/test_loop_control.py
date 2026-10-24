@@ -263,8 +263,7 @@ def test_a_loop_continues_and_breaks_where_the_language_sends_it(deployed, name,
     assert not rejected, (name, rejected)
     if values[0] in EXACT[name]:
         assert engine is not UNK, (name, values)
-    if engine is not UNK:
-        assert engine == O.chain_says(deployed, fn, values), (name, values, formula)
+    O.agrees(formula, engine, O.chain_says(deployed, fn, values), (name, values))
 
 
 def test_a_break_whose_loop_cant_be_told_from_the_source_is_rejected_by_name(deployed, monkeypatch):

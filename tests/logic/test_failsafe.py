@@ -1,9 +1,12 @@
 """The fail-safe oracle, metamorphic: every verdict-oracle probe a test module registers (``PROBES``) is decided again
 under each injected fault, and the faulted verdict is never bolder than the clean one (``_oracle.never_bolder``:
-never more open, never a smaller complete list, never complete where the clean run was not). The faults: every
-followed callee mis-lowered (as "nobody", answering false, and as "everyone", answering true), every storage read
-failing, every ``eth_call`` failing, every log history cut in half, and each budget constant at zero and at a small
-value. The clean verdicts themselves are checked against the chain by the modules that register them."""
+never more open, never a smaller complete list, never complete where the clean run was not), and whatever it claims
+beyond the clean verdict holds on the chain (``_oracle.chain_sound``: a holder only it lists passes ``eth_call`` from
+its own address, an "open now" at a witness of its own passes for all five strangers). The faults: every followed
+callee mis-lowered (as "nobody", always reverting; as "false", returning false; as "everyone", returning true), every
+storage read failing, every ``eth_call`` failing, every log history cut in half, and each budget constant at zero
+and at a small value. The clean verdicts themselves are checked against the chain by the modules that register
+them."""
 
 from __future__ import annotations
 
@@ -47,9 +50,10 @@ BUDGETS = {
     "_BINDINGS": ((holders_module,), 1),
 }
 _SIZES = {"UNPROVEN_BATCH", "_CANDIDATE_BATCH"}
+# A followed callee's lowering replaced by (success condition, the value it returns).
+CALLEE_FAULTS = {"callee_nobody": (FALSE, FALSE), "callee_false": (TRUE, FALSE), "callee_everyone": (TRUE, TRUE)}
 FAULTS = [
-    "callee_nobody",
-    "callee_everyone",
+    *CALLEE_FAULTS,
     "storage",
     "calls",
     "logs",
@@ -94,13 +98,13 @@ def deployed(anvil):  # noqa: F811
 
 def _inject(fault: str, monkeypatch, d, contract: str):
     """Apply ``fault``; the chain to decide on."""
-    if fault.startswith("callee_"):
-        answer = FALSE if fault == "callee_nobody" else TRUE
+    if fault in CALLEE_FAULTS:
+        pc, answer = CALLEE_FAULTS[fault]
         called = Lowerer.called
 
         def misread(self, function, args, view):
             if getattr(getattr(function, "contract", None), "name", contract) != contract:
-                return TRUE, (answer,)
+                return pc, (answer,)
             return called(self, function, args, view)
 
         monkeypatch.setattr(Lowerer, "called", misread)
@@ -130,6 +134,7 @@ def test_a_fault_never_makes_a_verdict_bolder(deployed, monkeypatch, module, ind
     finally:
         _forget(d)
     O.never_bolder(clean, faulted)
+    O.chain_sound(d, contract, function, faulted, clean)
 
 
 def _forget(d) -> None:

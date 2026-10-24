@@ -162,12 +162,14 @@ def test_a_condition_on_what_never_changes_still_refutes_everyone(d, name):
             assert O.strangers_passing(d, "C", O.function(d, "C", name), amount) == {False}
 
 
+def _unpause(d):
+    assert O.transact(d, "C", "setPaused(bool)", ("bool",), (False,))
+
+
 def test_a_pause_is_open_once_it_allows(d):
-    v = O.check(d, "C", "paus", O.verdict(d, "C", "paus"), open_at=False, samples=AMOUNTS)
+    # Open later: the owner unpauses, and every stranger passes then.
+    v = O.check(d, "C", "paus", O.verdict(d, "C", "paus"), open_at=False, samples=AMOUNTS, later=_unpause)
     assert v.openness == "open" and v.allowed == "later"
-    with O.snapshot(d):
-        assert O.transact(d, "C", "setPaused(bool)", ("bool",), (False,))
-        assert O.strangers_passing(d, "C", O.function(d, "C", "paus"), {"amount": 1}) == {True}
 
 
 def test_a_condition_on_a_slot_a_delegatecall_can_write_is_never_nobody_ever(d):

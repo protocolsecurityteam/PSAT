@@ -207,3 +207,11 @@ def test_inlined_code_letting_nobody_through_is_never_a_complete_nobody(deployed
     assert not v.complete, v
     assert "inlined_callee:originOk()" in v.gaps
     O.never_bolder(clean, v)
+
+
+@pytest.mark.parametrize(("name", "signature"), [("p9r", "originReq()"), ("p9v", "originVoid(uint256)"),
+                                                 ("q3", "originReqArg(uint256)"), ("q4", "originReq()")])  # fmt: skip
+def test_unfollowed_code_requiring_the_origin_is_never_taken_at_the_chains_word(deployed, name, signature):
+    v = O.check(deployed, "C", name, _verdict(deployed, name, followed=False), samples=X, open_at=False)
+    O.sound(v, {ADMIN})
+    assert v.openness == "not_determined" and f"origin:{signature}" in v.gaps

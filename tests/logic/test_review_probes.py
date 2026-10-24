@@ -207,11 +207,40 @@ def test_an_element_read_the_lowering_answers_is_the_chains(elements, name, valu
     formula = Lowerer(c).success(fn)
     world = World(d.chain(), d.at["C"], O.selector(fn.solidity_signature), {d.at["C"]: c})
     world.parameters = tuple(parameter(p, i) for i, p in enumerate(fn.parameters))
-    # Only the scalar arguments are bound: a calldata array or struct the caller hands in is read from its words.
-    assignment = {parameter(p, i): v for i, (p, v) in enumerate(zip(fn.parameters, values)) if isinstance(v, int)}
+    # Every argument is bound, and each length or item of one the caller hands in (``len``/``elem`` over it, a struct
+    # argument's fields by name) is what the ``eth_call`` sends.
+    named: dict = {}
+    for p, v in zip(fn.parameters, values):
+        fields = getattr(getattr(p.type, "type", None), "elems_ordered", None)
+        named.update({f"{p.name}.{f.name}": x for f, x in zip(fields, v)} if fields and isinstance(v, tuple) else {})
+        named[p.name] = v
+    assignment = {parameter(p, i): v for i, (p, v) in enumerate(zip(fn.parameters, values))}
+    probe = Evaluator(world, {"caller": OWNER, "signer": OWNER}, dict(assignment))
+
+    def held(t):
+        if t[0] == "arg":
+            return named.get(t[1])
+        inner = held(t[1])
+        if t[0] == "len":
+            return len(inner) if isinstance(inner, (list, bytes)) else None
+        index = probe.eval(t[2])
+        ok = isinstance(inner, (list, bytes)) and isinstance(index, int) and 0 <= index < len(inner)
+        return inner[index] if ok else 0
+
+    def over_argument(t):
+        while isinstance(t, tuple) and t and t[0] in ("len", "elem"):
+            t = t[1]
+        return isinstance(t, tuple) and t and t[0] == "arg"
+
+    for t in subterms(formula, "arg"):
+        if t not in assignment and isinstance(named.get(t[1]), int):
+            assignment[t] = named[t[1]]  # a struct argument's field
+    for t in sorted(subterms(formula, "len") + subterms(formula, "elem"), key=lambda t: len(str(t))):
+        value = held(t) if over_argument(t) else None
+        if value is not None:
+            assignment[t] = value
     engine = Evaluator(world, {"caller": OWNER, "signer": OWNER}, assignment).truth(formula)
-    if engine is not UNK:
-        assert engine == chain, (name, values, formula)
+    O.agrees(formula, engine, chain, (name, values))
 
 
 # --- audit 3, return values (``harness.py``): loops, modifiers, Yul, and pre-0.5 declarations ----------------------
@@ -476,8 +505,7 @@ def test_a_modifier_running_its_body_in_a_loop_is_the_chains(mods, name):
     for n in range(5):
         for want in range(6):
             formula, engine = O.engine_says(mods, fn, (n, want))
-            if engine is not UNK:
-                assert engine == O.chain_says(mods, fn, (n, want)), (name, n, want, formula)
+            O.agrees(formula, engine, O.chain_says(mods, fn, (n, want)), (name, n, want))
 
 
 # --- verdict probes: audit 1 (callee2, latch, reject), audit 2 (q12, q4 nest), audit 3 (a_inlined/missing/open) ----
@@ -813,11 +841,15 @@ def test_a_known_request_the_chain_answers_is_never_nobody(setups):
 def test_no_code_at_a_constant_now_is_never_nobody_ever(setups, name):
     # audit 1: a gate a factory deploys later at 0xDeaDBeef: once code is there, every stranger passes.
     d = setups["latch"]
-    v = O.check(d, "C", name, O.verdict(d, "C", name, "Inner"), open_at=False)
-    assert not O.nobody(v), v
-    with O.snapshot(d):
+
+    def gate_deployed(d):
         code = rpc(d.url, "eth_getCode", [O.hex20(d.at["Gate"]), "latest"])
         rpc(d.url, "anvil_setCode", ["0x00000000000000000000000000000000deadbeef", code])
+
+    v = O.check(d, "C", name, O.verdict(d, "C", name, "Inner"), open_at=False, later=gate_deployed)
+    assert not O.nobody(v), v
+    with O.snapshot(d):
+        gate_deployed(d)
         assert O.strangers_passing(d, "C", O.function(d, "C", name)) == {True}
 
 

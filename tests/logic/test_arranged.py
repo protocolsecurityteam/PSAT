@@ -771,13 +771,14 @@ def test_what_anyone_may_redo_once_holders_did_it_is_not_open(g):
         assert O.strangers_passing(g, "Switch", disable) == {True}
 
 
+def _unpause(g):
+    assert O.transact(g, "Switch", "pause(bool)", ("bool",), (False,), sender=OWNER)
+
+
 def test_a_paused_public_function_is_still_open_once_unpaused(g):
-    v = O.check(g, "Switch", "deposit", O.verdict(g, "Switch", "deposit"), open_at=False)
+    # Open later: the manager unpauses, and every stranger passes then.
+    v = O.check(g, "Switch", "deposit", O.verdict(g, "Switch", "deposit"), open_at=False, later=_unpause)
     assert v.openness == "open" and v.allowed != "now"
-    deposit = O.function(g, "Switch", "deposit")
-    with O.snapshot(g):  # the manager unpauses
-        assert O.transact(g, "Switch", "pause(bool)", ("bool",), (False,), sender=OWNER)
-        assert O.strangers_passing(g, "Switch", deposit) == {True}
 
 
 def test_a_wait_with_a_condition_unread_is_undetermined_not_nobody(g):
@@ -863,3 +864,9 @@ def test_a_request_whose_filing_could_not_be_read_is_undetermined(g):
     faulted = O.verdict(g, "Queue", "claim", chain=O.Faulty(g, storage=_closed_slot(g, "Queue")))
     assert faulted.openness == "not_determined"
     O.never_bolder(clean, faulted)
+
+
+def test_disabling_what_only_a_manager_may_disable_holds_against_the_chain(g):
+    # Quorum is 5: only a manager (the deployer, its role in namespaced storage) passes now.
+    v = O.check(g, "Spaced", "disable", O.verdict(g, "Spaced", "disable"), open_at=False)
+    O.sound(v, {OWNER})

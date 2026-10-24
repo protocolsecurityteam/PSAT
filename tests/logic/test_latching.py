@@ -249,3 +249,26 @@ def test_a_codeless_immutable_target_is_never_latched(d):
 def test_no_code_at_a_precompile_stays_latched(d, contract):
     v = _latched(d, contract, "codedPrecompile")  # no contract is ever created there: nobody, ever
     assert O.nobody(v)
+
+
+_COMES_ABOUT = {
+    "pinged": lambda d: _owner(d, "CD", "setTarget(address)", ("address",), (d.at["Ping"],)),
+    "pingedRoute": lambda d: _owner(d, "CD", "setRoute(address)", ("address",), (d.at["Ping"],)),
+    "pingedNowhere": _code_at(0xDEAD),
+    "codedNowhere": _code_at(0xDEAD),
+    "pingedImmutable": _code_at(0xFEED),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_COMES_ABOUT))
+def test_a_codeless_target_behind_a_delegatecall_is_not_latched_either(d, name):
+    # ``CD`` as ``C``: no code where the call goes now, and the owner passes once it is there.
+    v = _latched(d, "CD", name, _COMES_ABOUT[name])
+    assert not O.nobody(v) and set(v.principals) | set(v.conditions) <= {OWNER}
+
+
+def test_a_codeless_item_of_a_stored_list_behind_a_delegatecall_is_not_latched(d):
+    with O.snapshot(d):
+        _owner(d, "CD", "addTarget(address)", ("address",), (0xBEEF,))
+        v = _latched(d, "CD", "pingedEach", _code_at(0xBEEF))
+        assert not O.nobody(v)
