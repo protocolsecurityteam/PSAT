@@ -150,6 +150,28 @@ contract C {
         }
         require(s == want);
     }
+    function yulLetInLoop(uint256 n, uint256 want) external pure {
+        uint256 s;
+        assembly { for { let k := 0 } lt(k, n) { k := add(k, 1) } { let j s := add(s, add(j, 1)) j := 7 } }
+        require(s == want);
+    }
+    function yulLetSwitch(uint256 n, uint256 want) external pure {
+        uint256 s;
+        assembly {
+            for { let k := 0 } lt(k, 3) { k := add(k, 1) } {
+                let a let b := 0 switch eq(k, n) case 1 { a := 4 } s := add(s, add(a, add(b, 1)))
+            }
+        }
+        require(s == want);
+    }
+    function yulFunctionLet(uint256 n, uint256 want) external pure {
+        uint256 s;
+        assembly {
+            function f(m) -> r { let t if gt(m, 2) { t := 5 } r := add(r, add(t, 1)) }
+            s := add(f(n), f(0))
+        }
+        require(s == want);
+    }
 }
 """
 
@@ -218,6 +240,10 @@ EXPECTED = {
     "yulNested": lambda n: 11 * n,
     "yulPost": lambda n: sum(5 + 2 * i for i in range(n) if i != 1),
     "yulInFor": lambda n: 102 * n,
+    # A Yul ``let`` without a value is zero each time it runs, an earlier iteration's value gone.
+    "yulLetInLoop": lambda n: n,
+    "yulLetSwitch": lambda n: 3 + (4 if n < 3 else 0),
+    "yulFunctionLet": lambda n: (6 if n > 2 else 1) + 1,
 }
 CASES = [(name, (n, want(n) + d)) for name, want in EXPECTED.items() for n in range(5) for d in (0, 2)]
 # Bounds read from an argument are followed exactly for a couple of iterations, then forgotten (``loop:N``).

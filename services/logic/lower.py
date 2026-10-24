@@ -1650,7 +1650,12 @@ class Lowerer:
         memory) each time the declaration runs, an inner loop's counter entered again. Before, they are function-scoped,
         zeroed once at the function's entry (``_function_scoped_locals``), and the declaration emits no code: it keeps
         what an earlier iteration, or an assignment written above it, left. Where the version can't be read, a local
-        already holding something other than zero is unknown by name."""
+        already holding something other than zero is unknown by name. A Yul ``let`` without a value is zero each time
+        it runs, in every version (Slither marks Yul locals ``memory``, though each is one stack word); a Yul function's
+        parameters, declared the same way at its entry, hold what they were handed."""
+        yul = getattr(getattr(self._node, "scope", None), "is_yul", False)
+        if yul and not _reference_typed(declared.type) and not any(p is declared for p in function.parameters):
+            return replace(st, env={**st.env, id(declared): _zero(declared.type)})
         memory, value = self._memory_var(declared), _local_value(declared)
         if not (memory or value):
             return st
