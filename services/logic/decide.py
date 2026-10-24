@@ -1164,12 +1164,12 @@ class Evaluator:
     def truth(self, term: Term) -> Any:
         """True, False or UNK (``PREIMAGE`` and ``ASSUMED`` count as true; a path that reverts, as false).
 
-        Callee code never decides on its own: asked from outside any evaluation, a False or a True that some followed
-        callee's code went into (a call over guessed or unknown arguments answered by it, an action's return value) is
-        asked again without any callee code, every such call put to the chain or left unknown. What fails there fails;
-        what passes there passes; what is left unknown is unknown (counted, ``world.code_refuted`` for a refusal,
-        ``world.code_passed`` for a pass). Inside an evaluation, and for ranking (``ranked``), the code's answer is
-        used as it is."""
+        Callee code never refutes on its own: asked from outside any evaluation, a False that some followed callee's
+        code went into (a call over guessed or unknown arguments answered by it, an action's return value) is asked
+        again without any callee code, every such call put to the chain or left unknown. What still fails stands;
+        what passes there passes; what is left unknown is unknown (counted, ``world.code_refuted``). A pass is asked
+        again where a decision rests on it (``passes``, ``confirmed``). Inside an evaluation, and for ranking
+        (``ranked``), the code's answer is used as it is."""
         if self.coded[1] or not self.callee_code:
             return self.ranked(term)
         outer, self.coded[0] = self.coded[0], False
@@ -1178,8 +1178,23 @@ class Evaluator:
             used = self.coded[0]
         finally:
             self.coded[0] = outer or self.coded[0]
-        if used and value in (True, False):
-            value = self._without_code(term, value)
+        if value is False and used:
+            value = self._without_code(term)
+        return value
+
+    def passes(self, term: Term) -> Any:
+        """``truth``, with a True that some followed callee's code went into asked again without any callee code too
+        (within the reads left for confirming, ``confirming``): what a decision says passes never rests on the code."""
+        if self.coded[1] or not self.callee_code:
+            return self.ranked(term)
+        outer, self.coded[0] = self.coded[0], False
+        try:
+            value = self.truth(term)
+            used = self.coded[0]
+        finally:
+            self.coded[0] = outer or self.coded[0]
+        if value is True and used:
+            value = self._without_code(term, True)
         return value
 
     def ranked(self, term: Term) -> Any:
@@ -3331,7 +3346,7 @@ def _decide_one(
     base = Evaluator(world, identity, dict(fixed), blind, when)
     # Gathering reads or asking only whether the state settles it: callee code answers as it is (``Evaluator.ranked``).
     passed = world.code_passed
-    unknown_args = base.ranked(formula) if base_only or reads_only else base.truth(formula)
+    unknown_args = base.ranked(formula) if base_only or reads_only else base.passes(formula)
     # A pass a callee's code showed whatever the arguments, unknown without it: the likeliest guess alone, asked of the
     # chain first, settles most (one read, before a batch of guesses each asks the chain).
     coded_pass = unknown_args is UNK and world.code_passed > passed

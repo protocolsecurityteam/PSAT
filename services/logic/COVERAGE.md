@@ -274,8 +274,9 @@ Found while working, not in the before table:
   input is known whole and unknown otherwise, and the choice never depends on what the chain has cached. Without these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s
   read budget on one ``hasPermission`` call per guessed recipient (``test_callee_frame``).
 * Callee code never decides on its own, followed or inlined: fail-safe under any mis-lowering of a callee.
-  * Answers. A refusal it gives a guess only skips that guess. A ``False`` or a ``True`` asked from outside any
-    evaluation (``Evaluator.truth``) that some callee's code went into (a view call over guessed or unknown arguments
+  * Answers. A refusal it gives a guess only skips that guess. A ``False`` asked from outside any evaluation
+    (``Evaluator.truth``), and a ``True`` a decision rests on (``Evaluator.passes``, ``confirmed``), that some
+    callee's code went into (a view call over guessed or unknown arguments
     answered by it, an action's return value, a ``try``'s outcome; memoized values carry the mark, ``_coded_terms``)
     is asked again with no callee code at all: each such call whose input is known whole put to the chain (cache
     first, then a read within the function's budget; an ``abi.encode`` of known static values handed on as ``bytes`` is known,
