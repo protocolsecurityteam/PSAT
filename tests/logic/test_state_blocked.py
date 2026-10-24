@@ -32,6 +32,42 @@ contract C {
     function actFixed(uint256 amount) external { require(amount >= fixedLo && amount <= HI); x = amount; }
     function paus(uint256 amount) external { require(!paused); x = amount; }
 }
+
+// The same with an owner-only delegatecall into code the owner names: ``fixedLo`` is no longer fixed.
+contract CD is C {
+    function exec(address t, bytes calldata d) external {
+        require(msg.sender == owner);
+        (bool ok,) = t.delegatecall(d);
+        require(ok);
+    }
+}
+
+contract Setter is C {
+    function set() external { fixedLo = 0; }
+}
+
+// ``C``'s code behind a proxy whose admin may point it at code that writes anything.
+contract Proxy {
+    uint256 lo = 10;  // ``C``'s layout, as it deployed it
+    uint256 hi = 5;
+    uint256 fixedLo = 10;
+    address owner;
+    uint256 x;
+    bool paused = true;
+    address impl;
+    address admin;
+    constructor(address i) { impl = i; admin = msg.sender; owner = msg.sender; }
+    function upgradeTo(address i) external { require(msg.sender == admin); impl = i; }
+    fallback() external payable {
+        address i = impl;
+        assembly {
+            calldatacopy(0, 0, calldatasize())
+            let r := delegatecall(gas(), i, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            switch r case 0 { revert(0, returndatasize()) } default { return(0, returndatasize()) }
+        }
+    }
+}
 """
 
 OWNER = O.OWNER
@@ -40,9 +76,18 @@ AMOUNTS = [{"amount": a} for a in (0, 5, 7, 10, 50)]
 
 def _setup(d):
     d.deploy("C")
+    d.deploy("CD")
+    d.deploy("Setter")
+    d.deploy("Proxy", ("address",), (d.at["C"],))
 
 
-PROBES = [O.Probe(SOURCE, _setup, tuple(("C", f, ()) for f in ("act", "actOwner", "actConstant", "actFixed", "paus")))]
+PROBES = [
+    O.Probe(
+        SOURCE,
+        _setup,
+        (*(("C", f, ()) for f in ("act", "actOwner", "actConstant", "actFixed", "paus")), ("CD", "actFixed", ())),
+    )
+]
 
 
 @pytest.fixture(scope="module")
@@ -96,3 +141,21 @@ def test_a_pause_is_open_once_it_allows(d):
     with O.snapshot(d):
         assert O.transact(d, "C", "setPaused(bool)", ("bool",), (False,))
         assert O.strangers_passing(d, "C", O.function(d, "C", "paus"), {"amount": 1}) == {True}
+
+
+def test_a_condition_on_a_slot_a_delegatecall_can_write_is_never_nobody_ever(d):
+    # ``CD``'s owner may delegatecall code that writes ``fixedLo``: what reads it can change.
+    v = O.check(d, "CD", "actFixed", O.verdict(d, "CD", "actFixed"), samples=AMOUNTS, open_at=False)
+    assert not O.nobody(v), v
+    with O.snapshot(d):
+        data = O.calldata(O.function(d, "Setter", "set"))
+        assert O.transact(d, "CD", "exec(address,bytes)", ("address", "bytes"), (d.at["Setter"], data))
+        assert O.strangers_passing(d, "CD", O.function(d, "CD", "actFixed"), {"amount": 5}) == {True}
+
+
+def test_a_condition_behind_a_proxy_is_never_nobody_ever(d):
+    # ``C`` run at the proxy's address: its admin may upgrade to code that writes the slot, so nothing in it is fixed.
+    proxy = d.at["Proxy"]
+    v = O.verdict(d, "C", "actFixed", at=proxy)
+    assert not O.nobody(v), v
+    O.check(d, "C", "actFixed", v, at=proxy, samples=AMOUNTS, open_at=False)

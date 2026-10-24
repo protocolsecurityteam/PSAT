@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 import os
+import re
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -534,10 +535,11 @@ _PRECOMPILES = range(1, 0x12)  # 0x01-0x11: addresses the protocol reserves, whe
 
 def _permanent(probe: Evaluator, target: Term) -> bool:
     """Whether whether code sits at an address term can never change: this contract, or a precompile the code
-    fixes (a constant), which no contract is ever created at."""
+    fixes (a constant, or a slot of this contract nothing can change: ``World.constant_load``), which no contract is
+    ever created at."""
     if _strip(target) == THIS:
         return True
-    if not _fixed_target(target):
+    if not _fixed_target(target, probe.world):
         return False
     value = probe.eval(target)
     return isinstance(value, int) and not isinstance(value, bool) and value % 2**160 in _PRECOMPILES
@@ -549,15 +551,52 @@ def _strip(term: Term) -> Term:
     return term
 
 
-def _fixed_target(target: Term) -> bool:
-    """Whether an address term is fixed by the code itself: constants, this contract, and conversions of them. Not an
-    immutable: whose it is (a callee's, at an address read from storage) and what it holds are set at deployment."""
+def _fixed_target(target: Term, world: World | None = None) -> bool:
+    """Whether an address term is fixed by the code itself: constants, this contract, conversions of them, and a slot
+    of this contract nothing can change (``World.constant_load``, which holds only where no delegatecall or proxy can
+    write it). Not an immutable: whose it is (a callee's, at an address read from storage) and what it holds are set
+    at deployment."""
     kind = target[0]
     if kind == "conv":
-        return _fixed_target(target[2])
+        return _fixed_target(target[2], world)
     if kind == "op":
-        return all(_fixed_target(a) for a in target[2])
+        return all(_fixed_target(a, world) for a in target[2])
+    if kind in ("load", "rawload") and world is not None:
+        return world.constant_load(target)
     return kind in ("const", "this", "constant")
+
+
+def _delegating(contract: Any, chain: Chain, address: int, code_of: Callable[[int], int] | None) -> bool:
+    """Whether storage at ``address`` may be written by code other than ``contract``'s own entry points, so that no
+    slot of it is constant however its own code reads: the contract makes a delegatecall (or callcode) of its own,
+    low-level or in assembly (a library's internal functions are its own code); the address runs other code first (a
+    proxy whose implementation ``code_of`` names, or whose deployed code delegates where the compiled contract
+    doesn't, or is a different length from it; an EIP-7702 delegation); or that code can't be read."""
+    from slither.core.cfg.node import NodeType
+
+    from .decide import _runtime_code
+
+    for fn in contract.functions_and_modifiers:
+        calls = [str(c) for c in [*fn.low_level_calls, *fn.solidity_calls]]
+        if any("delegatecall" in c or "callcode" in c for c in calls) or any(
+            n.type == NodeType.ASSEMBLY and re.search(r"\b(delegatecall|callcode)\s*\(", str(n.inline_asm or ""))
+            for n in fn.nodes
+        ):
+            return True
+    if code_of is not None and code_of(address) % 2**160 != address % 2**160:
+        return True
+    deployed = chain.code(address % 2**160)
+    if not isinstance(deployed, bytes) or deployed[:3] == b"\xef\x01\x00":
+        return True
+    if not _delegate_ops(deployed):
+        return False
+    compiled = _runtime_code(contract)
+    return not compiled or not _delegate_ops(compiled) or len(compiled) != len(deployed)
+
+
+def _delegate_ops(code: bytes) -> bool:
+    """Whether runtime code has a ``DELEGATECALL`` or ``CALLCODE`` opcode (push data and the metadata skipped)."""
+    return bool(_opcodes(code) & {0xF2, 0xF4})
 
 
 # Block fields that only grow; the others (base fee, coinbase, randomness) are anything in a later block.
@@ -1320,7 +1359,13 @@ _METADATA_KEYS = (b"\x64ipfs", b"\x65bzzr0", b"\x65bzzr1", b"\x64solc")
 
 def _runtime_reach(code: bytes) -> str | None:
     """``origin`` when runtime code has an ``ORIGIN`` opcode, ``unfollowed`` when it has a call opcode (what it calls
-    may read the origin), else ``None``: a walk over the opcodes, skipping push data and the trailing metadata."""
+    may read the origin), else ``None``."""
+    seen = _opcodes(code)
+    return "origin" if _ORIGIN_OP in seen else "unfollowed" if seen & _CALL_OPS else None
+
+
+def _opcodes(code: bytes) -> set[int]:
+    """The opcodes runtime code holds: a walk over them, skipping push data and the trailing metadata."""
     if len(code) >= 2:
         size = int.from_bytes(code[-2:], "big")
         meta = code[-size - 2 : -2] if size + 2 <= len(code) else b""
@@ -1332,7 +1377,7 @@ def _runtime_reach(code: bytes) -> str | None:
         op = code[i]
         seen.add(op)
         i += 1 + (op - 0x5F if 0x60 <= op <= 0x7F else 0)
-    return "origin" if _ORIGIN_OP in seen else "unfollowed" if seen & _CALL_OPS else None
+    return seen
 
 
 def _hidden_calls(term: Term) -> bool:
@@ -2127,10 +2172,16 @@ def function_verdict(
 
     def constant_load(load: Term) -> bool:
         """Whether this contract's slot ``load`` reads can never hold anything but what it holds now: no entry point
-        writes it, or none can leave it holding anything else from here (``_reachable``, as latching asks)."""
+        writes it, or none can leave it holding anything else from here (``_reachable``, as latching asks); and no
+        code but the contract's own entry points can write it (``_delegating``: no delegatecall of its own, no proxy
+        in front of it)."""
         if load[1] != THIS:
             return False
         memo = world.__dict__.setdefault("_constant_loads", {})
+        if "delegating" not in memo:
+            memo["delegating"] = _delegating(contracts.get(address, contract), chain, address, code_of)
+        if memo["delegating"]:
+            return False
         if load not in memo:
             writes = _written_values(contracts.get(address, contract), [load])
             entries = _values_at(writes, load) if writes is not None else None

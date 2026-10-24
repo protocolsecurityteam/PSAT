@@ -266,7 +266,8 @@ def nobody(v: Any) -> bool:
 
 
 def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None = None, samples=({},),
-          known: Iterable[int] = (), open_at: Any = None, arrange: Callable | None = None) -> Any:  # fmt: skip
+          known: Iterable[int] = (), open_at: Any = None, arrange: Callable | None = None,
+          holders_after: Callable | None = None) -> Any:  # fmt: skip
     """``v`` against the chain as it stands (see the module's docstring).
 
     ``samples``: argument sets (by name) at which a refused caller must fail; ``known``: addresses beyond the strangers
@@ -274,11 +275,17 @@ def check(d: A.Deployment, contract: str, name: str, v: Any, *, at: int | None =
     deposit, a request, coming to hold what ``requires`` names), run with the verdict's own ``after`` calls before
     that stranger's call; ``open_at``: arguments at which, so arranged, every stranger passes (the verdict must then
     be "open"; checked whatever the verdict), or ``False`` where none can (never "open now"). An "open now" verdict
-    is checked at its own witness unless ``open_at`` is given."""
+    is checked at its own witness unless ``open_at`` is given. ``holders_after(d)``: what has to happen first for the
+    listed holders to pass where the verdict lists them on a condition closed now (the owner turning it on, code
+    coming to be at an address), run before their calls."""
     fn = function(d, contract, name)
     where = at if at is not None else d.at[contract]
-    for holder in v.principals:
-        assert passes(d, where, fn, v.witnesses.get(holder, {}), sender=holder), (name, hex(holder), v)
+    with snapshot(d):
+        if holders_after is not None:
+            holders_after(d)
+        # Those listed on conditions freed pass once ``holders_after`` has opened them.
+        for holder in {*v.principals, *(v.conditions if holders_after is not None else ())}:
+            assert passes(d, where, fn, v.witnesses.get(holder, {}), sender=holder), (name, hex(holder), v)
     if v.openness == "open" and v.allowed == "now" or isinstance(open_at, dict):
         assert arrange is not None or not v.requires, (name, "say how a stranger comes to hold", v.requires)
         for who in STRANGERS:  # each on its own: what one stranger arranges may stand in another's way
