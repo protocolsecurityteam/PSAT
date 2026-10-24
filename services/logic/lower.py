@@ -961,6 +961,8 @@ class Lowerer:
         # its dynamic calldata reads as (``unsupported:slice``, or ``unsupported:slice_source`` where its source
         # can't be read faithfully), else empty.
         self._sliced = ""
+        # Per function (by id, the function kept beside its result): its same-named locals (``_same_named``).
+        self._named: dict[int, tuple[Any, dict[int, Any], frozenset]] = {}
         # Whether the call may carry ether: an entry point that isn't payable reverts on any (``success``).
         self._payable = True
         # Ends of the whole call reached inside callees (an assembly ``return``), gathered for the top level.
@@ -1659,6 +1661,46 @@ class Lowerer:
             return
         yield from self._succeed(node, st, node.sons)
 
+    def _same_named(self, function: Any) -> tuple[dict[int, Any], frozenset]:
+        """Locals of ``function`` declared under one name more than once, which Slither doesn't always tell apart:
+        sibling Yul blocks each with ``let x`` get two variables named alike, every use bound to one of them. Where
+        every declaration is Yul's and the uses name at most one of the variables, the name is one cell, which each
+        declaration starts again (Yul forbids shadowing a name still in scope, so their lifetimes never overlap): a map
+        from each variable to the one its uses name. Otherwise, unless the uses name each variable (Solidity's own
+        scoping, resolved by declaration), which variable a use reads isn't known: those variables (by id), read as
+        ``unknown:shadowed:<name>``."""
+        found = self._named.get(id(function))
+        if found is not None and found[0] is function:
+            return found[1], found[2]
+        declared: dict[str, list[Any]] = {}
+        yul_declared: set[int] = set()
+        used: set[int] = set()
+        for node in getattr(function, "nodes", None) or []:
+            var = getattr(node, "variable_declaration", None)
+            if var is not None and getattr(var, "name", None):
+                group = declared.setdefault(var.name, [])
+                if not any(v is var for v in group):
+                    group.append(var)
+                if getattr(getattr(node, "scope", None), "is_yul", False):
+                    yul_declared.add(id(var))
+            for ir in node.irs or ():
+                for operand in (*getattr(ir, "read", ()), getattr(ir, "lvalue", None)):
+                    used.add(id(operand))
+        cells: dict[int, Any] = {}
+        unknown_ids: set[int] = set()
+        for group in declared.values():
+            if len(group) < 2:
+                continue
+            named = [v for v in group if id(v) in used]
+            if all(id(v) in yul_declared for v in group) and len(named) <= 1:
+                cell = named[0] if named else group[0]
+                cells.update({id(v): cell for v in group})
+            elif len(named) < len(group) or any(id(v) in yul_declared for v in group):
+                unknown_ids.update(id(v) for v in group)
+        result = (function, cells, frozenset(unknown_ids))
+        self._named[id(function)] = result
+        return cells, result[2]
+
     def _declare(self, function: Function, declared: Any, st: State) -> State:
         """A local declared without a value. Since Solidity 0.5 locals are block-scoped: zero (a fresh zeroed object in
         memory) each time the declaration runs, an inner loop's counter entered again. Before, they are function-scoped,
@@ -1669,6 +1711,9 @@ class Lowerer:
         parameters, declared the same way at its entry, hold what they were handed."""
         yul = getattr(getattr(self._node, "scope", None), "is_yul", False)
         if yul and not _reference_typed(declared.type) and not any(p is declared for p in function.parameters):
+            # Sibling Yul blocks each declaring ``x``: every use of the name is bound to one of them, the cell each
+            # declaration starts again (``_same_named``).
+            declared = self._same_named(function)[0].get(id(declared), declared)
             return replace(st, env={**st.env, id(declared): _zero(declared.type)})
         memory, value = self._memory_var(declared), _local_value(declared)
         if not (memory or value):
@@ -2994,6 +3039,9 @@ class Lowerer:
             if var.is_immutable:
                 return mk("immutable", self.code, var.name)
             return self._read_at((self.this, var.name, ()), st)
+        owner = getattr(var, "function", None)
+        if owner is not None and id(var) in self._same_named(owner)[1]:
+            return unknown(f"shadowed:{var.name}")  # which of the same-named locals is read isn't known
         held = st.env.get(id(var))
         if isinstance(held, tuple) and held and held[0] == "loc":
             return self._read_at(held[1], st)
