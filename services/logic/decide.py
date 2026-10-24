@@ -2112,8 +2112,10 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # open only on conditions: its call, run once on the chain, settles it when it goes through. One that fails
         # proves nothing (other arguments, another state) and changes nothing.
         found = _executes(formula, world, FRESH, set(), tries=1)
-        if found is not None:
+        if found is not None and strangers_run(formula, world, found, tries=1):
             verdict = Verdict("open", frozenset(), True, witnesses={FRESH: found})
+        elif found is not None and verdict.openness == "not_determined":
+            verdict = replace(verdict, gaps=(*verdict.gaps, "strangers_differ"))
     if verdict.openness == "not_determined" and free:
         # What only the conditions leave open is theirs to report, not a reason the answer is open; a failed read and
         # a callee not followed (never set aside as a condition) always are.
@@ -2373,7 +2375,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         # A stranger's pass only a callee's code showed, unknown without it: its own call, run on the chain, settles
         # it before every candidate is asked about.
         ran = _executes(formula, world, FRESH, set(), tries=2)
-        if ran is not None:
+        if ran is not None and strangers_run(formula, world, ran, tries=2):
             return Verdict("open", frozenset(), True, witnesses={FRESH: ran})
     arranged = world.arrange(formula)
     if arranged:
@@ -3158,6 +3160,18 @@ def _executes(
         if isinstance(answer, bytes):
             return _argument_values(guess)
     return None
+
+
+def strangers_run(formula: Term, world: World, witness: dict[str, Any], tries: int | None = None) -> bool:
+    """Whether every other stranger's own call goes through on the chain, as ``FRESH``'s did with ``witness``: one
+    passing proves little where the caller's address (or the origin a callee reads) feeds arithmetic, so each of
+    ``_OTHER_STRANGERS`` must pass too (``_strangers_pass``), with ``FRESH``'s arguments, its own address where they
+    held ``FRESH``'s, or a search of its own."""
+    for other in _OTHER_STRANGERS:
+        own = {k: other if v == FRESH else v for k, v in witness.items()}
+        if runs(world, other, own) is not True and _executes(formula, world, other, set(), tries=tries) is None:
+            return False
+    return True
 
 
 def runs(world: World, who: int, arguments: dict[str, Any]) -> bool | None:

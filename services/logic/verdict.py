@@ -30,6 +30,7 @@ from .decide import (
     decide,
     gate_of,
     runs,
+    strangers_run,
     when_atoms,
 )
 from .decide import _size as _size_of
@@ -1392,8 +1393,8 @@ def _inlined_verdict(
     gaps = tuple(f"inlined_callee:{signature}" for signature in signatures)
     witness = proposed.witnesses.get(FRESH)
     if proposed.openness == "open" and proposed.allowed == "now" and witness is not None:
-        if runs(world, FRESH, witness) is True:
-            return proposed  # the stranger's own call goes through on the chain
+        if runs(world, FRESH, witness) is True and strangers_run(formula, world, witness):
+            return proposed  # every stranger's own call goes through on the chain
     offered = sorted((proposed.principals | set(proposed.conditions)) - base.principals)
     confirmed = {}
     for who in offered[:_EXECUTED_CANDIDATES]:
