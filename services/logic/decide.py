@@ -20,6 +20,7 @@ the committed set isn't known.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
 import re
@@ -101,6 +102,11 @@ SNAPSHOT_PAGE = 10_000
 CREATION_PROBES = 16  # ``eth_getCode`` probes, in one batch, that place a contract's creation before a window scan
 
 
+class Offline(BaseException):
+    """A read the chain hasn't answered, asked while reading is off (``detached``): never sent. A ``BaseException``,
+    so no handler for a failed read takes it for one."""
+
+
 def _tracked(logs: Callable) -> Callable:
     """``logs`` noting, per read (address and topics), whether that read came back partial: ``truncated`` names the
     address once any of its histories was, which says nothing of another, short one (its role grants beside its
@@ -110,6 +116,8 @@ def _tracked(logs: Callable) -> Callable:
         key = (address, topics)
         if key in self.partial or not topics:
             return logs(self, address, topics)
+        if self.offline:
+            raise Offline(key)
         before = address in self.truncated
         self.truncated.discard(address)
         cut = True
@@ -130,6 +138,7 @@ class Chain:
     """Reads at one pinned block."""
 
     failed = 0  # see ``__init__``
+    offline = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -158,6 +167,9 @@ class Chain:
         self._memo: dict = {}
         # While set, an unanswered read is recorded here and reads as unknown instead of costing a round trip.
         self.pending: list[tuple[tuple, str, list]] | None = None
+        # While set (``detached``), nothing is read: an unanswered word or call reads as unknown, unrecorded; any
+        # other unanswered read (a history, a dump, a trace) raises ``Offline``.
+        self.offline = False
         # Reads sent so far, and the most allowed (``None``: no limit); past it, every new read answers unknown.
         self.sent = 0
         # Seconds of history scanning one function may still spend (``function_verdict`` sets it per function):
@@ -185,7 +197,7 @@ class Chain:
     def gather(self, run: Callable[[], Any], rounds: int = 6) -> None:
         """Run ``run`` with reads deferred, fetch everything it asked for in one batch, and repeat for reads that
         depended on those, so the real run finds them answered."""
-        if self.batch is None:
+        if self.batch is None or self.offline:
             return
         for _ in range(rounds):
             self.pending = []
@@ -202,7 +214,7 @@ class Chain:
         pending = {key: (method, params) for key, method, params in requests if key not in self._memo}
         if self.limit is not None:
             pending = dict(list(pending.items())[: max(0, self.limit - self.sent)])
-        if not pending or self.batch is None:
+        if not pending or self.batch is None or self.offline:
             return
         self.sent += len(pending)
         try:
@@ -235,6 +247,8 @@ class Chain:
         return ("c", address, data, sender, key), "eth_call", [*params, diff]
 
     def _get(self, key: tuple, method: str, params: list) -> Any:
+        if key not in self._memo and self.offline:
+            return UNK
         if key not in self._memo and self.pending is not None and self.batch is not None:
             self.pending.append((key, method, params))
             return UNK
@@ -342,6 +356,8 @@ class Chain:
         key = ("dump", address)
         if key in self._memo:
             return self._memo[key]
+        if self.offline:
+            raise Offline(key)
         self._memo[key] = None
         header = self._get(("b",), "eth_getBlockByNumber", [hex(self.block), False]) if self.debug else None
         if not isinstance(header, dict) or not isinstance(header.get("hash"), str):
@@ -388,6 +404,8 @@ class Chain:
         key = ("created_trace", address)
         if key in self._memo:
             return self._memo[key]
+        if self.offline:
+            raise Offline(key)
         self._memo[key] = None
         tx = self.creation_tx(address) if self.debug else None
         if tx is None or not self._affordable(2):
@@ -421,6 +439,8 @@ class Chain:
                 out[s] = self._memo[("slot_writer", address, s)]
         if not todo:
             return out
+        if self.offline:
+            raise Offline(("slot_writer", address))
         for s in todo:
             self._memo[("slot_writer", address, s)] = None
             out[s] = None
@@ -504,6 +524,8 @@ class Chain:
         ``CREATION_PROBES`` evenly spaced blocks without it (0 when any probe fails, or the code was there from the
         first: old state is often served by fewer nodes)."""
         key = ("created", address)
+        if key not in self._memo and self.offline:
+            raise Offline(key)
         if key not in self._memo:
             known = self.creation_block(address)
             if known is not None:
@@ -3636,7 +3658,8 @@ def _screened(formula: Term, world: World, candidates: set[int], loosened: froze
     leaves open, then those it refuses; within each, those holding more of the formula's lookups keyed by who calls
     (an entry, a balance, an allowance: nonzero), then ``_ranked``'s order. The screen reads nothing new: what the
     chain hasn't answered yet (a candidate not prefetched) reads unknown, so it costs no read the questions wouldn't
-    make. The order only: every candidate is asked about in turn."""
+    make, and leaves no trace (``detached``): what it evaluated is remembered nowhere the questions read. The order
+    only: every candidate is asked about in turn."""
     ranked = _ranked(candidates, world)
     if len(ranked) < 2:
         return ranked
@@ -3650,23 +3673,52 @@ def _screened(formula: Term, world: World, candidates: set[int], loosened: froze
             if world.work - spent > _SCREEN_WORK:
                 return  # the rest keep ``_ranked``'s order, among those the screen left open
             identity = {"caller": candidate, "signer": FRESH}
-            exact = Evaluator(world, identity).truth(formula)
-            loose = Evaluator(world, identity, {}, frozenset(), loosened).truth(formula)
-            probe = Evaluator(world, identity)
-            held = 0
-            for t in keyed:
-                value = probe.eval(t)
-                held += isinstance(value, int) and not isinstance(value, bool) and value != 0
+            try:
+                exact = Evaluator(world, identity).truth(formula)
+                loose = Evaluator(world, identity, {}, frozenset(), loosened).truth(formula)
+                probe = Evaluator(world, identity)
+                held = 0
+                for t in keyed:
+                    value = probe.eval(t)
+                    held += isinstance(value, int) and not isinstance(value, bool) and value != 0
+            except Offline:
+                continue  # it needs a read not made yet: left where ``_ranked`` puts it, among the open ones
             screen[candidate] = (0 if True in (exact, loose) else 2 if loose is False else 1, -held)
 
-    deferred, world.chain.pending = world.chain.pending, []  # unanswered reads: unknown, and never sent
-    try:
+    with detached(world):
         look(ranked)
-    finally:
-        world.chain.pending = deferred
-        world.work = spent
     place = {c: i for i, c in enumerate(ranked)}
     return sorted(ranked, key=lambda c: (screen.get(c, (1, 0)), place[c]))
+
+
+@contextlib.contextmanager
+def detached(world: World) -> Iterator[None]:
+    """A block that evaluates anything and leaves no trace: the chain reads nothing (``Chain.offline``), and the
+    world and chain are put back as they were, every memo, count and budget (``solver_record``, ``_brought``,
+    ``work``, ``code_refuted``, ``truncated``, ``failed``) included, so nothing remembered from it, an unknown read
+    among them, reaches a later question."""
+    chain = world.chain
+    saved, saved_chain, memo = dict(world.__dict__), dict(chain.__dict__), chain._memo
+    world.__dict__.update({k: _copied(v) for k, v in saved.items()})
+    chain.__dict__.update({k: _copied(v) for k, v in saved_chain.items() if k != "_memo"})
+    chain._memo = dict(memo)
+    chain.offline = True
+    try:
+        yield
+    finally:
+        world.__dict__.clear()
+        world.__dict__.update(saved)
+        chain.__dict__.clear()
+        chain.__dict__.update(saved_chain)
+
+
+def _copied(value: Any) -> Any:
+    """A container's copy deep enough that changing what it holds (a solver record's counts) leaves the original."""
+    if isinstance(value, dict):
+        return {k: list(v) if isinstance(v, list) else set(v) if isinstance(v, set) else v for k, v in value.items()}
+    if isinstance(value, (set, list)):
+        return type(value)(value)
+    return value
 
 
 def _requirements(formula: Term, world: World) -> tuple:

@@ -273,12 +273,15 @@ Found while working, not in the before table:
 * ``decide._screened``: candidates are asked about in the order the state as it stands suggests: those it already
   lets through (the formula, or it with every condition not about who calls freed) first, those it refuses last,
   within each those holding more of the formula's lookups keyed by who calls; the screen's evaluation is off the
-  decision's budget (bounded apart, ``_SCREEN_WORK``) and it reads nothing new (what the chain hasn't answered,
-  a candidate not yet prefetched, reads unknown, in the middle of the order). Each
+  decision's budget (bounded apart, ``_SCREEN_WORK``) and leaves no trace (``decide.detached``): the chain reads
+  nothing (a word or call not yet answered reads unknown, any other unanswered read leaves the candidate unscreened),
+  and the world and chain are put back as they were, every memo (``solver_record``, ``_brought``), count and budget
+  included, so an unknown read in the screen never reaches a later question. Each
   candidate's questions may spend at most half the work left when it is asked (``_SHARE``); what every candidate
   shares (the stranger's chances) is asked under the decision's own limit. The order only: every candidate is asked
   about in turn, and one a budget leaves unasked is counted (``untested_candidates``)
-  (``test_budgets::test_candidates_the_state_refuses_are_asked_about_last``).
+  (``test_budgets::test_candidates_the_state_refuses_are_asked_about_last``,
+  ``test_budgets::test_the_screen_reads_nothing_and_leaves_no_trace``).
 * A delegatecall or a call into this contract's own entry point inside a loop marks storage unknown past the loop
   (``*elsewhere``) without counting as lost writes: those writes are that code's (``logged.py`` and the latch account
   for them there).

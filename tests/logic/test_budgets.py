@@ -185,6 +185,67 @@ def test_candidates_the_state_refuses_are_asked_about_last(roles, monkeypatch):
     assert full.principals == set(MINTERS) - {REVOKED} | {DECOY}
 
 
+class _Unbatched(_Scanned):
+    """The same node without batches: nothing defers a read."""
+
+    def __init__(self, sample: frozenset = frozenset()):
+        super().__init__(sample)
+        self.batch = None
+
+
+@pytest.mark.parametrize("node", [_Scanned, _Unbatched])
+def test_the_screen_reads_nothing_and_leaves_no_trace(roles, monkeypatch, node):
+    # The screen only orders the candidates: it sends no read (with batches or without), and nothing it evaluated,
+    # an unanswered read among it, stays remembered where the questions look (memos, counts, the budget).
+    screened = decide._screened
+    unchanged: list[bool] = []
+
+    def spy(formula, world, candidates, loosened):
+        chain = world.chain
+
+        def state():
+            return (
+                chain.sent,
+                chain.failed,
+                dict(chain._memo),
+                set(chain.truncated),
+                dict(chain.partial),
+                {k: list(v) for k, v in world.solver_record.items()},
+                dict(world.__dict__.get("_brought", {})),
+                world.work,
+                getattr(world, "code_refuted", 0),
+            )
+
+        before = state()
+        order = screened(formula, world, candidates, loosened)
+        unchanged.append(state() == before)
+        return order
+
+    monkeypatch.setattr(decide, "_screened", spy)
+    verdict = _verdict(roles, node())
+    assert verdict.principals == set(MINTERS) - {REVOKED} | {DECOY}
+    assert unchanged and all(unchanged)
+
+
+def test_a_detached_block_reads_nothing_and_puts_every_memo_back():
+    from services.logic.decide import UNK, Offline, World, detached
+
+    chain = _Unbatched()
+    world = World(chain, this=AT, selector=0)
+    world.solver_record[("q", 0)] = [1, 0]
+    with detached(world):
+        assert chain.storage(AT, 1) is UNK  # unanswered: unknown, never sent
+        with pytest.raises(Offline):
+            chain.logs(AT, frozenset({"0x" + format(_GRANTED, "064x")}))
+        world.solver_record[("q", 0)][0] += 5  # a give-up counted in the block
+        world.solver_record[("r", 0)] = [3, 0]
+        world.__dict__.setdefault("_brought", {})["k"] = UNK
+        world.work += 50
+    assert chain.sent == 0 and not chain._memo
+    assert world.solver_record == {("q", 0): [1, 0]}
+    assert "_brought" not in world.__dict__ and world.work == 0
+
+
 def test_the_budgets_above_do_bind(roles, monkeypatch):
     # Otherwise the property above would hold vacuously.
     full = _verdict(roles)
