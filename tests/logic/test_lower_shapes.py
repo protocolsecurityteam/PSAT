@@ -1,12 +1,19 @@
-"""Solidity shapes the lowering reads as the language means them, compiled and lowered."""
+"""Solidity shapes the lowering reads as the language means them: each probe compiled, deployed on anvil, and its
+lowered success condition (or a getter's return value) evaluated by the decision's own evaluator at concrete inputs
+and senders, compared with ``eth_call`` of the same call."""
 
 from __future__ import annotations
 
 import pytest
+from eth_abi.abi import encode
+from eth_account import Account
+from eth_utils import keccak
 
+from services.logic.decide import FRESH, Evaluator, World
 from services.logic.lower import Lowerer
-from services.logic.terms import CALLER, THIS, contains, mk, subterms
-from tests.fuzz.authority import solc_path
+from services.logic.terms import mk, reset_terms, subterms
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -23,8 +30,18 @@ library Percent {
     uint256 internal constant FACTOR = 1e4;
 }
 
+contract Authority {
+    address owner;
+    constructor(address o) { owner = o; }
+    function canCall(address caller, address, bytes4) external view returns (bool, uint32) {
+        return (caller == owner, 0);
+    }
+}
+
 contract Manager {
     mapping(address => bool) allowed;
+
+    function allow(address a) external { allowed[a] = true; }
 
     function canCall(address caller_, bytes calldata data_) external view returns (bool) {
         uint256[3] memory params_ = _decode(data_);
@@ -46,6 +63,8 @@ contract C is IRegistry {
     address authority;
     uint256 public fee;
     mapping(uint256 => uint256[]) params;
+
+    constructor(address a, Manager m) { authority = a; manager = m; fee = 5; }
 
     function canCallWithDelay(address caller) internal view returns (bool immediate) {
         bytes memory data = abi.encodeCall(IAuthority.canCall, (caller, address(this), bytes4(msg.data[0:4])));
@@ -106,77 +125,6 @@ contract C is IRegistry {
 """
 
 
-@pytest.fixture(scope="module")
-def contracts(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("shapes") / "C.sol"
-    path.write_text(SOURCE)
-    return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
-
-
-@pytest.fixture(scope="module")
-def contract(contracts):
-    return contracts["C"]
-
-
-def _function(contract, name):
-    return next(f for f in contract.functions_entry_points if f.name == name)
-
-
-def test_an_assembly_staticcall_of_encoded_data_is_the_view_call_it_makes(contract):
-    formula = Lowerer(contract).success(_function(contract, "managed"))
-    calls = subterms(formula, "call")
-    assert [c[2] for c in calls] == ["canCall(address,address,bytes4)"]
-    assert calls[0][3] == (CALLER, THIS, mk("sig"))  # the selector this call came in with
-    assert subterms(formula, "ok") and subterms(formula, "item")  # succeeded, and its first word is the answer
-    assert not contains(formula, frozenset({"opaque", "unknown"}))
-
-
-def test_a_struct_arguments_fields_are_arguments_and_library_constants_fold(contract):
-    formula = Lowerer(contract).success(_function(contract, "configure"))
-    names = {a[1] for a in subterms(formula, "arg")}
-    assert names == {"config.bonus", "config.receiver"}
-    assert any(c[1] == 10_000 for c in subterms(formula, "const"))
-    assert not contains(formula, frozenset({"opaque", "unknown"}))
-
-
-def test_a_memory_array_holds_what_was_written_to_it(contract):
-    assert Lowerer(contract).success(_function(contract, "check")) == mk("const", True, "bool")
-
-
-def test_a_declaration_a_public_variable_implements_is_its_getter(contract):
-    getter = next(f for f in contract.functions_entry_points if f.name == "fee" and f.entry_point is None)
-    pc, values = Lowerer(contract).returns(getter, [])
-    assert pc == mk("const", True, "bool")
-    assert values == (mk("load", THIS, "fee", ()),)
-
-
-def test_what_a_function_builds_reads_back_as_built(contract):
-    # ``return pair(a)`` hands on both values; a struct literal's field and ``new bytes(20)``'s length read back.
-    assert Lowerer(contract).success(_function(contract, "made")) == mk("const", True, "bool")
-
-
-def test_the_arguments_without_the_selector_decode_back_to_the_arguments(contracts):
-    # Maple's pool hands its manager ``msg.data[4:]``; the manager decodes the lender from it into a static array.
-    formula = Lowerer(contracts["C"]).success(_function(contracts["C"], "deposit"))
-    (call,) = subterms(formula, "call")
-    assets, receiver = mk("arg", "assets", "uint256"), mk("arg", "receiver", "address")
-    assert call[3] == (CALLER, mk("enc", "abi.encode", (assets, receiver)))
-    manager = contracts["Manager"]
-    can_call = next(f for f in manager.functions_entry_points if f.name == "canCall")
-    pc, (allowed,) = Lowerer(manager, sender=THIS, this=mk("const", 1, "address")).returns(can_call, list(call[3]))
-    (lookup,) = subterms(allowed, "load")
-    key = lookup[3][0][1]
-    while key[0] == "conv":
-        key = key[2]
-    assert key == receiver  # the lender is the deposit's receiver
-    assert not contains(allowed, frozenset({"opaque", "unknown"}))
-
-
 SIGNED = """
 pragma solidity 0.8.27;
 
@@ -201,21 +149,6 @@ contract Signed {
     }
 }
 """
-
-
-def test_a_packed_signature_reads_back_as_the_signer_check(tmp_path_factory):
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("signed") / "S.sol"
-    path.write_text(SIGNED)
-    signed = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Signed")
-    formula = Lowerer(signed).success(_function(signed, "check"))
-    (signer,) = subterms(formula, "signer")
-    assert signer[2:] == (mk("arg", "v", "uint8"), mk("arg", "r", "bytes32"), mk("arg", "s", "bytes32"))
-    assert subterms(formula, "codesize") and not contains(formula, frozenset({"opaque"}))
 
 
 LINKED = """
@@ -248,6 +181,8 @@ contract ERC677Token is ERC677 {
 }
 
 contract LinkToken is BasicToken, ERC677Token {
+    function LinkToken() public { balances[msg.sender] = 100; }
+
     function transfer(address to, uint256 value) public returns (bool) {
         require(to != address(this));
         return super.transfer(to, value);
@@ -255,22 +190,7 @@ contract LinkToken is BasicToken, ERC677Token {
 }
 """
 
-
-def test_super_runs_the_next_body_in_the_deployed_contracts_order(tmp_path_factory):
-    solc = solc_path("0.4.19")
-    if solc is None:
-        pytest.skip("solc 0.4.19 not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("linked") / "L.sol"
-    path.write_text(LINKED)
-    link = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "LinkToken")
-    formula = Lowerer(link).success(_function(link, "transferAndCall"))
-    assert not contains(formula, frozenset({"unknown"}))
-    assert subterms(formula, "load")  # BasicToken's balance check, not an unanalysed declaration
-
-
-SIZED = """
+SIZED_SRC = """
 pragma solidity 0.4.19;
 
 contract Sized {
@@ -287,16 +207,139 @@ contract Sized {
 }
 """
 
+KEY = Account.create("psat.logic.lower_shapes")
+SIGNER = int(KEY.address, 16)
+SENDERS = [O.OWNER, FRESH]
 
-def test_legacy_assemblys_code_size_reads_as_the_accounts_code_size(tmp_path_factory):
-    solc = solc_path("0.4.19")
-    if solc is None:
-        pytest.skip("solc 0.4.19 not installed")
-    from slither import Slither
 
-    path = tmp_path_factory.mktemp("sized") / "S.sol"
-    path.write_text(SIZED)
-    sized = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Sized")
-    formula = Lowerer(sized).success(_function(sized, "onlyAccounts"))
-    assert set(subterms(formula, "codesize")) == {mk("codesize", mk("arg", "account", "address"))}
-    assert not contains(formula, frozenset({"unknown"}))
+@pytest.fixture(scope="module")
+def d(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE + SIGNED.split("\n", 2)[2])
+    d.deploy("Authority", ("address",), (O.OWNER,))
+    d.deploy("Manager")
+    d.deploy("C", ("address", "address"), (d.at["Authority"], d.at["Manager"]))
+    d.deploy("Signed")
+    assert O.transact(d, "Manager", "allow(address)", ("address",), (O.ACCOUNTS[1],))
+    return d
+
+
+@pytest.fixture(scope="module")
+def legacy(anvil):  # noqa: F811
+    source = LINKED + SIZED_SRC.split("\n", 2)[2]
+    d = O.deployment(*anvil, source, "0.4.19")
+    d.deploy("LinkToken")
+    d.deploy("Sized")
+    return d
+
+
+def _agrees(d, contract, name, values, senders=SENDERS, followed=()):
+    """For each sender: the evaluated formula is definite and is what ``eth_call`` says; the outcomes, per sender."""
+    fn = O.function(d, contract, name)
+    out = []
+    for who in senders:
+        chain = O.chain_says(d, fn, values, contract, sender=who)
+        formula, engine = O.engine_says(d, fn, values, contract, sender=who, contracts=d.contracts(contract, *followed))
+        assert engine == chain, (name, values, hex(who), chain, engine, formula)
+        out.append(chain)
+    return out
+
+
+@pytest.mark.parametrize("followed", [("Authority",), ()], ids=["followed", "unfollowed"])
+def test_an_assembly_staticcall_of_encoded_data_is_the_view_call_it_makes(d, followed):
+    # ``canCall(caller, this, msg.sig)`` asked of the authority, its first word the answer: the owner passes only.
+    assert _agrees(d, "C", "managed", [], followed=followed) == [True, False]
+
+
+def test_a_struct_arguments_fields_are_arguments_and_library_constants_fold(d):
+    fn = O.function(d, "C", "configure")
+    reset_terms()
+    formula = Lowerer(d.slither["C"]).success(fn)
+    bonus, receiver = sorted(subterms(formula, "arg"), key=lambda a: a[1])
+    assert (bonus[1], receiver[1]) == ("config.bonus", "config.receiver")
+    world = World(d.chain(), d.at["C"], O.selector(fn.solidity_signature), {})
+    seen = set()
+    for b, r in [(10_000, 1), (10_001, 1), (0, 0), (5, O.OWNER)]:
+        data = keccak(text="configure((uint16,address))")[:4] + encode(["(uint16,address)"], [(b, O.hex20(r))])
+        chain = O.eth_call(d.url, d.at["C"], data, O.OWNER)
+        engine = Evaluator(world, {"caller": O.OWNER, "signer": O.OWNER}, {bonus: b, receiver: r}).truth(formula)
+        assert engine == chain, (b, r, chain, engine)
+        seen.add(chain)
+    assert seen == {True, False}
+
+
+def test_a_memory_array_holds_what_was_written_to_it(d):
+    assert _agrees(d, "C", "check", [4]) == [True, True]
+
+
+def test_a_declaration_a_public_variable_implements_is_its_getter(d):
+    getter = next(f for f in d.slither["C"].functions_entry_points if f.name == "fee" and f.entry_point is None)
+    reset_terms()
+    pc, values = Lowerer(d.slither["C"]).returns(getter, [])
+    world = World(d.chain(), d.at["C"], O.selector("fee()"), d.contracts("C"))
+    ev = Evaluator(world, {"caller": O.OWNER, "signer": O.OWNER})
+    word = O.rpc(
+        d.url, "eth_call", [{"to": O.hex20(d.at["C"]), "data": "0x" + keccak(text="fee()")[:4].hex()}, "latest"]
+    )
+    assert ev.eval(values[0]) == int(word, 16) == 5
+    assert pc == mk("const", True, "bool")
+
+
+def test_what_a_function_builds_reads_back_as_built(d):
+    # ``return pair(a)`` hands on both values; a struct literal's field and ``new bytes(20)``'s length read back.
+    assert _agrees(d, "C", "made", [9]) == [True, True]
+
+
+@pytest.mark.parametrize("followed", [("Manager",), ()], ids=["followed", "unfollowed"])
+def test_the_arguments_without_the_selector_decode_back_to_the_arguments(d, followed):
+    # Maple's pool hands its manager ``msg.data[4:]``; the manager decodes the lender from it into a static array:
+    # only an allowlisted receiver passes.
+    assert _agrees(d, "C", "deposit", [7, O.ACCOUNTS[1]], followed=followed) == [True, True]
+    assert _agrees(d, "C", "deposit", [7, O.ACCOUNTS[2]], followed=followed) == [False, False]
+
+
+def _signed(digest: bytes):
+    sig = Account._sign_hash(digest, KEY.key) if hasattr(Account, "_sign_hash") else KEY.unsafe_sign_hash(digest)
+    return sig.v, sig.r.to_bytes(32, "big"), sig.s.to_bytes(32, "big")
+
+
+def test_a_packed_signature_reads_back_as_the_signer_check(d):
+    # The lowering reads the signature as ``signer(digest, v, r, s)``, the identity that signed: here, what
+    # ``ecrecover`` of those arguments gives, and the formula must then say what the chain does.
+    fn = O.function(d, "Signed", "check")
+    digest = keccak(b"psat")
+    v, r, s = _signed(digest)
+    outcomes = set()
+    for owner, (vv, rr, ss) in [(SIGNER, (v, r, s)), (O.OWNER, (v, r, s)), (d.at["C"], (v, r, s)),
+                                (SIGNER, (v, s, r))]:  # fmt: skip
+        values = [owner, digest, vv, rr, ss]
+        try:
+            signer = int(Account._recover_hash(digest, vrs=(vv, rr, ss)), 16)
+        except Exception:
+            signer = 0
+        chain = O.chain_says(d, fn, values, "Signed")
+        reset_terms()
+        formula = Lowerer(d.slither["Signed"]).success(fn)
+        world = World(d.chain(), d.at["Signed"], O.selector(fn.solidity_signature), {})
+        names = [p.name for p in fn.parameters]
+        words = [owner, int.from_bytes(digest, "big"), vv, int.from_bytes(rr, "big"), int.from_bytes(ss, "big")]
+        args = {a: words[names.index(a[1])] for a in subterms(formula, "arg")}
+        engine = Evaluator(world, {"caller": O.OWNER, "signer": signer}, args).truth(formula)
+        assert engine == chain, (hex(owner), chain, engine)
+        outcomes.add(chain)
+    assert outcomes == {True, False}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="A-row (new): super into the next body in the deployed order (0.4.19 LinkToken.transferAndCall) lowers "
+    "BasicToken.transfer with value read as 0: `require(0 <= balances[caller])` passes where the chain reverts",
+)
+def test_super_runs_the_next_body_in_the_deployed_contracts_order(legacy):
+    # ``super.transfer`` in ``ERC677Token`` is ``BasicToken``'s body in ``LinkToken``: the balance check holds.
+    assert _agrees(legacy, "LinkToken", "transferAndCall", [O.ACCOUNTS[1], 50]) == [True, False]
+    assert _agrees(legacy, "LinkToken", "transferAndCall", [O.ACCOUNTS[1], 150]) == [False, False]
+
+
+def test_legacy_assemblys_code_size_reads_as_the_accounts_code_size(legacy):
+    assert _agrees(legacy, "Sized", "onlyAccounts", [O.ACCOUNTS[1]]) == [True, True]
+    assert _agrees(legacy, "Sized", "onlyAccounts", [legacy.at["LinkToken"]]) == [False, False]

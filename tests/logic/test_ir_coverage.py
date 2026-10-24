@@ -15,9 +15,11 @@ import pytest
 import services.logic.lower as lower
 from services.logic.decide import Chain
 from services.logic.lower import Lowerer, State
-from services.logic.terms import TRUE, contains, mk, subterms
+from services.logic.terms import TRUE, contains, subterms
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 
 def _labels(term) -> set:
@@ -271,28 +273,51 @@ def test_each_rejected_operation_lowers_to_its_label(contract):
         assert lowerer.lost
 
 
-def test_handled_environment_builtins_are_their_values(contract):
-    from slither.core.declarations import SolidityFunction
-    from slither.slithir.operations import SolidityCall
-    from slither.slithir.variables import TemporaryVariable
+ENVIRONMENT = """
+pragma solidity 0.8.27;
 
-    node = _node(contract)
-    expected = {
-        "timestamp()": mk("time", "timestamp"),
-        "number()": mk("time", "number"),
-        "chainid()": mk("time", "chainid"),
-        "address()": mk("this"),
-        "caller()": mk("caller"),
-        "origin()": mk("origin"),
-        "callvalue()": mk("callvalue"),
-        "selfbalance()": mk("balance", mk("this")),
-        "this.balance()": mk("balance", mk("this")),
-        "codesize()": mk("codesize", mk("this")),
+contract E {
+    function yulAddress(uint256 want) external view { uint256 v; assembly { v := address() } require(v == want); }
+    function yulSelfbalance(uint256 want) external view {
+        uint256 v;
+        assembly { v := selfbalance() }
+        require(v == want);
     }
-    for name, value in expected.items():
-        result = TemporaryVariable(node, index=10_002)
-        ir = SolidityCall(SolidityFunction(name), 0, result, "uint256")
-        lowerer = Lowerer(contract)
-        lowerer._node = node
-        assert lowerer._solidity_call(ir, State(TRUE)).env.get(id(result)) == value, name
-    assert not contains(value, frozenset({"unknown"}))
+    function thisBalance(uint256 want) external view { require(address(this).balance == want); }
+    function yulCodesize(uint256 want) external view { uint256 v; assembly { v := codesize() } require(v == want); }
+    function yulCaller(uint256 want) external view { uint256 v; assembly { v := caller() } require(v == want); }
+    function yulOrigin(uint256 want) external view { uint256 v; assembly { v := origin() } require(v == want); }
+    function yulCallvalue(uint256 want) external view { uint256 v; assembly { v := callvalue() } require(v == want); }
+    function yulChainid(uint256 want) external view { uint256 v; assembly { v := chainid() } require(v == want); }
+    function yulTimestamp(uint256 want) external view { uint256 v; assembly { v := timestamp() } require(v >= want); }
+    function yulNumber(uint256 want) external view { uint256 v; assembly { v := number() } require(v >= want); }
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def environment(anvil):  # noqa: F811
+    d = O.deployment(*anvil, ENVIRONMENT)
+    d.deploy("E")
+    O.rpc(d.url, "anvil_setBalance", [O.hex20(d.at["E"]), hex(7)])
+    return d
+
+
+def test_handled_environment_builtins_are_their_values(environment):
+    d = environment
+    block = O.rpc(d.url, "eth_getBlockByNumber", ["latest", False])
+    code = O.rpc(d.url, "eth_getCode", [O.hex20(d.at["E"]), "latest"])
+    actual = {
+        "yulAddress": d.at["E"], "yulSelfbalance": 7, "thisBalance": 7, "yulCodesize": len(code) // 2 - 1,
+        "yulCaller": O.OWNER, "yulOrigin": O.OWNER, "yulCallvalue": 0,
+        "yulChainid": int(O.rpc(d.url, "eth_chainId", []), 16),
+        "yulTimestamp": int(block["timestamp"], 16), "yulNumber": int(block["number"], 16),
+    }  # fmt: skip
+    for name, value in actual.items():
+        fn = O.function(d, "E", name)
+        for want in (value, value + 1, max(value - 1, 0)):
+            chain = O.chain_says(d, fn, [want], "E")
+            formula, engine = O.engine_says(d, fn, [want], "E")
+            assert engine == chain, (name, want, chain, engine, formula)
+            assert not contains(formula, frozenset({"unknown"})), name
+        assert O.chain_says(d, fn, [value], "E"), name

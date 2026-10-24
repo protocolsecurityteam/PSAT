@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from services.logic.lower import Lowerer
-from services.logic.terms import FALSE, TRUE, const, contains, mk, replace_terms, subterms
+from services.logic.decide import UNK, Evaluator, World
+from services.logic.lower import Lowerer, parameter
+from services.logic.terms import FALSE, TRUE, const, contains, replace_terms, reset_terms, subterms
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
 from tests.logic import _oracle as O
@@ -26,6 +27,9 @@ contract C {
     uint256[4] fixedList;
     Cfg cfg;
     mapping(uint256 => uint256) m;
+
+    constructor() { list.push(3); list.push(0); fixedList[1] = 2; balances[msg.sender] = 1; }
+    function push(uint256 v) external { list.push(v); }
 
     function literal(uint256 i) external pure { uint256[3] memory a = [uint256(4), 5, 6]; require(a[i] == 5); }
     function written(uint256 i) external pure {
@@ -184,38 +188,99 @@ def test_a_declaration_in_a_loop_makes_a_fresh_object_each_time(contract):
     assert _formula(contract, "fresh") == TRUE
 
 
-def test_calldata_items_are_the_callers_items_within_their_length(contract):
-    xs, i = mk("arg", "xs", "uint256[]"), mk("arg", "i", "uint256")
-    formula = _formula(contract, "calldataArray")
-    assert mk("elem", xs, i) in subterms(formula, "elem")
-    assert mk("cmp", "lt", i, mk("len", xs)) in subterms(formula, "cmp")
-    fixed = _formula(contract, "calldataFixed")
-    assert mk("cmp", "lt", i, const(2)) in subterms(fixed, "cmp")
+@pytest.fixture(scope="module")
+def pure(anvil):  # noqa: F811
+    d = O.deployment(*anvil, PURE)
+    d.deploy("C")
+    return d
 
 
-def test_a_bytes_index_is_one_byte_not_a_word(contract):
-    d = mk("arg", "d", "bytes")
-    assert mk("slice", mk("elem", d, const(0)), 0, 1) in subterms(_formula(contract, "calldataByte"), "slice")
-    data = _formula(contract, "dataByte")
-    assert subterms(data, "slice") and subterms(data, "calldatasize")
+def _engine(d, fn, values, sender=O.OWNER):
+    """The lowered formula's truth at ``values``: a ``bytesN`` as its number, dynamic ``bytes`` as its bytes."""
+    reset_terms()
+    formula = Lowerer(d.slither["C"]).success(fn)
+    world = World(d.chain(), d.at["C"], O.selector(fn.solidity_signature), d.contracts("C"))
+    world.parameters = tuple(parameter(p, i) for i, p in enumerate(fn.parameters))  # ``msg.data``'s own words
+    assignment = {}
+    for i, (p, v) in enumerate(zip(fn.parameters, values)):
+        term = parameter(p, i)
+        fixed = term[2].startswith("bytes") and term[2] != "bytes"
+        assignment[term] = int.from_bytes(v, "big") if fixed and isinstance(v, bytes) else v
+    identity = {"caller": sender, "signer": sender}
+    # A calldata array's or ``bytes``' length and items are the caller's: what these values hold there.
+    for t in subterms(formula, "len"):
+        if t[1] in assignment:
+            assignment[t] = len(assignment[t[1]])
+    for t in subterms(formula, "elem"):
+        held = assignment.get(t[1])
+        if held is None:
+            continue
+        k = Evaluator(world, identity, assignment).eval(t[2])
+        if isinstance(held, bytes):
+            assignment[t] = int.from_bytes(held[k : k + 32].ljust(32, b"\0"), "big")
+        else:
+            assignment[t] = held[k] if k < len(held) else 0
+    return formula, Evaluator(world, identity, assignment).truth(formula)
 
 
-def test_the_first_bytes_of_a_slice_are_the_first_bytes_once_there_are_that_many(contract):
-    d = mk("arg", "d", "bytes")
-    formula = _formula(contract, "firstBytes")
-    assert mk("slice", mk("elem", d, const(0)), 0, 4) in subterms(formula, "slice")
-    assert mk("cmp", "le", const(4), mk("len", d)) in subterms(formula, "cmp")
-    assert not subterms(formula, "unknown")
+def _differential(d, name, grid, definite=True):
+    """Over ``grid``: the evaluated formula is the chain's answer (``definite`` off: or unknown); both outcomes seen."""
+    fn = O.function(d, "C", name)
+    seen = set()
+    for values in grid:
+        chain = O.chain_says(d, fn, values)
+        formula, engine = _engine(d, fn, values)
+        if definite or engine is not UNK:
+            assert engine == chain, (name, values, chain, engine, formula)
+        seen.add(chain)
+    assert seen == {True, False}, (name, seen)
 
 
-def test_storage_items_are_bounded_by_their_arrays_length_and_mappings_are_not(contract):
-    i = mk("arg", "i", "uint256")
-    assert not subterms(_formula(contract, "mapped"), "cmp") or all(
-        c[1] != "lt" or c[2] != mk("arg", "who", "address") for c in subterms(_formula(contract, "mapped"), "cmp")
-    )
-    stored = _formula(contract, "stored")
-    assert mk("cmp", "lt", i, mk("load", mk("this"), "list", (("f", "length"),))) in subterms(stored, "cmp")
-    assert mk("cmp", "lt", i, const(4)) in subterms(_formula(contract, "storedFixed"), "cmp")
+def test_calldata_items_are_the_callers_items_within_their_length(pure):
+    _differential(pure, "calldataArray", [([5], 0), ([5], 1), ([1, 5], 1), ([1, 5], 0), ([], 0), ([5, 5], 2)])
+    _differential(pure, "calldataFixed", [([5, 0], 0), ([0, 5], 0), ([0, 5], 1), ([5, 5], 2)])
+
+
+def test_a_bytes_index_is_one_byte_not_a_word(pure):
+    _differential(pure, "calldataByte", [(b"\x01",), (b"\x01\x02",), (b"\x02\x01",), (b"",), (b"\x00" * 31 + b"\x01",)])
+    # ``msg.data[0]``, the selector's first byte: the word holding it runs past the four bytes sent, into bytes a
+    # caller may append, so the lowering may leave it unknown; never the other answer.
+    fn = O.function(pure, "C", "dataByte")
+    formula, engine = _engine(pure, fn, [])
+    chain = O.chain_says(pure, fn, [])
+    assert chain == (O.selector("dataByte()") >> 24 == 1)
+    assert engine is UNK or engine == chain
+    assert subterms(formula, "slice")  # one byte, not a word
+
+
+def test_the_first_bytes_of_a_slice_are_the_first_bytes_once_there_are_that_many(pure):
+    grid = [(b"\x12\x34\x56\x78\x9a", b"\x12\x34\x56\x78"), (b"\x12\x34\x56\x78", b"\x12\x34\x56\x78"),
+            (b"\x12\x34\x56", b"\x12\x34\x56\x00"), (b"\x12\x34\x56\x79", b"\x12\x34\x56\x78")]  # fmt: skip
+    _differential(pure, "firstBytes", grid)
+
+
+def test_storage_items_are_bounded_by_their_arrays_length_and_mappings_are_not(pure):
+    # ``list`` holds [3, 0]; ``fixedList`` [0, 2, 0, 0]; the deployer has a balance.
+    _differential(pure, "stored", [(0,), (1,), (2,), (100,)])
+    _differential(pure, "storedFixed", [(1,), (0,), (4,)])
+    _differential(pure, "mapped", [(O.OWNER,), (O.ACCOUNTS[1],)])
+
+
+def test_storage_after_a_call_into_this_contracts_own_code_reads_unknown(pure):
+    # ``this.setX(2)`` leaves 2: ``x == 1`` never holds after it; the lowering may not know, never says it does.
+    fn = O.function(pure, "C", "selfCalled")
+    formula, engine = _engine(pure, fn, [])
+    assert not O.chain_says(pure, fn, [])
+    assert engine is not True and "selfcall:setX(uint256)" in {o[1] for o in subterms(formula, "opaque")}
+
+
+def test_a_storage_pointer_chosen_by_branch_reads_and_writes_unknown(pure):
+    # Either branch passes on the chain; the lowering refuses to pick a pointer, never says it fails.
+    fn = O.function(pure, "C", "chosen")
+    for c in (True, False):
+        formula, engine = _engine(pure, fn, [c])
+        assert O.chain_says(pure, fn, [c]) and engine is not False, (c, engine)
+    assert "unsupported:storage_pointer_choice" in {t[1] for k in ("unknown", "opaque") for t in subterms(formula, k)}
 
 
 def test_a_field_reads_back_what_a_whole_struct_write_or_delete_left(contract):
@@ -265,6 +330,10 @@ library Set {
 
 contract Source {
     function revenue() external pure returns (uint256) { return 1; }
+}
+
+contract BadSource {
+    function revenue() external pure returns (uint256) { revert(); }
 }
 
 contract C {
@@ -338,43 +407,50 @@ def _verdict(d, name):
     reset_terms()
     contract = d.slither["C"]
     fn = next(f for f in contract.functions_entry_points if f.name == name)
-    return function_verdict(contract, fn, d.at["C"], d.chain(), d.contracts("C", "Source"))[0]
+    return function_verdict(contract, fn, d.at["C"], d.chain(), d.contracts("C", "Source", "BadSource"))[0]
 
 
-def _deployed(anvil, sources: int, members: int):  # noqa: F811
+def _deployed(anvil, sources: int, members: int, bad: int = 0):  # noqa: F811
     from eth_abi.abi import encode
     from eth_utils import keccak
 
     url, root = anvil
-    d = Deployment(url, root, SOURCES)
+    d = O.deployment(url, root, SOURCES)
     d.deploy("C")
     d.deploy("Source")
+    d.deploy("BadSource")
 
     def call(signature: str, who: int) -> None:
         d.send("C", "0x" + (keccak(text=signature)[:4] + encode(["address"], ["0x%040x" % who])).hex())
 
     for _ in range(sources):
         call("addSource(address)", d.at["Source"])
+    for _ in range(bad):
+        call("addSource(address)", d.at["BadSource"])
     for who in MEMBERS[:members]:
         call("addMember(address)", who)
     return d
 
 
-def test_a_storage_list_copied_to_memory_calls_each_item_not_the_list(anvil):  # noqa: F811
-    d = _deployed(anvil, sources=1, members=0)
-    formula = _formula(d.slither["C"], "setShare")
-    targets = {c[1] for c in subterms(formula, "call")}
-    whole = mk("load", mk("this"), "sources", (("f", "items"),))
-    assert all(whole not in (t, t[2] if t[0] == "conv" else None) for t in targets)
-    assert any(subterms(t, "load") and subterms(t, "load")[0][3][-1][0] == "k" for t in targets)
+@pytest.mark.parametrize(("good", "bad"), [(1, 0), (0, 1), (1, 1)])
+def test_a_storage_list_copied_to_memory_calls_each_item_not_the_list(anvil, good, bad):  # noqa: F811
+    # Lido's defect: ``sources.values()`` copied to memory, each item's ``revenue()`` called. A source that reverts
+    # stops the admin; the list itself is never the callee.
+    d = _deployed(anvil, sources=good, members=0, bad=bad)
+    fn = O.function(d, "C", "setShare")
+    chain = O.chain_says(d, fn, [1])
+    assert chain == (bad == 0)
+    formula, engine = O.engine_says(d, fn, [1], contracts=d.contracts("C", "Source", "BadSource"))
+    assert engine == chain, (good, bad, engine, formula)
+    v = O.check(d, "C", "setShare", _verdict(d, "setShare"))
+    O.sound(v, {O.OWNER} if chain else set())
 
 
-def test_a_loop_over_an_empty_list_never_calls_and_the_admin_passes(anvil):  # noqa: F811
-    from tests.support.anvil import ACCOUNT0
-
-    for count in (0, 1):
-        verdict = _verdict(_deployed(anvil, sources=count, members=0), "setShare")
-        assert verdict.openness == "restricted" and verdict.principals == {int(ACCOUNT0, 16)}
+@pytest.mark.parametrize("count", [0, 1])
+def test_a_loop_over_an_empty_list_never_calls_and_the_admin_passes(anvil, count):  # noqa: F811
+    d = _deployed(anvil, sources=count, members=0)
+    v = O.check(d, "C", "setShare", _verdict(d, "setShare"))
+    assert v.openness == "restricted" and set(v.principals) == {O.OWNER}
 
 
 @pytest.mark.parametrize("name", ["viaReturn", "viaBreak", "viaDoWhile"])
@@ -402,18 +478,23 @@ def test_a_list_is_followed_exactly_up_to_the_bound_and_never_past_it(anvil, nam
 @pytest.mark.parametrize("name", ["laterReturn", "laterBreak"])
 def test_a_return_or_break_past_the_iterations_followed_is_never_dropped(anvil, name):  # noqa: F811
     # Five members: the fourth iteration lets anyone through, never "nobody, ever".
-    verdict = _verdict(_deployed(anvil, sources=0, members=5), name)
-    assert not (verdict.openness == "restricted" and verdict.complete and not verdict.principals)
+    d = _deployed(anvil, sources=0, members=5)
+    assert O.strangers_passing(d, "C", O.function(d, "C", name)) == {True}
+    v = O.check(d, "C", name, _verdict(d, name))
+    O.sound(v, anyone=True)
 
 
 def test_what_only_a_later_iteration_writes_is_never_taken_as_unwritten(anvil):  # noqa: F811
-    from tests.support.anvil import ACCOUNT0
-
     # The sixth iteration records the caller: the admin passes with n >= 6, never "nobody, ever".
-    verdict = _verdict(_deployed(anvil, sources=0, members=0), "later")
-    assert int(ACCOUNT0, 16) in verdict.principals or not verdict.complete
+    d = _deployed(anvil, sources=0, members=0)
+    later = O.function(d, "C", "later")
+    assert O.passes(d, "C", later, {"n": 6}) and not O.passes(d, "C", later, {"n": 5})
+    v = O.check(d, "C", "later", _verdict(d, "later"), samples=({"n": 6}, {"n": 2}))
+    assert not O.nobody(v)
+    O.sound(v, {O.OWNER})
 
 
 def test_an_item_pushed_then_copied_reads_back_as_pushed(anvil):  # noqa: F811
-    verdict = _verdict(_deployed(anvil, sources=0, members=2), "pushed")
-    assert verdict.openness == "open"  # whoever calls pushes its own address and reads it back
+    # Whoever calls pushes its own address and reads it back.
+    d = _deployed(anvil, sources=0, members=2)
+    O.check(d, "C", "pushed", _verdict(d, "pushed"), open_at={})

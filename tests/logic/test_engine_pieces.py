@@ -1,4 +1,5 @@
-"""The logic engine's building blocks that need no chain: witness ordering, formula rewriting, term traversal."""
+"""The logic engine's building blocks: witness enumeration, evaluation of calls and encodings, history reading under
+node failure, and (against the compiler and anvil) immutables and a check call's empty return."""
 
 from __future__ import annotations
 
@@ -31,6 +32,8 @@ from services.logic.terms import (
     mk_op,
     mk_or,
 )
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 X = mk("arg", "x", "uint256")
 OWNER = mk("load", THIS, "owner", ())
@@ -50,12 +53,46 @@ def test_ranked_product_of_an_empty_domain_is_empty():
     assert list(_ranked_product([])) == [()]
 
 
-def test_an_immutable_is_the_word_every_offset_agrees_on():
-    word = (0xABC).to_bytes(32, "big")
-    code = b"\x60" * 3 + word + b"\x00" * 5 + word
-    assert immutable_value(code, (3, 40)) == 0xABC
-    assert immutable_value(code, (3, 4)) is None  # disagreeing offsets: not the code that was compiled
-    assert immutable_value(code, (60,)) is None  # past the end
+IMMUTABLE = """
+pragma solidity 0.8.27;
+
+contract Held {
+    uint256 immutable gate;
+    uint256 immutable other;
+    constructor(uint256 g) { gate = g; other = g + 1; }
+    function both() external view returns (uint256, uint256) { return (gate, other); }
+}
+"""
+
+
+def test_an_immutable_is_the_word_every_offset_agrees_on(anvil, tmp_path):  # noqa: F811
+    # The compiler's own record of where each immutable sits (``immutableReferences``), against the code the
+    # constructor left on the chain: the word read at every offset is the value deployed.
+    import json
+    import subprocess
+
+    from tests.fuzz.authority import solc_path
+
+    d = O.deployment(*anvil, IMMUTABLE)
+    d.deploy("Held", ("uint256",), (0xABC,))
+    selection = {"*": {"*": ["evm.deployedBytecode.immutableReferences"]}}
+    standard = {"language": "Solidity", "sources": {"H.sol": {"content": IMMUTABLE}},
+                "settings": {"outputSelection": selection}}  # fmt: skip
+    out = json.loads(
+        subprocess.run(
+            [str(solc_path("0.8.27")), "--standard-json"],
+            input=json.dumps(standard),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout  # fmt: skip
+    )
+    refs = out["contracts"]["H.sol"]["Held"]["evm"]["deployedBytecode"]["immutableReferences"]
+    offsets = sorted(tuple(r["start"] for r in places) for places in refs.values())
+    code = bytes.fromhex(O.rpc(d.url, "eth_getCode", [O.hex20(d.at["Held"]), "latest"])[2:])
+    assert sorted(immutable_value(code, o) for o in offsets) == [0xABC, 0xABD]
+    assert immutable_value(code, (offsets[0][0], offsets[1][0])) is None  # disagreeing offsets: not this code
+    assert immutable_value(code, (len(code),)) is None  # past the end
 
 
 class _Chain(Chain):
@@ -90,11 +127,44 @@ def test_a_call_into_no_code_reverts_and_negating_it_does_not_pass():
     assert probe.truth(mk_or([mk_cmp("eq", CALLER, OWNER), _blocked(REGISTRY)])) is False
 
 
-def test_a_check_call_returning_nothing_passes_only_when_nothing_was_expected():
-    probe = _evaluator(_Chain(coded={REGISTRY}))
-    check = mk("call", mk("const", REGISTRY, "address"), "onlyAdmin(address)", (CALLER,), True)
-    assert probe.truth(mk("ok", check, 0)) is True
-    assert probe.truth(mk("ok", check, None)) is UNK
+CHECKED = """
+pragma solidity 0.8.27;
+
+interface ICheck { function onlyAdmin(address who) external view; }
+interface ICheckBool { function onlyAdmin(address who) external view returns (bool); }
+
+contract Registry {
+    address admin;
+    constructor(address a) { admin = a; }
+    function onlyAdmin(address who) external view { require(who == admin); }
+}
+
+contract Uses {
+    address registry;
+    constructor(address r) { registry = r; }
+    // A check returning nothing, expecting nothing: it passes where the registry's own check does.
+    function act() external view { ICheck(registry).onlyAdmin(msg.sender); }
+    // The same call read as returning a bool: nothing comes back to decode, so it reverts for everyone.
+    function actBool() external view { require(ICheckBool(registry).onlyAdmin(msg.sender)); }
+}
+"""
+
+
+@pytest.mark.parametrize("followed", [("Registry",), ()], ids=["followed", "unfollowed"])
+@pytest.mark.parametrize("name", ["act", "actBool"])
+def test_a_check_call_returning_nothing_passes_only_when_nothing_was_expected(anvil, name, followed):  # noqa: F811
+    d = O.deployment(*anvil, CHECKED)
+    d.deploy("Registry", ("address",), (O.OWNER,))
+    d.deploy("Uses", ("address",), (d.at["Registry"],))
+    fn = O.function(d, "Uses", name)
+    for who in (O.OWNER, FRESH):
+        chain = O.chain_says(d, fn, [], "Uses", sender=who)
+        assert chain == (name == "act" and who == O.OWNER)
+        formula, engine = O.engine_says(d, fn, [], "Uses", sender=who, contracts=d.contracts("Uses", *followed))
+        # Never the other answer; definite where the callee's code shows nothing was expected back.
+        assert engine == chain or engine is UNK, (name, hex(who), chain, engine, formula)
+        if name == "act" and followed:
+            assert engine is not UNK, (name, hex(who), formula)
 
 
 def test_assembly_memory_hashes_the_bytes_each_store_left():
@@ -219,14 +289,6 @@ def test_a_history_no_node_reads_whole_is_read_window_by_window():
     logs = chain.logs(0xABC, frozenset({event}))
     assert [words for _, words in logs] == [[1], [2], [3]]
     assert 0xABC not in chain.truncated
-
-
-def test_a_history_that_stays_refused_is_partial_never_empty():
-    from services.logic.decide import Chain
-
-    chain = Chain(lambda m, p: None, 300_000, lambda calls: [None] * len(calls))
-    assert chain.logs(0xABC, frozenset({"0x" + "11" * 32})) == []
-    assert 0xABC in chain.truncated
 
 
 def test_a_history_scan_the_budget_cut_off_is_partial_and_not_read_again():

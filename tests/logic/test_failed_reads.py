@@ -8,6 +8,8 @@ from eth_utils import keccak
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -49,12 +51,8 @@ _GRANTED = int.from_bytes(keccak(b"RoleGranted(bytes32,address,address)"), "big"
 _REVOKED = int.from_bytes(keccak(b"RoleRevoked(bytes32,address,address)"), "big")
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 def _member(who: int) -> int:
-    return _slot(who, _slot(_ROLE, 0))
+    return O.slot(who, O.slot(_ROLE, 0))
 
 
 class _Deployed(Chain):
@@ -269,7 +267,7 @@ class _Managed(Chain):
 
     def _answer(self, method, params):
         if method == "eth_getStorageAt":
-            return hex(EXECUTOR if int(params[1], 16) == _slot(POOL, 1) else 0)
+            return hex(EXECUTOR if int(params[1], 16) == O.slot(POOL, 1) else 0)
         if method == "eth_getBlockByNumber":
             return {"timestamp": hex(1_700_000_000), "number": hex(100)}
         if method == "eth_getLogs":
@@ -319,6 +317,8 @@ contract Renounced {
     mapping(bytes32 => address[]) members;
     bytes32 constant MINTER = keccak256("MINTER");
 
+    constructor() { roles[MINTER][msg.sender] = true; members[MINTER].push(msg.sender); }
+
     function renounce(bytes32 role, address account, uint256 at) external {
         require(account == msg.sender);
         roles[role][account] = false;
@@ -334,19 +334,23 @@ contract Renounced {
 """
 
 
-def test_renouncing_ones_own_role_is_no_way_in(tmp_path_factory):
-    # Zero written to the stranger's own entry, and a list the gate never reads: neither can let it through.
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
+@pytest.fixture(scope="module")
+def renounced(anvil):  # noqa: F811
+    d = O.deployment(*anvil, RENOUNCED)
+    d.deploy("Renounced")
+    return d
 
-    from services.logic.terms import reset_terms
 
-    path = tmp_path_factory.mktemp("renounced") / "R.sol"
-    path.write_text(RENOUNCED)
-    contract = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Renounced")
-    fn = next(f for f in contract.functions_entry_points if f.name == "mint")
-    reset_terms()
-    verdict, _ = function_verdict(contract, fn, AT, _Unreadable(False), {AT: contract})
-    assert verdict.openness == "restricted" and "now_unknown" not in verdict.gaps
+def test_renouncing_ones_own_role_is_no_way_in(renounced):
+    # Zero written to the stranger's own entry, and a list the gate never reads: neither can let it through. Each
+    # stranger renounces for real, and its mint still reverts.
+    d = renounced
+    v = O.check(d, "Renounced", "mint", O.verdict(d, "Renounced", "mint"), open_at=False)
+    assert v.openness == "restricted" and "now_unknown" not in v.gaps
+    O.sound(v, {O.OWNER})
+    mint = O.function(d, "Renounced", "mint")
+    for who in O.STRANGERS:
+        with O.snapshot(d):
+            assert O.transact(d, "Renounced", "renounce(bytes32,address,uint256)", ("bytes32", "address", "uint256"),
+                              (keccak(b"MINTER"), who, 0), sender=who)  # fmt: skip
+            assert not O.passes(d, "Renounced", mint, sender=who)

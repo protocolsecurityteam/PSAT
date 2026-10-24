@@ -10,6 +10,8 @@ from eth_utils import keccak
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -149,12 +151,46 @@ def test_a_hubs_spokes_are_listed_whatever_their_caps_leave(built):
     assert verdict.complete
 
 
-def test_the_admin_sets_a_configured_managers_permission_manager(built):
-    words = {0: GLOBALS, 1: ADMIN | 1 << 160}  # ``configured`` packs after ``admin``, set
-    verdict = _verdict(built, "Manager", "setPermissionManager", _Deployed(words, []))
-    assert verdict.openness == "restricted"
-    # Whether some manager is a registered instance is the registry's to say, unread here: the admin is singled
-    # out, its call shown to pass only with that left free.
-    assert verdict.principals == set()
-    assert verdict.conditions == {ADMIN: "arguments"}
-    assert verdict.complete
+MANAGED = """
+pragma solidity 0.8.27;
+
+interface IGlobals { function isInstanceOf(bytes32 kind, address what) external view returns (bool); }
+
+contract Globals {
+    mapping(address => bool) registered;
+    constructor(address r) { registered[r] = true; }
+    function isInstanceOf(bytes32, address what) external view returns (bool) { return registered[what]; }
+}
+
+// ``Manager`` above, configured.
+contract Manager {
+    address globals;
+    address admin;
+    bool configured;
+    address permissionManager;
+
+    constructor(address g, address a) { globals = g; admin = a; configured = true; }
+
+    function setPermissionManager(address manager) external {
+        require(!configured || msg.sender == admin);
+        require(IGlobals(globals).isInstanceOf("PERMISSION_MANAGER", manager));
+        permissionManager = manager;
+    }
+}
+"""
+REGISTERED = 0xF7 << 140
+
+
+@pytest.mark.parametrize("followed", [("Globals",), ()], ids=["followed", "unfollowed"])
+def test_the_admin_sets_a_configured_managers_permission_manager(anvil, followed):  # noqa: F811
+    # Configured: only the admin, and only a manager the registry knows.
+    d = O.deployment(*anvil, MANAGED)
+    d.deploy("Globals", ("address",), (REGISTERED,))
+    d.deploy("Manager", ("address", "address"), (d.at["Globals"], O.ACCOUNTS[1]))
+    fn = O.function(d, "Manager", "setPermissionManager")
+    assert O.passes(d, "Manager", fn, {"manager": REGISTERED}, sender=O.ACCOUNTS[1])
+    assert not O.passes(d, "Manager", fn, {"manager": O.OWNER}, sender=O.ACCOUNTS[1])
+    v = O.verdict(d, "Manager", "setPermissionManager", *followed)
+    O.check(d, "Manager", "setPermissionManager", v, samples=({"manager": REGISTERED}, {}), open_at=False)
+    assert v.openness == "restricted"
+    assert set(v.principals) | set(v.conditions) == {O.ACCOUNTS[1]}

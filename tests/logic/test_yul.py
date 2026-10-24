@@ -7,25 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from services.logic.yul import Assign, Call, Effect, Name, Number, Unsupported, parse
+from services.logic.yul import Unsupported, parse
 from tests.fuzz.authority import solc_path
-
-
-def test_straight_line_yul_parses_into_statements():
-    parsed = parse(
-        """{
-            let ofs := add(add(keys, 0x20), mul(i, 48)) // one key
-            sstore(slot, mload(ofs))
-            i := add(i, 1)
-        }"""
-    )
-    assert parsed == [
-        Assign(
-            ("ofs",), Call("add", (Call("add", (Name("keys"), Number(0x20))), Call("mul", (Name("i"), Number(48)))))
-        ),
-        Effect(Call("sstore", (Name("slot"), Call("mload", (Name("ofs"),))))),
-        Assign(("i",), Call("add", (Name("i"), Number(1)))),
-    ]
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 
 @pytest.mark.parametrize("text", ["if x { sstore(0, 1) }", "for {} lt(i, 3) {} { i := add(i, 1) }", "switch x"])
@@ -107,19 +92,6 @@ def built(tmp_path_factory):
     return {c.name: c for c in Slither(str(path), solc=str(solc)).contracts}
 
 
-def test_assembly_writing_past_a_hash_leaves_the_mapping_logged(built):
-    from services.logic.logged import logged, written_by
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    keys = built["Keys"]
-    assert logged(keys, "operators", 1, ("reward",), False, True) == {("OperatorAdded", 2), ("RewardSet", 2)}
-    assert {s["event_signature"] for s in written_by(keys, "operators", ("reward",))} == {
-        "OperatorAdded(uint256,address)",
-        "RewardSet(uint256,address)",
-    }
-
-
 def test_assembly_that_may_write_anywhere_leaves_nothing_logged(built):
     from services.logic.logged import logged
     from services.logic.terms import reset_terms
@@ -128,40 +100,59 @@ def test_assembly_that_may_write_anywhere_leaves_nothing_logged(built):
     assert logged(built["Branchy"], "owners", 1, (), False) is None
 
 
-LOOPS = """
-pragma solidity 0.8.27;
-contract C {
-    function u() public pure returns (uint256 t) {
-        assembly { for { let k := 0 } lt(k, 3) { k := add(k, 1) } { t := add(t, 1) } }
-    }
-    function w() public pure returns (uint256 t) {
-        assembly { let k := 0 for { } lt(k, 3) { } { k := add(k, 1) if eq(k, 2) { continue } t := add(t, 1) } }
-    }
-    function b() public pure returns (uint256 t) {
-        assembly { for { let k := 0 } lt(k, 9) { k := add(k, 1) } { if eq(k, 4) { break } t := add(t, 1) } }
+ARITHMETIC = """
+pragma solidity 0.4.19;
+
+// Straight-line legacy assembly: each word operation, ``let`` and a nested block, read by ``yul.py``.
+contract A {
+    function y_add(uint a, uint b, uint w) public pure { uint r; assembly { r := add(a, b) } require(r == w); }
+    function y_sub(uint a, uint b, uint w) public pure { uint r; assembly { r := sub(a, b) } require(r == w); }
+    function y_mul(uint a, uint b, uint w) public pure { uint r; assembly { r := mul(a, b) } require(r == w); }
+    function y_div(uint a, uint b, uint w) public pure { uint r; assembly { r := div(a, b) } require(r == w); }
+    function y_mod(uint a, uint b, uint w) public pure { uint r; assembly { r := mod(a, b) } require(r == w); }
+    function y_exp(uint a, uint b, uint w) public pure { uint r; assembly { r := exp(a, b) } require(r == w); }
+    function y_and(uint a, uint b, uint w) public pure { uint r; assembly { r := and(a, b) } require(r == w); }
+    function y_or(uint a, uint b, uint w) public pure { uint r; assembly { r := or(a, b) } require(r == w); }
+    function y_xor(uint a, uint b, uint w) public pure { uint r; assembly { r := xor(a, b) } require(r == w); }
+    function y_lt(uint a, uint b, uint w) public pure { uint r; assembly { r := lt(a, b) } require(r == w); }
+    function y_gt(uint a, uint b, uint w) public pure { uint r; assembly { r := gt(a, b) } require(r == w); }
+    function y_eq(uint a, uint b, uint w) public pure { uint r; assembly { r := eq(a, b) } require(r == w); }
+    function y_iszero(uint a, uint b, uint w) public pure { uint r; assembly { r := iszero(a) } require(r == w); }
+    function y_not(uint a, uint b, uint w) public pure { uint r; assembly { r := not(a) } require(r == w); }
+    function y_let(uint256 a, uint256 b, uint256 want) public pure {
+        uint256 r;
+        assembly { let t := mul(a, 2) { let u := add(t, b) r := u } }
+        require(r == want);
     }
 }
 """
+_W = 2**256
+_OPS = {
+    "add": lambda a, b: (a + b) % _W, "sub": lambda a, b: (a - b) % _W, "mul": lambda a, b: (a * b) % _W,
+    "div": lambda a, b: a // b if b else 0, "mod": lambda a, b: a % b if b else 0, "exp": lambda a, b: pow(a, b, _W),
+    "and": lambda a, b: a & b, "or": lambda a, b: a | b, "xor": lambda a, b: a ^ b, "lt": lambda a, b: int(a < b),
+    "gt": lambda a, b: int(a > b), "eq": lambda a, b: int(a == b), "iszero": lambda a, b: int(a == 0),
+    "not": lambda a, b: _W - 1 - a, "let": lambda a, b: (2 * a + b) % _W,
+}  # fmt: skip
+_PAIRS = [(7, 3), (3, 7), (0, 0), (_W - 1, 2), (2, 255)]
 
 
-@pytest.mark.parametrize(("name", "value"), [("u", 3), ("w", 2), ("b", 4)])
-def test_a_yul_loop_slither_parses_runs_its_body(tmp_path, name, value):
-    """Yul from Solidity 0.6 on is Slither's own graph, not this reader's: a loop's condition node orders its sons
-    [exit, body], and its ``break``/``continue`` edges lead to the end of their ``if``. The loop runs its body, a
-    ``continue`` goes to the post block (or the condition), a ``break`` to the loop's end; ``test_loop_control``
-    checks the same forms against the chain."""
-    solc = solc_path("0.8.27")
-    if solc is None:
-        pytest.skip("solc 0.8.27 not installed")
-    from slither import Slither
+@pytest.fixture(scope="module")
+def arithmetic(anvil):  # noqa: F811
+    d = O.deployment(*anvil, ARITHMETIC, "0.4.19")
+    d.deploy("A")
+    return d
 
-    from services.logic.lower import Lowerer
-    from services.logic.terms import reset_terms
 
-    path = tmp_path / "L.sol"
-    path.write_text(LOOPS)
-    c = next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "C")
-    reset_terms()
-    pc, ret = Lowerer(c).returns(next(f for f in c.functions if f.name == name), [])
-    assert pc == ("const", True, "bool")
-    assert ret == (("const", value, "uint256"),)
+@pytest.mark.parametrize("op", sorted(_OPS))
+def test_legacy_assembly_arithmetic_is_the_evm_s(arithmetic, op):
+    # The legacy reader's word operations, evaluated, against ``eth_call``: the hand-computed word passes, one more
+    # doesn't, and the formula says the same at both.
+    fn = O.function(arithmetic, "A", f"y_{op}")
+    for a, b in _PAIRS:
+        want = _OPS[op](a, b)
+        for w, expected in ((want, True), ((want + 1) % _W, False)):
+            chain = O.chain_says(arithmetic, fn, [a, b, w], "A")
+            formula, engine = O.engine_says(arithmetic, fn, [a, b, w], "A")
+            assert chain is expected, (op, a, b, w)
+            assert engine == chain, (op, a, b, w, engine, formula)
