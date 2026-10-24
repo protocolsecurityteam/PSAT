@@ -7,10 +7,13 @@ entry point writes still refutes everyone. Against anvil."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
+from tests.support.anvil import rpc
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -46,6 +49,23 @@ contract Setter is C {
     function set() external { fixedLo = 0; }
 }
 
+// ``fixedLo`` (slot 2) written by no function of ``ViaExt``'s own: an external library's assembly writes it, run by
+// ``DELEGATECALL`` in ``ViaExt``'s storage.
+library ExtLib {
+    function raw(uint256 v) external { assembly { sstore(2, v) } }
+}
+
+contract ViaExt {
+    uint256 lo = 10;
+    uint256 hi = 5;
+    uint256 fixedLo = 10;
+    address owner;
+    uint256 x;
+    constructor() { owner = msg.sender; }
+    function rawFixed(uint256 v) external { require(msg.sender == owner); ExtLib.raw(v); }
+    function actRaw(uint256 amount) external { require(amount >= fixedLo && amount <= 5); x = amount; }
+}
+
 // ``C``'s code behind a proxy whose admin may point it at code that writes anything.
 contract Proxy {
     uint256 lo = 10;  // ``C``'s layout, as it deployed it
@@ -79,13 +99,20 @@ def _setup(d):
     d.deploy("CD")
     d.deploy("Setter")
     d.deploy("Proxy", ("address",), (d.at["C"],))
+    library = d.deploy("ExtLib")
+    d.compiled["ViaExt"]["bin"] = re.sub(r"__\$[0-9a-f]{34}\$__", "%040x" % library, d.compiled["ViaExt"]["bin"])
+    d.deploy("ViaExt")
 
 
 PROBES = [
     O.Probe(
         SOURCE,
         _setup,
-        (*(("C", f, ()) for f in ("act", "actOwner", "actConstant", "actFixed", "paus")), ("CD", "actFixed", ())),
+        (
+            *(("C", f, ()) for f in ("act", "actOwner", "actConstant", "actFixed", "paus")),
+            ("CD", "actFixed", ()),
+            ("ViaExt", "actRaw", ()),
+        ),
     )
 ]
 
@@ -159,3 +186,25 @@ def test_a_condition_behind_a_proxy_is_never_nobody_ever(d):
     v = O.verdict(d, "C", "actFixed", at=proxy)
     assert not O.nobody(v), v
     O.check(d, "C", "actFixed", v, at=proxy, samples=AMOUNTS, open_at=False)
+
+
+def test_a_slot_an_external_library_can_write_is_never_nobody_ever(d, monkeypatch):
+    # ``ExtLib.raw`` runs by ``DELEGATECALL`` in ``ViaExt``'s storage and writes ``fixedLo`` in assembly. Read as a
+    # compilation that kept the linked runtime code would give it (its opcodes then match the deployed code's), the
+    # call to an external library function is still a delegatecall of the contract's own.
+    import services.logic.decide as decide_module
+    import services.logic.verdict as verdict_module
+
+    deployed = bytes.fromhex(rpc(d.url, "eth_getCode", [O.hex20(d.at["ViaExt"]), "latest"])[2:])
+    compiled = decide_module._runtime_code
+
+    def linked(contract):
+        return deployed if contract.name == "ViaExt" else compiled(contract)
+
+    monkeypatch.setattr(decide_module, "_runtime_code", linked)
+    monkeypatch.setattr(verdict_module, "_runtime_code", linked, raising=False)
+    v = O.check(d, "ViaExt", "actRaw", O.verdict(d, "ViaExt", "actRaw"), samples=AMOUNTS, open_at=False)
+    assert not O.nobody(v), v
+    with O.snapshot(d):  # the owner has the library write the slot: every stranger passes
+        assert O.transact(d, "ViaExt", "rawFixed(uint256)", ("uint256",), (0,))
+        assert O.strangers_passing(d, "ViaExt", O.function(d, "ViaExt", "actRaw"), {"amount": 5}) == {True}

@@ -570,9 +570,10 @@ def _fixed_target(target: Term, world: World | None = None) -> bool:
 def _delegating(contract: Any, chain: Chain, address: int, code_of: Callable[[int], int] | None) -> bool:
     """Whether storage at ``address`` may be written by code other than ``contract``'s own entry points, so that no
     slot of it is constant however its own code reads: the contract makes a delegatecall (or callcode) of its own,
-    low-level or in assembly (a library's internal functions are its own code); the address runs other code first (a
-    proxy whose implementation ``code_of`` names, or whose deployed code delegates where the compiled contract
-    doesn't, or is a different length from it; an EIP-7702 delegation); or that code can't be read."""
+    low-level or in assembly, or by calling a library's external or public function (run by ``DELEGATECALL`` in this
+    storage; a library's internal functions are its own code); the address runs other code first (a proxy whose
+    implementation ``code_of`` names, or whose deployed code delegates where the compiled contract doesn't, or is a
+    different length from it; an EIP-7702 delegation); or that code can't be read."""
     from slither.core.cfg.node import NodeType
 
     for fn in contract.functions_and_modifiers:
@@ -580,6 +581,11 @@ def _delegating(contract: Any, chain: Chain, address: int, code_of: Callable[[in
         if any("delegatecall" in c or "callcode" in c for c in calls) or any(
             n.type == NodeType.ASSEMBLY and re.search(r"\b(delegatecall|callcode)\s*\(", str(n.inline_asm or ""))
             for n in fn.nodes
+        ):
+            return True
+        if any(
+            getattr(getattr(call, "function", None), "visibility", None) in ("external", "public")
+            for call in fn.all_library_calls()
         ):
             return True
     if code_of is not None and code_of(address) % 2**160 != address % 2**160:
