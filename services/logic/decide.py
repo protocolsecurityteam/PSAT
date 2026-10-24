@@ -1639,6 +1639,8 @@ class Evaluator:
                 if width is None:
                     return UNK
                 total += width
+            elif packed_width(arg) is None:
+                return UNK  # a value whose type isn't known: not known to be one word
             else:
                 total += 32
         return total
@@ -1678,9 +1680,9 @@ class Evaluator:
                     return None
                 width = packed_width(arg)
                 fixed = _fixed_bytes_type(arg)
+                if width is None:
+                    return None  # a value of unknown or dynamic type: its word, or words, aren't known
                 if kind == "abi.encodePacked":
-                    if width is None:
-                        return None
                     words.append((v % 2 ** (8 * width)).to_bytes(width, "big"))
                 elif fixed is not None:
                     # A ``bytesN`` sits at the left of its word; its value here is right-aligned in N bytes.
@@ -1982,7 +1984,15 @@ class Evaluator:
 
 def _fixed_bytes_type(term: Term) -> int | None:
     """N when ``term`` is typed ``bytesN`` (N < 32): a value the ABI left-aligns in its word."""
-    type_ = term[2] if term[0] in ("const", "arg") else term[1] if term[0] == "conv" else None
+    type_ = (
+        term[2]
+        if term[0] in ("const", "arg")
+        else term[1]
+        if term[0] == "conv"
+        else "bytes4"
+        if term[0] == "sig"
+        else None
+    )
     found = re.fullmatch(r"bytes(\d+)", type_) if isinstance(type_, str) else None
     return int(found.group(1)) if found and int(found.group(1)) < 32 else None
 

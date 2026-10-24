@@ -2089,7 +2089,7 @@ class Lowerer:
             # ``abi.encodeCall(I.f, (a, b))``: the same bytes as ``abi.encodeWithSignature("f(...)", a, b)``.
             function = args[0]
             if function[0] == "const" and function[2] == "function":
-                inputs = tuple(self.val(a, st) for a in ir.arguments[1])
+                inputs = tuple(_typed_word(a, self.val(a, st)) for a in ir.arguments[1])
                 value = mk("enc", "abi.encodeWithSignature", (const(function[1], "string"), *inputs))
                 return self._write(ir.lvalue, value, st) if ir.lvalue is not None else st
         if base in ("log0", "log1", "log2", "log3", "log4") and len(args) >= 2:
@@ -2183,7 +2183,15 @@ class Lowerer:
             # index, ``add(totalAddedKeys, i)``) no longer says: the argument's declared type does.
             value = mk("enc", base, tuple(_typed_packed(a, v) for a, v in zip(ir.arguments, args)))
         elif base.startswith("abi.encode"):
-            value = mk("enc", base, tuple(args))
+            # Each item takes its declared type's word: a ``bytesN`` read from storage sits at the left, an ``int8``
+            # sign-extends, which the read value itself no longer says. The selector or signature heading
+            # ``encodeWithSelector``/``encodeWithSignature`` is left as it is.
+            head = 1 if base in ("abi.encodeWithSelector", "abi.encodeWithSignature") else 0
+            value = mk(
+                "enc",
+                base,
+                (*args[:head], *(_typed_word(a, v) for a, v in zip(ir.arguments[head:], args[head:]))),
+            )
         elif base.startswith("abi.decode") and args and args[0][0] == "assumed":
             value = args[0]  # decoding what an arranged action returned: arranged too
         elif (
@@ -3278,6 +3286,27 @@ def _typed_packed(var: Any, value: Term) -> Term:
     if packed_width(value) is not None or not re.fullmatch(r"address|bool|u?int\d*|bytes\d+", type_):
         return value
     return mk("conv", type_, value)
+
+
+def _typed_word(var: Any, value: Term) -> Term:
+    """``value`` as ``abi.encode`` lays out ``var``'s declared one-word type (a contract an address, an enum a
+    ``uint8``), when its own shape doesn't already say that type; a value of another declared type (dynamic, an array,
+    a struct) is left as it is, for the encoding to refuse."""
+    declared = _typed_arg("", getattr(var, "type", None))[2]
+    if not re.fullmatch(r"address|bool|u?int\d*|bytes\d+", declared):
+        return value
+    own = (
+        _type_of(value)
+        if value[0] in ("arg", "const", "conv")
+        else "address"
+        if value[0] in ("caller", "origin", "this", "signer")
+        else "bytes4"
+        if value[0] == "sig"
+        else None
+    )
+    if own == declared or (own is None and packed_width(value) == 32 and declared in ("uint256", "bytes32")):
+        return value
+    return mk("conv", declared, value)
 
 
 def _static_words(values: tuple) -> list[Term] | None:

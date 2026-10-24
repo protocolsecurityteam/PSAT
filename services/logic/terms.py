@@ -593,6 +593,8 @@ def packed_width(term: Term) -> int | None:
         return 32
     if kind == "slice":
         return term[3]
+    if kind == "sig":
+        return 4  # ``msg.sig``, a ``bytes4``
     type_ = (
         term[2]
         if kind in ("const", "arg")
