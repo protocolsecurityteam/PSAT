@@ -2,16 +2,16 @@
 whose code may read it is never taken at the chain's word. Followed, it is inlined with its own success condition,
 which only proposes: a holder it names is listed once the whole call, run on the chain from that address, goes
 through, and the list never rests on its word (never complete, ``inlined_callee:<signature>``). Otherwise the call
-stays an unknown named for why. Each against what the chain does on anvil."""
+stays an unknown named for why. Each verdict is checked against ``eth_call`` on anvil (``_oracle.check``): the admin
+listed passes from its own address (the origin too), no stranger does."""
 
 from __future__ import annotations
 
 import pytest
 
-from services.logic.decide import Chain, Verdict
-from services.logic.verdict import function_verdict
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import rpc
+from services.logic.decide import Verdict
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -46,46 +46,28 @@ contract C {
 ADMIN = int("ab" * 20, 16)
 
 
+ADMIN = O.ACCOUNTS[1]
+X = ({"x": 0}, {"x": 1}, {"x": 100})
+NAMES = ("p9", "p9e", "p9r", "p9v", "q1", "q3", "q4")
+
+
+def _setup(d):
+    d.deploy("Guard", ("address",), (ADMIN,))
+    d.deploy("C", ("address", "address"), (ADMIN, d.at["Guard"]))
+
+
+PROBES = [O.Probe(SOURCE, _setup, tuple(("C", n, f) for n in NAMES for f in (("Guard",), ())))]
+
+
 @pytest.fixture(scope="module")
 def deployed(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
-    guard = d.deploy("Guard", ("address",), (ADMIN,))
-    d.deploy("C", ("address", "address"), (ADMIN, guard))
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
     return d
 
 
-def _chain(d, flaky: tuple[int, int] | None = None) -> Chain:
-    """``d``'s chain; ``flaky`` (address, slot): that storage word's first read fails as a node error."""
-    block = int(rpc(d.url, "eth_blockNumber", []), 16)
-    left = [1 if flaky else 0]
-
-    def read(method, params):
-        if left[0] and method == "eth_getStorageAt" and (int(params[0], 16), int(params[1], 16)) == flaky:
-            left[0] -= 1
-            raise RuntimeError("upstream timeout")
-        return rpc(d.url, method, params)
-
-    def batch(calls):
-        out = []
-        for method, params in calls:
-            try:
-                out.append(read(method, params))
-            except RuntimeError:
-                out.append(None)
-        return out
-
-    return Chain(read, block, batch)
-
-
-def _verdict(d, name, followed=True, flaky=None) -> Verdict:
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    contract = d.slither["C"]
-    fn = next(f for f in contract.functions_entry_points if f.name == name)
-    contracts = d.contracts("C", "Guard") if followed else d.contracts("C")
-    return function_verdict(contract, fn, d.at["C"], _chain(d, flaky), contracts)[0]
+def _verdict(d, name, followed=True, chain=None) -> Verdict:
+    return O.verdict(d, "C", name, *(("Guard",) if followed else ()), chain=chain)
 
 
 @pytest.mark.parametrize(
@@ -101,32 +83,45 @@ def _verdict(d, name, followed=True, flaky=None) -> Verdict:
 )
 def test_a_followed_callee_checking_the_origin_lists_its_admin(deployed, name, signature):
     # The admin, whose own call goes through on the chain; the inlined code's list is never complete on its word.
-    verdict = _verdict(deployed, name)
-    assert verdict.openness != "open" and not verdict.complete
-    assert verdict.principals == {ADMIN}
-    assert f"inlined_callee:{signature}" in verdict.gaps
+    v = O.check(deployed, "C", name, _verdict(deployed, name), samples=X, open_at=False)
+    assert not v.complete and set(v.principals) == {ADMIN}
+    assert f"inlined_callee:{signature}" in v.gaps
 
 
 @pytest.mark.parametrize(("name", "signature"), [("p9", "originOk()"), ("q1", "capFor()"), ("p9e", "onlyEoa()")])
 def test_code_not_followed_that_reads_the_origin_is_never_taken_at_the_chains_word(deployed, name, signature):
-    verdict = _verdict(deployed, name, followed=False)
-    assert verdict.openness == "not_determined"
-    assert f"origin:{signature}" in verdict.gaps
+    v = O.check(deployed, "C", name, _verdict(deployed, name, followed=False), samples=X, open_at=False)
+    O.sound(v, {ADMIN} if name != "p9e" else set())
+    assert v.openness == "not_determined"
+    assert f"origin:{signature}" in v.gaps
 
 
 def test_no_contract_is_a_transactions_origin(deployed):
     # tx.origin == msg.sender inside the guard: msg.sender is this contract, so nobody ever passes. The inlined code
     # says so; nothing the chain answers shows it is all, so nobody is listed and the list isn't complete.
-    verdict = _verdict(deployed, "p9e")
-    assert verdict.openness != "open" and not verdict.complete
-    assert verdict.principals == set()
-    assert "inlined_callee:onlyEoa()" in verdict.gaps
+    v = O.check(deployed, "C", "p9e", _verdict(deployed, "p9e"), samples=X, open_at=False)
+    assert not v.complete and v.principals == set()
+    assert "inlined_callee:onlyEoa()" in v.gaps
+    p9e = O.function(deployed, "C", "p9e")
+    for who in {*O.ACCOUNTS, *O.STRANGERS}:
+        assert not O.passes(deployed, "C", p9e, {"x": 0}, sender=who)
 
 
 def test_an_unread_callee_address_is_a_gap_not_a_silent_skip(deployed):
-    verdict = _verdict(deployed, "p9v", flaky=(deployed.at["C"], 1))
-    assert verdict.openness == "not_determined"
-    assert "read_failed:call_target:originVoid(uint256)" in verdict.gaps
+    left = [1]
+    guard_slot = (deployed.at["C"], 1)
+
+    def first_read(method, params):  # that storage word's first read fails as a node error
+        if left[0] and (int(params[0], 16), int(params[1], 16)) == guard_slot:
+            left[0] -= 1
+            return True
+        return False
+
+    clean = _verdict(deployed, "p9v")
+    v = _verdict(deployed, "p9v", chain=O.Faulty(deployed, storage=first_read))
+    assert v.openness == "not_determined"
+    assert "read_failed:call_target:originVoid(uint256)" in v.gaps
+    O.never_bolder(clean, v)
 
 
 def test_runtime_code_is_walked_by_opcode():
@@ -191,34 +186,24 @@ def _guard_reads(monkeypatch, value):
     monkeypatch.setattr(Lowerer, "called", misread)
 
 
-def _stranger_passes(d, name) -> bool:
-    from eth_abi.abi import encode
-    from eth_utils import keccak
-
-    data = "0x" + (keccak(text=f"{name}(uint256)")[:4] + encode(["uint256"], [0])).hex()
-    try:
-        rpc(d.url, "eth_call", [{"from": "0x" + "00" * 19 + "aa", "to": "0x%040x" % d.at["C"], "data": data}, "latest"])
-        return True
-    except RuntimeError:
-        return False
-
-
 def test_inlined_code_letting_everyone_through_opens_nothing_the_chain_refuses(deployed, monkeypatch):
     # Mis-lowered as "any origin but address 1": a stranger passes on its word, and the chain refuses it.
     from services.logic.terms import ORIGIN, const, mk_cmp, mk_not
 
+    clean = _verdict(deployed, "p9")
     _guard_reads(monkeypatch, mk_not(mk_cmp("eq", ORIGIN, const(1, "address"))))
-    assert not _stranger_passes(deployed, "p9")
-    verdict = _verdict(deployed, "p9")
-    assert verdict.openness != "open", verdict
-    assert "inlined_callee:originOk()" in verdict.gaps
+    v = O.check(deployed, "C", "p9", _verdict(deployed, "p9"), samples=X, open_at=False)
+    assert "inlined_callee:originOk()" in v.gaps
+    O.never_bolder(clean, v)
 
 
 def test_inlined_code_letting_nobody_through_is_never_a_complete_nobody(deployed, monkeypatch):
     # Mis-lowered as "the origin is address 1": nobody, on its word, while the chain lets the admin through.
     from services.logic.terms import ORIGIN, const, mk_cmp
 
+    clean = _verdict(deployed, "p9")
     _guard_reads(monkeypatch, mk_cmp("eq", ORIGIN, const(1, "address")))
-    verdict = _verdict(deployed, "p9")
-    assert not verdict.complete, verdict
-    assert "inlined_callee:originOk()" in verdict.gaps
+    v = O.check(deployed, "C", "p9", _verdict(deployed, "p9"), samples=X)
+    assert not v.complete, v
+    assert "inlined_callee:originOk()" in v.gaps
+    O.never_bolder(clean, v)

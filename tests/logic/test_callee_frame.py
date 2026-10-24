@@ -2,21 +2,15 @@
 its ``msg.data`` and ``msg.sig`` are its own, and its ``msg.sender`` is whoever makes the call, a callee one level up
 included. Its code may rank and skip the guesses a search makes, never prove one passes on its own: a pass resting on
 it is asked again of the chain. A guess failing a conjunct rules out the guesses agreeing on what its evaluation read,
-and ``msg.data`` reads every argument."""
+and ``msg.data`` reads every argument. Each verdict is checked against ``eth_call`` on anvil (``_oracle.check``): an
+open one passes for every stranger, a listed holder from its own address, a refusal for no stranger."""
 
 from __future__ import annotations
 
-import os
-
 import pytest
-from eth_abi.abi import encode
-from eth_utils import keccak
 
-os.environ["PSAT_LOGIC_STRICT_GAPS"] = "1"
-from services.logic.terms import reset_terms  # noqa: E402
-from services.logic.verdict import function_verdict  # noqa: E402
-from tests.logic._anvil import Deployment, anvil  # noqa: E402,F401
-from tests.support.anvil import ACCOUNT0  # noqa: E402
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -107,10 +101,10 @@ contract C {
 """
 
 
-@pytest.fixture(scope="module")
-def d(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
+EVERY = ("A", "B", "V", "S", "Checker", "Strict", "E", "D", "W", "F")
+
+
+def _setup(d):
     d.deploy("B")
     d.deploy("A", ("address",), (d.at["B"],))
     for name in ("V", "S", "Checker", "Strict", "Lax", "D"):
@@ -118,78 +112,69 @@ def d(anvil):  # noqa: F811
     d.deploy("E", ("address",), (d.at["D"],))
     d.deploy("W")
     d.deploy("F", ("address",), (d.at["W"],))
-    d.deploy(
-        "C",
-        ("address",) * 6,
-        tuple(d.at[n] for n in ("A", "V", "S", "Checker", "Strict", "E")),
+    d.deploy("C", ("address",) * 6, tuple(d.at[n] for n in ("A", "V", "S", "Checker", "Strict", "E")))
+    assert O.transact(d, "B", "setA(address)", ("address",), (d.at["A"],))
+    assert O.transact(d, "C", "setF(address)", ("address",), (d.at["F"],))
+
+
+PROBES = [
+    O.Probe(
+        SOURCE,
+        _setup,
+        tuple(
+            ("C", f, EVERY)
+            for f in ("asked", "askedBy", "nested", "paid", "selector", "forwarded", "confirmed", "words")
+        ),  # fmt: skip
     )
-    d.send("B", "0x" + (keccak(text="setA(address)")[:4] + encode(["address"], ["0x%040x" % d.at["A"]])).hex())
-    d.send("C", "0x" + (keccak(text="setF(address)")[:4] + encode(["address"], ["0x%040x" % d.at["F"]])).hex())
+]
+
+
+@pytest.fixture(scope="module")
+def d(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
     return d
 
 
-def _verdict(d, name, contracts=None, chain=None):
-    reset_terms()
-    c = d.slither["C"]
-    fn = next(f for f in c.functions_entry_points if f.name == name)
-    every = ("C", "A", "B", "V", "S", "Checker", "Strict", "E", "D", "W", "F")
-    known = contracts if contracts is not None else d.contracts(*every)
-    return function_verdict(c, fn, d.at["C"], chain or d.chain(), known)[0]
+def _verdict(d, name):
+    return O.verdict(d, "C", name, *EVERY)
 
 
 def test_a_callee_of_a_callee_sees_the_callee_asking_as_its_sender(d):
-    verdict = _verdict(d, "nested")
-    assert verdict.openness == "open", verdict
-    assert list(verdict.witnesses.values())[0].get("v") == 7
+    v = O.check(d, "C", "nested", _verdict(d, "nested"), open_at={"v": 7})
+    assert list(v.witnesses.values())[0].get("v") == 7
 
 
 def test_a_view_callee_reads_no_value_whatever_the_outer_call_carries(d):
     # Read with the outer call's value, ``vv.ok(v)`` would let a stranger paying v through. That it never does over
     # any v only V's code shows, which never refutes on its own (``test_callee_refutation``): the owner, not complete.
-    verdict = _verdict(d, "paid")
-    assert verdict.openness != "open", verdict
-    assert int(ACCOUNT0, 16) in verdict.principals
-    assert not verdict.complete and "callee_code_refutation" in verdict.gaps
+    paying = [{"v": n, "msg.value": n} for n in (1, 5)]
+    v = O.check(d, "C", "paid", _verdict(d, "paid"), samples=[{"v": 0}, *paying], open_at=False)
+    assert v.openness != "open" and O.OWNER in v.principals
+    assert not v.complete and "callee_code_refutation" in v.gaps
 
 
 def test_a_callee_reads_its_own_selector(d):
-    verdict = _verdict(d, "selector")
-    assert verdict.openness == "open", verdict
-    assert list(verdict.witnesses.values())[0].get("v") == 5
+    v = O.check(d, "C", "selector", _verdict(d, "selector"), open_at={"v": 5})
+    assert list(v.witnesses.values())[0].get("v") == 5
 
 
 def test_a_failed_guess_rules_out_only_the_guesses_agreeing_on_what_it_read(d):
     # b = 9 fails the forwarded check, which reads the whole call data: b = 10 must still be tried.
-    verdict = _verdict(d, "forwarded")
-    assert verdict.openness == "open", verdict
-    assert list(verdict.witnesses.values())[0].get("b") == 10
-
-
-def test_a_pass_resting_on_callee_code_is_asked_of_the_chain(d):
-    # The code believed to be at ``strict`` (Lax) lets v = 3 through; what is deployed there never does.
-    known = d.contracts("C")
-    known[d.at["Strict"]] = d.slither["Lax"]
-    verdict = _verdict(d, "confirmed", known)
-    assert verdict.openness != "open", verdict
+    v = O.check(d, "C", "forwarded", _verdict(d, "forwarded"), open_at={"a1": 0, "b": 10})
+    assert list(v.witnesses.values())[0].get("b") == 10
+    assert O.strangers_passing(d, "C", O.function(d, "C", "forwarded"), {"a1": 0, "b": 9}) == {False}
 
 
 def test_a_word_of_the_call_data_inside_the_arguments_is_what_they_encode(d):
-    verdict = _verdict(d, "words")
-    assert verdict.openness != "open", verdict
+    samples = [{"a1": a, "b": 8} for a in (8, 9, 0, 1)]
+    v = O.check(d, "C", "words", _verdict(d, "words"), samples=samples, open_at=False)
+    assert v.openness != "open"
 
 
-def _senders(chain, to: int) -> set[int]:
-    return {key[3] for key in chain._memo if isinstance(key, tuple) and key[:1] == ("c",) and key[1] == to}
-
-
-def test_a_callee_answering_alike_for_every_asker_is_asked_as_this_contract(d):
-    # D's code never reads who asks: E's call to it goes to the chain from this contract, an answer already shared.
-    chain = d.chain()
-    verdict = _verdict(d, "asked", chain=chain)
-    assert verdict.openness == "open" and list(verdict.witnesses.values())[0].get("v") == 14
-    assert _senders(chain, d.at["D"]) == {d.at["C"]}
-    # W's answer is who asks: F's call to it goes to the chain from F, and v = 4 passes as it does on the chain.
-    chain = d.chain()
-    verdict = _verdict(d, "askedBy", chain=chain)
-    assert verdict.openness == "open" and list(verdict.witnesses.values())[0].get("v") == 4
-    assert _senders(chain, d.at["W"]) == {d.at["F"]}
+@pytest.mark.parametrize(("name", "v"), [("asked", 14), ("askedBy", 4)])
+def test_a_callee_answering_alike_for_every_asker_is_asked_as_this_contract(d, name, v):
+    # D's code never reads who asks: E's call to it is asked as this contract. W's answer is who asks: F's call to it
+    # is asked as F. Either way the chain's answer: v = 14, v = 4 pass.
+    verdict = O.check(d, "C", name, _verdict(d, name), open_at={"v": v})
+    assert list(verdict.witnesses.values())[0].get("v") == v

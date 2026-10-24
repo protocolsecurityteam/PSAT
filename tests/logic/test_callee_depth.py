@@ -1,13 +1,15 @@
 """Depth into other contracts is spent only on the calls the caller's identity reaches: a check handed the caller is
 followed four contracts deep, and a callee no identity reaches is a condition, never followed at all. Who a callee's
 code lets through names the holders, each confirmed by the chain, but never shows they are all
-(``callee_code_list:<signature>``)."""
+(``callee_code_list:<signature>``). Each verdict is checked against ``eth_call`` on anvil (``_oracle.check``): every
+listed holder passes from its own address, no stranger does."""
 
 from __future__ import annotations
 
-from services.logic.verdict import function_verdict
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import calldata
+import pytest
+
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -57,70 +59,81 @@ contract Guarded {
 }
 """
 
-HOLDERS = ("0x" + "c3" * 20, "0x" + "d4" * 20)
+HOLDERS = set(O.ACCOUNTS[1:3])
 
 
-def _verdict(deployment, guarded, names):
-    from services.logic.terms import reset_terms
-
-    reset_terms()
-    contract = deployment.slither["Guarded"]
-    fn = next(f for f in contract.functions_entry_points if f.name == "act")
-    contracts = {guarded: contract, **deployment.contracts(*names)}
-    return function_verdict(contract, fn, guarded, deployment.chain(), contracts)[0]
+def _alias(d, name, contract, at):
+    d.at[name], d.slither[name] = at, d.slither[contract]
+    return at
 
 
-def _relayed(anvil, relays: int):
-    """``Guarded`` asking ``relays`` relays in turn, the last asking ``Roles``, which two hold."""
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
-    at = d.deploy("Roles")
-    for who in HOLDERS:
-        d.send("Roles", calldata("grant(address)", [who]))
-    names = ["Roles"]
-    for i in range(relays):
-        at = d.deploy("Relay", ("address",), (at,))
-        d.at[f"Relay{i}"], d.slither[f"Relay{i}"] = at, d.slither["Relay"]
-        names.append(f"Relay{i}")
-    return d, d.deploy("Guarded", ("address",), (at,)), names
-
-
-def test_identity_followed_four_contracts_deep(anvil):  # noqa: F811
-    d, guarded, names = _relayed(anvil, 3)
-    verdict = _verdict(d, guarded, names)
-    assert verdict.openness == "restricted"
-    assert verdict.principals == {int(h, 16) for h in HOLDERS}
-    assert not verdict.complete and "callee_code_list:check(address)" in verdict.gaps
-
-
-def test_identity_handed_on_further_names_where_it_stopped(anvil):  # noqa: F811
-    d, guarded, names = _relayed(anvil, 4)
-    verdict = _verdict(d, guarded, names)
-    assert verdict.openness == "restricted" and not verdict.complete
-    assert f"depth:call:check(address):arg0@0x{d.at['Roles']:040x}" in verdict.gaps
-
-
-def test_values_no_identity_reaches_are_never_followed(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
+def _setup(d):
+    """``Guarded3``/``Guarded4`` ask three/four relays in turn, the last asking ``Roles`` (two holders);
+    ``GuardedV`` asks ``Gate``, whose check reads a value through three ``Value`` contracts; ``GuardedU`` asks a
+    ``Roles`` nobody holds, its code not given."""
+    roles = d.deploy("Roles")
+    for who in sorted(HOLDERS):
+        assert O.transact(d, "Roles", "grant(address)", ("address",), (who,))
+    at = roles
+    for i in range(4):
+        at = _alias(d, f"Relay{i}", "Relay", d.deploy("Relay", ("address",), (at,)))
+        if i >= 2:
+            _alias(d, f"Guarded{i + 1}", "Guarded", d.deploy("Guarded", ("address",), (at,)))
     at = 0
     for _ in range(3):
         at = d.deploy("Value", ("address",), (at,))
-    gate = d.deploy("Gate", ("address",), (at,))
-    for who in HOLDERS:
-        d.send("Gate", calldata("grant(address)", [who]))
-    guarded = d.deploy("Guarded", ("address",), (gate,))
-    verdict = _verdict(d, guarded, ["Gate"])  # the values' code isn't given: not needed
-    assert verdict.openness == "restricted"
-    assert verdict.principals == {int(h, 16) for h in HOLDERS}
-    assert not verdict.complete and "callee_code_list:check(address)" in verdict.gaps
+    d.deploy("Gate", ("address",), (at,))
+    for who in sorted(HOLDERS):
+        assert O.transact(d, "Gate", "grant(address)", ("address",), (who,))
+    _alias(d, "GuardedV", "Guarded", d.deploy("Guarded", ("address",), (d.at["Gate"],)))
+    _alias(d, "Empty", "Roles", d.deploy("Roles"))
+    d.at["Roles"] = roles
+    _alias(d, "GuardedU", "Guarded", d.deploy("Guarded", ("address",), (d.at["Empty"],)))
 
 
-def test_an_unavailable_callee_handed_the_caller_is_named(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
-    roles = d.deploy("Roles")
-    guarded = d.deploy("Guarded", ("address",), (roles,))
-    verdict = _verdict(d, guarded, [])
-    assert verdict.openness == "restricted" and not verdict.complete
-    assert f"call:check(address):arg0@0x{roles:040x}" in verdict.gaps
+RELAYS3 = ("Roles", "Relay0", "Relay1", "Relay2")
+RELAYS4 = (*RELAYS3, "Relay3")
+PROBES = [
+    O.Probe(
+        SOURCE,
+        _setup,
+        (("Guarded3", "act", RELAYS3), ("Guarded4", "act", RELAYS4), ("GuardedV", "act", ("Gate",)),
+         ("GuardedU", "act", ())),
+    )
+]  # fmt: skip
+
+
+@pytest.fixture(scope="module")
+def d(anvil):  # noqa: F811
+    d = O.deployment(*anvil, SOURCE)
+    _setup(d)
+    return d
+
+
+def test_identity_followed_four_contracts_deep(d):
+    v = O.check(d, "Guarded3", "act", O.verdict(d, "Guarded3", "act", *RELAYS3), open_at=False)
+    assert v.openness == "restricted" and set(v.principals) == HOLDERS
+    assert not v.complete and "callee_code_list:check(address)" in v.gaps
+
+
+def test_identity_handed_on_further_names_where_it_stopped(d):
+    v = O.check(d, "Guarded4", "act", O.verdict(d, "Guarded4", "act", *RELAYS4), open_at=False)
+    O.sound(v, HOLDERS)
+    assert not v.complete
+    assert f"depth:call:check(address):arg0@0x{d.at['Roles']:040x}" in v.gaps
+    assert all(O.passes(d, "Guarded4", O.function(d, "Guarded4", "act"), sender=h) for h in HOLDERS)
+
+
+def test_values_no_identity_reaches_are_never_followed(d):
+    # The values' code isn't given: not needed.
+    v = O.check(d, "GuardedV", "act", O.verdict(d, "GuardedV", "act", "Gate"), open_at=False)
+    assert v.openness == "restricted" and set(v.principals) == HOLDERS
+    assert not v.complete and "callee_code_list:check(address)" in v.gaps
+
+
+def test_an_unavailable_callee_handed_the_caller_is_named(d):
+    clean = O.check(d, "GuardedU", "act", O.verdict(d, "GuardedU", "act", "Empty"), open_at=False)
+    v = O.check(d, "GuardedU", "act", O.verdict(d, "GuardedU", "act"), open_at=False)
+    assert v.openness == "restricted" and not v.complete
+    assert f"call:check(address):arg0@0x{d.at['Empty']:040x}" in v.gaps
+    O.never_bolder(clean, v)
