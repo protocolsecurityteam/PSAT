@@ -1,5 +1,11 @@
 # Effect scope
 
+**Status: unverified label, no oracle.** The `self` / `shared` / `none` label below has no independent oracle (no
+chain run can say whose positions a write touches in every state), so nothing tests it and nothing may rest on it:
+its label tests were deleted on 2026-10-24. The classifier stays in code, off by default (`PSAT_LOGIC_SCOPE_SKIP`
+unset); a verdict's `scope` field is informational only. The one test left (`test_scope_review`) checks only that
+facts a budget cut off are cached as "everything checked", the conservative side.
+
 Principle: the rule is conservative. A function is `self` only when every write it can make is shown, from the
 lowering alone, either to stay in an entry the caller holds or to move value out of one with the total conserved;
 whatever can't be shown is `shared`. A false `shared` costs enumeration time; a false `self` would hide holders.

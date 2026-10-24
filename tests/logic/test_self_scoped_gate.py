@@ -1,6 +1,6 @@
-"""A self-scoped function, with enumeration skipping on, still says who can pass: nobody, when the list of holders is
-shown empty; else its whole condition (not only the part about who calls) and how many the list names. With
-skipping off (the default) its holders are enumerated as for any function, scope and gate reported beside them."""
+"""A function the scope classifier calls self-scoped (an unverified label, off by default: ``SCOPE.md``) still says
+who can pass: with skipping on, nobody when the list of holders is shown empty; with skipping off (the default) its
+holders are enumerated as for any function."""
 
 from __future__ import annotations
 
@@ -104,20 +104,10 @@ def _verdict(contract, chain):
 def test_with_nobody_ever_allowlisted_nobody_can_send(gated, monkeypatch):
     monkeypatch.setattr(decide, "SKIP_SELF_SCOPED", True)
     verdict = _verdict(gated, _Deployed([]))
-    assert verdict.scope == "self"
     assert verdict.openness == "restricted" and verdict.complete and not verdict.principals
-
-
-def test_the_gate_reported_is_the_whole_condition_with_the_count_of_holders(gated, monkeypatch):
-    monkeypatch.setattr(decide, "SKIP_SELF_SCOPED", True)
-    verdict = _verdict(gated, _Deployed([SENDER]))
-    assert verdict.scope == "self" and verdict.gaps == ("self_scoped",)
-    assert any("accepts" in g for g in verdict.gate) and any("caller" in g for g in verdict.gate)
-    assert verdict.members == 1 and not verdict.principals
 
 
 def test_by_default_a_self_scoped_function_is_still_enumerated(gated):
     assert decide.SKIP_SELF_SCOPED is False
     verdict = _verdict(gated, _Deployed([SENDER]))
-    assert verdict.scope == "self" and verdict.gate
     assert "self_scoped" not in verdict.gaps and verdict.principals == {SENDER}

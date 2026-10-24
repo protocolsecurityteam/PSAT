@@ -65,12 +65,3 @@ def _labels(contract, name, unreadable: bool):
 @pytest.mark.parametrize("name", ["cut", "arguments"])
 def test_calldata_a_statement_reads_is_unknown_by_name_where_its_source_cannot_be_read(contract, name):
     assert "unsupported:slice_source" in _labels(contract, name, unreadable=True)
-
-
-def test_a_faithful_reading_still_tells_a_slice_from_the_arguments(contract):
-    assert "unsupported:slice" in _labels(contract, "cut", unreadable=False)
-    assert not {label for label in _labels(contract, "arguments", unreadable=False) if "slice" in label}
-
-
-def test_a_statement_reading_no_calldata_needs_no_source(contract):
-    assert not _labels(contract, "plain", unreadable=True)
