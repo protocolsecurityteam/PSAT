@@ -1904,7 +1904,8 @@ def function_verdict(
 
     def inverse(target: int, var: str, fields: tuple, value: int, proof: bool = True) -> set[int] | None:
         """Keys whose latest written value at ``var`` (under ``fields``) is ``value``, replaying the writer events
-        once per mapping; ``None`` when that history was cut or unread, so whose value it is isn't known.
+        once per mapping; ``None`` when that history was cut or unread, or some write's event doesn't name the value
+        it leaves, so whose value it is isn't known.
         ``proof=False``: keys to try only, each checked on the chain: the running code's events, however the
         earlier implementations logged, and a history read partial for what it holds."""
         if target not in contracts:
@@ -1915,6 +1916,8 @@ def function_verdict(
             return {
                 key for key, written in guessed[(target, var, fields)].items() if written % 2**160 == value % 2**160
             }
+        if every(target, logged, _spec_name(var), 1, tuple(fields), False, True) is None:
+            return None  # a write whose value no event names (only its key logged): whose value it is goes unread
         if (target, var, fields) not in replayed:
             replayed[(target, var, fields)] = _latest_written(target, var, fields)
         latest = replayed[(target, var, fields)]
