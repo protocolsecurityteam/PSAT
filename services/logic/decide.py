@@ -2363,8 +2363,16 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 if acts is UNK and world.effective is not None:
                     gaps += _unsettled(world.effective, world, anyone, None)
                 return Verdict("not_determined", frozenset(), False, gaps=tuple(gaps))
+        unsingled = tuple(f"callee_unsingled:{signature}" for signature in coded)
         if now is True:
-            return Verdict("open", frozenset(), True, witnesses={FRESH: _argument_values(found)})
+            witness = _argument_values(found)
+            if coded and not (runs(world, FRESH, witness) is True and strangers_run(formula, world, witness)):
+                # Every stranger alike only on a callee's code: open only where each one's own call goes through.
+                return Verdict("not_determined", frozenset(), False, gaps=(*unsingled, "strangers_differ"))
+            return Verdict("open", frozenset(), True, witnesses={FRESH: witness})
+        if coded:
+            # Open once the conditions allow, for every stranger alike only on a callee's code: no call shows it.
+            return Verdict("not_determined", frozenset(), False, gaps=unsingled)
         return Verdict("open", frozenset(), True, allowed="later")
     if Evaluator(world, anyone, {}, frozenset(), when | records | _identity_atoms(formula)).truth(formula) is False:
         # Fails whoever calls, whatever the arguments and adjustable conditions: nobody, ever (a consumed initializer).

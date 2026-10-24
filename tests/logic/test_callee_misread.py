@@ -111,3 +111,15 @@ def test_an_origin_read_the_lowering_misses_is_never_open(d, followed):
     _never_open(d, "shadowOrigin", v)
     assert O.passes(d, "C", O.function(d, "C", "shadowOrigin"), {"x": 0}, sender=ADMIN)
     assert "origin:ok()" in v.gaps
+
+
+@pytest.mark.parametrize("followed", [True, False])
+def test_a_callee_whose_code_reads_the_caller_alike_is_open_only_if_every_stranger_passes(d, followed):
+    # ``check(msg.sender)`` refuses a caller whose low bit is clear; lowered, the call in assembly assumed to succeed,
+    # it lets everyone through, reading the caller it is handed alike for all. That rests on the code alone: open
+    # only once every stranger's own call goes through on the chain, and one of them does not.
+    v = O.verdict(d, "C", "lowBit", *(("Bits",) if followed else ()))
+    _never_open(d, "lowBit", v)
+    assert O.strangers_passing(d, "C", O.function(d, "C", "lowBit"), {"x": 0}) == {True, False}
+    if followed:
+        assert "callee_unsingled:check(address)" in v.gaps
