@@ -1012,6 +1012,8 @@ class World:
     # Whether a call made by followed code answers the same whoever makes it (``verdict.asker_free``): then it is
     # asked of the chain as this contract, an answer any asker shares.
     asker_free: Callable[[Term], bool] = lambda call: False
+    # Bytes of return data a call's callee at an address declares it returns, when its declaration fixes them.
+    declared_size: Callable[[Term, int], int | None] = lambda call, address: None
     # Why a view call handed nothing of the caller may still answer otherwise for another caller (``origin``,
     # ``hidden``, ``unfollowed``, ...), else ``None``: see ``verdict.caller_bound``. ``None`` where no such check is
     # supplied: then only the callees' lowerings are read (``_reads_origin``).
@@ -1701,15 +1703,18 @@ class Evaluator:
 
     def _action(self, t: Term) -> Any:
         """A state-changing call: an action the caller arranges (a transfer, a deposit), unless it is handed the
-        caller and its own code, over these arguments, refuses this caller for entries the caller can't bring about
-        there (a supply controller list only an admin fills): then whether it passes is unknown, never assumed."""
+        caller. Then its callee's code, over these arguments, decides: refusing this caller for entries the caller
+        can't bring about there (a supply controller list only an admin fills), whether it passes is unknown, never
+        assumed; letting it through, the pass rests on that code (marked, and unknown with no callee code answering,
+        where a decision rests on it). A callee not followed leaves it unknown: only every stranger's own call, run
+        on the chain, shows it passes (``decide``)."""
         if not any(contains(a, IDENTITY_KINDS) for a in t[3]):
             return ASSUMED
         if self.eval(t[1]) is UNK:
             return UNK  # handed the caller by a contract whose address went unread: whose check it is is unknown
         lowered = self._callee(t)
         if lowered is None:
-            return ASSUMED
+            return UNK
         refused = self.truth(lowered[0])
         if refused is UNK:
             # Unsettled there (a read failed, business logic): what involves who calls decides, the rest left free.
@@ -1718,7 +1723,12 @@ class Evaluator:
             if refused is UNK:
                 return UNK
         if refused is not False:
+            if not self.callee_code:
+                return UNK
+            self.coded[0] = True
             return ASSUMED
+        # Refused there only on entries the caller can bring about (a balance, an allowance) is no pass but what the
+        # caller must hold (``requires``), asked as it stands with or without callee code answering.
         opened = self.world.action_open(t, lowered[0])
         if isinstance(opened, frozenset):
             # Some of the entries it reads the caller can bring about, not all (a balance, not a blacklist): an action
@@ -1808,7 +1818,8 @@ class Evaluator:
 
     def _returned_size(self, call: Term) -> Any:
         """Bytes of return data ``call`` leaves when it returns: a view call's as the chain answers, an action's as
-        its own code declares (USDT's ``transferFrom``, returning nothing)."""
+        its callee's function declares (USDT's ``transferFrom``, returning nothing; ``World.declared_size``), never as
+        its lowered code returns."""
         if call[0] != "call":
             return UNK  # the call inlined as what its callee returns: how many bytes came back goes unread
         if call[4]:
@@ -1818,10 +1829,11 @@ class Evaluator:
                 return UNK
             raw = self._chain_call(call, request[0], request[1], overrides)
             return len(raw) if isinstance(raw, bytes) else UNK
-        lowered = self._callee(call)
-        if lowered is None or any(_dynamic(str(r[2])) for r in lowered[1] if len(r) > 2 and isinstance(r[2], str)):
+        address = self.eval(call[1])
+        if not isinstance(address, int) or isinstance(address, bool):
             return UNK
-        return 32 * len(lowered[1])
+        size = self.world.declared_size(call, address % 2**160)
+        return UNK if size is None else size
 
     def _try_outcome(self, call: Term, returns: int | None) -> Any:
         """How a ``try`` on ``call`` ends: ``returned``, ``reverted`` (in the callee: a catch clause runs), or
@@ -2110,10 +2122,14 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     shown = verdict.openness == "open" and verdict.allowed == "conditional"
     if shown or (
         verdict.openness == "not_determined"
-        and (world.code_passed > passed or any(subterms(c, "unknown") or subterms(c, "opaque") for c in core))
+        and (
+            world.code_passed > passed
+            or any(subterms(c, "unknown") or subterms(c, "opaque") or _handed_actions(c) for c in core)
+        )
     ):
-        # What the lowering couldn't express, or a pass only a callee's code showed, keeps the stranger undecided, or
-        # open only on conditions: its call, run once on the chain, settles it when it goes through. One that fails
+        # What the lowering couldn't express, a pass only a callee's code showed, or an action handed the caller
+        # (its callee unfollowed, or its code only proposing), keeps the stranger undecided, or open only on
+        # conditions: its call, run once on the chain, settles it when every stranger's goes through. One that fails
         # proves nothing (other arguments, another state) and changes nothing.
         found = _executes(formula, world, FRESH, set(), tries=1)
         if found is not None and strangers_run(formula, world, found, tries=1):
@@ -2141,6 +2157,11 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         verdict = replace(verdict, gaps=verdict.gaps + ("budget:confirm",))
     chosen = tuple(("arguments", name) for name in _quantified(core))
     return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
+
+
+def _handed_actions(t: Term) -> list[Term]:
+    """The state-changing calls in ``t`` handed the caller's identity."""
+    return [c for c in subterms(t, "call") if not c[4] and any(contains(a, IDENTITY_KINDS) for a in c[3])]
 
 
 def _quantified(core: tuple[Term, ...]) -> list[str]:
@@ -2671,6 +2692,15 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 passes["caller"].add(candidate)
                 witnesses[candidate] = found_args
                 del conditions[candidate]
+    elif now_index is not None and fresh[now_index] is UNK:
+        # Whether a stranger passes is unknown, so none is singled out; a candidate left undecided whose own call
+        # goes through on the chain still holds the power (a pass only a callee's code showed, confirmed).
+        for candidate in sorted(undecided - known["caller"])[:_EXECUTED_CANDIDATES]:
+            found_args = _executes(formula, world, candidate, candidates)
+            if found_args is not None:
+                known["caller"].add(candidate)
+                witnesses[candidate] = found_args
+                undecided.discard(candidate)
     if limited:
         if world.chain.sent >= world.chain.limit:
             gaps.append("budget:unproven_reads")
@@ -2851,7 +2881,9 @@ def _open_parts(atom: Term, probe: "Evaluator", depth: int = 0) -> list[str]:
         if not isinstance(address, int) or isinstance(address, bool):
             out.append(f"read_failed:target:{call[2]}")
         elif not call[4]:
-            if probe.eval(call) is UNK:
+            if probe.eval(call) is UNK and probe.world.callee(call, address % 2**160) is None:
+                out.append(call_gap(call, probe))  # an action handed the caller, its callee not followed
+            elif probe.eval(call) is UNK:
                 out.append(f"action:{call[2]}")  # an action handed the caller, its callee's check unsettled
         elif probe.call_input(call) is not None:
             if probe.eval(call) is UNK:

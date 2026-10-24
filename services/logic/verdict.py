@@ -1811,6 +1811,20 @@ def function_verdict(
                         lowered[key] = (FALSE, ())  # no such function and no fallback: the call reverts
         return lowered[key]
 
+    def declared_size(call: Term, address: int) -> int | None:
+        """Bytes of return data ``call``'s function at ``address`` declares, when each value it returns is one word
+        (solc 0.4's ``return f()`` in a function declaring none returns nothing); ``None`` otherwise."""
+        from slither.core.solidity_types import ElementaryType
+
+        found = contracts.get(address % 2**160)
+        target = found.get_function_from_signature(call[2]) if found is not None else None
+        if target is None or target.entry_point is None:
+            return None
+        types = [r.type for r in target.returns]
+        if not all(isinstance(t, ElementaryType) and t.name not in ("bytes", "string") for t in types):
+            return None
+        return 32 * len(types)
+
     def asker_free(call: Term) -> bool:
         """Whether what a call made by followed code answers can't depend on who makes it: the callee's own code,
         lowered with a stand-in for its ``msg.sender``, never shows the stand-in, reads nothing it couldn't express,
@@ -2182,6 +2196,7 @@ def function_verdict(
     world.callee = callee
     world.asker_free = asker_free
     world.caller_bound = caller_bound
+    world.declared_size = declared_size
     world.action_open = action_open
     world.credited = credited
     world.writer_topics = writer_topics

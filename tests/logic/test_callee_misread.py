@@ -123,3 +123,13 @@ def test_a_callee_whose_code_reads_the_caller_alike_is_open_only_if_every_strang
     assert O.strangers_passing(d, "C", O.function(d, "C", "lowBit"), {"x": 0}) == {True, False}
     if followed:
         assert "callee_unsingled:check(address)" in v.gaps
+
+
+@pytest.mark.parametrize("followed", [True, False])
+def test_an_action_handed_the_caller_is_open_only_where_every_strangers_call_goes_through(d, followed):
+    # ``canMint`` refuses everyone but a controller, by a call into code that always reverts: lowered, it lets
+    # everyone through (A52); unfollowed, nothing shows what it checks. Either way whether the action passes for a
+    # stranger rests on no code the chain ran: open only once every stranger's own call goes through, and none does.
+    v = O.verdict(d, "C", "mint", *(("Supply",) if followed else ()))
+    _never_open(d, "mint", v)
+    assert O.passes(d, "C", O.function(d, "C", "mint"), {"amount": 1}, sender=CONTROLLER)

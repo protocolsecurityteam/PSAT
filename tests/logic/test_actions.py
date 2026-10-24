@@ -130,7 +130,13 @@ def _setup(d):
 
 
 VAULT = ("deposit", "payFee", "depositSigned", "refund", "payOut")
-PROBES = [O.Probe(SOURCE, _setup, (*(("Vault", f, ("Token",)) for f in VAULT), ("Minter", "mint", ("Supply",))))]
+PROBES = [
+    O.Probe(
+        SOURCE,
+        _setup,
+        (*(("Vault", f, ("Token",)) for f in VAULT), ("Minter", "mint", ("Supply",)), ("Minter", "mint", ())),
+    )
+]
 
 
 @pytest.fixture(scope="module")
@@ -166,6 +172,14 @@ def test_a_mint_its_supply_contract_allows_only_controllers_is_never_open(d):
     assert v.openness != "open"
     with O.snapshot(d):  # no stranger can make itself a controller
         assert not O.transact(d, "Supply", "addController(address)", ("address",), (O.STRANGERS[0],), O.STRANGERS[0])
+
+
+def test_a_mint_handed_to_a_supply_contract_not_followed_is_never_open(d):
+    # Nothing shows what ``canMint`` checks of the caller it is handed: open only once every stranger's own call goes
+    # through on the chain, and none does.
+    v = O.verdict(d, "Minter", "mint")
+    O.check(d, "Minter", "mint", v, samples=({"amount": 0}, {"amount": 1}), open_at=False)
+    assert v.openness != "open"
 
 
 def test_a_fixed_fee_in_tokens_anyone_can_obtain_stays_open(d):

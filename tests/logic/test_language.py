@@ -195,28 +195,24 @@ def calls(anvil):  # noqa: F811
     return d
 
 
-_ACTION = pytest.mark.xfail(
-    strict=True,
-    reason="A12-call: a low-level .call handing the caller to a target the caller picks is an arranged action, "
-    "true at every input, though the target's own code (followed) refuses this caller",
-)
-CALL_CASES = [
-    pytest.param(name, who, marks=_ACTION if name == "viaCall" and who != O.OWNER else ())
-    for name in ("viaCall", "viaStatic")
-    for who in SENDERS
-]
+CALL_CASES = [pytest.param(name, who) for name in ("viaCall", "viaStatic") for who in SENDERS]
 
 
 @pytest.mark.parametrize(("name", "who"), CALL_CASES, ids=[f"{c.values[0]}-{c.values[1]:#x}"[:24] for c in CALL_CASES])
 def test_a_low_level_call_is_the_call_its_data_encodes(calls, name, who):
-    # The call data hands the caller to ``Target``, whose own check lets only its owner through: followed, the
-    # lowered formula says what ``eth_call`` says for the owner and for strangers.
+    # The call data hands the caller to ``Target``, whose own check lets only its owner through: the lowered formula
+    # says what ``eth_call`` says for the owner and for strangers. ``viaCall``'s is an action handed the caller, and
+    # no callee's code answers here (``engine_says`` follows none): whether it passes is unknown for everyone, never
+    # assumed (a stranger it once let through, A12-call).
     fn = O.function(calls, "C", name)
     target = calls.at["Target"]
     chain = O.chain_says(calls, fn, [target], sender=who)
     assert chain == (who == O.OWNER)
     formula, engine = O.engine_says(calls, fn, [target], sender=who, contracts=calls.contracts("C", "Target"))
-    assert engine == chain, (name, hex(who), chain, engine, formula)
+    if name == "viaCall":
+        assert engine is UNK and ("call", "allow(address)") in {c[::2][:2] for c in subterms(formula, "call")}
+    else:
+        assert engine == chain, (name, hex(who), chain, engine, formula)
 
 
 def test_an_undecodable_staticcall_is_rejected_by_name(calls):
