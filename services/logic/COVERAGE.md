@@ -269,33 +269,55 @@ Found while working, not in the before table:
   handed), never just those it names (``amount <= balance`` refuting an amount whatever the recipient). A view call over
   guessed arguments whose callee is followed is answered by the callee's own code (in its own frame, A39/A40) first,
   the chain only when that is unknown. The code ranks and skips guesses, and is never trusted for an answer: a pass
-  resting on it is asked again with every such call put to the chain (``confirmed``), and the choice never depends on
-  what the chain has cached. Without these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s
+  resting on it is asked again with no callee code at all (``confirmed``), each such call put to the chain where its
+  input is known whole and unknown otherwise, and the choice never depends on what the chain has cached. Without these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s
   read budget on one ``hasPermission`` call per guessed recipient (``test_callee_frame``).
-* Callee code never refutes on its own (fail-safe under any mis-lowering of a callee). A refusal it gives a guess only
-  skips that guess. A ``False`` asked from outside any evaluation (``Evaluator.truth``) that some callee's code went
-  into (a view call over guessed or unknown arguments answered by it, an action's return value, a ``try``'s outcome;
-  memoized values carry the mark, ``_coded_terms``) is asked again with no callee code: each such call put to the
-  chain (cache first, then a read within the function's budget) or left unknown. A solver "nothing satisfies it" that
-  inlined a callee's code (``solve``) is asked again with each view call a value of its own, tied to what the chain
-  answers at the inputs the models reach (``_chain_lemmas``, at most ``_CHAIN_ROUNDS`` inputs): still unsatisfiable,
-  the chain refuted it; a model every answer agrees with is checked like any other and may pass; anything else is
-  unknown. A candidate the loosened formula refuses only through a callee's code, and not without it, is undecided and
-  never searched (the code's refusal spares the search, so it never costs the others the budget); gathering reads and
-  asking whether the state alone settles a question (``base_only``) take the code's answer as it is, since neither
-  answers. What only the code showed is unknown, counted (``world.code_refuted``), and a verdict left incomplete by it
-  names ``callee_code_refutation``. Cost: "nobody, ever" over an argument the callee is handed with infinitely many
-  values (``require(guard.flagged(x) || owner)``) is no longer claimed from the callee's code; one whose call inputs
-  are few (the caller, a flag picked between two values) still is, from the chain (``test_callee_refutation``).
-  Not covered: a callee inlined into the formula because it is handed the caller (``verdict.bind_callers``) is lowered
-  and trusted like the contract's own code.
+* Callee code never decides on its own, followed or inlined: fail-safe under any mis-lowering of a callee.
+  * Answers. A refusal it gives a guess only skips that guess. A ``False`` or a ``True`` asked from outside any
+    evaluation (``Evaluator.truth``) that some callee's code went into (a view call over guessed or unknown arguments
+    answered by it, an action's return value, a ``try``'s outcome; memoized values carry the mark, ``_coded_terms``)
+    is asked again with no callee code at all: each such call whose input is known whole put to the chain (cache
+    first, then a read within the function's budget; an ``abi.encode`` of known static values handed on as ``bytes`` is known,
+    ``Evaluator._argument``), any other unknown. What fails there fails, what passes there passes, the rest is unknown,
+    counted (``world.code_refuted``, ``world.code_passed``), and a verdict left incomplete names
+    ``callee_code_refutation`` or ``callee_code_pass``; a stranger left undecided by a pass only callee code showed
+    has its own call run once on the chain, open when it goes through (``decide``). A solver "nothing satisfies it"
+    that inlined a callee's code (``solve``) is asked again with each view call a value of its own, tied to what the
+    chain answers at the inputs the models reach: the target, the arguments and, where the answer may depend on who
+    asks, the callee making the call (``_chain_lemmas``, at most ``_CHAIN_ROUNDS`` inputs; an input that isn't one
+    number, a ``bytes``, leaves it unknown). Still unsatisfiable, the chain refuted it; a model every answer agrees
+    with is checked like any other and may pass; anything else is unknown. A candidate the loosened formula refuses
+    only through a callee's code, and not without it, is undecided and never searched (the code's refusal spares the
+    search, so it never costs the others the budget); gathering reads and asking whether the state alone settles a
+    question (``base_only``) take the code's answer as it is, since neither answers.
+  * Who. A holder list built through a callee's code (``holders``' walk into a call handed the caller: an
+    ``isPoolAdmin`` in an ACL manager) is never shown to be all, since no chain answer shows a mis-lowered callee
+    named too few: its members are the likely ones, each asked of the chain like any candidate, and the verdict names
+    ``callee_code_list:<signature>``; a list the contract's own checks bound (``msg.sender == owner && acl.check``)
+    stays shown whole. A callee's code saying it reads the caller it is handed alike for everyone (Maple's
+    ``canCall(id, msg.sender, data)``) never makes "nobody, ever": a stranger failing in every state is restricted,
+    not complete, ``callee_unsingled:<signature>``.
+  * Inlined. A view call whose followed code reads ``tx.origin`` (itself or a callee it asks, ``verdict.caller_bound``),
+    whether or not it is handed the caller, is inlined into the formula (``verdict.bind_callers``), since the chain
+    would answer it with this contract as the origin. Its code is trusted for nothing: the verdict is decided on the
+    formula with each such call an unknown (``verdict._inlined_verdict``); the inlined formula only proposes, and the
+    chain confirms by running the whole call (``decide.runs``): a stranger's pass with the arguments found makes it
+    open; each holder it names whose own call goes through is listed; the list is never complete on its word, and the
+    verdict names ``inlined_callee:<signature>``.
+  * Cost: "nobody, ever" over an argument the callee is handed with infinitely many values
+    (``require(guard.flagged(x) || owner)``) is no longer claimed from the callee's code; one whose call inputs are
+    few (the caller, a flag picked between two values) still is, from the chain. A function whose holders only a
+    callee's code bounds lists them, each confirmed, but never completely; one gated by a callee reading the origin
+    likewise (``test_callee_refutation``, ``test_origin_callees``, ``test_origin_shapes``, ``test_callee_depth``).
+  * Not covered: none of this class. What remains trusted is the lowering of the contract's own code, as everywhere.
 * ``decide._screened``: candidates are asked about in the order the state as it stands suggests: those it already
   lets through (the formula, or it with every condition not about who calls freed) first, those it refuses last,
   within each those holding more of the formula's lookups keyed by who calls; the screen's evaluation is off the
   decision's budget (bounded apart, ``_SCREEN_WORK``) and leaves no trace (``decide.detached``): the chain reads
   nothing (a word or call not yet answered reads unknown, any other unanswered read leaves the candidate unscreened),
-  and the world and chain are put back as they were, every memo (``solver_record``, ``_brought``), count and budget
-  included, so an unknown read in the screen never reaches a later question. Each
+  and the world and chain are put back as they were, every memo (``solver_record``, ``_brought``, and the verdict's own
+  lookups: where a call goes, how a call is bound to its asker, which slots are constant), count and budget included,
+  so an unknown read in the screen never reaches a later question. Each
   candidate's questions may spend at most half the work left when it is asked (``_SHARE``); what every candidate
   shares (the stranger's chances) is asked under the decision's own limit. The order only: every candidate is asked
   about in turn, and one a budget leaves unasked is counted (``untested_candidates``)

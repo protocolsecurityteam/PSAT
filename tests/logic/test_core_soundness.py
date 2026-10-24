@@ -105,8 +105,11 @@ def test_a_spent_read_budget_never_opens_it(anvil, monkeypatch):  # noqa: F811
 def test_a_followed_callee_reading_the_origin_singles_out_its_admin(anvil):  # noqa: F811
     d = _deployed(anvil)
     verdict = _verdict(d, "viaOrigin")
-    assert verdict.openness == "restricted" and verdict.complete
+    # Inlined, the guard's code only proposes: the admin's own call goes through on the chain; over every ``x`` no
+    # run settles the list, so it is not complete.
+    assert verdict.openness != "open" and not verdict.complete
     assert verdict.principals == {ADMIN}
+    assert "inlined_callee:ok(uint256)" in verdict.gaps
     assert _verdict(d, "viaOriginOr").openness != "open"
 
 

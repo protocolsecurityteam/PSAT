@@ -263,7 +263,16 @@ def _sets(formula: Term, world: Any, root: str = "caller") -> tuple[Who, Who]:
                 returned.update(items)
                 if bare:
                     returned[c] = lowered[1][0]
-            return walk(replace_terms(t, returned), positive, depth + 1)
+            # Who the callee's code lets through rests on that code alone, which no chain answer can show is all of
+            # them (a callee mis-lowered names too few): its members are the likely ones, never shown to be all.
+            found: dict = {}
+            why: frozenset = frozenset()
+            for who in walk(replace_terms(t, returned), positive, depth + 1):
+                found.update(who.members if who.members is not None else {h: ({},) for h in who.hints})
+                why |= who.why
+            guess = _unproven(found, f"callee_code_list:{min(calls, key=stable)[2]}")
+            guess = replace(guess, why=guess.why | why)
+            return guess, guess
         # What the writers of each lookup it keys by the caller logged (a check followed into a manager: the
         # manager's grants), and the logs of every contract it reads.
         from .decide import _named_lookup, _unlisted

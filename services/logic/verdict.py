@@ -11,6 +11,8 @@ from typing import Any
 from eth_utils.crypto import keccak
 
 from .decide import (
+    _EXECUTED_CANDIDATES,
+    _OTHER_STRANGERS,
     ANY_KEY,
     FRESH,
     IDENTITY_DEPTH,
@@ -27,6 +29,8 @@ from .decide import (
     coverage,
     decide,
     gate_of,
+    runs,
+    when_atoms,
 )
 from .decide import _size as _size_of
 from .immutables import immutable_offsets, immutable_value
@@ -43,6 +47,7 @@ from .terms import (
     TRUE,
     Term,
     assume_conjuncts,
+    conjuncts,
     contains,
     mk,
     mk_and,
@@ -584,7 +589,6 @@ def _time_flips(world: World, atom: Term, current: bool, probe: Evaluator) -> bo
 def latched_atoms(formula: Term, world: World, contract: Any) -> frozenset:
     """``when`` conditions this contract's code can never flip from how they read now: a consumed initializer's
     flag, a check of this contract's own code. Read as they are, not assumed adjustable."""
-    from .decide import when_atoms
     from .terms import stable, subterms
 
     out: set[Term] = set()
@@ -1003,8 +1007,8 @@ def after_own_call(formula: Term, world: World, contract: Any) -> tuple | None:
     caller's key, after which it gets through (``assignDelegate`` before ``unassignDelegate``): that function's
     signature, the arguments of that call and of this one; ``None`` when none does. Each write is worked out on
     the chain as it stands and read back in its place, so the pair is a run of two calls, not a rule."""
-    from .decide import _OTHER_STRANGERS, _argument_values, _outcome
-    from .terms import conjuncts, contains, subterms
+    from .decide import _argument_values, _outcome
+    from .terms import contains, subterms
 
     names = {
         t[2]
@@ -1359,6 +1363,52 @@ def _unconditional(formula: Term, call: Term) -> bool:
 
 # Chain reads one function's decision may send; past it, reads answer unknown (sound, never wrong).
 READS_PER_FUNCTION = 2000
+# Of those, the most a function may send confirming passes only a callee's code showed (``decide.confirming``): about
+# one per holder such a check lets through, each its own call.
+CONFIRM_READS = 300
+
+
+def _inlined_verdict(
+    formula: Term,
+    stripped: Term,
+    world: World,
+    cover: Callable[[Term], Any],
+    signatures: list[str],
+) -> Verdict:
+    """The verdict where ``bind_callers`` put a callee's code (one reading ``tx.origin``, whose call the chain would
+    answer with this contract as the origin) in place of its call in ``formula``. That code is trusted for nothing:
+    the verdict is decided on ``stripped``, each such call an unknown no caller is marked alike for, so no refusal
+    and no list rests on it. Where that leaves the answer open or the list incomplete, the inlined formula only
+    proposes, and the chain confirms by running the whole call (``decide.runs``): a stranger's pass with the
+    arguments found makes it open; each holder it lists whose own call goes through is listed, the list never
+    complete on its word. Any it proposes that the chain doesn't confirm is left undecided, and the verdict names
+    ``inlined_callee:<signature>``."""
+    kept = {k: world.__dict__.get(k) for k in ("arranged", "dumped", "arrange_unknown")}
+    base = decide(stripped, world, cover(stripped))
+    if base.openness == "open" or base.complete:
+        return base
+    world.__dict__.update(kept)
+    proposed = decide(formula, world, cover(formula))
+    gaps = tuple(f"inlined_callee:{signature}" for signature in signatures)
+    witness = proposed.witnesses.get(FRESH)
+    if proposed.openness == "open" and proposed.allowed == "now" and witness is not None:
+        if runs(world, FRESH, witness) is True:
+            return proposed  # the stranger's own call goes through on the chain
+    offered = sorted((proposed.principals | set(proposed.conditions)) - base.principals)
+    confirmed = {}
+    for who in offered[:_EXECUTED_CANDIDATES]:
+        if runs(world, who, proposed.witnesses.get(who, {})) is True:
+            confirmed[who] = proposed.witnesses.get(who, {})
+    principals = base.principals | frozenset(confirmed)
+    unconfirmed = (frozenset(offered) | proposed.signers) - principals - base.signers
+    return replace(
+        base,
+        principals=principals,
+        undecided=(base.undecided | unconfirmed) - principals,
+        witnesses={**base.witnesses, **confirmed},
+        conditions={k: v for k, v in base.conditions.items() if k not in confirmed},
+        gaps=base.gaps + gaps + proposed.gaps,
+    )
 
 
 def function_verdict(
@@ -1381,6 +1431,7 @@ def function_verdict(
     selector = int.from_bytes(keccak(text=function.solidity_signature)[:4], "big")
     world = World(chain, address, selector, contracts, dict(values or {}), _address_literals(contract))
     world.effective = lowerer.effective
+    world.confirm_left = CONFIRM_READS
     world.written = lowerer.written
     world.parameters = tuple(parameter(p, i) for i, p in enumerate(function.parameters))
     if code_of is not None:
@@ -1388,11 +1439,11 @@ def function_verdict(
     relations: dict[int, set] = {}
     lowered: dict[Term, tuple[Term, tuple] | None] = {}
 
-    addresses: dict[Term, tuple[Any, int]] = {}
-
     def address_of(term: Term) -> Any:
         # A read deferred to a batch (``Chain.gather``) answers unknown until fetched: an unknown address is asked
-        # again only once the chain has answered something new.
+        # again only once the chain has answered something new. Remembered in the world, which a block that must
+        # leave no trace (``decide.detached``) puts back as it was.
+        addresses = world.__dict__.setdefault("_addresses", {})
         known = len(chain._memo)
         held = addresses.get(term)
         if held is None or (held[0] is UNK and held[1] != known):
@@ -1696,8 +1747,6 @@ def function_verdict(
                         lowered[key] = (FALSE, ())  # no such function and no fallback: the call reverts
         return lowered[key]
 
-    asked: dict[tuple, bool] = {}
-
     def asker_free(call: Term) -> bool:
         """Whether what a call made by followed code answers can't depend on who makes it: the callee's own code,
         lowered with a stand-in for its ``msg.sender``, never shows the stand-in, reads nothing it couldn't express,
@@ -1706,6 +1755,7 @@ def function_verdict(
         address = address_of(call[1])
         if len(call) <= 5 or not isinstance(address, int) or isinstance(address, bool):
             return len(call) <= 5
+        asked = world.__dict__.setdefault("_asker_free", {})
         key = (call, address % 2**160)
         if key not in asked:
             asked[key] = False
@@ -1939,8 +1989,6 @@ def function_verdict(
             isinstance(address, int) and not isinstance(address, bool) and chain.code(address % 2**160) == b""
         )
 
-    bound: dict[tuple, str | None] = {}
-
     def caller_bound(call: Term, depth: int = 0) -> str | None:
         """Why a view call handed nothing of the caller may still answer otherwise for another caller, else
         ``None``. Inside any callee ``tx.origin`` is the caller's, and the chain answers such a call with this
@@ -1948,6 +1996,7 @@ def function_verdict(
         when its followed code does, ``nested`` when a callee it asks does; ``unfollowed`` when code not followed has
         a call opcode (it may reach one) or can't be read, or the callees go deeper than followed (``origin`` when it
         has an ``ORIGIN`` opcode); ``read_failed:call_target`` when where it goes can't be read."""
+        bound = world.__dict__.setdefault("_caller_bound", {})
         key = (call, depth)
         if key in bound:
             return bound[key]
@@ -1984,7 +2033,9 @@ def function_verdict(
         bound[key] = why
         return why
 
-    def bind_callers(term: Term, top: bool) -> Term:
+    inlined: list[str] = []  # signatures of the calls ``bind_callers`` put its callee's code in place of
+
+    def bind_callers(term: Term, top: bool, inline: bool = True) -> Term:
         """``term`` with each view call ``caller_bound`` names kept from being read as the same for everyone. One
         whose followed code reads ``tx.origin`` (itself, or a callee it asks) is inlined in the formula itself
         (``top``): asked whether it returns (``ok``, ``caught``), its success condition stands in; used for its
@@ -1993,7 +2044,8 @@ def function_verdict(
         in are asked about in turn, a few rounds deep. Every other such call becomes an unknown no caller is marked
         alike for, named ``origin:``, ``unfollowed:`` or ``read_failed:call_target:`` and the signature. A call
         handed the caller is asked about the origin (and where it goes) only: whatever else its callee does, the
-        caller it is handed already keeps it out of what every caller faces alike."""
+        caller it is handed already keeps it out of what every caller faces alike. ``inline=False``: every such call
+        an unknown, nothing inlined (the formula no callee's code is trusted in, see ``_inlined_verdict``)."""
         for round_ in range(IDENTITY_DEPTH + 1):
             changed = False
             for call in sorted({c for c in subterms(term, "call") if c[4]}, key=stable):
@@ -2007,8 +2059,9 @@ def function_verdict(
                 lowered = callee(call) if why in ("origin", "nested") else None
                 uses = [x for x in subterms(term, "item") if x[1] == call]
                 bare = call in subterms(replace_terms(term, {x: TRUE for x in uses}, keep_subjects=True), "call")
-                inline = lowered is not None and top and round_ < IDENTITY_DEPTH
-                if inline and (not (uses or bare) or _unconditional(term, call)):
+                inlining = inline and lowered is not None and top and round_ < IDENTITY_DEPTH
+                if inlining and (not (uses or bare) or _unconditional(term, call)):
+                    inlined.append(call[2])
                     pc, ret = lowered
                     mapping: dict[Term, Term] = {}
                     for x in subterms(term, "ok"):
@@ -2033,8 +2086,10 @@ def function_verdict(
         return term
 
     world.failed_at = failed_at
-    formula = bind_callers(substitute(formula, "delegate", delegate), True)
-    formula = assume_conjuncts(formula)
+    delegated = substitute(formula, "delegate", delegate)
+    formula = assume_conjuncts(bind_callers(delegated, True))
+    # With a callee's code inlined, the same formula with each such call an unknown instead: what decides.
+    stripped = assume_conjuncts(bind_callers(delegated, True, inline=False)) if inlined else None
     effective = substitute(world.effective, "delegate", delegate)
     world.effective = assume_conjuncts(bind_callers(effective, False))
     world.callee = callee
@@ -2049,11 +2104,22 @@ def function_verdict(
     world.latest = latest
     world.inverse = inverse
     world.immutable = immutable
+
     world.latched = latched_atoms(formula, world, contracts.get(address, contract))
     world.cover = lambda term: coverage(term, keyed, lower_call, listed, settled, valued)
     world.arrange = lambda term: arranged_within_budget(term, world, contracts.get(address, contract))
     world.prior = lambda term: after_own_call(term, world, contracts.get(address, contract))
     world.scope = classify(lowerer.exits, lowerer.lost, function, contract_facts(contract))
-    verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))
+    if stripped is None:
+        verdict = decide(formula, world, coverage(formula, keyed, lower_call, listed, settled, valued))
+    else:
+        world.latched |= latched_atoms(stripped, world, contracts.get(address, contract))
+        verdict = _inlined_verdict(
+            formula,
+            stripped,
+            world,
+            lambda term: coverage(term, keyed, lower_call, listed, settled, valued),
+            sorted(set(inlined)),
+        )
     gate = verdict.gate or (gate_of(formula) if world.scope.kind == "self" else ())
     return replace(verdict, scope=world.scope.kind, scope_writes=world.scope.writes, gate=gate), formula

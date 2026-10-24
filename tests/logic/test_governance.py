@@ -528,6 +528,10 @@ def test_what_a_hub_the_caller_picks_returns_is_what_its_code_returns(tmp_path_f
         def _answer(self, method, params):
             if method == "eth_getStorageAt":
                 return hex(HUB) if int(params[0], 16) == GOV and int(params[1], 16) == slot else "0x0"
+            if method == "eth_call" and int(params[0]["to"], 16) == GOV:
+                # The supply itself, run as the chain runs it: the hub adds the amount and returns it as the shares,
+                # well within ``uint120``. The hub's code only proposes the pass; this run confirms it.
+                return "0x"
             return super()._answer(method, params)
 
         def code(self, address):

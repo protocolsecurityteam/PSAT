@@ -1,6 +1,8 @@
 """A callee sees the caller's ``tx.origin``, and the chain answers a call with this contract as the origin: a callee
-whose code may read it is never taken at the chain's word. Followed, it is inlined with its own success condition;
-otherwise the call stays an unknown named for why. Each against what the chain does on anvil."""
+whose code may read it is never taken at the chain's word. Followed, it is inlined with its own success condition,
+which only proposes: a holder it names is listed once the whole call, run on the chain from that address, goes
+through, and the list never rests on its word (never complete, ``inlined_callee:<signature>``). Otherwise the call
+stays an unknown named for why. Each against what the chain does on anvil."""
 
 from __future__ import annotations
 
@@ -86,11 +88,23 @@ def _verdict(d, name, followed=True, flaky=None) -> Verdict:
     return function_verdict(contract, fn, d.at["C"], _chain(d, flaky), contracts)[0]
 
 
-@pytest.mark.parametrize("name", ["p9", "p9r", "p9v", "q1", "q3", "q4"])
-def test_a_followed_callee_checking_the_origin_lists_its_admin(deployed, name):
+@pytest.mark.parametrize(
+    ("name", "signature"),
+    [
+        ("p9", "originOk()"),
+        ("p9r", "originReq()"),
+        ("p9v", "originVoid(uint256)"),
+        ("q1", "capFor()"),
+        ("q3", "originReqArg(uint256)"),
+        ("q4", "originReq()"),
+    ],
+)
+def test_a_followed_callee_checking_the_origin_lists_its_admin(deployed, name, signature):
+    # The admin, whose own call goes through on the chain; the inlined code's list is never complete on its word.
     verdict = _verdict(deployed, name)
-    assert verdict.openness == "restricted" and verdict.complete
+    assert verdict.openness != "open" and not verdict.complete
     assert verdict.principals == {ADMIN}
+    assert f"inlined_callee:{signature}" in verdict.gaps
 
 
 @pytest.mark.parametrize(("name", "signature"), [("p9", "originOk()"), ("q1", "capFor()"), ("p9e", "onlyEoa()")])
@@ -101,10 +115,12 @@ def test_code_not_followed_that_reads_the_origin_is_never_taken_at_the_chains_wo
 
 
 def test_no_contract_is_a_transactions_origin(deployed):
-    # tx.origin == msg.sender inside the guard: msg.sender is this contract, so nobody ever passes.
+    # tx.origin == msg.sender inside the guard: msg.sender is this contract, so nobody ever passes. The inlined code
+    # says so; nothing the chain answers shows it is all, so nobody is listed and the list isn't complete.
     verdict = _verdict(deployed, "p9e")
-    assert verdict.openness == "restricted" and verdict.complete
+    assert verdict.openness != "open" and not verdict.complete
     assert verdict.principals == set()
+    assert "inlined_callee:onlyEoa()" in verdict.gaps
 
 
 def test_an_unread_callee_address_is_a_gap_not_a_silent_skip(deployed):
@@ -158,3 +174,51 @@ def test_every_verdict_reports_how_it_is_allowed(monkeypatch):
     monkeypatch.setattr(deployment, "function_verdict", lambda *args, **kwargs: (undecided, None))
     out = deployment.deployment_verdicts(None, "0x" + "11" * 20, 1, "http://127.0.0.1:9", block=1)
     assert out["functions"]["f()"]["allowed"] is None
+
+
+def _guard_reads(monkeypatch, value):
+    """Guard's ``originOk`` lowered wrongly, still reading the origin (so it is inlined): ``value`` of the origin."""
+    from services.logic.lower import Lowerer
+    from services.logic.terms import TRUE
+
+    called = Lowerer.called
+
+    def misread(self, function, args, view):
+        if getattr(function, "name", None) == "originOk":
+            return TRUE, (value,)
+        return called(self, function, args, view)
+
+    monkeypatch.setattr(Lowerer, "called", misread)
+
+
+def _stranger_passes(d, name) -> bool:
+    from eth_abi.abi import encode
+    from eth_utils import keccak
+
+    data = "0x" + (keccak(text=f"{name}(uint256)")[:4] + encode(["uint256"], [0])).hex()
+    try:
+        rpc(d.url, "eth_call", [{"from": "0x" + "00" * 19 + "aa", "to": "0x%040x" % d.at["C"], "data": data}, "latest"])
+        return True
+    except RuntimeError:
+        return False
+
+
+def test_inlined_code_letting_everyone_through_opens_nothing_the_chain_refuses(deployed, monkeypatch):
+    # Mis-lowered as "any origin but address 1": a stranger passes on its word, and the chain refuses it.
+    from services.logic.terms import ORIGIN, const, mk_cmp, mk_not
+
+    _guard_reads(monkeypatch, mk_not(mk_cmp("eq", ORIGIN, const(1, "address"))))
+    assert not _stranger_passes(deployed, "p9")
+    verdict = _verdict(deployed, "p9")
+    assert verdict.openness != "open", verdict
+    assert "inlined_callee:originOk()" in verdict.gaps
+
+
+def test_inlined_code_letting_nobody_through_is_never_a_complete_nobody(deployed, monkeypatch):
+    # Mis-lowered as "the origin is address 1": nobody, on its word, while the chain lets the admin through.
+    from services.logic.terms import ORIGIN, const, mk_cmp
+
+    _guard_reads(monkeypatch, mk_cmp("eq", ORIGIN, const(1, "address")))
+    verdict = _verdict(deployed, "p9")
+    assert not verdict.complete, verdict
+    assert "inlined_callee:originOk()" in verdict.gaps

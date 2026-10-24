@@ -1031,6 +1031,11 @@ class World:
     # How many answers that came out false only through a followed callee's code standing in for a call came out
     # unknown once asked without it (``Evaluator.truth``, ``solve``): ``decide`` names the gap.
     code_refuted: int = 0
+    # Likewise for answers that came out true only through a followed callee's code: unknown once asked without it.
+    code_passed: int = 0
+    # Reads the chain may still be sent to confirm passes only a callee's code showed (``confirming``); past them such
+    # a pass is unknown, unasked (``budget:confirm``).
+    confirm_left: float = float("inf")
     # The stranger's own calls that, made first, let it through (see ``verdict.after_own_call``): the function's
     # signature and the arguments of each, or ``None``.
     prior: Callable[[Term], Any] = lambda formula: None
@@ -1156,11 +1161,12 @@ class Evaluator:
     def truth(self, term: Term) -> Any:
         """True, False or UNK (``PREIMAGE`` and ``ASSUMED`` count as true; a path that reverts, as false).
 
-        Callee code never refutes on its own: asked from outside any evaluation, a False that some followed callee's
-        code went into (a call over guessed or unknown arguments answered by it, an action's return value) is asked
-        again without any callee code, every such call put to the chain or left unknown. What still fails stands;
-        what passes there passes; what is left unknown is unknown (counted, ``world.code_refuted``). Inside an
-        evaluation, and for ranking (``ranked``), the code's answer is used as it is."""
+        Callee code never decides on its own: asked from outside any evaluation, a False or a True that some followed
+        callee's code went into (a call over guessed or unknown arguments answered by it, an action's return value) is
+        asked again without any callee code, every such call put to the chain or left unknown. What fails there fails;
+        what passes there passes; what is left unknown is unknown (counted, ``world.code_refuted`` for a refusal,
+        ``world.code_passed`` for a pass). Inside an evaluation, and for ranking (``ranked``), the code's answer is
+        used as it is."""
         if self.coded[1] or not self.callee_code:
             return self.ranked(term)
         outer, self.coded[0] = self.coded[0], False
@@ -1169,8 +1175,8 @@ class Evaluator:
             used = self.coded[0]
         finally:
             self.coded[0] = outer or self.coded[0]
-        if value is False and used:
-            value = self._without_code(term)
+        if used and value in (True, False):
+            value = self._without_code(term, value)
         return value
 
     def ranked(self, term: Term) -> Any:
@@ -1183,10 +1189,12 @@ class Evaluator:
             self.coded[1] -= 1
         return False if value is REVERTED else value
 
-    def _without_code(self, term: Term) -> Any:
+    def _without_code(self, term: Term, passed: bool = False) -> Any:
         again = self.without_code()
-        value = again.truth(term)
-        if value is UNK:
+        value = confirming(self.world, lambda: again.truth(term)) if passed else again.truth(term)
+        if value is UNK and passed:
+            self.world.code_passed += 1
+        elif value is UNK:
             self.world.code_refuted += 1
         return value
 
@@ -1887,6 +1895,11 @@ class Evaluator:
             return int.from_bytes(raw.ljust(int(type_[5:]), b"\0"), "big") if len(raw) <= int(type_[5:]) else UNK
         if a[0] == "array" and type_ == "bytes":
             return self._bytes_of(a)
+        if a[0] == "enc" and type_ == "bytes":
+            # ``abi.encode(assets, receiver)`` handed on as ``bytes``: its bytes, where every item is a known static
+            # value (``_encoded``), so the call is the chain's to answer.
+            data = self._encoded(a)
+            return data if data is not None else UNK
         if a[0] == "array" and type_.endswith("[]") and type_[:-2] in ("uint256", "bytes32", "address"):
             words = self._array_words(a)
             return UNK if words is UNK else words
@@ -2055,7 +2068,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     only those that read unknown for what the lowering couldn't express: one false now (a pause) stays and decides
     as before, and one a failed read or the budget left open keeps blocking."""
     failed = world.chain.failed if world.failed_at is None else world.failed_at
-    refuted = world.code_refuted
+    refuted, passed = world.code_refuted, world.code_passed
     verdict = _decide(formula, world, coverage)
     core, free = split(formula)
     if verdict.openness == "not_determined":
@@ -2064,11 +2077,12 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             verdict = _on_conditions(formula, world, coverage, opaque) or verdict
     shown = verdict.openness == "open" and verdict.allowed == "conditional"
     if shown or (
-        verdict.openness == "not_determined" and any(subterms(c, "unknown") or subterms(c, "opaque") for c in core)
+        verdict.openness == "not_determined"
+        and (world.code_passed > passed or any(subterms(c, "unknown") or subterms(c, "opaque") for c in core))
     ):
-        # What the lowering couldn't express keeps the stranger undecided, or open only on conditions: its call, run
-        # once on the chain, settles it when it goes through. One that fails proves nothing (other arguments, another
-        # state) and changes nothing.
+        # What the lowering couldn't express, or a pass only a callee's code showed, keeps the stranger undecided, or
+        # open only on conditions: its call, run once on the chain, settles it when it goes through. One that fails
+        # proves nothing (other arguments, another state) and changes nothing.
         found = _executes(formula, world, FRESH, set(), tries=1)
         if found is not None:
             verdict = Verdict("open", frozenset(), True, witnesses={FRESH: found})
@@ -2086,6 +2100,11 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if world.code_refuted > refuted and not verdict.complete and "callee_code_refutation" not in verdict.gaps:
         # A failure only a followed callee's code showed, unknown without it (``Evaluator.truth``, ``solve``).
         verdict = replace(verdict, gaps=verdict.gaps + ("callee_code_refutation",))
+    if world.code_passed > passed and not verdict.complete and "callee_code_pass" not in verdict.gaps:
+        # A pass only a followed callee's code showed, unknown without it.
+        verdict = replace(verdict, gaps=verdict.gaps + ("callee_code_pass",))
+    if world.__dict__.get("confirm_spent") and not verdict.complete:
+        verdict = replace(verdict, gaps=verdict.gaps + ("budget:confirm",))
     chosen = tuple(("arguments", name) for name in _quantified(core))
     return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
 
@@ -2204,9 +2223,13 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     records = world.records
     unread = any(probe.truth(atom) is UNK for atom in when)
     if not _may_single_out(formula, world):
-        # Nobody is singled out: open unless no state of the conditions lets anyone through.
+        # Nobody is singled out: open unless no state of the conditions lets anyone through. Where only a callee's
+        # code, handed the caller, says it reads the caller alike for everyone, that rests on the code alone (a
+        # callee mis-lowered reads alike for everyone): the stranger's failure stands, "nobody" isn't shown.
+        coded = _singling_code(formula, world)
         if all(_outcome(formula, world, anyone, set(), fixed=state) is False for state in states):
-            return Verdict("restricted", frozenset(), True)
+            gaps = tuple(f"callee_unsingled:{signature}" for signature in coded)
+            return Verdict("restricted", frozenset(), not coded, gaps=gaps)
         found: dict[Term, Any] = {}
         world.records_free = False
         try:
@@ -2245,9 +2268,16 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         return Verdict("restricted", frozenset(), True)
     # The cheap question first: a stranger getting through now makes it open, whoever else can.
     found_early: dict[Term, Any] = {}
+    passed = world.code_passed
     allowed = _strangers_allowed(formula, world, found_early)
     if allowed is not None:
         return Verdict("open", frozenset(), True, witnesses={FRESH: _argument_values(found_early)}, allowed=allowed)
+    if world.code_passed > passed:
+        # A stranger's pass only a callee's code showed, unknown without it: its own call, run on the chain, settles
+        # it before every candidate is asked about.
+        ran = _executes(formula, world, FRESH, set(), tries=2)
+        if ran is not None:
+            return Verdict("open", frozenset(), True, witnesses={FRESH: ran})
     arranged = world.arrange(formula)
     if arranged:
         # What failed it may be the stranger's own entries, which open code lets anyone fill (a position to withdraw
@@ -3033,6 +3063,34 @@ def _executes(
     return None
 
 
+def runs(world: World, who: int, arguments: dict[str, Any]) -> bool | None:
+    """Whether this function, called by ``who`` with ``arguments`` (by name, as a verdict's witnesses give them; zero
+    for the rest) as the chain stands, goes through: an ``eth_call`` of the whole call. ``None`` where that can't be
+    asked (ether sent, an argument that can't be encoded, a failed read)."""
+    if arguments.get("msg.value"):
+        return None
+    assignment: dict[Term, Any] = {}
+    for parameter in world.parameters:
+        if parameter[0] != "arg":
+            continue
+        type_ = parameter[2]
+        default: Any = 0
+        if type_ == "bool":
+            default = False
+        elif type_ in ("bytes", "string"):
+            default = b""
+        elif type_.endswith("[]"):
+            default = []
+        assignment[parameter] = arguments.get(parameter[1], default)
+    data = Evaluator(world, {"caller": who, "signer": FRESH}, assignment)._calldata()
+    if not isinstance(data, bytes):
+        return None
+    answer = world.chain.call(world.this, data, who)
+    if isinstance(answer, bytes):
+        return True
+    return False if answer is REVERTED else None
+
+
 def _argument_values(found: dict[Term, Any]) -> dict[str, Any]:
     return {t[1]: v for t, v in found.items() if t[0] == "arg" and t != CALLDATA} | {
         "msg.value": v for t, v in found.items() if t[0] == "callvalue"
@@ -3200,7 +3258,11 @@ def _decide_one(
     when = frozenset(fixed) | free_when
     base = Evaluator(world, identity, dict(fixed), blind, when)
     # Gathering reads or asking only whether the state settles it: callee code answers as it is (``Evaluator.ranked``).
+    passed = world.code_passed
     unknown_args = base.ranked(formula) if base_only or reads_only else base.truth(formula)
+    # A pass a callee's code showed whatever the arguments, unknown without it: the likeliest guess alone, asked of the
+    # chain first, settles most (one read, before a batch of guesses each asks the chain).
+    coded_pass = unknown_args is UNK and world.code_passed > passed
     if unknown_args is UNK and relaxed:
         # Business logic freed: once the identity's own conditions are read, whether the freed ones can let it
         # through is a question of the connectives, not of guessing each one.
@@ -3255,7 +3317,7 @@ def _decide_one(
             count -= _SEARCH_BATCH
             if not batch:
                 return False
-            if not reads_only and len(batch) > 1:
+            if not reads_only and len(batch) > 1 and not coded_pass:
                 # Their reads in one round trip (each guess may ask the chain about its own keys), then the answers.
                 world.chain.gather(lambda: [assess(values) for values in batch], rounds=2)
             for values in batch:
@@ -3298,6 +3360,8 @@ def _decide_one(
         # Gathering reads ahead of the real question: the likeliest few guesses' are what it will want first, and a
         # pass over every candidate can't spend the budget the questions themselves need.
         return True if search(_GATHER_GUESSES) else UNK
+    if coded_pass and search(1):
+        return True
     if search(_EARLY_GUESSES):
         return True
     # Then the solver, far cheaper than guessing on when nothing passes (a whole domain each argument can't satisfy).
@@ -3339,9 +3403,31 @@ def confirmed(ev: Evaluator, formula: Term, free: frozenset | None = None, answe
         # What reads no call is the same however calls are answered: kept, so only the calls are asked again.
         kept = {t: v for t, v in ev._memo.items() if not contains(t, _CALL_KINDS) and t not in ev._coded_terms}
         again = Evaluator(ev.world, ev.identity, ev.assignment, ev.blind, ev.when, kept)
-        again.code_first = False
-        result = ask(again)
+        # No callee code at all: a call whose input isn't known whole is unknown there, never its code's answer again.
+        again.code_first = again.callee_code = False
+        result = confirming(ev.world, lambda: ask(again))
+        if result is UNK:
+            ev.world.code_passed += 1
     return result
+
+
+def confirming(world: World, ask: Callable[[], Any]) -> Any:
+    """``ask()``, a pass only a callee's code showed asked again of the chain, within the reads left for that
+    (``World.confirm_left``): the reads it sends, or leaves pending for a batch, are spent; none left, it is unknown
+    and unasked."""
+    chain = world.chain
+    if world.confirm_left <= 0:
+        world.__dict__["confirm_spent"] = True
+        return UNK
+
+    def reads() -> int:
+        return chain.sent + (len(chain.pending) if chain.pending is not None else 0)
+
+    before = reads()
+    try:
+        return ask()
+    finally:
+        world.confirm_left -= max(reads() - before, 0)
 
 
 def _decisive(formula: Term, world: World) -> bool:
@@ -3963,19 +4049,29 @@ def _may_single_out(formula: Term, world: World, depth: int = 0) -> bool:
     lowered over its arguments, doesn't use it either (Maple's ``canCall(id, msg.sender, data)`` checking only the
     deposit's receiver), a followed callee reads ``tx.origin`` (the caller's, whatever it is handed), or something
     unknown appears that the lowering didn't mark as the same for everyone. Remembered per world, unless a callee's
-    address was still unread (asked again once it is)."""
+    address was still unread (asked again once it is); a "no" resting on a callee's code is remembered with the calls
+    it rests on (``_singling_code``)."""
     memo = world.__dict__.setdefault("_singling", {})
     key = (formula, depth)
     if key in memo:
-        return memo[key]
+        return memo[key][0]
     unread: list[bool] = []
-    answer = _singles_out(formula, world, depth, unread)
+    coded: list[str] = []
+    answer = _singles_out(formula, world, depth, unread, coded)
     if not unread:
-        memo[key] = answer
+        memo[key] = (answer, tuple(dict.fromkeys(coded)) if not answer else ())
     return answer
 
 
-def _singles_out(formula: Term, world: World, depth: int, unread: list[bool]) -> bool:
+def _singling_code(formula: Term, world: World) -> tuple[str, ...]:
+    """The signatures of the calls handed the caller whose code alone says ``formula`` singles out nobody."""
+    if _may_single_out(formula, world):
+        return ()
+    held = world.__dict__.get("_singling", {}).get((formula, 0))
+    return held[1] if held is not None else ()
+
+
+def _singles_out(formula: Term, world: World, depth: int, unread: list[bool], coded: list[str]) -> bool:
     if any(not singles_out_nobody(u) for u in subterms(formula, "unknown")):
         return True
     calls = [c for c in subterms(formula, "call") if any(contains(a, IDENTITY_KINDS) for a in c[3])]
@@ -3991,6 +4087,8 @@ def _singles_out(formula: Term, world: World, depth: int, unread: list[bool]) ->
             return True
         if any(isinstance(p, tuple) and _may_single_out(p, world, depth + 1) for p in (lowered[0], *lowered[1])):
             return True
+        # Its code, handed the caller, reads it alike for everyone: that rests on the code alone.
+        coded.append(call[2])
     return _reads_origin(formula, world, depth)
 
 
@@ -4293,8 +4391,9 @@ def _solve(
         return v
 
     products: list[tuple[Any, Any, Any]] = []  # (x, y, x * y) left free
-    # With ``chain_calls``: each view call's value, with the call and its target's and arguments' z3 terms.
-    answered: list[tuple[Term, str, Any, Term, list]] = []
+    # With ``chain_calls``: each view call's value, with the call, its inputs (target, arguments, and the callee
+    # making it where its answer may depend on who asks) and their z3 terms.
+    answered: list[tuple[Term, str, Any, Term, tuple, list]] = []
     escapes: list[Any] = []  # values nothing here models (an opaque builtin, an unknown): free, so only adding models
     strangers = {v for v in ground.identity.values() if v in _STRANGERS}
 
@@ -4470,7 +4569,9 @@ def _solve(
             if chain_calls and call[0] == "call" and call[4]:
                 # A value of its own, tied to the chain's answer at each input a model reaches.
                 value = var(sort)
-                answered.append((t, sort, value, call, [go(x, "int") for x in (call[1], *call[3])]))
+                asker = (call[5],) if len(call) > 5 and not ground.world.asker_free(call) else ()
+                inputs = (call[1], *call[3], *asker)
+                answered.append((t, sort, value, call, inputs, [go(x, "int") for x in inputs]))
                 return value
             lowered = ground.world.callee(call) if call[0] == "call" and call[4] and ground.callee_code else None
             if lowered is not None and index < len(lowered[1]):
@@ -4555,14 +4656,15 @@ _CHAIN_ROUNDS = 8  # inputs of calls answered by the chain while a refutation is
 
 def _chain_lemmas(answered: list, check: Evaluator, model: Any, lit: Callable) -> list | None:
     """For each view call left a value of its own (``_solve``'s ``chain_calls``): what the chain answers at the input
-    ``model`` gives it (its target and arguments, evaluated), as "at this input, this value" (or "never this input",
-    where the call reverts, which fails the whole call), for each the model contradicts. ``None`` when an input or
-    an answer isn't known."""
+    ``model`` gives it (its target, arguments and, where the answer may depend on who asks, the callee making it,
+    evaluated), as "at this input, this value" (or "never this input", where the call reverts, which fails the whole
+    call), for each the model contradicts. ``None`` when an input or an answer isn't known: an input that isn't one
+    number (a ``bytes`` argument) included, so such a refutation is left unknown."""
     import z3
 
     lemmas = []
-    for term, sort, value, call, parts in answered:
-        inputs = [check.eval(x) for x in (call[1], *call[3])]
+    for term, sort, value, call, terms, parts in answered:
+        inputs = [check.eval(x) for x in terms]
         if any(not isinstance(v, int) for v in inputs):
             return None
         answer = check.eval(term)

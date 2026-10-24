@@ -1,5 +1,7 @@
 """Depth into other contracts is spent only on the calls the caller's identity reaches: a check handed the caller is
-followed four contracts deep, and a callee no identity reaches is a condition, never followed at all."""
+followed four contracts deep, and a callee no identity reaches is a condition, never followed at all. Who a callee's
+code lets through names the holders, each confirmed by the chain, but never shows they are all
+(``callee_code_list:<signature>``)."""
 
 from __future__ import annotations
 
@@ -88,7 +90,7 @@ def test_identity_followed_four_contracts_deep(anvil):  # noqa: F811
     verdict = _verdict(d, guarded, names)
     assert verdict.openness == "restricted"
     assert verdict.principals == {int(h, 16) for h in HOLDERS}
-    assert verdict.complete
+    assert not verdict.complete and "callee_code_list:check(address)" in verdict.gaps
 
 
 def test_identity_handed_on_further_names_where_it_stopped(anvil):  # noqa: F811
@@ -111,7 +113,7 @@ def test_values_no_identity_reaches_are_never_followed(anvil):  # noqa: F811
     verdict = _verdict(d, guarded, ["Gate"])  # the values' code isn't given: not needed
     assert verdict.openness == "restricted"
     assert verdict.principals == {int(h, 16) for h in HOLDERS}
-    assert verdict.complete
+    assert not verdict.complete and "callee_code_list:check(address)" in verdict.gaps
 
 
 def test_an_unavailable_callee_handed_the_caller_is_named(anvil):  # noqa: F811
