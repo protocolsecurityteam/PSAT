@@ -255,6 +255,7 @@ class Faulty(Chain):
         out = super().logs(address, topics)
         if self.cut_logs and topics:
             self.truncated.add(address)
+            self.partial[(address, topics)] = True  # as a scan cut short marks it
             return out[: len(out) // 2]
         return out
 
@@ -339,7 +340,12 @@ def never_bolder(clean: Any, faulted: Any) -> None:
     assert rank <= clean_rank, (clean, faulted)
     if faulted.complete:
         assert clean.complete, (clean, faulted)
-        assert set(faulted.principals) >= set(clean.principals), (clean, faulted)
+        assert listed(faulted) >= listed(clean), (clean, faulted)
+
+
+def listed(v: Any) -> set[int]:
+    """Who a verdict names: a complete list is these together (``Verdict.conditions``)."""
+    return set(v.principals) | set(v.signers) | set(v.conditions)
 
 
 # --- the probe registry the fail-safe sweep reads ---
