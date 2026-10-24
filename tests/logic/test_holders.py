@@ -7,9 +7,9 @@ import pytest
 from eth_utils import keccak
 
 from services.logic.decide import Chain
-from services.logic.holders import ANYONE, NOBODY, Who, _join, _meet
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -59,16 +59,12 @@ MINTERS = [(0xB0 << 150) + i for i in range(300)]
 REVOKED, BLOCKED = MINTERS[7], MINTERS[11]
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 class _Deployed(Chain):
     """300 minters granted, one revoked since, one blocked."""
 
     def __init__(self):
-        self.words = {_slot(m, _slot(_MINTER, 0)): 1 for m in MINTERS if m != REVOKED}
-        self.words[_slot(BLOCKED, 1)] = 1
+        self.words = {O.slot(m, O.slot(_MINTER, 0)): 1 for m in MINTERS if m != REVOKED}
+        self.words[O.slot(BLOCKED, 1)] = 1
         batch = lambda calls: [self._safe(m, p) for m, p in calls]  # noqa: E731
         super().__init__(self._answer, 100, batch)
 
@@ -130,19 +126,3 @@ def test_every_minter_the_history_names_is_listed_and_read_however_many(roles):
 
 def test_a_blocklist_alone_lists_nobody(roles):
     assert _verdict(roles, "transfer").openness == "open"
-
-
-def test_sets_combine_as_the_checks_do():
-    a, b = Who({1: ({},), 2: ({},)}), Who({2: ({},), 3: ({},)})
-    assert _meet(a, b).members == {2: ({},)}
-    assert set(_join(a, b).members) == {1, 2, 3}
-    everyone_but_2 = Who(None, frozenset({2}))
-    assert _meet(a, everyone_but_2).members == {1: ({},)}
-    joined = _join(a, everyone_but_2)
-    assert joined.members is None and joined.excluded == frozenset() and joined.hints == {1, 2}
-    assert _meet(ANYONE, NOBODY).members == {}
-    bound = _meet(Who({1: ({"k": 5}, {"k": 6})}), Who({1: ({"k": 6},)}))
-    assert bound.members == {1: ({"k": 6},)}
-    # Held at one key in one lookup and at another in the next, under the same argument: no call satisfies both.
-    assert _meet(Who({1: ({"k": 5},)}), Who({1: ({"k": 6},)})).members == {}
-    assert _meet(Who({1: ({"k": 5},)}), Who({1: ({},)})).members == {1: ({"k": 5},)}

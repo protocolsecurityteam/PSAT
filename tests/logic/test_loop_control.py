@@ -12,14 +12,12 @@ iterations followed exactly."""
 from __future__ import annotations
 
 import pytest
-from eth_abi.abi import encode
-from eth_utils import keccak
 
-from services.logic.decide import UNK, Evaluator, World
-from services.logic.lower import Lowerer, parameter
+from services.logic.decide import UNK
+from services.logic.lower import Lowerer
 from services.logic.terms import reset_terms, subterms
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import ACCOUNT0, rpc
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -252,40 +250,21 @@ EXACT = {name: range(1, 4) for name in EXPECTED} | {"nestedSymbolic": range(1, 3
 
 @pytest.fixture(scope="module")
 def deployed(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
+    d = O.deployment(*anvil, SOURCE)
     d.deploy("C")
     return d
 
 
-def _chain_says(d, fn, values) -> bool:
-    data = keccak(text=fn.solidity_signature)[:4] + encode(["uint256", "uint256"], list(values))
-    try:
-        rpc(d.url, "eth_call", [{"from": ACCOUNT0, "to": "0x%040x" % d.at["C"], "data": "0x" + data.hex()}, "latest"])
-        return True
-    except RuntimeError:
-        return False
-
-
-def _engine_says(d, fn, values):
-    reset_terms()
-    formula = Lowerer(d.slither["C"]).success(fn)
-    world = World(d.chain(), d.at["C"], int.from_bytes(keccak(text=fn.solidity_signature)[:4], "big"), {})
-    assignment = {parameter(p, i): v for i, (p, v) in enumerate(zip(fn.parameters, values))}
-    caller = int(ACCOUNT0, 16)
-    return formula, Evaluator(world, {"caller": caller, "signer": caller}, assignment).truth(formula)
-
-
 @pytest.mark.parametrize(("name", "values"), CASES, ids=[f"{c[0]}{c[1]}" for c in CASES])
 def test_a_loop_continues_and_breaks_where_the_language_sends_it(deployed, name, values):
-    fn = next(f for f in deployed.slither["C"].functions_entry_points if f.name == name)
-    formula, engine = _engine_says(deployed, fn, values)
+    fn = O.function(deployed, "C", name)
+    formula, engine = O.engine_says(deployed, fn, values)
     rejected = sorted({t[1] for t in subterms(formula, "unknown") if str(t[1]).startswith("unsupported:")})
     assert not rejected, (name, rejected)
     if values[0] in EXACT[name]:
         assert engine is not UNK, (name, values)
     if engine is not UNK:
-        assert engine == _chain_says(deployed, fn, values), (name, values, formula)
+        assert engine == O.chain_says(deployed, fn, values), (name, values, formula)
 
 
 def test_a_break_whose_loop_cant_be_told_from_the_source_is_rejected_by_name(deployed, monkeypatch):

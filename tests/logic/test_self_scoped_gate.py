@@ -11,6 +11,7 @@ from services.logic import decide
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -47,17 +48,13 @@ SENDER, RECEIVER = 0xB1 << 152, 0xB2 << 152
 _ALLOWED = int.from_bytes(keccak(b"Allowed(address)"), "big")
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 class _Deployed(Chain):
     """``senders`` allowlisted (and logged); ``RECEIVER`` accepted."""
 
     def __init__(self, senders: list):
         self.senders = senders
-        self.words = {_slot(who, 1): 1 for who in senders}
-        self.words[_slot(RECEIVER, 2)] = 1
+        self.words = {O.slot(who, 1): 1 for who in senders}
+        self.words[O.slot(RECEIVER, 2)] = 1
         super().__init__(self._answer, 100, lambda calls: [self._safe(m, p) for m, p in calls])
 
     def _safe(self, method, params):

@@ -9,6 +9,7 @@ from eth_utils import keccak
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -75,10 +76,6 @@ AT, ADMIN = 0xA1 << 140, 0xB2 << 140
 MANAGERS = (0xC3 << 140, 0xD4 << 140, 0xE5 << 140)
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 def _topic(signature: str) -> int:
     return int.from_bytes(keccak(signature.encode()), "big")
 
@@ -111,12 +108,12 @@ class _Deployed(Chain):
 
 
 def _by_id():
-    words = {_slot(i + 1, 0): m for i, m in enumerate(MANAGERS)}
+    words = {O.slot(i + 1, 0): m for i, m in enumerate(MANAGERS)}
     return _Deployed(words, [([_topic("OpSet(uint256,address)"), i + 1], [m]) for i, m in enumerate(MANAGERS)])
 
 
 def _by_cell():
-    words = {_slot(7, _slot(i + 1, 0)): m for i, m in enumerate(MANAGERS)}
+    words = {O.slot(7, O.slot(i + 1, 0)): m for i, m in enumerate(MANAGERS)}
     signature = "OpSet(uint256,uint256,address)"
     return _Deployed(words, [([_topic(signature), i + 1, 7], [m]) for i, m in enumerate(MANAGERS)])
 

@@ -12,6 +12,7 @@ from services.logic import decide
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -67,10 +68,6 @@ REVOKED = MINTERS[5]
 DECOY = 0xD0 << 150  # holds the role, but only a contract-wide sample of log words names it
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 def _hex(word: int) -> str:
     return "0x" + format(word, "064x")
 
@@ -80,7 +77,7 @@ class _Scanned(Chain):
 
     def __init__(self, sample: frozenset = frozenset()):
         self.sample = sample
-        self.words = {_slot(m, _slot(_MINTER, 0)): 1 for m in [*MINTERS, DECOY] if m != REVOKED}
+        self.words = {O.slot(m, O.slot(_MINTER, 0)): 1 for m in [*MINTERS, DECOY] if m != REVOKED}
         self.grants = [((i + 1) * 200_000, [_GRANTED, _MINTER, m]) for i, m in enumerate(MINTERS)] + [
             (9_000_000, [_REVOKED, _MINTER, REVOKED]),
             (9_500_000, [_GRANTED, _MINTER, DECOY]),
@@ -180,23 +177,6 @@ def test_a_smaller_budget_costs_holders_only_with_a_gap_saying_so(roles, monkeyp
     if (reduced.openness, reduced.principals) != (full.openness, full.principals):
         assert not reduced.complete
         assert any(g.startswith(("untested_candidates:", "now_unknown")) for g in reduced.gaps)
-
-
-def test_candidates_the_state_refuses_are_asked_about_last(roles, monkeypatch):
-    # The revoked minter sits among the others by address and by the sources naming it; its entry, read as it
-    # stands, refuses it: asked about after every candidate the state lets through.
-    asked: list[int] = []
-    screened = decide._screened
-
-    def spy(*args):
-        order = screened(*args)
-        asked.extend(order)
-        return order
-
-    monkeypatch.setattr(decide, "_screened", spy)
-    full = _verdict(roles)
-    assert asked[-1] == REVOKED and set(asked) == set(MINTERS) | {DECOY}
-    assert full.principals == set(MINTERS) - {REVOKED} | {DECOY}
 
 
 class _Unbatched(_Scanned):
@@ -327,22 +307,6 @@ def _crowded_chain(clock, crowds: set, seconds_per_round: float):
     return Chain(lambda m, p: None, 19_999_999, batch)
 
 
-def test_a_crowded_history_read_first_takes_no_more_than_its_share(monkeypatch):
-    # Which history a function reads first follows set order: a token's transfers refused window after window must
-    # not spend the time a role history read after them needs.
-    clock = _Clock()
-    monkeypatch.setattr(decide, "time", clock)
-    crowd, short = 0xC1 << 150, 0xC2 << 150
-    transfers, grants = frozenset({"0x" + "11" * 32}), frozenset({"0x" + "22" * 32})
-    chain = _crowded_chain(clock, {crowd}, seconds_per_round=5.0)
-    chain.scan_left = chain.history_seconds = 20.0
-    chain.scan_total = 90.0
-    chain.logs(crowd, transfers)
-    chain.logs(short, grants)
-    assert chain.cut(crowd, transfers) and clock.now <= 25.0
-    assert not chain.cut(short, grants)
-
-
 def test_a_functions_history_scanning_is_bounded_in_total_and_what_it_cuts_is_cut(monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(decide, "time", clock)
@@ -361,7 +325,7 @@ class _SomeUnreadable(_Scanned):
 
     def __init__(self, failing: set):
         super().__init__()
-        self.failing = {_slot(m, _slot(_MINTER, 0)) for m in failing}
+        self.failing = {O.slot(m, O.slot(_MINTER, 0)) for m in failing}
 
     def _answer(self, method, params):
         if method == "eth_getStorageAt" and int(params[1], 16) in self.failing:

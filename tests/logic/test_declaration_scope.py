@@ -10,16 +10,13 @@ every version: parameters and return variables as written, and before 0.5 the fu
 from __future__ import annotations
 
 import pytest
-from eth_abi.abi import encode
-from eth_utils import keccak
 
-import tests.logic._anvil as A
-from services.logic.decide import UNK, Evaluator, World
-from services.logic.lower import Lowerer, parameter
+from services.logic.decide import UNK
+from services.logic.lower import Lowerer
 from services.logic.terms import reset_terms, subterms
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 from tests.logic._anvil import anvil  # noqa: F401
-from tests.support.anvil import ACCOUNT0, rpc
 
 SOURCE_04 = """
 pragma solidity 0.4.19;
@@ -121,18 +118,11 @@ CASES = [(v, name, (n, want(n) + d)) for (v, name), want in EXPECTED.items() for
 
 @pytest.fixture(scope="module")
 def deployed(anvil):  # noqa: F811
-    url, root = anvil
     out = {}
     for version, source in SOURCES.items():
         if solc_path(version) is None:
             continue
-        old, A.SOLC = A.SOLC, version
-        try:
-            sub = root / version
-            sub.mkdir(exist_ok=True)
-            out[version] = A.Deployment(url, sub, source)
-        finally:
-            A.SOLC = old
+        out[version] = O.deployment(*anvil, source, version)
         out[version].deploy("C")
     return out
 
@@ -142,20 +132,9 @@ def test_a_local_declared_without_a_value_is_zero_where_the_compiler_makes_it_so
     if version not in deployed:
         pytest.skip(f"solc {version} not installed")
     d = deployed[version]
-    fn = next(f for f in d.slither["C"].functions_entry_points if f.name == name)
-    data = keccak(text=fn.solidity_signature)[:4] + encode(["uint256", "uint256"], list(values))
-    try:
-        rpc(d.url, "eth_call", [{"from": ACCOUNT0, "to": "0x%040x" % d.at["C"], "data": "0x" + data.hex()}, "latest"])
-        chain = True
-    except RuntimeError:
-        chain = False
-    reset_terms()
-    formula = Lowerer(d.slither["C"]).success(fn)
-    selector = int.from_bytes(keccak(text=fn.solidity_signature)[:4], "big")
-    world = World(d.chain(), d.at["C"], selector, {d.at["C"]: d.slither["C"]})
-    assignment = {parameter(p, i): v for i, (p, v) in enumerate(zip(fn.parameters, values))}
-    caller = int(ACCOUNT0, 16)
-    engine = Evaluator(world, {"caller": caller, "signer": caller}, assignment).truth(formula)
+    fn = O.function(d, "C", name)
+    chain = O.chain_says(d, fn, values)
+    formula, engine = O.engine_says(d, fn, values, contracts=d.contracts("C"))
     rejected = sorted({t[1] for t in subterms(formula, "unknown") if str(t[1]).startswith("unsupported:")})
     assert not rejected, (name, rejected)
     assert engine is not UNK, (version, name, values, formula)

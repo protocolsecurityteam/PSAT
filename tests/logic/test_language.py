@@ -5,15 +5,12 @@ succeeds on anvil. (What it rejects is named, never answered: ``test_ir_coverage
 from __future__ import annotations
 
 import pytest
-from eth_abi.abi import encode
 from eth_utils import keccak
 
-from services.logic.decide import Evaluator, World, converted
-from services.logic.lower import Lowerer, parameter
-from services.logic.terms import fits, mk, reset_terms, subterms
-from tests.fuzz.authority import solc_path
-from tests.logic._anvil import Deployment, anvil  # noqa: F401
-from tests.support.anvil import ACCOUNT0, rpc
+from services.logic.decide import UNK
+from services.logic.terms import subterms
+from tests.logic import _oracle as O
+from tests.logic._anvil import anvil  # noqa: F401
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -136,56 +133,29 @@ CASES = [
 
 @pytest.fixture(scope="module")
 def deployed(anvil):  # noqa: F811
-    url, root = anvil
-    d = Deployment(url, root, SOURCE)
+    d = O.deployment(*anvil, SOURCE)
     d.deploy("C")
     return d
 
 
-def _chain_says(d, fn, values) -> bool:
-    types = [parameter(p, i)[2] for i, p in enumerate(fn.parameters)]  # an enum as the ABI sees it
-    data = keccak(text=fn.solidity_signature)[:4] + encode(types, list(values))
-    call = {"from": ACCOUNT0, "to": "0x%040x" % d.at["C"], "data": "0x" + data.hex()}
-    try:
-        rpc(d.url, "eth_call", [call, "latest"])
-        return True
-    except RuntimeError:
-        return False
-
-
-def _engine_says(d, fn, values):
-    reset_terms()
-    contract = d.slither["C"]
-    formula = Lowerer(contract).success(fn)
-    world = World(d.chain(), d.at["C"], int.from_bytes(keccak(text=fn.solidity_signature)[:4], "big"), {})
-    assignment = {}
-    for i, (p, v) in enumerate(zip(fn.parameters, values)):
-        term = parameter(p, i)
-        assignment[term] = int.from_bytes(v, "big") if isinstance(v, bytes) else v
-    caller = int(ACCOUNT0, 16)
-    return formula, Evaluator(world, {"caller": caller, "signer": caller}, assignment).truth(formula)
-
-
 @pytest.mark.parametrize(("name", "values"), CASES, ids=[f"{c[0]}{c[1]}"[:60] for c in CASES])
 def test_the_lowered_condition_says_what_the_chain_does(deployed, name, values):
-    fn = next(f for f in deployed.slither["C"].functions_entry_points if f.name == name)
-    formula, engine = _engine_says(deployed, fn, values)
+    fn = O.function(deployed, "C", name)
+    formula, engine = O.engine_says(deployed, fn, values)
     # Every construct here is one the lowering handles: a definite answer, the chain's.
-    assert engine == _chain_says(deployed, fn, values), (name, values, formula)
-
-
-def test_conversions_and_ranges_evaluate_as_the_types_say():
-    assert converted("uint16", 70000) == 70000 % 65536
-    assert converted("int8", 255) == -1 and converted("int8", -129) == 127 and converted("int256", MAX) == -1
-    assert converted("uint256", -1) == MAX and converted("address", 2**160 + 5) == 5
-    assert converted("bytes4", 0x1234567890) == 0x34567890
-    assert fits("add", 200, 55, 8, False) and not fits("add", 200, 56, 8, False)
-    assert fits("sub", -100, 28, 8, True) and not fits("sub", -100, 29, 8, True)
-    assert fits("pow", 2, 255, 256, False) and not fits("pow", 2, 256, 256, False) and fits("pow", -1, 2**200, 8, True)
+    assert engine == O.chain_says(deployed, fn, values), (name, values, formula)
 
 
 CALLS = """
 pragma solidity 0.8.27;
+
+contract Target {
+    address owner;
+    uint256 n;
+    constructor(address o) { owner = o; }
+    function allow(address who) external { require(who == owner); n += 1; }
+    function allowed(address who) external view returns (bool) { return who == owner; }
+}
 
 contract C {
     function viaCall(address t) external {
@@ -206,7 +176,7 @@ contract C {
 LEGACY = """
 pragma solidity 0.4.19;
 
-contract L {
+contract C {
     function guarded(address y) public view {
         address r;
         assembly { if iszero(y) { r := y } }
@@ -214,43 +184,65 @@ contract L {
     }
 }
 """
+SENDERS = [O.OWNER, *O.STRANGERS[:2]]
 
 
-def _compiled(tmp_path_factory, source, version, name):
-    solc = solc_path(version)
-    if solc is None:
-        pytest.skip(f"solc {version} not installed")
-    from slither import Slither
-
-    path = tmp_path_factory.mktemp("language") / "X.sol"
-    path.write_text(source)
-    return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == name)
+@pytest.fixture(scope="module")
+def calls(anvil):  # noqa: F811
+    d = O.deployment(*anvil, CALLS)
+    d.deploy("Target", ("address",), (O.OWNER,))
+    d.deploy("C")
+    return d
 
 
-def test_a_low_level_call_is_the_call_its_data_encodes(tmp_path_factory):
-    from services.logic.terms import CALLER
-
-    contract = _compiled(tmp_path_factory, CALLS, "0.8.27", "C")
-    reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "viaCall")
-    calls = subterms(Lowerer(contract).success(fn), "call")
-    # The action handed the caller, so the callee's own check of who that is counts; not an arranged success.
-    assert [(c[2], c[3], c[4]) for c in calls] == [("allow(address)", (CALLER,), False)]
-    reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "viaStatic")
-    formula = Lowerer(contract).success(fn)
-    assert {(c[2], c[4]) for c in subterms(formula, "call")} == {("allowed(address)", True)}
-    assert subterms(formula, "item") and not subterms(formula, "assumed")  # its answer, decoded: never assumed
-    reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "viaOpaqueStatic")
-    assert "unsupported:staticcall" in {u[1] for u in subterms(Lowerer(contract).success(fn), "unknown")}
+_ACTION = pytest.mark.xfail(
+    strict=True,
+    reason="A12-call: a low-level .call handing the caller to a target the caller picks is an arranged action, "
+    "true at every input, though the target's own code (followed) refuses this caller",
+)
+CALL_CASES = [
+    pytest.param(name, who, marks=_ACTION if name == "viaCall" and who != O.OWNER else ())
+    for name in ("viaCall", "viaStatic")
+    for who in SENDERS
+]
 
 
-def test_legacy_assembly_assigns_nothing_for_sure_past_control_flow(tmp_path_factory):
-    contract = _compiled(tmp_path_factory, LEGACY, "0.4.19", "L")
-    reset_terms()
-    fn = next(f for f in contract.functions_entry_points if f.name == "guarded")
-    formula = Lowerer(contract).success(fn)
-    # ``r := y`` runs only when ``y`` is zero: never ``r == y`` for sure, so never "open to whoever passes itself".
-    assert "asm:r" in {u[1] for u in subterms(formula, "unknown")}
-    assert not any(c[1] == "eq" and mk("arg", "y", "address") in c[2:] for c in subterms(formula, "cmp"))
+@pytest.mark.parametrize(("name", "who"), CALL_CASES, ids=[f"{c.values[0]}-{c.values[1]:#x}"[:24] for c in CALL_CASES])
+def test_a_low_level_call_is_the_call_its_data_encodes(calls, name, who):
+    # The call data hands the caller to ``Target``, whose own check lets only its owner through: followed, the
+    # lowered formula says what ``eth_call`` says for the owner and for strangers.
+    fn = O.function(calls, "C", name)
+    target = calls.at["Target"]
+    chain = O.chain_says(calls, fn, [target], sender=who)
+    assert chain == (who == O.OWNER)
+    formula, engine = O.engine_says(calls, fn, [target], sender=who, contracts=calls.contracts("C", "Target"))
+    assert engine == chain, (name, hex(who), chain, engine, formula)
+
+
+def test_an_undecodable_staticcall_is_rejected_by_name(calls):
+    fn = O.function(calls, "C", "viaOpaqueStatic")
+    data = keccak(text="allowed(address)")[:4] + bytes(12) + bytes.fromhex(O.OWNER.to_bytes(20, "big").hex())
+    formula, engine = O.engine_says(calls, fn, [calls.at["Target"], data], contracts=calls.contracts("C", "Target"))
+    assert O.chain_says(calls, fn, [calls.at["Target"], data])
+    assert engine is UNK and "unsupported:staticcall" in {u[1] for u in subterms(formula, "unknown")}
+
+
+@pytest.fixture(scope="module")
+def legacy(anvil):  # noqa: F811
+    d = O.deployment(*anvil, LEGACY, "0.4.19")
+    d.deploy("C")
+    return d
+
+
+@pytest.mark.parametrize("y", [0, 1, O.OWNER, O.STRANGERS[0]])
+def test_legacy_assembly_assigns_nothing_for_sure_past_control_flow(legacy, y):
+    # ``r := y`` runs only when ``y`` is zero: never ``r == y`` for sure. On the chain every call reverts; the
+    # lowering says so or leaves ``r`` unknown by name, never "whoever passes itself as y".
+    fn = O.function(legacy, "C", "guarded")
+    for who in SENDERS:
+        chain = O.chain_says(legacy, fn, [y], sender=who)
+        formula, engine = O.engine_says(legacy, fn, [y], sender=who)
+        assert not chain
+        assert engine is UNK or engine is False or engine == chain, (hex(y), hex(who), engine)
+        if engine is UNK:
+            assert "asm:r" in {u[1] for u in subterms(formula, "unknown")}

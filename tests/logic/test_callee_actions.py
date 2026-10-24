@@ -9,6 +9,7 @@ from eth_utils import keccak
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -78,19 +79,15 @@ _ALLOWED = int.from_bytes(keccak(b"Allowed(address)"), "big")
 _GRANTED = int.from_bytes(keccak(b"Granted(address)"), "big")
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 class _Deployed(Chain):
     """The pool's manager at ``MANAGER``, which allowed ``ALLOWED`` and logged it."""
 
     def __init__(self):
         self.words = {
             (POOL, 0): MANAGER,
-            (MANAGER, _slot(ALLOWED, 0)): 1,
+            (MANAGER, O.slot(ALLOWED, 0)): 1,
             (GUARDED, 0): REGISTRY,
-            (REGISTRY, _slot(7, ALLOWED)): 1,
+            (REGISTRY, O.slot(7, ALLOWED)): 1,
         }
         batch = lambda calls: [self._safe(m, p) for m, p in calls]  # noqa: E731
         super().__init__(self._answer, 100, batch)

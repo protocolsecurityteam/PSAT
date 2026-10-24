@@ -10,6 +10,7 @@ from eth_utils import keccak
 from services.logic.decide import Chain
 from services.logic.verdict import function_verdict
 from tests.fuzz.authority import solc_path
+from tests.logic import _oracle as O
 
 SOURCE = """
 pragma solidity 0.8.27;
@@ -90,10 +91,6 @@ _ONLY_ADMIN = keccak(b"onlyAdmin(address)")[:4]
 _PROXIABLE = keccak(b"proxiableUUID()")[:4]
 
 
-def _slot(key: int, base: int) -> int:
-    return int.from_bytes(keccak(key.to_bytes(32, "big") + base.to_bytes(32, "big")), "big")
-
-
 class _Deployed(Chain):
     """The three contracts as configured; ``AT`` runs ``IMPL``'s code behind a proxy whose upgrades no event shows."""
 
@@ -160,7 +157,7 @@ def _verdict(built, name, fn_name, chain, code_of=None):
 
 
 def test_receivers_are_found_at_the_keys_the_running_codes_events_set_them(built):
-    words = {_slot(eid, 1): who for eid, who in RECEIVERS.items()}
+    words = {O.slot(eid, 1): who for eid, who in RECEIVERS.items()}
     chain = _Deployed(words, {AT, IMPL})
     verdict = _verdict(built, "Pool", "onMessage", chain, code_of=lambda a: IMPL if a == AT else a)
     assert verdict.openness == "restricted"
