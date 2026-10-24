@@ -325,6 +325,25 @@ Found while working, not in the before table:
   about in turn, and one a budget leaves unasked is counted (``untested_candidates``)
   (``test_budgets::test_candidates_the_state_refuses_are_asked_about_last``,
   ``test_budgets::test_the_screen_reads_nothing_and_leaves_no_trace``).
+* Candidates of an unproven list (``decide.UNPROVEN_CANDIDATES``, ``UNPROVEN_READS``, ``UNPROVEN_BATCH``): where the
+  holder list is unproven (hints: a callee's code, log words, constants) and no state of the conditions shows a
+  stranger refused, no candidate can be singled out and the list can never be complete, so asking about candidates
+  only lengthens an incomplete list. There every stranger's own call is run on the chain first and settles it "open"
+  when all of them go through (``strangers_run``); otherwise at most ``UNPROVEN_CANDIDATES`` (48) are asked about, the
+  likeliest first (``_screened``), in batches of ``UNPROVEN_BATCH`` (8), under a hard sub-budget of
+  ``UNPROVEN_READS`` (300) chain reads past which a read answers unknown (the candidate undecided, the verdict naming
+  ``budget:unproven_reads``); the rest are counted (``untested_candidates:<n>``). A proven list keeps the whole
+  budget, where completeness is reachable. Changing these constants never changes the openness, only shortens the
+  never-complete list with a gap saying so (``test_budgets::test_the_unproven_candidate_budgets_*``,
+  ``test_a_proven_list_keeps_the_whole_budget``). On Maple ``Pool.redeem`` (0x356b8d89, 3,335 hints from
+  ``callee_code_list``, cache-only run) reads went from 2,003 to 402, decision time 40 s to 19 s, verdict unchanged
+  (not determined), ``untested_candidates:3334`` (the first candidate's own search spends the 300).
+* Reads per function: ``verdict.READS_PER_FUNCTION`` (2,000), lowered where a cap on all the reads a chain may send is
+  supplied (``function_verdict(read_cap=...)``, else the ``PSAT_LOGIC_READ_CAP`` environment variable, both counted
+  against ``chain.sent``) to ``READ_CAP_SHARE`` (a quarter) of what is left of it (``verdict.function_reads``), so one
+  function never spends a whole run's cap; past its budget a read answers unknown (``budget:reads``)
+  (``test_budgets::test_one_function_takes_a_share_of_a_supplied_read_cap``,
+  ``test_a_supplied_read_cap_bounds_what_one_function_sends``).
 * A delegatecall or a call into this contract's own entry point inside a loop marks storage unknown past the loop
   (``*elsewhere``) without counting as lost writes: those writes are that code's (``logged.py`` and the latch account
   for them there).

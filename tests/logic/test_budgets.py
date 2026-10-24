@@ -39,6 +39,20 @@ contract Roles {
         require(roles[MINTER][msg.sender]);
         total += 1;
     }
+
+    // A loop over the caller's address the engine widens: whether a stranger passes ``mintOr`` is undecided.
+    function odd(address a) internal pure returns (bool) {
+        uint256 s;
+        for (uint256 i; i < uint160(a) % 1000; i++) { s += i; }
+        return s == 12345;
+    }
+
+    function mintOr() external {
+        require(roles[MINTER][msg.sender] || odd(msg.sender));
+        last = msg.sender;
+    }
+
+    address last;
 }
 """
 
@@ -121,11 +135,11 @@ def roles(tmp_path_factory):
     return next(c for c in Slither(str(path), solc=str(solc)).contracts if c.name == "Roles")
 
 
-def _verdict(roles, chain=None):
+def _verdict(roles, chain=None, name="mint"):
     from services.logic.terms import reset_terms
 
     reset_terms()
-    fn = next(f for f in roles.functions_entry_points if f.name == "mint")
+    fn = next(f for f in roles.functions_entry_points if f.name == name)
     verdict, _ = function_verdict(roles, fn, AT, chain or _Scanned(), {AT: roles})
     return verdict
 
@@ -361,3 +375,83 @@ def test_candidates_left_open_first_dont_stop_the_rest_being_asked(roles):
     verdict = _verdict(roles, _SomeUnreadable(failing))
     assert verdict.principals == (set(MINTERS) | {DECOY}) - {REVOKED} - failing
     assert failing <= verdict.undecided and not verdict.complete
+
+
+HINTS = [(0xC0 << 150) + (i << 90) for i in range(120)]  # likely holders no source proves: none holds the role
+
+
+def _unproven(monkeypatch):
+    """The holder list built as hints (a callee's code naming them), never shown to be all."""
+    built = decide._built
+
+    def hinted(formula, world):
+        members, _, why = built(formula, world)
+        return members | set(HINTS), False, [*why, "callee_code_list:test"]
+
+    monkeypatch.setattr(decide, "_built", hinted)
+
+
+def test_an_unproven_list_with_the_stranger_undecided_tests_few_candidates(roles, monkeypatch):
+    _unproven(monkeypatch)
+    chain = _Scanned()
+    verdict = _verdict(roles, chain, "mintOr")
+    assert verdict.openness == "not_determined" and not verdict.complete
+    untested = next(int(g.split(":")[1]) for g in verdict.gaps if g.startswith("untested_candidates:"))
+    assert untested >= len(HINTS) + len(MINTERS) - decide.UNPROVEN_CANDIDATES
+
+
+@pytest.mark.parametrize(
+    ("candidates", "reads"), [(1, 1), (2, 5), (4, 20), (8, 60), (48, 300), (200, 300), (48, 10**9)]
+)
+def test_the_unproven_candidate_budgets_cost_holders_only_with_a_gap_saying_so(roles, monkeypatch, candidates, reads):
+    # The monotonicity sweep for ``UNPROVEN_CANDIDATES``/``UNPROVEN_READS``: against every candidate asked about,
+    # smaller ones never change the verdict, only shorten the (never complete) list, with a gap saying so.
+    _unproven(monkeypatch)
+    monkeypatch.setattr(decide, "UNPROVEN_CANDIDATES", 10**6)
+    monkeypatch.setattr(decide, "UNPROVEN_READS", 10**9)
+    full = _verdict(roles, _Scanned(), "mintOr")
+    assert not any(g.startswith("untested_candidates:") for g in full.gaps)
+    monkeypatch.setattr(decide, "UNPROVEN_CANDIDATES", candidates)
+    monkeypatch.setattr(decide, "UNPROVEN_READS", reads)
+    reduced = _verdict(roles, _Scanned(), "mintOr")
+    assert reduced.openness == full.openness and reduced.allowed == full.allowed
+    assert not reduced.complete and not full.complete
+    assert reduced.principals <= full.principals
+    if candidates < len(HINTS) + len(MINTERS):
+        assert any(g.startswith("untested_candidates:") for g in reduced.gaps), reduced.gaps
+
+
+@pytest.mark.parametrize(("candidates", "reads"), [(1, 1), (48, 300)])
+def test_a_proven_list_keeps_the_whole_budget(roles, monkeypatch, candidates, reads):
+    full = _verdict(roles)
+    monkeypatch.setattr(decide, "UNPROVEN_CANDIDATES", candidates)
+    monkeypatch.setattr(decide, "UNPROVEN_READS", reads)
+    reduced = _verdict(roles)
+    assert (reduced.openness, reduced.principals, reduced.complete) == (full.openness, full.principals, True)
+
+
+def test_one_function_takes_a_share_of_a_supplied_read_cap(monkeypatch):
+    from services.logic import verdict as verdict_module
+
+    chain = _Scanned()
+    chain.sent = 1000
+    monkeypatch.delenv("PSAT_LOGIC_READ_CAP", raising=False)
+    assert verdict_module.function_reads(chain) == verdict_module.READS_PER_FUNCTION
+    assert verdict_module.function_reads(chain, 2000) == int(1000 * verdict_module.READ_CAP_SHARE)
+    assert verdict_module.function_reads(chain, 500) == 0
+    assert verdict_module.function_reads(chain, 10**9) == verdict_module.READS_PER_FUNCTION
+    monkeypatch.setenv("PSAT_LOGIC_READ_CAP", "1400")
+    assert verdict_module.function_reads(chain) == int(400 * verdict_module.READ_CAP_SHARE)
+
+
+def test_a_supplied_read_cap_bounds_what_one_function_sends(roles, monkeypatch):
+    # A run's cap nearly spent: the function sends at most its share of what is left, and the verdict, whatever
+    # that leaves undecided, is never more open or more complete than the full one.
+    full = _verdict(roles)
+    monkeypatch.setenv("PSAT_LOGIC_READ_CAP", "40")
+    chain = _Scanned()
+    reduced = _verdict(roles, chain)
+    assert chain.sent <= 10
+    assert _OPENNESS[reduced.openness] <= _OPENNESS[full.openness]
+    assert reduced.principals <= full.principals
+    assert not reduced.complete

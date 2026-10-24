@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -1364,6 +1365,10 @@ def _unconditional(formula: Term, call: Term) -> bool:
 
 # Chain reads one function's decision may send; past it, reads answer unknown (sound, never wrong).
 READS_PER_FUNCTION = 2000
+# Where a cap on all the reads a chain may send is supplied (``function_verdict(read_cap=...)``, else the
+# ``PSAT_LOGIC_READ_CAP`` environment variable), the most of what is left of it one function may send: one function
+# never spends a whole run's reads.
+READ_CAP_SHARE = 0.25
 # Of those, the most a function may send confirming passes only a callee's code showed (``decide.confirming``): about
 # one per holder such a check lets through, each its own call.
 CONFIRM_READS = 300
@@ -1412,6 +1417,17 @@ def _inlined_verdict(
     )
 
 
+def function_reads(chain: Chain, read_cap: int | None = None) -> int:
+    """The reads one function's decision may send: ``READS_PER_FUNCTION``, or less where a cap on the chain's reads
+    in all is supplied (``read_cap``, else ``PSAT_LOGIC_READ_CAP``): ``READ_CAP_SHARE`` of what is left of it."""
+    if read_cap is None:
+        supplied = os.environ.get("PSAT_LOGIC_READ_CAP", "").strip()
+        read_cap = int(supplied) if supplied.isdigit() else None
+    if read_cap is None:
+        return READS_PER_FUNCTION
+    return min(READS_PER_FUNCTION, int(max(0, read_cap - chain.sent) * READ_CAP_SHARE))
+
+
 def function_verdict(
     contract: Any,
     function: Any,
@@ -1420,11 +1436,14 @@ def function_verdict(
     contracts: dict[int, Any],
     values: dict[str, Any] | None = None,
     code_of: Callable[[int], int] | None = None,
+    read_cap: int | None = None,
 ) -> tuple[Verdict, Term]:
     """``contracts`` maps addresses to Slither contracts the formula may read or call (``address`` included), the
-    code that runs there; ``code_of`` maps an address to the one holding that code (a proxy's implementation)."""
+    code that runs there; ``code_of`` maps an address to the one holding that code (a proxy's implementation);
+    ``read_cap``, the most reads ``chain`` may send in all (counted by ``chain.sent``), of which this function takes
+    at most ``READ_CAP_SHARE`` of what is left."""
     failed_at = chain.failed  # failed reads before this function: see ``World.failed_at``
-    chain.limit = chain.sent + READS_PER_FUNCTION
+    chain.limit = chain.sent + function_reads(chain, read_cap)
     chain.scan_left = chain.history_seconds = LOG_SECONDS
     chain.scan_total = LOG_TOTAL_SECONDS
     lowerer = Lowerer(contract)

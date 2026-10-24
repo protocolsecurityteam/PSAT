@@ -2433,9 +2433,18 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     if proven:
         # Nobody outside the list can pass, by construction: the lookups' blind spots don't apply.
         coverage = replace(coverage, representative=True, blind=frozenset(), values=frozenset())
-    _prefetch(formula, world, set(_ranked(candidates, world)[:_CANDIDATE_BATCH]))
+        _prefetch(formula, world, set(_ranked(candidates, world)[:_CANDIDATE_BATCH]))
     roots = ["caller"] + (["signer"] if contains(formula, frozenset({"signer"})) else [])
     fresh = [_outcome(formula, world, anyone, candidates, fixed=state) for state in states]
+    # An unproven list with no state refusing a stranger: candidates only lengthen a list never complete
+    # (``UNPROVEN_CANDIDATES``). The stranger's own call is asked first, every stranger's, and settles it if it passes.
+    limited = not proven and not any(f is False for f in fresh)
+    if limited:
+        ran = _executes(formula, world, FRESH, set(), tries=2)
+        if ran is not None and strangers_run(formula, world, ran, tries=2):
+            return Verdict("open", frozenset(), True, witnesses={FRESH: ran})
+    if not proven:
+        _prefetch(formula, world, set(_ranked(candidates, world)[: UNPROVEN_BATCH if limited else _CANDIDATE_BATCH]))
     # Lookups the events can't list, or whose histories were cut: listed from storage when a dump accounts for them,
     # with whoever it names asked about like the rest.
     snapshot = (
@@ -2523,9 +2532,21 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
             _decide_one(formula, world, identity, candidates, fixed={}, refute_ok=False, reads_only=True)
 
     order = _screened(formula, world, candidates, loosened)
-    batches = [order[i : i + _CANDIDATE_BATCH] for i in range(0, len(order), _CANDIDATE_BATCH)]
+    size, phase_reads, whole_limit = _CANDIDATE_BATCH, world.chain.sent, world.chain.limit
+    if limited:
+        untested.update(order[UNPROVEN_CANDIDATES:])
+        order, size = order[:UNPROVEN_CANDIDATES], UNPROVEN_BATCH
+        # One candidate's own search can spend hundreds of reads: past the sub-budget its reads answer unknown, the
+        # candidate left undecided, until the candidates' calls run below are done.
+        sub = phase_reads + UNPROVEN_READS
+        world.chain.limit = sub if whole_limit is None else min(whole_limit, sub)
+
+    def spent() -> bool:
+        return world.exhausted() or (limited and world.chain.sent - phase_reads >= UNPROVEN_READS)
+
+    batches = [order[i : i + size] for i in range(0, len(order), size)]
     for number, batch in enumerate(batches):
-        if world.exhausted():
+        if spent():
             untested.update(batch)
             continue
         if number:
@@ -2536,7 +2557,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         pairs = [(root, candidate) for root in roots for candidate in batch]
         for root, candidate in pairs:
             world.work_limit = limit
-            if world.exhausted():
+            if spent():
                 untested.add(candidate)
                 continue
             world.work_limit = min(limit, world.work + max(_MIN_SHARE, (limit - world.work) * _SHARE))
@@ -2638,6 +2659,10 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
                 passes["caller"].add(candidate)
                 witnesses[candidate] = found_args
                 del conditions[candidate]
+    if limited:
+        if world.chain.sent >= world.chain.limit:
+            gaps.append("budget:unproven_reads")
+        world.chain.limit = whole_limit
     callers, signers = frozenset(passes["caller"]), frozenset(passes.get("signer", ()))
     decided = callers | signers | frozenset(conditions)
     undecided -= decided
@@ -3216,6 +3241,14 @@ _LOWEST_SENDER = 2**16
 _OTHER_STRANGERS = tuple(FRESH ^ bit for bit in (1, 2, 4, 8))
 _STRANGERS = frozenset({FRESH, *_OTHER_STRANGERS})
 _CANDIDATE_BATCH = 256  # candidates whose reads are fetched and questions asked together; all are asked in turn
+# Where the holder list is unproven (hints, never all) and no state shows a stranger refused, no candidate can be
+# singled out and the list can never be complete: asking about candidates can only lengthen an incomplete list. There
+# at most ``UNPROVEN_CANDIDATES`` are asked about, the likeliest first, within ``UNPROVEN_READS`` reads, in batches of
+# ``UNPROVEN_BATCH`` (a batch's reads go out together, so it overshoots by at most one batch's); the rest are
+# reported (``untested_candidates:<n>``). A proven list keeps the whole budget, where completeness is reachable.
+UNPROVEN_CANDIDATES = 48
+UNPROVEN_READS = 300
+UNPROVEN_BATCH = 8
 _CALLEE_DEPTH = 3  # contracts deep that callees handed the arguments are read for the keys to try
 # Contracts deep that a check handed the caller is followed. Depth is spent only on calls the identity reaches: a
 # callee handed none of it is a condition every caller faces alike and is never followed for who may call.
