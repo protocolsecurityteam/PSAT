@@ -236,8 +236,10 @@ def test_the_solver_leaves_a_blind_call_unknown():
     world.callee = lambda term, address=None: (TRUE, (FALSE,))  # its code: nobody
     blind = Evaluator(world, {"caller": FRESH, "signer": FRESH}, {}, frozenset({(call[1], call[2])}))
     assert solve(call, blind) is not None
+    # Nor does the code alone refute it: over every ``x`` the chain can't be asked, so it is unknown, and counted.
     seeing = Evaluator(world, {"caller": FRESH, "signer": FRESH})
-    assert solve(call, seeing) is None
+    assert solve(call, seeing) is UNK
+    assert world.code_refuted == 1
 
 
 def test_the_solver_looks_for_a_witness_through_what_it_can_read_first():

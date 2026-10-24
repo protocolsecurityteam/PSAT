@@ -1028,6 +1028,9 @@ class World:
     # Storage words earlier calls of the question wrote, (address, slot) -> word (UNK where what they wrote is
     # unknown): read before the chain, and handed to the node for the calls it runs (see ``verdict.after_own_call``).
     overlay: dict = field(default_factory=dict)
+    # How many answers that came out false only through a followed callee's code standing in for a call came out
+    # unknown once asked without it (``Evaluator.truth``, ``solve``): ``decide`` names the gap.
+    code_refuted: int = 0
     # The stranger's own calls that, made first, let it through (see ``verdict.after_own_call``): the function's
     # signature and the arguments of each, or ``None``.
     prior: Callable[[Term], Any] = lambda formula: None
@@ -1136,21 +1139,64 @@ class Evaluator:
         self.blind = blind
         self._memo: dict[Term, Any] = dict(settled) if settled else {}
         # Whether a view call over arguments the caller picks is answered by its followed callee's code before the
-        # chain (each guess a call of its own), and whether any answer so far rested on that: shared with the
-        # evaluators this one makes, so a pass resting on it is asked of the chain again (``confirmed``).
+        # chain (each guess a call of its own), and whether any answer so far rested on a callee's code: shared with
+        # the evaluators this one makes, with how deep in an evaluation they are, so a pass resting on it is asked of
+        # the chain again (``confirmed``) and a failure resting on it is asked without it (``truth``).
         self.code_first = True
-        self.coded = [False]
+        self.callee_code = True  # whether a followed callee's code may answer a call at all
+        self.coded = [False, 0]
+        self._coded_terms: set = set()  # memoized values some callee's code went into
 
     def nested(self, when: frozenset) -> "Evaluator":
         """An evaluator over the same identity and arguments with ``when`` free, sharing how calls are answered."""
         inner = Evaluator(self.world, self.identity, self.assignment, self.blind, when)
-        inner.code_first, inner.coded = self.code_first, self.coded
+        inner.code_first, inner.callee_code, inner.coded = self.code_first, self.callee_code, self.coded
         return inner
 
     def truth(self, term: Term) -> Any:
-        """True, False or UNK (``PREIMAGE`` and ``ASSUMED`` count as true; a path that reverts, as false)."""
-        value = self._test(term)
+        """True, False or UNK (``PREIMAGE`` and ``ASSUMED`` count as true; a path that reverts, as false).
+
+        Callee code never refutes on its own: asked from outside any evaluation, a False that some followed callee's
+        code went into (a call over guessed or unknown arguments answered by it, an action's return value) is asked
+        again without any callee code, every such call put to the chain or left unknown. What still fails stands;
+        what passes there passes; what is left unknown is unknown (counted, ``world.code_refuted``). Inside an
+        evaluation, and for ranking (``ranked``), the code's answer is used as it is."""
+        if self.coded[1] or not self.callee_code:
+            return self.ranked(term)
+        outer, self.coded[0] = self.coded[0], False
+        try:
+            value = self.ranked(term)
+            used = self.coded[0]
+        finally:
+            self.coded[0] = outer or self.coded[0]
+        if value is False and used:
+            value = self._without_code(term)
+        return value
+
+    def ranked(self, term: Term) -> Any:
+        """``truth`` with whatever a callee's code answered taken as it is: for ordering and skipping guesses only,
+        never for a refutation."""
+        self.coded[1] += 1
+        try:
+            value = self._test(term)
+        finally:
+            self.coded[1] -= 1
         return False if value is REVERTED else value
+
+    def _without_code(self, term: Term) -> Any:
+        again = self.without_code()
+        value = again.truth(term)
+        if value is UNK:
+            self.world.code_refuted += 1
+        return value
+
+    def without_code(self) -> "Evaluator":
+        """This evaluator with no callee code answering any call, keeping what it read that no callee's code went
+        into."""
+        kept = {t: v for t, v in self._memo.items() if t not in self._coded_terms}
+        again = Evaluator(self.world, self.identity, self.assignment, self.blind, self.when, kept)
+        again.code_first = again.callee_code = False
+        return again
 
     def _test(self, term: Term) -> Any:
         """``truth``, keeping REVERTED apart from False: negating a revert doesn't make it pass."""
@@ -1165,7 +1211,22 @@ class Evaluator:
 
     def eval(self, t: Term) -> Any:
         if t in self._memo:
+            if t in self._coded_terms:
+                self.coded[0] = True
             return self._memo[t]
+        outer, self.coded[0] = self.coded[0], False
+        self.coded[1] += 1
+        try:
+            value = self._eval_new(t)
+        finally:
+            self.coded[1] -= 1
+            used = self.coded[0]
+            self.coded[0] = outer or used
+        if used and t in self._memo:
+            self._coded_terms.add(t)
+        return value
+
+    def _eval_new(self, t: Term) -> Any:
         if self.world.arranged and t in self.world.arranged and t not in self.assignment and t in self.when:
             # Unassigned: free wherever the entry may be the caller's own.
             mine = self.truth(self.world.arranged[t])
@@ -1666,10 +1727,11 @@ class Evaluator:
                 return acted
             # Taken to succeed: what it returns is what its own code returns when it does (Aave's ``hub.add``
             # returning the shares a ``SafeCast`` then bounds), when that can be worked out.
-            lowered = self._callee(t)
+            lowered = self._callee(t) if self.callee_code else None
             if lowered is not None and index < len(lowered[1]):
                 value = self.eval(lowered[1][index])
                 if isinstance(value, (int, bool)) and value not in (REVERTED,):
+                    self.coded[0] = True
                     return value
             return ASSUMED
         request = self.call_input(t)
@@ -1688,9 +1750,10 @@ class Evaluator:
                     return value
         if request is None:
             # Not every argument is known: answer with the callee's own code, lowered over these arguments.
-            lowered = self._callee(t)
+            lowered = self._callee(t) if self.callee_code else None
             if lowered is None or index >= len(lowered[1]):
                 return UNK
+            self.coded[0] = True
             if self.truth(lowered[0]) is False:
                 return REVERTED
             return self.eval(lowered[1][index])
@@ -1744,9 +1807,10 @@ class Evaluator:
                 self.coded[0] = True
                 return "returned" if returned else "reverted"
         if request is None:
-            lowered = self._callee(call)
+            lowered = self._callee(call) if self.callee_code else None
             if lowered is None:
                 return UNK
+            self.coded[0] = True
             returned = self.truth(lowered[0])
             return UNK if returned is UNK else ("returned" if returned else "reverted")
         overrides = self.overrides()
@@ -1991,6 +2055,7 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
     only those that read unknown for what the lowering couldn't express: one false now (a pause) stays and decides
     as before, and one a failed read or the budget left open keeps blocking."""
     failed = world.chain.failed if world.failed_at is None else world.failed_at
+    refuted = world.code_refuted
     verdict = _decide(formula, world, coverage)
     core, free = split(formula)
     if verdict.openness == "not_determined":
@@ -2018,6 +2083,9 @@ def decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         tainted_unknowns = [u for c in core for u in subterms(c, "unknown") if not singles_out_nobody(u)]
         tainted_unknowns += [o for c in core for o in subterms(c, "opaque") if contains(o, IDENTITY_KINDS)]
         verdict = replace(verdict, gaps=verdict.gaps + tuple(unknown_gap(u[1]) for u in tainted_unknowns))
+    if world.code_refuted > refuted and not verdict.complete and "callee_code_refutation" not in verdict.gaps:
+        # A failure only a followed callee's code showed, unknown without it (``Evaluator.truth``, ``solve``).
+        verdict = replace(verdict, gaps=verdict.gaps + ("callee_code_refutation",))
     chosen = tuple(("arguments", name) for name in _quantified(core))
     return replace(verdict, core=_readings(core), condition_terms=_business(free) + chosen)
 
@@ -2312,7 +2380,7 @@ def _decide(formula: Term, world: World, coverage: Coverage) -> Verdict:
         unsettled.clear()
         loose_open.clear()
         for identity in identities:
-            if Evaluator(world, identity, {}, frozenset(), loosened).truth(formula) is UNK:
+            if Evaluator(world, identity, {}, frozenset(), loosened).ranked(formula) is UNK:
                 loose_open.append(identity)
             if _decide_one(formula, world, identity, candidates, fixed={}, refute_ok=False, base_only=True) is UNK:
                 unsettled.append(identity)
@@ -3183,15 +3251,16 @@ def _decide_one(
         if any(all(values[i] == v for i, v in nogood) for nogood in nogoods):
             return False
         guess = Evaluator(world, identity, {**fixed, **dict(zip(free, values))}, blind, when, settled)
-        answer = guess.truth(formula)
+        # A guess a callee's code refuses is skipped, never a refutation: only the solver below answers "nobody".
+        answer = guess.ranked(formula)
         if answer is not False:
             return confirmed(guess, formula, free_when if relaxed else None, answer)
         if answer is False and formula[0] == "and" and not world.chain.pending:
             for conjunct in cheapest_first(formula):
-                if guess.truth(conjunct) is not False:
+                if guess.ranked(conjunct) is not False:
                     continue
                 consulted = _Reads({**fixed, **dict(zip(free, values))})
-                if Evaluator(world, identity, consulted, blind, when, settled).truth(conjunct) is False:
+                if Evaluator(world, identity, consulted, blind, when, settled).ranked(conjunct) is False:
                     read = sorted(place[t] for t in consulted.seen if t in place)
                     nogoods.append(tuple((i, values[i]) for i in read))
                 break
@@ -3241,7 +3310,7 @@ def confirmed(ev: Evaluator, formula: Term, free: frozenset | None = None, answe
     result = ask(ev, answer)
     if result is True and ev.coded[0]:
         # What reads no call is the same however calls are answered: kept, so only the calls are asked again.
-        kept = {t: v for t, v in ev._memo.items() if not contains(t, _CALL_KINDS)}
+        kept = {t: v for t, v in ev._memo.items() if not contains(t, _CALL_KINDS) and t not in ev._coded_terms}
         again = Evaluator(ev.world, ev.identity, ev.assignment, ev.blind, ev.when, kept)
         again.code_first = False
         result = ask(again)
@@ -3453,7 +3522,7 @@ def _independent(evaluator: Evaluator, free: frozenset) -> dict[Term, Any]:
             varies[key] = t in free or any([walk(x) for x in (t[1:] if isinstance(t[0], str) else t)])
         return varies[key]
 
-    return {t: v for t, v in evaluator._memo.items() if not walk(t)}
+    return {t: v for t, v in evaluator._memo.items() if not walk(t) and t not in evaluator._coded_terms}
 
 
 def _ranked_product(domains: list[list[Any]]) -> Iterator[tuple]:
@@ -3674,8 +3743,8 @@ def _screened(formula: Term, world: World, candidates: set[int], loosened: froze
                 return  # the rest keep ``_ranked``'s order, among those the screen left open
             identity = {"caller": candidate, "signer": FRESH}
             try:
-                exact = Evaluator(world, identity).truth(formula)
-                loose = Evaluator(world, identity, {}, frozenset(), loosened).truth(formula)
+                exact = Evaluator(world, identity).ranked(formula)
+                loose = Evaluator(world, identity, {}, frozenset(), loosened).ranked(formula)
                 probe = Evaluator(world, identity)
                 held = 0
                 for t in keyed:
@@ -4122,12 +4191,33 @@ def solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: int
     record = ground.world.solver_record.setdefault((id(formula), ground.when), [0, 0])
     if record[0] >= _SOLVER_GIVE_UPS and not record[1]:
         return UNK
-    result = _solve(formula, ground, timeout_ms, attempts)
+    inlined = [False]
+    outer, ground.coded[0] = ground.coded[0], False
+    try:
+        result = _solve(formula, ground, timeout_ms, attempts, inlined)
+        inlined[0] = inlined[0] or ground.coded[0]
+    finally:
+        ground.coded[0] = outer or ground.coded[0]
+    if result is None and inlined[0] and ground.callee_code:
+        # "Nothing satisfies it" resting on a followed callee's code standing in for a call (``Evaluator.truth``):
+        # asked again with each view call a value of its own, tied to what the chain answers for the inputs the
+        # models reach (``_solve``'s ``chain_calls``). Still nothing: refuted by the chain, not the code. A model
+        # every answer agrees with is checked like any other; anything else is unknown.
+        result = _solve(formula, ground.without_code(), timeout_ms, attempts, [False], chain_calls=True)
+        if result is UNK:
+            ground.world.code_refuted += 1
     record[0 if result is UNK else 1] += 1
     return result
 
 
-def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: int = 3) -> Any:
+def _solve(
+    formula: Term,
+    ground: Evaluator,
+    timeout_ms: int = 300,
+    attempts: int = 3,
+    inlined: list | None = None,
+    chain_calls: bool = False,
+) -> Any:
     """``None`` when no choice of arguments (and no value of anything unknown) satisfies ``formula``; else argument
     values that make it true when checked against the chain, or UNK.
 
@@ -4176,6 +4266,8 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
         return v
 
     products: list[tuple[Any, Any, Any]] = []  # (x, y, x * y) left free
+    # With ``chain_calls``: each view call's value, with the call and its target's and arguments' z3 terms.
+    answered: list[tuple[Term, str, Any, Term, list]] = []
     escapes: list[Any] = []  # values nothing here models (an opaque builtin, an unknown): free, so only adding models
     strangers = {v for v in ground.identity.values() if v in _STRANGERS}
 
@@ -4348,8 +4440,15 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
             call, index = (t, 0) if kind == "call" else (t[1], t[2])
             if call[0] == "call" and (call[1], call[2]) in ground.blind and contains(call, IDENTITY_KINDS):
                 return var(sort, escape=True)  # whoever it lets through can't all be listed: unknown, as evaluated
-            lowered = ground.world.callee(call) if call[0] == "call" and call[4] else None
+            if chain_calls and call[0] == "call" and call[4]:
+                # A value of its own, tied to the chain's answer at each input a model reaches.
+                value = var(sort)
+                answered.append((t, sort, value, call, [go(x, "int") for x in (call[1], *call[3])]))
+                return value
+            lowered = ground.world.callee(call) if call[0] == "call" and call[4] and ground.callee_code else None
             if lowered is not None and index < len(lowered[1]):
+                if inlined is not None:
+                    inlined[0] = True
                 return go(lowered[1][index], sort)
         return var(sort, escape=True)
 
@@ -4363,8 +4462,10 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
     pins = [z3.Not(v) if z3.is_bool(v) else v == 0 for v in escapes]
     sliced: list[Any] = []
     unsettled = False  # a model blocked whose check came back unknown: it may pass, so no refutation after it
-    for attempt in range(attempts + (1 if pins else 0)):
+    attempt, rounds = 0, 0
+    while attempt < attempts + (1 if pins else 0):
         pinned = bool(pins) and attempt == 0
+        attempt += 1
         # A fresh solver each time: one checked again runs z3's incremental core, without the preprocessing that
         # makes 256-bit modular arithmetic cheap (seconds instead of milliseconds).
         solver = z3.Solver()
@@ -4394,10 +4495,19 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
             value = model.eval(z3.Bool(name), model_completion=True)
             values[term] = z3.is_true(value)
             blocking.append(z3.Bool(name) != value)  # these arguments may pass with the conditions otherwise
-        checked = confirmed(
-            Evaluator(ground.world, ground.identity, {**ground.assignment, **values}, ground.blind, ground.when),
-            formula,
-        )
+        check = Evaluator(ground.world, ground.identity, {**ground.assignment, **values}, ground.blind, ground.when)
+        if chain_calls:
+            check.code_first = check.callee_code = False
+            lemmas = _chain_lemmas(answered, check, model, lit)
+            if lemmas is None or (lemmas and rounds >= _CHAIN_ROUNDS):
+                return UNK  # an input the chain can't answer, or more inputs than are asked about
+            if lemmas:
+                # What the chain answers at the inputs this model reaches, which it got wrong: kept, and asked again.
+                blocked.extend(lemmas)
+                rounds += 1
+                attempt -= 1
+                continue
+        checked = confirmed(check, formula)
         if checked is True:
             return values
         unsettled = unsettled or checked is not False
@@ -4411,6 +4521,31 @@ def _solve(formula: Term, ground: Evaluator, timeout_ms: int = 300, attempts: in
             return UNK
         blocked.append(z3.Or(*blocking))
     return UNK
+
+
+_CHAIN_ROUNDS = 8  # inputs of calls answered by the chain while a refutation is checked without callee code
+
+
+def _chain_lemmas(answered: list, check: Evaluator, model: Any, lit: Callable) -> list | None:
+    """For each view call left a value of its own (``_solve``'s ``chain_calls``): what the chain answers at the input
+    ``model`` gives it (its target and arguments, evaluated), as "at this input, this value" (or "never this input",
+    where the call reverts, which fails the whole call), for each the model contradicts. ``None`` when an input or
+    an answer isn't known."""
+    import z3
+
+    lemmas = []
+    for term, sort, value, call, parts in answered:
+        inputs = [check.eval(x) for x in (call[1], *call[3])]
+        if any(not isinstance(v, int) for v in inputs):
+            return None
+        answer = check.eval(term)
+        if answer is not REVERTED and not isinstance(answer, int):
+            return None
+        same = z3.And(*[p == int(v) % 2**256 for p, v in zip(parts, inputs)])
+        lemma = z3.Not(same) if answer is REVERTED else z3.Implies(same, value == lit(answer, sort))
+        if not z3.is_true(model.eval(lemma, model_completion=True)):
+            lemmas.append(lemma)
+    return lemmas
 
 
 def _rlimit_count(solver: Any) -> float:

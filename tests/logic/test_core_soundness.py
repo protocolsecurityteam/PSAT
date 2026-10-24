@@ -88,7 +88,10 @@ def test_a_failed_read_in_a_followed_callee_never_opens_it(anvil):  # noqa: F811
     verdict = _verdict(d, "viaFlag", failing=d.at["Guard"])
     assert verdict.openness == "not_determined"
     assert "read_failed:storage:flag" in verdict.gaps
-    assert _verdict(d, "viaFlag").openness == "restricted"  # read whole: nobody, the flag being unset
+    # Read whole: nobody passes, the flag being unset, but over every ``x`` only Guard's code shows it, which never
+    # refutes on its own: unknown, never open.
+    whole = _verdict(d, "viaFlag")
+    assert whole.openness == "not_determined" and "callee_code_refutation" in whole.gaps
 
 
 def test_a_spent_read_budget_never_opens_it(anvil, monkeypatch):  # noqa: F811

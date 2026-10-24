@@ -129,9 +129,12 @@ def test_a_callee_of_a_callee_sees_the_callee_asking_as_its_sender(d):
 
 
 def test_a_view_callee_reads_no_value_whatever_the_outer_call_carries(d):
+    # Read with the outer call's value, ``vv.ok(v)`` would let a stranger paying v through. That it never does over
+    # any v only V's code shows, which never refutes on its own (``test_callee_refutation``): the owner, not complete.
     verdict = _verdict(d, "paid")
-    assert verdict.openness == "restricted", verdict
-    assert verdict.principals == frozenset({int(ACCOUNT0, 16)})
+    assert verdict.openness != "open", verdict
+    assert int(ACCOUNT0, 16) in verdict.principals
+    assert not verdict.complete and "callee_code_refutation" in verdict.gaps
 
 
 def test_a_callee_reads_its_own_selector(d):

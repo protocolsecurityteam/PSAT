@@ -266,10 +266,24 @@ Found while working, not in the before table:
   evaluation actually consulted (``_Reads``; ``msg.data`` consults every argument, followed callee code whatever it is
   handed), never just those it names (``amount <= balance`` refuting an amount whatever the recipient). A view call over
   guessed arguments whose callee is followed is answered by the callee's own code (in its own frame, A39/A40) first,
-  the chain only when that is unknown; the code only ranks and skips guesses: a pass resting on it is asked again with
-  every such call put to the chain (``confirmed``), and the choice never depends on what the chain has cached. Without
-  these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s read budget on one ``hasPermission``
-  call per guessed recipient (``test_callee_frame``).
+  the chain only when that is unknown. The code ranks and skips guesses, and is never trusted for an answer: a pass
+  resting on it is asked again with every such call put to the chain (``confirmed``), and the choice never depends on
+  what the chain has cached. Without these, the exact checked-subtraction conditions spent Maple ``Pool.transfer``'s
+  read budget on one ``hasPermission`` call per guessed recipient (``test_callee_frame``).
+* Callee code never refutes on its own (fail-safe under any mis-lowering of a callee). A refusal it gives a guess only
+  skips that guess. A ``False`` asked from outside any evaluation (``Evaluator.truth``) that some callee's code went
+  into (a view call over guessed or unknown arguments answered by it, an action's return value, a ``try``'s outcome;
+  memoized values carry the mark, ``_coded_terms``) is asked again with no callee code: each such call put to the
+  chain (cache first, then a read within the function's budget) or left unknown. A solver "nothing satisfies it" that
+  inlined a callee's code (``solve``) is asked again with each view call a value of its own, tied to what the chain
+  answers at the inputs the models reach (``_chain_lemmas``, at most ``_CHAIN_ROUNDS`` inputs): still unsatisfiable,
+  the chain refuted it; a model every answer agrees with is checked like any other and may pass; anything else is
+  unknown. What only the code showed is unknown, counted (``world.code_refuted``), and a verdict left incomplete by it
+  names ``callee_code_refutation``. Cost: "nobody, ever" over an argument the callee is handed with infinitely many
+  values (``require(guard.flagged(x) || owner)``) is no longer claimed from the callee's code; one whose call inputs
+  are few (the caller, a flag picked between two values) still is, from the chain (``test_callee_refutation``).
+  Not covered: a callee inlined into the formula because it is handed the caller (``verdict.bind_callers``) is lowered
+  and trusted like the contract's own code.
 * ``decide._screened``: candidates are asked about in the order the state as it stands suggests: those it already
   lets through (the formula, or it with every condition not about who calls freed) first, those it refuses last,
   within each those holding more of the formula's lookups keyed by who calls; the screen's evaluation is off the

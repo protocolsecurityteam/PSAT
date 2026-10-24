@@ -100,6 +100,6 @@ def test_a_callee_first_reached_while_reads_wait_for_a_batch_is_still_followed(c
     fn = next(f for f in c.functions_entry_points if f.name == "f")
     deployed = {THIS: c, MANAGER: contracts["Manager"], PERMISSIONS: contracts["Permissions"]}
     verdict, _ = function_verdict(c, fn, THIS, _Batched(), deployed)
-    assert verdict.openness == "restricted"
     assert verdict.principals == {OWNER}
-    assert verdict.complete
+    # That a stranger fails over every ``x`` only the callees' code shows, which never refutes on its own.
+    assert verdict.openness == "not_determined" and "callee_code_refutation" in verdict.gaps
